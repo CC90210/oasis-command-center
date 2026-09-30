@@ -1,0 +1,284 @@
+/* Hallmark · component: calendar surface · genre: modern-minimal · theme: OASIS OS dark (inherited)
+ * concept: "Horizon" - the time grid knows where the sun is. Night hours sit
+ *   recessed, daylight hours sit on the canvas, the horizon is drawn at the
+ *   real sunrise and sunset for the viewer's location, and Shabbat is a
+ *   hatched, protected span. Every background here carries information.
+ * states: default · hover · focus-visible · active · disabled · loading · error · success
+ *
+ * Scoped under .cal so nothing leaks into the rest of the OS. Consumes the OS
+ * semantic tokens (--c-*) from app/globals.css and adds only what a calendar
+ * needs: ten calendar hues, the sky tones and the protected-time texture.
+ * Constitution: rule 7 (semantic tokens), 8 (no indigo/violet), 14 (borders
+ * separate, shadows elevate), 16 (4-8px radius), 24 (motion durations).
+ */
+
+.cal {
+  /* Calendar hues. Chroma and lightness tuned so white text on a 24% mix
+     over the panel clears AA, and each hue reads distinct on the dark
+     canvas. Violet/indigo deliberately absent (constitution rule 8). */
+  --cal-tide: oklch(68% 0.14 245);
+  --cal-moss: oklch(70% 0.13 145);
+  --cal-saffron: oklch(80% 0.14 82);
+  --cal-ember: oklch(66% 0.18 33);
+  --cal-coral: oklch(72% 0.13 15);
+  --cal-rose: oklch(72% 0.12 350);
+  --cal-jade: oklch(72% 0.10 178);
+  --cal-sky: oklch(78% 0.09 220);
+  --cal-sand: oklch(76% 0.05 70);
+  --cal-slate: oklch(70% 0.02 250);
+
+  /* Sky. Night is the recessed plane, day is the canvas. */
+  --cal-night: rgb(var(--c-bg-deep));
+  --cal-day: rgb(var(--c-bg-panel));
+  --cal-horizon: oklch(78% 0.12 70 / 0.55);
+  --cal-now: oklch(66% 0.2 29);
+  --cal-protected-hatch: oklch(80% 0.12 82 / 0.14);
+  --cal-protected-wash: oklch(80% 0.12 82 / 0.05);
+  --cal-protected-edge: oklch(80% 0.12 82 / 0.35);
+  --cal-protected-ink: oklch(86% 0.08 82);
+  --cal-lift: 0 4px 10px rgba(0, 0, 0, 0.45), 0 16px 32px rgba(0, 0, 0, 0.38);
+
+  /* Geometry (4px scale). */
+  --cal-hour: 48px;
+  --cal-gutter: 56px;
+  --cal-radius: 6px;
+
+  /* Motion (constitution rule 24). */
+  --cal-ease-out: cubic-bezier(0, 0.4, 0, 1);
+  --cal-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --cal-fast: 100ms;
+  --cal-panel: 160ms;
+
+  font-variant-numeric: tabular-nums;
+}
+
+.cal [data-hue="tide"] { --ev: var(--cal-tide); }
+.cal [data-hue="moss"] { --ev: var(--cal-moss); }
+.cal [data-hue="saffron"] { --ev: var(--cal-saffron); }
+.cal [data-hue="ember"] { --ev: var(--cal-ember); }
+.cal [data-hue="coral"] { --ev: var(--cal-coral); }
+.cal [data-hue="rose"] { --ev: var(--cal-rose); }
+.cal [data-hue="jade"] { --ev: var(--cal-jade); }
+.cal [data-hue="sky"] { --ev: var(--cal-sky); }
+.cal [data-hue="sand"] { --ev: var(--cal-sand); }
+.cal [data-hue="slate"] { --ev: var(--cal-slate); }
+
+.cal .swatch { background: var(--ev); }
+
+/* ── Event chip ─────────────────────────────────────────────────────────── */
+
+/* No `position` here: the grid places chips with Tailwind's `absolute`, and
+   this selector outranks a utility class, so setting it would stack them. */
+.cal .chip {
+  border-radius: var(--cal-radius);
+  border-left: 3px solid var(--ev);
+  background: color-mix(in oklch, var(--ev) 24%, rgb(var(--c-bg-panel)));
+  color: rgb(var(--c-fg));
+  transition: background-color var(--cal-fast) var(--cal-ease);
+  outline: none;
+}
+.cal .chip:hover { background: color-mix(in oklch, var(--ev) 32%, rgb(var(--c-bg-panel))); }
+.cal .chip:focus-visible,
+.cal .chip[data-selected="true"] {
+  outline: 2px solid rgb(var(--c-fg));
+  outline-offset: 1px;
+  z-index: 30;
+}
+/* Free time: outlined, not filled, so it reads as not blocking the slot. */
+.cal .chip[data-free="true"] {
+  background: rgb(var(--c-bg) / 0.85);
+  border: 1px dashed var(--ev);
+  border-left: 3px solid var(--ev);
+}
+.cal .chip[data-past="true"] { color: rgb(var(--c-fg-muted)); }
+.cal .chip[data-past="true"]:not([data-free="true"]) {
+  background: color-mix(in oklch, var(--ev) 12%, rgb(var(--c-bg-panel)));
+}
+/* The lifted copy while dragging: it floats, so it gets the elevation shadow. */
+.cal .chip[data-ghost="true"] {
+  box-shadow: var(--cal-lift);
+  z-index: 40;
+  cursor: grabbing;
+}
+.cal .chip[data-dragging-source="true"] { opacity: 0.35; }
+
+/* A single-line chip in month view and the all-day strip. */
+.cal .pill {
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--ev) 30%, rgb(var(--c-bg-panel)));
+  color: rgb(var(--c-fg));
+  outline: none;
+}
+.cal .pill:hover { background: color-mix(in oklch, var(--ev) 40%, rgb(var(--c-bg-panel))); }
+.cal .pill:focus-visible { outline: 2px solid rgb(var(--c-fg)); outline-offset: 1px; }
+.cal .dotline { border-radius: 4px; outline: none; }
+.cal .dotline:hover { background: rgb(var(--c-bg-hover)); }
+.cal .dotline:focus-visible { outline: 2px solid rgb(var(--c-fg)); outline-offset: -1px; }
+
+/* ── Sky ────────────────────────────────────────────────────────────────── */
+
+.cal .horizon-line {
+  position: absolute;
+  inset-inline: 0;
+  height: 0;
+  border-top: 1px dashed var(--cal-horizon);
+  pointer-events: none;
+}
+
+.cal .now-line {
+  position: absolute;
+  inset-inline: 0;
+  height: 2px;
+  background: var(--cal-now);
+  pointer-events: none;
+  z-index: 35;
+}
+.cal .now-line::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: -4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--cal-now);
+}
+
+/* Shabbat: a hatched span. The texture is the message - you cannot book here. */
+.cal .protected {
+  position: absolute;
+  inset-inline: 0;
+  pointer-events: none;
+  z-index: 5;
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--cal-protected-hatch) 0 1px,
+    transparent 1px 7px
+  );
+  background-color: var(--cal-protected-wash);
+  border-block: 1px solid var(--cal-protected-edge);
+}
+/* The same texture, as a 10px mark, for views too small to draw the span. */
+.cal .protected-mark {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid var(--cal-protected-edge);
+  background-image: repeating-linear-gradient(135deg, var(--cal-protected-ink) 0 1px, transparent 1px 3px);
+}
+.cal .protected-label {
+  color: var(--cal-protected-ink);
+}
+
+/* ── Surfaces that float ────────────────────────────────────────────────── */
+
+.cal-float {
+  box-shadow: var(--cal-lift);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cal-enter {
+    animation: cal-enter var(--cal-panel, 160ms) cubic-bezier(0, 0.4, 0, 1);
+  }
+}
+@keyframes cal-enter {
+  from { opacity: 0; transform: translateY(4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The OS form primitives (.input/.select in globals.css) are unlayered and
+   come after Tailwind's utilities, so their `width: 100%` and padding beat a
+   utility class. Inside the calendar, honour the sizing utilities we use. */
+.cal .input.w-auto, .cal .select.w-auto { width: auto; }
+.cal .input.w-16 { width: 4rem; }
+.cal .input.w-20 { width: 5rem; }
+.cal .input.py-0, .cal .select.py-0 { padding-block: 0; }
+
+/* Weekday/weekend toggles and view switcher share this segmented control. */
+.cal .seg {
+  border: 1px solid rgb(var(--c-hairline));
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.cal .seg > button {
+  height: 28px;
+  padding-inline: 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgb(var(--c-fg-muted));
+  transition: background-color var(--cal-fast) var(--cal-ease), color var(--cal-fast) var(--cal-ease);
+}
+.cal .seg > button:hover { color: rgb(var(--c-fg)); background: rgb(var(--c-active-hover)); }
+.cal .seg > button[aria-pressed="true"] { color: rgb(var(--c-fg)); background: rgb(var(--c-active)); }
+.cal .seg > button:focus-visible { outline: 2px solid rgb(var(--c-accent) / 0.8); outline-offset: 1px; }
+
+/* Display lives apart from the look, behind :not(.hidden): this selector
+   outranks a utility, so a responsive `hidden md:inline-flex` must still win. */
+.cal .seg:not(.hidden) { display: inline-flex; }
+.cal .icon-btn:not(.hidden) { display: inline-grid; }
+
+/* Icon and text buttons. */
+.cal .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding-inline: 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgb(var(--c-fg));
+  border: 1px solid rgb(var(--c-hairline));
+  transition: background-color var(--cal-fast) var(--cal-ease), border-color var(--cal-fast) var(--cal-ease);
+}
+.cal .btn:hover { background: rgb(var(--c-active-hover)); border-color: rgb(var(--c-bg-border-strong)); }
+.cal .btn:active { background: rgb(var(--c-active)); }
+.cal .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.cal .btn:focus-visible,
+.cal .icon-btn:focus-visible { outline: 2px solid rgb(var(--c-accent) / 0.8); outline-offset: 1px; }
+.cal .btn[data-variant="primary"] {
+  background: rgb(var(--c-accent-muted));
+  border-color: transparent;
+  color: rgb(var(--c-fg));
+}
+.cal .btn[data-variant="primary"]:hover { background: rgb(var(--c-accent-muted) / 0.88); }
+.cal .btn[data-variant="danger"] { color: rgb(var(--c-status-hot)); }
+.cal .btn[data-variant="ghost"] { border-color: transparent; }
+
+.cal .icon-btn {
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  color: rgb(var(--c-fg-muted));
+  transition: background-color var(--cal-fast) var(--cal-ease), color var(--cal-fast) var(--cal-ease);
+}
+.cal .icon-btn:hover { background: rgb(var(--c-active-hover)); color: rgb(var(--c-fg)); }
+.cal .icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.cal .kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding-inline: 4px;
+  border-radius: 4px;
+  border: 1px solid rgb(var(--c-hairline));
+  background: rgb(var(--c-bg-deep));
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: rgb(var(--c-fg-muted));
+}
+
+/* Day number badge: today is the only filled accent on the page. */
+.cal .daynum {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+.cal .daynum[data-today="true"] { background: rgb(var(--c-accent-muted)); color: rgb(var(--c-fg)); }
