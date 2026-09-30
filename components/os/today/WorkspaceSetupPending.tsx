@@ -2,15 +2,17 @@
  * Today for a workspace OASIS has not set up yet (plan D6).
  *
  * The rail already shows Today alone for such a workspace (lib/os/nav.ts,
- * provisioned: false); this is the page behind that row. It reads nothing and
- * names nothing — no pipeline, no team, no OASIS data — and says what happens
- * next. Wording follows UNPROVISIONED_SEED's own Today page
- * (lib/manifest/seeds.ts), which the manifest shells still render.
+ * provisioned: false); this is the page behind that row. It names nothing
+ * about anyone else's data: no pipeline, no team, no OASIS data. It says what
+ * happens next, and (since 2026-09-30) shows the real setup steps OASIS has
+ * recorded for THIS workspace and who to ask, through ProvisioningProgress,
+ * which reads the viewer's own workspace from the session.
  *
- * Server component, no hooks, no reads.
+ * Presentational itself: no reads here (tests/os-today.test.ts).
  */
 import Link from "next/link";
 import { PageFrame } from "@/components/os/PageFrame";
+import { ProvisioningProgress } from "@/components/onboarding/ProvisioningProgress";
 
 export function WorkspaceSetupPending() {
   return (
@@ -28,6 +30,9 @@ export function WorkspaceSetupPending() {
           .
         </p>
       </section>
+      <div className="mt-4">
+        <ProvisioningProgress />
+      </div>
     </PageFrame>
   );
 }

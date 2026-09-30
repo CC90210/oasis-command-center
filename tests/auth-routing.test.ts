@@ -294,7 +294,9 @@ async function testOrphanRecoveryHappyPath() {
         },
       ],
     ],
-    inviteRows: [{ token_hash: "abc123hash", created_at: "2026-05-27T00:00:00Z" }],
+    // tenant_id / team_role: recovery plans the member's profile for the
+    // invite's workspace before claiming it (lib/invite-profile-finalization.ts).
+    inviteRows: [{ token_hash: "abc123hash", tenant_id: "sunbiz-uuid", team_role: "member", created_at: "2026-05-27T00:00:00Z" }],
     redeemResult: { ok: true, tenant_id: "sunbiz-uuid", team_role: "member" },
     tenantRow: { slug: "submissions", custom_fields: { command_center_profile_slug: "sun" } },
     redeemCalls: [],

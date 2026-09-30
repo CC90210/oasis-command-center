@@ -14,9 +14,11 @@
  * forces callers to use the canonical shape.
  */
 
-import { SEED_MANIFESTS, UNPROVISIONED_SLUG } from "./seeds";
+import { OASIS_SEED_TENANT_IDS, SEED_MANIFESTS, UNPROVISIONED_SLUG } from "./seeds";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /**
  * Slugs no tenant may write a manifest for, whoever asks.
@@ -108,8 +110,17 @@ const OWNER_UNVERIFIED: GuardFail = {
  */
 export async function crossTenantGuard(
   slug: string,
-  callerTenantId: string
+  callerTenantId: string,
+  exemption?: OperatorProvisioningExemption,
 ): Promise<GuardResult> {
+  if (exemption) {
+    const allowed = await admitOperatorProvisioning(slug, exemption);
+    if (!allowed.ok) return allowed;
+    // From here the write is judged as the TARGET workspace's own write: the
+    // operator may set up a workspace's manifest, never take another
+    // workspace's slug or overwrite a manifest bound to someone else.
+    callerTenantId = exemption.targetTenantId;
+  }
   const lookup = await getServiceSupabase()
     .from("tenant_manifests")
     .select("tenant_id")
@@ -186,14 +197,89 @@ async function unclaimedSlugGuard(
 }
 
 /**
+ * OPERATOR PROVISIONING EXEMPTION (2026-09-30, OASIS OS S2 T7).
+ *
+ * The cross-workspace rule judges a write by the CALLER's own workspace, which
+ * is right for every tenant route and is exactly why OASIS could never set up a
+ * client's workspace: the operator's workspace is OASIS's, so a client's slug
+ * was always "another tenant's". lib/provisioning/provision-tenant.ts passes
+ * this exemption to write a manifest FOR the target workspace. It is:
+ *
+ *   operator-only  the auth user is re-verified here as a platform operator
+ *                  (lib/platform-operator.ts: the alias AND an owner/admin
+ *                  OASIS membership read by auth id), whatever the caller
+ *                  claims. A failed or negative check refuses.
+ *   narrow         the write is then judged exactly as the TARGET workspace's
+ *                  own write would be. OASIS's own workspaces and retired ones
+ *                  are refused outright, and protectedSlugGuard still runs
+ *                  first in manifestWriteGuards.
+ *   audited        a tenant_audit_log row on the target workspace records who
+ *                  used it, for which slug, before the write. If that row
+ *                  cannot be written, the exemption is refused.
+ */
+export type OperatorProvisioningExemption = {
+  kind: "operator_provisioning";
+  operatorAuthUserId: string;
+  /** The operator's SESSION email (never a profile column). */
+  operatorEmail: string;
+  targetTenantId: string;
+  /** One line for the audit row ("provision acme-plumbing"). */
+  reason: string;
+};
+
+async function admitOperatorProvisioning(
+  slug: string,
+  exemption: OperatorProvisioningExemption,
+): Promise<GuardResult> {
+  if (exemption.kind !== "operator_provisioning" || !exemption.targetTenantId) {
+    return { ok: false, status: 403, error: "operator_exemption_invalid" };
+  }
+  if (OASIS_SEED_TENANT_IDS.has(exemption.targetTenantId) || isRetiredTenant(exemption.targetTenantId)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "protected_workspace",
+      reason: "OASIS's own workspaces and retired workspaces are not provisioned here.",
+    };
+  }
+  const operator = await resolvePlatformOperatorForAuthUser(exemption.operatorAuthUserId, exemption.operatorEmail);
+  if (!operator.operator) {
+    return { ok: false, status: 403, error: "operator_required", reason: "Only an OASIS operator can set up a client workspace." };
+  }
+  const audit = await getServiceSupabase().rpc("log_tenant_event", {
+    p_tenant_id: exemption.targetTenantId,
+    p_action_type: "manifest.operator_provisioning_exemption",
+    p_target_table: "tenant_manifests",
+    p_target_id: slug,
+    p_after: { slug, reason: exemption.reason.slice(0, 200) },
+    p_metadata: { operator_auth_user_id: exemption.operatorAuthUserId },
+  });
+  if (audit.error) {
+    console.error("[manifest.guards] operator exemption audit failed; refusing", {
+      slug,
+      targetTenantId: exemption.targetTenantId,
+      error: audit.error.message,
+    });
+    return {
+      ok: false,
+      status: 503,
+      error: "operator_exemption_unaudited",
+      reason: "Could not record the operator action, so it was not taken. Try again in a moment.",
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Sugar that runs the two guards in canonical order. Returns the first
  * failure or `ok`. Most callers want this, not the individual functions.
  */
 export async function manifestWriteGuards(
   slug: string,
-  callerTenantId: string
+  callerTenantId: string,
+  exemption?: OperatorProvisioningExemption,
 ): Promise<GuardResult> {
   const proto = protectedSlugGuard(slug);
   if (!proto.ok) return proto;
-  return crossTenantGuard(slug, callerTenantId);
+  return crossTenantGuard(slug, callerTenantId, exemption);
 }

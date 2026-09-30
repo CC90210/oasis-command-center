@@ -15,6 +15,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { redeemInvite } from "@/lib/team";
 import { DEMO_CLIENT_PROFILE_COOKIE } from "@/lib/client-profiles";
 import { resolvePostLoginRedirect } from "@/lib/auth-routing";
+import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
 
 const PENDING_INVITE_COOKIE = "pending_invite_token";
 
@@ -92,16 +93,22 @@ export async function GET(req: NextRequest) {
 
   try {
     if (!data.user.email) throw new Error("missing_email");
+    const fullName =
+      fullNameHint ||
+      (data.user.user_metadata?.full_name as string) ||
+      (data.user.user_metadata?.name as string) ||
+      (data.user.email?.split("@")[0] ?? "User");
     await provisionAuthenticatedUser({
       db: getServiceSupabase(),
       authUserId: data.user.id,
       email: data.user.email,
-      fullName:
-        fullNameHint ||
-        (data.user.user_metadata?.full_name as string) ||
-        (data.user.user_metadata?.name as string) ||
-        (data.user.email?.split("@")[0] ?? "User"),
-      brand: brandHint || (data.user.user_metadata?.brand as string) || "OASIS AI",
+      fullName,
+      // Never "OASIS AI": that named strangers' workspaces after OASIS. An
+      // unnamed workspace is "<First name>'s workspace" until its owner names it.
+      brand:
+        brandHint ||
+        (data.user.user_metadata?.brand as string) ||
+        defaultWorkspaceName(fullName, data.user.email),
     });
   } catch (provisioningErr) {
     // Don't block sign-in if provisioning hiccups; Settings can re-trigger.

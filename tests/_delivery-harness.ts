@@ -113,6 +113,7 @@ export function splitSql(sql: string): string[] {
 }
 
 export const MIGRATION_PATH = join(__dirname, "..", "database", "turso", "183_delivery_and_support.turso.sql");
+export const LEDGER_MIGRATION_PATH = join(__dirname, "..", "database", "turso", "bravo__190_ledger_core.sql");
 
 const NOW_SQL = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 const UUID_SQL =
@@ -149,8 +150,13 @@ export async function setupDatabase(): Promise<Client> {
     CREATE TABLE lead_interactions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       tenant_id TEXT, lead_id TEXT, type TEXT, channel TEXT, direction TEXT, agent_source TEXT,
       subject TEXT, content TEXT, content_preview TEXT, to_email TEXT, metadata TEXT,
-      created_at TEXT DEFAULT ${NOW_SQL});
+      created_at TEXT DEFAULT ${NOW_SQL},
+      sent_at TEXT, to_phone TEXT, from_phone TEXT, from_email TEXT, actor_user_id TEXT,
+      provider TEXT, provider_message_id TEXT);
   `);
+  // The Business Ledger (bravo__190): the desk's ticket writes record
+  // ticket.opened / first_response / resolved in the same batch.
+  await db.executeMultiple(readFileSync(LEDGER_MIGRATION_PATH, "utf8"));
   await db.batch(
     [
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },

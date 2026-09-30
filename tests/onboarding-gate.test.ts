@@ -74,15 +74,54 @@ assert.equal(
   "orphan invitee → /onboarding/welcome (page runs recovery)",
 );
 
-// Genuine fresh-tenant signup — no invitation, no attachment yet.
+// No workspace and no invitation. 2026-09-30: this used to go to the wizard,
+// which now serves only a workspace owner and refuses an account with no
+// workspace; its refusal page's link to "/" was sent straight back, a loop on
+// every page until the next login. "/" explains the account is not linked.
 assert.equal(
   shouldRedirectToOnboarding({
     onboarding_completed_at: null,
     invited_by: null,
     tenant_id: null,
   }),
+  null,
+  "no workspace, no invite → no redirect (the wizard cannot serve them)",
+);
+
+// 2026-09-30: the OWNER of a workspace that is not set up yet may set it up
+// themselves, so the gate sends them to the wizard. Only a positive "not set
+// up" does: an unknown answer never traps anyone, and a member never goes.
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: false },
+  ),
   "/onboarding/wizard",
-  "fresh signup → /onboarding/wizard (industry template flow)",
+  "owner of an unprovisioned workspace -> wizard",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: true },
+  ),
+  null,
+  "owner of a set-up workspace lands in it",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: null },
+  ),
+  null,
+  "unknown provisioning state never gates",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 0 },
+    { workspaceProvisioned: false },
+  ),
+  null,
+  "a member of an unprovisioned workspace is never sent to the wizard",
 );
 
 console.log("Onboarding gate tests passed");

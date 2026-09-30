@@ -47,6 +47,7 @@ import { askHrefFor, buildOsNav, osNavRows } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
+import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
 import { PerfVitals } from "@/components/PerfVitals";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -125,6 +126,8 @@ export default async function RootLayout({
   let profile = null;
   let resolvedPrimaryAgent: string | null = null;
   let tenantProfileSlug: string | null = null;
+  /** The viewer's workspace's own name (tenants.name), for the shell header. */
+  let tenantName: string | null = null;
   let demoProfileSlug: string | null = null;
   let pathOverrideSlug: string | null = null;
   // Props for the persistent ChatWidget hoisted into MainShell (2026-06-18).
@@ -243,6 +246,7 @@ export default async function RootLayout({
           // EVERY page. Same columns, same null-on-error degradation the
           // surrounding safe() already expects.
           const tenant = await getTenant(tenantId);
+          tenantName = tenant?.name ?? null;
           return resolveClientProfileSlug({
             slug: tenant?.slug || "",
             custom_fields: tenant?.custom_fields || {},
@@ -412,7 +416,18 @@ export default async function RootLayout({
         founders: { content: foundersGateOpen, finances: foundersGateOpen && financeOwner },
       })
     : null;
-  const osWorkspaceName = profile?.brand || manifest?.brand.name || "Workspace";
+  // The workspace's OWN name first (tenants.name), then its manifest brand,
+  // then the viewer's profile brand (2026-09-30). The profile brand used to
+  // win, and every account path defaulted it to "OASIS AI", so a client's
+  // header could read as OASIS's. The legacy default counts as unnamed outside
+  // OASIS's own workspaces (lib/provisioning/workspace-name.ts).
+  const ownWorkspaceName = workspaceDisplayName({
+    tenantName,
+    manifestBrand: manifest?.brand.name,
+    profileBrand: profile?.brand,
+    isOasisWorkspace: isOasisSurfaceTenant(viewerTenantSlug ?? tenantProfileSlug),
+  });
+  const osWorkspaceName = ownWorkspaceName;
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on
@@ -472,7 +487,7 @@ export default async function RootLayout({
               brand={
                 demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
                   ? manifest.brand.name
-                  : profile?.brand || manifest.brand.name
+                  : ownWorkspaceName
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}

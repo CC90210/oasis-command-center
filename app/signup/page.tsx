@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
@@ -9,6 +9,9 @@ import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AuthRedirectGuard } from "@/components/AuthRedirectGuard";
 import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
+import { inviteRedeemFailure, inviteRedeemMessage } from "@/lib/invite-redeem-errors";
+
+type RedeemBody = { ok?: boolean; message?: string; error?: string; tenant_slug?: string | null };
 
 /**
  * /signup — invite-only (P0-8, 2026-09-28).
@@ -96,6 +99,64 @@ function InviteSignup({
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [accountExists, setAccountExists] = useState(false);
+  // Set once the account exists but joining the workspace failed in a way a
+  // retry can fix: the invite is still unclaimed, so "Try again" redeems it
+  // with the session the account creation already gave us.
+  const [joinRetry, setJoinRetry] = useState(false);
+  // null until the server says which auth backend runs. Google signup exists
+  // only on the legacy backend, so the button stays hidden until we know.
+  const [googleSignup, setGoogleSignup] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    authMode()
+      .then((mode) => {
+        if (live) setGoogleSignup(mode !== "turso");
+      })
+      .catch((error: unknown) => {
+        console.error("[signup] auth backend check failed; hiding Google signup", error);
+        if (live) setGoogleSignup(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /**
+   * Join the workspace with the session we hold. On success, open the app:
+   * "/" resolves the workspace from the session, and the onboarding gate sends
+   * an owner whose workspace is not set up yet to the setup wizard. On failure,
+   * show the sentence for the code (never the code) and offer a retry when the
+   * invite is still valid.
+   */
+  async function joinWorkspace(): Promise<void> {
+    const rr = await fetch("/api/auth/redeem-invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw_token: inviteToken }),
+    });
+    const rb = (await rr.json().catch(() => ({}))) as RedeemBody;
+    if (!rr.ok || !rb.ok) {
+      setErr(inviteRedeemMessage(rb));
+      setJoinRetry(inviteRedeemFailure(rb.error).retryable);
+      return;
+    }
+    setJoinRetry(false);
+    // Full-page assign: the session is an httpOnly cookie and server
+    // components must re-render with it.
+    window.location.assign("/");
+  }
+
+  async function onRetryJoin() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await joinWorkspace();
+    } catch (ex: unknown) {
+      setErr(ex instanceof Error ? "We could not reach the server. Check your connection and try again." : "Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -146,21 +207,7 @@ function InviteSignup({
           }
           return;
         }
-        const rr = await fetch("/api/auth/redeem-invite", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ raw_token: inviteToken }),
-        });
-        const rb = (await rr.json().catch(() => ({}))) as {
-          ok?: boolean; message?: string; error?: string; tenant_slug?: string | null };
-        if (!rr.ok || !rb.ok) {
-          setErr(rb.message || rb.error || "Invite redemption failed");
-          return;
-        }
-        const slug = rb.tenant_slug?.trim();
-        // Full-page assign: the session is an httpOnly cookie and server
-        // components must re-render with it.
-        window.location.assign(slug ? `/t/${slug}` : "/");
+        await joinWorkspace();
         return;
       }
 
@@ -237,8 +284,10 @@ function InviteSignup({
           // the workspace link didn't finish. Support can finish it
           // server-side (the repair path used for Emily).
           setErr(
-            (body.message || body.error || `Finalization failed (HTTP ${lastStatus || "?"})`) +
-              " — your account was created but couldn't be linked to the workspace. Reach out to your workspace admin and they can finish the setup in one step."
+            (body.error || body.message
+              ? inviteRedeemMessage(body)
+              : `We could not reach the server (HTTP ${lastStatus || "?"}).`) +
+              " Your account was created but is not linked to the workspace yet. Reach out to your workspace admin and they can finish the setup in one step."
           );
           return;
         }
@@ -274,7 +323,7 @@ function InviteSignup({
         tenant_slug?: string | null;
       };
       if (!r.ok || !body.ok) {
-        setErr(body.message || body.error || "Invite redemption failed");
+        setErr(inviteRedeemMessage(body));
         return;
       }
       // Invitees skip the new-tenant wizard and land directly in
@@ -386,6 +435,16 @@ function InviteSignup({
                 {err}
               </div>
             )}
+            {joinRetry && (
+              <button
+                type="button"
+                onClick={onRetryJoin}
+                disabled={busy}
+                className="w-full rounded-md border border-accent/50 bg-accent/10 py-2 text-sm font-bold text-fg hover:bg-accent/20 disabled:opacity-50"
+              >
+                {busy ? "Joining…" : "Try joining again"}
+              </button>
+            )}
             {accountExists && (
               <div className="rounded-lg border border-accent/35 bg-accent/5 p-3 space-y-2.5">
                 <div className="text-xs font-semibold text-fg">
@@ -447,28 +506,37 @@ function InviteSignup({
               data.
             </p>
 
-            <button
-              type="submit"
-              disabled={busy}
-              className="w-full bg-accent text-bg font-bold py-2.5 rounded-md hover:bg-accent-muted transition-colors disabled:opacity-50"
-            >
-              {busy ? "Creating account…" : "Create account"}
-            </button>
+            {!joinRetry && (
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full bg-accent text-bg font-bold py-2.5 rounded-md hover:bg-accent-muted transition-colors disabled:opacity-50"
+              >
+                {busy ? "Creating account…" : "Create account"}
+              </button>
+            )}
           </form>
 
-          <div className="my-5 flex items-center gap-3">
-            <div className="h-px flex-1 bg-bg-border" />
-            <span className="text-xs text-fg-dim uppercase tracking-wider">or</span>
-            <div className="h-px flex-1 bg-bg-border" />
-          </div>
+          {/* Google signup exists only on the legacy auth backend. Under Turso
+              auth it could only answer "temporarily unavailable", so the
+              button is not drawn at all (2026-09-30 audit: a dead button). */}
+          {googleSignup === true && (
+            <>
+              <div className="my-5 flex items-center gap-3">
+                <div className="h-px flex-1 bg-bg-border" />
+                <span className="text-xs text-fg-dim">or</span>
+                <div className="h-px flex-1 bg-bg-border" />
+              </div>
 
-          <button
-            onClick={onGoogle}
-            disabled={busy}
-            className="w-full bg-bg-elev border border-bg-border text-fg font-medium py-2.5 rounded-md hover:bg-bg-hover transition-colors disabled:opacity-50"
-          >
-            Sign up with Google
-          </button>
+              <button
+                onClick={onGoogle}
+                disabled={busy}
+                className="w-full bg-bg-elev border border-bg-border text-fg font-medium py-2.5 rounded-md hover:bg-bg-hover transition-colors disabled:opacity-50"
+              >
+                Sign up with Google
+              </button>
+            </>
+          )}
         </div>
 
         <p className="text-center text-sm text-fg-muted mt-6">

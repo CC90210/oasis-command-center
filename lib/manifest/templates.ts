@@ -30,11 +30,10 @@ export const REAL_ESTATE_TEMPLATE: TenantManifest = {
     footer_label: "Real estate brokerage · powered by OASIS AI",
     footer_tagline: "Every lead, every deal, one place.",
   },
-  agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
-    { slug: "atlas", display_name: "Atlas", enabled: true },
-    { slug: "maven", display_name: "Maven", enabled: true },
-  ],
+  // No agents in a template. A workspace's teammates come from the departments
+  // chosen at setup (lib/provisioning/team.ts), named for their department and
+  // never for one of OASIS's own agents (2026-09-30).
+  agents: [],
   nav: [
     { href: "/", label: "Today", icon: "LayoutDashboard", group: "Operations" },
     { href: "/pipeline", label: "Pipeline", icon: "GitBranch", group: "Operations" },
@@ -96,12 +95,9 @@ export const REAL_ESTATE_TEMPLATE: TenantManifest = {
     { path: "properties", label: "Properties", kind: "table", entity: "property" },
     { path: "deals", label: "Deals", kind: "kanban", entity: "deal", config: { group_by: "stage" } },
   ],
-  permissions: { local_files: true, computer_control: false, web_access: true },
-  default_prompts: [
-    { agent_slug: "bravo", label: "Daily standup", prompt: "Give me a 5-bullet brief: hot leads, deals closing this week, today's showings, anything past-due, top priority." },
-    { agent_slug: "maven", label: "Draft a listing post", prompt: "Pick a recent property and draft an Instagram caption + photo prompts in my voice." },
-    { agent_slug: "atlas", label: "Commission forecast", prompt: "Project my commission revenue for the next 60 days based on deals in the pipeline." },
-  ],
+  permissions: { local_files: false, computer_control: false, web_access: true },
+  // No default prompts: the old ones were addressed to OASIS's own agents.
+  default_prompts: [],
   onboarding_industry: "real_estate",
   data_backend: "supabase",
   deployment_mode: "shared",
@@ -111,235 +107,6 @@ export const REAL_ESTATE_TEMPLATE: TenantManifest = {
     monthly_price_hint: "$49/mo",
     summary: "Lead pipeline + property + deal tracking.",
   },
-  meta: { created_at: NOW, updated_at: NOW, schema_version: MANIFEST_SCHEMA_VERSION },
-};
-
-export const BUSINESS_FUNDING_TEMPLATE: TenantManifest = {
-  version: 1,
-  tenant_slug: "business-funding-template",
-  brand: {
-    name: "Your Funding Operation",
-    logo: "sunbiz",
-    subtitle: "Agent Command Center",
-    footer_label: "Business funding · powered by OASIS AI",
-    footer_tagline: "Funded deals over noise.",
-  },
-  agents: [
-    // Operational primary — backend admin, Chrome jobs, data collection, workflow runner.
-    { slug: "solara", display_name: "Solara", enabled: true, primary: true, core: true },
-    // Brand-facing sales persona — outreach, SMS follow-ups, closing voice.
-    { slug: "helios", display_name: "Helios", enabled: true, core: true },
-  ],
-  // Mirrors SUN_SEED — funding-shop stack. New tenants created from this
-  // template inherit the readiness opinion so their Setup Readiness card
-  // surfaces Kixie + TextTorrent + Gmail App Password from day one.
-  required_services: [
-    {
-      service: "ai_provider",
-      label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
-      kind: "ai_provider",
-      detail:
-        "Powers Solara + Helios backend automations (drip cadence, lender response classifier, daily plan generator). Configure under Settings → Agents → AI keys.",
-    },
-    {
-      service: "gws",
-      label: "Gmail App Password (shared submissions@)",
-      kind: "tenant_credential",
-      detail:
-        "Shared outbound identity for shop-out + drawer email. send_gateway.py on the bridge reads from .env.agents today; adding the key to the tenant store here is required for production deploys (VPS / hosted bridge) so credentials migrate with the workspace.",
-    },
-    {
-      service: "kixie",
-      label: "Kixie (click-to-call + business SMS)",
-      kind: "tenant_credential",
-      detail:
-        "Centralizes Kixie inside the command center — call buttons, dialer, SMS, and call logs all surface in the lead drawer. Operators stop opening the Kixie app.",
-    },
-    {
-      service: "texttorrent",
-      label: "TextTorrent (bulk + 1:1 SMS)",
-      kind: "tenant_credential",
-      detail:
-        "TT API powers the Text Torrent button + bulk sequences. Goal: full embedding — every TT feature reachable from the command center, no app switching.",
-    },
-  ],
-  nav: [
-    { href: "/", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },
-    // Multi-agent switcher — Solara (operational) + Helios (sales) under one chat surface.
-    { href: "/agent", label: "Agents", icon: "Bot", group: "Operations" },
-    { href: "/reasoning", label: "Reasoning", icon: "Brain", group: "Operations" },
-    { href: "/leads", label: "Leads", icon: "Users", group: "Pipeline" },
-    { href: "/applications", label: "Applications", icon: "FileText", group: "Pipeline", badge_key: "applications" },
-    { href: "/offers", label: "Offers", icon: "HandCoins", group: "Deals" },
-    { href: "/funded-deals", label: "Funded Deals", icon: "BadgeDollarSign", group: "Deals" },
-    { href: "/renewals", label: "Renewals", icon: "RefreshCcw", group: "Deals" },
-    { href: "/commissions", label: "Commissions", icon: "DollarSign", group: "Deals" },
-    { href: "/sms", label: "SMS", icon: "MessageSquare", group: "Outreach" },
-    { href: "/email-blast", label: "Email", icon: "Mail", group: "Outreach" },
-    { href: "/lenders", label: "Lenders", icon: "Landmark", group: "Network" },
-    // Top-level integrations + settings — both tenant-aware so SunBiz signups
-    // see their own credentials + agent toggles, not OASIS's.
-    { href: "/integrations", label: "Integrations", icon: "Plug", group: "System" },
-    { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
-  ],
-  data_model: [
-    {
-      name: "lead",
-      label: "Lead",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "contact_name", type: "string" },
-        { name: "phone", type: "string" },
-        { name: "email", type: "string" },
-        { name: "monthly_revenue", type: "number" },
-        // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
-        // 2026-05-23). Dropped imported / not_interested / approved.
-        // 2026-06-18 (CC): dropped `submitted` + `declined`; added `ghost`.
-        // Mirrors SUN_SEED + LEAD_PIPELINE_STAGES.
-        { name: "stage", type: "enum", enum_values: ["intent_inquiry_submitted", "hot_lead", "uw_sheet", "missing_info", "follow_up", "sent_application", "viewed_application", "signed_application", "ghost", "default"], required: true },
-        { name: "missing_info", type: "json" },
-      ],
-    },
-    {
-      name: "application",
-      label: "Application",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "contact_name", type: "string" },
-        { name: "lead_id", type: "string" },
-        { name: "lender_id", type: "string" },
-        { name: "requested_amount", type: "number" },
-        { name: "submitted_at", type: "datetime" },
-        // Aligned with SUN_SEED post migration 064 (Jordan/Oasis
-        // 2026-05-23). Slimmed from 17 statuses to 10.
-        { name: "status", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
-        // Owner address — Phase 3 of Jordan/Oasis 2026-05-23. Lives in
-        // JSONB on the application record (no DDL). Matches SUN_SEED.
-        { name: "owner_address_line1", type: "string" },
-        { name: "owner_address_line2", type: "string" },
-        { name: "owner_address_city", type: "string" },
-        { name: "owner_address_state", type: "string" },
-        { name: "owner_address_zip", type: "string" },
-      ],
-    },
-    {
-      name: "offer",
-      label: "Offer",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "application_id", type: "string" },
-        { name: "lender_id", type: "string" },
-        { name: "lender_name", type: "string" },
-        { name: "amount", type: "number" },
-        { name: "term_months", type: "number" },
-        { name: "factor_rate", type: "number" },
-        // Same slimmed enum as application.status post-064 — keeps the
-        // Offers page able to group by either entity's stage.
-        { name: "stage", type: "enum", enum_values: ["application_in", "shopping", "missing_info", "requested_docs", "docs_out", "login", "funded", "follow_ups", "declined", "dead_file"], required: true },
-      ],
-    },
-    {
-      name: "funded_deal",
-      label: "Funded Deal",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "lead_id", type: "string" },
-        { name: "lender_id", type: "string" },
-        { name: "lender_name", type: "string" },
-        { name: "product_type", type: "enum", enum_values: ["same_day_funding", "mca", "term_loan", "long_term_loan", "line_of_credit", "equipment", "invoice_factoring", "sba"] },
-        { name: "amount_funded", type: "number", required: true },
-        { name: "funded_at", type: "date" },
-        { name: "term_months", type: "number" },
-        { name: "factor_rate", type: "number" },
-        { name: "repayment_amount", type: "number" },
-        { name: "commission_amount", type: "number" },
-        { name: "renewal_eligible_at", type: "date" },
-        { name: "status", type: "enum", enum_values: ["funded", "renewal_due", "renewed", "lost", "default"] },
-      ],
-    },
-    {
-      name: "renewal",
-      label: "Renewal",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "funded_deal_id", type: "string" },
-        { name: "amount_available", type: "number" },
-        { name: "due_date", type: "date" },
-        { name: "last_contacted_at", type: "date" },
-        { name: "next_action", type: "string" },
-        { name: "status", type: "enum", enum_values: ["upcoming", "due", "overdue", "renewed", "lost"], required: true },
-      ],
-    },
-    {
-      name: "commission",
-      label: "Commission",
-      fields: [
-        { name: "business_name", type: "string", required: true },
-        { name: "funded_deal_id", type: "string" },
-        { name: "lender_name", type: "string" },
-        { name: "broker_share_pct", type: "number" },
-        { name: "amount", type: "number" },
-        { name: "paid", type: "boolean" },
-        { name: "paid_at", type: "date" },
-      ],
-    },
-    {
-      name: "lender",
-      label: "Lender",
-      fields: [
-        { name: "name", type: "string", required: true },
-        { name: "contact", type: "string" },
-        { name: "product_type", type: "enum", enum_values: ["same_day_funding", "mca", "term_loan", "long_term_loan", "line_of_credit", "equipment", "invoice_factoring", "sba"] },
-        { name: "min_monthly_revenue", type: "number" },
-        { name: "max_funded_amount", type: "number" },
-        { name: "min_time_in_business_months", type: "number" },
-        { name: "fico_floor", type: "number" },
-        { name: "sla_response_days", type: "number" },
-        { name: "notes", type: "string" },
-      ],
-    },
-  ],
-  pages: [
-    { path: "reasoning", label: "Reasoning", kind: "reasoning" },
-    { path: "leads", label: "Lead Pipeline", kind: "pipeline_entity", entity: "lead", config: { stage_field: "stage" } },
-    { path: "applications", label: "Opportunity Pipeline", kind: "pipeline_entity", entity: "application", config: { stage_field: "status" } },
-    { path: "offers", label: "Offers", kind: "kanban", entity: "offer", config: { group_by: "stage" } },
-    { path: "funded-deals", label: "Funded Deals", kind: "kanban", entity: "funded_deal", config: { compute_group_by: "renewal_window" } },
-    { path: "renewals", label: "Renewals", kind: "kanban", entity: "renewal", config: { group_by: "status" } },
-    { path: "commissions", label: "Commissions", kind: "table", entity: "commission" },
-    { path: "lenders", label: "Lenders", kind: "table", entity: "lender" },
-  ],
-  permissions: { local_files: true, computer_control: false, web_access: true },
-  default_prompts: [
-    { agent_slug: "solara", label: "Morning briefing", prompt: "Pull leads that haven't been touched in 24h, applications waiting on docs, and offers expiring this week." },
-    { agent_slug: "solara", label: "Renewal sweep", prompt: "Which funded deals are within 60 days of renewal? Surface the top 3 by amount." },
-    { agent_slug: "solara", label: "Record funded deal", prompt: "Create a funded deal from this note: ABC Corp funded $50,000 today with XYZ Capital on a 12-month term. If anything required is missing, ask one clear question before writing." },
-    { agent_slug: "solara", label: "Update renewal status", prompt: "Find the renewal record for ABC Corp and mark the next action as call owner today. If there are multiple matches, show them before updating." },
-    { agent_slug: "helios", label: "Draft cold outreach", prompt: "Draft a first-touch SMS for a freshly qualified lead. Sound human, not corporate." },
-    { agent_slug: "helios", label: "Follow-up cadence", prompt: "Draft a 3-touch revival sequence over 7 days for leads that ghosted after the application step." },
-  ],
-  onboarding_industry: "business_funding",
-  data_backend: "turso",
-  deployment_mode: "dedicated",
-  tier: {
-    label: "Pro",
-    setup_complexity: "Guided",
-    monthly_price_hint: "Custom",
-    summary: "Funding shop: Solara + Helios, full pipeline.",
-  },
-  compliance: {
-    tcpa: {
-      send_window_local: "9am-9pm",
-      honor_opt_outs: true,
-      weekend_sends: false,
-      opt_out_phrase: "Reply STOP to opt out.",
-    },
-  },
-  // jotform removed 2026-06-06 — see seeds.ts for the canonical SunBiz
-  // pattern; intake is the dashboard's native /forms designer.
-  integrations: [
-    { kind: "twilio", enabled: true },
-  ],
   meta: { created_at: NOW, updated_at: NOW, schema_version: MANIFEST_SCHEMA_VERSION },
 };
 
@@ -353,10 +120,7 @@ export const ECOMMERCE_TEMPLATE: TenantManifest = {
     footer_label: "E-commerce · powered by OASIS AI",
     footer_tagline: "Move product. Stay sane.",
   },
-  agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
-    { slug: "maven", display_name: "Maven", enabled: true },
-  ],
+  agents: [],
   nav: [
     { href: "/", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },
     { href: "/reasoning", label: "Reasoning", icon: "Brain", group: "Operations" },
@@ -408,10 +172,7 @@ export const ECOMMERCE_TEMPLATE: TenantManifest = {
     { path: "customers", label: "Customers", kind: "table", entity: "customer" },
   ],
   permissions: { local_files: false, computer_control: false, web_access: true },
-  default_prompts: [
-    { agent_slug: "bravo", label: "Yesterday's results", prompt: "Summarise yesterday's orders, refunds, and top-selling SKUs in 5 bullets." },
-    { agent_slug: "maven", label: "Promote a product", prompt: "Pick a top-performing SKU and draft a 3-email sequence to lapsed customers." },
-  ],
+  default_prompts: [],
   onboarding_industry: "ecommerce",
   data_backend: "supabase",
   deployment_mode: "shared",
@@ -434,11 +195,7 @@ export const AGENCY_TEMPLATE: TenantManifest = {
     footer_label: "Agency · powered by OASIS AI",
     footer_tagline: "Clients delivered.",
   },
-  agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
-    { slug: "maven", display_name: "Maven", enabled: true },
-    { slug: "atlas", display_name: "Atlas", enabled: true },
-  ],
+  agents: [],
   nav: [
     { href: "/", label: "Today", icon: "LayoutDashboard", group: "Operations" },
     { href: "/reasoning", label: "Reasoning", icon: "Brain", group: "Operations" },
@@ -476,11 +233,8 @@ export const AGENCY_TEMPLATE: TenantManifest = {
     { path: "clients", label: "Clients", kind: "table", entity: "client" },
     { path: "projects", label: "Projects", kind: "kanban", entity: "project", config: { group_by: "stage" } },
   ],
-  permissions: { local_files: true, computer_control: false, web_access: true },
-  default_prompts: [
-    { agent_slug: "bravo", label: "Standup", prompt: "Roll up: clients in trouble, projects past due, deliverables shipped yesterday." },
-    { agent_slug: "atlas", label: "Cash position", prompt: "Show retainer income, overdue invoices, projected cash for next 30 days." },
-  ],
+  permissions: { local_files: false, computer_control: false, web_access: true },
+  default_prompts: [],
   onboarding_industry: "agency",
   data_backend: "supabase",
   deployment_mode: "shared",
@@ -503,19 +257,14 @@ export const CUSTOM_TEMPLATE: TenantManifest = {
     footer_label: "Custom · powered by OASIS AI",
     footer_tagline: "Build it your way.",
   },
-  // Custom (C-suite) tier ships the full operations C-suite by default.
-  // CC manually scopes which agents stay enabled when configuring the customer.
-  agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
-    { slug: "atlas", display_name: "Atlas", enabled: true },
-    { slug: "maven", display_name: "Maven", enabled: true },
-  ],
+  // Teammates come from the departments chosen at setup, like every template.
+  agents: [],
   nav: [
     { href: "/", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },
     { href: "/reasoning", label: "Reasoning", icon: "Brain", group: "Operations" },
     { href: "/settings", label: "Settings", icon: "Settings", group: "System" },
   ],
-  permissions: { local_files: true, computer_control: false, web_access: true },
+  permissions: { local_files: false, computer_control: false, web_access: true },
   onboarding_industry: "custom",
   data_backend: "supabase",
   deployment_mode: "shared",
@@ -523,14 +272,13 @@ export const CUSTOM_TEMPLATE: TenantManifest = {
     label: "Enterprise",
     setup_complexity: "Done-for-you",
     monthly_price_hint: "Custom",
-    summary: "C-suite package: Bravo, Atlas, Maven. Setup required.",
+    summary: "Your departments, set up around your business.",
   },
   meta: { created_at: NOW, updated_at: NOW, schema_version: MANIFEST_SCHEMA_VERSION },
 };
 
 export const TEMPLATES = {
   real_estate: REAL_ESTATE_TEMPLATE,
-  business_funding: BUSINESS_FUNDING_TEMPLATE,
   ecommerce: ECOMMERCE_TEMPLATE,
   agency: AGENCY_TEMPLATE,
   custom: CUSTOM_TEMPLATE,
@@ -538,7 +286,7 @@ export const TEMPLATES = {
 
 export type TemplateKey = keyof typeof TEMPLATES;
 
-export const TEMPLATE_KEYS: TemplateKey[] = ["real_estate", "business_funding", "ecommerce", "agency", "custom"];
+export const TEMPLATE_KEYS: TemplateKey[] = ["real_estate", "ecommerce", "agency", "custom"];
 
 /**
  * Wizard questions per template — the onboarding flow renders these step by
@@ -573,23 +321,6 @@ export const WIZARD_QUESTIONS: Record<TemplateKey, WizardQuestion[]> = {
     ]},
     { id: "extra_fields", prompt: "Any custom fields you track on leads we should include?", hint: "Comma-separated, like 'referral_source, pre_approved, school_district'.", kind: "longtext" },
     { id: "tagline", prompt: "Pick a 3-5 word tagline to show in the footer.", kind: "text", placeholder: "Every door, every deal." },
-  ],
-  business_funding: [
-    { id: "brand_name", prompt: "What's the funding shop called?", kind: "text", required: true, placeholder: "Sun Biz Funding" },
-    { id: "primary_offer", prompt: "What's the main product?", kind: "single_choice", required: true, choices: [
-      { value: "mca", label: "Merchant Cash Advance" },
-      { value: "term_loan", label: "Term loan" },
-      { value: "line_of_credit", label: "Line of credit" },
-      { value: "mixed", label: "Mixed — we broker a few" },
-    ]},
-    { id: "monthly_apps", prompt: "Roughly how many applications per month?", kind: "single_choice", choices: [
-      { value: "lt_50", label: "Under 50" },
-      { value: "50_200", label: "50–200" },
-      { value: "200_plus", label: "200+" },
-    ]},
-    { id: "primary_agent_name", prompt: "Name your operations agent.", hint: "Runs the back office — pipeline, applications, lender match, renewals. Default: Solara.", kind: "text", placeholder: "Solara" },
-    { id: "sales_agent_name", prompt: "Name your sales-facing agent.", hint: "Cold outreach, SMS follow-ups, closing voice. Default: Helios.", kind: "text", placeholder: "Helios" },
-    { id: "tagline", prompt: "A short footer tagline.", kind: "text", placeholder: "Funded deals over noise." },
   ],
   ecommerce: [
     { id: "brand_name", prompt: "What's the store called?", kind: "text", required: true },
