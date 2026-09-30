@@ -30,6 +30,7 @@
 import { usePathname } from "next/navigation";
 import { useRef } from "react";
 import ChatWidget from "@/components/ChatWidget";
+import { RunnerStatusHeader } from "@/components/admin/RunnerStatusHeader";
 import { ContentHeader, type ContentHeaderProps } from "@/components/os/ContentHeader";
 import type { ChatShellProps } from "@/lib/chat-shell-props";
 
@@ -173,23 +174,30 @@ export function MainShell({
           // mobile top bar.
           className={
             onAgent
-              ? "fixed top-14 left-0 right-0 bottom-0 z-20 bg-bg os-canvas-overlay transition-[left] duration-150"
+              ? "fixed top-14 left-0 right-0 bottom-0 z-20 flex flex-col bg-bg os-canvas-overlay transition-[left] duration-150"
               : "hidden"
           }
           aria-hidden={!onAgent}
         >
-          <ChatWidget
-            agentKeys={chat.agentKeys}
-            defaultAgent={chat.defaultAgent}
-            isAdmin={chat.isAdmin}
-            welcomeMessages={chat.welcomeMessages}
-            advancedPicker={chat.advancedPicker}
-            variant="fullscreen"
-            // Off /agent the instance stays mounted (transcript survives) but
-            // pauses its prewarm + 30s health poll so it isn't working on every
-            // page. The live stream reader is unaffected.
-            active={onAgent}
-          />
+          {/* The Coding harness's runner strip: computer, AI tools, warm pool.
+              Mounted only on /agent so it never polls from another page. */}
+          {onAgent && <RunnerStatusHeader />}
+          <div className="min-h-0 flex-1">
+            <ChatWidget
+              agentKeys={chat.agentKeys}
+              defaultAgent={chat.defaultAgent}
+              isAdmin={chat.isAdmin}
+              welcomeMessages={chat.welcomeMessages}
+              advancedPicker={chat.advancedPicker}
+              targetLabels={chat.targetLabels}
+              variant="fullscreen"
+              // Off /agent the instance stays mounted (transcript survives) but
+              // pauses its prewarm + 30s health poll so it isn't working on every
+              // page, and ignores ?agent / ?prompt that belong to other pages.
+              // The live stream reader is unaffected.
+              active={onAgent}
+            />
+          </div>
         </div>
       )}
     </>

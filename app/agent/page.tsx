@@ -1,30 +1,35 @@
 /**
- * /agent — the Agents tab route.
+ * /agent — Admin › Coding harness (2026-09-30; was "Agent console").
  *
- * As of 2026-06-18 the ChatWidget is NO LONGER mounted here. It lives in the
- * persistent shell (components/MainShell.tsx), which renders one ChatWidget
- * instance that survives soft navigation so a running agent keeps running when
- * you click away and back. Props are resolved server-side in app/layout.tsx
- * via lib/chat-shell-props.ts and threaded into MainShell.
+ * OPERATOR ONLY. It runs Claude Code, Codex or Gemini in a department's repo
+ * on the operator's computer through the bridge (Business-Empire-Agent for
+ * Chief of Staff and Operations, CMO-Agent for Marketing, CFO-Agent for
+ * Finance). Anyone else is sent to Chief of Staff, where everyday questions
+ * belong; the department channels are the product, this is the operator's
+ * workbench.
  *
- * This route only needs to EXIST so /agent is a valid path (and so MainShell's
- * pathname check renders the chat full-screen here). The persistent chat is a
- * `fixed`, z-20 overlay above this <main>, so the fallback below is visible
- * only if the persistent chat couldn't mount — e.g. a brand-new tenant with no
- * agent enabled yet (chat props resolve to null).
- *
- * Mounting a ChatWidget here again would create a SECOND competing instance
- * (double stream, orphaned warm-pool tab) — don't. See MainShell.
+ * The chat itself is NOT mounted here. It lives in the persistent shell
+ * (components/MainShell.tsx), which renders one ChatWidget that survives soft
+ * navigation, with the runner header above it. Props come from
+ * lib/chat-shell-props.ts via app/layout.tsx. This route only has to exist so
+ * /agent is a valid path; its body shows only if the shell's chat could not
+ * mount. Mounting a second ChatWidget here would double every stream.
  */
 
-export default function ClientAgentPage() {
+import { redirect } from "next/navigation";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
+import { ASK_HREF } from "@/lib/os/nav";
+
+export const dynamic = "force-dynamic";
+
+export default async function CodingHarnessPage() {
+  if (!(await isPlatformOperator())) redirect(ASK_HREF);
   return (
     <div className="flex h-full min-h-[60vh] items-center justify-center text-center">
       <div className="max-w-sm space-y-2 px-6">
-        <p className="text-sm text-fg-dim">Loading your agent workspace…</p>
-        <p className="text-xs text-fg-faint">
-          If this message stays, your workspace doesn&apos;t have an agent
-          enabled yet — an operator can enable one in Settings.
+        <p className="text-sm text-fg-muted">Loading the Coding harness…</p>
+        <p className="text-xs text-fg-dim">
+          If this stays, the harness could not load for your workspace. Reload the page; the reason is in the server log.
         </p>
       </div>
     </div>

@@ -8,15 +8,17 @@
  */
 
 import { AutomationsContent } from "@/components/automations/AutomationsContent";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function AutomationsPage() {
-  // System surface — cron jobs, background workers, sequence engines. 404 for
-  // an outside contractor. Gated HERE rather than inside AutomationsContent so
-  // the tenant-scoped mount at /t/<slug>/automations, which serves other
-  // tenants' own operators, is left exactly as it is.
-  await requireSystemSurface();
+  // Admin surface — the OASIS platform schedules, background workers and the
+  // drafter. Operator only (2026-09-30): requireSystemSurface admitted any
+  // client workspace's owner, who could read OASIS's cron names by URL. Gated
+  // HERE rather than inside AutomationsContent so the tenant-scoped mount at
+  // /t/<slug>/automations, which serves each workspace's own routines, is left
+  // exactly as it is.
+  await requireOperator();
   return <AutomationsContent />;
 }
