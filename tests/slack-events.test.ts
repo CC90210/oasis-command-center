@@ -368,6 +368,25 @@ async function main() {
     assert.equal((await slackRows(BRAVO_CO)).length, 0, "nothing in the other workspace");
   });
 
+  await check("the mirrored message shows on the linked client's Conversations thread (the client hub's own reader)", async () => {
+    await db.executeMultiple(`CREATE TABLE IF NOT EXISTS lead_interactions (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, channel TEXT,
+      direction TEXT, type TEXT, subject TEXT, content_preview TEXT, content TEXT, created_at TEXT, sent_at TEXT, agent_source TEXT,
+      metadata TEXT, to_email TEXT, from_email TEXT, to_phone TEXT, from_phone TEXT);`);
+    const { loadClientConversation } = await import("../lib/os/customers/conversations");
+    const customer = { id: CUSTOMER_A, display_name: "Acme Plumbing", primary_email: null, primary_phone: null, source_lead_id: null };
+    const convo = await loadClientConversation(db, ALPHA, customer, []);
+    const slack = convo.messages.filter((m) => m.channel === "slack");
+    const mirrored = (await slackRows(ALPHA)).filter((r) => r.meta.customer_id === CUSTOMER_A);
+    assert.equal(slack.length, mirrored.length, "every mirrored #clients message is on the client's thread");
+    const invoice = slack.find((m) => m.preview === "The invoice for is late & overdue");
+    assert.ok(invoice, "the message is on the thread");
+    assert.equal(invoice.direction, "inbound");
+    assert.equal(invoice.subject, "Slack · Mia Member");
+    // Another workspace asking for the same client id sees nothing of it.
+    const other = await loadClientConversation(db, BRAVO_CO, customer, []);
+    assert.equal(other.messages.filter((m) => m.channel === "slack").length, 0);
+  });
+
   await check("the same channel id under ANOTHER team does not mirror into the first workspace", async () => {
     const before = (await slackRows()).length;
     const r = await events.handleSlackEvents(signed(eventBody(message("UBMEMBER", "C0CLIENTS", "bravo side"), { team: TEAM_B })), deps());
