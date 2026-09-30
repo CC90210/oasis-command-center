@@ -14,9 +14,13 @@
  *     When the bridge's own fleet reporter says it cannot read the process
  *     table, the count is unknown, never "all down" (2026-09-23);
  *   - error and warning events: agent_events at severity error or warn, with
- *     the legacy spelling 'warning' read as 'warn'.
+ *     the legacy spelling 'warning' read as 'warn';
+ *   - the workspace's outcome checks (OASIS: the founder-booking check): a
+ *     failing, stale or never-run check, an open alert, or a read that failed.
+ *     /health lists them in its outcome card; both pages count them.
  * Plus the pipeline bucket both pages show: cold leads, by COUNT(*), never the
- * length of a capped display list.
+ * length of a capped display list. needsYouCount is the one count: /health's
+ * header and /operations' "All clear" both read it.
  *
  * TENANT. Every read is scoped to the tenant the caller got from the session.
  * cron_jobs carries tenant_id (every row is OASIS's); agent_events has no
@@ -44,6 +48,9 @@ import {
   describeStatusReporter,
   type StatusReporter,
 } from "@/lib/automations/worker-status";
+import { loadOutcomeChecks, type OutcomeCheckData } from "@/lib/health/outcome-panel-data";
+import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
 export type AdminDb = ReturnType<typeof getServiceSupabase>;
 
@@ -419,9 +426,52 @@ export type AttentionSummary = {
   coldLeads: number | null;
 };
 
-/** "Nothing needs you" needs every alarm count read and zero. Warnings and cold leads are signals, not alarms. */
-export function nothingNeedsYou(s: AttentionSummary): boolean {
-  return [s.errors, s.cronFailures, s.workersDown].every((n) => n === 0);
+/**
+ * The outcome checks a workspace's "needs you" counts (lib/health/
+ * outcome-panel-data.ts): OASIS its founder-booking (calendar) check; a SunBiz
+ * workspace (retired, so a stale session only) its delivery outcomes without
+ * the calendar row; any other workspace none (null). /health loads it once for
+ * its outcome card and its header; /operations loads it for "All clear". A
+ * load that throws is a blind read (logged): one signal, never a clean board.
+ */
+export async function loadWorkspaceOutcome(
+  tenantId: string,
+  profileSlug: string | null,
+  now: number,
+): Promise<OutcomeCheckData | null> {
+  const calendarCheckIds = CALENDAR_CHECKS.map((check) => check.id);
+  const filter =
+    tenantId === WEBDEV_TENANT_ID
+      ? { includeCheckIds: calendarCheckIds }
+      : profileSlug === "sun"
+        ? { excludeCheckIds: calendarCheckIds }
+        : null;
+  if (!filter) return null;
+  try {
+    return await loadOutcomeChecks(tenantId, now, filter);
+  } catch (err) {
+    console.error("[attention.outcome_checks]", err);
+    return { rows: [], openAlerts: [], readFailed: true, readError: err instanceof Error ? err.message : String(err), signalCount: 1 };
+  }
+}
+
+/**
+ * THE count of what needs you: the alarm counts (errors, failed automations,
+ * workers down) plus the outcome checks' signals (0 for a workspace without
+ * outcome checks). null when an alarm count could not be read. /health's
+ * header and /operations' "All clear" both come from here, so one page cannot
+ * say "1 needs you" while the other says "All clear". Warnings and cold leads
+ * are signals, not alarms.
+ */
+export function needsYouCount(s: AttentionSummary, outcome: Pick<OutcomeCheckData, "signalCount"> | null): number | null {
+  const alarms = [s.errors, s.cronFailures, s.workersDown];
+  if (alarms.some((n) => n === null)) return null;
+  return alarms.reduce<number>((sum, n) => sum + (n ?? 0), 0) + (outcome?.signalCount ?? 0);
+}
+
+/** "Nothing needs you": every alarm count read and zero, and no outcome signal. */
+export function nothingNeedsYou(s: AttentionSummary, outcome: Pick<OutcomeCheckData, "signalCount"> | null): boolean {
+  return needsYouCount(s, outcome) === 0;
 }
 
 /** The attention tiles for /operations: the same reads and rules /health uses. Never throws. */

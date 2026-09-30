@@ -402,11 +402,20 @@ async function main() {
       encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
     CREATE TABLE application_lender_threads (id TEXT PRIMARY KEY, tenant_id TEXT, application_id TEXT, lender_id TEXT,
       recipient_email TEXT, status TEXT, sent_at TEXT);
+    CREATE TABLE health_check_runs (id TEXT PRIMARY KEY, tenant_id TEXT, check_id TEXT, verdict TEXT,
+      observed REAL, baseline REAL, reason TEXT, ran_at TEXT);
+    CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, first_failed_at TEXT,
+      last_alerted_at TEXT, repeat_n INTEGER);
   `);
   await db.batch(
     [
       { sql: "INSERT INTO tenant_records VALUES ('l1', ?, 'lead', '{\"stage\":\"won\",\"source\":\"referral\"}', ?, ?)", args: [OASIS, now, now] },
       { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL)", args: [OASIS] },
+      // OASIS's founder-booking check passed just now: a readable, healthy board.
+      {
+        sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-ok', ?, 'calendar.workspace_credential_usable', 'ok', NULL, ?)",
+        args: [OASIS, now],
+      },
     ],
     "write",
   );
@@ -440,6 +449,36 @@ async function main() {
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
     assert.match(settings.text, /Tool access: cloud only/);
     assert.equal((await (await shellStatus.GET()).json()).bridgeOnline, false);
+  });
+
+  // One count, two pages (lib/admin/attention.ts needsYouCount). /health's
+  // header counts the founder-booking check (a header saying "Nothing needs
+  // you" above a failing check is what lib/health/outcome-panel-data.ts exists
+  // to prevent), so /operations' All clear must count it too.
+  await check("/health's header and /operations' All clear agree: a failing founder-booking check needs you on both", async () => {
+    const pages = async () => ({
+      ops: (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text,
+      health: (await render(await HealthPage())).text,
+    });
+    const passing = await pages();
+    assert.match(passing.health, /Nothing needs you/);
+    assert.match(passing.ops, /All clear/);
+    assert.doesNotMatch(passing.ops, /Outcome checks:/);
+    await db.execute({
+      sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-fail', ?, 'calendar.workspace_credential_usable', 'failing', 'workspace credential rejected', ?)",
+      args: [OASIS, new Date(Date.now() + 1000).toISOString()],
+    });
+    try {
+      const failing = await pages();
+      for (const tile of OPS_TILES) {
+        assert.match(failing.ops, new RegExp(`${tile} 0 `), `${tile}: the alarm counts are still 0`);
+      }
+      assert.match(failing.health, /\b1 need ?s you/, "the header counts the failing check");
+      assert.doesNotMatch(failing.ops, /All clear/, "All clear reads the same count");
+      assert.match(failing.ops, /Outcome checks: 1 need ?s you/, "and says where it is");
+    } finally {
+      await db.execute("DELETE FROM health_check_runs WHERE id = 'hc-fail'");
+    }
   });
 
   // ── The client components draw the unknown they are handed ──────────────

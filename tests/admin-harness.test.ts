@@ -15,14 +15,17 @@
  *   - POST /api/automations/background-workers/control drives the OASIS fleet
  *     for the verified operator only, through the bridge's fleet_control tool
  *     with the server's bearer; a 401 from the bridge is bridge_refused_token;
+ *     no bridge target is bridge_not_configured for that operator, and still
+ *     a 404 for anyone else;
  *   - lib/automations/worker-control.ts always posts that route and words a
  *     401 as "the bridge refused the request (token)";
  *   - GET /api/bridge/warm-status: operator only, bearer on, session ids dropped;
  *   - /api/usage names its key source, and the platform key only for the
- *     operator; the chat is Ready only on a real key or a reachable bridge;
+ *     operator; an OpenRouter refusal is a 502, never the route's own 401/412;
+ *     the chat is Ready only on a real key or a reachable bridge;
  *   - the persistent chat reads ?agent/?prompt only on /agent;
  *   - lib/chat-shell-props.ts: operator-only, no no-tenant fallback, the three
- *     harness targets instead of personas;
+ *     harness targets instead of personas; a failed workspace read is logged;
  *   - bridge replies' markers are never written when the reply ends: markers
  *     outside code become signed proposals, sent before `done` in whole SSE
  *     frames even when the network splits them; the operator's confirm to
@@ -119,9 +122,14 @@ stub("next/link", { __esModule: true, default: () => null });
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
 const u = (n: number, email: string) => ({ id: `0e000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
+const SUNBIZ = "5b5b5b5b-0000-4000-8000-00000000005b";
 const CC = u(1, "conaugh@oasisai.work");
 const CLIENT_OWNER = u(2, "owner@client.test");
 const CLOSER = u(3, "closer@oasisai.work");
+// A SunBiz ('submissions') member passes authorizeBridgeRequest's tenant gate
+// without being the operator, so with no bridge target set it reaches
+// bridge_not_configured, which the OASIS fleet route must still conceal.
+const SUNBIZ_REP = u(4, "rep@sunbiz.test");
 
 async function login(user: { id: string; email: string } | null) {
   if (!user) {
@@ -172,12 +180,14 @@ async function main() {
   });
   await db.batch(
     [
-      ...[CC, CLIENT_OWNER, CLOSER].map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
+      ...[CC, CLIENT_OWNER, CLOSER, SUNBIZ_REP].map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'oasis-ai-cc', 'OASIS AI', ?)", args: [OASIS, JSON.stringify({ bridge_url: "https://bridge.test" })] },
       { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'client-co', 'Client Co', '{}')", args: [CLIENT] },
+      { sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'submissions', 'SunBiz', '{}')", args: [SUNBIZ] },
       profile(CC, OASIS, "owner", 1),
       profile(CLIENT_OWNER, CLIENT, "owner", 1),
       profile(CLOSER, OASIS, "closer"),
+      profile(SUNBIZ_REP, SUNBIZ, "owner", 1),
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at) VALUES ('bp-1', ?, 'CCPC (Windows)', ?)", args: [OASIS, new Date(Date.now() - 30_000).toISOString()] },
     ],
     "write",
@@ -241,6 +251,36 @@ async function main() {
     await login(null);
     assert.equal((await post({ service: "pm2.bravo-ig-dm", action: "restart" })).status, 401);
     assert.equal(calls.length, 0);
+  });
+  await check("control: with no bridge target the operator hears bridge_not_configured (503); a SunBiz member still gets the 404; no bridge call", async () => {
+    const bridgeEnv = ["BRIDGE_BEARER_TOKEN_OASIS_AI_CC", "BRIDGE_VPS_URL", "BRIDGE_BEARER_TOKEN"] as const;
+    const saved = Object.fromEntries(bridgeEnv.map((k) => [k, process.env[k]]));
+    for (const k of bridgeEnv) delete process.env[k];
+    calls = [];
+    try {
+      await login(CC);
+      const res = await post({ service: "pm2.bravo-ig-dm", action: "restart" });
+      assert.equal(res.status, 503);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      assert.deepEqual(body, { ok: false, error: "bridge_not_configured" });
+      const { describeControlError } = await import("../lib/automations/worker-control");
+      assert.equal(describeControlError(body.error, res.status), "no bridge address or token is set for this workspace", "the operator reads the missing bridge, not 'this workspace can't control that worker'");
+
+      // The premise: the SunBiz member reaches the same bridge_not_configured,
+      // as a non-operator, so this is the concealment branch under test.
+      await login(SUNBIZ_REP);
+      const bridge = await import("../lib/bridge-proxy");
+      assert.deepEqual(await bridge.authorizeBridgeRequest(), { ok: false, status: 503, error: "bridge_not_configured", isOperator: false, tenantSlug: "submissions" });
+      const rep = await post({ service: "pm2.bravo-ig-dm", action: "restart" });
+      assert.equal(rep.status, 404, "a non-operator is told nothing, not that a bridge is missing");
+      assert.deepEqual(await rep.json(), { ok: false, error: "not_found" });
+      assert.equal(calls.length, 0);
+    } finally {
+      for (const k of bridgeEnv) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
   });
 
   await check("worker-control: always the server route; a 401 reads as the token", async () => {
@@ -389,6 +429,23 @@ async function main() {
       delete process.env.PLATFORM_DEFAULT_ANTHROPIC_API_KEY;
     }
   });
+  await check("/api/usage: an OpenRouter refusal is a 502 naming OpenRouter's status, never this route's 401 (signed out) or 412 (no key)", async () => {
+    await login(CC);
+    process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = "sk-or-test-not-real";
+    try {
+      for (const upstream of [401, 402, 412]) {
+        calls = [];
+        answer = (url) => (url === "https://openrouter.ai/api/v1/auth/key" ? json(upstream, { error: { message: "refused" } }) : json(500, {}));
+        const res = await usageGet();
+        assert.equal(res.status, 502, `OpenRouter ${upstream}`);
+        assert.deepEqual(await res.json(), { ok: false, error: `openrouter_${upstream}`, key_source: "platform" });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].url, "https://openrouter.ai/api/v1/auth/key");
+      }
+    } finally {
+      delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
+    }
+  });
 
   // ── The harness's props ─────────────────────────────────────────────────
   await check("chat-shell-props: operator only, no no-tenant fallback, the three harness targets", async () => {
@@ -406,6 +463,28 @@ async function main() {
       maven: "Marketing · CMO-Agent",
       atlas: "Finance · CFO-Agent",
     });
+  });
+  await check("chat-shell-props: a failed workspace read is logged with the tenant id; a workspace that is not OASIS is not", async () => {
+    const { resolveChatShellProps } = await import("../lib/chat-shell-props");
+    const ccProfile = { tenant_id: OASIS, agents_enabled: ["bravo"], primary_agent: "bravo", email: CC.email };
+    const originalError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => void logged.push(args.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    try {
+      assert.equal(await resolveChatShellProps({ profile: { ...ccProfile, tenant_id: CLIENT }, userEmail: CC.email, isPlatformOperator: true }), null);
+      assert.ok(!logged.some((l) => l.includes("chatshell.tenant_unread")), "a client workspace that was read is not a read failure");
+      await db.execute("ALTER TABLE tenants RENAME TO tenants_parked");
+      try {
+        assert.equal(await resolveChatShellProps({ profile: ccProfile, userEmail: CC.email, isPlatformOperator: true }), null);
+      } finally {
+        await db.execute("ALTER TABLE tenants_parked RENAME TO tenants");
+      }
+    } finally {
+      console.error = originalError;
+    }
+    const line = logged.find((l) => l.includes("chatshell.tenant_unread"));
+    assert.ok(line, `the failed read is logged (saw: ${logged.join(" | ") || "nothing"})`);
+    assert.ok(line.includes(OASIS), "the log names the workspace");
   });
 
   // ── Markers in a bridge reply: proposed, never written on close ────────

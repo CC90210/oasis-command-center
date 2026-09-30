@@ -87,7 +87,10 @@ export async function GET(req: NextRequest) {
       headers: { authorization: `Bearer ${apiKey}` },
       cache: "no-store",
     });
-    if (!r.ok) return NextResponse.json({ ok: false, error: `openrouter_${r.status}`, key_source: keySource }, { status: r.status });
+    // OpenRouter's status stays in `error`; this route answers 502. Forwarded,
+    // its 401 (key rejected) would read as this route's own 401 (signed out),
+    // and its 412 as this route's no_api_key, which the chat reads as "no key".
+    if (!r.ok) return NextResponse.json({ ok: false, error: `openrouter_${r.status}`, key_source: keySource }, { status: 502 });
     const j = (await r.json()) as { data?: { usage?: number; limit?: number; is_free_tier?: boolean } };
     return NextResponse.json({
       ok: true,

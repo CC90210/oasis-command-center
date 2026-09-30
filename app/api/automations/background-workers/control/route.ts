@@ -168,12 +168,20 @@ export async function POST(req: Request) {
  * The OASIS local fleet: the verified platform operator in an OASIS workspace,
  * a worker from the OASIS inventory, the bridge's `fleet_control` tool.
  * Everyone else gets a 404 that names nothing (a signed-out browser, 401).
+ * The operator whose OASIS workspace has no bridge target gets 503
+ * bridge_not_configured, which lib/automations/worker-control.ts words as "no
+ * bridge address or token is set for this workspace", never "this workspace
+ * can't control that worker".
  */
 async function controlOasisFleet(req: Request, bridge: BridgeAuthResult): Promise<NextResponse> {
   if (!bridge.ok) {
-    return bridge.status === 401
-      ? NextResponse.json({ ok: false, error: "unauthenticated" }, { status: 401 })
-      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    if (bridge.status === 401) {
+      return NextResponse.json({ ok: false, error: "unauthenticated" }, { status: 401 });
+    }
+    if (bridge.error === "bridge_not_configured" && bridge.isOperator === true && isOasisSurfaceTenant(bridge.tenantSlug ?? "")) {
+      return NextResponse.json({ ok: false, error: "bridge_not_configured" }, { status: 503 });
+    }
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   if (!bridge.isOperator || !isOasisSurfaceTenant(bridge.tenantSlug)) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });

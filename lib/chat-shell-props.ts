@@ -76,7 +76,14 @@ export async function resolveChatShellProps(args: {
     safe("chatshell.manifest", getTenantManifestForUser(tenantId), null),
     safe("chatshell.tenant", getTenant(tenantId), null),
   ]);
-  if (!isOasisSurfaceTenant((tenant?.slug || "").trim().toLowerCase())) return null;
+  // getTenant answers null for a failed read as well as a missing row, and
+  // throws for neither, so safe() above logs nothing. Log it here: the /agent
+  // fallback tells the operator the reason is in the server log.
+  if (!tenant) {
+    console.error("[chatshell.tenant_unread] the workspace row could not be read or does not exist; the harness is not mounted", { tenantId });
+    return null;
+  }
+  if (!isOasisSurfaceTenant((tenant.slug || "").trim().toLowerCase())) return null;
 
   const enabled = HARNESS_TARGETS.map((t) => t.agent as string);
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;

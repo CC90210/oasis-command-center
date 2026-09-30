@@ -453,7 +453,7 @@ async function main() {
   await check("the /operations tiles read the same numbers", async () => {
     const tiles = await at.loadAttentionSummary(OASIS, { now: NOW });
     assert.deepEqual(tiles, health.attention);
-    assert.equal(at.nothingNeedsYou(tiles), false);
+    assert.equal(at.nothingNeedsYou(tiles, null), false);
   });
   await check("a failed read is null, never 0: cron_jobs missing leaves the rest standing", async () => {
     await db.execute("ALTER TABLE cron_jobs RENAME TO cron_jobs_parked");
@@ -465,7 +465,7 @@ async function main() {
       assert.equal(h.cron, null);
       assert.equal(h.attention.cronFailures, null);
       assert.equal(h.attention.errors, 2, "the other reads still answer");
-      assert.equal(at.nothingNeedsYou({ ...h.attention, errors: 0, workersDown: 0 }), false, "an unread count is not a zero");
+      assert.equal(at.nothingNeedsYou({ ...h.attention, errors: 0, workersDown: 0 }, null), false, "an unread count is not a zero");
     } finally {
       console.error = originalError;
       await db.execute("ALTER TABLE cron_jobs_parked RENAME TO cron_jobs");

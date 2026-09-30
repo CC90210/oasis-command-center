@@ -18,7 +18,8 @@
 
 import Link from "next/link";
 import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
-import { agentStates, getActiveProfile, recentDecisions, recentEvents } from "@/lib/queries";
+import { agentStates, getActiveProfile, getTenant, recentDecisions, recentEvents } from "@/lib/queries";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
@@ -29,7 +30,7 @@ import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 import { requireOperator } from "@/lib/role-surfaces-session";
-import { loadAttentionSummary, nothingNeedsYou } from "@/lib/admin/attention";
+import { loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou } from "@/lib/admin/attention";
 
 export const dynamic = "force-dynamic";
 
@@ -88,7 +89,7 @@ export default async function OperationsPage({
   // inline ones alike; safe() turns that into null, which each card and tile
   // draws as "Couldn't check", never as an empty tape, a fleet of stopped
   // workers, "0 bridges online" or a green 0 under "All clear".
-  const [snaps, pairings, events, decisions, attention] = await Promise.all([
+  const [snaps, pairings, events, decisions, attention, outcome] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
       agentStates(agentNamesForOps).then((rows) =>
@@ -146,6 +147,13 @@ export default async function OperationsPage({
     tenantId
       ? loadAttentionSummary(tenantId)
       : Promise.resolve({ errors: null, warnings: null, cronFailures: null, workersDown: null, coldLeads: null }),
+    // The outcome checks (OASIS: the founder-booking check) count into "All
+    // clear" exactly as they count into /health's header. Never throws.
+    tenantId
+      ? safe("operations.tenant", getTenant(tenantId), null).then((tenant) =>
+          loadWorkspaceOutcome(tenantId, tenant ? resolveClientProfileSlug(tenant) : null, Date.now()),
+        )
+      : Promise.resolve(null),
   ]);
   const snapByName = new Map((snaps ?? []).map((s) => [s.agent_name, s] as const));
 
@@ -174,9 +182,10 @@ export default async function OperationsPage({
   const enabled = agentNamesForOps.filter((key) => familySet.has(resolveAgentKey(key)));
   const now = Date.now();
 
-  // "All clear" is a claim about the alarm counts: it needs every one read,
-  // and every one zero. A count that could not be read is not a zero.
-  const allClear = nothingNeedsYou(attention);
+  // "All clear" is /health's "Nothing needs you" (lib/admin/attention.ts
+  // needsYouCount): every alarm count read and zero, and no outcome-check
+  // signal. A count that could not be read is not a zero.
+  const allClear = nothingNeedsYou(attention, outcome);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -204,6 +213,12 @@ export default async function OperationsPage({
       </div>
       {allClear && (
         <div className="text-xs text-status-engaged">All clear — nothing needs your attention.</div>
+      )}
+      {outcome && outcome.signalCount > 0 && (
+        <div className="text-xs text-status-warm">
+          Outcome checks: {outcome.signalCount} need{outcome.signalCount === 1 ? "s" : ""} you.{" "}
+          <Link href="/health" className="underline">System health</Link> lists them.
+        </div>
       )}
 
       <Card

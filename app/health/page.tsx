@@ -30,7 +30,6 @@
 
 import { PageHeader, Card, Tag } from "@/components/Card";
 import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
-import { loadOutcomeChecks } from "@/lib/health/outcome-panel-data";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { safe } from "@/lib/api-helpers";
@@ -42,8 +41,7 @@ import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
-import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
-import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, type WorkerHealth } from "@/lib/admin/attention";
+import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
 import { formatAgo, loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
 import { redirect } from "next/navigation";
 import Link from "next/link";
@@ -85,10 +83,6 @@ export default async function HealthPage() {
     safe("health.tenant", getTenant(tenantId), null),
   ]);
   const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;
-  // The outcome checks: OASIS renders its founder-booking (calendar) check.
-  // A SunBiz workspace kept its delivery outcomes without the calendar row;
-  // SunBiz is retired, so that branch only survives for a stale session.
-  const isSunbizTenant = profileSlug === "sun";
   const isOasisTenant = tenantId === WEBDEV_TENANT_ID;
 
   const [heartbeats, keyedAi, coldLeadRows] = await Promise.all([
@@ -103,21 +97,14 @@ export default async function HealthPage() {
   const heartbeatServices = new Set(visibleIntegrationsForTenant(enabledAgents, { isOperator: true }).map((d) => d.service));
   const visibleHeartbeats = heartbeats?.filter((h) => heartbeatServices.has(h.service)) ?? null;
 
-  const calendarCheckIds = CALENDAR_CHECKS.map((check) => check.id);
-  const outcome = isSunbizTenant || isOasisTenant
-    ? await loadOutcomeChecks(
-        tenantId,
-        now,
-        isOasisTenant
-          ? { includeCheckIds: calendarCheckIds }
-          : { excludeCheckIds: calendarCheckIds },
-      )
-    : null;
+  // The outcome checks (OASIS: the founder-booking check), loaded once for the
+  // card below and the header count, so the two cannot disagree.
+  const outcome = await loadWorkspaceOutcome(tenantId, profileSlug, now);
 
   const a = system.attention;
-  const needsYou = [a.errors, a.cronFailures, a.workersDown, outcome?.signalCount ?? 0];
-  const unknown = needsYou.some((n) => n === null);
-  const total = needsYou.reduce<number>((sum, n) => sum + (n ?? 0), 0);
+  // The one count (lib/admin/attention.ts), the same one /operations' "All
+  // clear" reads. null = an alarm count could not be read.
+  const total = needsYouCount(a, outcome);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -125,7 +112,7 @@ export default async function HealthPage() {
         title="System health"
         subtitle="Whether your computer, its guards and your automations are working, in plain words. Every line says when it can't tell."
         action={
-          unknown ? (
+          total === null ? (
             <Tag tone="neutral">Couldn&apos;t check everything</Tag>
           ) : total === 0 ? (
             <Tag tone="engaged">Nothing needs you</Tag>
