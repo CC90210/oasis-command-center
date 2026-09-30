@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { AlignLeft, Bell, CalendarDays, Clock3, MapPin, Palette, Plus, Repeat2, Users, X } from "lucide-react";
 import { addDays, addMinutes, diffDays, fromDateKey, isDateKey, toDateKey } from "@/lib/calendar/dates";
 import { CALENDAR_COLORS, CALENDAR_COLOR_LABELS, type CalendarPrefs, type CalendarRecord, type EventInput } from "@/lib/calendar/types";
+import { wallAsLocal } from "@/lib/calendar/zone";
 import { RecurrenceField } from "./RecurrenceField";
 import { REMINDER_CHOICES, inputEnd, inputStart, reminderLabel, useDialogFocus } from "./ui";
 
@@ -148,7 +149,8 @@ export function EventEditor({ draft, isNew, calendars, prefs, error, saving, onC
             </Field>
 
             <Field icon={Repeat2} label="Repeat">
-              <RecurrenceField value={draft.recurrence} start={start} onChange={(recurrence) => onChange({ ...draft, recurrence })} />
+              {/* Built in the event's own zone: series expand there (seriesStarts). */}
+              <RecurrenceField value={draft.recurrence} start={draft.allDay ? start : wallAsLocal(start, draft.timeZone)} onChange={(recurrence) => onChange({ ...draft, recurrence })} />
             </Field>
 
             <Field icon={MapPin} label="Location">

@@ -262,6 +262,36 @@ const take = <T>(g: Generator<T>, n: number) => {
   assert.ok(moved[0].op === "update" && new Date(moved[0].patch.start!).getHours() === 10);
 }
 
+// ── Codex review of the shipped code (2026-09-30) ─────────────────────────
+
+{
+  // A "last Monday" series split at a 4th-Monday occurrence stays last-Monday.
+  const lastMon = ev({ id: "lm", start: local("2026-08-31T10:00").toISOString(), end: local("2026-08-31T11:00").toISOString(), recurrence: { freq: "MONTHLY", interval: 1, monthlyMode: "nth" } });
+  const range = [local("2026-08-01T00:00"), local("2027-01-01T00:00")] as const;
+  assert.deepEqual(expandOccurrences([lastMon], ...range).map((o) => toDateKey(o.start)), ["2026-08-31", "2026-09-28", "2026-10-26", "2026-11-30", "2026-12-28"]);
+  const sep28 = expandOccurrences([lastMon], local("2026-09-28T00:00"), local("2026-09-29T00:00"))[0];
+  const split = planEdit(sep28, { ...inputForOccurrence(sep28), title: "renamed" }, "following", [lastMon]);
+  assert.ok(split[0].op === "create" && split[0].event.recurrence?.nth === -1);
+  const tail = { ...split[0].event, id: "tail", createdAt: "", updatedAt: "" } as EventRecord;
+  assert.deepEqual(expandOccurrences([tail], ...range).map((o) => toDateKey(o.start)), ["2026-09-28", "2026-10-26", "2026-11-30", "2026-12-28"], "Nov 30, not Nov 23");
+  assert.equal(describeRecurrence(tail.recurrence, local("2026-09-28T10:00")), "Monthly on the last Monday");
+
+  // Renaming, for all, an occurrence that was lengthened on its own keeps the series' length.
+  const nineTen = ev({ id: "nt", start: local("2026-09-28T09:00").toISOString(), end: local("2026-09-28T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1 } });
+  const long = ev({ id: "long", recurringEventId: "nt", originalStart: local("2026-10-05T09:00").toISOString(), start: local("2026-10-05T09:00").toISOString(), end: local("2026-10-05T11:00").toISOString() });
+  const longOcc = expandOccurrences([nineTen, long], local("2026-10-05T00:00"), local("2026-10-06T00:00"))[0];
+  const renamed = planEdit(longOcc, { ...inputForOccurrence(longOcc), title: "renamed" }, "all", [nineTen, long]);
+  assert.ok(renamed[0].op === "update");
+  assert.equal(new Date(renamed[0].patch.end!).getHours(), 10, "the series stays one hour");
+  // Making that occurrence 30 minutes longer still, for all, lengthens the series by 30 minutes.
+  const longer = { ...inputForOccurrence(longOcc), end: local("2026-10-05T11:30").toISOString() };
+  const grown = planEdit(longOcc, longer, "all", [nineTen, long]);
+  assert.ok(grown[0].op === "update" && new Date(grown[0].patch.end!).getMinutes() === 30 && new Date(grown[0].patch.end!).getHours() === 10);
+  // "Following" from the lengthened instance: the new series is one hour too.
+  const fol = planEdit(longOcc, { ...inputForOccurrence(longOcc), title: "renamed" }, "following", [nineTen, long]);
+  assert.ok(fol[0].op === "create" && Date.parse(fol[0].event.end) - Date.parse(fol[0].event.start) === 3_600_000);
+}
+
 // ── addsTime (CodeRabbit, 2026-09-29) ─────────────────────────────────────
 
 {
