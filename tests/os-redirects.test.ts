@@ -296,13 +296,6 @@ const KNOWN_DEAD: ReadonlyArray<{ file: string; path: string; why: string }> = [
     path: "/metrics",
     why: "SUN_SEED nav, the retired SunBiz workspace (retired 2026-09-28). seeds.ts belongs to OASIS OS track T7.",
   },
-  {
-    file: "app/playbook/page.tsx",
-    path: "/templates",
-    why:
-      "SUNBIZ_SECTIONS, the SunBiz playbook card. /playbook opens only in OASIS's workspace since #479, so it " +
-      "never renders; the page belongs to OASIS OS track T2, which should delete the section.",
-  },
 ];
 const EXEMPT_FILES = new Set(["lib/manifest/templates.ts"]);
 

@@ -40,6 +40,10 @@ async function createInviteDb(url = ":memory:") {
     joined_at TEXT,
     is_owner INTEGER NOT NULL DEFAULT 0,
     agents_enabled TEXT NOT NULL DEFAULT '["bravo"]',
+    -- brand + primary_agent: production columns redemption now writes in the
+    -- same batch as the claim (2026-09-30); NOT NULL with these defaults, as live.
+    brand TEXT NOT NULL DEFAULT 'OASIS AI',
+    primary_agent TEXT NOT NULL DEFAULT 'bravo',
     prospect_focus TEXT NOT NULL DEFAULT '["service_trades"]'
   )`);
   return db;
@@ -433,16 +437,25 @@ function testBrowserRecoveryPathKeepsTheInvite() {
   );
   assert(reset.includes('fetch("/api/auth/redeem-invite"'), "reset redeems after authentication");
   assert(resetConfirm.includes("signSession({"), "successful Turso reset establishes a session");
+  // Since 2026-09-30 the role/manifest roster policy is applied INSIDE
+  // redeemInvite, before the claim, and written in the same batch as it
+  // (lib/team.ts -> lib/invite-profile-finalization.ts ->
+  // redeem_tenant_invite). Both completion routes go through redeemInvite, so
+  // they apply it by construction, and neither re-runs finalization after the
+  // claim (which is what used up invites on a failure).
+  const team = readFileSync("lib/team.ts", "utf8");
+  const planAt = team.indexOf("await finalizeInviteProfile({");
+  const claimAt = team.indexOf('supa.rpc("redeem_tenant_invite"');
+  assert(planAt > -1 && claimAt > planAt, "the profile plan is made before the invite is claimed");
+  assert(team.includes("p_agents_enabled: plan.agentsEnabled"), "the plan rides in the claim's own write");
   for (const route of [redeemRoute, finalizeRoute]) {
-    assert(
-      route.includes("finalizeInviteProfile({"),
-      "every invite completion path must apply the same role and manifest roster policy",
-    );
-    assert(
-      route.includes("preserveExistingMember: result.alreadyMember === true"),
-      "a redundant same-tenant invite must preserve the existing member's profile",
-    );
+    assert(route.includes("await redeemInvite(rawToken,"), "every invite completion path goes through redeemInvite");
+    assert(!route.includes("finalizeInviteProfile("), "no second, post-claim finalization step");
   }
+  assert(
+    team.includes("alreadyMember: nothingWritten") && team.includes("alreadyMember: true,"),
+    "a redundant same-tenant invite or a retry reports that nothing was rewritten",
+  );
   assert(
     finalizeRoute.includes("confirmInviteBoundEmail("),
     "the unauthenticated finalize route must bind the invite before confirming email",

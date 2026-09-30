@@ -12,6 +12,7 @@ import {
   verifyPassword,
 } from "@/lib/turso-auth";
 import { getClientIp } from "@/lib/api-helpers";
+import { onboardingClaimOrUndefined } from "@/lib/onboarding-claim";
 
 export const runtime = "nodejs";
 
@@ -47,14 +48,18 @@ export async function POST(req: NextRequest) {
   if (!url || !token) {
     return NextResponse.json({ error: "auth backend unavailable" }, { status: 503 });
   }
-  const session = await verifyPassword(createClient({ url, authToken: token }),
-                                       body.email, body.password);
+  const client = createClient({ url, authToken: token });
+  const session = await verifyPassword(client, body.email, body.password);
   if (!session) {
     return NextResponse.json({ error: "invalid credentials" }, { status: 401 });
   }
+  // The onboarding gate's answer rides in the cookie so middleware can apply it
+  // at the edge (lib/onboarding-claim.ts). A failed read mints no claim, which
+  // the gate never redirects: login itself never fails over it.
+  const onb = await onboardingClaimOrUndefined(client, session.sub);
   const res = NextResponse.json({ ok: true, email: session.email });
   res.cookies.set({
-    name: SESSION_COOKIE, value: signSession(session),
+    name: SESSION_COOKIE, value: signSession(onb ? { ...session, onb } : session),
     httpOnly: true, secure: process.env.NODE_ENV === "production",
     sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 7,
   });

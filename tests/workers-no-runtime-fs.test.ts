@@ -27,28 +27,21 @@ import { join, relative, sep } from "node:path";
 const ROOT = process.cwd();
 
 /**
- * lib/prompts/index.ts reads its .txt prompt files at module init with a
- * VARIABLE filename, so it cannot be converted with a one-line static import —
- * the prompts have to become modules first. It is listed here rather than
- * fixed because that is a change to the AI scoring routes under
- * /api/leads/[id] (score, next-action, compose-checkin), not to shop-out, and
- * bundling it into an outage fix would put unrelated risk on the hot path.
- *
- * Status 2026-09-15: latent, NOT observed failing — those three endpoints
- * logged zero errors in the Worker's observability window, because nothing has
- * exercised them since the cutover. They will throw the same way when they are.
+ * FIXED 2026-09-30 (the Playbook docs hub): lib/prompts/index.ts,
+ * lib/playbooks.ts and app/playbook/onboarding/page.tsx left this list. The
+ * markdown and the prompt text are compiled into lib/playbooks.generated.ts and
+ * lib/prompts/generated.ts by scripts/gen-content-modules.mjs (the `prebuild`
+ * script), and the onboarding page is a redirect. That generator is the
+ * pattern for the entries below: a file the Worker must read becomes a module.
  */
 /**
- * The other five were found BY this guard, not by the outage. None of them is
- * on the shop-out path (checked: nothing in the shop-out import graph reaches
- * them), so none is fixed here — an outage fix should not drag five unrelated
- * surfaces with it. They are real debt, and they are written down rather than
+ * The other entries were found BY this guard, not by the outage. None of them
+ * is on the shop-out path (checked: nothing in the shop-out import graph
+ * reaches them). They are real debt, and they are written down rather than
  * excluded quietly:
  *
  *   lib/agent-inbox-fs.ts          -> /api/inbox/{post,mark-read}, /inbox
  *   lib/agent-stats.ts             -> /agents
- *   lib/playbooks.ts               -> /playbook, /playbook/[slug]
- *   app/playbook/onboarding/page.tsx
  *   lib/cloud-knowledge-tools.ts   -> no importers found; likely dead
  *
  * Each will throw on the live Worker the first time it is exercised, in the
@@ -66,13 +59,10 @@ const ROOT = process.cwd();
  * this change is repairing.
  */
 const BASELINE = new Set([
-  "lib/prompts/index.ts",
   "lib/agent-inbox-fs.ts",
   "lib/agent-stats.ts",
   "lib/cloud-knowledge-tools.ts",
-  "lib/playbooks.ts",
   "lib/forms/watermark.ts",
-  "app/playbook/onboarding/page.tsx",
 ]);
 
 const SCAN_DIRS = ["lib", "app"];

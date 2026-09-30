@@ -22,9 +22,37 @@
 import { redirect } from "next/navigation";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { getManifest } from "@/lib/manifest/loader";
+import { getManifestByTenantId } from "@/lib/manifest/loader";
+import { getSeedManifest, isUnprovisionedManifest } from "@/lib/manifest/seeds";
+import { findActiveConnection } from "@/lib/connections/store";
+import { isVerifiedHealthy } from "@/lib/connections/rules";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { OasisLogo } from "@/components/brand/OasisLogo";
-import { WelcomeWizardClient } from "./WelcomeWizardClient";
+import { WelcomeWizardClient, type WelcomeTeammate } from "./WelcomeWizardClient";
+
+/**
+ * A teammate's label on this page: what it does, never an OASIS house persona
+ * or a SunBiz agent name. The house agents are OASIS's own department leads
+ * (components/os/department/config.ts binds Chief of Staff and Operations to
+ * one, Marketing and Finance to the others); any other agent keeps its
+ * workspace display name.
+ */
+const HOUSE_AGENT_LABELS: Readonly<Record<string, string>> = {
+  bravo: "Chief of Staff",
+  maven: "Marketing",
+  atlas: "Finance",
+  aura: "Personal assistant",
+  sdr: "Sales lead",
+  "customer-support": "Client Success lead",
+};
+const RETIRED_AGENT_SLUGS: ReadonlySet<string> = new Set(["solara", "helios"]);
+
+function teammateLabel(slug: string, displayName: string | undefined): string {
+  const key = slug.toLowerCase();
+  if (HOUSE_AGENT_LABELS[key]) return HOUSE_AGENT_LABELS[key];
+  if (RETIRED_AGENT_SLUGS.has(key)) return "Operations teammate";
+  return (displayName || "").trim() || "Teammate";
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,39 +111,52 @@ export default async function WelcomePage({
   if (!fromSettings && tenant) {
     const profileSlug = resolveClientProfileSlug(tenant);
     if (profileSlug) {
-      redirect(`/t/${profileSlug}`);
+      // Through the claim refresh: a session that still carries a "welcome"
+      // gate claim would otherwise be sent straight back here (Turso auth).
+      redirect(`/api/auth/onboarding-refresh?next=${encodeURIComponent(`/t/${profileSlug}`)}`);
     }
   }
 
-  // Enabled agents for the operator's tenant — limits the "default agent"
-  // dropdown to ones their workspace actually has. Falls back to a sane
-  // pair if the manifest isn't seeded yet.
-  const { data: manifest } = await db
-    .from("tenant_manifests")
-    .select("manifest")
-    .eq("tenant_id", profile.tenant_id || "")
-    .maybeSingle();
-  let enabledAgents: string[] =
-    Array.isArray(
-      (manifest?.manifest as { agents?: Array<{ slug: string; enabled?: boolean }> } | null)?.agents,
-    )
-      ? ((manifest!.manifest as { agents: Array<{ slug: string; enabled?: boolean }> }).agents
-          .filter((a) => a.enabled !== false)
-          .map((a) => a.slug))
-      : [];
-
-  if (!enabledAgents.length && tenant) {
-    const seedSlug = resolveClientProfileSlug(tenant);
-    if (seedSlug) {
-      const seedManifest = await getManifest(seedSlug).catch(() => null);
-      enabledAgents =
-        seedManifest?.agents
-          .filter((agent) => agent.enabled !== false)
-          .map((agent) => agent.slug) ?? [];
+  // The workspace's teammates: its own manifest (by tenant id), else its
+  // in-code seed. NEVER a fallback agent: the old ["bravo"] default showed
+  // OASIS's own agent to every client whose workspace was not set up yet.
+  // A failed manifest read is "could not tell", never "not set up": the page
+  // says it could not load the teammates (2026-09-30 fix pass; it used to fall
+  // through to the seed and tell a member of a set-up workspace that its
+  // teammates "appear once it is set up").
+  let manifestAgents: Array<{ slug: string; display_name?: string; enabled?: boolean }> = [];
+  let teammatesUnknown = false;
+  if (profile.tenant_id) {
+    let stored: Awaited<ReturnType<typeof getManifestByTenantId>> = null;
+    try {
+      stored = await getManifestByTenantId(profile.tenant_id);
+    } catch (err) {
+      console.error("[onboarding.welcome] manifest read failed", err);
+      teammatesUnknown = true;
+    }
+    if (stored) manifestAgents = stored.agents;
+    else if (tenant && !teammatesUnknown) {
+      const seed = getSeedManifest(resolveClientProfileSlug(tenant), profile.tenant_id);
+      if (!isUnprovisionedManifest(seed)) manifestAgents = seed.agents;
     }
   }
+  const teammates: WelcomeTeammate[] = manifestAgents
+    .filter((a) => a.enabled !== false)
+    .map((a) => ({ slug: a.slug, label: teammateLabel(a.slug, a.display_name) }));
 
-  if (!enabledAgents.length) enabledAgents = ["bravo"];
+  // Slack is offered as a briefing channel only once the workspace has a live
+  // Slack connection. A failed read hides it (and is logged).
+  let slackConnected = false;
+  if (profile.tenant_id && tursoConfigured()) {
+    try {
+      const slack = await findActiveConnection(getTursoClient(), profile.tenant_id, "slack");
+      // The connection hub's own rule for a green card: connected AND a recent
+      // healthy check. A claimed-but-unproven connection is not "connected".
+      slackConnected = !!slack && isVerifiedHealthy(slack, Date.now());
+    } catch (err) {
+      console.error("[onboarding.welcome] slack connection read failed; not offering Slack", err);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-bg-deep flex flex-col items-center py-12 px-6">
@@ -128,21 +169,31 @@ export default async function WelcomePage({
           <h1 className="text-2xl font-bold text-fg">
             Welcome{profile.full_name ? `, ${profile.full_name.split(" ")[0]}` : ""}
           </h1>
-          <p className="text-fg-muted text-sm">
-            You&apos;ve joined{" "}
-            <span className="text-fg font-semibold">{tenant?.name || "the workspace"}</span>. Let&apos;s
-            set up your personal preferences — takes about a minute.
-          </p>
+          {tenant ? (
+            <p className="text-fg-muted text-sm">
+              You&apos;ve joined{" "}
+              <span className="text-fg font-semibold">{tenant.name || "the workspace"}</span>. Let&apos;s
+              set up your personal preferences — takes about a minute.
+            </p>
+          ) : (
+            // An account with no workspace lands here after login (lib/auth-routing.ts).
+            // It has joined nothing, so the page does not say it has (2026-09-30 fix pass).
+            <p className="text-fg-muted text-sm">
+              Your account is not linked to a workspace yet. You can still set your personal preferences now.
+            </p>
+          )}
         </header>
 
         <WelcomeWizardClient
           initialProfile={{
             full_name: profile.full_name || "",
             display_name: profile.display_name || "",
-            primary_agent: profile.primary_agent || enabledAgents[0] || "bravo",
+            primary_agent: profile.primary_agent || teammates[0]?.slug || "",
             custom_fields: (profile.custom_fields as Record<string, unknown>) || {},
           }}
-          enabledAgents={enabledAgents}
+          teammates={teammates}
+          teammatesUnknown={teammatesUnknown}
+          slackConnected={slackConnected}
           alreadyCompleted={!!profile.onboarding_completed_at}
         />
       </div>

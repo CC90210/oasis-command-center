@@ -30,6 +30,7 @@ export const MANIFEST_SCHEMA_VERSION = 1 as const;
 // ManifestNavIconKey), which caused build failures whenever seeds.ts referenced
 // an icon the narrower type didn't know about.
 import type { NavIconKey } from "@/lib/nav-config";
+import type { DepartmentKey, ModuleKey } from "@/lib/os/types";
 import { isClientSafeTool, isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 export type ManifestNavIconKey = NavIconKey;
 
@@ -322,6 +323,50 @@ export type ManifestIntegration = {
   config?: Record<string, unknown>;
 };
 
+/**
+ * Where the workspace's team talks, as the owner answered "Where does your team
+ * talk?" in onboarding (or the operator chose at provisioning). A record of the
+ * answer only: it connects nothing. The Slack connection itself is made in
+ * Settings > Chat apps, and the Slack track reads this list to know which
+ * workspaces asked for it. "email" means "email only".
+ */
+export const MANIFEST_CHAT_APPS = ["slack", "teams", "telegram", "email"] as const;
+export type ManifestChatApp = (typeof MANIFEST_CHAT_APPS)[number];
+
+/**
+ * The fast classifier (Jev). "off" sends nothing to it; "shadow" runs it beside
+ * the normal path and records its answer without acting on it. A missing value
+ * is read as "off" by every consumer, and a client workspace defaults to "off".
+ */
+export const MANIFEST_JEV_MODES = ["off", "shadow"] as const;
+export type ManifestJevMode = (typeof MANIFEST_JEV_MODES)[number];
+
+/**
+ * `manifest.integrations` (2026-09-30). It used to be a bare array of
+ * connector bindings; it is now an object so the onboarding answers have a
+ * named home the Slack/Jev track can read as `integrations.chat_apps` and
+ * `integrations.jev`. A stored manifest that still holds the old array parses
+ * into `connectors`, so nothing already saved stops loading.
+ */
+export type ManifestIntegrations = {
+  chat_apps?: ManifestChatApp[];
+  jev?: ManifestJevMode;
+  connectors?: ManifestIntegration[];
+};
+
+/**
+ * What OASIS set up in this workspace: the departments and the opt-in modules
+ * the operator (or the owner, in the onboarding wizard) chose. A RECORD, not a
+ * grant: lib/os/modules.ts still decides which modules a client's rail shows,
+ * because a tenant can edit its own manifest and a module is something it
+ * bought. The provisioning console and the setup page read this to say what
+ * was set up.
+ */
+export type ManifestOsSetup = {
+  departments: DepartmentKey[];
+  modules: ModuleKey[];
+};
+
 export type ManifestPermissions = {
   local_files: boolean;
   computer_control: boolean;
@@ -459,7 +504,9 @@ export type TenantManifest = {
   nav: ManifestNavItem[];
   pages?: ManifestPageDef[];
   data_model?: ManifestEntityDef[];
-  integrations?: ManifestIntegration[];
+  integrations?: ManifestIntegrations;
+  /** Departments and modules OASIS set up here. See ManifestOsSetup. */
+  os?: ManifestOsSetup;
   permissions?: ManifestPermissions;
   default_prompts?: ManifestPromptDef[];
   onboarding_industry?: ManifestOnboardingIndustry;
@@ -771,6 +818,67 @@ function parseIntegration(v: Json, path: string): ManifestIntegration {
   };
 }
 
+const CHAT_APPS: ReadonlySet<string> = new Set(MANIFEST_CHAT_APPS);
+const JEV_MODES: ReadonlySet<string> = new Set(MANIFEST_JEV_MODES);
+
+/**
+ * `integrations` in either shape: the legacy array of connector bindings
+ * (becomes `connectors`) or the object. An unknown chat app or Jev mode is an
+ * error, not a silent drop: the wizard and the operator console only write the
+ * listed values, so anything else is a corrupted or hand-edited manifest.
+ */
+function parseIntegrations(v: Json, path: string): ManifestIntegrations {
+  if (isArray(v)) {
+    return { connectors: v.map((i, idx) => parseIntegration(i, `${path}[${idx}]`)) };
+  }
+  if (!isObject(v)) throw new ManifestParseError(path, "expected object or array");
+  const out: ManifestIntegrations = {};
+  if (v.chat_apps !== undefined) {
+    if (!isArray(v.chat_apps)) throw new ManifestParseError(`${path}.chat_apps`, "expected array");
+    const apps: ManifestChatApp[] = [];
+    v.chat_apps.forEach((a, idx) => {
+      if (!isString(a) || !CHAT_APPS.has(a)) {
+        throw new ManifestParseError(`${path}.chat_apps[${idx}]`, `unknown chat app ${JSON.stringify(a)}`);
+      }
+      if (!apps.includes(a as ManifestChatApp)) apps.push(a as ManifestChatApp);
+    });
+    out.chat_apps = apps;
+  }
+  if (v.jev !== undefined) {
+    if (!isString(v.jev) || !JEV_MODES.has(v.jev)) {
+      throw new ManifestParseError(`${path}.jev`, `unknown Jev mode ${JSON.stringify(v.jev)}`);
+    }
+    out.jev = v.jev as ManifestJevMode;
+  }
+  const connectors = optionalArray(v, "connectors", `${path}.connectors`, (i, idx) =>
+    parseIntegration(i, `${path}.connectors[${idx}]`),
+  );
+  if (connectors !== undefined) out.connectors = connectors;
+  return out;
+}
+
+const OS_DEPARTMENT_KEYS: ReadonlySet<string> = new Set<DepartmentKey>([
+  "chief_of_staff", "sales", "marketing", "client_success", "finance", "operations",
+]);
+const OS_MODULE_KEYS: ReadonlySet<string> = new Set<ModuleKey>([
+  "finance", "commissions", "legal", "content", "research", "ads", "meetings", "enablement", "prospects", "portal",
+]);
+
+function parseOsSetup(v: Json, path: string): ManifestOsSetup {
+  if (!isObject(v)) throw new ManifestParseError(path, "expected object");
+  const keys = (field: "departments" | "modules", allowed: ReadonlySet<string>): string[] =>
+    requireArray(v, field, path, (item, idx) => {
+      if (!isString(item) || !allowed.has(item)) {
+        throw new ManifestParseError(`${path}.${field}[${idx}]`, `unknown ${field.slice(0, -1)} ${JSON.stringify(item)}`);
+      }
+      return item;
+    }).filter((item, idx, all) => all.indexOf(item) === idx);
+  return {
+    departments: keys("departments", OS_DEPARTMENT_KEYS) as DepartmentKey[],
+    modules: keys("modules", OS_MODULE_KEYS) as ModuleKey[],
+  };
+}
+
 function parsePermissions(v: Json, path: string): ManifestPermissions {
   if (!isObject(v)) throw new ManifestParseError(path, "expected object");
   return {
@@ -880,9 +988,8 @@ export function parseManifest(input: Json): TenantManifest {
     nav: requireArray(input, "nav", "$", (n, idx) => parseNavItem(n, `$.nav[${idx}]`)),
     pages: optionalArray(input, "pages", "$.pages", (p, idx) => parsePage(p, `$.pages[${idx}]`)),
     data_model: optionalArray(input, "data_model", "$.data_model", (e, idx) => parseEntity(e, `$.data_model[${idx}]`)),
-    integrations: optionalArray(input, "integrations", "$.integrations", (i, idx) =>
-      parseIntegration(i, `$.integrations[${idx}]`)
-    ),
+    integrations: input.integrations !== undefined ? parseIntegrations(input.integrations, "$.integrations") : undefined,
+    os: input.os !== undefined ? parseOsSetup(input.os, "$.os") : undefined,
     permissions: input.permissions !== undefined ? parsePermissions(input.permissions, "$.permissions") : undefined,
     default_prompts: optionalArray(input, "default_prompts", "$.default_prompts", (p, idx) =>
       parsePrompt(p, `$.default_prompts[${idx}]`)

@@ -10,7 +10,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
-import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
+import { destinationForClaim, onboardingGateApplies, shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
 import { OS_REDIRECTS } from "./lib/os/redirects";
 
@@ -118,6 +118,9 @@ export const PUBLIC_PATH_PREFIXES = [
   "/favicon",
 ];
 
+/** Marks the "/" -> "/home" internal rewrite; see isInternalHomeRewrite. */
+const HOME_REWRITE_HEADER = "x-oasis-home-rewrite";
+
 // Unauthed "/" is REWRITTEN (not redirected) to the marketing home, so
 // oasisai.work stays the canonical URL for the brand apex in the address
 // bar, in shares, and in search. See lib/marketing/routes.ts for why "/"
@@ -193,7 +196,16 @@ export async function middleware(req: NextRequest) {
     // rewrite further down never re-enters this map.
     [MARKETING_HOME_PATH]: "/",
   };
-  if (pathname in REDIRECT_MAP) {
+  // The "/" -> "/home" rewrite below marks its request. Next's own server does
+  // not re-run middleware on an internal rewrite, but the standalone Node
+  // server (next start / Docker self-host) does, and without this check the
+  // rewritten /home request hit the /home -> "/" redirect above and looped
+  // forever for every anonymous visitor (2026-09-30 audit,
+  // standalone-anon-root-loop). A browser that sends the header itself only
+  // gets the public marketing page at /home, which is what /home is.
+  const isInternalHomeRewrite =
+    pathname === MARKETING_HOME_PATH && req.headers.get(HOME_REWRITE_HEADER) === "1";
+  if (pathname in REDIRECT_MAP && !isInternalHomeRewrite) {
     return NextResponse.redirect(new URL(REDIRECT_MAP[pathname], req.url));
   }
 
@@ -217,6 +229,7 @@ export async function middleware(req: NextRequest) {
   const rewriteMarketingHome = () => {
     const rewriteHeaders = new Headers(req.headers);
     rewriteHeaders.set("x-pathname", MARKETING_HOME_PATH);
+    rewriteHeaders.set(HOME_REWRITE_HEADER, "1");
     return NextResponse.rewrite(new URL(MARKETING_HOME_PATH, req.url), {
       request: { headers: rewriteHeaders },
     });
@@ -234,6 +247,17 @@ export async function middleware(req: NextRequest) {
     const token = req.cookies.get("oasis_session")?.value;
     const session = await verifySessionEdge(token, process.env.AUTH_SESSION_SECRET);
     if (session) {
+      // Onboarding gate, Turso branch (2026-09-30). The decision was made when
+      // this cookie was minted (lib/onboarding-claim.ts) and rides in it as
+      // `onb`, so there is no database call here. Before this the Turso branch
+      // let every page through: a workspace owner whose workspace was not set
+      // up, or an invitee whose join failed, landed on screens that could not
+      // work for them. A cookie with no claim (minted before this change) is
+      // never redirected. Page requests only; /api/* and /onboarding/* pass.
+      const destination = destinationForClaim(session.onb);
+      if (destination && onboardingGateApplies(pathname)) {
+        return NextResponse.redirect(new URL(destination, req.url));
+      }
       return NextResponse.next({ request: { headers: requestHeaders } });
     }
     // Same rule the Supabase branch below applies, and for the same reason:

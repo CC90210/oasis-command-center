@@ -24,6 +24,7 @@ import {
 } from "@/lib/website-sales-comp";
 import { buildBriefForOnboarding } from "@/lib/website-sales-build-brief";
 import { isRetiredTenant } from "@/lib/tenant/retired";
+import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
 
 function driverError(error: unknown): DriverError {
   return error && typeof error === "object"
@@ -3112,18 +3113,54 @@ export async function redeem_tenant_invite(
     already_redeemed: true,
   });
 
+  // The joining member's profile, decided by the app BEFORE this call
+  // (lib/invite-profile-finalization.ts finalizeInviteProfile) and written in
+  // the SAME batch as the claim below, so a redemption either claims the
+  // invite AND leaves a finished profile, or does neither (2026-09-30: the
+  // profile used to be finished in a second step after the claim committed,
+  // and a failure there used up the invite and left a half-made member).
+  // Absent args (the orphan-recovery caller before it passes a plan) mean "no
+  // agents": never the old hard-coded '["bravo"]', which put OASIS's own agent
+  // on every client's member.
+  const planAgents = Array.isArray(args["p_agents_enabled"])
+    ? (args["p_agents_enabled"] as unknown[]).filter((a): a is string => typeof a === "string" && a.trim() !== "")
+    : [];
+  const planPrimary =
+    typeof args["p_primary_agent"] === "string" && planAgents.includes(args["p_primary_agent"] as string)
+      ? (args["p_primary_agent"] as string)
+      : planAgents[0] ?? "";
+  const planBrand =
+    typeof args["p_brand"] === "string" && (args["p_brand"] as string).trim() !== ""
+      ? (args["p_brand"] as string).trim()
+      : null;
+  const expectedTenantId =
+    typeof args["p_expected_tenant_id"] === "string" ? (args["p_expected_tenant_id"] as string) : null;
+
   // PG: SELECT * ... WHERE token_hash = ? AND redeemed_at IS NULL AND
   //     revoked_at IS NULL AND expires_at > now() FOR UPDATE;
   // token_hash is UNIQUE (tenant_invites_token_hash_key) — at most one row.
   // The FOR UPDATE lock is replaced by the compare-and-swap claim below.
-  const sel = await client.execute({
-    sql:
-      `SELECT "id", "tenant_id", "email", "team_role", "created_by" ` +
-      `FROM "tenant_invites" ` +
-      `WHERE "token_hash" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
-      `AND ${notExpired} LIMIT 1`,
-    args: [tokenHash, nowIso],
-  });
+  //
+  // `kind` arrives with bravo__196. Until that migration is applied the column
+  // does not exist, and then no owner-claim invite can exist either, so every
+  // invite is read as a member invite. Only that exact error is tolerated.
+  const selectInvite = async (withKind: boolean) =>
+    client.execute({
+      sql:
+        `SELECT "id", "tenant_id", "email", "team_role", "created_by"${withKind ? `, "kind"` : ""} ` +
+        `FROM "tenant_invites" ` +
+        `WHERE "token_hash" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
+        `AND ${notExpired} LIMIT 1`,
+      args: [tokenHash, nowIso],
+    });
+  let sel;
+  try {
+    sel = await selectInvite(true);
+  } catch (e) {
+    if (!/no such column:\s*"?kind"?/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    console.warn("[redeem_tenant_invite] tenant_invites.kind is missing (bravo__196 not applied); reading every invite as a member invite");
+    sel = await selectInvite(false);
+  }
   const invite = (sel.rows[0] as unknown as Record<string, unknown> | undefined) ?? null;
 
   if (invite === null) {
@@ -3147,8 +3184,27 @@ export async function redeem_tenant_invite(
 
   const inviteId = String(invite["id"]);
   const tenantId = String(invite["tenant_id"]);
-  const teamRole = String(invite["team_role"]);
   const createdBy = String(invite["created_by"]);
+  // The plan was made for one workspace; never apply it to another.
+  if (expectedTenantId !== null && expectedTenantId !== tenantId) {
+    return { ok: false, error: "invite_tenant_changed" };
+  }
+  // Ownership comes from the invite's KIND, which only the operator's
+  // owner-invite route can mint. A member invite whose team_role says "owner"
+  // (only ever hand-inserted) joins as a member and never as an owner.
+  const ownerClaim = invite["kind"] === "owner_claim";
+  const rawRole = String(invite["team_role"]);
+  const teamRole = ownerClaim ? "owner" : rawRole === "owner" ? "member" : rawRole;
+  const isOwner = ownerClaim ? 1 : 0;
+  if (ownerClaim) {
+    const owner = await client.execute({
+      sql: `SELECT 1 FROM "user_profiles" WHERE "tenant_id" = ? AND "is_owner" = 1 LIMIT 1`,
+      args: [tenantId],
+    });
+    // user_profiles_one_owner_per_tenant would refuse the write anyway (and
+    // roll the claim back with it); this names the reason instead.
+    if (owner.rows.length > 0) return { ok: false, error: "workspace_already_has_owner" };
+  }
 
   const existingProfileQuery = await client.execute({
     sql: `SELECT "id", "tenant_id", "team_role" FROM "user_profiles"
@@ -3171,6 +3227,61 @@ export async function redeem_tenant_invite(
   if (existingTenantId) {
     if (existingTenantId !== tenantId) {
       return { ok: false, error: "already_member_of_another_tenant" };
+    }
+    if (ownerClaim && existingProfileId) {
+      // THE FOUNDER IS ALREADY A MEMBER (2026-09-30 fix pass). Every workspace
+      // made by signup_tenant or the setup CLI has its creator as its only,
+      // non-owner member, and the wizard is now owner-only, so an owner invite
+      // is those creators' one path to ownership. It used to return
+      // already_member here without reading the claim: the invite stayed
+      // unclaimed, is_owner stayed 0, and the redemption still answered ok.
+      // Now the claim and the promotion are one compare-and-swap batch: the
+      // invite is claimed only while this person is still an active member of
+      // this workspace and the workspace still has no owner, and the profile
+      // is promoted only if that claim happened.
+      const promote = await client.batch(
+        [
+          {
+            sql:
+              `UPDATE "tenant_invites" SET "redeemed_at" = ?, "redeemed_by" = ? ` +
+              `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL AND ${notExpired} ` +
+              `AND EXISTS (SELECT 1 FROM "user_profiles" p WHERE p."id" = ? AND p."tenant_id" = ? AND p."deactivated_at" IS NULL) ` +
+              `AND NOT EXISTS (SELECT 1 FROM "user_profiles" o WHERE o."tenant_id" = ? AND o."is_owner" = 1)`,
+            args: [nowIso, redeemerAuthId, inviteId, nowIso, existingProfileId, tenantId, tenantId],
+          },
+          {
+            sql:
+              `UPDATE "user_profiles" SET "is_owner" = 1, "team_role" = 'owner' ` +
+              `WHERE "id" = ? AND "tenant_id" = ? AND changes() = 1`,
+            args: [existingProfileId, tenantId],
+          },
+        ],
+        "write",
+      );
+      if (promote[0].rowsAffected === 1) {
+        return {
+          ok: true,
+          tenant_id: tenantId,
+          team_role: "owner",
+          is_owner: true,
+          profile_id: existingProfileId,
+          already_redeemed: false,
+          promoted_existing_member: true,
+        };
+      }
+      const again = await retrySelect();
+      if (again !== null) return alreadyRedeemedResponse(again);
+      const ownerNow = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "tenant_id" = ? AND "is_owner" = 1 LIMIT 1`,
+        args: [tenantId],
+      });
+      if (ownerNow.rows.length > 0) return { ok: false, error: "workspace_already_has_owner" };
+      const active = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "id" = ? AND "tenant_id" = ? AND "deactivated_at" IS NULL LIMIT 1`,
+        args: [existingProfileId, tenantId],
+      });
+      if (active.rows.length === 0) return { ok: false, error: "member_deactivated" };
+      return { ok: false, error: "invalid_or_expired" };
     }
     return {
       ok: true,
@@ -3204,7 +3315,7 @@ export async function redeem_tenant_invite(
   const profileClaimArgs = existingProfileId === null
     ? [redeemerAuthId]
     : [existingProfileId];
-  const statements: Array<{ sql: string; args: Array<string | number> }> = [
+  const statements: Array<{ sql: string; args: Array<string | number | null> }> = [
     {
       // Compare-and-swap claim: re-asserts every predicate the PG SELECT
       // evaluated under lock. rowsAffected === 0 -> lost the race.
@@ -3228,8 +3339,8 @@ export async function redeem_tenant_invite(
       sql:
         `INSERT INTO "user_profiles" ` +
         `("id", "auth_user_id", "email", "full_name", "tenant_id", "team_role", ` +
-        `"invited_by", "joined_at", "is_owner", "agents_enabled", "prospect_focus") ` +
-        `SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0, '["bravo"]', '["service_trades"]' ` +
+        `"invited_by", "joined_at", "is_owner", "agents_enabled", "primary_agent", "brand", "prospect_focus") ` +
+        `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '["service_trades"]' ` +
         `WHERE changes() = 1`,
       args: [
         newProfileId,
@@ -3240,6 +3351,13 @@ export async function redeem_tenant_invite(
         teamRole,
         createdBy,
         nowIso,
+        isOwner,
+        JSON.stringify(planAgents),
+        planPrimary,
+        // The workspace's own name from the plan. Without one (a caller that
+        // passed no plan), the person's own "<First name>'s workspace", never
+        // the column's legacy 'OASIS AI' default.
+        planBrand ?? defaultWorkspaceName(redeemerFullName, redeemerEmail),
       ],
     });
   } else {
@@ -3248,7 +3366,9 @@ export async function redeem_tenant_invite(
         `UPDATE "user_profiles" SET "tenant_id" = ?, "team_role" = ?, "invited_by" = ?, ` +
         `"email" = ?, ` +
         `"full_name" = CASE WHEN trim(?) <> '' THEN ? ELSE "full_name" END, ` +
-        `"joined_at" = COALESCE("joined_at", ?), "is_owner" = 0 ` +
+        `"joined_at" = COALESCE("joined_at", ?), "is_owner" = ?, ` +
+        `"agents_enabled" = ?, "primary_agent" = ?, ` +
+        `"brand" = COALESCE(?, "brand") ` +
         `WHERE "id" = ? AND "tenant_id" IS NULL AND changes() = 1`,
       args: [
         tenantId,
@@ -3258,6 +3378,10 @@ export async function redeem_tenant_invite(
         verifiedFullName,
         verifiedFullName,
         nowIso,
+        isOwner,
+        JSON.stringify(planAgents),
+        planPrimary,
+        planBrand,
         existingProfileId,
       ],
     });
@@ -3297,6 +3421,7 @@ export async function redeem_tenant_invite(
     ok: true,
     tenant_id: tenantId,
     team_role: teamRole,
+    is_owner: isOwner === 1,
     profile_id: existingProfileId ?? newProfileId,
     already_redeemed: false,
   };
@@ -3310,8 +3435,15 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
   const pAuthUserId = args.p_auth_user_id == null ? null : String(args.p_auth_user_id);
   const pEmail = args.p_email == null ? null : String(args.p_email);
   const pFullName = args.p_full_name == null ? null : String(args.p_full_name);
-  // p_brand DEFAULT 'OASIS AI' — default applies only when the key is absent; an explicit null stays null (and hits NOT NULL, as in PG).
-  const pBrand = 'p_brand' in args ? (args.p_brand == null ? null : String(args.p_brand)) : 'OASIS AI';
+  // p_brand: the Postgres default was 'OASIS AI', which named 18 strangers'
+  // workspaces after OASIS. An absent (or blank) brand now defaults to
+  // "<First name>'s workspace" (lib/provisioning/workspace-name.ts); an explicit
+  // null still stays null and hits NOT NULL, as in PG.
+  const pBrand = 'p_brand' in args
+    ? (args.p_brand == null
+        ? null
+        : String(args.p_brand).trim() || defaultWorkspaceName(args.p_full_name == null ? null : String(args.p_full_name), args.p_email == null ? null : String(args.p_email)))
+    : defaultWorkspaceName(args.p_full_name == null ? null : String(args.p_full_name), args.p_email == null ? null : String(args.p_email));
   const pSlugRaw = 'p_slug' in args && args.p_slug != null ? String(args.p_slug) : null;
 
   // v_slug := COALESCE(NULLIF(trim(p_slug), ''), regexp_replace(lower(split_part(p_email,'@',1)), '[^a-z0-9-]+', '-', 'g'))
@@ -3360,7 +3492,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
               )
               VALUES (
                 :id, :auth_user_id, :email, :full_name, :display_name, :brand, 'operator',
-                :tenant_id, :agents_enabled, 'bravo', :prospect_focus,
+                :tenant_id, :agents_enabled, '', :prospect_focus,
                 :now, :now
               )`,
         args: {
@@ -3371,8 +3503,10 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
           display_name: displayName,
           brand: pBrand,
           tenant_id: tenantId,
-          // text[] columns are stored as JSON text in the Turso schema.
-          agents_enabled: JSON.stringify(['bravo']),
+          // text[] columns are stored as JSON text in the Turso schema. A new
+          // workspace starts with no agents (it used to get OASIS's own 'bravo');
+          // its teammates arrive when OASIS provisions it.
+          agents_enabled: JSON.stringify([]),
           // Postgres relied on the column default ARRAY['service_trades']; the transpiler
           // dropped it (column is NOT NULL, no default in SQLite) so it must be supplied here.
           prospect_focus: JSON.stringify(['service_trades']),
