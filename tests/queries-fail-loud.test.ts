@@ -12,9 +12,10 @@
  * return the tenant's rows and nobody else's.
  *
  * It also pins the reads that were DELETED because nothing called them, the
- * two lib callers that turn the throw into an explicit unknown (shell status,
- * setup readiness), and a source guard: every exported read that calls
- * `.from(` must look at its error.
+ * two lib callers that turn the throw into an explicit unknown (shell status;
+ * setup readiness, which nothing renders yet but the OS plan's setup
+ * checklist reuses), and a source guard: every exported read that calls
+ * `.from(` must throw on its error, or be named with the reason it does not.
  *
  * Run: node --conditions=react-server --import tsx tests/queries-fail-loud.test.ts
  */
@@ -179,19 +180,44 @@ async function main() {
     for (const name of gone) assert.equal(name in q, false, `${name} is still exported`);
   });
 
-  // ── 4. Source guard: an exported read that queries must look at its error ─
-  await check("every exported read in lib/queries.ts that calls .from( checks the read's error", () => {
+  // ── 4. Source guard: an exported read that queries must throw on its error ─
+  // Mentioning `error` is not enough: `if (r.error) return []` mentions it and
+  // is the very defect this file exists to stop. Each read must THROW on its
+  // error, or be named below with the reason it still does not.
+  const NOT_YET_LOUD = new Map([
+    // null is this read's unknown, not a default: each metric is null on its
+    // own read's error, and the Today and department cards draw null as such.
+    ["momentumMetrics", "answers null per metric on that metric's read error"],
+    ["getTenant", "null also means 'no such tenant' to 21 callers; telling the two apart is its own sweep"],
+    ["getActiveProfile", "only its OPERATOR_EMAIL fallback reads, behind OPERATOR_EMAIL_FALLBACK_ENABLED; null means no profile"],
+    // SunBiz is retired (2026-09-28); these go with the SunBiz code-removal PR.
+    ["recentLeads", "SunBiz: only getLeadsForTenant → SunBizDashboard calls it"],
+    ["getRenewalsSummary", "SunBiz renewals"],
+    ["getRenewalsRows", "SunBiz renewals"],
+    ["getSmsHistory", "SunBiz /sms"],
+  ]);
+  await check("every exported read in lib/queries.ts that calls .from( throws on the read's error", () => {
     const src = readFileSync(join(__dirname, "..", "lib", "queries.ts"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, " ")
       .replace(/(^|[^:])\/\/.*$/gm, "$1");
-    const starts = [...src.matchAll(/^export (?:async function|const) (\w+)/gm)];
+    const starts = [...src.matchAll(/^export (?:async function|function|const) (\w+)/gm)];
     assert.ok(starts.length > 10, "the scan found the exports");
-    const unchecked: string[] = [];
+    const swallowing: string[] = [];
+    const nowLoud: string[] = [];
+    const reads = new Set<string>();
     starts.forEach((m, i) => {
       const body = src.slice(m.index, i + 1 < starts.length ? starts[i + 1].index : src.length);
-      if (body.includes(".from(") && !/\berror\b/.test(body)) unchecked.push(m[1]);
+      if (!body.includes(".from(")) return;
+      reads.add(m[1]);
+      const throws = /if \((?:\w+\.)?error\) throw new Error\(/.test(body);
+      if (!throws && !NOT_YET_LOUD.has(m[1])) swallowing.push(m[1]);
+      if (throws && NOT_YET_LOUD.has(m[1])) nowLoud.push(m[1]);
     });
-    assert.deepEqual(unchecked, [], `reads that never look at their error: ${unchecked.join(", ")}`);
+    assert.deepEqual(swallowing, [], `reads that do not throw on their error: ${swallowing.join(", ")}`);
+    // The list only shrinks: a read that now throws, or no longer exists, leaves it.
+    assert.deepEqual(nowLoud, [], `these throw now; take them off NOT_YET_LOUD: ${nowLoud.join(", ")}`);
+    const gone = [...NOT_YET_LOUD.keys()].filter((name) => !reads.has(name));
+    assert.deepEqual(gone, [], `no longer a read in lib/queries.ts; take them off NOT_YET_LOUD: ${gone.join(", ")}`);
   });
 
   if (failures > 0) {

@@ -12,15 +12,76 @@
  *
  * Each scenario comes in pairs: the unknown (null) and the KNOWN empty/false,
  * so the test can tell "Couldn't check" apart from a card that never says
- * "Not connected" at all.
+ * "Not connected" at all. ProviderAccountsCard reads two signals (keys and
+ * bridge) and warns only when both are known, so it is also drawn with one
+ * read failed and the other answered, both ways round.
  *
  * It asserts nothing: every assertion lives in the .test.ts.
  */
 import { dirname } from "node:path";
+import type { ReactElement } from "react";
 
 function stub(request: string, exports: Record<string, unknown>) {
   const p = require.resolve(request);
   require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
+}
+
+type El = ReactElement<Record<string, unknown>>;
+
+/**
+ * Calls one component as a plain function, frame after frame, with its own
+ * useState slots kept between calls: what React does across a router.refresh()
+ * that hands the same mounted card new props. renderToStaticMarkup draws a
+ * single frame and there is no DOM in the test toolchain, so this stands in
+ * for the reconciler for the card's OWN hooks only (it knows useState and
+ * nothing else, so a new hook fails loudly here). What it returns is drawn by
+ * real React.
+ */
+function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's useState reads
+  const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const slots: unknown[] = [];
+  let cursor = 0;
+  const dispatcher = {
+    useState(initial: unknown) {
+      const at = cursor++;
+      if (!(at in slots)) slots[at] = typeof initial === "function" ? (initial as () => unknown)() : initial;
+      const set = (next: unknown) => {
+        slots[at] = typeof next === "function" ? (next as (prev: unknown) => unknown)(slots[at]) : next;
+      };
+      return [slots[at], set];
+    },
+  };
+  return (props: P) => {
+    cursor = 0;
+    const previous = internals.H;
+    internals.H = dispatcher;
+    try {
+      return component(props) as El;
+    } finally {
+      internals.H = previous;
+    }
+  };
+}
+
+/** Depth-first through children only; throws when nothing matches. */
+function find(node: unknown, what: string, match: (el: El) => boolean): El {
+  const walk = (n: unknown): El | null => {
+    if (Array.isArray(n)) {
+      for (const child of n) {
+        const hit = walk(child);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (!n || typeof n !== "object" || !("props" in n)) return null;
+    const el = n as El;
+    if (match(el)) return el;
+    return walk(el.props.children);
+  };
+  const hit = walk(node);
+  if (!hit) throw new Error(`render: ${what} not found`);
+  return hit;
 }
 
 async function main() {
@@ -100,6 +161,12 @@ async function main() {
     accountsKnownEmpty: renderToStaticMarkup(
       React.createElement(ProviderAccountsCard, { connectedServices: new Set<string>(), bridgeOnline: false, canManageTeam: true, canInstallBridge: true }),
     ),
+    accountsKeysUnknownBridgeOffline: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, { connectedServices: null, bridgeOnline: false, canManageTeam: true, canInstallBridge: true }),
+    ),
+    accountsKeysEmptyBridgeUnknown: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, { connectedServices: new Set<string>(), bridgeOnline: null, canManageTeam: true, canInstallBridge: true }),
+    ),
     editorUnknown: renderToStaticMarkup(
       React.createElement(AgentConfigEditor, { agentKeys: [], bridgeOnline: null, globallyConnectedServices: null }),
     ),
@@ -111,6 +178,30 @@ async function main() {
     railUnknown: rail(null),
     railOffline: rail(false),
   };
+
+  // The same mounted card across a refresh. The key read fails, the operator
+  // connects Anthropic (its card flips at once; the rest still read "Couldn't
+  // check"), and router.refresh() hands back a read that works and shows
+  // OpenRouter's key was on file all along. Then Anthropic is disconnected:
+  // its card flips before the next refresh lands and stays off after it.
+  const accounts = framesOf(ProviderAccountsCard);
+  const base = { bridgeOnline: false, canManageTeam: true, canInstallBridge: true };
+  const card = (frame: El, provider: string) => find(frame, `the ${provider} card`, (el) => el.key === provider);
+  let frame = accounts({ ...base, connectedServices: null });
+  const setKey = find(card(frame, "anthropic"), "Anthropic's Set key button", (el) => el.type === "button" && typeof el.props.onClick === "function");
+  (setKey.props.onClick as () => void)();
+  frame = accounts({ ...base, connectedServices: null });
+  const dialog = find(frame, "the connect dialog", (el) => typeof el.props.onConnected === "function");
+  (dialog.props.onConnected as (p: string) => void)("anthropic");
+  out.accountsAfterConnect = renderToStaticMarkup(accounts({ ...base, connectedServices: null }));
+  const refreshed = new Set(["anthropic", "openrouter"]);
+  frame = accounts({ ...base, connectedServices: refreshed });
+  out.accountsAfterRefresh = renderToStaticMarkup(frame);
+  const disconnect = find(card(frame, "anthropic"), "Anthropic's Disconnect button", (el) => typeof el.props.onDisconnected === "function");
+  (disconnect.props.onDisconnected as () => void)();
+  out.accountsAfterDisconnect = renderToStaticMarkup(accounts({ ...base, connectedServices: refreshed }));
+  out.accountsAfterDisconnectRefresh = renderToStaticMarkup(accounts({ ...base, connectedServices: new Set(["openrouter"]) }));
+
   process.stdout.write(JSON.stringify(out));
 }
 

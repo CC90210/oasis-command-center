@@ -64,23 +64,27 @@ export function ProviderAccountsCard({
   canInstallBridge,
 }: Props) {
   const router = useRouter();
-  // Server-rendered set, but track in state so connecting flips the UI
-  // immediately without waiting for the router refresh round-trip. When the
-  // server read failed the set starts empty and `keysKnown` stays false, so a
+  // What the cards draw is the server's latest answer (the prop, which every
+  // router.refresh() hands back fresh) with this page's own connects and
+  // disconnects laid over it, so a click flips its card at once instead of
+  // waiting for the refresh round-trip. It is derived on every render, never
+  // copied into state: after a failed read the copy stayed empty, so the
+  // refresh that followed a connect showed the providers already on file as
+  // "Not connected". When the server read failed, `keysKnown` is false and a
   // provider this page has not just connected reads "Couldn't check".
   const keysKnown = initialServices !== null;
-  const [services, setServices] = useState<Set<string>>(initialServices ?? new Set());
+  const [changedHere, setChangedHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const services = new Set(initialServices ?? []);
+  for (const [svc, connectedNow] of changedHere) {
+    if (connectedNow) services.add(svc);
+    else services.delete(svc);
+  }
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
 
   function markConnected(p: Provider) {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
-    setServices((prev) => {
-      if (prev.has(svc)) return prev;
-      const next = new Set(prev);
-      next.add(svc);
-      return next;
-    });
+    setChangedHere((prev) => new Map(prev).set(svc, true));
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -235,14 +239,10 @@ export function ProviderAccountsCard({
                         <DisconnectButton
                           provider={p}
                           onDisconnected={() => {
-                            // Optimistically clear from local state; the
+                            // Optimistically clear it on this page; the
                             // server source-of-truth will catch up on the
                             // next refresh.
-                            setServices((prev) => {
-                              const next = new Set(prev);
-                              next.delete(PROVIDER_TO_SERVICE[p]);
-                              return next;
-                            });
+                            setChangedHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
                             if (typeof window !== "undefined") {
                               window.dispatchEvent(
                                 new CustomEvent("oasis:agent-configs-changed"),

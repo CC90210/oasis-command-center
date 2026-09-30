@@ -1,6 +1,6 @@
 import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { IntegrationDot } from "@/components/IntegrationDot";
-import { getActiveProfile, integrationsHealth, aiServicesWithKey } from "@/lib/queries";
+import { getActiveProfile, integrationsHealth, aiServicesWithKey, aiKeyOnFile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import {
   INTEGRATION_CATEGORIES,
@@ -21,9 +21,10 @@ export const dynamic = "force-dynamic";
 export default async function IntegrationsPage() {
   const profile = await safe("integrations.profile", getActiveProfile(), null);
 
-  // Both reads throw on failure; null is "Couldn't check" on every card,
-  // never a wall of "Not connected" (middleware sends /integrations to
-  // Settings › Connections, but the page must not lie if it is reached).
+  // Both reads throw on failure; null is "Couldn't check", never a wall of
+  // "Not connected" (middleware sends /integrations to Settings › Connections,
+  // but the page must not lie if it is reached). A failed key read makes only
+  // the AI provider cards unknown: it is the only thing it answers for.
   const [dbRows, connectedAiSet, user, enabledRaw] = await Promise.all([
     safe("integrations.health", integrationsHealth(profile?.tenant_id || null), null),
     safe("integrations.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null),
@@ -117,7 +118,7 @@ export default async function IntegrationsPage() {
                 <IntegrationDot
                   key={row.service}
                   health={row}
-                  connection={{ hasCredentials: connectedAiSet ? connectedAiSet.has(row.service) : null }}
+                  connection={{ hasCredentials: aiKeyOnFile(connectedAiSet, row.service) }}
                 />
               ))}
             </div>

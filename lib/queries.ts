@@ -794,6 +794,19 @@ export async function aiServicesWithKey(tenantId: string | null): Promise<Set<st
   return out;
 }
 
+const AI_KEY_SERVICES: ReadonlySet<string> = new Set(Object.values(PROVIDER_TO_SERVICE));
+
+/**
+ * What an integration card may say about a key, given aiServicesWithKey's
+ * answer (null = that read failed). The read only answers for the AI provider
+ * slugs, so its failure makes only those cards "Couldn't check"; Stripe,
+ * Gmail and the rest never depended on it and keep the `false` they always get.
+ */
+export function aiKeyOnFile(keyedAi: Set<string> | null, service: string): boolean | null {
+  if (keyedAi) return keyedAi.has(service);
+  return AI_KEY_SERVICES.has(service) ? null : false;
+}
+
 // ============================================================================
 // Sun Biz Funding shared-shell fallback readers
 // ----------------------------------------------------------------------------

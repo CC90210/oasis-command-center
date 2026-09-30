@@ -11,7 +11,9 @@
  * libSQL file twice: once with the read's table missing (the unknown state
  * must appear and the "nothing here" copy must not), once with the table
  * present (the page's normal state, so the check is not passing on a page
- * that always says "Couldn't check").
+ * that always says "Couldn't check"). /operations' own inline reads (the four
+ * health counts, the paired machines) are held to the same rule: an "All
+ * clear" or "0 bridges online" under a "Couldn't check" card contradicts it.
  *
  * Client components cannot run under react-server; the walker records the
  * props a page hands them instead (IntegrationDot, ProviderAccountsCard,
@@ -265,6 +267,17 @@ async function main() {
     assert.doesNotMatch(text, /No events recorded yet/);
     assert.doesNotMatch(text, /No decisions yet/);
   });
+  await check("/operations: failed health counts and pairings say Couldn't check, never All clear or 0 bridges online", async () => {
+    const { text } = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
+    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+      assert.match(text, new RegExp(`${tile} Couldn't check`), `${tile}: an unread count is not a number`);
+    }
+    assert.doesNotMatch(text, /All clear/, "all clear needs every count read");
+    assert.match(text, /Bridges: couldn't check/);
+    assert.doesNotMatch(text, /\d+ bridge ?s? online/); // the walker spaces JSX text pieces
+    assert.match(text, /Couldn't check the paired machines/);
+    assert.doesNotMatch(text, /No machines paired yet/);
+  });
   await check("/analytics: a failed pipeline read says Couldn't check, never 0 won / 0 lost", async () => {
     const { text } = await render(await AnalyticsPage());
     assert.match(text, /Won Couldn't check/);
@@ -277,7 +290,11 @@ async function main() {
     assert.match(text, /The integration heartbeats could not be read/);
     assert.equal(client.filter((c) => c.name === "IntegrationDot").length, 0, "no card may claim a state");
   });
-  await check("/health and /integrations: a failed key read hands every card hasCredentials: null, not false", async () => {
+  // The key read answers only for the AI provider slugs, so its failure makes
+  // only those cards unknown. Stripe, Gmail and the rest never depended on it
+  // and keep the `false` they had before the read could fail.
+  const AI_SLUGS = new Set(["anthropic", "openai_codex", "google_ai", "openrouter"]);
+  await check("/health and /integrations: a failed key read hands the AI provider cards hasCredentials: null, the rest false", async () => {
     await db.execute(
       `CREATE TABLE integrations_health (id TEXT PRIMARY KEY, profile_id TEXT, tenant_id TEXT, service TEXT, status TEXT,
          last_ping_at TEXT, last_error TEXT, metadata TEXT, updated_at TEXT)`,
@@ -285,10 +302,12 @@ async function main() {
     for (const page of [HealthPage, IntegrationsPage]) {
       const { client } = await render(await page());
       const dots = client.filter((c) => c.name === "IntegrationDot");
-      assert.ok(dots.length > 0, "no integration cards rendered");
-      for (const d of dots) {
-        assert.deepEqual(d.props.connection, { hasCredentials: null }, JSON.stringify(d.props.connection));
-      }
+      const service = (d: Recorded) => (d.props.health as { service: string }).service;
+      const ai = dots.filter((d) => AI_SLUGS.has(service(d)));
+      const other = dots.filter((d) => !AI_SLUGS.has(service(d)));
+      assert.ok(ai.length > 0 && other.length > 0, `need AI and non-AI cards, saw: ${dots.map(service).join(", ")}`);
+      for (const d of ai) assert.deepEqual(d.props.connection, { hasCredentials: null }, `${service(d)}: ${JSON.stringify(d.props.connection)}`);
+      for (const d of other) assert.deepEqual(d.props.connection, { hasCredentials: false }, `${service(d)}: ${JSON.stringify(d.props.connection)}`);
     }
   });
   await check("/api/shell/status: an unreadable bridge answers bridgeOnline null, not false", async () => {
@@ -344,6 +363,19 @@ async function main() {
     assert.match(text, /Tool access: couldn't check the bridge/);
     assert.doesNotMatch(text, /Tool access: cloud only/);
   });
+  // Last in phase 1: it leaves both cron tables in place for phase 2.
+  await check("/operations: Failed automations sums two counts, so either one unread keeps it Couldn't check", async () => {
+    const tile = async () => (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
+    await db.execute("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT, last_result TEXT)");
+    assert.match(await tile(), /Failed automations Couldn't check/, "tenant_cron_jobs unread, cron_jobs readable");
+    await db.execute("ALTER TABLE cron_jobs RENAME TO cron_jobs_parked");
+    await db.execute(
+      `CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT, name TEXT, schedule TEXT, last_run_at TEXT,
+         last_run_status TEXT, last_run_error TEXT)`,
+    );
+    assert.match(await tile(), /Failed automations Couldn't check/, "cron_jobs unread, tenant_cron_jobs readable");
+    await db.execute("ALTER TABLE cron_jobs_parked RENAME TO cron_jobs");
+  });
 
   // ── Phase 2: the tables exist; the normal states come back ───────────────
   const now = new Date().toISOString();
@@ -361,6 +393,8 @@ async function main() {
       correlation_id TEXT, severity TEXT, payload TEXT, published_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, provider TEXT,
       encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
+    CREATE TABLE application_lender_threads (id TEXT PRIMARY KEY, tenant_id TEXT, application_id TEXT, lender_id TEXT,
+      recipient_email TEXT, status TEXT, sent_at TEXT);
   `);
   await db.batch(
     [
@@ -375,7 +409,13 @@ async function main() {
     assert.match((await render(await ReasoningPage())).text, /No decisions yet/);
     const ops = (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
     assert.match(ops, /No events recorded yet/);
-    assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions)/);
+    assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions|paired machines)/);
+    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+      assert.match(ops, new RegExp(`${tile} 0 `), `${tile}: a readable empty count is a real 0`);
+    }
+    assert.match(ops, /All clear/);
+    assert.match(ops, /0 bridge ?s online/); // the walker spaces JSX text pieces
+    assert.match(ops, /No machines paired yet/);
     const analytics = (await render(await AnalyticsPage())).text;
     assert.match(analytics, /Won 1/);
     assert.doesNotMatch(analytics, /Couldn't check the pipeline/);
@@ -384,6 +424,8 @@ async function main() {
     const health = await render(await HealthPage());
     const dots = health.client.filter((c) => c.name === "IntegrationDot");
     assert.ok(dots.every((d) => typeof (d.props.connection as { hasCredentials: unknown }).hasCredentials === "boolean"));
+    const anthropicDot = dots.find((d) => (d.props.health as { service: string }).service === "anthropic");
+    assert.deepEqual(anthropicDot?.props.connection, { hasCredentials: true }, "the key on file reads as on file");
     const settings = await render(await SettingsContent({ section: "ai" }));
     assert.equal(one(settings.client, "ProviderAccountsCard").bridgeOnline, false);
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
@@ -418,6 +460,35 @@ async function main() {
     const accountsKnown = plain(html.accountsKnownEmpty);
     assert.match(accountsKnown, /Not connected/);
     assert.match(accountsKnown, /No provider wired yet/);
+    // One read failed, the other answered: the warning needs BOTH known, so
+    // neither half alone may bring it back.
+    const keysUnknown = plain(html.accountsKeysUnknownBridgeOffline);
+    assert.match(keysUnknown, /Cloud: couldn't check/);
+    assert.match(keysUnknown, /Local bridge: offline/);
+    assert.doesNotMatch(keysUnknown, /No provider wired yet/, "keys nobody could check are not 'no provider'");
+    const bridgeUnknown = plain(html.accountsKeysEmptyBridgeUnknown);
+    assert.match(bridgeUnknown, /Cloud: no provider connected/);
+    assert.match(bridgeUnknown, /Local bridge: couldn't check/);
+    assert.doesNotMatch(bridgeUnknown, /No provider wired yet/, "a bridge nobody could check is not 'no bridge'");
+
+    // The same card across a refresh: the new prop wins, with this page's own
+    // connect and disconnect laid over it.
+    const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
+    const afterConnect = plain(html.accountsAfterConnect);
+    assert.match(afterConnect, /Cloud: 1 provider connected/, "the connect shows before the refresh lands");
+    assert.equal(count(afterConnect, /Replace key/g), 1, "Anthropic reads Connected");
+    assert.equal(count(afterConnect, /Couldn't check/g), 3, "the other three are still unknown, not 'Not connected'");
+    assert.doesNotMatch(afterConnect, /Not connected/);
+    const afterRefresh = plain(html.accountsAfterRefresh);
+    assert.match(afterRefresh, /Cloud: 2 providers connected/, "the refreshed read's OpenRouter key counts");
+    assert.equal(count(afterRefresh, /Replace key/g), 2, "Anthropic and OpenRouter both read Connected");
+    assert.equal(count(afterRefresh, /Not connected/g), 2, "OpenAI and Google are now KNOWN not connected");
+    assert.doesNotMatch(afterRefresh, /Couldn't check/);
+    for (const key of ["accountsAfterDisconnect", "accountsAfterDisconnectRefresh"]) {
+      const after = plain(html[key]);
+      assert.match(after, /Cloud: 1 provider connected/, `${key}: the disconnect shows at once and stays`);
+      assert.equal(count(after, /Replace key/g), 1, `${key}: only OpenRouter reads Connected`);
+    }
 
     const editor = plain(html.editorUnknown);
     assert.match(editor, /Couldn't check which AI accounts are connected/);
