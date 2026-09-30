@@ -2235,7 +2235,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // — a deferred tool firing means the turn DID produce a real
             // action even if the redactor swallowed the surrounding text.
             receivedAnyContent = true;
-            pendingToolUse = {
+            // A const for the state updater below: React runs that updater
+            // later, by which time the resume loop has already taken
+            // pendingToolUse and set it back to null.
+            const paused: PendingTool = {
               tool_use_id: String(parsed.tool_use_id || ""),
               name: String(parsed.name || "tool"),
               input: asRecord(parsed.input) || {},
@@ -2245,19 +2248,20 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               // the resume_state hasn't been tampered with.
               resume_signature: String(parsed.resume_signature || ""),
             };
+            pendingToolUse = paused;
             // Show "calling NAME..." chip in the toolCalls strip so the
             // operator sees activity while the bridge runs the tool.
-            const entryId = `bridge-${pendingToolUse.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const entryId = `bridge-${paused.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             setThinking(true);
             setStatusPhase("tool");
-            setStatusDetail(pendingToolUse.name);
+            setStatusDetail(paused.name);
             setToolCalls((prev) => [
               ...prev,
               {
                 id: entryId,
-                kind: pendingToolUse!.name,
-                label: pendingToolUse!.name,
-                detail: truncateJson(pendingToolUse!.input),
+                kind: paused.name,
+                label: paused.name,
+                detail: truncateJson(paused.input),
                 createdAt: Date.now(),
               },
             ]);

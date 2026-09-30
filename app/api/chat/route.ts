@@ -53,6 +53,7 @@ import {
   cloudToolsPromptBlockV2,
   streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
+  type ResumeState,
 } from "@/lib/cloud-tool-runner";
 import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
@@ -261,6 +262,8 @@ export async function POST(req: NextRequest) {
     if (createErr || !created) return jsonError(500, "session_create_failed");
     sessionId = created.id as string;
   }
+  // The session a paused turn's resume_state names (and is signed with).
+  const turnSessionId: string = sessionId;
   if (sessionId && turnAttachments.length > 0) {
     await linkChatAttachmentsToSession({
       tenantId,
@@ -611,8 +614,9 @@ export async function POST(req: NextRequest) {
 
   // ---- Stream response back as SSE ----------------------------------------
   let assistantText = "";
-  let usageIn = 0;
-  let usageOut = 0;
+  // The chat_messages row's tokens; null when the turn's tokens are unknown.
+  let usageIn: number | null = 0;
+  let usageOut: number | null = 0;
   // The loop's own token count when the turn ended (a done event, or a pause
   // for a bridge tool); null when it ended with neither. The session's running
   // totals are added from this and nothing else (lib/chat-persistence.ts).
@@ -734,7 +738,10 @@ export async function POST(req: NextRequest) {
               // The paused loop's calls have finished; resume_state carries
               // their token count, and the resume adds only what comes after.
               turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
-              const sig = signResumeState(ev.resume_state, {
+              // The state names this turn's session, signed with the rest:
+              // /api/chat/resume files the resumed half under it.
+              const issued: ResumeState = { ...ev.resume_state, sessionId: turnSessionId };
+              const sig = signResumeState(issued, {
                 tenant_id: tenantId,
                 user_id: user.id,
                 agent_key: agentKey,
@@ -747,15 +754,24 @@ export async function POST(req: NextRequest) {
                   tool_use_id: ev.tool_use_id,
                   name: ev.name,
                   input: ev.input,
-                  resume_state: ev.resume_state,
+                  resume_state: issued,
                   resume_signature: sig,
                 });
               }
             } else if (ev.type === "done") {
-              usageIn = ev.inputTokens;
-              usageOut = ev.outputTokens;
               turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
-              send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              if (ev.unreportedCalls > 0) {
+                // A step the provider sent no usage report for: the sums are
+                // only the other steps', so the message row records unknown
+                // tokens and no usage event claims them as the turn's. (The
+                // session totals add nothing either: that call's cost is unknown.)
+                usageIn = null;
+                usageOut = null;
+              } else {
+                usageIn = ev.inputTokens;
+                usageOut = ev.outputTokens;
+                send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              }
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
               send("error", sseErrorFrame(streamError));
