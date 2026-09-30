@@ -10,17 +10,26 @@
  * SunBizFormsClient instead of FormsListClient — the SunBiz surface shows
  * the three-step funnel cards (Initial Lead Capture, Full Application,
  * Bank Statement Upload) with status pills + create-from-template buttons.
+ *
+ * GATE (2026-09-30). The page asks the rail: requireOsRoute("/forms") is its
+ * first statement, so it opens for exactly the viewers whose rail draws the
+ * Forms row, and 404s for an unprovisioned workspace or a session that does
+ * not resolve to one. The workspace is the session's, never a profile guess.
+ *
+ * A failed read says "Forms couldn't load" and logs the detail. It used to
+ * print the database driver's message, or tell a client to run a Supabase
+ * migration command "on the operator machine".
  */
 
 import { PageHeader } from "@/components/Card";
-import { getActiveProfile, getTenant } from "@/lib/queries";
+import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { FormsListClient } from "@/components/forms/FormsListClient";
 import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
+import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { AlertCircle } from "lucide-react";
-import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -34,38 +43,39 @@ type FormRow = {
   updated_at: string;
 };
 
-async function loadForms(tenantId: string | null): Promise<
-  | { ok: true; rows: FormRow[] }
-  | { ok: false; reason: "no_tenant" | "migration_not_applied" | "db_error"; detail?: string }
-> {
-  if (!tenantId) return { ok: false, reason: "no_tenant" };
-  const db = getServiceSupabase();
-  const { data, error } = await db
-    .from("forms")
-    .select("id, slug, name, description, enabled, created_at, updated_at")
-    .eq("tenant_id", tenantId)
-    .order("created_at", { ascending: false });
-  if (error) {
-    if (isMissingTableError(error, "public.forms")) {
-      return { ok: false, reason: "migration_not_applied" };
+async function loadForms(tenantId: string): Promise<{ ok: true; rows: FormRow[] } | { ok: false }> {
+  try {
+    const db = getServiceSupabase();
+    const { data, error } = await db
+      .from("forms")
+      .select("id, slug, name, description, enabled, created_at, updated_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false });
+    if (error) {
+      // The detail is for the log, never the screen.
+      console.error(
+        "[forms.load]",
+        isMissingTableError(error, "public.forms") ? "forms table missing" : "read failed",
+        { tenantId, message: error.message },
+      );
+      return { ok: false };
     }
-    return { ok: false, reason: "db_error", detail: error.message };
+    return { ok: true, rows: (data as FormRow[]) || [] };
+  } catch (err) {
+    console.error("[forms.load] read threw", { tenantId }, err);
+    return { ok: false };
   }
-  return { ok: true, rows: (data as FormRow[]) || [] };
 }
 
 export default async function FormsPage() {
-  const user = await getSessionUser();
-  if (!user) redirect("/login");
+  const viewer = await requireOsRoute("/forms");
+  const tenantId = viewer.surface.tenantId;
 
-  const profile = await safe("forms.profile", getActiveProfile(), null);
-  const result = await loadForms(profile?.tenant_id || null);
+  const result = await loadForms(tenantId);
   // Pass the tenant logo down so the "New form" creator can pre-fill the
   // starter's branding.logo_url. One source of truth — operators set the
   // logo once in Settings → Branding, every new form picks it up.
-  const tenant = profile?.tenant_id
-    ? await safe("forms.tenant", getTenant(profile.tenant_id), null)
-    : null;
+  const tenant = await safe("forms.tenant", getTenant(tenantId), null);
   const tenantLogoUrl = tenant?.logo_url ?? null;
   // Tenant slug threads through so the per-row Copy button can produce
   // a real public form URL (/f/<tenant_slug>/<form_slug>) instead of an
@@ -87,36 +97,10 @@ export default async function FormsPage() {
         subtitle="First-party forms with personalized lead links. Built-in replacement for JotForm + similar 3rd-party intake."
       />
 
-      {!result.ok && result.reason === "no_tenant" && (
+      {!result.ok && (
         <div className="rounded-xl border border-status-warm/40 bg-status-warm/5 p-4 text-sm text-status-warm flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>No tenant resolved for this user. Complete onboarding first.</span>
-        </div>
-      )}
-
-      {!result.ok && result.reason === "migration_not_applied" && (
-        <div className="rounded-xl border border-accent/40 bg-accent/5 p-4 space-y-2">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-accent shrink-0 mt-0.5" />
-            <div className="flex-1 text-sm">
-              <div className="font-bold text-fg">One-time setup required</div>
-              <p className="text-xs text-fg-muted mt-1 leading-relaxed">
-                The Forms feature needs migration 042 applied to your Supabase
-                project. Run the command below on the operator machine. After
-                it completes, refresh the page.
-              </p>
-            </div>
-          </div>
-          <div className="rounded-md bg-bg-deep border border-bg-border p-2.5 font-mono text-[11px] text-fg-muted select-all">
-            python scripts/apply_migration.py database/042_tenant_forms.sql
-          </div>
-        </div>
-      )}
-
-      {!result.ok && result.reason === "db_error" && (
-        <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-400">
-          <div className="font-bold">Couldn&apos;t load forms.</div>
-          <div className="text-xs mt-1 font-mono">{result.detail}</div>
+          <span>Forms couldn&apos;t load. The error has been logged. Try again in a minute.</span>
         </div>
       )}
 

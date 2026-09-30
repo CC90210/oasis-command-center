@@ -47,6 +47,7 @@ import { askHrefFor, buildOsNav, osNavRows } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
+import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
 import { PerfVitals } from "@/components/PerfVitals";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -75,7 +76,7 @@ export const metadata: Metadata = {
   icons: { icon: "/favicon.ico" },
 };
 
-/** The only seed slugs the public demo cookie may select (set by /api/demo/sun). */
+/** The only seed slugs the public demo cookie may select. /api/demo/sun, which set it, was deleted 2026-09-29; a browser can still carry one until it expires. */
 const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
 
 export default async function RootLayout({
@@ -105,9 +106,8 @@ export default async function RootLayout({
     // itself: the matcher would swallow every route in the app and strip
     // the operator chrome site-wide.
     ...ALL_MARKETING_PATHS,
-    "/welcome",   // legacy URL; next.config.js 308s it to /start before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
+    "/welcome",   // legacy URL; next.config.js 308s it to "/" before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
     "/download",
-    "/configure",
     "/login",
     "/signup",
     "/forgot-password",
@@ -126,6 +126,8 @@ export default async function RootLayout({
   let profile = null;
   let resolvedPrimaryAgent: string | null = null;
   let tenantProfileSlug: string | null = null;
+  /** The viewer's workspace's own name (tenants.name), for the shell header. */
+  let tenantName: string | null = null;
   let demoProfileSlug: string | null = null;
   let pathOverrideSlug: string | null = null;
   // Props for the persistent ChatWidget hoisted into MainShell (2026-06-18).
@@ -155,8 +157,7 @@ export default async function RootLayout({
   if (!isFullBleed) {
     const cookieStore = await cookies();
     // Path-based tenant slug (Phase 1): `/t/<slug>/...` URLs anchor the shell to
-    // that tenant's manifest regardless of the viewer's home tenant. Demo paths
-    // still take precedence — `/demo/sun` is the public, auth-free preview.
+    // that tenant's manifest regardless of the viewer's home tenant.
     const tSlugMatch = pathname.match(/^\/t\/([a-z0-9][a-z0-9_-]{1,62})(?:\/|$)/i);
     const pathTenantSlug = tSlugMatch ? tSlugMatch[1].toLowerCase() : null;
 
@@ -182,22 +183,19 @@ export default async function RootLayout({
     // than in front of them. Resolves false on any failure, loudly.
     const platformOperatorP = safe("layout.platform_operator", isPlatformOperator(), false);
 
-    // Demo cookie is honoured ONLY when:
-    //   - the operator is on /demo/sun (explicit opt-in via URL), OR
-    //   - the operator has no real tenant binding (anonymous preview)
-    // Once `profile.tenant_id` exists, the cookie is ignored and best-effort
-    // cleared. Best-effort because Server Components can't always mutate
-    // cookies in Next 15 — middleware handles the durable clear.
-    const isExplicitDemoPath = pathname.startsWith("/demo/sun");
+    // Demo cookie is honoured ONLY when the viewer has no real tenant binding
+    // (anonymous preview). Once `profile.tenant_id` exists, the cookie is
+    // ignored and best-effort cleared. Best-effort because Server Components
+    // can't always mutate cookies in Next 15 — middleware handles the durable
+    // clear. The /demo/sun path used to force the SunBiz seed in as an explicit
+    // opt-in, for every viewer; that page is a 404 since 2026-09-29 (F0
+    // containment), so the opt-in went with it rather than wrap the retired
+    // SunBiz brand and nav around the 404. Pinned by tests/f0-containment.test.ts.
     const operatorHasRealTenant = !!profile?.tenant_id;
     const rawDemoCookie = cookieStore.get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
-    const requestedDemoProfile = isExplicitDemoPath
-      ? "sun"
-      : operatorHasRealTenant
-        ? null
-        : rawDemoCookie;
+    const requestedDemoProfile = operatorHasRealTenant ? null : rawDemoCookie;
 
-    if (rawDemoCookie && operatorHasRealTenant && !isExplicitDemoPath) {
+    if (rawDemoCookie && operatorHasRealTenant) {
       try {
         cookieStore.set(DEMO_CLIENT_PROFILE_COOKIE, "", {
           maxAge: 0,
@@ -248,6 +246,7 @@ export default async function RootLayout({
           // EVERY page. Same columns, same null-on-error degradation the
           // surrounding safe() already expects.
           const tenant = await getTenant(tenantId);
+          tenantName = tenant?.name ?? null;
           return resolveClientProfileSlug({
             slug: tenant?.slug || "",
             custom_fields: tenant?.custom_fields || {},
@@ -395,8 +394,8 @@ export default async function RootLayout({
   // ── OASIS OS rail ────────────────────────────────────────────────────────
   // Every workspace's OWN shell renders the OS rail, computed by the pure
   // buildOsNav from the viewer's persona, capabilities, operator status,
-  // workspace and modules. The /t/<slug> path shells and /demo/sun keep the
-  // manifest nav: they render a workspace's stored manifest (another tenant's,
+  // workspace and modules. The /t/<slug> path shells and the demo shell keep
+  // the manifest nav: they render a workspace's stored manifest (another tenant's,
   // for a preview), and demo mode rewrites every link to the demo landing.
   //
   // An unprovisioned workspace (UNPROVISIONED_SEED) gets Today only, and a
@@ -417,7 +416,18 @@ export default async function RootLayout({
         founders: { content: foundersGateOpen, finances: foundersGateOpen && financeOwner },
       })
     : null;
-  const osWorkspaceName = profile?.brand || manifest?.brand.name || "Workspace";
+  // The workspace's OWN name first (tenants.name), then its manifest brand,
+  // then the viewer's profile brand (2026-09-30). The profile brand used to
+  // win, and every account path defaulted it to "OASIS AI", so a client's
+  // header could read as OASIS's. The legacy default counts as unnamed outside
+  // OASIS's own workspaces (lib/provisioning/workspace-name.ts).
+  const ownWorkspaceName = workspaceDisplayName({
+    tenantName,
+    manifestBrand: manifest?.brand.name,
+    profileBrand: profile?.brand,
+    isOasisWorkspace: isOasisSurfaceTenant(viewerTenantSlug ?? tenantProfileSlug),
+  });
+  const osWorkspaceName = ownWorkspaceName;
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on
@@ -477,7 +487,7 @@ export default async function RootLayout({
               brand={
                 demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
                   ? manifest.brand.name
-                  : profile?.brand || manifest.brand.name
+                  : ownWorkspaceName
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}

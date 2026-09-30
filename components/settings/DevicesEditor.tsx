@@ -109,7 +109,8 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(ms / (24 * 60 * 60_000))}d ago`;
 }
 
-export function DevicesEditor() {
+/** `installRepo`: the private harness repo, passed by SettingsContent inside its verified-operator gate. */
+export function DevicesEditor({ installRepo }: { installRepo: string }) {
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // device id being revoked
   const [error, setError] = useState<string | null>(null);
@@ -242,7 +243,7 @@ export function DevicesEditor() {
             </button>
           </div>
         )}
-        {installerOpen && <InstallBridgeModal onClose={() => { setInstallerOpen(false); load(); }} />}
+        {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
       </div>
     );
   }
@@ -290,7 +291,7 @@ export function DevicesEditor() {
           </button>
         </div>
       </div>
-      {installerOpen && <InstallBridgeModal onClose={() => { setInstallerOpen(false); load(); }} />}
+      {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
       {pairCode && (
         <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
       )}

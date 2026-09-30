@@ -24,6 +24,7 @@ import { nonEmptyString } from "@/lib/format-helpers";
 import { BattleCard } from "@/components/web-leads/BattleCard";
 import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
+import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
   canMutateOasisSalesRecord,
@@ -287,6 +288,10 @@ export default async function PipelineLeadDetailPage({
       />
 
       <LeadMetricsBand metrics={metrics} canChangeStage={canWorkLifecycle} />
+
+      {/* Won deals only: "Convert to client" / the client record it became.
+          Draws nothing on any other stage, and changes nothing about the deal. */}
+      <ClientRecordCard tenantId={tenantId} leadId={id} stage={metrics.stageKey} />
 
       {canWorkLifecycle || managerCoachingView ? (
         <LeadLifecycleActions

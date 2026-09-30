@@ -11,10 +11,11 @@
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
-import { CLIENT_A, CLIENT_B, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
+import { CLIENT_A, CLIENT_B, OASIS, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
 
 // tsconfig.json sets jsx:"preserve" for Next, so tsx compiles the pages' JSX
 // with the classic runtime, which expects a global `React` (see
@@ -87,20 +88,20 @@ async function main() {
     client_name: null, client_email: null, client_company: null, client_match: "manual", project_hint: null,
     reporter_user_id: null, assigned_to: null,
   };
-  const pA = await store.createProject(db, {
+  const pA = await store.createProject(db, OASIS, {
     title: "ALPHA-PROJECT", description: null, client_tenant_id: CLIENT_A, client_name: null, client_email: null,
     lead_id: null, stage: "building", priority: "high", assigned_to: null, due_date: null,
   }, founder, now);
-  const pB = await store.createProject(db, {
+  const pB = await store.createProject(db, OASIS, {
     title: "BRAVO-PROJECT", description: null, client_tenant_id: CLIENT_B, client_name: null, client_email: null,
     lead_id: null, stage: "review", priority: "low", assigned_to: null, due_date: null,
   }, founder, now);
-  await store.addProjectUpdate(db, pA, { body: "ALPHA-SHARED-UPDATE", visibility: "client" }, founder, now);
-  await store.addProjectUpdate(db, pA, { body: "ALPHA-INTERNAL-UPDATE", visibility: "internal" }, founder, now);
-  const tA = (await store.createTicket(db, { ...base, title: "ALPHA-TICKET", project_id: pA, client_tenant_id: CLIENT_A }, now)).ticket;
-  const tB = (await store.createTicket(db, { ...base, title: "BRAVO-TICKET", project_id: pB, client_tenant_id: CLIENT_B }, now)).ticket;
-  await store.addTicketComment(db, tA.id, { body: "ALPHA-INTERNAL-NOTE", is_internal: true, author_type: "team", author: founder }, now);
-  await store.addTicketComment(db, tA.id, { body: "ALPHA-PUBLIC-REPLY", is_internal: false, author_type: "team", author: founder }, now);
+  await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-SHARED-UPDATE", visibility: "client" }, founder, now);
+  await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-INTERNAL-UPDATE", visibility: "internal" }, founder, now);
+  const tA = (await store.createTicket(db, OASIS, { ...base, title: "ALPHA-TICKET", project_id: pA, client_tenant_id: CLIENT_A }, now)).ticket;
+  const tB = (await store.createTicket(db, OASIS, { ...base, title: "BRAVO-TICKET", project_id: pB, client_tenant_id: CLIENT_B }, now)).ticket;
+  await store.addTicketComment(db, OASIS, tA.id, { body: "ALPHA-INTERNAL-NOTE", is_internal: true, author_type: "team", author: founder }, now);
+  await store.addTicketComment(db, OASIS, tA.id, { body: "ALPHA-PUBLIC-REPLY", is_internal: false, author_type: "team", author: founder }, now);
 
   const projects = (await import("../app/projects/page")).default;
   const project = (await import("../app/projects/[id]/page")).default;
@@ -162,6 +163,34 @@ async function main() {
     assert.equal(await is404(project({ params: Promise.resolve({ id: pB }) })), true);
     assert.equal(await is404(ticket({ params: Promise.resolve({ id: tB.id }) })), true);
   });
+  // Codex, PR #473: a client workspace's owner landed on OASIS's vendor view
+  // and could neither list nor create their own projects. /projects now
+  // resolves the viewer's own desk first, like /tickets.
+  const ownA = await store.createProject(db, CLIENT_A, {
+    title: "CLIENT-A-OWN-PROJECT", description: null, client_tenant_id: null, client_name: "A's customer", client_email: null,
+    lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null,
+  }, { userId: USERS.clientA.id, name: "Alice Client" }, now);
+  await check("client A's owner: their OWN board on /projects, and OASIS's projects for them in their own section", async () => {
+    const board = await text(projects({ searchParams: sp }));
+    assert.match(board, /CLIENT-A-OWN-PROJECT/, "the owner's own workspace board");
+    assert.match(board, /Projects OASIS runs for you/);
+    assert.match(board, /ALPHA-PROJECT/, "OASIS's project about A, as vendor");
+    assert.doesNotMatch(board, /BRAVO-PROJECT/);
+    const src = readFileSync(join(__dirname, "..", "components/delivery/ProjectForms.tsx"), "utf8");
+    assert.match(src, /run\("\/api\/projects\?scope=desk", "POST"/, "New project writes to the viewer's own desk");
+  });
+  await login(USERS.clientB);
+  await check("client B never sees client A's own project", async () => {
+    const board = await text(projects({ searchParams: sp }));
+    assert.doesNotMatch(board, /CLIENT-A-OWN-PROJECT|ALPHA-PROJECT/);
+    assert.equal(await is404(project({ params: Promise.resolve({ id: ownA }) })), true);
+  });
+  await login(USERS.cc);
+  await check("OASIS's board does not carry a client workspace's own projects", async () => {
+    assert.doesNotMatch(await text(projects({ searchParams: sp })), /CLIENT-A-OWN-PROJECT/);
+  });
+  await login(USERS.clientA);
+
   await check("client portal: 'Your projects' and 'Your tickets' for client A only, with the report link", async () => {
     const page = await text(portal());
     assert.match(page, /Your projects/);

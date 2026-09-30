@@ -52,6 +52,8 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
   if (method !== "GET") throw new Error(`Stripe write attempted in test: ${method} ${url.pathname}`);
   const p = url.pathname;
   if (p === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+  // Every webhook event is proved to be the pinned account's before it is booked (stripe-ingest.ts stripeEventOrigin).
+  if (p.startsWith("/v1/events/")) return json({ id: decodeURIComponent(p.slice("/v1/events/".length)), object: "event" });
   if (p === "/v1/charges") return list(stripe.list.map((id) => stripe.charges.get(id)));
   if (p.startsWith("/v1/charges/")) {
     const c = stripe.charges.get(decodeURIComponent(p.slice("/v1/charges/".length)));
@@ -72,6 +74,8 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
     return inv ? json(inv) : json({ error: { message: "No such invoice" } }, 404);
   }
   if (p === "/v1/refunds") return list([]);
+  // The reconcile also lists payouts (tests/finances-stripe-payouts.test.ts covers them); none here.
+  if (p === "/v1/payouts") return list([]);
   if (p === "/v1/subscriptions") {
     return list([{ id: "sub_live", object: "subscription", status: "active", currency: "cad", livemode: true, customer: { id: "cus_live", name: "Client", email: "client@example.test" }, items: { data: [{ quantity: 1, price: { unit_amount: 10000, currency: "cad", recurring: { interval: "month", interval_count: 1 } } }] } }]);
   }
@@ -130,6 +134,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(root, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   const rates: Array<[string, string]> = [];
   for (let d = 12; d <= 22; d++) rates.push([`2026-06-${d}`, "1.3700"]);
   for (let d = 1; d <= 24; d++) rates.push([`2026-09-${String(d).padStart(2, "0")}`, "1.3800"]);

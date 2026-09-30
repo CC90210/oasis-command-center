@@ -2,18 +2,30 @@
 
 /**
  * Root error boundary. Next.js renders this when ANY server component
- * inside the dashboard shell throws — instead of the framework's default
+ * inside the dashboard shell throws, instead of the framework's default
  * stark white page.
  *
  * Most readers in /today, /pipeline, /analytics, etc are wrapped in
  * `safe(p, fallback)` so individual queries can't get here. This catches
  * the residual class: a bug in render code, a misconfigured env, a
- * Supabase outage that takes the whole call down.
+ * database outage that takes the whole call down.
+ *
+ * Clients see this page too, so it speaks to a person who cannot read a log:
+ * what to try, and where to send the code. It used to tell them to check the
+ * hosting provider's function logs, which only an operator can open. The digest
+ * stays because it is the one thing that lets us find the failure in the
+ * Worker's logs from their message.
+ *
+ * It is also the boundary for the public pages a client's own prospects open
+ * (/f/<client>/<form>, /sign/<token>, /unsubscribe): there it names no OASIS
+ * contact and drops the link to Today, an operator page (components/ErrorHelp.tsx).
  */
 
 import { useEffect } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
+import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
 
 export default function ErrorBoundary({
   error,
@@ -22,9 +34,9 @@ export default function ErrorBoundary({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const prospectFacing = isProspectFacingPath(usePathname());
   useEffect(() => {
-    // Log to console — Vercel captures this in the Function Logs view.
-    // No third-party telemetry yet; this is the diagnostic surface.
+    // The Worker's logs capture console output; this is the diagnostic record.
     console.error("[error.tsx]", error);
   }, [error]);
 
@@ -35,18 +47,9 @@ export default function ErrorBoundary({
           <div className="w-9 h-9 rounded-lg bg-status-warm/15 border border-status-warm/30 flex items-center justify-center text-status-warm">
             <AlertTriangle className="w-5 h-5" />
           </div>
-          <h1 className="text-base font-bold text-fg">Something broke on this page</h1>
+          <h1 className="text-base font-bold text-fg">Something went wrong</h1>
         </div>
-        <p className="text-sm text-fg-muted leading-relaxed">
-          The dashboard caught an unexpected error rendering this view. Other
-          pages should still work. If this keeps happening, capture the digest
-          below and check the Vercel function logs.
-        </p>
-        {error.digest && (
-          <div className="text-[11px] font-mono text-fg-dim bg-bg-deep border border-bg-border rounded-md px-3 py-2 break-all">
-            digest: {error.digest}
-          </div>
-        )}
+        <ErrorHelp digest={error.digest} prospectFacing={prospectFacing} />
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <button
             onClick={() => reset()}
@@ -54,9 +57,11 @@ export default function ErrorBoundary({
           >
             <RefreshCw className="w-4 h-4" /> Try again
           </button>
-          <Link href="/" className="btn-secondary inline-flex items-center gap-1.5 text-sm">
-            <Home className="w-4 h-4" /> Today
-          </Link>
+          {prospectFacing ? null : (
+            <Link href="/" className="btn-secondary inline-flex items-center gap-1.5 text-sm">
+              <Home className="w-4 h-4" /> Today
+            </Link>
+          )}
         </div>
       </div>
     </div>

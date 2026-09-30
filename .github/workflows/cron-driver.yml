@@ -124,14 +124,22 @@ jobs:
               ROUTES="/api/cron/operator-email-agent?write=1" ;;
             "*/15 * * * *")
               # health-check is the outcome watchdog.
+              # connection-health re-probes live Connections (Stripe restricted
+              # keys) so a card stays green only while a live check keeps passing.
               ROUTES="/api/cron/enroll-drips
                       /api/cron/reconcile-sms
                       /api/cron/health-check
-                      /api/cron/sla-check" ;;
+                      /api/cron/sla-check
+                      /api/cron/connection-health" ;;
             "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
             "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry
                                       /api/cron/reconcile-website-sales-payments" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
+            # The books' daily upkeep (lib/founders-finances/books-cron.ts).
+            "47 21 * * *")   ROUTES="/api/cron/finance-books?job=fx-refresh" ;;
+            "53 21 * * *")   ROUTES="/api/cron/finance-books?job=stripe-reconcile" ;;
+            "7 22 * * *")    ROUTES="/api/cron/finance-books?job=wise-reconcile" ;;
+            "29 22 * * *")   ROUTES="/api/cron/finance-books?job=wise-sync" ;;
             "")
               # Manual workflow_dispatch: drive the paths that move mail plus
               # the watchdog. Deliberately not everything — a hand-run should

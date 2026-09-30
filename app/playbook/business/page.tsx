@@ -1,135 +1,123 @@
-import { Card, PageHeader, Tag } from "@/components/Card";
+import { requirePlaybookReader } from "@/lib/playbook-access";
+import { notFound } from "next/navigation";
 import Link from "next/link";
-import {
-  BUSINESS_DOCS,
-  DOC_PILLARS,
-  type DocPillar,
-} from "@/lib/business-docs";
-import { ArrowLeft, Briefcase, DollarSign, Megaphone, Wrench, Scale, ArrowRight, Check, FileText } from "lucide-react";
-import { getAgentInfo } from "@/lib/agents";
+import { ArrowLeft, ArrowRight, FileText } from "lucide-react";
+import { Card, PageHeader, Tag } from "@/components/Card";
+import { DOC_CATEGORIES } from "@/lib/playbook/catalog";
+import { docsDb, listDocs, type DocSummary } from "@/lib/playbook/documents";
+import { STORAGE_NOT_READY } from "@/lib/playbook/http";
+import { STATUS_TONE, sourceLine } from "@/lib/playbook/present";
+import { STATUS_LABEL, type DocStatus } from "@/lib/playbook/status";
+import { resolveDocsViewer } from "@/lib/playbook/viewer";
+import { VISIBILITY_LABEL } from "@/lib/playbook/visibility";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const PILLAR_ICON: Record<DocPillar, React.ComponentType<{ className?: string }>> = {
-  ceo: Briefcase,
-  cfo: DollarSign,
-  cmo: Megaphone,
-  ops: Wrench,
-  legal: Scale,
-};
+/**
+ * /playbook/business - every business document OASIS keeps, grouped by
+ * category. Each card opens the document itself (/playbook/business/<slug>):
+ * rendered, with Copy, Download and its history. (It used to link every card to
+ * the AI Team roster, which dropped the request and 404'd for every member who
+ * is not a founder: audit business-docs-link-to-ai-team.)
+ *
+ * Statuses are derived (lib/playbook/status.ts), never typed. Visibility is
+ * filtered before anything is read (lib/playbook/visibility.ts): a teammate
+ * never sees a founders-only document listed.
+ */
+export default async function BusinessDocsPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
+  const viewer = await resolveDocsViewer();
+  if (!viewer.ok) notFound();
+  const { rows, storage } = await listDocs(viewer, docsDb(), new Date());
 
-const PILLAR_ORDER: DocPillar[] = ["ceo", "cfo", "cmo", "ops", "legal"];
-
-export default function BusinessDocsPage() {
-  const drafted = BUSINESS_DOCS.filter((d) => d.status === "drafted").length;
+  const counts = rows.reduce<Record<DocStatus, number>>(
+    (acc, r) => ({ ...acc, [r.status]: acc[r.status] + 1 }),
+    { current: 0, review_due: 0, draft: 0, missing: 0, superseded: 0, unknown: 0, not_set_up: 0 },
+  );
+  const requiredMissing = rows.filter((r) => r.doc.required && r.status === "missing").length;
 
   return (
     <div className="space-y-6 animate-fade-in">
-      {/* Breadcrumb — matches the pattern other /playbook/* deep
-          pages use so navigation is consistent across the section. */}
-      <Link
-        href="/playbook"
-        className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg transition-colors"
-      >
+      <Link href="/playbook" className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg transition-colors">
         <ArrowLeft className="w-3.5 h-3.5" />
         <span>Playbook</span>
       </Link>
 
       <PageHeader
-        title="Business Documentation"
-        subtitle="Every document a real C-suite needs. Click to ask the owning agent to draft / refresh it."
+        title="Business documentation"
+        subtitle="Every document OASIS AI Solutions keeps: legal, corporate, tax, sales, security, people and strategy. Open one to read, copy or download it; a missing one can be drafted from verified facts."
         action={
-          <Tag tone="accent">
-            {drafted} drafted · {BUSINESS_DOCS.length - drafted} stubs
-          </Tag>
+          <div className="flex flex-wrap gap-1.5">
+            <Tag tone="engaged">{counts.current} current</Tag>
+            {counts.review_due > 0 && <Tag tone="warm">{counts.review_due} review due</Tag>}
+            {counts.draft > 0 && <Tag tone="info">{counts.draft} draft</Tag>}
+            {/* Only a read of document storage can say how many are missing.
+                Not set up, or unreadable, is unknown: no "0 missing" then. */}
+            {storage === "ok" && <Tag tone="hot">{counts.missing} missing</Tag>}
+            {counts.unknown > 0 && <Tag>{counts.unknown} couldn&apos;t check</Tag>}
+            {counts.not_set_up > 0 && <Tag>{counts.not_set_up} not set up yet</Tag>}
+          </div>
         }
       />
 
-      <Card title="How this hub works" subtitle="Each pillar maps to one of your AI execs. Click a doc to send it to that agent — they'll draft, review, or refresh.">
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-          {PILLAR_ORDER.map((p) => {
-            const def = DOC_PILLARS[p];
-            const info = getAgentInfo(def.agent);
-            const Icon = PILLAR_ICON[p];
-            return (
-              <div key={p} className="rounded-md border border-bg-border bg-bg-elev/40 px-2.5 py-2">
-                <div className={`inline-flex items-center gap-1.5 ${info.textClass}`}>
-                  <Icon className="w-3.5 h-3.5" />
-                  <span className="text-[10px] uppercase tracking-wider font-bold">
-                    {def.label.split(" — ")[0]}
-                  </span>
-                </div>
-                <div className="text-[10px] text-fg-muted mt-1 leading-snug">{def.tagline}</div>
-                <div className="text-[10px] text-fg-dim font-mono mt-1">→ {def.agent}</div>
-              </div>
-            );
-          })}
+      {storage !== "ok" && (
+        <div role="status" className="rounded-lg border border-status-warm/40 bg-status-warm/10 px-4 py-3 text-sm text-fg">
+          {storage === "table_missing"
+            ? STORAGE_NOT_READY
+            : "Stored documents could not be read just now, so their status shows as \"Couldn't check\". Live documents still open. Refresh to try again."}
         </div>
-      </Card>
+      )}
 
-      {PILLAR_ORDER.map((p) => {
-        const def = DOC_PILLARS[p];
-        const list = BUSINESS_DOCS.filter((d) => d.pillar === p);
+      {requiredMissing > 0 && (
+        <p className="text-sm text-fg-muted">
+          <span className="font-semibold text-fg">{requiredMissing} required {requiredMissing === 1 ? "document is" : "documents are"} missing.</span>{" "}
+          Each one says what is needed from CC.
+        </p>
+      )}
+
+      {DOC_CATEGORIES.map((cat) => {
+        const list = rows.filter((r) => r.doc.category === cat.key);
         if (list.length === 0) return null;
-        const Icon = PILLAR_ICON[p];
-        const info = getAgentInfo(def.agent);
         return (
-          <Card
-            key={p}
-            title={def.label}
-            subtitle={def.tagline}
-            action={
-              <span className={`text-[10px] uppercase tracking-wider font-bold ${info.textClass} inline-flex items-center gap-1`}>
-                <Icon className="w-3 h-3" /> owned by {def.agent}
-              </span>
-            }
-          >
+          <Card key={cat.key} title={cat.label} subtitle={cat.blurb}>
             <div className="grid sm:grid-cols-2 gap-2.5">
-              {list.map((d) => {
-                const href = `/agents?agent=${encodeURIComponent(d.owner)}&prompt=${encodeURIComponent(d.draft_prompt)}`;
-                return (
-                  <Link
-                    key={d.id}
-                    href={href}
-                    className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3"
-                  >
-                    <div className={`w-8 h-8 rounded-md flex items-center justify-center bg-bg-elev border border-bg-border flex-shrink-0 ${info.textClass}`}>
-                      <FileText className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm font-bold text-fg">{d.title}</span>
-                        {d.status === "drafted" && (
-                          <span className="text-[9px] uppercase tracking-wider font-bold text-status-engaged bg-status-engaged/10 border border-status-engaged/30 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5">
-                            <Check className="w-2.5 h-2.5" /> drafted
-                          </span>
-                        )}
-                        {d.status === "stub" && (
-                          <span className="text-[9px] uppercase tracking-wider font-bold text-status-warm bg-status-warm/10 border border-status-warm/30 px-1.5 py-0.5 rounded">
-                            stub
-                          </span>
-                        )}
-                        {d.status === "missing" && (
-                          <span className="text-[9px] uppercase tracking-wider font-bold text-fg-dim bg-bg-elev border border-bg-border px-1.5 py-0.5 rounded">
-                            missing
-                          </span>
-                        )}
-                        <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity ml-auto" />
-                      </div>
-                      <div className="text-xs text-fg-muted mt-1 leading-snug">{d.description}</div>
-                      {d.storage_hint && (
-                        <div className="text-[10px] text-fg-dim font-mono mt-1.5">
-                          stored at {d.storage_hint}
-                        </div>
-                      )}
-                    </div>
-                  </Link>
-                );
-              })}
+              {list.map((r) => (
+                <DocCard key={r.doc.slug} row={r} />
+              ))}
             </div>
           </Card>
         );
       })}
     </div>
+  );
+}
+
+function DocCard({ row }: { row: DocSummary }) {
+  const { doc, status } = row;
+  return (
+    <Link
+      href={`/playbook/business/${doc.slug}`}
+      className="group rounded-lg border border-hairline bg-bg-elev/40 hover:border-accent/50 transition-colors p-3.5 flex items-start gap-3"
+    >
+      <div className="w-8 h-8 rounded-md flex items-center justify-center bg-bg-elev border border-hairline flex-shrink-0 text-fg-muted">
+        <FileText className="w-4 h-4" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-sm font-semibold text-fg">{doc.title}</span>
+          <Tag tone={STATUS_TONE[status]}>{STATUS_LABEL[status]}</Tag>
+          <Tag>{VISIBILITY_LABEL[doc.visibility]}</Tag>
+          {doc.required && <span className="text-[11px] text-fg-dim">Required</span>}
+          <ArrowRight className="hover-reveal-cue w-3.5 h-3.5 text-fg-dim transition-opacity ml-auto" />
+        </div>
+        <div className="text-xs text-fg-muted mt-1 leading-snug">{doc.summary}</div>
+        <div className="text-[11px] text-fg-dim mt-1.5">{sourceLine(row.sourceLabel, row.sourceDate)}</div>
+        {status === "missing" && doc.needsFromCc && (
+          <div className="text-[11px] text-status-warm mt-1">Missing - needs CC: {doc.needsFromCc}</div>
+        )}
+      </div>
+    </Link>
   );
 }

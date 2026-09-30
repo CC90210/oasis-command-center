@@ -2,6 +2,10 @@
  * lib/os/approvals/execute.ts — carry out an approved approval, exactly once.
  *
  * THE ORDER (docs/os-revamp/02 §3.3 "How an approval executes"):
+ *   0. READY. Before the claim, prove the finish can write its Business
+ *      Ledger row (store.assertExecutionLedgerReady): a finish that failed
+ *      after the send would leave a sent email `executing` with its outcome
+ *      lost. A refusal here throws while the row is still `approved`.
  *   1. CLAIM. Compare-and-swap approved → executing (store.claimForExecution).
  *      Only the caller whose UPDATE changed the row continues. A second click,
  *      a retried request, a concurrent worker: all get `not_claimable` and do
@@ -30,6 +34,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { canonicalJson } from "@/lib/os/approvals/rules";
 import {
+  assertExecutionLedgerReady,
   claimForExecution,
   finishExecution,
   getApprovalInTenant,
@@ -69,6 +74,10 @@ export async function executeApproval(
   const tenantId = (args.tenantId || "").trim();
   if (!tenantId || !args.approvalId) return { ok: false, error: "not_found", approval: null };
 
+  const before = await getApprovalInTenant(db, tenantId, args.approvalId);
+  if (!before) return { ok: false, error: "not_found", approval: null };
+  await assertExecutionLedgerReady(db, before, now());
+
   if (!(await claimForExecution(db, tenantId, args.approvalId, now()))) {
     const current = await getApprovalInTenant(db, tenantId, args.approvalId);
     return { ok: false, error: current ? "not_claimable" : "not_found", approval: current };
@@ -89,7 +98,7 @@ export async function executeApproval(
     console.error("[approvals.execute] failed", { id: approval.id, kind: approval.action_kind, reason: outcome.result.reason });
   }
 
-  await finishExecution(db, tenantId, approval.id, { status: outcome.ok ? "executed" : "failed", result: outcome.result }, now());
+  await finishExecution(db, tenantId, approval.id, { status: outcome.ok ? "executed" : "failed", result: outcome.result }, now(), approval);
   const done = await getApprovalInTenant(db, tenantId, approval.id);
   if (!done) throw new Error(`approvals: finished ${approval.id} but cannot read it back`);
 
@@ -131,6 +140,10 @@ export function tapeEventFor(a: ApprovalRow): AgentEventPublish {
   } else if (a.action_kind === "publish_post") {
     const p = parsePayload(a);
     target = { channel: "social", platforms: p.platforms };
+  } else if (a.action_kind === "send_slack_message") {
+    // Where, never what: the reply's text stays on the approval.
+    const p = parsePayload(a);
+    target = { channel: "slack", slack_channel: p.channel_name ?? p.channel_id };
   }
   return {
     eventType,

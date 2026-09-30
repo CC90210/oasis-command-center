@@ -540,6 +540,11 @@ async function main() {
       "sms-reply-agent", "enroll-drips", "dispatch-drips", "reconcile-drip-telemetry",
       "reconcile-website-sales-payments", "dispatch-founder-meeting-reminders", "operator-email-agent",
       "health-check", "sla-check", "reconcile-sms",
+      // OASIS OS Connections (2026-09-29): multi-tenant, per-connection probes.
+      "connection-health",
+      // The OASIS business book's daily upkeep (2026-09-29): rates, Stripe, Wise.
+      // Tenant-free: the Finances book carries no tenant key, and SunBiz has none.
+      "finance-books",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

@@ -62,13 +62,15 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
     if (r.source === "stripe_live") {
       // OASIS: live Stripe MRR + the revenue goal (collected in a period).
       const mrr = r.mrr as { cents: number; currency: string; usd_cents: number | null; active_subscriptions: number } | null;
+      // When the books last heard from Stripe ("Last synced 3 hours ago"), so a stale figure is never read as current.
+      const syncNote = (r.stripe_sync as { note?: string } | undefined)?.note;
       const goal = r.goal as {
         target_usd: number; period_end: string; collected_usd: number;
         pct_to_target: number; gap_usd: number; days_left: number; status: string;
       } | null;
       lines.push(
         mrr
-          ? `- Net MRR (live Stripe): ${mrr.currency} ${fmtUSD(mrr.cents / 100)}${mrr.usd_cents !== null && mrr.currency !== "USD" ? ` (≈ USD ${fmtUSD(mrr.usd_cents / 100)})` : ""}, ${mrr.active_subscriptions} active subscription(s)`
+          ? `- MRR (Stripe${syncNote ? `, ${syncNote.charAt(0).toLowerCase()}${syncNote.slice(1)}` : ""}): ${mrr.currency} ${fmtUSD(mrr.cents / 100)}${mrr.usd_cents !== null && mrr.currency !== "USD" ? ` (≈ USD ${fmtUSD(mrr.usd_cents / 100)})` : ""}, ${mrr.active_subscriptions} active subscription(s)`
           : r.stripe_connected === false
             ? "- Net MRR: unknown — Stripe is not connected to Finances yet (Founders → Finances → Settings → Stripe); card payments are not in 'collected'. Say so, do not estimate"
             : "- Net MRR: Stripe unavailable right now — say so, do not estimate",

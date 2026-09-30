@@ -141,7 +141,16 @@ assert.equal(daemonToggleRefusal({ ok: true, name: null }), null);
 // A cron row pointing at a service nobody lists would be status-less by
 // construction.
 {
-  const workersRoute = readFileSync("app/api/automations/background-workers/route.ts", "utf8");
+  // The OASIS inventory moved out of the route into lib/automations/oasis-workers.ts
+  // (2026-09-30), shared with the control route's allowlist and System health;
+  // the route must still read it from there.
+  const workersRoute = readFileSync("lib/automations/oasis-workers.ts", "utf8");
+  assert.ok(
+    readFileSync("app/api/automations/background-workers/route.ts", "utf8").includes(
+      'import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";',
+    ),
+    "the workers route must list the shared OASIS inventory",
+  );
   for (const def of DAEMON_BACKED_CRONS) {
     assert.ok(
       workersRoute.includes(`"${def.service}"`),

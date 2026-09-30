@@ -2,11 +2,12 @@
  * components/os/aiteam/roster.ts — who is on this workspace's AI team.
  *
  * Two kinds of teammate:
- *   leads    the agent behind each department channel the viewer can open.
- *            Same binding and same gate as the department tabs
+ *   leads    the agent behind each department channel the viewer can open,
+ *            NAMED FOR ITS DEPARTMENTS ("Chief of Staff · Operations"), never
+ *            for the agent. Same binding and same gate as the department tabs
  *            (components/os/department/config.ts + gate.ts), so the roster
- *            never lists a department the viewer cannot open, and a client
- *            workspace never lists an OASIS persona.
+ *            never lists a department the viewer cannot open, and no
+ *            workspace, OASIS's own included, sees a persona's name.
  *   custom   agents this workspace built in the builder (the `agents` table,
  *            tenant-owned rows — what the marketplace calls "private").
  *
@@ -21,11 +22,15 @@ import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { departmentChannelFor } from "@/components/os/department/config";
-import { workspaceChatReadiness } from "@/components/os/department/channel";
+import { departmentChannelFor, departmentProfile } from "@/components/os/department/config";
+import { lastTurnOn, readWorkspaceTurns, workspaceChatReadiness } from "@/components/os/department/channel";
 import { departmentGate } from "@/components/os/department/gate";
 import type { Read } from "@/components/os/department/routines";
 import type { OsViewer } from "@/components/os/department/viewer";
+import { agentChannelKey, departmentChannelKey } from "@/lib/os/channel/outcome";
+import type { WebState } from "./TeammateRow";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -36,8 +41,18 @@ export type LeadTeammate = {
   summary: string;
   /** The departments this teammate leads, each a Web home. */
   departments: TeammateHome[];
-  /** Web channel state: answering, or why not. */
-  web: "ready" | "not_connected" | "not_set_up";
+  /**
+   * Web channel state, by the department header's own rules: a key on file
+   * whose last turn failed is `not_working` (the header says "Not working"),
+   * and a read that failed is `unknown`, never a green check.
+   */
+  web: WebState;
+  /**
+   * Where it lives in Slack: its mapped channels, or why it does not
+   * (lib/slack/status.ts). Absent for a department with no teammate: nothing
+   * answers there in Slack either.
+   */
+  slack?: SlackHome;
 };
 
 export type CustomTeammate = {
@@ -49,8 +64,14 @@ export type CustomTeammate = {
   enabled: boolean;
   /** Its chat, when the workspace has a chat slug. */
   webHref: string | null;
-  /** Whether that chat can answer (a chat slug and an AI provider). */
-  web: "ready" | "not_connected";
+  /**
+   * Whether that chat can answer, by the leads' own rule: a chat slug and an
+   * AI provider, and then its last turn (recorded under agentChannelKey). A
+   * refusal of the workspace key anywhere, or of this chat's own turn, is
+   * `not_working`; a read that failed is `unknown`. Never a green check over a
+   * key the provider is refusing.
+   */
+  web: Exclude<WebState, "not_set_up">;
 };
 
 export type AiTeam = {
@@ -103,25 +124,51 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
     ...new Set(bindings.flatMap((b) => (b.binding.kind === "agent" ? [b.binding.agentSlug] : []))),
   ];
 
-  const [readiness, agents, custom] = await Promise.all([
+  const [readiness, agents, custom, turns, slackPresence] = await Promise.all([
     workspaceChatReadiness(viewer),
     Promise.all(slugs.map((s) => getAgentBySlug(s, tenantId))),
     loadCustom(tenantId),
+    readWorkspaceTurns(tenantId),
+    loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
   ]);
-  const web: "ready" | "not_connected" = readiness.slug && readiness.provider ? "ready" : "not_connected";
+  // Key readiness, the same answer the channel gets: no slug or no key is Not
+  // connected; an AI settings read that failed is unknown, not "not connected".
+  const web: "ready" | "not_connected" | "unknown" = !readiness.slug
+    ? "not_connected"
+    : readiness.provider === "ready"
+      ? "ready"
+      : readiness.provider === "unknown"
+        ? "unknown"
+        : "not_connected";
+  // A ready teammate is only as good as its channels' last turns (the
+  // department header's rule, lastTurnOn): one that failed is Not working, and
+  // a record that could not be read is unknown. Leads and custom teammates are
+  // judged the same way, each on the channel keys the route records them under.
+  const webOn = (channelKeys: readonly string[]): Exclude<WebState, "not_set_up"> => {
+    if (web !== "ready") return web;
+    const last = channelKeys.map((k) => lastTurnOn(turns, k));
+    if (last.some((t) => t.kind === "failed")) return "not_working";
+    if (last.some((t) => t.kind === "unknown")) return "unknown";
+    return "ready";
+  };
 
   const leads: LeadTeammate[] = [];
   for (const [i, slug] of slugs.entries()) {
     const agent = agents[i];
-    const departments = bindings
-      .filter((b) => b.binding.kind === "agent" && b.binding.agentSlug === slug)
-      .map((b) => ({ label: b.dept.label, href: b.dept.href }));
+    const led = bindings.filter((b) => b.binding.kind === "agent" && b.binding.agentSlug === slug);
+    const departments = led.map((b) => ({ label: b.dept.label, href: b.dept.href }));
+    // A department lead is named for its departments, never for the agent
+    // behind them: OASIS's leads are house agents with personal names, and
+    // clients (and CC, in OASIS's own workspace) address "Sales", not a
+    // persona. The summary is the department's own purpose line, written for
+    // any business (config.ts PROFILES), not the agent's library blurb.
     leads.push({
       id: slug,
-      name: agent?.name ?? departments.map((d) => d.label).join(" · "),
-      summary: agent?.short_description ?? "",
+      name: departments.map((d) => d.label).join(" · "),
+      summary: led[0] ? departmentProfile(led[0].dept.key).purpose : "",
       departments,
-      web: agent ? web : "not_connected",
+      web: agent ? webOn(led.map((b) => departmentChannelKey(b.dept.key))) : "not_connected",
+      slack: slackHomeFor(slackPresence, led.map((b) => b.dept.key)),
     });
   }
   for (const { dept, binding } of bindings) {
@@ -146,7 +193,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
             ...c,
             enabled: enabled.has(c.slug.toLowerCase()),
             webHref: readiness.slug ? `/t/${readiness.slug}/agent/${encodeURIComponent(c.slug)}` : null,
-            web,
+            web: webOn([agentChannelKey(c.slug)]),
           })),
         }
       : custom,

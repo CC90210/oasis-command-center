@@ -78,45 +78,60 @@ const bridgeStatusBlock = queries.slice(
   queries.indexOf("export async function getBridgeOnline"),
 );
 assert.ok(bridgeStatusBlock.includes('.eq("tenant_id", tenantId)'));
-assert.ok(
-  bridgeStatusBlock.match(/\.eq\("tenant_id", tenantId\)/g)?.length === 2,
-  "both the pairing and pairing-owner reads must remain tenant-scoped",
+// One read since 2026-09-29: the pairing-owner lookup went with its only
+// consumer (getTenantBridgeOwner, which nothing called). Every .from( in the
+// block must still carry the tenant filter.
+assert.equal(
+  bridgeStatusBlock.match(/\.from\(/g)?.length,
+  bridgeStatusBlock.match(/\.eq\("tenant_id", tenantId\)/g)?.length,
+  "every read in getTenantBridgeStatus must remain tenant-scoped",
 );
 
-// ── Surfaces that control the viewer's OWN daemons must target loopback ────
+// ── The viewer's OWN daemons and CLIs are reached through the server ───────
 //
 // 2026-09-03: the worker Start/Stop/Restart buttons and the CLI diagnostics
-// panel each read NEXT_PUBLIC_BRIDGE_CHAT_BASE for the local bridge. That var
-// is the hosted-VPS override for SunBiz employees, and the deployed bundle had
-// it inlined as http://localhost:3000 — a dev-server port. Every Restart click
-// on the operator's own machine POSTed there and failed with
-// `Unexpected token '<', "<!DOCTYPE"`. The proxy is not a substitute (it fails
-// closed for a tenant with no bridge_url, and a Worker cannot reach a laptop),
-// so the ONLY correct target for a local daemon is the viewer's loopback.
+// panel each read NEXT_PUBLIC_BRIDGE_CHAT_BASE for the local bridge, which the
+// deployed bundle had inlined as http://localhost:3000. They moved to the
+// loopback bridge. 2026-09-30: since the bridge bearer went on (BEA 38139ede,
+// 09-29) the bridge answers 401 to any call without the token, loopback
+// included, and the token must never reach a browser. So neither surface calls
+// the bridge from the browser any more: worker control POSTs the server's
+// control route, which holds the bearer, and the CLI panel reads the inventory
+// the bridge pushes with its heartbeat.
 for (const rel of [
   join("lib", "automations", "worker-control.ts"),
   join("components", "BridgeCliPanel.tsx"),
+  join("components", "WarmPoolPanel.tsx"),
 ]) {
   const src = readFileSync(join(ROOT, rel), "utf8");
-  // The READ is the defect, not the name: both files explain in a comment why
-  // they no longer read it, so this pins `process.env.` access specifically.
   assert.ok(
-    !src.includes("process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE"),
-    `${rel} must not read the hosted-bridge override for a LOCAL daemon`,
+    !src.includes("process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE") && !/\bBRIDGE_CHAT_BASE\b/.test(src),
+    `${rel} must not read the hosted-bridge override`,
   );
   assert.ok(
-    src.includes('import { LOCAL_BRIDGE_DEFAULT } from "@/lib/bridge-client-routing"'),
-    `${rel} must take the loopback bridge from the one routing module`,
+    !src.includes("LOCAL_BRIDGE_DEFAULT") && !src.includes("127.0.0.1:9100") && !src.includes("localhost:9100"),
+    `${rel} must not call the bridge from the browser; it answers 401 without the bearer`,
   );
 }
 const workerControl = readFileSync(join(ROOT, "lib", "automations", "worker-control.ts"), "utf8");
 assert.ok(
-  workerControl.includes("fetch(`${LOCAL_BRIDGE_DEFAULT}/exec-tool`"),
-  "the local worker-control path must POST to the loopback bridge's /exec-tool",
+  workerControl.includes('export const WORKER_CONTROL_ROUTE = "/api/automations/background-workers/control"') &&
+    workerControl.includes("await fetch(WORKER_CONTROL_ROUTE, {"),
+  "worker control must always POST the server's control route",
 );
 assert.ok(
-  workerControl.includes("is the local bridge running on this machine?"),
-  "a non-JSON answer must be named as 'no bridge here', not surfaced as a JSON parse error",
+  workerControl.includes('"the bridge refused the request (token)"'),
+  "a 401 from the bridge must read as the token, never as offline",
+);
+const cliPanel = readFileSync(join(ROOT, "components", "BridgeCliPanel.tsx"), "utf8");
+assert.ok(
+  cliPanel.includes('export const CLI_STATUS_ROUTE = "/api/bridge/cli-status"') && cliPanel.includes("fetch(CLI_STATUS_ROUTE"),
+  "the CLI panel must read the server's inventory route",
+);
+const warmPanel = readFileSync(join(ROOT, "components", "WarmPoolPanel.tsx"), "utf8");
+assert.ok(
+  warmPanel.includes('export const WARM_STATUS_ROUTE = "/api/bridge/warm-status"') && warmPanel.includes("fetch(WARM_STATUS_ROUTE"),
+  "the warm-pool panel must read the server's warm-status route",
 );
 
 // Windows retired PM2 as the operator-machine supervisor on 2026-08-27. Every

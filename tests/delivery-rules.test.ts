@@ -296,7 +296,7 @@ check("no session: 401", () => {
   assert.deepEqual(resolveDeliveryViewer({ ok: false }), { ok: false, status: 401, error: "not_signed_in" });
 });
 check("SQL scope: founder pinned to OASIS; client pinned to OASIS AND their workspace", () => {
-  assert.deepEqual(rowScope({ kind: "founder", userId: "u", canAct: true }, "t"), { sql: "t.tenant_id = ?", args: [OASIS] });
+  assert.deepEqual(rowScope({ kind: "founder", tenantId: OASIS, userId: "u", canAct: true }, "t"), { sql: "t.tenant_id = ?", args: [OASIS] });
   assert.deepEqual(rowScope({ kind: "client", userId: "u", clientTenantId: "cx", canAct: true }, "p"), {
     sql: "p.tenant_id = ? AND p.client_tenant_id = ?",
     args: [OASIS, "cx"],

@@ -88,6 +88,11 @@ const morning = [
   ["eating", "Eating", 570, 600],
 ] as const;
 
+/**
+ * CC's weekly routine as the old Schedule page drew it (Sunday to Friday).
+ * The page is gone; this is now the source "Restore my weekly routine" writes
+ * from (lib/calendar/routine.ts routineBlocks / buildRoutineSeries).
+ */
 export function createPlaceholderSchedule(now = new Date()): ScheduleDocument {
   const monday = new Date(now);
   const mondayOffset = (now.getDay() + 6) % 7;

@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -11,6 +12,8 @@ import {
   Handshake,
 } from "lucide-react";
 import { PROMPTS_LIBRARY } from "@/lib/prompts-library";
+import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 
 export const dynamic = "force-dynamic";
 
@@ -86,13 +89,12 @@ const PHASES: Phase[] = [
     duration: "8 min — install + pair",
     icon: "terminal",
     body:
-      "Run the one-line installer. The wizard pairs the machine to your dashboard automatically (HMAC-based self-pair, no token paste required).",
+      "Paused until the desktop runner ships: the one-line installer and its wizard, which paired the machine to your dashboard automatically, clone a repository that is private since 2026-09-29.",
     steps: [
       {
-        title: "Send the OS-detected install command",
+        title: "Paused: installing on a client's machine",
         detail:
-          "From /configure, the appropriate one-liner is auto-detected. Copy it, send to client. They paste, hit Enter, the wizard runs through their pre-collected answers.",
-        cta: { label: "Open /configure", href: "/configure" },
+          "Paused until the desktop runner ships. Do not send a client the install script, and do not grant a client's machine access to the harness repository: it went private on 2026-09-29 to contain it, and every install path clones it. /install.ps1 and /install.sh are operator-only, and /configure, which generated the client's one-liner, is retired. The steps below apply once the runner replaces this one.",
       },
       {
         title: "Watch for the auto-pair confirmation",
@@ -172,7 +174,7 @@ const PHASES: Phase[] = [
       {
         title: "Discover what's already running",
         detail:
-          "Before building on top of their stack, scan what they already have. The discover prompt lists their n8n workflows, Stripe products, Supabase tables, Gmail labels — so you don't accidentally overwrite anything.",
+          "Before building on top of their stack, scan what they already have. The discover prompt lists their n8n workflows, Stripe products, database tables, Gmail labels — so you don't accidentally overwrite anything.",
         promptId: "client-discover-existing-stack",
       },
       {
@@ -205,7 +207,7 @@ const PHASES: Phase[] = [
       {
         title: "Audit which crons even apply",
         detail:
-          "Before changing any cadence, decide what should run at all. Most crons in the default repo are CC-specific. The scope prompt walks vercel.json + .agents/workflows/ and returns an enable / disable / retune recommendation per job — recommendation only, it changes nothing.",
+          "Before changing any cadence, decide what should run at all. Most crons in the default repo are CC-specific. The scope prompt walks config/cron-registry.json + .agents/workflows/ and returns an enable / disable / retune recommendation per job — recommendation only, it changes nothing.",
         promptId: "client-cron-scope",
       },
       {
@@ -269,11 +271,16 @@ const PHASES: Phase[] = [
   },
 ];
 
-function StepRow({ step }: { step: Phase["steps"][number] }) {
+function StepRow({ step, open }: { step: Phase["steps"][number]; open: readonly string[] }) {
   const prompt = step.promptId ? PROMPT_BY_ID.get(step.promptId) : null;
-  const promptHref = prompt
-    ? `/agents?agent=${encodeURIComponent(prompt.agent)}&prompt=${encodeURIComponent(prompt.prompt)}`
-    : null;
+  // The step's prompt goes to the department that answers for its agent
+  // (lib/os/chat-href.ts); the channel prefills it and never sends it. Only
+  // when the viewer may open that department (a link to one they cannot open
+  // is a 404); a department link in the step follows the same rule.
+  const promptDept = prompt ? departmentForAgent(prompt.agent) : null;
+  const promptHref = prompt && promptDept ? askIfOpen(promptDept, prompt.prompt, open) : null;
+  const ctaSlug = step.cta ? teamSlugOf(step.cta.href) : null;
+  const cta = step.cta && (ctaSlug === null || open.includes(ctaSlug)) ? step.cta : null;
   return (
     <li className="border-l-2 border-bg-border pl-4 py-2 hover:border-accent/40 transition-colors">
       <div className="flex items-start gap-2">
@@ -287,15 +294,15 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
                 href={promptHref}
                 className="text-[11px] text-accent hover:text-accent-bright inline-flex items-center gap-1"
               >
-                <Sparkles className="w-3 h-3" /> run this prompt
+                <Sparkles className="w-3 h-3" /> Ask {promptDept ? departmentLabel(promptDept) : ""}
               </Link>
             )}
-            {step.cta && (
+            {cta && (
               <Link
-                href={step.cta.href}
+                href={cta.href}
                 className="text-[11px] text-fg-muted hover:text-accent inline-flex items-center gap-1"
               >
-                {step.cta.label} →
+                {cta.label} →
               </Link>
             )}
           </div>
@@ -305,7 +312,10 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
   );
 }
 
-export default function ClientDeployPage() {
+export default async function ClientDeployPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
+  const open = await openAskDepartments();
   const totalSteps = PHASES.reduce((acc, p) => acc + p.steps.length, 0);
 
   return (
@@ -402,7 +412,7 @@ export default function ClientDeployPage() {
             <strong className="text-fg">The pair token</strong> — minted on first <code className="text-accent">oasis bridge serve</code> through the installed launcher. Stored at <code className="text-accent">~/.oasis/bridge_token</code> (chmod 600 on Unix). SHA-256 hashed in the <code className="text-accent">bridge_pairings</code> table. Idempotent by <code className="text-accent">(tenant_id, machine_fingerprint)</code> via partial unique index — re-pairing rotates the token instead of creating duplicates.
           </div>
           <div>
-            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (Supabase, GitHub, n8n, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
+            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (GitHub, n8n, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
           </div>
         </div>
       </Card>
@@ -419,7 +429,7 @@ export default function ClientDeployPage() {
             <p className="text-sm text-fg-muted leading-relaxed mb-4">{phase.body}</p>
             <ul className="space-y-1">
               {phase.steps.map((step, i) => (
-                <StepRow key={i} step={step} />
+                <StepRow key={i} step={step} open={open} />
               ))}
             </ul>
           </Card>

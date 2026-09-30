@@ -15,14 +15,22 @@
  *   personalGoogle     the viewer's own gmail_oauth link
  *                      (listUserIntegrationStatus — the personal status API's
  *                      reader)
+ *   connections        the tenant's live tenant_connections rows (state and
+ *                      health only — lib/connections/store.ts
+ *                      listActiveConnections). Before migration bravo__187 is
+ *                      applied this read fails, and the cards it feeds say
+ *                      "Status unavailable", not "Not connected".
  */
 
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient } from "@/lib/turso";
 import { listTenantIntegrationStatus } from "@/lib/tenant-integration-store";
 import { listUserIntegrationStatus } from "@/lib/user-integration-store";
-import type { ConnectorFacts, HeartbeatFact, KeyRowFact } from "@/lib/os/connectors";
+import { listActiveConnections } from "@/lib/connections/store";
+import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
+import type { ConnectionFact, ConnectorFacts, HeartbeatFact, KeyRowFact } from "@/lib/os/connectors";
 
 const HEARTBEAT_SERVICES = ["gws", "telegram"] as const;
 
@@ -79,14 +87,45 @@ async function loadPersonalGoogle(tenantId: string, userId: string): Promise<boo
   }
 }
 
+async function loadConnections(tenantId: string): Promise<ConnectionFact[] | null> {
+  try {
+    const rows = await listActiveConnections(getTursoClient(), tenantId);
+    return rows.map((r) => ({
+      provider: r.provider,
+      status: r.status,
+      account_id: r.external_account_id,
+      account_label: r.external_account_label,
+      environment: r.environment,
+      last_health_at: r.last_health_at,
+      last_health_verdict: r.last_health_verdict,
+      last_health_code: r.last_health_code,
+      last_health_detail: r.last_health_detail,
+    }));
+  } catch (error) {
+    console.error("[connections.facts.connections]", error);
+    return null;
+  }
+}
+
 export async function loadConnectorFacts(input: {
   tenantId: string;
   userId: string;
 }): Promise<ConnectorFacts> {
-  const [keyRows, heartbeats, personalGoogleLinked] = await Promise.all([
+  const [keyRows, heartbeats, personalGoogleLinked, connections] = await Promise.all([
     loadKeyRows(input.tenantId),
     loadHeartbeats(input.tenantId),
     loadPersonalGoogle(input.tenantId, input.userId),
+    loadConnections(input.tenantId),
   ]);
-  return { keyRows, heartbeats, personalGoogleLinked };
+  return { keyRows, heartbeats, personalGoogleLinked, connections, appNotConfigured: appNotConfiguredProviders() };
+}
+
+/**
+ * Providers that need OASIS's own app on this deployment and do not have it
+ * (Slack without its Worker secrets). Names only, from the registry; the card
+ * then says "app not configured yet" instead of offering a connect that
+ * cannot work.
+ */
+export function appNotConfiguredProviders(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  return PROVIDERS.filter((p) => (p.liveWhenEnv?.length ?? 0) > 0 && providerAvailability(p, env) !== "live").map((p) => p.id);
 }

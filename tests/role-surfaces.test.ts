@@ -751,14 +751,20 @@ const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
 const teamPolicy = stripComments(read("lib/team.ts"));
 const commissionReader = stripComments(read("lib/website-sales-commission-summary.ts"));
 
+// Since 2026-09-30 the page asks the rail itself: requireOsRoute("/commissions")
+// is the Commissions row's own predicate (module `commissions` AND audience
+// "commissions", i.e. maySeeCommissionSurface), and it 404s when the viewer
+// cannot be resolved. The persona-only check it replaced let a client
+// workspace's owner open OASIS's commission portal.
+// tests/client-route-gating.test.ts runs the page for a client owner, an OASIS
+// closer and CC.
 assert.ok(
-  commissionPage.includes("resolveViewerSurface") && commissionPage.includes("maySeeCommissionSurface"),
-  "the Commission page must apply the same capability gate as its navigation",
+  /export default async function CommissionsPage\(\) \{\s*await requireOsRoute\("\/commissions"\);/.test(commissionPage),
+  "the Commission page must apply the same capability gate as its navigation, as its first statement",
 );
-assert.match(
-  commissionPage,
-  /if \(!surface\.ok \|\| !maySeeCommissionSurface\(surface\.capabilities\)\) notFound\(\)/,
-  "the Commission page fails closed when viewer identity cannot be resolved",
+assert.ok(
+  read("lib/os/nav.ts").includes('href: "/commissions", label: "Commissions", icon: "DollarSign", section: "growth", group: "Sales", module: "commissions", audience: "commissions"'),
+  "the Commissions rail row is gated on the commission surface (audience commissions) and the commissions module",
 );
 assert.ok(
   commissionApi.includes("resolvePersona") && commissionApi.includes("maySeeCommissionSurface"),
@@ -936,9 +942,6 @@ for (const reader of ["loadOasisMoney", "GoalPaceChart", "GoalCountdownCard"]) {
 
 const GATED_PAGES = [
   "app/analytics/page.tsx",
-  "app/operations/page.tsx",
-  "app/automations/page.tsx",
-  "app/health/page.tsx",
   "app/agents/page.tsx",
 ];
 for (const page of GATED_PAGES) {
@@ -951,6 +954,16 @@ for (const page of GATED_PAGES) {
     /await requireSystemSurface\(\);/.test(src),
     `${page} must AWAIT the gate; a floating promise gates nothing`,
   );
+}
+// The OASIS platform's own internals take the stricter operator gate
+// (2026-09-30): requireSystemSurface admits any workspace's founder, so a
+// client owner could open these by URL and read OASIS's cron names. The
+// behaviour is proven in tests/admin-surfaces-operator-only.test.ts.
+for (const page of ["app/operations/page.tsx", "app/automations/page.tsx", "app/health/page.tsx"]) {
+  const src = read(page);
+  assert.ok(/await requireOperator\(\);/.test(src), `${page} must await requireOperator()`);
+  // A call or an import, not the comment that says why it left.
+  assert.ok(!/requireSystemSurface\(|import[^;]*\brequireSystemSurface\b/.test(src), `${page} must not fall back to the founder gate`);
 }
 
 const settingsPage = read("app/settings/page.tsx");

@@ -32,10 +32,12 @@ import { FX_PAIR_USDCAD, addDays, parseRateMicro, torontoToday, usdToCadCents } 
 import { getInvoiceDetail, listContacts, listInvoices } from "./invoices-io";
 import { revenueCollected, stripeMrr } from "./metrics";
 import { monthlyCentsForItem, type RecurringInterval } from "./mrr";
-import { REPORT_KINDS, listPayments, loadLedger, overview, runReport, taxOverview, type ReportKind } from "./reports-io";
+import { REPORT_KINDS, booksCoverageFor, listPayments, loadLedger, overview, runReport, taxOverview, type ReportKind } from "./reports-io";
 import { loadSettings } from "./settings-io";
 import { importHistory, listRules, listTransactions } from "./transactions-io";
+import { listActivity } from "./activity-io";
 import { query, queryOne } from "./db";
+import { LAST_SYNCED_EVENT_SQL, STRIPE_RECONCILED_ACTION } from "./stripe-ingest";
 
 export type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 type Sp = Record<string, string | string[] | undefined>;
@@ -126,9 +128,12 @@ async function latestStoredUsdCad(): Promise<{ date: string; rate: string } | nu
 // ── per-page loaders ─────────────────────────────────────────────────────
 
 /**
- * Overview. The overdue sweep is deferred: the page runs it after the
- * response (next/server after()), and nothing shown depends on it because
- * overdue is recomputed from the due date.
+ * Money › Overview (/money; /founders/finances redirects there). The overdue
+ * sweep is deferred: the page runs it after the response (next/server
+ * after()), and nothing shown depends on it because overdue is recomputed
+ * from the due date. `recent` is every recorded movement (bank lines,
+ * payments, bills: activity-io.ts), not bank lines alone, so a book with no
+ * bank feed still shows its September bills and its Stripe payments.
  */
 export async function loadOverviewPage(viewer: FinanceViewer, entity: EntityRow) {
   const today = torontoToday();
@@ -136,7 +141,7 @@ export async function loadOverviewPage(viewer: FinanceViewer, entity: EntityRow)
     overview(viewer, entity.id, { sweep: "deferred" }),
     revenueCollected({ from: `${today.slice(0, 7)}-01`, to: addDays(today, 1) }, { storedRatesOnly: true }),
     stripeMrr({ storedRatesOnly: true }),
-    listTransactions(viewer, entity.id, { limit: 8 }),
+    listActivity(viewer, entity.id, { limit: 8 }),
     listRecurring(viewer, entity.id),
     latestStoredUsdCad(),
     loadSettings(entity.id),
@@ -144,6 +149,11 @@ export async function loadOverviewPage(viewer: FinanceViewer, entity: EntityRow)
   return { ov, collected, mrr, recent, recurring: recurringMonthly(recurringRows, usdCad), stripePinned: Boolean(settings.stripe_account_id) };
 }
 
+/**
+ * Transactions: the bank register (categorise, exclude, rules), every
+ * recorded movement (activity-io.ts) under the same date and search filters,
+ * and what the book covers. All one wave.
+ */
 export async function loadTransactionsPage(viewer: FinanceViewer, entity: EntityRow, sp: Sp) {
   const filters = {
     accountId: param(sp, "account") || undefined,
@@ -153,14 +163,16 @@ export async function loadTransactionsPage(viewer: FinanceViewer, entity: Entity
     to: param(sp, "to") || undefined,
     q: param(sp, "q") || undefined,
   };
-  const [rows, accounts, categories, imports, payments] = await Promise.all([
+  const [rows, accounts, categories, imports, payments, activity, coverage] = await Promise.all([
     listTransactions(viewer, entity.id, filters),
     entityAccounts(entity.id),
     entityCategories(entity.id),
     importHistory(viewer, entity.id),
     listPayments(viewer, entity.id, 25),
+    listActivity(viewer, entity.id, { from: filters.from, to: filters.to, q: filters.q, limit: 100 }),
+    booksCoverageFor(entity),
   ]);
-  return { filters, rows, accounts, categories, imports, payments };
+  return { filters, rows, accounts, categories, imports, payments, activity, coverage };
 }
 
 /** Invoices. Like the Overview, the page runs the overdue sweep after the response. */
@@ -210,35 +222,60 @@ export async function loadBillsPage(viewer: FinanceViewer, entity: EntityRow) {
   return { bills, accounts, categories, settings, recurring, attachments };
 }
 
+/** Accounts: balances from the ledger, owner equity, and what the book covers (from the same ledger read). */
 export async function loadAccountsPage(viewer: FinanceViewer, entity: EntityRow) {
   const today = torontoToday();
-  const [{ accounts, lines }, equity] = await Promise.all([loadLedger(entity.id, addDays(today, 1)), equitySummary(viewer, entity.id)]);
-  return { today, accounts, lines, equity };
+  const ledger = loadLedger(entity.id, addDays(today, 1));
+  const [{ accounts, lines }, equity, coverage] = await Promise.all([ledger, equitySummary(viewer, entity.id), booksCoverageFor(entity, ledger)]);
+  return { today, accounts, lines, equity, coverage };
 }
 
+/**
+ * Reports: the statement, and what the book covers. The coverage reads the
+ * book to date, whatever range the statement shows: a P&L of September still
+ * has to say that costs before September 1 are not recorded.
+ */
 export async function loadReportsPage(viewer: FinanceViewer, entity: EntityRow, sp: Sp) {
   const kindRaw = param(sp, "kind") as ReportKind;
   const kind: ReportKind = REPORT_KINDS.includes(kindRaw) ? kindRaw : "pnl";
   const account = param(sp, "account") || null;
-  const [report, accounts] = await Promise.all([
+  const [report, accounts, coverage] = await Promise.all([
     runReport(viewer, entity.id, kind, { from: param(sp, "from") || undefined, to: param(sp, "to") || undefined, accountId: account }),
     kind === "ledger" ? entityAccounts(entity.id) : Promise.resolve([]),
+    booksCoverageFor(entity),
   ]);
-  return { kind, account, report, accounts };
+  return { kind, account, report, accounts, coverage };
 }
 
 export async function loadTaxesPage(viewer: FinanceViewer, sp: Sp) {
   return taxOverview(viewer, { from: param(sp, "from") || undefined, to: param(sp, "to") || undefined });
 }
 
-/** Settings, minus the Stripe account check (a network call) which the page streams separately. */
+/**
+ * Settings, minus the Stripe account check (a network call) which the page
+ * streams separately. `lastEvent.at` is the newest delivery of any kind (the
+ * webhook line); `synced_at` the newest live event that reached the books and
+ * `reconciled_at` the newest completed Stripe reconcile, the two facts
+ * stripe-ingest.ts lastStripeSync reads for "Last synced". `bankAccounts` are
+ * the choices for where Stripe payouts land.
+ */
 export async function loadSettingsPage(viewer: FinanceViewer, entity: EntityRow) {
-  const [settings, rules, categories, lastFx, lastEvent] = await Promise.all([
+  const [settings, rules, categories, lastFx, lastEvent, bankAccounts] = await Promise.all([
     loadSettings(entity.id),
     listRules(viewer, entity.id),
     entityCategories(entity.id),
     queryOne<{ d: string | null }>(`SELECT MAX(rate_date) AS d FROM fin_fx_rates`),
-    queryOne<{ at: string | null; n: number }>(`SELECT MAX(received_at) AS at, COUNT(*) AS n FROM fin_stripe_events`),
+    queryOne<{ at: string | null; n: number; synced_at: string | null; reconciled_at: string | null }>(
+      `SELECT MAX(received_at) AS at, COUNT(*) AS n,
+              (${LAST_SYNCED_EVENT_SQL}) AS synced_at,
+              (SELECT MAX(created_at) FROM fin_audit_log WHERE entity_id = ? AND action = ?) AS reconciled_at
+         FROM fin_stripe_events`,
+      [entity.id, STRIPE_RECONCILED_ACTION],
+    ),
+    query<{ id: string; code: string; name: string }>(
+      `SELECT id, code, name FROM fin_accounts WHERE entity_id = ? AND subtype = 'bank' AND archived = 0 ORDER BY code`,
+      [entity.id],
+    ),
   ]);
-  return { settings, rules, categories, lastFx, lastEvent };
+  return { settings, rules, categories, lastFx, lastEvent, bankAccounts };
 }

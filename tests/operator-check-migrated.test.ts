@@ -180,7 +180,11 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["lib/tenant-access.ts", /profile\.isPlatformOperator === true/],
   ["lib/tenant-access.ts", /await isPlatformOperatorForAuthUser\(user\.id, user\.email\)/],
   ["lib/chat-auth.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
-  ["lib/chat-shell-props.ts", /isAdmin: isPlatformOperator,[\s\S]*isAdmin: isPlatformOperator,/],
+  // The persistent chat is the Coding harness (2026-09-30): the verified
+  // verdict gates it entirely, then drives isAdmin.
+  ["lib/chat-shell-props.ts", /if \(!isPlatformOperator\) return null;[\s\S]*isAdmin: isPlatformOperator,/],
+  // /api/usage's platform key (the chat's Ready check) follows the same rule.
+  ["app/api/usage/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*const fallback = isOperator \? operatorPlatformFallback\(\) : null;/],
   ["lib/auth-routing.ts", /const isEmpireOperator = await isPlatformOperatorForAuthUser\(authUserId, email\);/],
   ["app/layout.tsx", /isPlatformOperator: await platformOperatorP,/],
   ["app/layout.tsx", /isPlatformOperator: platformOperator,/],
@@ -190,7 +194,12 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["app/api/event-feed/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
   ["app/api/cron-jobs/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
   ["app/api/cron-jobs/[id]/route.ts", /source === "empire" && !\(await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\)\)/],
-  ["app/api/agents/chat/route.ts", /\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\) \? operatorPlatformFallback\(\)/],
+  // Read once: the same verdict gates the platform key and the model id in the
+  // stream (clients never see which model answered).
+  ["app/api/agents/chat/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*const fallback = isOperator \? operatorPlatformFallback\(\) : null;/],
+  // A Slack mention gets the platform key only when the person who wrote it is
+  // the verified operator (their Slack email linked to that teammate).
+  ["lib/slack/jobs.ts", /return isPlatformOperatorForAuthUser\(String\(r\.auth_user_id\), [\s\S]*platformFallback: operator \? operatorPlatformFallback\(\) : null,/],
   ["app/api/agents/generate/route.ts", /\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\) \? operatorPlatformFallback\(\)/],
   ["app/api/manifest/chat/route.ts", /\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\) \? operatorPlatformFallback\(\)/],
   ["app/api/gmail-templates/[id]/solara/route.ts", /\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\) \? operatorPlatformFallback\(\)/],
@@ -205,8 +214,9 @@ const MIGRATED: Array<[string, RegExp]> = [
   // there is no operator decision left on that page to pin.
   ["app/admin/agents/page.tsx", /\n\s*await requireOperator\(\);/],
   // A department channel reads "ready" through the same verified platform-key
-  // rule as app/api/agents/chat, never the email alone.
-  ["components/os/department/channel.ts", /isPlatformOperatorForAuthUser\(authUserId, email\)/],
+  // rule as app/api/agents/chat, never the email alone, and only when a
+  // platform key exists to fall back to.
+  ["components/os/department/channel.ts", /operatorPlatformFallback\(\) !== null && \(await isPlatformOperatorForAuthUser\(authUserId, email\)\)/],
   ["app/integrations/page.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
   // Settings was split into sections by the OASIS OS shell: every section reads
   // one cached verified verdict (settings-viewer.ts -> isPlatformOperator()).

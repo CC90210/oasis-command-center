@@ -17,6 +17,7 @@ import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
   listTenantIntegrationStatus,
+  tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
 import {
   findTenantManuallyEditableIntegrationSchema,
@@ -72,6 +73,20 @@ export async function POST(req: NextRequest) {
   const validation = validateIntegrationValue(fieldDef, value);
   if (validation) {
     return NextResponse.json({ ok: false, error: validation }, { status: 422 });
+  }
+  // Client workspaces connect Stripe READ-ONLY, with a restricted key, through
+  // Settings › Connections (/api/connections/stripe/connect). This editor would
+  // store a full secret key that can move money, so it stays OASIS's own
+  // (the checkout-link key). Deleting a key stored here before is still allowed.
+  if (service === "stripe" && !tenantMayUseEnvFallback(sess.tenantId)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "stripe_connects_with_restricted_key",
+        message: "Connect Stripe from the Stripe card in Settings › Connections, with a read-only restricted key (rk_…).",
+      },
+      { status: 422 },
+    );
   }
 
   const result = await setTenantIntegrationValue({

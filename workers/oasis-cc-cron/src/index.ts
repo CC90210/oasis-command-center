@@ -24,6 +24,10 @@ import { cronMatches } from "./cron-match";
 // sync-sms-numbers and dispatch-bulk-email. Multi-tenant routes stay and skip
 // retired tenants (lib/tenant/retired.ts). Re-adding one of these would restart
 // writes for a tenant whose data is being exported and deleted.
+//
+// 2026-09-29, the books' daily upkeep (lib/founders-finances/books-cron.ts):
+// exchange rates, the Stripe reconcile (payouts included), Wise invoice
+// matches, then the Wise bank feed, in that order, once a day each.
 export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
@@ -39,6 +43,11 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/health-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
+  { path: "/api/cron/connection-health", schedule: "*/15 * * * *" },
+  { path: "/api/cron/finance-books?job=fx-refresh", schedule: "47 21 * * *" },
+  { path: "/api/cron/finance-books?job=stripe-reconcile", schedule: "53 21 * * *" },
+  { path: "/api/cron/finance-books?job=wise-reconcile", schedule: "7 22 * * *" },
+  { path: "/api/cron/finance-books?job=wise-sync", schedule: "29 22 * * *" },
 ];
 
 // Self-contained runtime types: this dir sits inside the Next app's tsconfig

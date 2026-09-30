@@ -105,8 +105,11 @@ import {
   unblockContact as ttUnblockContact,
 } from "./integrations/texttorrent";
 import { resolveTextTorrentSenderId } from "./integrations/texttorrent-sender";
+import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "./ai/usage";
+import { meterRefusalCode } from "./ai/usage-codes";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+const utf8 = new TextEncoder();
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
 const HTTP_BODY_CAP_BYTES = 5 * 1024 * 1024; // 5 MB max external response
 const HTTP_TIMEOUT_MS = 15_000;
@@ -2351,7 +2354,14 @@ export type StreamYield =
       input: Record<string, unknown>;
       resume_state: ResumeState;
     }
-  | { type: "done"; inputTokens: number; outputTokens: number }
+  /**
+   * The turn ended. inputTokens / outputTokens are the SUM of its provider
+   * requests' own usage reports. unreportedCalls counts the requests that
+   * finished with no usage report: their tokens are unknown, so while it is
+   * above 0 the sums are only the other requests' (a floor) and a caller must
+   * not show or store them as the turn's tokens.
+   */
+  | { type: "done"; inputTokens: number; outputTokens: number; unreportedCalls: number }
   | { type: "error"; message: string };
 
 type ContentBlock =
@@ -2369,11 +2379,9 @@ type AnthropicMessage =
  * the pre-pause state intact. Contains everything resumeAnthropicTurn()
  * needs to continue the model's session without re-running prior iterations.
  *
- * Security note: this state passes through the browser. v1 trusts the
- * authed dashboard session (replay attacks only let an operator mess with
- * their OWN chat, no cross-tenant blast radius). If /api/chat/resume ever
- * becomes a multi-tenant or public surface, add HMAC signing here so a
- * malicious page can't synthesize states the server didn't issue.
+ * Security note: this state passes through the browser, so the routes sign
+ * it (lib/resume-hmac.ts) bound to the tenant, user and agent it was issued
+ * to, and /api/chat/resume refuses any state the server did not issue.
  */
 export type ResumeState = {
   /** Anthropic model ID — must match the model that was streaming the pause. */
@@ -2391,6 +2399,10 @@ export type ResumeState = {
    *  of resetting to zero. */
   totalIn: number;
   totalOut: number;
+  /** Calls before the pause that finished with no usage report (see the
+   *  done event's unreportedCalls), carried so the resumed turn's done event
+   *  still says its totals are a floor. Absent = none. */
+  unreportedCalls?: number;
   /** Echo of the original request's maxTokens / enableTools — applied to
    *  the resumed call so the second half of the conversation behaves
    *  identically to what would have happened without the pause. */
@@ -2416,6 +2428,12 @@ export type ResumeState = {
    *  sees the same bridge tool set the original call resolved.
    *  null = no advertisement on record (older bridges). */
   bridgeAdvertisedTools?: string[] | null;
+  /** The chat session the paused turn belongs to. The loop never sets it:
+   *  the route that signs the state stamps it, so it is signed with the
+   *  rest, and /api/chat/resume files the resumed half under it rather than
+   *  under a session id from the request body (which the browser can send
+   *  stale). */
+  sessionId?: string;
 };
 
 export type ToolLoopRequest = {
@@ -2473,6 +2491,13 @@ export type ToolLoopRequest = {
    * upstream because its safety contract is the most restrictive.
    */
   chatMode?: ChatPlanMode;
+  /**
+   * REQUIRED: meters every model call the loop makes (lib/ai/usage.ts). Each
+   * iteration is its own call: it reserves against the tenant's monthly AI
+   * budget before it is sent and records its own ai_usage_events row, so a
+   * loop that reaches the cap on iteration 3 stops there with the budget code.
+   */
+  meter: ModelCallMeter;
 };
 
 export async function* streamAnthropicWithTools(
@@ -2506,7 +2531,9 @@ export async function* streamAnthropicWithTools(
     startIter: 0,
     startTotalIn: 0,
     startTotalOut: 0,
+    startUnreportedCalls: 0,
     ctx,
+    meter: req.meter,
   });
 }
 
@@ -2518,7 +2545,8 @@ export async function* streamAnthropicWithTools(
  * Takes the ResumeState the runner emitted before pausing + the
  * tool_result the client produced. Appends the tool_result block onto
  * the message history and continues the iteration loop from where it
- * left off — same iteration cap, same running token totals.
+ * left off — same iteration cap, same running token totals. `meter` meters
+ * the resumed calls exactly as ToolLoopRequest.meter meters the first half.
  */
 export async function* resumeAnthropicTurn(
   resume: ResumeState,
@@ -2526,6 +2554,7 @@ export async function* resumeAnthropicTurn(
   toolResult: { content: string; is_error: boolean },
   ctx: ToolContext,
   apiKey: string,
+  meter: ModelCallMeter,
 ): AsyncGenerator<StreamYield> {
   const history: AnthropicMessage[] = [...resume.history];
   // Append the user-side tool_result block that the browser produced.
@@ -2561,7 +2590,9 @@ export async function* resumeAnthropicTurn(
     startIter: resume.iteration + 1,
     startTotalIn: resume.totalIn,
     startTotalOut: resume.totalOut,
+    startUnreportedCalls: resume.unreportedCalls ?? 0,
     ctx,
+    meter,
   });
 }
 
@@ -2605,8 +2636,14 @@ export async function* streamOpenAICompatibleWithTools(
     // Keep this path cloud-safe instead of advertising tools it cannot resume.
     forceExcludeDeferred: true,
   });
+  // The turn's tokens: the SUM of every step's own report. Each step is its
+  // own provider request (its own ai_usage_events row), and each reports only
+  // its own usage, so keeping the last report under-counted every tool turn.
+  // A step with no usage report adds nothing to the sums and is counted here
+  // instead, so the done event never passes a partial sum off as the turn's.
   let totalIn = 0;
   let totalOut = 0;
+  let unreportedCalls = 0;
 
   for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
     const body: Record<string, unknown> = {
@@ -2632,58 +2669,94 @@ export async function* streamOpenAICompatibleWithTools(
       body.tool_choice = "auto";
     }
 
-    const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
-      method: "POST",
-      headers: openAICompatibleHeaders(req.provider, req.apiKey),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok || !res.body) {
-      const detail = await safeText(res);
-      yield {
-        type: "error",
-        message:
-          res.status >= 500 || res.status === 429
-            ? `provider_temporarily_unavailable:${req.provider}_${res.status}`
-            : `${req.provider}_${res.status}:${detail}`,
-      };
+    const json = JSON.stringify(body);
+    // Each iteration is its own metered call: reserve before sending.
+    let modelCall: ModelCall;
+    try {
+      modelCall = await req.meter.begin({
+        provider: req.provider,
+        model: req.model,
+        maxOutputTokens: req.maxTokens ?? 4096,
+        promptBytes: utf8.encode(json).length,
+      });
+    } catch (err) {
+      yield { type: "error", message: meterRefusalCode(err) };
       return;
     }
 
     let assistantText = "";
     let finishReason: string | null = null;
     const toolBuffers = new Map<number, { id: string; name: string; args: string }>();
+    let ledger: ModelUsage | null = null;
+    let end: CallEnd | null = null;
+    // This step's own usage report; if a provider repeats it, the last one stands.
+    let stepIn = 0;
+    let stepOut = 0;
 
-    for await (const ev of parseSSE(res.body)) {
-      const data = asSSERecord(ev.data);
-      if (!data) continue;
-      const choice = firstSSERecord(data.choices);
-      const delta = asSSERecord(choice?.delta);
-      const text = delta?.content;
-      if (typeof text === "string" && text.length > 0) {
-        assistantText += text;
-        yield { type: "delta", text };
+    try {
+      const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
+        method: "POST",
+        headers: openAICompatibleHeaders(req.provider, req.apiKey),
+        body: json,
+      });
+      if (!res.ok || !res.body) {
+        const detail = await safeText(res);
+        end = res.ok
+          ? { outcome: "error", errorCode: "empty_body" }
+          : { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+        yield {
+          type: "error",
+          message:
+            res.status >= 500 || res.status === 429
+              ? `provider_temporarily_unavailable:${req.provider}_${res.status}`
+              : `${req.provider}_${res.status}:${detail}`,
+        };
+        return;
       }
-      for (const rawCall of asSSEArray(delta?.tool_calls)) {
-        const call = asSSERecord(rawCall);
-        if (!call) continue;
-        const index = typeof call.index === "number" ? call.index : toolBuffers.size;
-        const fn = asSSERecord(call.function);
-        const prev = toolBuffers.get(index) || { id: "", name: "", args: "" };
-        toolBuffers.set(index, {
-          id: typeof call.id === "string" && call.id ? call.id : prev.id,
-          name: typeof fn?.name === "string" && fn.name ? fn.name : prev.name,
-          args: prev.args + (typeof fn?.arguments === "string" ? fn.arguments : ""),
-        });
+
+      for await (const ev of parseSSE(res.body)) {
+        const data = asSSERecord(ev.data);
+        if (!data) continue;
+        const choice = firstSSERecord(data.choices);
+        const delta = asSSERecord(choice?.delta);
+        const text = delta?.content;
+        if (typeof text === "string" && text.length > 0) {
+          assistantText += text;
+          yield { type: "delta", text };
+        }
+        for (const rawCall of asSSEArray(delta?.tool_calls)) {
+          const call = asSSERecord(rawCall);
+          if (!call) continue;
+          const index = typeof call.index === "number" ? call.index : toolBuffers.size;
+          const fn = asSSERecord(call.function);
+          const prev = toolBuffers.get(index) || { id: "", name: "", args: "" };
+          toolBuffers.set(index, {
+            id: typeof call.id === "string" && call.id ? call.id : prev.id,
+            name: typeof fn?.name === "string" && fn.name ? fn.name : prev.name,
+            args: prev.args + (typeof fn?.arguments === "string" ? fn.arguments : ""),
+          });
+        }
+        if (typeof choice?.finish_reason === "string") {
+          finishReason = choice.finish_reason;
+        }
+        const usage = asSSERecord(data.usage);
+        if (usage) {
+          stepIn = numberOr(usage.prompt_tokens, stepIn);
+          stepOut = numberOr(usage.completion_tokens, stepOut);
+          ledger = openAICompatibleLedgerUsage(usage);
+        }
       }
-      if (typeof choice?.finish_reason === "string") {
-        finishReason = choice.finish_reason;
-      }
-      const usage = asSSERecord(data.usage);
-      if (usage) {
-        totalIn = numberOr(usage.prompt_tokens, totalIn);
-        totalOut = numberOr(usage.completion_tokens, totalOut);
-      }
+      end = { outcome: "ok", usage: ledger };
+    } catch (err) {
+      end = { outcome: "error", errorCode: "stream_failed", usage: null };
+      throw err;
+    } finally {
+      await modelCall.finish(end ?? { outcome: "cancelled", usage: null });
     }
+    totalIn += stepIn;
+    totalOut += stepOut;
+    // The step's usage as the ledger recorded it: none means its tokens are unknown.
+    if (ledger === null) unreportedCalls += 1;
 
     const toolUses = [...toolBuffers.values()]
       .filter((tu) => tu.name.length > 0)
@@ -2694,7 +2767,7 @@ export async function* streamOpenAICompatibleWithTools(
         rawArgs: tu.args || "{}",
       }));
     if (toolUses.length === 0 || finishReason !== "tool_calls") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -2767,6 +2840,26 @@ function openAICompatibleHeaders(
   return headers;
 }
 
+/**
+ * One OpenAI-compatible usage report, for the ledger: prompt_tokens includes
+ * the cached prefix, so the ledger's input is the uncached part; OpenRouter
+ * adds usage.cost (USD, what it charged) and cache_write_tokens. null when the
+ * report lacks either count.
+ */
+function openAICompatibleLedgerUsage(usage: Record<string, unknown>): ModelUsage | null {
+  if (typeof usage.prompt_tokens !== "number" || typeof usage.completion_tokens !== "number") return null;
+  const details = asSSERecord(usage.prompt_tokens_details);
+  const cached = numberOr(details?.cached_tokens, 0);
+  const written = numberOr(details?.cache_write_tokens, 0);
+  return {
+    inputTokens: Math.max(usage.prompt_tokens - cached - written, 0),
+    outputTokens: usage.completion_tokens,
+    cacheReadTokens: cached,
+    cacheWriteTokens: written,
+    providerCostUsd: typeof usage.cost === "number" ? usage.cost : null,
+  };
+}
+
 function parseToolArgs(raw: string): Record<string, unknown> {
   if (!raw.trim()) return {};
   try {
@@ -2806,7 +2899,11 @@ type IterationLoopArgs = {
   startIter: number;
   startTotalIn: number;
   startTotalOut: number;
+  /** Calls already finished with no usage report (0 for fresh). */
+  startUnreportedCalls: number;
   ctx: ToolContext;
+  /** Meters each iteration's model call (ToolLoopRequest.meter). */
+  meter: ModelCallMeter;
 };
 
 /**
@@ -2907,6 +3004,9 @@ async function* runIterationLoop(
   });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;
+  // Iterations whose call finished with no complete usage report: their
+  // tokens are unknown, so the done event says the sums are a floor.
+  let unreportedCalls = args.startUnreportedCalls;
 
   for (let iter = args.startIter; iter < MAX_TOOL_ITERATIONS; iter++) {
     // Output tokens for THIS iteration only. Anthropic's message_delta
@@ -2939,24 +3039,19 @@ async function* runIterationLoop(
       }));
     }
 
-    const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok || !res.body) {
-      const detail = await safeText(res);
-      yield {
-        type: "error",
-        message:
-          res.status >= 500 || res.status === 429
-            ? `provider_temporarily_unavailable:anthropic_${res.status}`
-            : `anthropic_${res.status}:${detail}`,
-      };
+    const json = JSON.stringify(body);
+    // Each iteration is its own metered call: it reserves against the
+    // tenant's month before it is sent, and a refusal ends the loop here.
+    let call: ModelCall;
+    try {
+      call = await args.meter.begin({
+        provider: "anthropic",
+        model,
+        maxOutputTokens: maxTokens ?? 4096,
+        promptBytes: utf8.encode(json).length,
+      });
+    } catch (err) {
+      yield { type: "error", message: meterRefusalCode(err) };
       return;
     }
 
@@ -2967,73 +3062,118 @@ async function* runIterationLoop(
     const blockBuffers = new Map<number, { kind: "text" | "tool_use"; partial: string }>();
     let stopReason: string | null = null;
     let iterOut = 0;
+    // For the ledger: message_start carries the prompt side (input_tokens is
+    // uncached; cache reads and writes are their own counts), message_delta
+    // the cumulative output. Complete once a message_delta reported output.
+    const ledger: ModelUsage = { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null };
+    let end: CallEnd | null = null;
 
-    for await (const ev of parseSSE(res.body)) {
-      // content_block_*, message_delta, etc.) — each branch reads
-      const data = asSSERecord(ev.data);
-      if (!data) continue;
-      if (ev.event === "message_start") {
-        const usage = asSSERecord(asSSERecord(data.message)?.usage);
-        if (usage) totalIn += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-      } else if (ev.event === "content_block_start") {
-        const block = asSSERecord(data.content_block);
-        const idx = typeof data.index === "number" ? data.index : -1;
-        if (idx < 0) continue;
-        if (block?.type === "text") {
-          blockBuffers.set(idx, { kind: "text", partial: "" });
-          blocks[idx] = { type: "text", text: "" };
-        } else if (block?.type === "tool_use") {
-          blockBuffers.set(idx, { kind: "tool_use", partial: "" });
-          blocks[idx] = {
-            type: "tool_use",
-            id: typeof block.id === "string" ? block.id : "",
-            name: typeof block.name === "string" ? block.name : "",
-            input: {},
-          };
-        }
-      } else if (ev.event === "content_block_delta") {
-        const idx = typeof data.index === "number" ? data.index : -1;
-        const buf = blockBuffers.get(idx);
-        if (!buf) continue;
-        const delta = asSSERecord(data.delta);
-        if (delta?.type === "text_delta" && typeof delta.text === "string") {
-          buf.partial += delta.text;
-          const b = blocks[idx];
-          if (b?.type === "text") b.text += delta.text;
-          yield { type: "delta", text: delta.text };
-        } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
-          buf.partial += delta.partial_json;
-        }
-      } else if (ev.event === "content_block_stop") {
-        const idx = typeof data.index === "number" ? data.index : -1;
-        const buf = blockBuffers.get(idx);
-        if (!buf) continue;
-        if (buf.kind === "tool_use") {
-          // Finalize the tool_use input — parse the accumulated JSON
-          const b = blocks[idx];
-          if (b?.type === "tool_use") {
-            try {
-              b.input = buf.partial ? JSON.parse(buf.partial) : {};
-            } catch {
-              b.input = {};
+    try {
+      const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+        },
+        body: json,
+      });
+      if (!res.ok || !res.body) {
+        const detail = await safeText(res);
+        end = res.ok
+          ? { outcome: "error", errorCode: "empty_body" }
+          : { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+        yield {
+          type: "error",
+          message:
+            res.status >= 500 || res.status === 429
+              ? `provider_temporarily_unavailable:anthropic_${res.status}`
+              : `anthropic_${res.status}:${detail}`,
+        };
+        return;
+      }
+
+      for await (const ev of parseSSE(res.body)) {
+        // content_block_*, message_delta, etc.) — each branch reads
+        const data = asSSERecord(ev.data);
+        if (!data) continue;
+        if (ev.event === "message_start") {
+          const usage = asSSERecord(asSSERecord(data.message)?.usage);
+          if (usage) {
+            totalIn += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+            ledger.inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
+            ledger.cacheReadTokens = numberOr(usage.cache_read_input_tokens, 0);
+            ledger.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, 0);
+          }
+        } else if (ev.event === "content_block_start") {
+          const block = asSSERecord(data.content_block);
+          const idx = typeof data.index === "number" ? data.index : -1;
+          if (idx < 0) continue;
+          if (block?.type === "text") {
+            blockBuffers.set(idx, { kind: "text", partial: "" });
+            blocks[idx] = { type: "text", text: "" };
+          } else if (block?.type === "tool_use") {
+            blockBuffers.set(idx, { kind: "tool_use", partial: "" });
+            blocks[idx] = {
+              type: "tool_use",
+              id: typeof block.id === "string" ? block.id : "",
+              name: typeof block.name === "string" ? block.name : "",
+              input: {},
+            };
+          }
+        } else if (ev.event === "content_block_delta") {
+          const idx = typeof data.index === "number" ? data.index : -1;
+          const buf = blockBuffers.get(idx);
+          if (!buf) continue;
+          const delta = asSSERecord(data.delta);
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            buf.partial += delta.text;
+            const b = blocks[idx];
+            if (b?.type === "text") b.text += delta.text;
+            yield { type: "delta", text: delta.text };
+          } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            buf.partial += delta.partial_json;
+          }
+        } else if (ev.event === "content_block_stop") {
+          const idx = typeof data.index === "number" ? data.index : -1;
+          const buf = blockBuffers.get(idx);
+          if (!buf) continue;
+          if (buf.kind === "tool_use") {
+            // Finalize the tool_use input — parse the accumulated JSON
+            const b = blocks[idx];
+            if (b?.type === "tool_use") {
+              try {
+                b.input = buf.partial ? JSON.parse(buf.partial) : {};
+              } catch {
+                b.input = {};
+              }
             }
           }
+          blockBuffers.delete(idx);
+        } else if (ev.event === "message_delta") {
+          const delta = asSSERecord(data.delta);
+          if (delta?.stop_reason) stopReason = String(delta.stop_reason);
+          // Cumulative for THIS message — overwrite, don't add. Final
+          // message_delta has the total; we add to totalOut after the loop.
+          const usage = asSSERecord(data.usage);
+          if (typeof usage?.output_tokens === "number") {
+            iterOut = usage.output_tokens;
+            ledger.outputTokens = usage.output_tokens;
+          }
+        } else if (ev.event === "message_stop") {
+          break;
         }
-        blockBuffers.delete(idx);
-      } else if (ev.event === "message_delta") {
-        const delta = asSSERecord(data.delta);
-        if (delta?.stop_reason) stopReason = String(delta.stop_reason);
-        // Cumulative for THIS message — overwrite, don't add. Final
-        // message_delta has the total; we add to totalOut after the loop.
-        const usage = asSSERecord(data.usage);
-        if (typeof usage?.output_tokens === "number") {
-          iterOut = usage.output_tokens;
-        }
-      } else if (ev.event === "message_stop") {
-        break;
       }
+      end = { outcome: "ok", usage: ledger.inputTokens !== null && ledger.outputTokens !== null ? ledger : null };
+    } catch (err) {
+      end = { outcome: "error", errorCode: "stream_failed", usage: null };
+      throw err;
+    } finally {
+      await call.finish(end ?? { outcome: "cancelled", usage: null });
     }
     totalOut += iterOut;
+    // The same test the ledger's usage above uses: both sides reported.
+    if (ledger.inputTokens === null || ledger.outputTokens === null) unreportedCalls += 1;
 
     // If the model didn't ask to call any tools, we're done. Filter
     // tool_use blocks defensively: a block with no id or name would
@@ -3046,7 +3186,7 @@ async function* runIterationLoop(
         b?.type === "tool_use" && typeof b.id === "string" && b.id.length > 0 && typeof b.name === "string" && b.name.length > 0
     );
     if (toolUses.length === 0 || stopReason !== "tool_use") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -3126,6 +3266,8 @@ async function* runIterationLoop(
           iteration: iter,
           totalIn,
           totalOut,
+          // Only when there are any, so an ordinary state carries no new key.
+          ...(unreportedCalls > 0 ? { unreportedCalls } : {}),
           maxTokens,
           enableTools,
           toolPalette: args.toolPalette,

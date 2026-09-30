@@ -51,12 +51,19 @@ for (const open of [
   "/work",
   "/about",
   "/contact",
-  "/start",
   "/privacy",
   "/terms",
   "/dmca",
 ]) {
   assert.equal(isPublic(open), true, `${open} is public marketing`);
+}
+
+// /start left the marketing site on 2026-09-29 (F0 containment): it fed the
+// developer install funnel, whose repo went private. It is a 404 now, and off
+// the public list with /configure and /demo/sun; tests/f0-containment.test.ts
+// pins the rest.
+for (const retired of ["/start", "/configure", "/demo/sun"]) {
+  assert.equal(isPublic(retired), false, `${retired} is retired and must not be public`);
 }
 
 // The marketing prefixes must not over-match a future dashboard route
@@ -137,6 +144,14 @@ for (const notPublic of ["/api/perf", "/api/perf/anything-else", "/api/perf/vita
     false,
     `${notPublic} must stay session-gated — only the vitals beacon is public`,
   );
+}
+
+// The Business Ledger ingest authenticates each producer by HMAC inside its
+// route (lib/ledger/ingest.ts); the harnesses hold no session. Only that exact
+// path is public: the rest of /api/ledger stays behind the session.
+assert.equal(isPublic("/api/ledger/ingest"), true, "/api/ledger/ingest is HMAC-gated inside its route and must reach it");
+for (const notPublic of ["/api/ledger", "/api/ledger/events", "/api/ledger/ingest-admin"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only the ingest path is public`);
 }
 
 // ...and nothing else under /api/internal is public. The prefix must not be a

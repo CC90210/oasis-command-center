@@ -39,6 +39,8 @@ import { loadPendingApprovals } from "@/components/os/approvals/load";
 import { departmentBySlug } from "@/lib/os/departments";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { loadSlackPresence, slackHomeFor } from "@/lib/slack/status";
 
 export const dynamic = "force-dynamic";
 
@@ -86,19 +88,23 @@ export default async function DepartmentPage({
   // Routines feed both the panel and the Operations / Chief of Staff numbers:
   // read once, shared, while the channel check runs beside them.
   const routinesRead = loadTenantRoutines(tenantId);
-  const [channel, routines, numbers, approvals] = await Promise.all([
+  const [channel, routines, numbers, approvals, slackPresence] = await Promise.all([
     resolveChannelState(dept, viewer),
     routinesRead,
     routinesRead.then((r) => loadDepartmentNumbers(dept, viewer, r)),
     // This department's approvals waiting on THIS viewer: the session's
     // workspace, and only if the viewer is seated in this department
     // (lib/os/approvals/rules.ts DEPARTMENT_SEATS; owners/admins see all).
+    // Chief of Staff answers for the whole workspace, as Today does, so its
+    // cards are every department's — the same approvals its count includes.
     loadPendingApprovals({
       scope: approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput }),
       tenantSlug: viewer.surface.tenantSlug,
-      department: dept.key,
+      department: dept.key === "chief_of_staff" ? null : dept.key,
       limit: OVERVIEW_APPROVALS_SHOWN,
     }),
+    // Where this department lives in Slack (lib/slack/status.ts).
+    loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
   ]);
 
   const deptRoutines = routines.ok
@@ -110,11 +116,17 @@ export default async function DepartmentPage({
   // Pending approvals are an exact COUNT(*); an attention item from a capped
   // read makes the total a floor, and so does an approvals read that failed:
   // it added 0 for a number nobody knows.
-  const needsYou =
-    numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
+  // Chief of Staff carries its own total: Today's (numbers.ts, needsYouTotal
+  // over the shared Needs-you reads, approvals included), so the tab and
+  // Today's card can never print different answers for the same moment.
+  const needsYou = numbers.needsYou
+    ? numbers.needsYou.total
+    : numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
   // Any floor in the sum makes the total a floor too. A floor of 0 is not
   // "nothing waiting", so the header cannot say Working (statusFor).
-  const needsYouCapped = numbers.attention.some((item) => item.capped === true) || !approvals.ok;
+  const needsYouCapped = numbers.needsYou
+    ? numbers.needsYou.capped
+    : numbers.attention.some((item) => item.capped === true) || !approvals.ok;
   const profile = departmentProfile(dept.key);
 
   return (
@@ -131,6 +143,8 @@ export default async function DepartmentPage({
         tiles: numbers.tiles,
         routines: deptRoutines,
         connections: profile.connections,
+        // Only a department with a teammate answers in Slack.
+        slack: binding.kind === "agent" ? slackHomeFor(slackPresence, [dept.key]) : null,
         // Connections are workspace configuration: owners and admins, the
         // same rule as the rail footer's Connections door.
         canManageConnections: viewer.surface.persona === "founder",

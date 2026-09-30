@@ -13,7 +13,6 @@
  */
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { ArrowRight, Loader2, Sparkles, User, Settings as SettingsIcon, CheckCircle2 } from "lucide-react";
 
 type InitialProfile = {
@@ -25,14 +24,20 @@ type InitialProfile = {
 
 type Step = "identity" | "preferences" | "ai" | "saving" | "done";
 
-const AGENT_LABELS: Record<string, string> = {
-  bravo: "Bravo (lead architect)",
-  solara: "Solara (operations + pipeline)",
-  helios: "Helios (sales + outreach)",
-  maven: "Maven (content + marketing)",
-  atlas: "Atlas (finance + strategy)",
-  aura: "Aura (personal assistant)",
-};
+/**
+ * One of the workspace's teammates, already labelled by the server
+ * (app/onboarding/welcome/page.tsx): named for what it does, never for an
+ * OASIS house persona or a SunBiz agent (2026-09-30).
+ */
+export type WelcomeTeammate = { slug: string; label: string };
+
+/**
+ * The briefing channels lib/profile-custom-fields.ts BRIEFING_CHANNEL
+ * documents: email / sms / slack / none. Slack is offered only when the
+ * workspace has a live Slack connection (the server decides).
+ */
+type BriefingChannel = "email" | "sms" | "slack" | "none";
+const BRIEFING_CHANNELS: ReadonlySet<string> = new Set(["email", "sms", "slack", "none"]);
 
 const TIMEZONES: Array<{ value: string; label: string }> = [
   { value: "America/New_York", label: "Eastern (New York)" },
@@ -48,27 +53,42 @@ const TIMEZONES: Array<{ value: string; label: string }> = [
 
 export function WelcomeWizardClient({
   initialProfile,
-  enabledAgents,
+  teammates,
+  teammatesUnknown = false,
+  slackConnected,
   alreadyCompleted,
 }: {
   initialProfile: InitialProfile;
-  enabledAgents: string[];
+  /** May be empty: a workspace not set up yet has no teammates. */
+  teammates: WelcomeTeammate[];
+  /** True when the workspace's teammates could not be read (not "none"). */
+  teammatesUnknown?: boolean;
+  slackConnected: boolean;
   alreadyCompleted: boolean;
 }) {
-  const router = useRouter();
-
   const [step, setStep] = useState<Step>("identity");
   const [fullName, setFullName] = useState(initialProfile.full_name);
   const [displayName, setDisplayName] = useState(initialProfile.display_name || initialProfile.full_name.split(" ")[0] || "");
-  const [primaryAgent, setPrimaryAgent] = useState(initialProfile.primary_agent);
+  const [primaryAgent, setPrimaryAgent] = useState(
+    teammates.some((t) => t.slug === initialProfile.primary_agent) ? initialProfile.primary_agent : teammates[0]?.slug ?? "",
+  );
   const [timezone, setTimezone] = useState(
     (initialProfile.custom_fields?.timezone as string) ||
       (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "America/New_York"),
   );
-  const [briefingChannel, setBriefingChannel] = useState<"email" | "telegram" | "none">(
-    (initialProfile.custom_fields?.briefing_channel as "email" | "telegram" | "none") || "email",
+  const savedChannel = String(initialProfile.custom_fields?.briefing_channel ?? "");
+  const [briefingChannel, setBriefingChannel] = useState<BriefingChannel>(
+    BRIEFING_CHANNELS.has(savedChannel) && (savedChannel !== "slack" || slackConnected)
+      ? (savedChannel as BriefingChannel)
+      : "email",
   );
   const [error, setError] = useState<string | null>(null);
+  const channelOptions: Array<{ value: BriefingChannel; label: string }> = [
+    { value: "email", label: "Email me" },
+    { value: "sms", label: "Text me" },
+    ...(slackConnected ? [{ value: "slack" as const, label: "Message me in Slack" }] : []),
+    { value: "none", label: "Don't send a briefing" },
+  ];
 
   async function save(extra?: { skip_ai?: boolean }) {
     setError(null);
@@ -87,7 +107,8 @@ export function WelcomeWizardClient({
         body: JSON.stringify({
           full_name: fullName.trim(),
           display_name: displayName.trim() || fullName.trim().split(" ")[0] || "Member",
-          primary_agent: primaryAgent,
+          // Only a teammate this workspace actually has; nothing when it has none.
+          ...(primaryAgent ? { primary_agent: primaryAgent } : {}),
           custom_fields: {
             timezone,
             briefing_channel: briefingChannel,
@@ -104,10 +125,11 @@ export function WelcomeWizardClient({
         return;
       }
       setStep("done");
-      // Small delay so the operator sees the "all set" state, then route home.
+      // Small delay so the person sees the "all set" state, then route home
+      // through the claim refresh: the session still says "welcome" until it
+      // is re-minted, and the onboarding gate would send them straight back.
       setTimeout(() => {
-        router.push("/");
-        router.refresh();
+        window.location.assign("/api/auth/onboarding-refresh?next=/");
       }, 900);
     } catch (e) {
       setError(e instanceof Error ? e.message : "save failed");
@@ -182,28 +204,31 @@ export function WelcomeWizardClient({
           subtitle="Pick the agent you'll talk to most and where you want updates."
         >
           <div className="space-y-3">
-            <Field
-              label="Your default agent"
-              value={primaryAgent}
-              onChange={setPrimaryAgent}
-              kind="select"
-              options={enabledAgents.map((slug) => ({
-                value: slug,
-                label: AGENT_LABELS[slug] || slug,
-              }))}
-              hint="The agent that opens first when you click 'Chat' anywhere."
-            />
+            {teammates.length > 0 ? (
+              <Field
+                label="Your default teammate"
+                value={primaryAgent}
+                onChange={setPrimaryAgent}
+                kind="select"
+                options={teammates.map((t) => ({ value: t.slug, label: t.label }))}
+                hint="The teammate that opens first when you click 'Chat' anywhere."
+              />
+            ) : teammatesUnknown ? (
+              <p className="text-[12.5px] text-fg-muted leading-relaxed">
+                We could not load your teammates just now; you can pick a default one later in Settings.
+              </p>
+            ) : (
+              <p className="text-[12.5px] text-fg-muted leading-relaxed">
+                Your workspace&apos;s AI teammates appear once it is set up. You can pick a default one then, in Settings.
+              </p>
+            )}
             <Field
               label="Daily briefing channel"
               value={briefingChannel}
-              onChange={(v) => setBriefingChannel(v as "email" | "telegram" | "none")}
+              onChange={(v) => setBriefingChannel(BRIEFING_CHANNELS.has(v) ? (v as BriefingChannel) : "email")}
               kind="select"
-              options={[
-                { value: "email", label: "Email me" },
-                { value: "telegram", label: "Telegram me" },
-                { value: "none", label: "Don't send a briefing" },
-              ]}
-              hint="Daily summary of what your agents did. You can change this anytime in Settings."
+              options={channelOptions}
+              hint="Saved as your preference for a daily summary. You can change it anytime in Settings."
             />
           </div>
           <Footer
@@ -218,7 +243,7 @@ export function WelcomeWizardClient({
         <StepCard
           icon={<Sparkles className="w-5 h-5" />}
           title="Connect your own AI (optional)"
-          subtitle="Skip for now and your workspace's shared key kicks in. You can connect your own anytime from Settings → My Agents."
+          subtitle="Optional. You can connect your own AI account anytime from Settings."
         >
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4 text-sm text-fg-muted leading-relaxed">
             <div className="font-semibold text-fg mb-1">Why connect your own?</div>
@@ -229,8 +254,7 @@ export function WelcomeWizardClient({
             </ul>
           </div>
           <div className="text-[12px] text-fg-dim leading-relaxed">
-            You don&apos;t need to do this right now. The workspace already has a working AI setup — skip
-            and you can come back to it when it&apos;s convenient.
+            You don&apos;t need to do this right now. Skip it and come back when it&apos;s convenient.
           </div>
           {error && (
             <div className="text-[12px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-md p-2">

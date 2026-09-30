@@ -72,7 +72,7 @@ async function main() {
   // ── fixtures: a client project to match against ─────────────────────────
   const now = new Date("2026-09-24T12:00:00.000Z");
   const founder = { userId: "u-cc", name: "CC" };
-  const projectA = await store.createProject(db, {
+  const projectA = await store.createProject(db, OASIS, {
     title: "Client A website", description: null, client_tenant_id: CLIENT_A, client_name: "Alice",
     client_email: "owner@client-a.test", lead_id: null, stage: "live", priority: "medium", assigned_to: null, due_date: null,
   }, founder, now);
@@ -149,14 +149,14 @@ async function main() {
     // The public form's email is unverified: anyone who knows a client's address
     // could otherwise put text into that client's portal.
     const client = { kind: "client" as const, userId: "u-client-a", clientTenantId: CLIENT_A, canAct: true };
-    const founder = { kind: "founder" as const, userId: "u-cc", canAct: true };
+    const founder = { kind: "founder" as const, tenantId: OASIS, userId: "u-cc", canAct: true };
     const id = String(ticketRow.id);
     assert.equal(await store.getTicket(db, client, id), null, "client must not see an unconfirmed inferred ticket");
     assert.ok(await store.getTicket(db, founder, id), "founders always see it");
-    const confirmed = await store.updateTicket(db, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:05:00.000Z"));
+    const confirmed = await store.updateTicket(db, OASIS, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:05:00.000Z"));
     assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
     assert.ok(await store.getTicket(db, client, id), "after confirmation the client sees their ticket");
-    const again = await store.updateTicket(db, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:06:00.000Z"));
+    const again = await store.updateTicket(db, OASIS, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:06:00.000Z"));
     assert.equal(again.ok, false, "confirming a link that is no longer inferred is refused");
   });
   await check("NO lead: tenant_records and lead_interactions are untouched", async () => {
@@ -191,7 +191,7 @@ async function main() {
     assert.match(toFounders.body, /booking widget/);
     assert.match(toFounders.body, /https:\/\/app\.test\/tickets\//);
     // A second run — a duplicate after(), the cron's retry — sends nothing.
-    await notify.runIntakeNotifications(db, String(ticketRow.id), fakeNotify, now);
+    await notify.runIntakeNotifications(db, OASIS, String(ticketRow.id), fakeNotify, now);
     assert.equal(sent.length, 3);
     const after = (await db.execute({ sql: "SELECT founder_alert_status, client_ack_status FROM support_tickets WHERE id = ?", args: [String(ticketRow.id)] })).rows[0];
     assert.equal(after.founder_alert_status, "telegram: sent; email: sent");
@@ -265,8 +265,8 @@ async function main() {
       project_id: null, client_tenant_id: null, client_name: "D", client_email: "d@d.co", client_company: null,
       client_match: "none", project_hint: null, reporter_user_id: null, assigned_to: null, form_submission_id: "sub-dup-1",
     };
-    const [a, b] = await Promise.all([store.createTicket(db, input, now), store.createTicket(db, input, now)]);
-    const c = await store.createTicket(db, input, now);
+    const [a, b] = await Promise.all([store.createTicket(db, OASIS, input, now), store.createTicket(db, OASIS, input, now)]);
+    const c = await store.createTicket(db, OASIS, input, now);
     assert.equal(a.ticket.id, b.ticket.id);
     assert.equal(a.ticket.id, c.ticket.id);
     assert.equal([a.created, b.created, c.created].filter(Boolean).length, 1);

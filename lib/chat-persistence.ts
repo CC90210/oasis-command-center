@@ -8,15 +8,17 @@
  * (adding a `kind` column for example) needed parallel edits and
  * the two paths drifted easily.
  *
- * Session totals + agent_model_config last_used_at updates are NOT
- * extracted: /api/chat overwrites the running totals from per-turn
- * values (pre-existing behavior — may be a bug, not changing it
- * here); /api/chat/resume fetches + adds (correctly accumulates
- * across the paused/resumed boundary). Different semantics →
- * different code per caller.
+ * chat_sessions' running totals are shared too (sessionTotalsDelta +
+ * addToSessionTotals): both routes ADD what they spent, in one SQL
+ * increment. /api/chat used to overwrite them and /api/chat/resume
+ * read-then-added, so the two gave the same columns different meanings
+ * and a resumed turn's tokens vanished on the next turn.
+ * agent_model_config last_used_at stays per caller.
  */
 
+import type { ModelCallMeter } from "./ai/usage";
 import { getServiceSupabase } from "./supabase-server";
+import { getTursoClient, tursoConfigured } from "./turso";
 import {
   redactAll,
   redactTenantVaultSecrets,
@@ -77,8 +79,9 @@ export type AssistantTurnPersistArgs = {
    *  last line of defense before chat_messages becomes a long-term
    *  secret-leak risk. */
   content: string;
-  inputTokens: number;
-  outputTokens: number;
+  /** null: the turn's tokens are unknown (a call finished with no usage report). */
+  inputTokens: number | null;
+  outputTokens: number | null;
   latencyMs: number;
   error?: string | null;
   /** Optional header prepended to content. /api/chat/resume uses this
@@ -133,4 +136,83 @@ export async function persistAssistantTurn(
     return false;
   }
   return true;
+}
+
+/** Token counts as the chat stream or the tool loop reported them. */
+export type TurnTokens = { inputTokens: number; outputTokens: number };
+
+/** What one request adds to a chat_sessions row's running totals. */
+export type SessionTotalsDelta = { inputTokens: number; outputTokens: number; costUsd: number };
+
+/**
+ * What one request of a chat turn (/api/chat, or one /api/chat/resume) adds to
+ * chat_sessions' running totals: its own tokens and its own cost, TOGETHER, or
+ * null for nothing.
+ *
+ * - `end` is the stream's own token count when the request ended: the `done`
+ *   event's, or a pause's resume_state totals (the loop stopped for a bridge
+ *   tool after its calls finished). The meter counts cost, not tokens, so a
+ *   request that ended with neither (a provider refusal, a tool loop stopped
+ *   mid-turn) adds nothing: there is no token count to pair its cost with.
+ * - `start` is where the loop's count began. A resumed loop starts from the
+ *   paused request's totals, which that request already added.
+ * - The cost is the meter's, only when every call's cost is known. A local
+ *   model has no price rows, but a local call costs nothing: a known $0.
+ */
+export function sessionTotalsDelta(args: {
+  end: TurnTokens | null;
+  start?: TurnTokens;
+  meter: ModelCallMeter;
+}): SessionTotalsDelta | null {
+  if (!args.end) return null;
+  const turn = args.meter.totals();
+  if (turn.calls === 0) return null;
+  const costMicroUsd =
+    args.meter.context.billingMode === "local" ? 0 : turn.unknownCostCalls === 0 ? turn.costMicroUsd : null;
+  if (costMicroUsd === null) return null;
+  const start = args.start ?? { inputTokens: 0, outputTokens: 0 };
+  return {
+    inputTokens: Math.max(0, args.end.inputTokens - start.inputTokens),
+    outputTokens: Math.max(0, args.end.outputTokens - start.outputTokens),
+    costUsd: costMicroUsd / 1_000_000,
+  };
+}
+
+/**
+ * Add one request's delta to a chat_sessions row and stamp updated_at, in ONE
+ * statement scoped by id AND tenant_id. The increment happens in SQL, so two
+ * requests that finish together both land; a read-then-write loses one. A
+ * null delta only stamps updated_at.
+ *
+ * Raw SQL on the Turso client because the adapter's .update() binds values and
+ * cannot say `col = col + ?`. getServiceSupabase().from() reads Turso only
+ * under turso_cloud, so anywhere else this refuses rather than write a
+ * different database than the one the session is read from.
+ */
+export async function addToSessionTotals(args: {
+  sessionId: string;
+  tenantId: string;
+  delta: SessionTotalsDelta | null;
+}): Promise<void> {
+  if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud" || !tursoConfigured()) {
+    throw new Error("chat_sessions totals: this deployment's sessions are not on Turso, so nothing was added");
+  }
+  const updatedAt = new Date().toISOString();
+  const { sessionId, tenantId, delta } = args;
+  await getTursoClient().execute(
+    delta
+      ? {
+          sql: `UPDATE chat_sessions
+                   SET total_input_tokens = total_input_tokens + ?,
+                       total_output_tokens = total_output_tokens + ?,
+                       estimated_cost_usd = estimated_cost_usd + ?,
+                       updated_at = ?
+                 WHERE id = ? AND tenant_id = ?`,
+          args: [delta.inputTokens, delta.outputTokens, delta.costUsd, updatedAt, sessionId, tenantId],
+        }
+      : {
+          sql: `UPDATE chat_sessions SET updated_at = ? WHERE id = ? AND tenant_id = ?`,
+          args: [updatedAt, sessionId, tenantId],
+        },
+  );
 }

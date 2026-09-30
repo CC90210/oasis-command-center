@@ -41,6 +41,11 @@ const root = join(__dirname, "..");
 const LABEL_PATH = "docs/compliance/PRIVACY_NUTRITION_LABEL.json";
 const labelText = readFileSync(join(root, LABEL_PATH), "utf8");
 const label = JSON.parse(labelText) as {
+  app: {
+    privacyContact: string;
+    privacyOfficer: { name: string; title: string; titleFr: string; email: string };
+  };
+  userRights: { requestChannel: string };
   tracking: { thirdPartyAnalyticsSdks: unknown[]; advertisingPixels: unknown[] };
   subprocessors: { name: string; dpaInPlace: boolean }[];
   dataCollected: {
@@ -318,7 +323,24 @@ const EXEMPT_HOSTS: Record<string, string> = {
   "api.mapbox.com": "SunBiz merchant application form only: address lookup fallback",
   "api.github.com": "reads OASIS's own repositories for agent knowledge; sends no personal information",
   "api.transferwise.com": "OASIS's own business bank account (founders' finances); sends no customer data",
+  "api.typesafe.ai":
+    "Jev (TypeSafe): only the key check runs (list models, no data) while lib/jev/mode.ts JEV_TEXT_PROCESSING_APPROVED is false; flipping it needs TypeSafe on /privacy (asserted below)",
 };
+
+// Jev may classify workspace text only in the same change that lists TypeSafe
+// as a processor: the exemption above is true only while the gate is shut.
+{
+  const jevMode = readFileSync(join(root, "lib/jev/mode.ts"), "utf8");
+  const gate = /export const JEV_TEXT_PROCESSING_APPROVED = (true|false);/.exec(jevMode);
+  assert.ok(gate, "lib/jev/mode.ts lost its JEV_TEXT_PROCESSING_APPROVED gate: TypeSafe could receive text unlisted.");
+  if (gate[1] === "true") {
+    assert.ok(
+      SUBPROCESSORS.some((s) => /TypeSafe/i.test(s.name)),
+      "Jev classifies workspace text (JEV_TEXT_PROCESSING_APPROVED = true) but TypeSafe is not on /privacy.",
+    );
+    assert.fail("Remove api.typesafe.ai from EXEMPT_HOSTS and map it to TypeSafe in HOST_TO_PROCESSOR: it now receives text.");
+  }
+}
 
 const HOST_TO_PROCESSOR: Record<string, string> = {
   "api.anthropic.com": "Anthropic PBC",
@@ -453,6 +475,52 @@ for (const field of ["PRIVACY_OFFICER.name", "PRIVACY_OFFICER.title.en", "PRIVAC
     `/privacy does not render ${field}; Law 25 requires the person in charge to be published.`,
   );
 }
+
+// The pages render these facts from lib/legal/constants.ts; a retyped literal
+// is how a page keeps saying the old thing after the constant moves (the DMCA
+// agent's city was typed into /dmca until 2026-09-30).
+for (const rel of [
+  "app/(marketing)/privacy/page.tsx",
+  "app/(marketing)/terms/page.tsx",
+  "app/(marketing)/dmca/page.tsx",
+  "components/legal/LegalPage.tsx",
+  "app/settings/privacy/page.tsx",
+]) {
+  const src = readFileSync(join(root, rel), "utf8");
+  for (const [name, value] of [
+    ["LEGAL_PRINCIPAL_PLACE", legal.LEGAL_PRINCIPAL_PLACE],
+    ["LEGAL_JURISDICTION", legal.LEGAL_JURISDICTION],
+    ["PRIVACY_OFFICER.name", PRIVACY_OFFICER.name],
+    ...Object.entries(LEGAL_CONTACTS).map(([k, v]) => [`LEGAL_CONTACTS.${k}`, v] as const),
+  ] as const) {
+    assert.ok(!src.includes(value), `${rel} types "${value}" as a literal; render ${name} from lib/legal/constants.ts.`);
+  }
+}
+
+// The manifest publishes the same contact and the same person. Until
+// 2026-09-30 nothing tied its three address fields to LEGAL_CONTACTS, so when
+// the constants moved off the never-created privacy@ alias, the JSON would have
+// kept advertising it and no test would have noticed.
+assert.equal(
+  label.app.privacyContact,
+  LEGAL_CONTACTS.privacy,
+  `${LABEL_PATH} app.privacyContact must be LEGAL_CONTACTS.privacy, the address /privacy publishes.`,
+);
+assert.equal(
+  label.userRights.requestChannel,
+  LEGAL_CONTACTS.privacy,
+  `${LABEL_PATH} userRights.requestChannel must be LEGAL_CONTACTS.privacy: /privacy sends rights requests there.`,
+);
+assert.deepEqual(
+  label.app.privacyOfficer,
+  {
+    name: PRIVACY_OFFICER.name,
+    title: PRIVACY_OFFICER.title.en,
+    titleFr: PRIVACY_OFFICER.title.fr,
+    email: PRIVACY_OFFICER.email,
+  },
+  `${LABEL_PATH} app.privacyOfficer must match PRIVACY_OFFICER in lib/legal/constants.ts.`,
+);
 
 // ---------------------------------------------------------------------------
 // 8. Model-provider sharing is disclosed per category wherever /privacy says

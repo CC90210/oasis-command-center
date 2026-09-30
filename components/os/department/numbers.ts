@@ -20,7 +20,11 @@
  *   Marketing  momentumMetrics (post_analytics), form_submissions
  *   Finance    loadOasisMoney (ledger + live Stripe)
  *   CS         listTickets / listProjects + slaStatus (lib/delivery)
- *   Ops        tenant_cron_jobs, via ./routines.ts
+ *   Ops        tenant_cron_jobs (+ OASIS's Empire rows), via ./routines.ts,
+ *              summarised by routine-rules.ts routineHealth — the same
+ *              numbers Today's Operations card prints
+ *   CoS        Needs you: components/os/today/brief-load.ts, the SAME reads
+ *              and the same count (model.ts needsYouTotal) as Today
  */
 
 import "server-only";
@@ -43,9 +47,29 @@ import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { ACTIVE_PROJECT_STAGES, slaStatus } from "@/lib/delivery/rules";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
+import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import {
+  briefPlanFor,
+  empireLaneFromCheck,
+  empireRoutinesFor,
+  loadNeedsYouReads,
+  needsYouFrom,
+  operatorDayAt,
+} from "@/components/os/today/brief-load";
+import { needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
-import { failedWithin, type RoutineRow } from "./routine-rules";
-import type { Read } from "./routines";
+import { mrrTile } from "./money-rules";
+import {
+  empireReadFor,
+  failedRoutinesHref,
+  mergeRoutineReads,
+  OPERATIONS_HREF,
+  routineHealth,
+  type EmpireLane,
+  type RoutineHealth,
+  type RoutineRow,
+} from "./routine-rules";
+import { loadEmpireRoutines, type Read } from "./routines";
 import type { OsViewer } from "./viewer";
 
 export type AttentionItem = {
@@ -62,6 +86,13 @@ export type DepartmentNumbers = {
   tiles: KpiTileProps[];
   /** Real things needing a person now. Drives the header's "Needs you". */
   attention: AttentionItem[];
+  /**
+   * The header's "Needs you" total when this department owns the whole-
+   * workspace answer (Chief of Staff: model.ts needsYouTotal, approvals
+   * included). Absent: the page sums `attention` and this department's
+   * approvals itself.
+   */
+  needsYou?: { total: number; capped: boolean };
 };
 
 const CONNECTIONS_HREF = "/settings/connections";
@@ -197,15 +228,22 @@ function pipelineTiles(p: Read<PipelineFigures> | null, compact: boolean): KpiTi
 // ── Client Success (tickets + projects) ───────────────────────────────────
 
 /**
- * lib/delivery is one queue today, pinned to OASIS's workspace
- * (DELIVERY_TENANT_ID) until W7 generalises it. Inside OASIS a founder works
- * that queue; a member of any other workspace sees only the requests THEIR
- * workspace filed and the projects run FOR them, so their tiles say so rather
- * than presenting a vendor's queue as their own customers'.
+ * Every workspace runs its own desk (lib/delivery/access.ts, relation "desk").
+ * Its team (owners and admins) sees THEIR customers' tickets and their own
+ * projects. A member below that in another workspace still sees only the
+ * requests their workspace filed with OASIS and the projects OASIS runs for
+ * them (relation "vendor"), so their tiles say so rather than presenting a
+ * vendor's queue as their own customers'.
  */
 type DeliveryFigures = {
   kind: "founder" | "client";
   open: number;
+  /**
+   * The desk has ever held a ticket (open or closed). With none, the ticket
+   * tiles say "No tickets yet": "0 breached" over a desk nobody has used is a
+   * health verdict with nothing behind it.
+   */
+  ticketHistory: boolean;
   breached: number;
   atRisk: number;
   activeProjects: number;
@@ -215,16 +253,18 @@ type DeliveryFigures = {
   projectsTruncated: boolean;
 };
 
-/** lib/delivery/access.ts, asked with the session this page already resolved. */
+/** lib/delivery/access.ts, asked with the session this page already resolved: own desk first, then vendor. */
 function deliveryViewerFor(viewer: OsViewer) {
   const s = viewer.surface;
-  return resolveDeliveryViewer({
-    ok: true,
+  const input = {
+    ok: true as const,
     persona: s.persona,
     tenantId: s.tenantId,
     userId: s.userId,
     canAct: s.capabilities.canAct,
-  });
+  };
+  const desk = resolveDeliveryViewer(input, { relation: "desk" });
+  return desk.ok ? desk : resolveDeliveryViewer(input);
 }
 
 async function loadDelivery(viewer: OsViewer, withProjects: boolean): Promise<Read<DeliveryFigures> | null> {
@@ -240,9 +280,13 @@ async function loadDelivery(viewer: OsViewer, withProjects: boolean): Promise<Re
     ]);
     const now = new Date();
     const states = tickets.rows.map((t) => slaStatus(t, now).state);
+    // Only asked when nothing is open: same viewer, same scope.
+    const ticketHistory =
+      tickets.rows.length > 0 || (await listTickets(db, access.viewer, { status: "closed" })).rows.length > 0;
     return {
       kind: access.viewer.kind,
       open: tickets.rows.length,
+      ticketHistory,
       breached: states.filter((s) => s === "breached").length,
       atRisk: states.filter((s) => s === "at_risk").length,
       activeProjects: projects
@@ -252,6 +296,11 @@ async function loadDelivery(viewer: OsViewer, withProjects: boolean): Promise<Re
       projectsTruncated: projects ? projects.truncated : false,
     };
   });
+}
+
+/** A desk with no ticket ever: a ticket tile says so instead of a 0. */
+function noTickets(label: string, hint: string): KpiTileProps {
+  return { label, value: null, status: "no_data", emptyText: "No tickets yet", hint };
 }
 
 function breachAttention(d: DeliveryFigures): AttentionItem[] {
@@ -271,32 +320,49 @@ function breachAttention(d: DeliveryFigures): AttentionItem[] {
 
 // ── Routines (Operations, Chief of Staff) ─────────────────────────────────
 
-function routineTiles(r: Read<RoutineRow[]>): { tiles: KpiTileProps[]; failed24h: RoutineRow[] } {
-  if (!r.ok) return { tiles: [failed("Routines on", "Routine read failed")], failed24h: [] };
-  const rows = r.value;
-  const on = rows.filter((x) => x.enabled).length;
-  const failed24h = failedWithin(rows.filter((x) => x.enabled), 24, Date.now());
-  return {
-    tiles: [
-      {
-        label: "Routines on",
-        value: rows.length === 0 ? "0" : `${n(on)} of ${n(rows.length)}`,
-        status: "live",
-        hint: rows.length === 0 ? "None set up yet" : "Scheduled for this workspace",
-      },
-    ],
-    failed24h,
-  };
+/**
+ * The verified platform-operator check for this viewer's session
+ * (lib/platform-operator.ts), as an Empire lane: a failed lookup is "unknown",
+ * never a quiet "no" (brief-load.ts empireLaneFromCheck).
+ */
+function operatorCheck(viewer: OsViewer): () => Promise<EmpireLane> {
+  return async () => empireLaneFromCheck(await resolvePlatformOperatorForAuthUser(viewer.authUserId, viewer.email));
 }
 
-function failureAttention(failed24h: RoutineRow[]): AttentionItem[] {
-  if (failed24h.length === 0) return [];
+/**
+ * The routines this viewer's health numbers cover: the workspace's own, plus —
+ * for the platform operator standing in OASIS — the Empire scheduler's rows
+ * carrying the OASIS workspace id (routines.ts loadEmpireRoutines). The same
+ * rule Today's Operations card reads by (brief-load.ts empireRoutinesFor).
+ */
+async function routineHealthFor(viewer: OsViewer, workspace: Read<RoutineRow[]>): Promise<Read<RoutineHealth>> {
+  // "unknown" (the operator check failed) is a failed Empire read, so the
+  // tiles say "Couldn't check" rather than the workspace lane alone.
+  const lane = await empireRoutinesFor(viewer.surface, operatorCheck(viewer));
+  const empire = await empireReadFor(lane, () => loadEmpireRoutines(viewer.surface.tenantId));
+  const merged = mergeRoutineReads(workspace, empire);
+  return merged.ok ? { ok: true, value: routineHealth(merged.value, Date.now()) } : { ok: false };
+}
+
+function routineTiles(r: Read<RoutineHealth>): KpiTileProps[] {
+  if (!r.ok) return [failed("Routines on", "Routine read failed")];
+  const h = r.value;
+  // No routine set up is not "0 of 0 on": there is nothing to be on.
+  if (h.total === 0) return [{ label: "Routines on", value: null, status: "no_data", emptyText: "None set up yet" }];
+  return [{ label: "Routines on", value: `${n(h.on)} of ${n(h.total)}`, status: "live", hint: "Scheduled for this workspace" }];
+}
+
+function failureAttention(h: RoutineHealth): AttentionItem[] {
+  if (h.failed24h.length === 0) return [];
+  const href = failedRoutinesHref(h.failed24h);
   return [
     {
       id: "routines-failed",
-      count: failed24h.length,
-      label: `${n(failed24h.length)} routine${failed24h.length === 1 ? "" : "s"} failed in the last 24 hours`,
-      href: null,
+      count: h.failed24h.length,
+      label: `${n(h.failed24h.length)} routine${h.failed24h.length === 1 ? "" : "s"} failed in the last 24 hours`,
+      // The panel below lists the workspace lane: no link needed. An Empire
+      // failure is listed only in Automations, so the line goes there.
+      href: href === OPERATIONS_HREF ? null : href,
     },
   ];
 }
@@ -403,12 +469,8 @@ async function financeNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
       money.stripeConnected === false
         ? { label: "MRR", value: null, status: "not_connected", hint: "Stripe", ...(stripeHref ? { connectHref: stripeHref } : {}) }
         : money.mrr
-          ? {
-              label: "MRR",
-              value: `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`,
-              status: "live",
-              hint: `${n(money.mrr.active_subscriptions)} live Stripe subscription${money.mrr.active_subscriptions === 1 ? "" : "s"}`,
-            }
+          ? // Live only while Stripe's sync is; stale or unreadable keeps the amount in the hint (./money-rules.ts).
+            mrrTile(money.mrr, money.stripeSync, Date.now())
           : failed("MRR", "Stripe unavailable"),
       !goal
         ? { label: "Goal pace", value: null, status: "live", hint: "No active revenue goal" }
@@ -439,7 +501,9 @@ async function clientSuccessNumbers(viewer: OsViewer): Promise<DepartmentNumbers
   if (d.kind === "client") {
     return {
       tiles: [
-        { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" },
+        d.ticketHistory
+          ? { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" }
+          : noTickets("Open requests", "Support requests your team filed"),
         { label: "Active projects", value: tileCount(d.activeProjects, d.projectsTruncated), status: "live", hint: "In discovery, building or review" },
       ],
       attention: [],
@@ -449,24 +513,41 @@ async function clientSuccessNumbers(viewer: OsViewer): Promise<DepartmentNumbers
   // "Open", so they are floors whenever it is (never an exact-looking total).
   return {
     tiles: [
-      { label: "Open tickets", value: open, status: "live", hint: "Open, in progress or waiting" },
-      { label: "SLA breached", value: tileCount(d.breached, d.truncated), status: "live", hint: "Unanswered past target" },
-      { label: "At risk", value: tileCount(d.atRisk, d.truncated), status: "live", hint: "Last quarter of the window" },
+      ...(d.ticketHistory
+        ? ([
+            { label: "Open tickets", value: open, status: "live", hint: "Open, in progress or waiting" },
+            { label: "SLA breached", value: tileCount(d.breached, d.truncated), status: "live", hint: "Unanswered past target" },
+            { label: "At risk", value: tileCount(d.atRisk, d.truncated), status: "live", hint: "Last quarter of the window" },
+          ] satisfies KpiTileProps[])
+        : [
+            noTickets("Open tickets", "Open, in progress or waiting"),
+            noTickets("SLA breached", "Unanswered past target"),
+            noTickets("At risk", "Last quarter of the window"),
+          ]),
       { label: "Active projects", value: tileCount(d.activeProjects, d.projectsTruncated), status: "live", hint: "Discovery, building or review" },
     ],
     attention: breachAttention(d),
   };
 }
 
-function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>): DepartmentNumbers {
+async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>): Promise<DepartmentNumbers> {
   const owner = viewer.surface.persona === "founder";
-  const r = routineTiles(routines);
+  const health = await routineHealthFor(viewer, routines);
   return {
     tiles: [
-      ...r.tiles,
-      routines.ok
-        ? { label: "Failed in 24h", value: n(r.failed24h.length), status: "live", hint: "Routines that are on" }
-        : failed("Failed in 24h", "Routine read failed"),
+      ...routineTiles(health),
+      !health.ok
+        ? failed("Failed in 24h", "Routine read failed")
+        : health.value.total === 0
+          ? { label: "Failed in 24h", value: null, status: "no_data", emptyText: "No routines yet" }
+          : {
+              label: "Failed in 24h",
+              value: n(health.value.failed24h.length),
+              status: "live",
+              hint: health.value.lastSuccessAt
+                ? `Last clean run ${formatOperatorDate({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }, new Date(health.value.lastSuccessAt))}`
+                : "No clean run recorded yet",
+            },
       {
         label: "Connection health",
         value: null,
@@ -475,32 +556,66 @@ function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>): Depa
         ...(owner ? { connectHref: CONNECTIONS_HREF } : {}),
       },
     ],
-    attention: failureAttention(r.failed24h),
+    attention: health.ok ? failureAttention(health.value) : [],
   };
 }
 
+/**
+ * Chief of Staff's "Needs you" IS Today's: the same reads
+ * (components/os/today/brief-load.ts loadNeedsYouReads, planned from this
+ * viewer's own capabilities and rail), the same list (buildNeedsYou) and the
+ * same count (needsYouTotal, approvals included). Its lines are the list's
+ * rows; the tiles stay this tab's own glance at the pipeline, the desk and
+ * the routines.
+ */
 async function chiefOfStaffNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>): Promise<DepartmentNumbers> {
-  const [pipeline, delivery] = await Promise.all([loadPipeline(viewer), loadDelivery(viewer, false)]);
-  const r = routineTiles(routines);
+  const day = operatorDayAt(new Date());
+  const { plan } = briefPlanFor(viewer.surface, viewer.navInput);
+  const showFinancials = viewer.surface.capabilities.canSeeCompanyFinancials && plan.money;
+  const [pipeline, delivery, reads] = await Promise.all([
+    loadPipeline(viewer),
+    loadDelivery(viewer, false),
+    loadNeedsYouReads({
+      viewer: viewer.surface,
+      navInput: viewer.navInput,
+      plan,
+      showFinancials,
+      day,
+      approvalsLimit: 1,
+      isPlatformOperator: operatorCheck(viewer),
+    }),
+  ]);
+  const needs = needsYouFrom(reads, day.nowMs);
   const tiles: KpiTileProps[] = [...pipelineTiles(pipeline, true)];
-  const attention: AttentionItem[] = [];
   if (delivery !== null) {
     if (delivery.ok) {
       const d = delivery.value;
       const open = tileCount(d.open, d.truncated);
       tiles.push(
-        d.kind === "founder"
-          ? { label: "Open tickets", value: open, status: "live", hint: "Across every client" }
-          : { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" },
+        !d.ticketHistory
+          ? noTickets(d.kind === "founder" ? "Open tickets" : "Open requests", d.kind === "founder" ? "Across every client" : "Support requests your team filed")
+          : d.kind === "founder"
+            ? { label: "Open tickets", value: open, status: "live", hint: "Across every client" }
+            : { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" },
       );
-      attention.push(...breachAttention(d));
     } else {
       tiles.push(failed("Open tickets", "Ticket read failed"));
     }
   }
-  tiles.push(...r.tiles);
-  attention.push(...failureAttention(r.failed24h));
-  return { tiles, attention };
+  // The routines tile reads the same health as the list below it when the
+  // brief read routines for this viewer; otherwise the workspace's own lane.
+  tiles.push(...routineTiles(reads.routines ?? (await routineHealthFor(viewer, routines))));
+  return {
+    tiles,
+    attention: needs.items.map((item) => ({
+      id: item.id,
+      label: item.title,
+      href: item.href,
+      count: item.count ?? 1,
+      capped: item.capped === true,
+    })),
+    needsYou: needsYouTotal(needs),
+  };
 }
 
 export async function loadDepartmentNumbers(

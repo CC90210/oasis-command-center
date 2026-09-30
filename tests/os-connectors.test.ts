@@ -26,17 +26,20 @@ import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
   connectorBySlug,
+  connectorHref,
   connectorMatches,
   glyphColor,
   contrastOnTile,
   resolveConnectorStatus,
+  type ConnectionFact,
   type ConnectorDef,
   type ConnectorFacts,
   type HeartbeatFact,
   type KeyRowFact,
 } from "../lib/os/connectors";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
-import { findIntegrationSchema } from "../lib/tenant-integration-schemas";
+import { findIntegrationSchema, findTenantManuallyEditableIntegrationSchema } from "../lib/tenant-integration-schemas";
+import { providerById } from "../lib/connections/registry";
 import {
   SETTINGS_SECTIONS,
   legacyAnchorTargets,
@@ -132,7 +135,7 @@ assert.notEqual(glyphColor(connectorBySlug("cal-com")!), "#292929", "Cal.com's n
 
 // The live set is pinned. Making a connector live means pointing it at a store
 // that exists — this list changes in the same commit, on purpose.
-const LIVE = ["stripe", "google-workspace", "telegram", "twilio", "constant-contact"].sort();
+const LIVE = ["stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev"].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),
   LIVE,
@@ -146,6 +149,21 @@ for (const def of CONNECTOR_CATALOG) {
     continue;
   }
   const src = def.live.source;
+  if (src.kind === "tenant_connection") {
+    // A Connections-framework card reads tenant_connections, which the facts
+    // loader must actually load; the provider must be LIVE in the registry
+    // (tests/os-connections.test.ts pins the registry side).
+    // Live, or live only where OASIS's own app is configured (Slack's
+    // liveWhenEnv); such a card says "app not configured yet" elsewhere.
+    const provider = providerById(src.provider);
+    assert.ok(
+      provider && (provider.availability === "live" || (provider.liveWhenEnv?.length ?? 0) > 0),
+      `${def.slug}: "${src.provider}" is not a live provider`,
+    );
+    assert.equal(src.provider, def.slug, `${def.slug}: a framework card's provider id is its slug`);
+    assert.match(factsSource, /listActiveConnections\(/, `${def.slug}: connections are never loaded`);
+    continue;
+  }
   // Every field a status reads is a real field of a real integration schema —
   // the same store Credentials writes and listTenantIntegrationStatus reads.
   const schema = findIntegrationSchema(src.service);
@@ -163,10 +181,10 @@ for (const def of CONNECTOR_CATALOG) {
 const everyService = new Set<string>();
 for (const def of CONNECTOR_CATALOG) {
   everyService.add(def.slug).add(def.slug.replace(/-/g, "_"));
-  if (def.live) everyService.add(def.live.source.service);
+  if (def.live) everyService.add(def.live.source.kind === "tenant_connection" ? def.live.source.provider : def.live.source.service);
 }
 const allFields = ["secret_key", "app_password", "from_address", "bot_token", "chat_id", "account_sid", "auth_token",
-  "from_number", "messaging_service_sid", "access_token", "refresh_token", "api_key", "token"];
+  "from_number", "messaging_service_sid", "access_token", "refresh_token", "api_key", "token", "restricted_key"];
 const GREEN: ConnectorFacts = {
   keyRows: [...everyService].flatMap((service) =>
     allFields.map((field_key): KeyRowFact => ({
@@ -175,6 +193,12 @@ const GREEN: ConnectorFacts = {
   ),
   heartbeats: [...everyService].map((service): HeartbeatFact => ({ service, status: "healthy", last_ping_at: iso(MIN) })),
   personalGoogleLinked: true,
+  // A connected, freshly verified framework connection for EVERY slug — a
+  // coming-soon card handed one must still say coming soon.
+  connections: [...everyService].map((provider): ConnectionFact => ({
+    provider, status: "connected", account_id: "acct_hostile", account_label: "Hostile", environment: "live",
+    last_health_at: iso(MIN), last_health_verdict: "healthy", last_health_code: null, last_health_detail: null,
+  })),
 };
 
 for (const def of CONNECTOR_CATALOG) {
@@ -189,7 +213,7 @@ assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN,
 
 // Every lookup failed: "status unavailable" for every live card — never
 // "not connected", never "connected".
-const FAILED: ConnectorFacts = { keyRows: null, heartbeats: null, personalGoogleLinked: null };
+const FAILED: ConnectorFacts = { keyRows: null, heartbeats: null, personalGoogleLinked: null, connections: null };
 for (const def of CONNECTOR_CATALOG) {
   const s = resolveConnectorStatus(def, FAILED, NOW);
   assert.equal(s.kind, def.live ? "unknown" : "coming_soon", `${def.slug}: a failed lookup resolved to "${s.kind}"`);
@@ -200,8 +224,11 @@ assert.equal(
   "unknown",
 );
 
+// Only the connections read failing is still unknown for a framework card.
+assert.equal(resolveConnectorStatus(connectorBySlug("stripe")!, { ...GREEN, connections: null }, NOW).kind, "unknown");
+
 // Nothing saved at all: honestly not connected.
-const EMPTY: ConnectorFacts = { keyRows: [], heartbeats: [], personalGoogleLinked: false };
+const EMPTY: ConnectorFacts = { keyRows: [], heartbeats: [], personalGoogleLinked: false, connections: [] };
 for (const slug of LIVE) {
   assert.equal(resolveConnectorStatus(connectorBySlug(slug)!, EMPTY, NOW).kind, "not_connected", slug);
 }
@@ -211,22 +238,33 @@ const keyRow = (service: string, field_key: string, over: Partial<KeyRowFact> = 
 });
 const stripe = connectorBySlug("stripe")!;
 const twilio = connectorBySlug("twilio")!;
+const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
+  keyRow("twilio", "account_sid", over),
+  keyRow("twilio", "auth_token", over),
+  keyRow("twilio", "from_number", over),
+];
 
 // A saved key nobody tested is set up, not connected.
-assert.equal(
-  resolveConnectorStatus(stripe, { ...EMPTY, keyRows: [keyRow("stripe", "secret_key")] }, NOW).kind,
-  "configured",
-);
+assert.equal(resolveConnectorStatus(twilio, { ...EMPTY, keyRows: twilioKeys() }, NOW).kind, "configured");
 // A failed test is attention, even beside an older passing one.
 assert.equal(
-  resolveConnectorStatus(stripe, {
+  resolveConnectorStatus(twilio, {
     ...EMPTY,
     keyRows: [
-      keyRow("stripe", "secret_key", { last_test_ok: false, last_tested_at: iso(MIN) }),
-      keyRow("stripe", "publishable_key", { last_test_ok: true, last_tested_at: iso(HOUR) }),
+      ...twilioKeys({ last_test_ok: true, last_tested_at: iso(HOUR) }),
+      keyRow("twilio", "messaging_service_sid", { last_test_ok: false, last_tested_at: iso(MIN) }),
     ],
   }, NOW).kind,
   "attention",
+);
+// Stripe is a framework card now: a legacy secret key in the Credentials store
+// (OASIS's checkout-link key) never makes it connected — or even "set up".
+assert.equal(
+  resolveConnectorStatus(stripe, {
+    ...EMPTY,
+    keyRows: [keyRow("stripe", "secret_key", { last_test_ok: true, last_tested_at: iso(MIN) })],
+  }, NOW).kind,
+  "not_connected",
 );
 // Twilio needs a number OR a messaging service: sid + token alone are incomplete.
 assert.equal(
@@ -298,7 +336,7 @@ assert.equal(
 );
 // Your own Google link is real, but it never makes the WORKSPACE connected.
 assert.notEqual(
-  resolveConnectorStatus(gws, { keyRows: [], heartbeats: [], personalGoogleLinked: true }, NOW).kind,
+  resolveConnectorStatus(gws, { keyRows: [], heartbeats: [], personalGoogleLinked: true, connections: [] }, NOW).kind,
   "connected",
 );
 // A heartbeat for one service never lights up another.
@@ -307,6 +345,7 @@ assert.notEqual(
     keyRows: [keyRow("telegram", "bot_token"), keyRow("telegram", "chat_id")],
     heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }],
     personalGoogleLinked: true,
+    connections: [],
   }, NOW).kind,
   "connected",
 );
@@ -318,6 +357,8 @@ const uiFiles = [
   ...readdirSync(join(root, "components/os/connections")).map((f) => `components/os/connections/${f}`),
   "components/settings/ChatAppCard.tsx",
   "components/settings/AddonCard.tsx",
+  "components/settings/JevCard.tsx",
+  "app/settings/ai/page.tsx",
   "app/settings/connections/page.tsx",
   "app/settings/chat-apps/page.tsx",
   "app/settings/notifications/page.tsx",
@@ -330,9 +371,16 @@ const hub = read("components/os/connections/ConnectionsHub.tsx");
 assert.match(hub, /status \?\? \{ kind: "unknown"/, "the hub must read a missing status as unknown");
 assert.match(read("app/settings/connections/page.tsx"), /resolveConnectorStatus\(/);
 assert.match(read("app/settings/chat-apps/page.tsx"), /resolveConnectorStatus\(telegram/);
-// Slack is Phase 2 on both surfaces.
-assert.equal(connectorBySlug("slack")!.live, null);
-assert.equal(connectorBySlug("slack")!.plannedFor, "Phase 2");
+// Slack is a Connections-framework card set up under Chat apps, and it says
+// "app not configured yet" wherever OASIS's Slack app is not on the deployment.
+const slackDef = connectorBySlug("slack")!;
+assert.deepEqual(slackDef.live?.source, { kind: "tenant_connection", provider: "slack" });
+assert.deepEqual(slackDef.live?.connect, { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" });
+assert.equal(
+  resolveConnectorStatus(slackDef, { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [], appNotConfigured: ["slack"] }, Date.now()).label,
+  "Slack app not configured yet",
+);
+assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
 assert.match(read("app/settings/chat-apps/page.tsx"), /Coming in Phase 2/);
 
 // Search: by name, keyword and category label; nonsense matches nothing.
@@ -412,7 +460,7 @@ assert.match(content, /show\("ai"\) && isOperator &&[\s\S]{0,80}LocalCliProvider
 assert.match(content, /isVerifiedOperator\(\)/);
 assert.doesNotMatch(content, /isOperatorEmail\(/, "operator status must not come from the session email alone");
 // The workspace-level hub is owners/admins only; everyone else sees their own Google.
-assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.canManage\)/);
+assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.canManage\) \{[\s\S]{0,400}<SettingsContent section="connections"/);
 
 // ─── 6. The hub's popup watch and the drawer's focus trap (CodeRabbit #468) ─
 
@@ -517,6 +565,64 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.ca
   assert.match(drawer, /e\.key === "Escape"/, "Escape still closes it");
   assert.match(drawer, /returnFocus\.current\?\.focus\?\.\(\)/, "focus still goes back to the opener on close");
   assert.match(drawer, /ref=\{panelRef\}\s+role="dialog"\s+aria-modal="true"/, "the trap is scoped to the aria-modal sheet");
+}
+
+// ─── 7. One card per app (CC, 2026-09-29) ───────────────────────────────────
+// The page used to list every app a second time under "Keys and accounts".
+// Now each app's card is the one place it is set up, custom keys are one card,
+// and apps that are not built are a single compact row, not cards that do nothing.
+
+{
+  // An owner's page renders the hub and nothing that lists the apps again.
+  const page = read("app/settings/connections/page.tsx");
+  const ownerPath = page.slice(page.indexOf("const facts = await loadConnectorFacts"));
+  assert.match(ownerPath, /<ConnectionsHub/);
+  assert.doesNotMatch(ownerPath, /SettingsContent|IntegrationKeysPanel|Keys and accounts/, "an owner's page lists the apps once");
+  assert.equal(existsSync(join(root, "components/settings/IntegrationKeysPanel.tsx")), false, "the page-wide key list is gone");
+  const content = read("components/settings/SettingsContent.tsx");
+  assert.doesNotMatch(content, /title="Credentials"|title="Integration health"|<IntegrationKeysPanel|<CustomCredentialsVault/);
+
+  // Every app whose keys are saved in the store has exactly one card, and that
+  // card's service is one an owner may actually edit.
+  const keyCards = CONNECTOR_CATALOG.flatMap((d) => (d.live?.connect.kind === "keys" ? [[d.slug, d.live.connect.service] as const] : []));
+  assert.ok(keyCards.length >= 3, "Google, Twilio and the Telegram team bot are set up in their drawers");
+  const services = keyCards.map(([, s]) => s);
+  assert.equal(new Set(services).size, services.length, "one card per saved-key service");
+  for (const [slug, service] of keyCards) {
+    assert.ok(findTenantManuallyEditableIntegrationSchema(service), `${slug}: "${service}" is not an owner-editable key set`);
+  }
+  // The legacy anchor that sent people to the removed list is gone everywhere.
+  assert.doesNotMatch(read("lib/os/connectors.ts"), /CREDENTIALS_ANCHOR|keysLink/);
+  assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /CREDENTIALS_ANCHOR/);
+  assert.match(read("app/settings/chat-apps/page.tsx"), /connectorHref\("telegram"\)/);
+  assert.equal(connectorHref("telegram"), "/settings/connections?app=telegram");
+
+  // The drawer sets the app up in place; the hub opens it for keys and ?app=.
+  const drawer = read("components/os/connections/ConnectorDrawer.tsx");
+  assert.match(drawer, /<ServiceKeysForm/);
+  assert.match(drawer, /def\.yourAccount === "google" && personalGoogle[\s\S]{0,400}<PersonalIntegrationsPanel/);
+  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return openDrawer\(def\.slug\)/);
+  assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
+  // Google's sign-in comes back to its drawer, not to a removed anchor.
+  assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
+  assert.match(page, /one\(sp\.gmail_oauth\) \? "google-workspace"/);
+
+  // A closed sheet stays closed on refresh: both close paths clear ?app= and
+  // Google's sign-in result params (CodeRabbit #477).
+  assert.match(hub, /const closeDrawer = useCallback\(\(\) => \{\s*setDrawerOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /const closeCustom = useCallback\(\(\) => \{\s*setCustomOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /DEEP_LINK_PARAMS = \["app", "gmail_oauth", "reason", "gmail", "mailbox"\]/);
+  // Remove always re-reads, even when a later DELETE fails part-way.
+  assert.match(read("components/os/connections/ServiceKeysForm.tsx"), /\} finally \{[\s\S]{0,300}await reload\(\);\s*onChanged\(\);/);
+
+  // Custom keys are one card, opened in the same accessible sheet.
+  assert.match(hub, /<CustomCredentialsVault \/>/);
+  assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
+
+  // Apps that are not built are one compact row, never full cards that do nothing.
+  assert.match(hub, /const later = visible\.filter\(\(def\) => !def\.live\)/);
+  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool/);
+  assert.doesNotMatch(hub, /rest\.filter\(\(d\) => d\.category === cat\.key\)/, "coming-soon apps no longer fill the category grids");
 }
 
 console.log(

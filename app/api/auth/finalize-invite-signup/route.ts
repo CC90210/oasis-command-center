@@ -13,9 +13,10 @@
  * This route:
  *   1. Auto-confirms the user's email via service-role admin
  *      (idempotent — harmless if already confirmed)
- *   2. Redeems the invite via the existing service-role redeemInvite
- *      helper (which validates token + email-matches-pinned + atomic
- *      RPC)
+ *   2. Redeems the invite via the service-role redeemInvite helper, which
+ *      validates token + email-matches-pinned, decides the member's profile
+ *      and claims the invite and writes that profile in ONE batch
+ *      (2026-09-30; see app/api/auth/redeem-invite/route.ts).
  *
  * Caller then redirects to /login?invite=...&email=... so the invitee
  * signs in with the password they just created.
@@ -31,8 +32,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { previewInvite, redeemInvite } from "@/lib/team";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { adminConfirmEmail, adminGetUser } from "@/lib/turso-auth-admin";
-import { finalizeInviteProfile } from "@/lib/invite-profile-finalization";
 import { confirmInviteBoundEmail } from "@/lib/invite-account-recovery";
+import { inviteRedeemFailure } from "@/lib/invite-redeem-errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,36 +100,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 2. Redeem the invite. redeemInvite() re-validates the token + checks
-  //    the user's email matches the invite's pinned email (when set).
+  // 2. Redeem the invite. redeemInvite() re-validates the token, checks the
+  //    user's email matches the invite's pinned email, and applies the same
+  //    role/manifest roster policy as authenticated redemption, in the same
+  //    write as the claim. A failure leaves the invite unclaimed.
   const result = await redeemInvite(rawToken, userId);
   if (!result.ok) {
+    const failure = inviteRedeemFailure(result.error);
     return NextResponse.json(
-      { ok: false, error: "redeem_failed", message: result.error },
-      { status: 400 },
-    );
-  }
-
-  // 3. Apply the same role/manifest profile policy as authenticated invite
-  //    redemption, then return the tenant route. This step fails closed so a
-  //    redeemed user never lands with a stale agent roster.
-  let tenantSlug: string | null = null;
-  try {
-    ({ tenantSlug } = await finalizeInviteProfile({
-      tenantId: result.tenantId,
-      authUserId: userId,
-      teamRole: result.teamRole,
-      preserveExistingMember: result.alreadyMember === true,
-    }));
-  } catch (error) {
-    console.error("[auth.finalize-invite-signup] profile finalization failed", {
-      tenantId: result.tenantId,
-      userId,
-      error: error instanceof Error ? error.message : "profile_finalize_failed",
-    });
-    return NextResponse.json(
-      { ok: false, error: "profile_finalize_failed" },
-      { status: 500 },
+      { ok: false, error: failure.code, message: failure.message },
+      { status: failure.status },
     );
   }
 
@@ -136,6 +117,6 @@ export async function POST(req: NextRequest) {
     ok: true,
     tenant_id: result.tenantId,
     team_role: result.teamRole,
-    tenant_slug: tenantSlug,
+    tenant_slug: result.tenantSlug,
   });
 }

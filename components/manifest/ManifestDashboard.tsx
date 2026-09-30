@@ -9,6 +9,25 @@ import { getRenewalsSummary } from "@/lib/queries";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { pipelineRowHref } from "@/lib/pipeline-display";
 import { formatMoney, timeAgo } from "@/lib/fmt";
+import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { departmentChannelFor } from "@/components/os/department/config";
+
+/**
+ * Where an agent's "Chat" goes: the department channel it answers in
+ * (2026-09-30). It used to open the /agent chat with the agent preselected, which is now the
+ * operator's Coding harness and sends everyone else to Chief of Staff with the
+ * agent dropped. A workspace's own (neutral) binding wins, then OASIS's; an
+ * agent no department uses goes to Chief of Staff, where the Ask button lands.
+ */
+export function departmentHrefForAgent(slug: string): string {
+  for (const oasis of [false, true]) {
+    for (const d of OS_DEPARTMENTS) {
+      const binding = departmentChannelFor(d.key, { oasis });
+      if (binding.kind === "agent" && binding.agentSlug === slug) return d.href;
+    }
+  }
+  return "/team/chief-of-staff";
+}
 
 type AgentAlertRow = {
   id: string;
@@ -202,7 +221,7 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
                   </div>
                 </div>
                 <Link
-                  href={`/agent?agent=${encodeURIComponent(agent.slug)}`}
+                  href={departmentHrefForAgent(agent.slug)}
                   className="inline-flex items-center gap-1 text-xs font-bold text-accent hover:text-accent/80 opacity-80 group-hover:opacity-100 transition-opacity"
                 >
                   <MessageSquare className="w-3 h-3" />

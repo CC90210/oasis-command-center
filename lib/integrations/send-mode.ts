@@ -51,6 +51,8 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   constant_contact: "LIVE_SEND_CONSTANT_CONTACT",
   // Smartlead cold-email: activating a campaign / pushing leads is gated separately.
   smartlead: "LIVE_SEND_SMARTLEAD",
+  // An approved department reply in a Slack thread (send_slack_message).
+  slack: "LIVE_SEND_SLACK",
 };
 
 /**

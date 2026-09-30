@@ -144,8 +144,12 @@ assert.match(manager, /unresolved_failures/,
   "Empire failure counters must remain visibly red until a successful run clears them");
 assert.match(manager, /!inventory\.empire_included/,
   "a hidden Empire lane must be stated on the page, never inferred from an absence of rows");
-assert.match(manager, /Empire schedules are not shown/,
-  "the omission line must be words the operator can act on, not a missing section");
+assert.match(manager, /This list covers this workspace&apos;s automations only/,
+  "the omission line must be words the reader can act on, not a missing section");
+// The same line renders on a client workspace's /t/<slug>/automations: it may
+// not name the operator's internal "Empire" lane (2026-09-30).
+assert.doesNotMatch(manager, /Empire schedules are not shown|empire-wide|>\s*Empire\s*</,
+  "no client-visible string names the Empire lane");
 // A stored next_run_at in the past is not a plan. When the scheduler host stops,
 // nothing writes a row, nothing goes red, and every card advertises a fire date
 // that has already been missed as though it were still coming.

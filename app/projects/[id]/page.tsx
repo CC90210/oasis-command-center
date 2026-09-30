@@ -22,7 +22,9 @@ import { ProjectControls, TaskList, UpdateComposer } from "@/components/delivery
 import { timeAgo } from "@/lib/fmt";
 import { memberDisplayName, slaStatus } from "@/lib/delivery/rules";
 import { formatForFounders } from "@/lib/delivery/messages";
-import { getDeliveryAccess, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
+import { getDeliveryAccessChain, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
+import { isOasisDesk, type DeliveryViewer } from "@/lib/delivery/access";
+import { loadCustomerOptions, type CustomerOptions } from "@/lib/os/customers/session";
 import {
   getProject,
   listClientTenants,
@@ -36,15 +38,17 @@ export const dynamic = "force-dynamic";
 
 export default async function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const access = await getDeliveryAccess();
-  if (!access.ok) {
-    if (access.status === 403) notFound();
+  // The viewer's own desk first, then (outside OASIS) OASIS as vendor — the
+  // same order as the API (lib/delivery/session.ts resolveProjectAccess).
+  const { desk, vendor } = await getDeliveryAccessChain();
+  if (!desk.ok && !vendor?.ok) {
+    if (desk.status === 403) notFound();
     return <Card><EmptyState message="Sign in to see this project." /></Card>;
   }
-  const viewer = access.viewer;
   const db = getDeliveryDb();
   if (!db) return <LoadError what="this project" detail="The database is not configured on this deployment." />;
 
+  let viewer: DeliveryViewer | null = null;
   let data: {
     project: NonNullable<Awaited<ReturnType<typeof getProject>>>;
     tasks: Awaited<ReturnType<typeof listProjectTasks>>;
@@ -52,21 +56,26 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
     tickets: Awaited<ReturnType<typeof listTickets>>["rows"];
   } | null = null;
   try {
-    const project = await getProject(db, viewer, id);
-    if (project) {
+    for (const access of [desk, vendor]) {
+      if (!access?.ok) continue;
+      const project = await getProject(db, access.viewer, id);
+      if (!project) continue;
+      viewer = access.viewer;
       const [tasks, updates, tickets] = await Promise.all([
         listProjectTasks(db, viewer, id),
         listProjectUpdates(db, viewer, id),
         listTickets(db, viewer, { project_id: id, status: "all" }),
       ]);
       data = { project, tasks, updates, tickets: tickets.rows };
+      break;
     }
   } catch (err) {
     console.error("[projects.detail.page]", err);
-    const detail = viewer.kind === "founder" ? (err instanceof Error ? err.message : String(err)) : undefined;
+    // The driver's text is for OASIS's own team, never a client workspace's.
+    const detail = desk.ok && isOasisDesk(desk.viewer) ? (err instanceof Error ? err.message : String(err)) : undefined;
     return <LoadError what="this project" detail={detail} />;
   }
-  if (!data) notFound();
+  if (!data || !viewer) notFound();
   const { project, tasks, updates, tickets } = data;
   const now = new Date();
 
@@ -121,16 +130,25 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
     );
   }
 
+  const oasis = isOasisDesk(viewer);
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
+  let customers: CustomerOptions = { state: "not_set_up" };
   let sideFailure: string | null = null;
   try {
-    [roster, directory, tenants] = await Promise.all([loadAssignmentRoster(), loadMemberDirectory(), listClientTenants(db)]);
+    [roster, directory, tenants, customers] = await Promise.all([
+      loadAssignmentRoster(viewer.tenantId),
+      loadMemberDirectory(viewer.tenantId),
+      // Client workspaces are OASIS's vendor relationship; no other desk has them.
+      oasis ? listClientTenants(db) : Promise.resolve([]),
+      loadCustomerOptions(db, viewer.tenantId),
+    ]);
   } catch (err) {
     console.error("[projects.detail.page.roster]", err);
     sideFailure = err instanceof Error ? err.message : String(err);
   }
+  const customerOptions = customers.state === "ok" ? customers.options : null;
   const rosterOptions = roster
     .filter((m) => m.auth_user_id)
     .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }));
@@ -159,6 +177,7 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
             project={project}
             roster={rosterOptions}
             clientTenants={tenants.map((t) => ({ value: t.id, label: t.name }))}
+            customers={customerOptions}
           />
         </Card>
       )}
@@ -206,7 +225,20 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
         <div className="space-y-6">
           <Card title="Client">
             <div className="space-y-3">
-              <Field label="Portal workspace">{project.client_tenant_name ?? "None (email only)"}</Field>
+              {customers.state !== "not_set_up" && (
+                <Field label="Client record">
+                  {project.customer_id ? (
+                    <Link className="text-accent hover:underline" href={`/clients/${project.customer_id}`} prefetch={false}>
+                      {customerOptions?.find((c) => c.value === project.customer_id)?.label ?? "Open client"}
+                    </Link>
+                  ) : customers.state === "error" ? (
+                    "Couldn't load client records"
+                  ) : (
+                    "Not linked"
+                  )}
+                </Field>
+              )}
+              {oasis && <Field label="Portal workspace">{project.client_tenant_name ?? "None (email only)"}</Field>}
               <Field label="Name">{project.client_name ?? "Not set"}</Field>
               <Field label="Email">
                 {project.client_email ? <a className="text-accent hover:underline" href={`mailto:${project.client_email}`}>{project.client_email}</a> : "Not set"}

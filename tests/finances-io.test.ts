@@ -6,7 +6,12 @@
  * — no mocks of our own code. Network is disabled (global fetch throws), and
  * no Stripe key is configured, so every path that would call Stripe or the
  * Bank of Canada takes its offline branch, which is itself under test:
- * fees recorded as pending, rates read from the seeded table.
+ * fees recorded as pending, rates read from the seeded table. The one
+ * exception is a webhook delivery: an event is booked only once a key of the
+ * pinned account proves it is that account's (stripe-ingest.ts
+ * stripeEventOrigin), so `deliver` holds such a key for the delivery. Stripe
+ * then knows the event and no other object (every other read is a 404, the
+ * same "Stripe could not say" branch).
  *
  * Run: node --conditions=react-server --import tsx tests/finances-io.test.ts
  */
@@ -27,8 +32,18 @@ delete process.env.INVOICE_FROM_APP_PASSWORD;
 delete process.env.OASIS_MAIL_FROM;
 delete process.env.OASIS_MAIL_APP_PASSWORD;
 
+/** The pinned account's key, held only while `deliver` posts an event. */
+const STRIPE_KEY = "rk_live_finances_io_test_only";
+/** Every network call but a Stripe read made with that key. */
 let networkCalls = 0;
-globalThis.fetch = (async (input: unknown) => {
+globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+  const url = new URL(String(input));
+  if (url.host === "api.stripe.com" && process.env.STRIPE_SECRET_KEY === STRIPE_KEY && (init?.method || "GET").toUpperCase() === "GET") {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+    if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
+    return json({ error: { type: "invalid_request_error", message: "No such object" } }, 404);
+  }
   networkCalls += 1;
   throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
 }) as typeof fetch;
@@ -54,6 +69,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(__dirname, "../database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   for (const [d, r] of [
     ["2026-09-10", "1.3600"],
     ["2026-09-11", "1.3600"],
@@ -92,8 +110,13 @@ async function main() {
     const ts = opts.sign === "stale" ? now - 600 : now;
     const secret = opts.sign === "bad" ? "whsec_wrong" : (process.env.STRIPE_FINANCE_WEBHOOK_SECRET as string);
     const sig = computeStripeSignature(payload, secret, ts);
-    const res = await webhook.POST(new Request("http://localhost/api/webhooks/stripe-finance", { method: "POST", headers: { "stripe-signature": `t=${ts},v1=${sig}` }, body: payload }));
-    return { status: res.status, body: (await res.json()) as Record<string, unknown>, event };
+    process.env.STRIPE_SECRET_KEY = STRIPE_KEY;
+    try {
+      const res = await webhook.POST(new Request("http://localhost/api/webhooks/stripe-finance", { method: "POST", headers: { "stripe-signature": `t=${ts},v1=${sig}` }, body: payload }));
+      return { status: res.status, body: (await res.json()) as Record<string, unknown>, event };
+    } finally {
+      delete process.env.STRIPE_SECRET_KEY;
+    }
   }
   const charge = (p: { id: string; amount: number; currency?: string; created?: number; pi?: string; metadata?: Record<string, string>; bt?: Record<string, unknown> | string; refunded?: number; refunds?: unknown[]; name?: string; email?: string; customer?: string }) => ({
     id: p.id,
@@ -251,6 +274,12 @@ async function main() {
     assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_sig'`), 0);
   });
 
+  // Production has OASIS's Stripe account pinned (Finances › Settings). Since
+  // 2026-09-30 a webhook event reaches the books only from the pinned account
+  // (stripe-ingest.ts stripeEventOrigin): `deliver` holds that account's key,
+  // and Stripe finds each event in it.
+  await raw.execute({ sql: `UPDATE fin_settings SET stripe_account_id = 'acct_test_oasis' WHERE entity_id = ?`, args: [B] });
+
   await check("webhook: idempotent on event id, one payment across charge + intent events", async () => {
     const bt = { id: "txn_1", object: "balance_transaction", amount: 50000, fee: 1480, net: 48520, currency: "cad" };
     const c1 = charge({ id: "ch_1", amount: 50000, pi: "pi_1", bt, name: "Northwind", email: "ap@northwind.test", customer: "cus_nw" });
@@ -267,7 +296,7 @@ async function main() {
     const test = await deliver("charge.succeeded", { ...c1, id: "ch_test", livemode: false }, { livemode: false });
     assert.equal(test.body.status, "ignored");
     assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_test'`), 0, "test-mode events never enter the books");
-    assert.equal(networkCalls, 0, "no key configured -> no Stripe call attempted");
+    assert.equal(networkCalls, 0, "nothing but reads of the pinned Stripe account: no write, no other host");
   });
 
   let invoiceStripe = "";
@@ -436,7 +465,11 @@ async function main() {
     assert.equal(res.status, 200);
     const body = (await res.json()) as { revenue_collected: { payments: number }; threshold: { level: string }; mrr: { mrr_cents: number } };
     assert.ok(body.revenue_collected.payments >= 3);
+    // A bank statement was imported (rbc.csv, above) with lines dated before
+    // the first revenue, so the books can hold every sale and the tracker may
+    // say "under" (books-coverage.ts; without an import it is "unconfirmed").
     assert.equal(body.threshold.level, "ok");
+    assert.equal((body as unknown as { threshold: { revenueComplete: boolean } }).threshold.revenueComplete, true);
     assert.equal(body.mrr.mrr_cents, 60000);
     const post = (payload: unknown) =>
       draftsRoute.POST(new Request("http://localhost/api/internal/finance/transactions", { method: "POST", headers: { authorization: `Bearer ${saved}` }, body: JSON.stringify(payload) }));

@@ -1,13 +1,21 @@
 /**
- * /projects — delivery projects.
+ * /projects — delivery projects: the viewer's OWN workspace's board first.
  *
- * Founders: the board, one column per stage, with filters (stage, assignee,
- * client/title search, archived) and a create form. Clients: their own
- * workspace's projects only, with the last update shared with them.
+ * Every workspace runs its own desk (lib/delivery/access.ts, relation "desk"),
+ * and this page resolves it first, exactly as /tickets does (Codex, PR #473:
+ * a client workspace's owner used to land on OASIS's vendor view here and
+ * could neither list nor create their own projects).
+ *   - Owners/admins: their workspace's board, one column per stage, with
+ *     filters (stage, assignee, client/title search, archived) and a create
+ *     form that writes to the same desk (?scope=desk). OASIS's board is the
+ *     same page it always was.
+ *   - Anyone in another workspace ALSO sees "Projects OASIS runs for you":
+ *     OASIS's projects about their workspace (relation "vendor"), with the
+ *     last update shared with them — the only view for members below
+ *     owner/admin.
  *
- * Who sees what is decided once, in lib/delivery/access.ts. An OASIS
- * non-founder gets a 404 (the route does not confirm it exists), and a failed
- * read renders as an error, never as "no projects yet".
+ * An OASIS non-founder gets a 404 (the route does not confirm it exists), and
+ * a failed read renders as an error, never as "no projects yet".
  */
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -17,12 +25,13 @@ import { ProjectCreateForm } from "@/components/delivery/ProjectForms";
 import { timeAgo } from "@/lib/fmt";
 import {
   ACTIVE_PROJECT_STAGES,
+  DELIVERY_TENANT_ID,
   PROJECT_STAGES,
   PROJECT_STAGE_LABELS,
   memberDisplayName,
   type ProjectStage,
 } from "@/lib/delivery/rules";
-import { getDeliveryAccess, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
+import { getDeliveryAccessChain, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
 import { listClientTenants, listProjects, type Project } from "@/lib/delivery/store";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
@@ -68,10 +77,47 @@ function ProjectCard({ p, assignee }: { p: Project; assignee: string | null }) {
   );
 }
 
+/** OASIS's projects about the viewer's workspace (vendor), read before render. */
+type VendorProjects = { ok: true; projects: Project[] } | { ok: false };
+
+async function loadVendorProjects(db: NonNullable<ReturnType<typeof getDeliveryDb>>, viewer: Parameters<typeof listProjects>[1]): Promise<VendorProjects> {
+  try {
+    return { ok: true, projects: (await listProjects(db, viewer)).rows };
+  } catch (err) {
+    console.error("[projects.page.vendor]", err);
+    return { ok: false };
+  }
+}
+
+function VendorProjectList({ data }: { data: VendorProjects }) {
+  if (!data.ok) return <LoadError what="your projects" />;
+  if (data.projects.length === 0) return <Card><EmptyState message="No projects are linked to your workspace yet." /></Card>;
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {data.projects.map((p) => (
+        <Link key={p.id} href={`/projects/${p.id}`} className="block rounded-xl border border-bg-border bg-bg-panel p-5 hover:border-accent/40">
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="font-semibold text-fg">{p.title}</h2>
+            <StageTag stage={p.stage} />
+          </div>
+          {p.last_client_update_body ? (
+            <p className="mt-3 line-clamp-3 text-sm text-fg-muted">
+              {p.last_client_update_body}
+              <span className="mt-1 block text-xs text-fg-dim">{timeAgo(p.last_client_update_at)}</span>
+            </p>
+          ) : (
+            <p className="mt-3 text-sm text-fg-dim">No updates shared yet.</p>
+          )}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 export default async function ProjectsPage({ searchParams }: { searchParams?: Promise<Search> }) {
-  const access = await getDeliveryAccess();
-  if (!access.ok) {
-    if (access.status === 403) notFound();
+  const { desk, vendor } = await getDeliveryAccessChain();
+  if (!desk.ok && !vendor?.ok) {
+    if (desk.status === 403) notFound();
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader title="Projects" />
@@ -79,21 +125,14 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
       </div>
     );
   }
-  const viewer = access.viewer;
   const sp = (await searchParams) ?? {};
   const db = getDeliveryDb();
   if (!db) return <LoadError what="projects" detail="The database is not configured on this deployment." />;
+  const vendorViewer = vendor?.ok && vendor.viewer.kind === "client" ? vendor.viewer : null;
+  const vendorProjects = vendorViewer ? await loadVendorProjects(db, vendorViewer) : null;
 
-  // ── client view ─────────────────────────────────────────────────────────
-  if (viewer.kind === "client") {
-    let projects: Project[] = [];
-    let failure: string | null = null;
-    try {
-      projects = (await listProjects(db, viewer)).rows;
-    } catch (err) {
-      console.error("[projects.page.client]", err);
-      failure = err instanceof Error ? err.message : String(err);
-    }
+  // ── a member below owner/admin in a client workspace: OASIS as vendor only ──
+  if (!desk.ok || desk.viewer.kind !== "founder") {
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader
@@ -101,41 +140,26 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
           subtitle="Where each of your projects stands, and the latest update from the OASIS team."
           action={<a className="btn-secondary" href={SUPPORT_FORM_PATH}>Report an issue</a>}
         />
-        {failure ? (
-          <LoadError what="your projects" />
-        ) : projects.length === 0 ? (
-          <Card><EmptyState message="No projects are linked to your workspace yet." /></Card>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            {projects.map((p) => (
-              <Link key={p.id} href={`/projects/${p.id}`} className="block rounded-xl border border-bg-border bg-bg-panel p-5 hover:border-accent/40">
-                <div className="flex items-start justify-between gap-3">
-                  <h2 className="font-semibold text-fg">{p.title}</h2>
-                  <StageTag stage={p.stage} />
-                </div>
-                {p.last_client_update_body ? (
-                  <p className="mt-3 line-clamp-3 text-sm text-fg-muted">
-                    {p.last_client_update_body}
-                    <span className="mt-1 block text-xs text-fg-dim">{timeAgo(p.last_client_update_at)}</span>
-                  </p>
-                ) : (
-                  <p className="mt-3 text-sm text-fg-dim">No updates shared yet.</p>
-                )}
-              </Link>
-            ))}
-          </div>
-        )}
+        <VendorProjectList data={vendorProjects ?? { ok: true, projects: [] }} />
       </div>
     );
   }
 
-  // ── founder view ────────────────────────────────────────────────────────
+  // ── the viewer's own workspace's board ──────────────────────────────────
+  const viewer = desk.viewer;
+  // Linking a project to a client WORKSPACE exists only on OASIS's desk; any
+  // other desk links to its own client records (lib/os/customers).
+  const oasisDesk = viewer.tenantId === DELIVERY_TENANT_ID;
   const stageFilter = PROJECT_STAGES.includes(sp.stage as ProjectStage) ? (sp.stage as ProjectStage) : null;
   let result: Awaited<ReturnType<typeof listProjects>> | null = null;
   let failure: string | null = null;
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
+  // The assignee menu's roster fails on its own (OASIS's needs both founders
+  // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
+  // The board still renders; only the menu degrades, with a notice.
+  let rosterNotice: string | null = null;
   try {
     [result, roster, directory, tenants] = await Promise.all([
       listProjects(db, viewer, {
@@ -144,9 +168,16 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         q: sp.q || null,
         includeArchived: sp.archived === "1",
       }),
-      loadAssignmentRoster(),
-      loadMemberDirectory(),
-      listClientTenants(db),
+      loadAssignmentRoster(viewer.tenantId).catch((err: unknown) => {
+        console.error("[projects.page.roster]", err);
+        const msg = err instanceof Error ? err.message : String(err);
+        rosterNotice = msg.includes("oasis_pipeline_assignment_roster_incomplete")
+          ? "Projects can't be assigned from here right now: the assignment roster needs both founders as active members of this workspace, and one is missing. Everything else on the board works."
+          : "The assignee list couldn't be loaded, so projects can't be assigned from here right now. The error has been logged; everything else on the board works.";
+        return [] as Awaited<ReturnType<typeof loadAssignmentRoster>>;
+      }),
+      loadMemberDirectory(viewer.tenantId),
+      oasisDesk ? listClientTenants(db) : Promise.resolve([]),
     ]);
   } catch (err) {
     console.error("[projects.page]", err);
@@ -179,6 +210,11 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         <LoadError what="projects" detail={failure} />
       ) : (
         <>
+          {(rosterNotice as string | null) && (
+            <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
+              {rosterNotice}
+            </p>
+          )}
           <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Active" value={active} accent />
             <Stat label="In client review" value={projects.filter((p) => p.stage === "review").length} />
@@ -246,6 +282,16 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
             </div>
           )}
         </>
+      )}
+
+      {vendorProjects && (
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">Projects OASIS runs for you</h2>
+            <p className="mt-0.5 text-[13px] text-fg-muted">Where each one stands, and the latest update from the OASIS team.</p>
+          </div>
+          <VendorProjectList data={vendorProjects} />
+        </section>
       )}
     </div>
   );

@@ -34,7 +34,17 @@ export interface TursoSession {
   exp: number;      // unix seconds
   /** Database-backed revocation epoch. Password changes increment this. */
   ver: number;
+  /**
+   * Where the onboarding gate sends this session, decided when the cookie was
+   * minted (lib/onboarding-claim.ts): "wizard", "welcome" or "done". Middleware
+   * reads it at the edge with no database call. Absent on cookies minted before
+   * 2026-09-30, which the gate never redirects. A routing hint only, never an
+   * authorization: every page and route still checks the database.
+   */
+  onb?: "done" | "wizard" | "welcome";
 }
+
+const ONBOARDING_CLAIMS: ReadonlySet<string> = new Set(["done", "wizard", "welcome"]);
 
 function secret(): string {
   const s = process.env.AUTH_SESSION_SECRET;
@@ -80,7 +90,8 @@ export function verifySession(token: string | undefined | null): TursoSession | 
     // bumps the database to one and immediately invalidates those old cookies.
     const ver = payload.ver === undefined ? 0 : payload.ver;
     if (!Number.isSafeInteger(ver) || ver < 0) return null;
-    return { sub: payload.sub, email: payload.email, exp: payload.exp, ver };
+    const onb = typeof payload.onb === "string" && ONBOARDING_CLAIMS.has(payload.onb) ? payload.onb : undefined;
+    return { sub: payload.sub, email: payload.email, exp: payload.exp, ver, ...(onb ? { onb } : {}) };
   } catch {
     return null;
   }

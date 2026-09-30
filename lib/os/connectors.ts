@@ -33,6 +33,8 @@ import {
   classifyWorkspaceConnection,
   isWorkspaceHeartbeatFresh,
 } from "@/lib/integrations/workspace-connection-status";
+import { isVerifiedHealthy } from "@/lib/connections/rules";
+import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
 
 // ── Catalog shape ──────────────────────────────────────────────────────────
 
@@ -42,7 +44,8 @@ export type ConnectorCategoryKey =
   | "meetings"
   | "messaging"
   | "ads_social"
-  | "crm_import";
+  | "crm_import"
+  | "ai_models";
 
 /** Catalog groups, in the order the hub renders them. */
 export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: string }[] = [
@@ -52,6 +55,7 @@ export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: 
   { key: "messaging", label: "Messaging" },
   { key: "ads_social", label: "Ads & social" },
   { key: "crm_import", label: "CRM import" },
+  { key: "ai_models", label: "AI models" },
 ];
 
 export type ConnectorIcon =
@@ -73,8 +77,13 @@ export type ConnectorIcon =
  *   oauth_tokens         OAuth tokens in the shared store. Authorised, but not
  *                        re-checked on page load (that would be a provider call
  *                        per render).
+ *   tenant_connection    a Connections-framework connection (tenant_connections,
+ *                        lib/connections/*): green only while its last LIVE
+ *                        probe passed and is under a day old
+ *                        (lib/connections/rules.ts isVerifiedHealthy).
  */
 export type ConnectorStatusSource =
+  | { kind: "tenant_connection"; provider: string }
   | { kind: "workspace_heartbeat"; service: "gws" | "telegram"; requireAll: readonly string[] }
   | {
       kind: "tenant_keys";
@@ -90,7 +99,17 @@ export type ConnectorStatusSource =
 export type ConnectorConnect =
   | { kind: "link"; href: string; label: string }
   /** An OAuth start route opened in a popup that postMessages `{ source }` back. */
-  | { kind: "popup"; href: string; label: string; messageSource: string };
+  | { kind: "popup"; href: string; label: string; messageSource: string }
+  /**
+   * A key pasted into the connector's drawer and posted to
+   * /api/connections/[provider]/connect, which probes it live before saving.
+   */
+  | { kind: "key_form"; label: string; provider: string }
+  /**
+   * The app's fields in the shared key store (lib/tenant-integration-schemas.ts),
+   * saved, tested and removed in the connector's drawer (ServiceKeysForm).
+   */
+  | { kind: "keys"; label: string; service: string };
 
 export type ConnectorDef = {
   slug: string;
@@ -116,12 +135,19 @@ export type ConnectorDef = {
   plannedFor?: "Phase 2" | "Later";
   /** Why it is not live yet, in plain English. */
   pendingNote?: string;
+  /**
+   * A connection tied to each person's own login, shown in the drawer under
+   * the workspace's (Google: your own Gmail and Calendar).
+   */
+  yourAccount?: "google";
+  /** Where the rest of this app's setup lives, when it is not all here. */
+  seeAlso?: { href: string; label: string };
 };
 
-/** Where the shared key editor and your own Google connection live. */
-export const CREDENTIALS_ANCHOR = "/settings/connections#integrations";
-
-const keysLink = (label: string): ConnectorConnect => ({ kind: "link", href: CREDENTIALS_ANCHOR, label });
+/** Settings › Connections with this app's drawer open. */
+export function connectorHref(slug: string): string {
+  return `/settings/connections?app=${encodeURIComponent(slug)}`;
+}
 
 // ── The catalog ────────────────────────────────────────────────────────────
 
@@ -135,15 +161,19 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["finance", "sales"],
     brandColor: "#635BFF",
     icon: { kind: "svg", file: "stripe.svg" },
-    reads: ["Payments, customers and subscriptions"],
-    does: [
-      "Shows revenue and recurring income in Finance",
-      "Creates checkout links for the proposals you send and confirms they were paid",
+    reads: [
+      "Your balance, payments, refunds and payouts",
+      "Customers, invoices and subscriptions",
     ],
-    keywords: ["payments", "billing", "mrr", "invoices"],
+    does: [
+      "Re-checks the key with Stripe every hour, so this card shows within the hour if Stripe stops accepting it",
+      "Will feed revenue and recurring income into Finance once the Finance sync ships (next release)",
+      "Never charges a card, issues a refund or moves money: the key it accepts is read-only",
+    ],
+    keywords: ["payments", "billing", "mrr", "invoices", "restricted key"],
     live: {
-      source: { kind: "tenant_keys", service: "stripe", requireAll: ["secret_key"], verifiable: true },
-      connect: keysLink("Add your Stripe key"),
+      source: { kind: "tenant_connection", provider: "stripe" },
+      connect: { kind: "key_form", label: "Connect Stripe", provider: "stripe" },
     },
   },
   {
@@ -210,8 +240,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     keywords: ["gmail", "calendar", "email", "drive", "meet", "google"],
     live: {
       source: { kind: "workspace_heartbeat", service: "gws", requireAll: ["app_password", "from_address"] },
-      connect: keysLink("Connect Google"),
+      connect: { kind: "keys", label: "Connect Google", service: "gws" },
     },
+    yourAccount: "google",
   },
   {
     slug: "calendly",
@@ -300,15 +331,23 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["chief_of_staff", "sales", "marketing", "client_success"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Sl", reason: "Removed from Simple Icons at Slack's request" },
-    reads: ["Messages in the channels you add an AI teammate to, and messages sent to it directly"],
+    reads: [
+      "Messages in the public channels you map to a department or a client",
+      "Messages that @mention OASIS, and the name and email of the person who wrote them",
+    ],
     does: [
-      "Your department agents reply in those channels under their own names",
-      "Approval requests arrive as buttons, and nothing goes out until someone approves",
-      "Messages are never used for training",
+      "Your department drafts a reply in the thread when someone @mentions it, under the department's name",
+      SLACK_APPROVAL_RULE,
+      "Messages in a channel mapped to a client show on that client's Conversations tab, and are deleted after 90 days",
+      "Guests, people from other companies and channels shared with other companies are never read or answered",
     ],
     keywords: ["chat", "channels", "team"],
-    live: null,
-    plannedFor: "Phase 2",
+    live: {
+      source: { kind: "tenant_connection", provider: "slack" },
+      connect: { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" },
+    },
+    pendingNote: "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here.",
+    seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
   },
   {
     slug: "telegram",
@@ -323,8 +362,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     keywords: ["chat", "alerts", "bot"],
     live: {
       source: { kind: "workspace_heartbeat", service: "telegram", requireAll: ["bot_token", "chat_id"] },
-      connect: { kind: "link", href: "/settings/chat-apps", label: "Set up Telegram" },
+      connect: { kind: "keys", label: "Set up Telegram", service: "telegram" },
     },
+    seeAlso: { href: "/settings/chat-apps", label: "Your own Telegram alerts are under Chat apps" },
   },
   {
     slug: "twilio",
@@ -345,7 +385,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
         requireAny: ["from_number", "messaging_service_sid"],
         verifiable: true,
       },
-      connect: keysLink("Add your Twilio keys"),
+      connect: { kind: "keys", label: "Add your Twilio keys", service: "twilio" },
     },
   },
   {
@@ -465,6 +505,34 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     live: null,
     plannedFor: "Phase 2",
   },
+
+  // AI models
+  {
+    // Jev, TypeSafe's System One model: a fast classifier the workspace pays
+    // for with its OWN TypeSafe key. Shadow only: it never decides anything
+    // (lib/jev/mode.ts). Mode and agreement live on Settings > AI brain.
+    slug: "jev",
+    name: "Jev (TypeSafe)",
+    summary: "A fast classifier, run beside OASIS in shadow",
+    category: "ai_models",
+    // Client Success: support-ticket triage. Chief of Staff: which department a
+    // general Slack message belongs to. The two places it shadows.
+    departments: ["client_success", "chief_of_staff"],
+    brandColor: null,
+    icon: { kind: "monogram", letters: "Jv", reason: "Not in Simple Icons" },
+    reads: ["Jev's answers to the questions OASIS asks it: a label and how sure it is"],
+    does: [
+      "Once OASIS lists TypeSafe as a processor: classifies new support tickets and general Slack messages in shadow, beside OASIS's normal path, and records only whether it agreed. Until then it only checks the key",
+      "Never decides, sends or changes anything on its own",
+      "The text it classifies goes to TypeSafe in the United States. TypeSafe's policy says it does not train on it",
+    ],
+    keywords: ["typesafe", "classifier", "system one", "shadow", "model"],
+    live: {
+      source: { kind: "tenant_connection", provider: "jev" },
+      connect: { kind: "key_form", label: "Connect Jev", provider: "jev" },
+    },
+    seeAlso: { href: "/settings/ai", label: "Mode, cost and agreement are under AI brain" },
+  },
 ];
 
 // ── Status ─────────────────────────────────────────────────────────────────
@@ -483,6 +551,24 @@ export type ConnectorStatus = {
   label: string;
   /** A second line for the drawer and tooltips. */
   detail?: string;
+  /** The connected account, as the provider named it (framework connections only). */
+  account?: string;
+};
+
+/**
+ * One live (not revoked) tenant_connections row, as the hub sees it: state and
+ * health only, never a credential.
+ */
+export type ConnectionFact = {
+  provider: string;
+  status: string;
+  account_id: string | null;
+  account_label: string | null;
+  environment: string | null;
+  last_health_at: string | null;
+  last_health_verdict: string | null;
+  last_health_code: string | null;
+  last_health_detail: string | null;
 };
 
 /** One row of listTenantIntegrationStatus — presence and test state, never a value. */
@@ -510,6 +596,13 @@ export type ConnectorFacts = {
   heartbeats: readonly HeartbeatFact[] | null;
   /** The viewer's own Google (gmail_oauth) link, or null when it could not be read. */
   personalGoogleLinked: boolean | null;
+  /** The tenant's live Connections-framework connections. */
+  connections: readonly ConnectionFact[] | null;
+  /**
+   * Providers that need OASIS's own app and do not have it on this deployment
+   * (Slack without its Worker secrets). Their cards say so and offer nothing.
+   */
+  appNotConfigured?: readonly string[] | null;
 };
 
 /** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
@@ -605,6 +698,99 @@ function keyedStatus(
       };
 }
 
+function accountLine(row: ConnectionFact): string | undefined {
+  const name = row.account_label ?? row.account_id;
+  if (!name) return undefined;
+  return row.environment === "test" ? `${name} · test mode` : name;
+}
+
+/**
+ * A Connections-framework card. Green comes ONLY from isVerifiedHealthy — a
+ * connected row whose last live probe passed under a day ago. Everything else
+ * says what is true in plain words, with the probe's own explanation.
+ */
+function frameworkStatus(
+  def: ConnectorDef,
+  provider: string,
+  connections: readonly ConnectionFact[],
+  keyRows: readonly KeyRowFact[] | null,
+  nowMs: number,
+): ConnectorStatus {
+  const row = connections.find((c) => c.provider === provider && c.status !== "revoked");
+  if (!row) {
+    // Stripe only: the Credentials store may also hold a separate secret key
+    // (checkout links for proposals). It is not this connection and never makes
+    // it green, but an owner deserves to know both exist.
+    const legacyKey =
+      provider === "stripe" &&
+      !!keyRows?.some((r) => r.service === "stripe" && r.field_key === "secret_key" && r.has_value);
+    return {
+      kind: "not_connected",
+      label: "Not connected",
+      detail: legacyKey
+        ? "A Stripe secret key is also saved under Keys and accounts for checkout links. That key is separate and is not used as this read-only connection."
+        : undefined,
+    };
+  }
+  const account = accountLine(row);
+  if (isVerifiedHealthy(row, nowMs)) {
+    return {
+      kind: "connected",
+      label: `Connected · verified ${formatVerifiedAgo(row.last_health_at, nowMs)}`,
+      detail: `The last live check with ${def.name} passed.`,
+      account,
+    };
+  }
+  switch (row.status) {
+    case "connected":
+      if (row.last_health_code === "provider_unreachable" || row.last_health_code === "unexpected_response") {
+        return {
+          kind: "configured",
+          label: `Connected · ${def.name} did not answer the last check`,
+          detail: row.last_health_detail ?? `OASIS could not reach ${def.name}. It will check again within the hour.`,
+          account,
+        };
+      }
+      return {
+        kind: "configured",
+        label: "Connected · waiting for a health check",
+        detail: "No live check has passed in the last 24 hours. OASIS re-checks every hour; Test again runs one now.",
+        account,
+      };
+    case "pending":
+      return {
+        kind: "configured",
+        label: "Setting up · not verified yet",
+        detail: "The connection has not passed a live check yet.",
+        account,
+      };
+    case "pending_review":
+      return {
+        kind: "configured",
+        label: "Pending platform approval",
+        detail: row.last_health_detail ?? undefined,
+        account,
+      };
+    case "expired":
+      return {
+        kind: "attention",
+        label: "Key no longer accepted",
+        detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
+        account,
+      };
+    case "degraded":
+    case "error":
+      return {
+        kind: "attention",
+        label: "Needs attention",
+        detail: row.last_health_detail ?? "The last live check found a problem.",
+        account,
+      };
+    default:
+      return { ...UNKNOWN, account };
+  }
+}
+
 /**
  * The status a card shows. Pure: the same facts and `nowMs` always give the
  * same words, which is what lets the test feed it hostile inputs.
@@ -624,6 +810,19 @@ export function resolveConnectorStatus(
   }
 
   const source = def.live.source;
+  if (source.kind === "tenant_connection") {
+    // An app OASIS itself has not been given on this deployment cannot be
+    // connected, whatever the facts say: say so rather than offer a dead button.
+    if (facts.appNotConfigured?.includes(source.provider)) {
+      return {
+        kind: "coming_soon",
+        label: `${def.name} app not configured yet`,
+        detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
+      };
+    }
+    if (!facts.connections) return UNKNOWN;
+    return frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs);
+  }
   if (source.kind === "tenant_keys" || source.kind === "oauth_tokens") {
     if (!facts.keyRows) return UNKNOWN;
     return keyedStatus(source, facts.keyRows, nowMs);

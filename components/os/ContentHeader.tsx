@@ -19,7 +19,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronRight, MessageSquareText } from "lucide-react";
-import { breadcrumbLabel } from "@/lib/os/match";
+import { breadcrumbTrail } from "@/lib/os/match";
 import { useWarmOnIntent } from "@/components/os/RailRow";
 
 export type ContentHeaderProps = {
@@ -33,7 +33,9 @@ export type ContentHeaderProps = {
 
 export function ContentHeader({ workspace, entries, askHref }: ContentHeaderProps) {
   const pathname = usePathname() || "/";
-  const page = breadcrumbLabel(pathname, entries);
+  // Usually one crumb; a page that belongs to a section it does not share a
+  // path with gets the section first ("Money › Invoices", lib/os/match.ts).
+  const trail = breadcrumbTrail(pathname, entries);
   const warmHome = useWarmOnIntent("/");
   return (
     <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-hairline px-4 md:px-5">
@@ -50,18 +52,32 @@ export function ContentHeader({ workspace, entries, askHref }: ContentHeaderProp
               {workspace}
             </Link>
           </li>
-          <li aria-hidden className="shrink-0 text-fg-dim">
-            <ChevronRight size={14} strokeWidth={1.75} />
-          </li>
-          <li className="min-w-0">
-            <span aria-current="page" className="block truncate font-medium text-fg">
-              {page}
-            </span>
-          </li>
+          {trail.map((crumb, i) => {
+            const last = i === trail.length - 1;
+            return (
+              <Crumb key={`${i}:${crumb}`} label={crumb} current={last} />
+            );
+          })}
         </ol>
       </nav>
       {askHref && <AskLink href={askHref} />}
     </header>
+  );
+}
+
+/** A chevron, then one crumb: the page itself (current) or the section it sits in. */
+function Crumb({ label, current }: { label: string; current: boolean }) {
+  return (
+    <>
+      <li aria-hidden className="shrink-0 text-fg-dim">
+        <ChevronRight size={14} strokeWidth={1.75} />
+      </li>
+      <li className="min-w-0">
+        <span aria-current={current ? "page" : undefined} className={`block truncate ${current ? "font-medium text-fg" : "text-fg-muted"}`}>
+          {label}
+        </span>
+      </li>
+    </>
   );
 }
 

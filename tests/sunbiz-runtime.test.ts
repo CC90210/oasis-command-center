@@ -21,7 +21,11 @@ assert.ok(!/items\.filter\(\(m\) => !\(m\.unreadCount/.test(ingest));
 assert.match(ingest, /provider_message_id:\s*textTorrentMessageFingerprint/);
 const webhook = readFileSync("app/api/webhooks/texttorrent/sms-inbound/route.ts", "utf8");
 assert.match(webhook, /error: "no_tenant_mapping"[\s\S]*status: 503/);
-assert.match(webhook, /error: "suppression_failed"[\s\S]*status: 503/);
+// The STOP path moved into lib/sms-opt-out.ts (#353), shared with the Twilio
+// front door: the webhook returns whatever that mapping says, and the mapping
+// is what keeps a failed suppression a 503 the provider retries.
+assert.match(webhook, /smsSuppressionFailureResponse\(error\)[\s\S]*status: failure\.status/);
+assert.match(readFileSync("lib/sms-opt-out.ts", "utf8"), /error: "suppression_failed", status: 503/);
 assert.match(webhook, /provider_message_id: providerMessageId/);
 assert.match(webhook, /from\("texttorrent_inbound_work"\)/);
 const route = readFileSync("app/api/conversations/drafts/[id]/route.ts", "utf8");

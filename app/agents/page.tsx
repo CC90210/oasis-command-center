@@ -3,8 +3,9 @@
  *
  * WHAT IT SHOWS
  *   Department leads   the agent behind each department channel the viewer
- *                      can open, with where it lives (Web today; Slack and
- *                      Telegram are Phase 2 and say so).
+ *                      can open, with where it lives (Web; Slack as the
+ *                      workspace's real state, lib/slack/status.ts; Telegram
+ *                      is Phase 2 and says so).
  *   Custom teammates   agents this workspace built in the builder, On/Off as
  *                      the workspace manifest has them.
  *   New teammate       owners/admins: the existing builder, plus six starting
@@ -113,6 +114,7 @@ export default async function AiTeamPage() {
                 summary={lead.summary}
                 departments={lead.departments}
                 web={lead.web}
+                slack={lead.slack}
                 href={lead.departments[0]?.href ?? null}
               />
             ))}

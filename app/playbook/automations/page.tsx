@@ -1,9 +1,12 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
-export default function IndustryAutomationPlaybookPage() {
+export default async function IndustryAutomationPlaybookPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   return (
     <div className="space-y-6 animate-fade-in">
       <Link href="/playbook" className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-accent">

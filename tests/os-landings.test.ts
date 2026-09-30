@@ -87,6 +87,13 @@ stub("next/link", {
   default: ({ href, children, ...rest }: { href: string; children?: unknown }) =>
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
+// The Money overview's six-month chart is a recharts client component (class
+// components, which react-server does not ship). A named stand-in keeps the
+// page's own decision to draw it visible (as tests/queries-fail-loud-callers
+// does for /analytics' charts).
+stub(join(__dirname, "..", "components", "founders", "finances", "InOutChart.tsx"), {
+  InOutChart: (props: { data?: unknown[] }) => ReactNS.createElement("figure", { "data-chart": "InOutChart", "aria-label": `InOutChart ${(props.data ?? []).length} months` }),
+});
 // `after` needs a live request scope; the Money page schedules its overdue
 // sweep with it. Recorded, not run.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stub
@@ -195,7 +202,8 @@ async function main() {
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, agents_enabled TEXT,
-      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT);
+      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT, invited_by TEXT, joined_at TEXT,
+      manager_user_id TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
@@ -205,12 +213,15 @@ async function main() {
     CREATE TABLE agent_state_snapshot (agent_name TEXT PRIMARY KEY, tick_count INTEGER, last_tick_at TEXT,
       working_memory TEXT, health_status TEXT);
     CREATE TABLE integrations_health (id TEXT PRIMARY KEY, tenant_id TEXT, service TEXT, status TEXT,
-      last_ping_at TEXT);
+      last_ping_at TEXT, metadata TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT, created_at TEXT, updated_at TEXT);
   `);
   // The finances book and the delivery tables in their real, migrated shape.
   await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   const delivery = readFileSync(join(ROOT, "database/turso/183_delivery_and_support.turso.sql"), "utf8");
   const deliveryTables = delivery.match(
     /CREATE TABLE IF NOT EXISTS (?:delivery_projects|delivery_tasks|delivery_updates|support_tickets|ticket_comments) \([\s\S]*?\n\);/g,
@@ -266,6 +277,13 @@ async function main() {
       event("e-client", CLIENT, "bravo", "BRAVO_RECORD_CREATED", { note: "CLIENT-MARKER" }),
       event("e-unstamped", null, "bravo", "BRAVO_RECORD_CREATED", { note: "UNSTAMPED-MARKER" }),
       { sql: "INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at) VALUES ('bravo', 41, ?)", args: [iso(2 * MINUTE)] },
+      // Running comes from the agent's processes (pm2.<agent>-*), not its tick
+      // (2026-09-30): bravo's scheduler checked in 2 minutes ago, atlas's
+      // Telegram bridge an hour ago, and maven never reported.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-1', ?, 'pm2.bravo-scheduler', 'healthy', ?)", args: [OASIS, iso(2 * MINUTE)] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-2', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [OASIS, iso(60 * MINUTE)] },
+      // Another workspace's fresh ping for the same process must not light OASIS's fleet.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-3', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [CLIENT, iso(1 * MINUTE)] },
       // Pipeline: one paid client with a project and an open ticket, one lost deal.
       lead("lead-won", { stage: "in_build", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test", last_contacted_at: iso(3 * 24 * 60 * MINUTE) }),
       lead("lead-lost", { stage: "lost", company: "Gone Co", email: "x@gone.test" }),
@@ -292,25 +310,36 @@ async function main() {
   const { getTursoClient } = await import("../lib/turso");
   const client = getTursoClient() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
   let sqlLog: string[] = [];
+  // The bound arguments of each statement, in step with sqlLog: which tenant a
+  // statement was pinned to is in its args, not its text.
+  let argsLog: unknown[][] = [];
   const sqlOf = (stmt: unknown): string => (typeof stmt === "string" ? stmt : String((stmt as { sql?: unknown })?.sql ?? ""));
+  const argsOfStmt = (stmt: unknown): unknown[] => {
+    const a = typeof stmt === "string" ? [] : (stmt as { args?: unknown })?.args;
+    return Array.isArray(a) ? a : a && typeof a === "object" ? Object.values(a as Record<string, unknown>) : [];
+  };
   for (const name of ["execute", "batch"] as const) {
     const original = (Object.getPrototypeOf(client) as Record<string, (...a: unknown[]) => Promise<unknown>>)[name];
     assert.equal(typeof original, "function", `libSQL client has a prototype ${name}`);
     client[name] = async function (this: unknown, ...a: unknown[]) {
-      if (name === "batch" && Array.isArray(a[0])) for (const s of a[0]) sqlLog.push(sqlOf(s));
-      else sqlLog.push(sqlOf(a[0]));
+      const stmts = name === "batch" && Array.isArray(a[0]) ? (a[0] as unknown[]) : [a[0]];
+      for (const s of stmts) {
+        sqlLog.push(sqlOf(s));
+        argsLog.push(argsOfStmt(s));
+      }
       return original.apply(this, a);
     };
   }
-  async function recording<T>(fn: () => Promise<T>): Promise<{ result: T | Error; sql: string[] }> {
+  async function recording<T>(fn: () => Promise<T>): Promise<{ result: T | Error; sql: string[]; args: unknown[][] }> {
     sqlLog = [];
+    argsLog = [];
     let result: T | Error;
     try {
       result = await fn();
     } catch (e) {
       result = e as Error;
     }
-    return { result, sql: sqlLog };
+    return { result, sql: sqlLog, args: argsLog };
   }
   const touchesFin = (sql: string[]) => sql.filter((s) => /\bfin_[a-z_]+/i.test(s));
   const touchesEvents = (sql: string[]) => sql.filter((s) => /\bagent_events\b/i.test(s));
@@ -411,17 +440,31 @@ async function main() {
     await login("cc");
     const hub = await AdminPage();
     const hubText = text(hub);
-    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox", "/system-health"]) {
+    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox"]) {
       assert.ok(hubText.includes(door), `the hub links ${door}`);
     }
+    // One System health (2026-09-30): /system-health redirects to /health and
+    // has no door of its own; the harness is named for what it is.
+    assert.ok(!hubText.includes("/system-health"), "no second System health door");
+    assert.ok(hubText.includes("Coding harness") && !hubText.includes("Agent console"), "the harness door is named Coding harness");
+    assert.doesNotMatch(hubText, /state-api|guard substrate/i, "no engineering-internal copy on the hub");
     const fleetTree = await FleetPage();
     const fleetProp = walk(fleetTree).elements.find((e) => e.props && "fleet" in e.props)?.props.fleet as
-      | { agents: string[]; signalsKnown: boolean; signals: Map<string, { live: boolean; tickCount: number | null }> }
+      | {
+          agents: string[];
+          signalsKnown: boolean;
+          signals: Map<string, { live: boolean; tickCount: number | null; lastTaskAt: string | null; processCount: number }>;
+        }
       | undefined;
     assert.ok(fleetProp, "the fleet reached the page");
     assert.equal(fleetProp.signalsKnown, true);
-    assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo ticked 2 minutes ago");
+    assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo's scheduler process checked in 2 minutes ago");
     assert.equal(fleetProp.signals.get("bravo")?.tickCount, 41);
+    assert.ok(fleetProp.signals.get("bravo")?.lastTaskAt, "the last tick is kept as Last task");
+    if (fleetProp.agents.includes("atlas")) {
+      assert.equal(fleetProp.signals.get("atlas")?.live, false, "atlas's only process last checked in an hour ago; another workspace's ping does not count");
+      assert.equal(fleetProp.signals.get("atlas")?.processCount, 1);
+    }
   });
   await check("/admin + /admin/agents: requireOperator() is the first statement", () => {
     assert.equal(firstStatement("app/admin/page.tsx"), "await requireOperator();");
@@ -551,7 +594,18 @@ async function main() {
     const run = await recording(() => ClientsPage());
     assert.ok(!(run.result instanceof Error), String(run.result));
     assert.ok(!text(run.result).includes("Harbour"));
-    assert.deepEqual(run.sql.filter((s) => /tenant_records|delivery_projects|support_tickets/i.test(s)), []);
+    // Since every workspace runs its own desk (bravo__188), a client workspace's
+    // /clients reads ITS OWN client records and desk counts. What must never
+    // happen is a read of OASIS's rows: every statement that touches a
+    // records/delivery table is bound to the client's tenant, never OASIS's.
+    const touching = run.sql
+      .map((s, i) => ({ s, args: run.args[i] }))
+      .filter(({ s }) => /tenant_records|delivery_projects|support_tickets|\bcustomers\b/i.test(s));
+    for (const { s, args } of touching) {
+      assert.ok(args.includes(CLIENT), `bound to the client's own tenant: ${s.slice(0, 80)}`);
+      assert.ok(!args.includes(OASIS), `never bound to OASIS's tenant: ${s.slice(0, 80)}`);
+    }
+    assert.equal(run.sql.some((s) => /\btenant_records\b/i.test(s)), false, "no pipeline-derived clients outside OASIS");
   });
   await check("/clients: a ticket list past its read cap shows floors (N+), never a total", async () => {
     const { CLIENTS_DELIVERY_LIMIT } = await import("../components/os/landings/clients-data");
@@ -575,11 +629,23 @@ async function main() {
       assert.deepEqual(table?.rows.map((r) => [r.name, r.openTickets]), [["Harbour Dental", CLIENTS_DELIVERY_LIMIT]]);
       assert.equal(table?.floors.openTickets, true, "the per-client ticket count is marked as a floor");
       assert.equal(table?.floors.activeProjects, false, "the project list was not capped");
+      // Client records lead the page now (migration bravo__188), so the
+      // subtitle carries no counts: it cannot print an unfloored total. The
+      // derived list's floors are asserted on the table and the words below.
       const subtitle = els.find((e) => e.props && e.props.title === "Clients" && "subtitle" in e.props)?.props.subtitle;
-      assert.equal(subtitle, `1 client · ${CLIENTS_DELIVERY_LIMIT}+ open tickets · 1 active project`);
+      assert.equal(subtitle, "The customers your business serves.");
       const all = walk(tree).strings.join("");
       assert.ok(all.includes(`Only the first ${CLIENTS_DELIVERY_LIMIT} open tickets were read`), "the cap is said in words");
-      assert.ok(all.includes(`${CLIENTS_DELIVERY_LIMIT}+`), "the table cell prints the floor");
+      // walk() records elements without rendering function components, so the
+      // cell has to be rendered here: ClientsTable, then each Count in it.
+      // (Before client records, this check passed on the SUBTITLE's "500+",
+      // never on a cell.)
+      const tableEl = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)!;
+      const tableTree = (tableEl.type as (p: unknown) => unknown)(tableEl.props);
+      const cells = walk(tableTree)
+        .elements.filter((e) => e.props && "value" in e.props && "hidden" in e.props)
+        .map((e) => String(((e.type as (p: unknown) => { props: { children: unknown } })(e.props)).props.children));
+      assert.ok(cells.includes(`${CLIENTS_DELIVERY_LIMIT}+`), `the table cell prints the floor: ${JSON.stringify(cells)}`);
     } finally {
       await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
     }
@@ -685,7 +751,8 @@ async function main() {
     for (const t of [...failed.headline, ...failed.month]) assert.equal(t.status, "error", t.label);
     const live = mm.moneyTiles(
       {
-        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0 },
+        // A bank line imported (the books hold bank data) and the whole book covered.
+        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0, coverage: { complete: true, gaps: [], bankLines: 1 }, books: { complete: true, gaps: [] } },
         collected: { cad_cents: 0, usd_cents: 0, payments: 0, fx_missing_days: [] },
         mrr: { mrr_cents: 0, currency: "CAD", active_subscriptions: 0, as_of: "2026-09-27T00:00:00Z" },
         recent: [{}],
@@ -695,7 +762,8 @@ async function main() {
     );
     const mrr = live.headline.find((t) => t.id === "mrr");
     assert.deepEqual([mrr?.status, mrr?.value], ["live", "CA$0.00"], "a synced Stripe with no subscriptions is a real zero");
-    assert.equal(live.headline.find((t) => t.id === "cash")?.status, "live", "books with a transaction are live");
+    assert.equal(live.headline.find((t) => t.id === "cash")?.status, "live", "books with an imported bank line are live");
+    assert.equal(live.month.find((t) => t.id === "in")?.status, "live", "a whole book's month is a real month");
   });
 
   if (failures > 0) {

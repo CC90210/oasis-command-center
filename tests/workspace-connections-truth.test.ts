@@ -77,8 +77,14 @@ const personal = readFileSync(
   join(root, "components", "settings", "PersonalIntegrationsPanel.tsx"),
   "utf8",
 );
+// Each app's keys are set up in its own Connections drawer (one card per app,
+// CC 2026-09-29); the page-wide IntegrationKeysPanel was deleted.
 const keysPanel = readFileSync(
-  join(root, "components", "settings", "IntegrationKeysPanel.tsx"),
+  join(root, "components", "os", "connections", "ServiceKeysForm.tsx"),
+  "utf8",
+);
+const connectorDrawer = readFileSync(
+  join(root, "components", "os", "connections", "ConnectorDrawer.tsx"),
   "utf8",
 );
 const keysRoute = readFileSync(
@@ -167,8 +173,8 @@ assert.ok(
   "the shared Telegram setup must expose the destination required by its status contract",
 );
 assert.ok(
-  keysPanel.includes("TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS") &&
-    !keysPanel.includes("{INTEGRATION_SCHEMAS.filter"),
+  keysPanel.includes("findTenantManuallyEditableIntegrationSchema(service)") &&
+    !keysPanel.includes("INTEGRATION_SCHEMAS"),
   "the tenant editor must render only shared, manually provisioned integrations",
 );
 assert.ok(
@@ -197,10 +203,16 @@ assert.ok(
   "Settings must retain one clear Team management CTA",
 );
 assert.ok(
-  settings.includes('title="Credentials"') &&
+  connectorDrawer.includes('def.yourAccount === "google"') &&
+    connectorDrawer.includes("<PersonalIntegrationsPanel") &&
     settings.includes("<PersonalIntegrationsPanel") &&
     settings.includes("<TelegramConnectCard"),
-  "personal Google and Telegram controls must live inside the consolidated Credentials sections",
+  "your own Google lives in the Google drawer (members: their personal view), Telegram under Chat apps",
+);
+assert.equal(
+  settings.includes('title="Credentials"'),
+  false,
+  "Settings must not list the apps a second time under a Credentials card",
 );
 assert.equal(
   personal.includes("Your account connections"),
@@ -208,7 +220,7 @@ assert.equal(
   "the personal controls must not create a second titled connection surface inside Credentials",
 );
 assert.ok(
-    keysPanel.includes('"Email-only"') &&
+    /Email-only: the keys are saved, but texting stays off until Twilio passes Test\./.test(keysPanel) &&
     keysPanel.includes("twilioVerified") &&
     testRoute.includes("missing_sender") &&
     testRoute.includes('j.status !== "active"') &&
@@ -216,8 +228,8 @@ assert.ok(
   "Twilio must remain visibly email-only until its account and sender pass Test",
 );
 assert.ok(
-  keysPanel.includes("configured in deployment") &&
-    keysPanel.includes("Connection test passed.") &&
+  keysPanel.includes('r.source === "environment" ? "Set by OASIS"') &&
+    keysPanel.includes("passed.") &&
     testRoute.includes("await transport.verify()"),
   "deployment-backed Google Workspace must render configured and support a side-effect-free SMTP auth test",
 );

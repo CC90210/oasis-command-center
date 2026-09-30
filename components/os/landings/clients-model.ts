@@ -1,7 +1,10 @@
 /**
  * clients-model — one list of "the business's customers" out of the three
- * places OASIS already records them, until the `customers` table (plan D5)
- * exists. PURE: tests/os-landings.test.ts runs the merge in bare node.
+ * places OASIS recorded them before the `customers` table (plan D5, migration
+ * bravo__188) existed. /clients now lists client records first and shows these
+ * below as "Not yet client records" until each won deal is converted (a
+ * converted deal is left out there). PURE: tests/os-landings.test.ts runs the
+ * merge in bare node.
  *
  * Sources, all OASIS-workspace data the viewer was already allowed to read:
  *   won deals   tenant_records leads whose stage proves a sale: won, then the
@@ -25,12 +28,24 @@
 /** Stages that mean "this deal is now a client" (paid, then delivery). */
 export const CLIENT_STAGES = ["won", "onboarding", "in_build", "client_review", "launched"] as const;
 
+/**
+ * Stages that mean "this WAS a client and the engagement ended": the retired
+ * 11-stage key `churned` that older rows may still carry
+ * (lib/oasis-lead-stage-engine.ts manual_archive lists it as legacy). Such a
+ * deal is a past client, so it is returned in `past`, never among the clients
+ * still to convert. (A launched deal whose engagement ended today is filed
+ * under Past by the founder's "Mark engagement ended", which makes it a Past
+ * client record; nothing here edits a lead.)
+ */
+export const ENDED_LEAD_STAGES = ["churned"] as const;
+
 const STAGE_LABEL: Record<string, string> = {
   won: "Won",
   onboarding: "Onboarding",
   in_build: "In build",
   client_review: "Client review",
   launched: "Launched",
+  churned: "Engagement ended",
 };
 
 const PROJECT_STAGE_LABEL: Record<string, string> = {
@@ -98,7 +113,13 @@ export type ClientFloors = {
   unlinkedTickets: boolean;
 };
 
-export type ClientsBuild = { rows: ClientRow[]; unlinkedTickets: number | null; floors: ClientFloors };
+export type ClientsBuild = {
+  rows: ClientRow[];
+  /** Deals whose engagement ended (ENDED_LEAD_STAGES): past clients, not clients to convert. */
+  past: ClientRow[];
+  unlinkedTickets: number | null;
+  floors: ClientFloors;
+};
 
 /** A count as the page prints it: "12+" when it is a floor. One rule for the whole shell (lib/os/count.ts). */
 export { floorCount as shownCount } from "@/lib/os/count";
@@ -166,9 +187,12 @@ export function buildClientRows(input: {
     tenantIds: new Set(),
   });
 
+  const pastKeys = new Set<string>();
   for (const lead of input.leads) {
     const stage = str(lead.data.stage) || "";
-    if (!(CLIENT_STAGES as readonly string[]).includes(stage)) continue;
+    const ended = (ENDED_LEAD_STAGES as readonly string[]).includes(stage);
+    if (!ended && !(CLIENT_STAGES as readonly string[]).includes(stage)) continue;
+    if (ended) pastKeys.add(`lead:${lead.id}`);
     const company = str(lead.data.company) || str(lead.data.business_name);
     const person = str(lead.data.name) || str(lead.data.contact_name);
     const email = str(lead.data.email);
@@ -226,13 +250,15 @@ export function buildClientRows(input: {
     acc.lastTouch = latest(acc.lastTouch, t.last_public_reply_at, t.created_at);
   }
 
-  const out: ClientRow[] = [...rows.values()].map(({ emails: _e, projectIds: _p, tenantIds: _t, ...row }) => row);
-  out.sort((a, b) => {
+  const all: ClientRow[] = [...rows.values()].map(({ emails: _e, projectIds: _p, tenantIds: _t, ...row }) => row);
+  all.sort((a, b) => {
     const ta = a.lastTouch ? Date.parse(a.lastTouch) : -Infinity;
     const tb = b.lastTouch ? Date.parse(b.lastTouch) : -Infinity;
     if (ta !== tb) return tb - ta;
     return a.name.localeCompare(b.name);
   });
+  const out = all.filter((r) => !pastKeys.has(r.key));
+  const past = all.filter((r) => pastKeys.has(r.key));
   const capped = input.capped ?? {};
   const leadsCapped = capped.leads === true;
   const projectsCapped = projectsKnown && capped.projects === true;
@@ -240,6 +266,7 @@ export function buildClientRows(input: {
   const unlinkedKnown = ticketsKnown && !leadsCapped && !projectsCapped;
   return {
     rows: out,
+    past,
     unlinkedTickets: unlinkedKnown ? unlinked : null,
     floors: {
       clients: leadsCapped || projectsCapped,

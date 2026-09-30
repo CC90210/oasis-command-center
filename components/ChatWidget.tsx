@@ -12,6 +12,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { bridgeProbeTimeoutMs, chatReadiness, harnessOwnsUrlParams } from "@/lib/admin/chat-readiness";
+import { PendingHarnessActions, pendingFromFrame, type PendingHarnessAction } from "@/components/admin/PendingHarnessActions";
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
 import { mdToHtml } from "@/lib/markdown";
@@ -543,6 +545,12 @@ type Props = {
    * turn still survives navigation; only the not-yet-needed prewarm/poll pause.
    */
   active?: boolean;
+  /**
+   * Picker labels per agent key, when this instance is the Coding harness
+   * (lib/admin/harness-targets.ts): "Marketing · CMO-Agent" instead of a
+   * persona name. Absent: the per-user display name, as before.
+   */
+  targetLabels?: Record<string, string>;
 };
 
 function seedMessagesForAgent(
@@ -561,17 +569,19 @@ function mintTabId(): string {
     : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card", active = true }: Props) {
+export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMessages, advancedPicker, tenantBridgeOwner, serverBridgeOnline, variant = "card", active = true, targetLabels }: Props) {
   const isFullscreenVariant = variant === "fullscreen";
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  // URL params let /reasoning Quick Actions deep-link a prompt + agent
-  // straight into the composer. Read once on mount, then strip from URL
-  // so a refresh doesn't re-fire the prompt.
-  const urlAgent = searchParams?.get("agent");
-  const urlPrompt = searchParams?.get("prompt");
-  const urlAutosend = searchParams?.get("autosend") === "1";
+  // URL params let a deep link (/agent?agent=…&prompt=…) put a target and a
+  // prompt straight into the composer, then are stripped so a refresh doesn't
+  // re-fire the prompt. Only while this instance is the one on /agent: hidden
+  // on another page, it must leave that page's params alone.
+  const ownsUrl = harnessOwnsUrlParams(active, pathname);
+  const urlAgent = ownsUrl ? searchParams?.get("agent") : null;
+  const urlPrompt = ownsUrl ? searchParams?.get("prompt") : null;
+  const urlAutosend = ownsUrl && searchParams?.get("autosend") === "1";
 
   const initialAgent = urlAgent && agentKeys.includes(urlAgent)
     ? urlAgent
@@ -595,6 +605,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // hasn't set an override. Used wherever an agent name surfaces in
   // the chat chrome.
   const { labelFor: agentDisplayName } = useAgentDisplayNames();
+  // On the Coding harness the keys are repos, not department personas: every
+  // label that names the target reads the harness target when there is one.
+  const targetLabel = (k: string) => targetLabels?.[k] ?? agentDisplayName(k);
   const [messages, setMessages] = useState<Msg[]>(() => seedMessagesForAgent(initialAgent, welcomeMessages));
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -657,7 +670,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (slashArgCommand === "agent") {
       return agentKeys.map((k) => ({
         value: k,
-        label: agentDisplayName(k),
+        label: targetLabels?.[k] ?? agentDisplayName(k),
         hint: getAgentInfo(k).tagline,
       }));
     }
@@ -678,7 +691,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, configs, agentDisplayName]);
+  }, [slashArgCommand, agentKeys, configs, agentDisplayName, targetLabels]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
@@ -728,6 +741,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       dismissed?: boolean;
     }>
   >([]);
+  // Changes a Coding harness reply proposed: nothing is written until the
+  // operator confirms each one (components/admin/PendingHarnessActions).
+  const [pendingActions, setPendingActions] = useState<PendingHarnessAction[]>([]);
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
   // Machine-readable failure reason from /api/bridge/health when probe fails.
   // Surfaced in the dropdown tooltip so the operator can see WHY the bridge
@@ -948,11 +964,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       .finally(() => setConfigsLoaded(true));
   }, []);
 
-  // Hydrate composer from /reasoning Quick Action deep-links. Once.
-  // Then strip params so a refresh doesn't re-trigger.
+  // Hydrate the composer from a deep link's ?prompt=, then strip the params
+  // so a refresh doesn't re-trigger. The persistent widget outlives many deep
+  // links, so the latch re-arms once the params are gone (a one-shot boolean
+  // swallowed every deep link after the first).
   const [hydratedFromUrl, setHydratedFromUrl] = useState(false);
   useEffect(() => {
-    if (hydratedFromUrl || !urlPrompt) return;
+    if (!urlPrompt) {
+      if (hydratedFromUrl) setHydratedFromUrl(false);
+      return;
+    }
+    if (hydratedFromUrl) return;
     setInput(urlPrompt);
     setHydratedFromUrl(true);
     // Remove the params from the URL without a full nav so the composer
@@ -978,28 +1000,54 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }, [hydratedFromUrl, urlPrompt, urlAutosend, pathname, searchParams, router]);
 
-  // OpenRouter usage pill — only fetches when the agent's provider is
-  // openrouter (or unknown but admin-fallback is openrouter). Anthropic /
-  // OpenAI / Google don't expose this cleanly, so the pill stays hidden.
+  // /api/usage answers two questions. The OpenRouter usage pill (Anthropic /
+  // OpenAI / Google expose no per-key usage, so the pill stays hidden there),
+  // and, for the operator with no key of this agent's own, whether a platform
+  // key really exists: 412 no_api_key means it does not, so the chat is not
+  // Ready and never claims "platform default" (2026-09-30).
+  const [platformKey, setPlatformKey] = useState<"unknown" | "present" | "absent">("unknown");
   useEffect(() => {
     if (!configsLoaded) return;
     const cfg = configs.find((c) => c.agent_key === agent);
+    const ownKey = !!(cfg?.has_key && cfg?.enabled);
     const isOpenRouter = !cfg || cfg.provider === "openrouter";
-    if (!isOpenRouter) {
+    const checkPlatform = !!isAdmin && !ownKey;
+    if (!checkPlatform) setPlatformKey("unknown");
+    if (!isOpenRouter && !checkPlatform) {
       setUsage(null);
       return;
     }
+    let cancelled = false;
     fetch(`/api/usage?agent=${encodeURIComponent(agent)}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => {
-        if (!j || !j.ok || !j.supported) {
+      .then(async (r) => {
+        const j = (await r.json().catch(() => null)) as
+          | { ok?: boolean; supported?: boolean; usage?: number; limit?: number | null; key_source?: string | null; error?: string }
+          | null;
+        if (cancelled) return;
+        if (checkPlatform) {
+          if (r.status === 412) setPlatformKey("absent");
+          else if (r.ok && j?.ok && j.key_source === "platform") setPlatformKey("present");
+          else {
+            console.error("[chat_widget.platform_key]", r.status, j?.error ?? "");
+            setPlatformKey("unknown");
+          }
+        }
+        if (!r.ok || !j || !j.ok || !j.supported) {
           setUsage(null);
           return;
         }
-        setUsage({ usage: Number(j.usage) || 0, limit: j.limit === null ? null : Number(j.limit) });
+        setUsage({ usage: Number(j.usage) || 0, limit: j.limit === null || j.limit === undefined ? null : Number(j.limit) });
       })
-      .catch(() => setUsage(null));
-  }, [agent, configs, configsLoaded]);
+      .catch((err) => {
+        console.error("[chat_widget.usage]", err);
+        if (cancelled) return;
+        if (checkPlatform) setPlatformKey("unknown");
+        setUsage(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, configs, configsLoaded, isAdmin]);
 
   // Clean up legacy localStorage keys from the removed Auto/Cloud/Desktop
   // picker. One-shot on mount — the keys are no longer written to or read.
@@ -1078,7 +1126,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     const probe = async () => {
       try {
         const ctl = new AbortController();
-        const t = setTimeout(() => ctl.abort(), 1500);
+        // Longer through the proxy than the proxy's own 1.5 s bridge budget
+        // (lib/admin/chat-readiness.ts bridgeProbeTimeoutMs).
+        const t = setTimeout(() => ctl.abort(), bridgeProbeTimeoutMs(isProxyModeRuntime()));
         // Proxy mode: probe the same-origin proxy (which forwards the bearer
         // to the VPS server-side) so the browser never touches the VPS and
         // never needs the bearer. Operator localhost: probe the bridge directly.
@@ -1189,6 +1239,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setError(null);
     setErrorCode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -1220,9 +1271,19 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }
 
   const cfg = useMemo(() => configs.find((c) => c.agent_key === agent) || null, [configs, agent]);
-  const hasOwnKey = cfg?.has_key && cfg?.enabled;
+  const hasOwnKey = !!(cfg?.has_key && cfg?.enabled);
   const cloudProviderReachable = cfg?.provider !== "ollama";
-  const cloudReady = configsLoaded && (hasOwnKey || isAdmin) && cloudProviderReachable;
+  // A real key: this agent's own, or a platform key /api/usage confirmed.
+  // Being the operator is not a key (see chatReadiness).
+  const cloud = chatReadiness({
+    bridgeReady: false,
+    configsLoaded,
+    hasOwnKey,
+    isAdmin: !!isAdmin,
+    platformKey,
+    providerIsLocalOnly: !cloudProviderReachable,
+  });
+  const cloudReady = cloud.ready;
   // bridgeReady is the single source of truth for ~10 downstream UI
   // affordances (tool-access badge, "API recommended now" nudge,
   // effective-mode default in auto picker, etc.). Goes through the
@@ -1244,6 +1305,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // header render block + commit 150a124.
   const desktopBridgeActive = effectiveMode === "cli" && bridgeReady;
   const ready = bridgeReady || cloudReady;
+  const readyViaPlatformKey = !bridgeReady && cloud.viaPlatformKey;
   const providerStatus = (() => {
     if (desktopBridgeActive && cfg?.provider === "ollama" && cliRuntime === "claude") {
       return `Provider: ${cfg.provider} · ${cfg.model} · local desktop`;
@@ -1252,9 +1314,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return `Provider: ${CLI_RUNTIME_LABELS[cliRuntime]} subscription (desktop bridge)`;
     }
     if (cfg?.provider === "ollama") return "Provider: local model (Desktop required)";
-    if (cfg) return `Provider: ${cfg.provider} · ${cfg.model} · saved key`;
-    if (isAdmin) return "Provider: OASIS platform default";
-    return configsLoaded ? "Provider: not connected" : "Provider: loading...";
+    if (cfg && hasOwnKey) return `Provider: ${cfg.provider} · ${cfg.model} · saved key`;
+    if (cloud.viaPlatformKey) return "Provider: OASIS platform key";
+    if (isAdmin && platformKey === "unknown" && configsLoaded) return "Provider: checking for a key...";
+    return configsLoaded ? "Provider: no key on file" : "Provider: loading...";
   })();
   // Resolve the actual route the next /send will take, given the picker.
   // Honest copy on scope: the cloud-only path is curated tools (records,
@@ -1282,7 +1345,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     ? cfg?.provider === "ollama"
       ? "Install the desktop bridge to use local Ollama models"
       : "Configure this agent's provider + API key in Settings → Agents"
-    : `Message ${agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
+    : `Message ${targetLabels?.[agent] ?? agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
   function reset() {
     // New chat: abort any in-flight stream first so a running turn can't bleed
@@ -1328,6 +1391,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setError(null);
     setErrorCode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -1379,6 +1443,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setErrorCode(null);
     setLastFailedMode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -2170,7 +2235,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // — a deferred tool firing means the turn DID produce a real
             // action even if the redactor swallowed the surrounding text.
             receivedAnyContent = true;
-            pendingToolUse = {
+            // A const for the state updater below: React runs that updater
+            // later, by which time the resume loop has already taken
+            // pendingToolUse and set it back to null.
+            const paused: PendingTool = {
               tool_use_id: String(parsed.tool_use_id || ""),
               name: String(parsed.name || "tool"),
               input: asRecord(parsed.input) || {},
@@ -2180,25 +2248,31 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               // the resume_state hasn't been tampered with.
               resume_signature: String(parsed.resume_signature || ""),
             };
+            pendingToolUse = paused;
             // Show "calling NAME..." chip in the toolCalls strip so the
             // operator sees activity while the bridge runs the tool.
-            const entryId = `bridge-${pendingToolUse.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const entryId = `bridge-${paused.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             setThinking(true);
             setStatusPhase("tool");
-            setStatusDetail(pendingToolUse.name);
+            setStatusDetail(paused.name);
             setToolCalls((prev) => [
               ...prev,
               {
                 id: entryId,
-                kind: pendingToolUse!.name,
-                label: pendingToolUse!.name,
-                detail: truncateJson(pendingToolUse!.input),
+                kind: paused.name,
+                label: paused.name,
+                detail: truncateJson(paused.input),
                 createdAt: Date.now(),
               },
             ]);
             // No early return — let the SSE stream finish naturally.
             // The outer resume loop checks pendingToolUse after the
             // stream closes.
+          } else if (event === "action_pending") {
+            // A change the harness proposed: shown with Apply / Confirm,
+            // written only when the operator confirms (/api/bridge/actions).
+            const proposal = pendingFromFrame(parsed, agent, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            if (proposal) setPendingActions((prev) => [...prev, proposal]);
           } else if (event === "action") {
             setActions((prev) => [
               ...prev,
@@ -2696,7 +2770,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
     >
       {/* Aurora wash inside the bordered container */}
-      <div className="chat-aurora absolute inset-0 pointer-events-none" />
+      <div className="chat-header-surface absolute inset-0 pointer-events-none" />
 
       {/* Header — agent picker only. Routing (cloud-API-key vs local-bridge)
           is decided automatically: use the desktop bridge when it's paired
@@ -2739,7 +2813,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         >
           {(agentKeys.length > 0 ? agentKeys : [agent]).map((k) => (
             <option key={k} value={k}>
-              {agentDisplayName(k)}
+              {targetLabels?.[k] ?? agentDisplayName(k)}
             </option>
           ))}
         </select>
@@ -2748,7 +2822,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             text; mobile shows just the short status pill below. */}
         <div className="hidden md:block flex-1 min-w-0">
           <div className="text-xs text-fg-muted truncate">
-            {getAgentInfo(agent).tagline}
+            {targetLabels?.[agent] ? `Runs in ${targetLabels[agent].split(" · ").pop()} on your computer` : getAgentInfo(agent).tagline}
           </div>
           <div className="text-xs text-fg-dim font-mono truncate">
             <span title={accessTitle} className={bridgeReady ? "text-accent" : undefined}>
@@ -2973,9 +3047,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           <EmptyTranscript
             ready={!!ready}
             agent={agent}
-            agentDisplayName={agentDisplayName}
+            agentDisplayName={(k) => targetLabels?.[k] ?? agentDisplayName(k)}
             configsLoaded={configsLoaded}
-            isAdmin={!!isAdmin}
+            readyVia={bridgeReady ? "bridge" : readyViaPlatformKey ? "platform_key" : "own_key"}
             currentProvider={cfg?.provider ?? null}
             onSuggestion={applySuggestion}
           />
@@ -3011,7 +3085,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               <Bubble
                 role={m.role}
                 agent={agent}
-                agentDisplayName={agentDisplayName}
+                agentDisplayName={targetLabel}
                 content={stripActionMarkers(m.content)}
                 attachments={m.attachments}
                 at={m.at}
@@ -3104,6 +3178,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             ))}
           </div>
         )}
+        <PendingHarnessActions
+          items={pendingActions}
+          onResolved={(uid, r) => {
+            setPendingActions((prev) => prev.filter((p) => p.uid !== uid));
+            setActions((prev) => [...prev, { ok: r.ok, type: r.type, summary: r.summary, error: r.error, uid }]);
+          }}
+          onDismiss={(uid) => setPendingActions((prev) => prev.filter((p) => p.uid !== uid))}
+        />
         {actions.length > 0 && (
           <div className="space-y-1.5">
             {actions.filter((a) => !a.dismissed).map((a) => {
@@ -3296,7 +3378,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 const otherReady =
                   otherMode === "cli"
                     ? bridgeReady
-                    : (cloudReady || isAdmin);
+                    : cloudReady;
                 if (!otherReady) return null;
                 // Last user message — what we'll re-send. If history has no
                 // user message somehow, the button shouldn't appear.
@@ -3552,7 +3634,7 @@ function EmptyTranscript({
   agent,
   agentDisplayName,
   configsLoaded,
-  isAdmin,
+  readyVia,
   currentProvider,
   onSuggestion,
 }: {
@@ -3564,7 +3646,8 @@ function EmptyTranscript({
    *  have to call useAgentDisplayNames itself (would double-fetch). */
   agentDisplayName: (agentKey: string) => string;
   configsLoaded: boolean;
-  isAdmin: boolean;
+  /** What made the chat ready, from a real check (chatReadiness). */
+  readyVia: "bridge" | "own_key" | "platform_key";
   currentProvider: string | null;
   onSuggestion: (text: string) => void;
 }) {
@@ -3618,9 +3701,11 @@ function EmptyTranscript({
           Ready
         </div>
         <p className="text-fg-muted">
-          {isAdmin
-            ? `Talking to ${agentDisplayName(agent).toUpperCase()} via the platform default key.`
-            : `${agentDisplayName(agent).toUpperCase()} is configured and ready.`} Ask anything — strategy, drafting, debugging, ops.
+          {readyVia === "bridge"
+            ? `${agentDisplayName(agent)} runs on your computer through the bridge.`
+            : readyVia === "platform_key"
+              ? `Talking to ${agentDisplayName(agent)} through the OASIS platform key.`
+              : `${agentDisplayName(agent)} is set up with its own key.`} Ask anything — strategy, drafting, debugging, ops.
         </p>
       </div>
       <div>

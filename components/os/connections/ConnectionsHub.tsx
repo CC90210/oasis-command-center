@@ -1,29 +1,34 @@
 "use client";
 
 /**
- * ConnectionsHub — the app grid at the top of Settings › Connections.
+ * ConnectionsHub — Settings › Connections: one card per app, and the card is
+ * the one place that app is set up (CC, 2026-09-29: the page used to list the
+ * same apps again under "Keys and accounts").
  *
  * "Your tools" first: live connectors this workspace has already set up in some
- * way (connected, saved, failing, or not checkable right now). Then the full
- * catalog, grouped by purpose and searchable. Statuses arrive computed from the
- * server (lib/os/connectors.ts resolveConnectorStatus), so this component only
+ * way (connected, saved, failing, or not checkable right now). Then the apps
+ * that can be connected today, grouped by purpose, with the Custom key card
+ * last. Apps that are not built yet are one compact "Coming later" row, not a
+ * grid of cards that do nothing. Statuses arrive computed from the server
+ * (lib/os/connectors.ts resolveConnectorStatus), so this component only
  * arranges them — it has no way to make a card look more connected than the
  * server said.
  *
- * Clicking a live card opens the flow that already exists for it: the shared
- * key editor and your own Google connection further down this page, the
- * Telegram setup on Chat apps, or Constant Contact's OAuth popup. Clicking a
- * coming-soon card opens the detail drawer. Every card also has a Details
- * button, so the drawer is one click away for live apps too.
+ * Clicking a card opens its drawer, where the app is connected, tested and
+ * removed; only an OAuth app (Constant Contact) goes straight to its popup.
+ * `?app=<slug>` opens that app's drawer (lib/os/connectors.ts connectorHref),
+ * and Google's sign-in comes back to it.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Info, Search } from "lucide-react";
+import { Info, KeyRound, Search } from "lucide-react";
 import { ConnectorIcon } from "@/components/os/connections/ConnectorIcon";
-import { ConnectorDrawer } from "@/components/os/connections/ConnectorDrawer";
+import { ConnectorDrawer, DrawerSheet } from "@/components/os/connections/ConnectorDrawer";
+import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
 import { watchPopup } from "@/components/os/connections/popup-watch";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
@@ -44,41 +49,66 @@ const POPUP_ERRORS: Record<string, string> = {
   login_required: "Your session expired. Sign in again, then retry.",
 };
 
-/**
- * Open a section on THIS page by id. A plain same-page anchor does not fire
- * `hashchange` when the hash is already the one in the URL, so a section the
- * user closed would stay closed; this opens it directly.
- */
-function openOnThisPage(href: string): boolean {
-  const url = new URL(href, window.location.href);
-  if (url.pathname !== window.location.pathname || !url.hash) return false;
-  const el = document.getElementById(url.hash.slice(1));
-  if (!el) return false;
-  if (el instanceof HTMLDetailsElement) el.open = true;
-  window.history.replaceState(null, "", url.hash);
-  requestAnimationFrame(() => el.scrollIntoView({ block: "start", behavior: "smooth" }));
-  return true;
+/** What opened a sheet on arrival: ?app=, and Google's sign-in result (page.tsx). */
+export const DEEP_LINK_PARAMS = ["app", "gmail_oauth", "reason", "gmail", "mailbox"] as const;
+
+/** A closed sheet stays closed: a refresh must not reopen it or replay a sign-in banner. */
+function clearDeepLink() {
+  const url = new URL(window.location.href);
+  let changed = false;
+  for (const key of DEEP_LINK_PARAMS) {
+    if (url.searchParams.has(key)) {
+      url.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  if (changed) window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
+
+const CUSTOM_KEYS = {
+  title: "Custom keys",
+  summary: "Any other app your agents use",
+  words: ["custom", "key", "keys", "secret", "token", "webhook", "api", "env", "other"],
+};
 
 export function ConnectionsHub({
   statuses,
   supportHref,
+  initialApp,
+  personalGoogle,
 }: {
   statuses: Record<string, ConnectorStatus>;
   supportHref: string | null;
+  /** `?app=<slug>`: that app's drawer opens on arrival. */
+  initialApp: string | null;
+  /** This workspace connects each person's own Google (not a shared inbox). */
+  personalGoogle: boolean;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [drawerSlug, setDrawerSlug] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [banner, setBanner] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [banner, setBanner] = useState<NoticeValue>(null);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
   const openDrawer = useCallback((slug: string) => {
     setDrawerSlug(slug);
     setDrawerOpen(true);
   }, []);
-  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    clearDeepLink();
+  }, []);
+  const closeCustom = useCallback(() => {
+    setCustomOpen(false);
+    clearDeepLink();
+  }, []);
+
+  useEffect(() => {
+    if (initialApp === "custom-keys") setCustomOpen(true);
+    else if (initialApp && connectorBySlug(initialApp)) openDrawer(initialApp);
+  }, [initialApp, openDrawer]);
 
   // The one popup being watched. Stopped on unmount and before another popup
   // starts, so its listener and poll never outlive this hub (popup-watch.ts).
@@ -144,10 +174,12 @@ export function ConnectionsHub({
   const connect = useCallback(
     (def: ConnectorDef) => {
       const action = def.live?.connect;
-      if (!action) return openDrawer(def.slug);
+      // Keys are set up in the drawer itself (form, Test, Remove), so the card
+      // opens the drawer; only an OAuth popup or a page link leaves it.
+      if (!action || action.kind === "key_form" || action.kind === "keys") return openDrawer(def.slug);
       setDrawerOpen(false);
       if (action.kind === "popup") return runPopup(def, action.href, action.messageSource);
-      if (!openOnThisPage(action.href)) router.push(action.href);
+      router.push(action.href);
     },
     [openDrawer, router, runPopup],
   );
@@ -157,7 +189,10 @@ export function ConnectionsHub({
     [query],
   );
   const yours = visible.filter((def) => isYourTool(def, statuses[def.slug]));
-  const rest = visible.filter((def) => !isYourTool(def, statuses[def.slug]));
+  const available = visible.filter((def) => def.live && !isYourTool(def, statuses[def.slug]));
+  const later = visible.filter((def) => !def.live);
+  const q = query.trim().toLowerCase();
+  const customVisible = !q || CUSTOM_KEYS.words.some((w) => w.includes(q) || q.includes(w));
 
   const drawerDef = drawerSlug ? connectorBySlug(drawerSlug) : null;
 
@@ -175,18 +210,7 @@ export function ConnectionsHub({
         />
       </div>
 
-      {banner && (
-        <div
-          role="status"
-          className={`rounded-lg border px-3 py-2 text-[13px] ${
-            banner.tone === "ok"
-              ? "border-status-engaged/30 bg-status-engaged/10 text-fg"
-              : "border-status-hot/30 bg-status-hot/10 text-fg"
-          }`}
-        >
-          {banner.text}
-        </div>
-      )}
+      <Notice notice={banner} />
 
       <section aria-labelledby="your-tools-heading">
         <h2 id="your-tools-heading" className="text-sm font-semibold text-fg">
@@ -217,33 +241,90 @@ export function ConnectionsHub({
         )}
       </section>
 
-      {CONNECTOR_CATEGORIES.map((cat) => {
-        const items = rest.filter((d) => d.category === cat.key);
-        if (items.length === 0) return null;
-        // Connectable apps first, then the ones still being built.
-        items.sort((a, b) => Number(!a.live) - Number(!b.live));
-        return (
-          <section key={cat.key} aria-labelledby={`cat-${cat.key}`}>
-            <h2 id={`cat-${cat.key}`} className="text-sm font-semibold text-fg">
-              {cat.label}
+      {(available.length > 0 || customVisible) && (
+        <section aria-labelledby="set-up-heading" className="space-y-5">
+          <div>
+            <h2 id="set-up-heading" className="text-sm font-semibold text-fg">
+              Connect today
             </h2>
-            <ul className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              {items.map((def) => (
-                <ConnectorCard
-                  key={def.slug}
-                  def={def}
-                  status={statuses[def.slug]}
-                  busy={busySlug === def.slug}
-                  onConnect={connect}
-                  onDetails={openDrawer}
-                />
-              ))}
-            </ul>
-          </section>
-        );
-      })}
+            <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
+              Open an app to connect it. Keys are stored encrypted and never shown again.
+            </p>
+          </div>
+          {CONNECTOR_CATEGORIES.map((cat) => {
+            const items = available.filter((d) => d.category === cat.key);
+            if (items.length === 0) return null;
+            return (
+              <div key={cat.key}>
+                <h3 id={`cat-${cat.key}`} className="text-xs font-medium text-fg-dim">
+                  {cat.label}
+                </h3>
+                <ul aria-labelledby={`cat-${cat.key}`} className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {items.map((def) => (
+                    <ConnectorCard
+                      key={def.slug}
+                      def={def}
+                      status={statuses[def.slug]}
+                      busy={busySlug === def.slug}
+                      onConnect={connect}
+                      onDetails={openDrawer}
+                    />
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+          {customVisible && (
+            <div>
+              <h3 id="cat-other" className="text-xs font-medium text-fg-dim">
+                Anything else
+              </h3>
+              <ul aria-labelledby="cat-other" className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <li className="group relative flex items-center gap-3 rounded-xl border border-hairline bg-bg-panel px-3 py-3 transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover">
+                  <button
+                    type="button"
+                    onClick={() => setCustomOpen(true)}
+                    aria-label="Open Custom keys"
+                    className="absolute inset-0 rounded-xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
+                  />
+                  <CustomKeysIcon />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-fg">{CUSTOM_KEYS.title}</div>
+                    <div className="truncate text-[12px] leading-4 text-fg-dim">{CUSTOM_KEYS.summary}</div>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
 
-      {visible.length === 0 && (
+      {later.length > 0 && (
+        <section aria-labelledby="later-heading">
+          <h2 id="later-heading" className="text-sm font-semibold text-fg">
+            Coming later
+          </h2>
+          <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
+            Not connectable yet. Open one to see what it will do.
+          </p>
+          <ul className="mt-3 flex flex-wrap gap-1.5">
+            {later.map((def) => (
+              <li key={def.slug}>
+                <button
+                  type="button"
+                  onClick={() => openDrawer(def.slug)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-hairline bg-bg-panel py-1 pl-1 pr-2.5 text-[13px] text-fg-muted transition-colors duration-150 hover:border-bg-border-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
+                >
+                  <ConnectorIcon def={def} size="sm" />
+                  {def.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {visible.length === 0 && !customVisible && (
         <p className="text-[13px] text-fg-muted">
           No apps match &ldquo;{query}&rdquo;.{" "}
           {supportHref && (
@@ -260,9 +341,37 @@ export function ConnectionsHub({
         status={drawerDef ? statuses[drawerDef.slug] ?? null : null}
         onClose={closeDrawer}
         onConnect={connect}
+        onChanged={() => router.refresh()}
         supportHref={supportHref}
+        personalGoogle={personalGoogle}
       />
+
+      <DrawerSheet
+        open={customOpen}
+        onClose={closeCustom}
+        head={{ icon: <CustomKeysIcon size="lg" />, title: CUSTOM_KEYS.title, summary: CUSTOM_KEYS.summary }}
+      >
+        <p className="text-[13px] leading-5 text-fg-muted">
+          For an app with no card: a client&apos;s API token, a webhook URL, an internal key. Values are stored encrypted
+          and never shown again. An agent can use one by name for a request it makes; the value itself never enters the
+          chat.
+        </p>
+        <CustomCredentialsVault />
+      </DrawerSheet>
     </div>
+  );
+}
+
+function CustomKeysIcon({ size = "md" }: { size?: "md" | "lg" }) {
+  return (
+    <span
+      aria-hidden
+      className={`inline-flex shrink-0 items-center justify-center border border-hairline bg-bg-raised text-fg-muted ${
+        size === "lg" ? "h-11 w-11 rounded-xl" : "h-9 w-9 rounded-lg"
+      }`}
+    >
+      <KeyRound className={size === "lg" ? "h-5 w-5" : "h-4 w-4"} />
+    </span>
   );
 }
 

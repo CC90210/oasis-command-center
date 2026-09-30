@@ -109,7 +109,7 @@ const EMOJI_RE = /\p{Extended_Pictographic}/u;
 // Curly quotes / em dash / en dash — common autocorrect artifacts that push
 // a GSM-7-eligible message into Unicode encoding (each one, silently, cuts
 // the per-segment budget from 160/153 to 70/67).
-const SMART_PUNCT_RE = /[‘’“”—–]/;
+const SMART_PUNCT_RE = /[\u2018\u2019\u201C\u201D\u2014\u2013]/;
 
 export function countSegments(text: string): SegmentInfo {
   const hasEmoji = EMOJI_RE.test(text);

@@ -7,8 +7,11 @@
  * Comment; the rest are one link away in the Feed.
  *
  * Then the rows that already exist somewhere else in the product: a past-due
- * follow-up on the board, a ticket past its SLA, a hot reply, an overdue
- * invoice. Each row opens the page where it is resolved.
+ * follow-up on the board, a founder meeting with no outcome, follow-ups
+ * carried over from before the cycle, open leads with no next step, a ticket
+ * past its SLA, a failed routine, a hot reply, an overdue invoice, a
+ * connection that needs the owner (until it recovers). Each row opens the page
+ * where it is resolved. The header counts the things behind the rows.
  *
  * An empty list says so, and a source that could not be read is named under
  * it — "nothing needs you" is only claimed when every source answered.
@@ -17,9 +20,9 @@
  * islands). Links keep prefetch off like every rail link.
  */
 import Link from "next/link";
-import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Receipt, Reply } from "lucide-react";
+import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Plug, Receipt, Repeat, Reply } from "lucide-react";
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
-import { needsYouCount, type NeedsYou, type NeedsYouIcon, type NeedsYouTone } from "@/components/os/today/model";
+import { needsYouTotal, type NeedsYou, type NeedsYouIcon, type NeedsYouTone } from "@/components/os/today/model";
 import { floorCount } from "@/lib/os/count";
 
 const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
@@ -29,6 +32,8 @@ const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
   meeting: CalendarDays,
   invoice: Receipt,
   bank: Landmark,
+  connection: Plug,
+  routine: Repeat,
 };
 
 /** Icon colour carries the tone; the words carry the meaning, so colour is never the only signal. */
@@ -62,7 +67,9 @@ export function NeedsYouList({
 }) {
   const { items, unavailable } = needsYou;
   const approvals = needsYou.approvals ?? null;
-  const total = needsYouCount(needsYou);
+  // Things, not rows: 15 overdue follow-ups are 15 (model.ts needsYouTotal,
+  // the same count the Chief of Staff card and tab print).
+  const { total, capped } = needsYouTotal(needsYou);
   const urgent = items.filter((i) => i.tone === "urgent").length + (approvals?.total ?? 0);
   const moreApprovals = approvals ? approvals.total - approvals.items.length : 0;
   return (
@@ -76,9 +83,9 @@ export function NeedsYouList({
             className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${
               urgent > 0 ? "bg-unread text-white" : "bg-bg-elev text-fg-muted"
             }`}
-            aria-label={`${total} item${total === 1 ? "" : "s"}`}
+            aria-label={`${capped ? "at least " : ""}${total} item${total === 1 && !capped ? "" : "s"}`}
           >
-            {formatCount(total)}
+            {formatCount(total, capped)}
           </span>
         )}
       </header>

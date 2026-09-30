@@ -33,7 +33,7 @@ export function normalizeText(s: string | null | undefined): string {
   return String(s || "")
     .toLowerCase()
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036F]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }

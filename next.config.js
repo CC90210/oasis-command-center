@@ -126,6 +126,12 @@ const nextConfig = {
     // 1, not 2 — see note 5 above. Two workers each entitled to a multi-GB heap
     // is what exhausted the container; one worker cannot race itself.
     cpus: 1,
+    // NOT staleTimes.dynamic > 0 (considered 2026-09-29 for tab switching).
+    // Many client components save with fetch() and update their own state
+    // without router.refresh(); with a client router cache, clicking away and
+    // back would show the page as it was BEFORE the save. Wrong data is worse
+    // than a slow tab. Speed comes from loading.tsx boundaries, warm-on-intent
+    // prefetch and faster server renders instead.
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
@@ -245,14 +251,17 @@ const nextConfig = {
       {
         // The entry-path page moved off the brand apex when the marketing
         // site took over "/" (2026-07-31). /welcome had been shared
-        // directly, so the old URL has to keep resolving.
+        // directly, so the old URL has to keep resolving. It pointed at
+        // /start until 2026-09-29, when /start was retired (F0 containment);
+        // "/" is where /start itself sent a signed-in visitor, and it is the
+        // marketing home for everyone else.
         source: "/welcome",
-        destination: "/start",
+        destination: "/",
         permanent: true,
       },
       {
         source: "/command-centre-explained",
-        destination: "/start",
+        destination: "/",
         permanent: true,
       },
       // Inbound links from the previous marketing site

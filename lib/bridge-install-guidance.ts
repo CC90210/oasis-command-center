@@ -51,6 +51,43 @@ export function bridgeInstallCommands(os: BridgeHostOS): string {
   ].join("\n");
 }
 
+/**
+ * Pair-only command, for a machine that ALREADY has the bridge installed. It
+ * does NOT clone, install anything or run the wizard. It calls the
+ * unauthenticated redeem endpoint (the pair code is the credential), receives
+ * the bridge token and writes it to ~/.oasis/bridge_token (0600), which is
+ * what the bridge reads on every heartbeat. Then the bridge is restarted.
+ *
+ * Self-contained on purpose (one paste, no repository): bash uses the
+ * always-present python3; Windows uses Invoke-RestMethod. `envPrefix` names the
+ * two variables the command reads (`<prefix>_PAIR_CODE`, and the optional
+ * `<prefix>_DASHBOARD_URL` host override). The operator wizard keeps the
+ * prefix its machines already use; a client's pair-only page passes a neutral
+ * one, so nothing the harness names reaches a client's screen.
+ */
+export function bridgePairCommand(os: BridgeHostOS, code: string, envPrefix: string): string {
+  const codeVar = `${envPrefix}_PAIR_CODE`;
+  const urlVar = `${envPrefix}_DASHBOARD_URL`;
+  const nixPair =
+    `${codeVar}="${code}" python3 -c "` +
+    "import os,json,platform,socket,urllib.request as u;from pathlib import Path;" +
+    `c=os.environ['${codeVar}'].strip().upper();` +
+    `b=os.environ.get('${urlVar}','https://oasisai.work').rstrip('/');` +
+    "d=json.dumps({'code':c,'machine':{'label':platform.node() or 'machine','fingerprint':platform.system()+'|'+platform.machine()+'|'+socket.gethostname()}}).encode();" +
+    "r=u.Request(b+'/api/auth/pair-code/redeem',data=d,headers={'content-type':'application/json'},method='POST');" +
+    "t=json.loads(u.urlopen(r,timeout=20).read())['bridge']['token'];" +
+    "p=Path.home()/'.oasis';p.mkdir(parents=True,exist_ok=True);f=p/'bridge_token';f.write_text(t);os.chmod(f,0o600);" +
+    "print('paired ->',str(f))\"";
+  const winPair =
+    `$env:${codeVar}="${code}"; ` +
+    `$b=if($env:${urlVar}){$env:${urlVar}.TrimEnd('/')}else{'https://oasisai.work'}; ` +
+    `$body=@{code=$env:${codeVar}.ToUpper();machine=@{label=$env:COMPUTERNAME;fingerprint=('windows|'+$env:PROCESSOR_ARCHITECTURE+'|'+$env:COMPUTERNAME)}} | ConvertTo-Json -Compress; ` +
+    "$r=Invoke-RestMethod -Method Post -Uri ($b+'/api/auth/pair-code/redeem') -ContentType 'application/json' -Body $body; " +
+    "$d=Join-Path $HOME '.oasis'; New-Item -ItemType Directory -Force -Path $d | Out-Null; " +
+    "Set-Content -Path (Join-Path $d 'bridge_token') -Value $r.bridge.token -NoNewline; Write-Host 'paired'";
+  return os === "windows" ? winPair : nixPair;
+}
+
 export function bridgeSupervisorLabel(os: BridgeHostOS): string {
   if (os === "windows") return "Windows Task Scheduler (with a Startup-folder fallback)";
   if (os === "macos") return "launchd";

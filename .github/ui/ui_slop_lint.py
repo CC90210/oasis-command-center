@@ -72,7 +72,15 @@ SKIP_PARTS = set([
     "node_modules", ".next", ".git", "dist", "build", "out", "coverage",
     "vendor", "_ARCHIVE", ".ingested", "venv", "__pycache__",
     ".turbo", ".vercel", "site-packages", "examples", ".hallmark",
+    # Generated advertising creative is a different medium with different rules.
+    # An ad is a poster: a glow there is a deliberate art direction choice, not a
+    # product-UI tell, and `*.generated.*` files are rewritten by their generator
+    # so editing them achieves nothing. Scanning them put 28 unfixable hits in
+    # front of the real ones, which is how a gate gets ignored.
+    "cold-outreach",
 ])
+# Same reasoning, by filename: never lint machine-written output.
+SKIP_NAME_PARTS = (".generated.",)
 # This linter and its test necessarily CONTAIN the banned strings. Skipping them
 # by name stops the guard reporting itself, which would be the dumbest possible
 # false positive.
@@ -109,8 +117,26 @@ RULES_SIMPLE = [
     ("radial-wash", RE_RADIAL),
     ("faint-grid", RE_GRID),
     ("named-decor", RE_NAMED_DECOR),
-    ("ai-accent", RE_AI_ACCENT),
 ]
+
+# Indigo/violet is BANNED as a brand-primary accent (constitution rule 8) because
+# it was Tailwind's old default button colour and now reads as generated. But
+# scoping indigo specifically to AI-touched surfaces is a real convention, and
+# Adon's call on 2026-09-29 was "keep it, but let's just not overuse it".
+#
+# So the rule splits by location rather than allowing it everywhere:
+#   inside these paths  -> `ai-accent-scoped`, the intended AI-feature accent
+#   anywhere else       -> `ai-accent`, creep to remove
+#
+# Both are recorded in the baseline, so neither can GROW. That is what enforces
+# "do not overuse": the intended use is capped at its current footprint, and any
+# new violet outside the AI surfaces fails outright. A single blanket allowance
+# would have let it spread through brand chrome unnoticed, which is the actual
+# failure mode being guarded against.
+AI_SURFACE_PREFIXES = (
+    "components/conversations/",
+    "components/calls/",
+)
 
 
 def _blur_class(line):
@@ -134,6 +160,15 @@ def scan_text(rel, text):
             if rx.search(line):
                 hits.append({"file": rel, "line": i, "rule": rule,
                              "severity": "VIOLATION", "snippet": line.strip()[:160]})
+
+        if RE_AI_ACCENT.search(line):
+            in_ai_surface = any(rel.startswith(p) for p in AI_SURFACE_PREFIXES)
+            hits.append({
+                "file": rel, "line": i,
+                "rule": "ai-accent-scoped" if in_ai_surface else "ai-accent",
+                "severity": "VIOLATION",
+                "snippet": line.strip()[:160],
+            })
 
         m = RE_HALO.search(line)
         if m and int(m.group(1)) >= 16:
@@ -166,6 +201,8 @@ def iter_files(root, dirs):
             if p.name in SKIP_FILES:
                 continue
             if SKIP_PARTS & set(p.parts):
+                continue
+            if any(frag in p.name for frag in SKIP_NAME_PARTS):
                 continue
             yield p
     for name in ("tailwind.config.js", "tailwind.config.ts", "tailwind.config.mjs"):
@@ -263,7 +300,12 @@ def main():
     if by_rule:
         print("  AI-TELL PATTERNS")
         for rule, n in sorted(by_rule.items(), key=lambda kv: -kv[1]):
-            print("    " + rule.ljust(15) + " " + str(n))
+            note = ""
+            if rule == "ai-accent-scoped":
+                note = "  (indigo/violet INSIDE the AI surfaces - intended, capped here)"
+            elif rule == "ai-accent":
+                note = "  (indigo/violet OUTSIDE the AI surfaces - creep, remove)"
+            print("    " + rule.ljust(18) + " " + str(n).rjust(4) + note)
     if warns:
         print("\n  eyebrow (heuristic, advisory only): " + str(len(warns)))
 

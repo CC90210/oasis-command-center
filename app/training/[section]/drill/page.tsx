@@ -24,7 +24,7 @@ export default async function TrainingDrillPage({
   params: Promise<{ section: string }>;
 }) {
   const [session, { section: slug }] = await Promise.all([resolveSessionContext(), params]);
-  if (!session.ok) redirect(`/auth/login?next=/training/${slug}/drill`);
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent(`/training/${slug}/drill`)}`);
   if (!mayViewTraining(session)) redirect("/");
 
   const section = sectionBySlug(slug);

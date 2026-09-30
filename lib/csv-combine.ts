@@ -11,7 +11,7 @@
  */
 export function combineCsvTexts(texts: string[]): string {
   const nonEmpty = texts
-    .map((t) => t.replace(/^﻿/, "").trim())
+    .map((t) => t.replace(/^\uFEFF/, "").trim())
     .filter(Boolean);
   if (nonEmpty.length === 0) return "";
   if (nonEmpty.length === 1) return nonEmpty[0];

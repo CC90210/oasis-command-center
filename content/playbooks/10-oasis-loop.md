@@ -1,3 +1,8 @@
+---
+tags: [playbook, method, operator]
+updated: 2026-07-11
+---
+
 # The OASIS Loop — Best Practice Playbook
 
 > A closed-loop AI interaction method for getting production-grade output from any AI system with an agent harness.

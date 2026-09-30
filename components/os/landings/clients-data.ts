@@ -1,7 +1,9 @@
 /**
- * clients-data — the reads behind /clients, each gated by the SAME rule its own
- * page uses, so this list can never show more than Pipeline, Projects and the
- * Support desk would show this viewer.
+ * clients-data — the reads behind /clients' "Not yet client records" section
+ * (OASIS's pipeline-derived clients; the client records themselves are read by
+ * clients-records-data.ts), each gated by the SAME rule its own page uses, so
+ * this list can never show more than Pipeline, Projects and the Support desk
+ * would show this viewer.
  *
  *   won deals          canSeeAllPipeline inside an OASIS workspace. A rep,
  *                      manager or marketer sees clients through their own
@@ -23,6 +25,7 @@ import { LIST_LIMIT, listProjects, listTickets } from "@/lib/delivery/store";
 import type { OsPageViewer } from "@/components/os/landings/page-gate";
 import {
   CLIENT_STAGES,
+  ENDED_LEAD_STAGES,
   type ClientLead,
   type ClientProject,
   type ClientTicket,
@@ -47,7 +50,8 @@ async function loadWonDeals(viewer: OsPageViewer): Promise<SourceState<ClientLea
     const r = await listRecords({
       tenant_id: viewer.surface.tenantId,
       entity: "lead",
-      whereIn: { stage: CLIENT_STAGES },
+      // Won deals, and deals whose engagement ended (listed under Past by the model).
+      whereIn: { stage: [...CLIENT_STAGES, ...ENDED_LEAD_STAGES] },
       sort: "-updated_at",
       limit: CLIENTS_LEAD_LIMIT,
     });

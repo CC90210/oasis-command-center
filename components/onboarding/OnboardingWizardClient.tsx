@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
 import {
   AlertCircle,
   ArrowRight,
@@ -12,62 +11,51 @@ import {
   Loader2,
   ShoppingBag,
   Sparkles,
-  Store,
   Users,
 } from "lucide-react";
 import {
-  TEMPLATES,
   WIZARD_QUESTIONS,
   type TemplateKey,
   type WizardQuestion,
 } from "@/lib/manifest/templates";
-import { AGENT_REGISTRY } from "@/lib/agents";
+import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Answers = Record<string, string | string[]>;
+
+/**
+ * The owner's workspace setup (2026-09-30 rewrite).
+ *
+ * What changed and why:
+ *   - The agent picker is gone. It offered OASIS's own house agents and the
+ *     SunBiz pack, and a client workspace ended up with them. The owner now
+ *     picks DEPARTMENTS (Chief of Staff, Sales, Marketing, Client Success,
+ *     Finance, Operations) plus opt-in add-ons; each department brings a
+ *     neutral teammate named for it (lib/provisioning/team.ts).
+ *   - The business-funding industry and its SunBiz drip sequences are gone.
+ *   - "Where does your team talk?" and "Fast classifier (Jev, optional)" are
+ *     new steps, saved to manifest.integrations.chat_apps / .jev.
+ *   - No URL slug field: the workspace keeps its own address.
+ *   - No invented prices or taglines, and nothing defaults to "OASIS AI".
+ */
 
 type Step =
   | "industry"
   | "questions"
-  | "agents"
-  | "agent_setup" // Phase J — per-agent setup questions for picked agents
+  | "departments"
+  | "chat_apps"
+  | "jev"
   | "brand"
   | "confirm"
   | "submitting"
   | "done";
 
-/**
- * Agent packages — declarative groups exposed in the multi-select step.
- * The wizard pre-checks the industry-template defaults, but the user can
- * pick any combination across packages (e.g. SunBiz + a Lumen sub-agent).
- *
- * Each entry references AGENT_REGISTRY by slug; if a slug isn't in the
- * registry it's filtered out at render time so deprecated agents auto-
- * disappear from the picker.
- */
-const AGENT_PACKAGES: { id: string; label: string; description: string; agents: string[] }[] = [
-  {
-    id: "oasis_csuite",
-    label: "OASIS C-Suite",
-    description: "Bravo runs operations, Atlas is your CFO, Maven your CMO. Aura, Hermes, Lumen handle life, commerce, memory.",
-    agents: ["bravo", "atlas", "maven", "aura", "hermes", "life-preservation"],
-  },
-  {
-    id: "sunbiz",
-    label: "SunBiz Funding Pack",
-    description: "Solara runs the back office (pipeline, applications, lender match, renewals). Helios is the sales voice (cold SMS, follow-ups, closing).",
-    agents: ["solara", "helios"],
-  },
-];
-
-/**
- * Default agents pre-checked when the user picks an industry. Derived from
- * each template's own agents[] list so there's one source of truth — if a
- * template changes which agents it ships with, the wizard reflects it
- * automatically with no second edit.
- */
-function defaultAgentsForTemplate(k: TemplateKey): string[] {
-  return TEMPLATES[k].agents.filter((a) => a.enabled).map((a) => a.slug);
-}
+export type WizardOptions = {
+  /** The workspace's own name, as OASIS created it. The brand placeholder. */
+  workspaceName: string;
+  departments: Array<{ key: string; label: string; purpose: string; teammate: string | null; locked: boolean }>;
+  defaultDepartments: string[];
+  modules: Array<{ key: string; label: string; description: string }>;
+};
 
 const INDUSTRIES: {
   key: TemplateKey;
@@ -75,52 +63,42 @@ const INDUSTRIES: {
   blurb: string;
   Icon: typeof Building2;
 }[] = [
-  { key: "real_estate", title: "Real Estate", blurb: "Brokerages, teams, individual agents. Leads → properties → deals → commissions.", Icon: Building2 },
-  { key: "business_funding", title: "Business Funding", blurb: "MCAs, term loans, broker shops. Applications → offers → funded deals → renewals.", Icon: Store },
-  { key: "ecommerce", title: "E-commerce", blurb: "Stores moving real product. Orders → customers → inventory → marketing.", Icon: ShoppingBag },
-  { key: "agency", title: "Agency", blurb: "Service businesses delivering client work. Clients → projects → retainers → invoices.", Icon: Users },
-  { key: "custom", title: "Custom (C-suite)", blurb: "Premium done-for-you package with Bravo, Atlas, and Maven. Setup required — we tailor it to your operation before you go live.", Icon: Sparkles },
+  { key: "real_estate", title: "Real Estate", blurb: "Brokerages, teams, individual agents. Leads, properties, deals, commissions.", Icon: Building2 },
+  { key: "ecommerce", title: "E-commerce", blurb: "Stores moving real product. Orders, customers, inventory, marketing.", Icon: ShoppingBag },
+  { key: "agency", title: "Agency", blurb: "Service businesses delivering client work. Clients, projects, retainers, invoices.", Icon: Users },
+  { key: "custom", title: "Custom", blurb: "Your business does not fit a box. Start from the departments and shape it with OASIS.", Icon: Sparkles },
 ];
 
-/** Color tag per tier label — kept declarative so it's easy to retune. */
-function tierToneClasses(label: string): string {
-  switch (label) {
-    case "Free":       return "border-fg-dim/40 bg-fg-dim/10 text-fg-muted";
-    case "Starter":    return "border-emerald-400/40 bg-emerald-400/10 text-emerald-300";
-    case "Pro":        return "border-accent/40 bg-accent/10 text-accent";
-    case "Enterprise": return "border-amber-400/40 bg-amber-400/10 text-amber-300";
-    default:           return "border-bg-border bg-bg-elev text-fg-muted";
-  }
-}
+const CHAT_APPS: Array<{ key: string; label: string; note: string }> = [
+  { key: "slack", label: "Slack", note: "Slack connects in Settings > Chat apps." },
+  { key: "teams", label: "Microsoft Teams", note: "Recorded so OASIS knows to set it up for you." },
+  { key: "telegram", label: "Telegram", note: "Recorded so OASIS knows to set it up for you." },
+  { key: "email", label: "Email only", note: "Your team works over email." },
+];
 
-function slugifyClient(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 62) || "tenant";
-}
+const STEP_ORDER: Step[] = ["industry", "questions", "departments", "chat_apps", "jev", "brand", "confirm"];
 
-export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
+/**
+ * canInstallBridge: the server's verified platform-operator verdict
+ * (app/onboarding/wizard/page.tsx). Only the operator is offered the bridge
+ * install at the end; see OnboardingDoneChoices.
+ */
+export function OnboardingWizardClient({
+  userEmail,
+  canInstallBridge,
+  options,
+}: {
+  userEmail?: string;
+  canInstallBridge: boolean;
+  options: WizardOptions;
+}) {
   const [step, setStep] = useState<Step>("industry");
-  // Tenant slug returned by /api/onboarding/wizard on successful create.
-  // The done step uses this to link directly to the new tenant's dashboard
-  // when the operator declines the "pair a machine first" CTA.
-  const [doneSlug, setDoneSlug] = useState<string | null>(null);
   const [template, setTemplate] = useState<TemplateKey | null>(null);
   const [answers, setAnswers] = useState<Answers>({});
-  const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
-  // Phase J — per-agent setup answers. Map<agentSlug, Map<questionId, value>>.
-  // Populated during the agent_setup step from AGENT_REGISTRY[slug].setup_questions.
-  // Submitted alongside the wizard body so the API can write each agent
-  // binding's setup_answers field. Defaults pre-filled from question.default
-  // when the step first renders so operators only adjust what differs.
-  const [agentSetupAnswers, setAgentSetupAnswers] = useState<
-    Record<string, Record<string, string | number | boolean>>
-  >({});
-  const [slug, setSlug] = useState<string>("");
-  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
+  const [departments, setDepartments] = useState<string[]>(options.defaultDepartments);
+  const [modules, setModules] = useState<string[]>([]);
+  const [chatApps, setChatApps] = useState<string[]>([]);
+  const [jev, setJev] = useState<"off" | "shadow">("off");
   const [error, setError] = useState<string | null>(null);
 
   const questions: WizardQuestion[] = useMemo(
@@ -130,24 +108,7 @@ export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
 
   const brandName = (answers.brand_name as string) || "";
   const tagline = (answers.tagline as string) || "";
-
-  const derivedSlug = brandName ? slugifyClient(brandName) : "";
-  const effectiveSlug = slugManuallyEdited ? slug : derivedSlug;
-
-  function pickIndustry(k: TemplateKey) {
-    setTemplate(k);
-    // Pre-fill agent selection with the industry's default package so the
-    // user can confirm without unchecking anything. They can still add/
-    // remove anything in the agents step.
-    setSelectedAgents(defaultAgentsForTemplate(k));
-    setStep("questions");
-  }
-
-  function toggleAgent(slug: string) {
-    setSelectedAgents((prev) =>
-      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]
-    );
-  }
+  const departmentLabels = options.departments.filter((d) => departments.includes(d.key)).map((d) => d.label);
 
   function answerKeyChange(id: string, value: string | string[]) {
     setAnswers((prev) => ({ ...prev, [id]: value }));
@@ -164,51 +125,41 @@ export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
       });
   }
 
+  function toggle(list: string[], key: string): string[] {
+    return list.includes(key) ? list.filter((k) => k !== key) : [...list, key];
+  }
+
+  function toggleChatApp(key: string) {
+    // "Email only" cannot sit beside a chat app, in either direction.
+    setChatApps((prev) =>
+      key === "email" ? (prev.includes("email") ? [] : ["email"]) : toggle(prev.filter((k) => k !== "email"), key),
+    );
+  }
+
   async function submit() {
     if (!template) return;
     setError(null);
     setStep("submitting");
     try {
-      // Stamp selected_agents into answers so wizard-finalize can override
-      // the template's default agents[] with the user's actual picks.
-      const finalAnswers = { ...answers, selected_agents: selectedAgents };
       const res = await fetch("/api/onboarding/wizard", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           template,
-          slug: effectiveSlug,
-          answers: finalAnswers,
-          // Phase J — per-agent setup answers. Map<agentSlug, Record<qid, val>>.
-          // wizard-finalize stamps these onto each agent binding's
-          // setup_answers field; the persona resolver folds them into
-          // the agent's system prompt on every chat turn.
-          agent_setup_answers: agentSetupAnswers,
+          answers: { ...answers, departments, modules, chat_apps: chatApps, jev },
         }),
       });
-      const data = (await res.json()) as
+      const data = (await res.json().catch(() => ({}))) as
         | { ok: true; slug: string; version: number }
-        | { ok: false; error: string; message?: string };
+        | { ok: false; error?: string; reason?: string; message?: string };
       if (!data.ok) {
-        if (data.error === "slug_taken") {
-          setError("That URL slug is already in use. Edit it and try again.");
-          setStep("confirm");
-          return;
-        }
-        setError(data.message || data.error);
+        setError(data.reason || data.message || "Your workspace could not be saved. Try again.");
         setStep("confirm");
         return;
       }
-      // Stash the new tenant's slug on state and stop the auto-redirect.
-      // The done step now lets the operator choose: pair a local machine
-      // first (recommended for CLI access) or open the dashboard now.
-      // CC's framing 2026-05-15: the wizard should "connect them to the
-      // agent command center" rather than dumping them in cold. This
-      // closes that loop in-product.
-      setDoneSlug(data.slug);
       setStep("done");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "network_error");
+    } catch {
+      setError("We could not reach the server. Check your connection and try again.");
       setStep("confirm");
     }
   }
@@ -219,630 +170,352 @@ export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
         <Header step={step} />
 
         {step === "industry" && (
-          <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {INDUSTRIES.map(({ key, title, blurb, Icon }) => {
-              const tpl = TEMPLATES[key];
-              const tier = tpl.tier;
-              const agents = tpl.agents || [];
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => pickIndustry(key)}
-                  className="group text-left rounded-2xl border border-bg-border bg-bg-elev/40 hover:border-accent/40 hover:bg-bg-elev/70 p-5 transition-all flex flex-col"
-                >
-                  <div className="flex items-center justify-between gap-2.5">
-                    <div className="flex items-center gap-2.5">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-accent/30 bg-accent/10 text-accent group-hover:bg-accent group-hover:text-bg transition-all">
-                        <Icon className="h-5 w-5" />
-                      </div>
-                      <div className="font-bold text-base text-fg">{title}</div>
-                    </div>
-                    {tier && (
-                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${tierToneClasses(tier.label)}`}>
-                        {tier.label}
-                      </span>
-                    )}
+          <section className="grid gap-4 md:grid-cols-2">
+            {INDUSTRIES.map(({ key, title, blurb, Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setTemplate(key);
+                  setStep("questions");
+                }}
+                className="group text-left rounded-2xl border border-bg-border bg-bg-elev/40 hover:border-accent/40 hover:bg-bg-elev/70 p-5 transition-colors flex flex-col"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-bg-border bg-bg-deep text-fg-muted">
+                    <Icon className="h-5 w-5" />
                   </div>
-                  <p className="mt-3 text-sm text-fg-muted leading-relaxed">{blurb}</p>
-                  {tier && (
-                    <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
-                      <TierMetaRow label="Setup" value={tier.setup_complexity} />
-                      <TierMetaRow label="Price" value={tier.monthly_price_hint || "—"} />
-                      <TierMetaRow
-                        label="Agents"
-                        value={`${agents.length} included`}
-                        full
-                      />
-                      {tier.summary && (
-                        <div className="col-span-2 text-[11px] text-fg-dim italic">
-                          {tier.summary}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-accent">
-                    Pick this template <ArrowRight className="h-3.5 w-3.5" />
-                  </div>
-                </button>
-              );
-            })}
+                  <div className="font-bold text-base text-fg">{title}</div>
+                </div>
+                <p className="mt-3 text-sm text-fg-muted leading-relaxed">{blurb}</p>
+                <div className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-accent">
+                  Start here <ArrowRight className="h-3.5 w-3.5" />
+                </div>
+              </button>
+            ))}
           </section>
         )}
 
         {step === "questions" && template && (
-          <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 space-y-5">
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-bold">
-                {INDUSTRIES.find((i) => i.key === template)?.title}
-              </div>
-              <h2 className="mt-1 text-xl font-bold">A few quick questions</h2>
-              <p className="text-sm text-fg-muted mt-1">
-                Skip anything optional. The AI editor can change all of this later.
-              </p>
-            </div>
-
+          <Panel title="A few quick questions" intro="Skip anything optional. You can change all of this later.">
             <div className="space-y-4">
               {questions.map((q) => (
                 <QuestionField
                   key={q.id}
                   question={q}
+                  placeholder={q.id === "brand_name" ? options.workspaceName || "Your business name" : q.placeholder}
                   value={answers[q.id]}
                   onChange={(v) => answerKeyChange(q.id, v)}
                 />
               ))}
             </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <button
-                type="button"
-                onClick={() => setStep("industry")}
-                className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep("agents")}
-                disabled={!requiredQuestionsAnswered()}
-                className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                Continue <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </section>
+            <Nav onBack={() => setStep("industry")} onNext={() => setStep("departments")} nextDisabled={!requiredQuestionsAnswered()} />
+          </Panel>
         )}
 
-        {step === "agents" && template && (
-          <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 space-y-5">
-            <div>
-              <h2 className="text-xl font-bold">Pick your agents</h2>
-              <p className="text-sm text-fg-muted mt-1">
-                Multi-select across packages — your shell can run the C-suite, a SunBiz pack, or any mix. We pre-checked the typical setup for{" "}
-                <strong className="text-fg">{INDUSTRIES.find((i) => i.key === template)?.title}</strong>; adjust freely. You can chat with all enabled agents and switch in the dropdown.
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              {AGENT_PACKAGES.map((pkg) => {
-                const agentsInPackage = pkg.agents.filter((slug) => AGENT_REGISTRY[slug]);
-                if (agentsInPackage.length === 0) return null;
-                const allChecked = agentsInPackage.every((a) => selectedAgents.includes(a));
-                const someChecked = agentsInPackage.some((a) => selectedAgents.includes(a));
+        {step === "departments" && (
+          <Panel
+            title="Pick your departments"
+            intro="Each department is a page for that part of your business. Where a department has an AI teammate, it comes with it, named for the department."
+          >
+            <div className="grid gap-2 sm:grid-cols-2">
+              {options.departments.map((d) => {
+                const active = departments.includes(d.key);
                 return (
-                  <div key={pkg.id} className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 space-y-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1">
-                        <div className="font-bold text-sm text-fg">{pkg.label}</div>
-                        <p className="mt-1 text-xs text-fg-muted leading-relaxed">{pkg.description}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (allChecked) {
-                            setSelectedAgents((prev) => prev.filter((s) => !agentsInPackage.includes(s)));
-                          } else {
-                            setSelectedAgents((prev) => Array.from(new Set([...prev, ...agentsInPackage])));
-                          }
-                        }}
-                        className="shrink-0 text-[10px] uppercase tracking-wider font-bold text-accent hover:text-accent/80"
-                      >
-                        {allChecked ? "Clear all" : someChecked ? "Add the rest" : "Select all"}
-                      </button>
-                    </div>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {agentsInPackage.map((slug) => {
-                        const info = AGENT_REGISTRY[slug];
-                        const active = selectedAgents.includes(slug);
-                        return (
-                          <button
-                            key={slug}
-                            type="button"
-                            onClick={() => toggleAgent(slug)}
-                            className={`text-left rounded-lg border px-3 py-2 text-sm transition-all ${
-                              active
-                                ? "border-accent bg-accent/10 text-fg"
-                                : "border-bg-border bg-bg-deep/40 text-fg-muted hover:border-accent/40 hover:bg-bg-elev/40"
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={`font-bold ${active ? "text-fg" : "text-fg-muted"} text-xs`}>
-                                {info.label}
-                              </span>
-                              <span className={`text-[10px] ${active ? "text-accent" : "text-fg-dim"}`}>
-                                {active ? "✓" : ""}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-fg-dim mt-0.5 truncate">{info.tagline}</div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <label
+                    key={d.key}
+                    className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+                      active ? "border-accent/60 bg-accent/5" : "border-bg-border bg-bg-deep/40"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-1 accent-accent"
+                      checked={active}
+                      disabled={d.locked}
+                      onChange={() => setDepartments((prev) => toggle(prev, d.key))}
+                    />
+                    <span>
+                      <span className="font-semibold text-fg">{d.label}</span>
+                      <span className="block text-xs text-fg-muted">{d.purpose}</span>
+                      <span className="block text-xs text-fg-dim">
+                        {d.teammate ? `Comes with: ${d.teammate}` : "No AI teammate yet for this department"}
+                        {d.locked ? " · always included" : ""}
+                      </span>
+                    </span>
+                  </label>
                 );
               })}
             </div>
-
-            <div className="rounded-xl border border-bg-border bg-bg-deep/40 px-4 py-2.5 text-xs text-fg-muted">
-              {selectedAgents.length === 0
-                ? "No agents selected — your shell will render with zero agents. You can add them later in Settings."
-                : `${selectedAgents.length} agent${selectedAgents.length === 1 ? "" : "s"} selected.`}
+            <div>
+              <h3 className="text-sm font-semibold text-fg">Add-ons (optional)</h3>
+              <p className="text-xs text-fg-muted">
+                Tell OASIS what else you want. Add-ons turn on with your plan; picking one here records the request.
+              </p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {options.modules.map((m) => (
+                  <label key={m.key} className="flex items-start gap-3 rounded-lg border border-bg-border bg-bg-deep/40 px-3 py-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-1 accent-accent"
+                      checked={modules.includes(m.key)}
+                      onChange={() => setModules((prev) => toggle(prev, m.key))}
+                    />
+                    <span>
+                      <span className="text-fg">{m.label}</span>
+                      <span className="block text-xs text-fg-muted">{m.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
             </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <button
-                type="button"
-                onClick={() => setStep("questions")}
-                className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  // Phase J — if any selected agent has setup_questions, route
-                  // through agent_setup step first. Otherwise skip straight
-                  // to brand (existing behavior). Pre-fill defaults so the
-                  // operator only adjusts what differs.
-                  const needsSetup = selectedAgents.some(
-                    (slug) => (AGENT_REGISTRY[slug]?.setup_questions?.length || 0) > 0,
-                  );
-                  if (needsSetup) {
-                    setAgentSetupAnswers((prev) => {
-                      const next = { ...prev };
-                      for (const slug of selectedAgents) {
-                        const qs = AGENT_REGISTRY[slug]?.setup_questions || [];
-                        if (!qs.length) continue;
-                        next[slug] = { ...(next[slug] || {}) };
-                        for (const q of qs) {
-                          if (next[slug][q.id] === undefined && q.default !== undefined) {
-                            next[slug][q.id] = q.default;
-                          }
-                        }
-                      }
-                      return next;
-                    });
-                    setStep("agent_setup");
-                  } else {
-                    setStep("brand");
-                  }
-                }}
-                className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                Continue <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </section>
+            <Nav onBack={() => setStep("questions")} onNext={() => setStep("chat_apps")} />
+          </Panel>
         )}
 
-        {step === "agent_setup" && (
-          <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 space-y-5">
-            <div>
-              <h2 className="text-xl font-bold">Configure your agents</h2>
-              <p className="text-sm text-fg-muted mt-1">
-                Quick setup per agent so each one knows your specifics from
-                turn one. You can change any of this later in{" "}
-                <span className="font-mono text-fg">/settings</span>.
-              </p>
+        {step === "chat_apps" && (
+          <Panel title="Where does your team talk?" intro="Pick every place your team works together. Nothing is connected yet; this tells OASIS where to reach you.">
+            <div className="grid gap-2 sm:grid-cols-2">
+              {CHAT_APPS.map((a) => (
+                <label key={a.key} className="flex items-start gap-3 rounded-xl border border-bg-border bg-bg-deep/40 px-4 py-3 text-sm">
+                  <input type="checkbox" className="mt-1 accent-accent" checked={chatApps.includes(a.key)} onChange={() => toggleChatApp(a.key)} />
+                  <span>
+                    <span className="font-semibold text-fg">{a.label}</span>
+                    <span className="block text-xs text-fg-muted">{a.note}</span>
+                  </span>
+                </label>
+              ))}
             </div>
+            <Nav onBack={() => setStep("departments")} onNext={() => setStep("jev")} />
+          </Panel>
+        )}
 
-            <div className="space-y-5">
-              {selectedAgents
-                .filter((slug) => (AGENT_REGISTRY[slug]?.setup_questions?.length || 0) > 0)
-                .map((slug) => {
-                  const info = AGENT_REGISTRY[slug];
-                  if (!info) return null;
-                  const qs = info.setup_questions || [];
-                  const slugAnswers = agentSetupAnswers[slug] || {};
-                  const setAnswer = (qid: string, val: string | number | boolean) => {
-                    setAgentSetupAnswers((prev) => ({
-                      ...prev,
-                      [slug]: { ...(prev[slug] || {}), [qid]: val },
-                    }));
-                  };
-                  return (
-                    <div key={slug} className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 space-y-3">
-                      <div className="flex items-baseline gap-2 flex-wrap">
-                        <div className={`font-bold text-base ${info.textClass}`}>{info.label}</div>
-                        <div className="text-xs text-fg-dim">{info.role}</div>
-                      </div>
-                      <div className="space-y-3">
-                        {qs.map((q) => (
-                          <div key={q.id} className="space-y-1">
-                            <label className="block">
-                              <span className="text-xs font-bold text-fg block">
-                                {q.label}
-                                {q.required && <span className="text-status-warm ml-1">*</span>}
-                              </span>
-                              {q.description && (
-                                <span className="text-[11px] text-fg-dim block mt-0.5 leading-relaxed">
-                                  {q.description}
-                                </span>
-                              )}
-                              {q.type === "text" && (
-                                <input
-                                  type="text"
-                                  value={String(slugAnswers[q.id] ?? "")}
-                                  onChange={(e) => setAnswer(q.id, e.target.value)}
-                                  placeholder={q.placeholder}
-                                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
-                                />
-                              )}
-                              {q.type === "textarea" && (
-                                <textarea
-                                  value={String(slugAnswers[q.id] ?? "")}
-                                  onChange={(e) => setAnswer(q.id, e.target.value)}
-                                  placeholder={q.placeholder}
-                                  rows={3}
-                                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
-                                />
-                              )}
-                              {q.type === "number" && (
-                                <input
-                                  type="number"
-                                  value={String(slugAnswers[q.id] ?? "")}
-                                  onChange={(e) => {
-                                    const n = Number(e.target.value);
-                                    setAnswer(q.id, isFinite(n) ? n : 0);
-                                  }}
-                                  placeholder={q.placeholder}
-                                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
-                                />
-                              )}
-                              {q.type === "select" && (
-                                <select
-                                  value={String(slugAnswers[q.id] ?? "")}
-                                  onChange={(e) => setAnswer(q.id, e.target.value)}
-                                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm text-fg focus:border-accent/50 focus:outline-none"
-                                >
-                                  <option value="">— select —</option>
-                                  {(q.options || []).map((o) => (
-                                    <option key={o.value} value={o.value}>
-                                      {o.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-                              {q.type === "boolean" && (
-                                <label className="mt-1 inline-flex items-center gap-2 text-sm text-fg cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={!!slugAnswers[q.id]}
-                                    onChange={(e) => setAnswer(q.id, e.target.checked)}
-                                    className="accent-accent"
-                                  />
-                                  <span>{slugAnswers[q.id] ? "Yes" : "No"}</span>
-                                </label>
-                              )}
-                            </label>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
+        {step === "jev" && (
+          <Panel
+            title="Fast classifier (Jev, optional)"
+            intro="Jev sorts incoming messages quickly, for example which ones are new leads. In shadow mode it runs beside your normal setup and records its answers without acting on them, so you can compare. It is off unless you turn it on."
+          >
+            <div className="grid gap-2 sm:grid-cols-2">
+              {(
+                [
+                  ["off", "Off", "Nothing is sent to Jev."],
+                  ["shadow", "Shadow", "Jev sorts beside the normal path and changes nothing."],
+                ] as const
+              ).map(([value, label, note]) => (
+                <label key={value} className="flex items-start gap-3 rounded-xl border border-bg-border bg-bg-deep/40 px-4 py-3 text-sm">
+                  <input type="radio" name="jev" className="mt-1 accent-accent" checked={jev === value} onChange={() => setJev(value)} />
+                  <span>
+                    <span className="font-semibold text-fg">{label}</span>
+                    <span className="block text-xs text-fg-muted">{note}</span>
+                  </span>
+                </label>
+              ))}
             </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <button
-                type="button"
-                onClick={() => setStep("agents")}
-                className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  // Validate required answers per agent. Block progression
-                  // until they're filled.
-                  const missing: string[] = [];
-                  for (const slug of selectedAgents) {
-                    const qs = AGENT_REGISTRY[slug]?.setup_questions || [];
-                    const slugAnswers = agentSetupAnswers[slug] || {};
-                    for (const q of qs) {
-                      if (!q.required) continue;
-                      const v = slugAnswers[q.id];
-                      if (v === undefined || v === "" || v === null) {
-                        missing.push(`${AGENT_REGISTRY[slug]?.label || slug}: ${q.label}`);
-                      }
-                    }
-                  }
-                  if (missing.length > 0) {
-                    setError(`Required: ${missing.join(" · ")}`);
-                    return;
-                  }
-                  setError(null);
-                  setStep("brand");
-                }}
-                className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                Continue <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            {error && (
-              <div className="rounded-xl border border-status-warm/40 bg-status-warm/10 px-4 py-2.5 text-xs text-status-warm inline-flex items-start gap-2">
-                <AlertCircle className="h-3.5 w-3.5 mt-0.5" />
-                <span>{error}</span>
-              </div>
-            )}
-          </section>
+            <Nav onBack={() => setStep("chat_apps")} onNext={() => setStep("brand")} />
+          </Panel>
         )}
 
         {step === "brand" && (
-          <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 space-y-5">
-            <div>
-              <h2 className="text-xl font-bold">Brand the shell</h2>
-              <p className="text-sm text-fg-muted mt-1">
-                The name shows in the sidebar and across every page. Pick the
-                URL slug too — that&apos;s the path your team will use.
-              </p>
-            </div>
-
-            <FieldRow label="Brand name" required>
+          <Panel title="Name your workspace" intro="The name shows in the header and across every page.">
+            <FieldRow label="Business name" required>
               <input
                 type="text"
                 value={brandName}
                 onChange={(e) => answerKeyChange("brand_name", e.target.value)}
-                placeholder="OASIS AI"
+                placeholder={options.workspaceName || "Your business name"}
                 className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
               />
             </FieldRow>
-
-            <FieldRow label="Footer tagline">
+            <FieldRow label="Footer line" hint="Optional. A short line under your name.">
               <input
                 type="text"
                 value={tagline}
                 onChange={(e) => answerKeyChange("tagline", e.target.value)}
-                placeholder="Only good things from now on."
                 className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
               />
             </FieldRow>
-
-            <FieldRow
-              label="URL slug"
-              hint={`Your Command Center will live at /t/${effectiveSlug || "<slug>"}`}
-            >
-              <input
-                type="text"
-                value={effectiveSlug}
-                onChange={(e) => {
-                  setSlugManuallyEdited(true);
-                  setSlug(e.target.value.toLowerCase());
-                }}
-                placeholder={derivedSlug || "your-tenant"}
-                className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg font-mono focus:border-accent/50 focus:outline-none"
-              />
-            </FieldRow>
-
-            <div className="flex items-center justify-between pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  // Route back through agent_setup if any picked agent has
-                  // setup questions, otherwise straight to agents (matches
-                  // forward routing).
-                  const needsSetup = selectedAgents.some(
-                    (s) => (AGENT_REGISTRY[s]?.setup_questions?.length || 0) > 0,
-                  );
-                  setStep(needsSetup ? "agent_setup" : "agents");
-                }}
-                className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep("confirm")}
-                disabled={!brandName.trim() || !effectiveSlug}
-                className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
-                Review <ArrowRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </section>
+            <Nav onBack={() => setStep("jev")} onNext={() => setStep("confirm")} nextDisabled={!brandName.trim()} nextLabel="Review" />
+          </Panel>
         )}
 
         {step === "confirm" && template && (
-          <section className="rounded-2xl border border-accent/25 bg-accent/5 p-6 space-y-5">
-            <div>
-              <h2 className="text-xl font-bold">Ready to create your Command Center</h2>
-              <p className="text-sm text-fg-muted mt-1">
-                We&apos;ll seed your manifest from the{" "}
-                <strong className="text-fg">{INDUSTRIES.find((i) => i.key === template)?.title}</strong>{" "}
-                template, fold in your answers, and drop you into{" "}
-                <span className="font-mono text-accent">/t/{effectiveSlug}</span>.
-              </p>
-            </div>
-
+          <Panel title="Ready to set up your workspace" intro="Check the details, then save. You can change them later.">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Summary label="Brand" value={brandName} />
-              <Summary label="Slug" value={`/t/${effectiveSlug}`} mono />
-              <Summary label="Industry" value={template.replace("_", " ")} />
-              <Summary label="Tagline" value={tagline || "(default)"} />
+              <Summary label="Business name" value={brandName} />
+              <Summary label="Starting point" value={INDUSTRIES.find((i) => i.key === template)?.title || template} />
+              <Summary label="Departments" value={departmentLabels.join(", ")} full />
               <Summary
-                label="Agents"
-                value={
-                  selectedAgents.length === 0
-                    ? "None — add later in Settings"
-                    : selectedAgents
-                        .map((slug) => AGENT_REGISTRY[slug]?.label || slug)
-                        .join(", ")
-                }
+                label="Add-ons requested"
+                value={modules.length ? options.modules.filter((m) => modules.includes(m.key)).map((m) => m.label).join(", ") : "None"}
                 full
               />
+              <Summary
+                label="Where your team talks"
+                value={chatApps.length ? CHAT_APPS.filter((a) => chatApps.includes(a.key)).map((a) => a.label).join(", ") : "Not answered"}
+              />
+              <Summary label="Fast classifier" value={jev === "shadow" ? "Shadow" : "Off"} />
               {userEmail && <Summary label="Signed in as" value={userEmail} full />}
             </div>
-
-            {/* Post-onboarding pointer. The wizard creates the manifest but
-                doesn't wire an AI provider — the user does that in Settings
-                immediately after. Surfacing the next step here means they
-                don't land on /t/<slug> wondering why chat doesn't work. */}
-            <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted leading-relaxed flex items-start gap-2">
-              <Sparkles className="h-4 w-4 text-accent shrink-0 mt-0.5" />
-              <div>
-                <span className="text-fg font-bold">Next: connect an AI provider.</span>{" "}
-                After this you&apos;ll land on your Command Center.
-                Open <span className="font-mono text-accent">Settings → AI provider accounts</span>{" "}
-                and connect an Anthropic, OpenRouter, OpenAI, or Google key — one click applies it to every enabled agent.
-                Anthropic unlocks the native tool_use loop (records read/write, http, integrations).
-              </div>
-            </div>
-
             {error && (
-              <div className="rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-2.5 text-sm text-red-200 inline-flex items-start gap-2">
+              <div role="alert" className="rounded-xl border border-status-hot/40 bg-status-hot/10 px-4 py-2.5 text-sm text-fg inline-flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 mt-0.5" />
                 <span>{error}</span>
               </div>
             )}
-
             <div className="flex items-center justify-between pt-2">
-              <button
-                type="button"
-                onClick={() => setStep("brand")}
-                className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-              >
+              <button type="button" onClick={() => setStep("brand")} className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs">
                 <ChevronLeft className="h-3.5 w-3.5" />
                 Back
               </button>
-              <button
-                type="button"
-                onClick={submit}
-                className="btn-send inline-flex items-center gap-1.5 !px-4 !py-2 text-sm"
-              >
+              <button type="button" onClick={submit} className="btn-send inline-flex items-center gap-1.5 !px-4 !py-2 text-sm">
                 <CheckCircle2 className="h-4 w-4" />
-                Create my Command Center
+                Set up my workspace
               </button>
             </div>
-          </section>
+          </Panel>
         )}
 
         {step === "submitting" && (
-          <section className="rounded-2xl border border-accent/30 bg-accent/10 p-8 text-center">
+          <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-8 text-center">
             <Loader2 className="h-8 w-8 animate-spin text-accent mx-auto" />
-            <div className="mt-3 font-bold">Building your manifest...</div>
-            <p className="text-sm text-fg-muted mt-1">
-              Saving template + folding in your answers + creating audit row.
-            </p>
+            <div className="mt-3 font-bold">Saving your workspace…</div>
           </section>
         )}
 
-        {step === "done" && (
-          <section className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-8 space-y-6">
-            <div className="text-center space-y-2">
-              <CheckCircle2 className="h-10 w-10 text-emerald-300 mx-auto" />
-              <div className="text-xl font-bold">Your workspace is live.</div>
-              <p className="text-sm text-fg-muted max-w-md mx-auto">
-                Manifest saved, agents enabled, branding applied. Two ways
-                to use it from here — pick what fits your setup.
-              </p>
-            </div>
-
-            {/* Two CTAs side-by-side. Pair-a-machine is the recommended path
-                for operators with a local computer (unlocks CLI chat, file
-                access, automations). Open-the-dashboard is the no-machine
-                path for cloud-only operators. */}
-            <div className="grid sm:grid-cols-2 gap-3">
-              <Link
-                href="/settings/devices/install"
-                className="rounded-xl border-2 border-accent bg-accent/10 p-5 hover:bg-accent/20 transition-colors flex flex-col gap-2"
-              >
-                <div className="flex items-center gap-2">
-                  <Download className="w-5 h-5 text-accent" />
-                  <div className="font-bold text-fg">Pair a machine</div>
-                  <span className="ml-auto text-[10px] uppercase tracking-wider text-accent font-bold">
-                    Recommended
-                  </span>
-                </div>
-                <p className="text-xs text-fg-muted leading-relaxed">
-                  Run one command on your laptop / desktop. Unlocks CLI chat
-                  with your Claude subscription, local file access, and the
-                  automations engine. ~1 minute.
-                </p>
-              </Link>
-
-              <Link
-                href={doneSlug ? `/t/${doneSlug}` : "/"}
-                className="rounded-xl border border-bg-border bg-bg-elev p-5 hover:border-accent-muted/40 transition-colors flex flex-col gap-2"
-              >
-                <div className="flex items-center gap-2">
-                  <ArrowRight className="w-5 h-5 text-fg-muted" />
-                  <div className="font-bold text-fg">Open dashboard now</div>
-                </div>
-                <p className="text-xs text-fg-muted leading-relaxed">
-                  Go straight to your workspace. Chat runs in cloud mode
-                  with your saved API key. You can pair a machine later
-                  from Settings → Devices.
-                </p>
-              </Link>
-            </div>
-          </section>
-        )}
+        {step === "done" && <OnboardingDoneChoices canInstallBridge={canInstallBridge} dashboardHref="/" />}
       </div>
     </div>
   );
 }
 
+/**
+ * The "workspace is live" step. Its own function with no hooks so
+ * tests/f0-containment.test.ts renders both versions for real.
+ *
+ * The "Pair a machine" card goes to /settings/devices/install, which installs
+ * the bridge for the verified platform operator only (F0 containment,
+ * 2026-09-29). Everyone else would land on a page with nothing to install, so
+ * for them the card, its "Recommended" badge and the "pair later from
+ * Settings → Devices" line (an operator-only section) are all gone, and the
+ * dashboard card takes the full width instead of leaving an empty slot.
+ */
+export function OnboardingDoneChoices({
+  canInstallBridge,
+  dashboardHref,
+}: {
+  canInstallBridge: boolean;
+  dashboardHref: string;
+}) {
+  const pairCard = canInstallBridge === true;
+  return (
+    <section className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-8 space-y-6">
+      <div className="text-center space-y-2">
+        <CheckCircle2 className="h-10 w-10 text-emerald-300 mx-auto" />
+        <div className="text-xl font-bold">Your workspace is live.</div>
+        <p className="text-sm text-fg-muted max-w-md mx-auto">
+          {pairCard
+            ? "Manifest saved, agents enabled, branding applied. Two ways to use it from here — pick what fits your setup."
+            : "Manifest saved, agents enabled, branding applied."}
+        </p>
+      </div>
+
+      {/* Operator: two CTAs side by side. Pair-a-machine is the recommended
+          path with a local computer (CLI chat, file access, automations);
+          Open-the-dashboard is the no-machine path. Everyone else: the
+          dashboard card alone. */}
+      <div className={pairCard ? "grid sm:grid-cols-2 gap-3" : "grid gap-3"}>
+        <BridgeInstallLink
+          canInstallBridge={pairCard}
+          className="rounded-xl border-2 border-accent bg-accent/10 p-5 hover:bg-accent/20 transition-colors flex flex-col gap-2"
+        >
+          <div className="flex items-center gap-2">
+            <Download className="w-5 h-5 text-accent" />
+            <div className="font-bold text-fg">Pair a machine</div>
+            <span className="ml-auto text-[10px] uppercase tracking-wider text-accent font-bold">
+              Recommended
+            </span>
+          </div>
+          <p className="text-xs text-fg-muted leading-relaxed">
+            Run one command on your laptop / desktop. Unlocks CLI chat
+            with your Claude subscription, local file access, and the
+            automations engine. ~1 minute.
+          </p>
+        </BridgeInstallLink>
+
+        {/* A full page load, not <Link>: the root layout does not re-render on
+            a soft navigation, so leaving this full-bleed flow client-side
+            painted the workspace with no rail and no header (2026-09-30 local
+            e2e walk). */}
+        <a
+          href={dashboardHref}
+          className="rounded-xl border border-bg-border bg-bg-elev p-5 hover:border-accent-muted/40 transition-colors flex flex-col gap-2"
+        >
+          <div className="flex items-center gap-2">
+            <ArrowRight className="w-5 h-5 text-fg-muted" />
+            <div className="font-bold text-fg">Open dashboard now</div>
+          </div>
+          <p className="text-xs text-fg-muted leading-relaxed">
+            {pairCard
+              ? "Go straight to your workspace. Chat runs in cloud mode with your saved API key. You can pair a machine later from Settings → Devices."
+              : "Go straight to your workspace. Chat runs in cloud mode with your saved API key."}
+          </p>
+        </a>
+      </div>
+    </section>
+  );
+}
+
 function Header({ step }: { step: Step }) {
-  const labels: Record<Step, string> = {
-    industry: "Pick your industry",
-    questions: "Tell us about your operation",
-    agents: "Pick your agents",
-    agent_setup: "Configure your agents",
-    brand: "Brand the shell",
-    confirm: "Review & create",
-    submitting: "Building",
-    done: "Done",
-  };
-  // 6 visible steps when agent_setup is rendered; we always show the
-  // higher numerator so the agent_setup step lands on "4 / 6" rather
-  // than re-labelling earlier steps. Steps that don't appear (e.g.
-  // operators with no setup_questions on their agents) skip the number
-  // — Header still renders cleanly because Step is a string union, not
-  // an index.
-  const number: Record<Step, string> = {
-    industry: "1 / 6",
-    questions: "2 / 6",
-    agents: "3 / 6",
-    agent_setup: "4 / 6",
-    brand: "5 / 6",
-    confirm: "6 / 6",
-    submitting: "",
-    done: "",
-  };
+  // One page title; each step's own heading lives in its panel, so the two
+  // never repeat each other.
+  const index = STEP_ORDER.indexOf(step);
   return (
     <header className="text-center space-y-2">
-      <div className="inline-flex items-center gap-2 rounded-full border border-accent/25 bg-accent/5 px-3 py-1 text-xs text-accent">
-        <Sparkles className="h-3.5 w-3.5" />
-        Onboarding wizard {number[step] && <>· {number[step]}</>}
-      </div>
-      <h1 className="text-3xl font-black tracking-tight sm:text-4xl">{labels[step]}</h1>
+      <h1 className="text-3xl font-black tracking-tight sm:text-4xl">
+        {step === "industry" ? "What kind of business is this?" : "Set up your workspace"}
+      </h1>
+      {index >= 0 && (
+        <div className="text-sm text-fg-muted">
+          Step {index + 1} of {STEP_ORDER.length}
+        </div>
+      )}
     </header>
+  );
+}
+
+function Panel({ title, intro, children }: { title: string; intro: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 space-y-5">
+      <div>
+        <h2 className="text-xl font-bold">{title}</h2>
+        <p className="text-sm text-fg-muted mt-1">{intro}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Nav({
+  onBack,
+  onNext,
+  nextDisabled,
+  nextLabel = "Continue",
+}: {
+  onBack: () => void;
+  onNext: () => void;
+  nextDisabled?: boolean;
+  nextLabel?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between pt-2">
+      <button type="button" onClick={onBack} className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs">
+        <ChevronLeft className="h-3.5 w-3.5" />
+        Back
+      </button>
+      <button type="button" onClick={onNext} disabled={nextDisabled} className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs">
+        {nextLabel} <ArrowRight className="h-3.5 w-3.5" />
+      </button>
+    </div>
   );
 }
 
@@ -869,32 +542,23 @@ function FieldRow({
   );
 }
 
-function TierMetaRow({ label, value, full }: { label: string; value: string; full?: boolean }) {
-  return (
-    <div className={`flex items-baseline gap-1.5 ${full ? "col-span-2" : ""}`}>
-      <span className="text-fg-dim uppercase tracking-wider font-bold text-[9px]">{label}</span>
-      <span className="text-fg-muted">{value}</span>
-    </div>
-  );
-}
-
-function Summary({ label, value, mono, full }: { label: string; value: string; mono?: boolean; full?: boolean }) {
+function Summary({ label, value, full }: { label: string; value: string; full?: boolean }) {
   return (
     <div className={`rounded-xl border border-bg-border bg-bg-elev/40 px-4 py-2.5 ${full ? "sm:col-span-2" : ""}`}>
-      <div className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-bold">{label}</div>
-      <div className={`mt-0.5 text-sm text-fg ${mono ? "font-mono text-accent truncate" : ""}`}>
-        {value || "(empty)"}
-      </div>
+      <div className="text-xs text-fg-muted">{label}</div>
+      <div className="mt-0.5 text-sm text-fg">{value || "(empty)"}</div>
     </div>
   );
 }
 
 function QuestionField({
   question,
+  placeholder,
   value,
   onChange,
 }: {
   question: WizardQuestion;
+  placeholder?: string;
   value: string | string[] | undefined;
   onChange: (v: string | string[]) => void;
 }) {
@@ -905,7 +569,7 @@ function QuestionField({
           type="text"
           value={(value as string) || ""}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={question.placeholder}
+          placeholder={placeholder}
           className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
         />
       </FieldRow>
@@ -918,7 +582,7 @@ function QuestionField({
           rows={3}
           value={(value as string) || ""}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={question.placeholder}
+          placeholder={placeholder}
           className="w-full resize-none rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
         />
       </FieldRow>
@@ -947,7 +611,7 @@ function QuestionField({
                 key={c.value}
                 type="button"
                 onClick={() => onChange(c.value)}
-                className={`text-left rounded-xl border px-4 py-2.5 text-sm transition-all ${
+                className={`text-left rounded-xl border px-4 py-2.5 text-sm transition-colors ${
                   active
                     ? "border-accent bg-accent-soft text-fg"
                     : "border-bg-border bg-bg-deep/40 text-fg-muted hover:border-accent/40 hover:bg-bg-elev/40"
@@ -976,7 +640,7 @@ function QuestionField({
                 const next = active ? arr.filter((v) => v !== c.value) : [...arr, c.value];
                 onChange(next);
               }}
-              className={`text-left rounded-xl border px-4 py-2.5 text-sm transition-all ${
+              className={`text-left rounded-xl border px-4 py-2.5 text-sm transition-colors ${
                 active
                   ? "border-accent bg-accent-soft text-fg"
                   : "border-bg-border bg-bg-deep/40 text-fg-muted hover:border-accent/40 hover:bg-bg-elev/40"

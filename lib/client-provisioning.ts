@@ -2,6 +2,40 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getClientCommandCenterProfileById } from "./client-profiles";
 import { getTursoClient, tursoConfigured } from "./turso";
 
+/** Registered profile ids that belong to OASIS itself, never to a client. */
+export const OASIS_ONLY_PROFILE_IDS: ReadonlySet<string> = new Set(["default", "oasis-ai-cc"]);
+
+/**
+ * Shells of retired workspaces. "sun" is SunBiz's (retired 2026-09-28): its
+ * nav, the solara/helios agents and a dedicated Turso backend. Writing it onto
+ * any workspace would re-couple SunBiz and show its agents to a client, so it
+ * is never written again, whoever asks.
+ */
+export const RETIRED_PROFILE_IDS: ReadonlySet<string> = new Set(["sun"]);
+
+/**
+ * Shells a BRAND-NEW workspace may start with (the setup CLI,
+ * app/api/auth/provision-cli). An allowlist, so a shell added to
+ * lib/client-profiles.ts later is refused until someone decides it is a
+ * client shell. Empty today: every registered shell is OASIS's own
+ * (default, oasis-ai-cc), a retired workspace's (sun), or one named client's
+ * (suga, whose brand and Maven agent belong to that one client). A new
+ * workspace is set up at /admin/installs instead (lib/provisioning).
+ */
+export const NEW_WORKSPACE_SHELL_IDS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Why the setup CLI may not give a new workspace `slug` as its shell, or null
+ * when it may. A sentence, for the CLI's 400.
+ */
+export function newWorkspaceShellRefusal(slug: string): string | null {
+  if (NEW_WORKSPACE_SHELL_IDS.has(slug)) return null;
+  if (getClientCommandCenterProfileById(slug).id !== slug) return `"${slug}" is not a registered shell.`;
+  if (OASIS_ONLY_PROFILE_IDS.has(slug)) return `"${slug}" is OASIS's own shell, not a client shell.`;
+  if (RETIRED_PROFILE_IDS.has(slug)) return `"${slug}" belongs to a retired workspace and is never given to another one.`;
+  return `"${slug}" belongs to one named client and is not given to a new workspace. Set the workspace up at /admin/installs.`;
+}
+
 type ProvisioningInput = {
   db: SupabaseClient;
   tenantId: string;
@@ -37,6 +71,15 @@ export async function applyClientProvisioningProfile({
   // path recognises.
   if (getClientCommandCenterProfileById(clientProfileSlug).id !== clientProfileSlug) {
     throw new Error(`applyClientProvisioningProfile: unknown client profile "${clientProfileSlug}"`);
+  }
+  // OASIS's own shells are not client shells. "oasis-ai-cc" resolves to OASIS's
+  // seed manifest (its nav, its agents), so writing it onto another workspace
+  // would hand that workspace OASIS's command center.
+  if (OASIS_ONLY_PROFILE_IDS.has(clientProfileSlug)) {
+    throw new Error(`applyClientProvisioningProfile: "${clientProfileSlug}" is OASIS's own shell, not a client shell`);
+  }
+  if (RETIRED_PROFILE_IDS.has(clientProfileSlug)) {
+    throw new Error(`applyClientProvisioningProfile: "${clientProfileSlug}" is a retired workspace's shell and is never written again`);
   }
 
   const tenantRes = await db

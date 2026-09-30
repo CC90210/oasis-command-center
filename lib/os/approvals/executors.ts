@@ -28,6 +28,14 @@
  *                 changed asset is refused; and the in-flight check and the
  *                 insert are one statement, so two approvals of one asset
  *                 cannot both queue.
+ *   send_slack_message  chat.postMessage in the thread the @mention came from,
+ *                 with the bot token of THIS workspace's live Slack connection
+ *                 (lib/slack/send.ts). The approved team must be the
+ *                 connection's own team, so an approval can never post into a
+ *                 Slack workspace this tenant does not hold. Dry-run first:
+ *                 isDryRun("slack") (LIVE_SEND_SLACK / DASHBOARD_LIVE_SEND /
+ *                 BRAVO_FORCE_DRY_RUN). The posted reply is mirrored onto the
+ *                 conversation (direction outbound).
  *
  * Dependencies are injected (ExecutorDeps) so tests drive the real executors
  * with a fake mailbox and a temp database; production passes nothing.
@@ -54,10 +62,12 @@ import {
   publishAssetSnapshot,
   validatePublishPostPayload,
   validateSendEmailPayload,
+  validateSendSlackMessagePayload,
   type ApprovalActionKind,
   type ExecutionResult,
 } from "@/lib/os/approvals/rules";
 import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
+import { postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
 
 export type ExecutorTenant = { id: string; slug: string | null };
 
@@ -84,6 +94,8 @@ export type ExecutorDeps = {
   signerFor: (email: string | null, brand: BrandKey) => EmailSigner | null;
   /** The Feed's event tape (agent_events). Best-effort: it logs, never throws. */
   publishEvent: (event: AgentEventPublish) => Promise<void>;
+  /** Post a Slack reply for a tenant (lib/slack/send.ts). Absent = the real one. */
+  postSlack?: (args: SlackPostArgs) => Promise<SlackPostOutcome>;
 };
 
 export function defaultExecutorDeps(): ExecutorDeps {
@@ -351,12 +363,49 @@ const publishPost: Executor = {
 };
 
 // ---------------------------------------------------------------------------
+// send_slack_message
+// ---------------------------------------------------------------------------
+
+const SLACK_PROVIDER = "slack";
+
+const sendSlackMessage: Executor = {
+  // Whether the workspace holds a live Slack connection is read when it runs
+  // (a database read); the card says "Slack reply" and the outcome says what
+  // happened, never a success it did not have.
+  readiness: () => null,
+  async run(ctx) {
+    const v = validateSendSlackMessagePayload(ctx.payload);
+    if (!v.ok) return failed("payload_invalid", `The stored Slack reply is not valid (${v.error}).`);
+    const { team_id, channel_id, thread_ts, text } = v.value;
+    if (ctx.deps.isDryRun("slack")) {
+      return {
+        ok: true,
+        result: { outcome: "dry_run", provider: SLACK_PROVIDER, would_send: { channel: channel_id, thread_ts, characters: text.length } },
+      };
+    }
+    const post = ctx.deps.postSlack ?? ((args: SlackPostArgs) => postSlackReply(ctx.db, args));
+    const sent = await post({
+      tenantId: ctx.tenant.id,
+      teamId: team_id,
+      channelId: channel_id,
+      threadTs: thread_ts,
+      text,
+      department: v.value.department ?? ctx.approval.department_key ?? null,
+      approvalId: ctx.approval.id,
+    });
+    if (sent.ok) return { ok: true, result: { outcome: "sent", provider: SLACK_PROVIDER, message_id: sent.ts } };
+    return failed(sent.reason, sent.message, SLACK_PROVIDER);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
 
 export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> = {
   send_email: sendEmail,
   publish_post: publishPost,
+  send_slack_message: sendSlackMessage,
 };
 
 export function noExecutorMessage(kind: string): string {
