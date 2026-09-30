@@ -14,7 +14,7 @@ import { requireSettingsSection } from "@/components/settings/settings-viewer";
 import { PageFrame } from "@/components/os/PageFrame";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { findActiveConnection, toPublicConnection } from "@/lib/connections/store";
-import { jevStats, readJevMode } from "@/lib/jev/mode";
+import { JEV_TEXT_PROCESSING_APPROVED, jevStats, readJevMode } from "@/lib/jev/mode";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import { connectorBySlug, resolveConnectorStatus } from "@/lib/os/connectors";
 import { isSlackSchemaMissing } from "@/lib/slack/routing";
@@ -59,7 +59,7 @@ export default async function SettingsAiPage() {
     >
       <div className="space-y-4">
         <SettingsContent section="ai" viewerAccess={viewer.viewerAccess} />
-        <JevCard facts={jev} nowMs={nowMs} canManage={viewer.access.canManage} oasis={viewer.access.oasisWorkspace} />
+        <JevCard facts={jev} nowMs={nowMs} canManage={viewer.access.canManage} oasis={viewer.access.oasisWorkspace} textApproved={JEV_TEXT_PROCESSING_APPROVED} />
       </div>
     </PageFrame>
   );

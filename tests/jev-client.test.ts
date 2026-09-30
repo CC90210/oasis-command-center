@@ -288,7 +288,7 @@ async function main() {
     };
     const ticket = { tenantId: CLIENT, title: `Refund ${MARKER}`, description: `Card 4242 ${MARKER}`, category: "question", severity: "low", now: new Date() };
     const before = JSON.stringify(ticket);
-    const r = await mode.shadowSupportTriage(db, ticket, { mode: { mode: "shadow", source: "manifest" }, apiKey: GOOD_KEY, classifyImpl });
+    const r = await mode.shadowSupportTriage(db, ticket, { mode: { mode: "shadow", source: "manifest" }, apiKey: GOOD_KEY, classifyImpl, processorApprovedForTest: true });
     assert.deepEqual(r, { asked: true, rows: 2, reason: "asked" });
     assert.equal(JSON.stringify(ticket), before, "the decided values are untouched");
     assert.equal(asked, 1);
@@ -308,9 +308,9 @@ async function main() {
   await check("an agreeing answer records agreed = 1; a failed call records its failure and agreed NULL (unknown is not 0)", async () => {
     await db.execute("DELETE FROM jev_calls");
     const agree = async () => ({ ok: true as const, model: "m", answers: { q0: { type: "choice" as const, choice: "general", confidence: 0.9, probabilities: {} } }, usage: { inputTokens: 5, outputTokens: 1 }, latencyMs: 10, attempts: 1 });
-    await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "lunch is here", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: GOOD_KEY, classifyImpl: agree });
+    await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "lunch is here", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: GOOD_KEY, classifyImpl: agree, processorApprovedForTest: true });
     const fail = async () => ({ ok: false as const, failure: "timeout" as const, status: null, latencyMs: 2000, attempts: 1 });
-    await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "another", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: GOOD_KEY, classifyImpl: fail });
+    await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "another", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: GOOD_KEY, classifyImpl: fail, processorApprovedForTest: true });
     const rows = (await db.execute("SELECT outcome, agreed, latency_ms FROM jev_calls ORDER BY created_at, outcome")).rows.map((x) => [x.outcome, x.agreed === null ? null : Number(x.agreed), Number(x.latency_ms)]);
     assert.deepEqual(rows.sort(), [["ok", 1, 10], ["timeout", null, 2000]].sort());
     const stats = await mode.jevStats(db, OASIS, new Date());
@@ -326,14 +326,32 @@ async function main() {
       calls += 1;
       return { ok: false as const, failure: "timeout" as const, status: null, latencyMs: 0, attempts: 1 };
     };
-    const off = await mode.shadowGeneralChannelRouting(db, { tenantId: CLIENT, text: "hi", now: new Date() }, { mode: { mode: "off", source: "default" }, apiKey: GOOD_KEY, classifyImpl: spy });
+    const off = await mode.shadowGeneralChannelRouting(db, { tenantId: CLIENT, text: "hi", now: new Date() }, { mode: { mode: "off", source: "default" }, apiKey: GOOD_KEY, classifyImpl: spy, processorApprovedForTest: true });
     assert.equal(off.reason, "off");
-    const noKey = await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "hi", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: null, classifyImpl: spy });
+    const noKey = await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "hi", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: null, classifyImpl: spy, processorApprovedForTest: true });
     assert.equal(noKey.reason, "no_key");
     // The real key lookup: this workspace has no Jev connection.
-    const real = await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "hi", now: new Date() }, { mode: { mode: "shadow", source: "default" }, classifyImpl: spy });
+    const real = await mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "hi", now: new Date() }, { mode: { mode: "shadow", source: "default" }, classifyImpl: spy, processorApprovedForTest: true });
     assert.equal(real.reason, "no_key");
     assert.equal(calls, 0);
+  });
+
+  await check("until TypeSafe is an approved processor, no workspace text is sent, whatever the mode and key", async () => {
+    assert.equal(mode.JEV_TEXT_PROCESSING_APPROVED, false, "flipping this needs TypeSafe on /privacy (tests/legal-compliance-drift.test.ts)");
+    let calls = 0;
+    const spy = async () => {
+      calls += 1;
+      return { ok: false as const, failure: "timeout" as const, status: null, latencyMs: 0, attempts: 1 };
+    };
+    const before = Number((await db.execute("SELECT COUNT(*) AS n FROM jev_calls")).rows[0].n);
+    for (const run of [
+      () => mode.shadowGeneralChannelRouting(db, { tenantId: OASIS, text: "hi", now: new Date() }, { mode: { mode: "shadow", source: "default" }, apiKey: GOOD_KEY, classifyImpl: spy }),
+      () => mode.shadowSupportTriage(db, { tenantId: OASIS, title: "t", description: "d", category: "bug", severity: "low", now: new Date() }, { mode: { mode: "on", source: "manifest" }, apiKey: GOOD_KEY, classifyImpl: spy }),
+    ]) {
+      assert.deepEqual(await run(), { asked: false, rows: 0, reason: "not_approved" });
+    }
+    assert.equal(calls, 0);
+    assert.equal(Number((await db.execute("SELECT COUNT(*) AS n FROM jev_calls")).rows[0].n), before);
   });
 
   await check("the support intake keeps what the requester chose: the shadow runs after the ticket and its result is never assigned", () => {

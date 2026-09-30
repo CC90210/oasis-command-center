@@ -521,7 +521,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     icon: { kind: "monogram", letters: "Jv", reason: "Not in Simple Icons" },
     reads: ["Jev's answers to the questions OASIS asks it: a label and how sure it is"],
     does: [
-      "In shadow mode, classifies new support tickets and general Slack messages beside OASIS's normal path, and records only whether it agreed",
+      "Once OASIS lists TypeSafe as a processor: classifies new support tickets and general Slack messages in shadow, beside OASIS's normal path, and records only whether it agreed. Until then it only checks the key",
       "Never decides, sends or changes anything on its own",
       "The text it classifies goes to TypeSafe in the United States. TypeSafe's policy says it does not train on it",
     ],

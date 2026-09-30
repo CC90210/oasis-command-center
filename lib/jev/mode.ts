@@ -42,6 +42,17 @@ import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { TICKET_CATEGORIES, TICKET_CATEGORY_LABELS, TICKET_SEVERITIES, TICKET_SEVERITY_LABELS } from "@/lib/delivery/rules";
 import { classify, type JevCallOpts, type JevQuestion, type JevResult } from "@/lib/jev/client";
 
+/**
+ * NOT YET APPROVED: no workspace text goes to TypeSafe. TypeSafe (hosted in the
+ * United States) is not on OASIS's published list of processors (/privacy), and
+ * sending personal information outside Quebec needs CC's decision first (a Law
+ * 25 privacy impact assessment and TypeSafe's DPA). Until this is flipped, in
+ * the SAME change that lists TypeSafe on /privacy, every shadow run stops here
+ * and only the key check (list models, which sends no data) ever calls
+ * TypeSafe. tests/legal-compliance-drift.test.ts holds the two together.
+ */
+export const JEV_TEXT_PROCESSING_APPROVED = false;
+
 export const JEV_MODES = ["off", "shadow", "on"] as const;
 export type JevMode = (typeof JEV_MODES)[number];
 
@@ -129,9 +140,11 @@ export type ShadowDeps = {
   /** Test seams; production reads the manifest and the key store. */
   mode?: ResolvedJevMode;
   apiKey?: string | null;
+  /** Test seam only: exercise the shadow as it will run once TypeSafe is approved. Production never sets it. */
+  processorApprovedForTest?: boolean;
 };
 
-export type ShadowRun = { asked: boolean; rows: number; reason: "off" | "no_key" | "asked" | "failed" };
+export type ShadowRun = { asked: boolean; rows: number; reason: "not_approved" | "off" | "no_key" | "asked" | "failed" };
 
 /**
  * Ask Jev the same questions the normal path already answered, record ONLY
@@ -142,6 +155,8 @@ export async function runShadow(
   input: { tenantId: string; state: string | Record<string, unknown>; questions: readonly ShadowQuestion[] },
 ): Promise<ShadowRun> {
   try {
+    // No text leaves for TypeSafe until OASIS lists it as a processor.
+    if (!JEV_TEXT_PROCESSING_APPROVED && deps.processorApprovedForTest !== true) return { asked: false, rows: 0, reason: "not_approved" };
     const mode = deps.mode ?? (await readJevMode(deps.db, input.tenantId));
     if (mode.mode === "off") return { asked: false, rows: 0, reason: "off" };
     const apiKey = deps.apiKey !== undefined ? deps.apiKey : await jevKeyFor(deps.db, input.tenantId);

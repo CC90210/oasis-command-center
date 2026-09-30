@@ -46,7 +46,20 @@ function modeSentence(mode: ResolvedJevMode | null, oasis: boolean): string {
   }
 }
 
-export function JevCard({ facts, nowMs, canManage, oasis }: { facts: JevCardFacts; nowMs: number; canManage: boolean; oasis: boolean }) {
+export function JevCard({
+  facts,
+  nowMs,
+  canManage,
+  oasis,
+  textApproved,
+}: {
+  facts: JevCardFacts;
+  nowMs: number;
+  canManage: boolean;
+  oasis: boolean;
+  /** lib/jev/mode.ts JEV_TEXT_PROCESSING_APPROVED: may workspace text go to TypeSafe at all yet? */
+  textApproved: boolean;
+}) {
   const s = facts.stats;
   // A refused or broken key sends nothing (lib/jev/mode.ts jevKeyFor).
   const connected = !!facts.connection && facts.connection.status !== "expired" && facts.connection.status !== "error";
@@ -79,11 +92,13 @@ export function JevCard({ facts, nowMs, canManage, oasis }: { facts: JevCardFact
 
         <dt className="font-medium text-fg-dim">What OASIS asks it</dt>
         <dd className="text-fg-muted">
-          {sends
-            ? "The priority and category of each new support ticket, and which department a message in a general Slack channel belongs to. Nothing else."
-            : connected
-              ? "Nothing while the mode is off."
-              : "Nothing: no key is connected."}
+          {!textApproved
+            ? "Nothing yet. TypeSafe is not on OASIS's published list of processors, so no workspace text is sent to it until that is approved. Once it is, in shadow: the priority and category of each new support ticket, and which department a message in a general Slack channel belongs to. The key check sends no data."
+            : sends
+              ? "The priority and category of each new support ticket, and which department a message in a general Slack channel belongs to. Nothing else."
+              : connected
+                ? "Nothing while the mode is off."
+                : "Nothing: no key is connected."}
           {oasis && (
             <span className="mt-1 block text-fg-dim">
               OASIS&apos;s inbound email classifier runs outside this app with its own key and switch, and is not counted here.
