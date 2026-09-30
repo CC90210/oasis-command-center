@@ -44,6 +44,12 @@ type Props = {
   prefs: CalendarPrefs;
   calendarName: string;
   now: Date;
+  /**
+   * true when a restore is sent, false when it failed. Until its rows are
+   * read back the page must not plan the browser-week import against the
+   * empty calendar it still shows.
+   */
+  onRestoring?: (pending: boolean) => void;
   onRestored: (result: RoutineRestored | { status: "already_restored" }) => void;
   onDismiss: () => void;
   /** Set when this browser still holds the old page's saved week: opens its import instead. */
@@ -105,7 +111,7 @@ function dateLabel(key: string): string {
   return `${monthShort(d.getMonth())} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
-export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onDismiss, onUseBrowserCopy }: Props) {
+export function RoutineRestore({ info, prefs, calendarName, now, onRestoring, onRestored, onDismiss, onUseBrowserCopy }: Props) {
   const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
   const [times, setTimes] = useState<Record<string, { start: string; end: string }>>(() =>
     Object.fromEntries(info.blocks.map((b) => [b.key, { start: hhmm(b.startMinute), end: hhmm(b.endMinute) }])),
@@ -140,9 +146,11 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onD
     if (!edits) return;
     setBusy(true);
     setError(null);
+    onRestoring?.(true);
     const outcome = await sendRoutineRestore(edits);
     setBusy(false);
     if (!outcome.ok) {
+      onRestoring?.(false);
       setError(outcome.message);
       setMode("view");
       return;

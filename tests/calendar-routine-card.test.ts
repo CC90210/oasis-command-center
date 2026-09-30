@@ -15,9 +15,17 @@
  *      logged nothing and always said "Could not reach the server". A network
  *      failure is now logged, and a failure after a successful write says the
  *      routine was saved.
+ *   3. (CodeRabbit, PR #493) The import's confirm step wrote the writes planned
+ *      when it OPENED. Opened while a restore was still in flight, it planned
+ *      create-only writes on the empty calendar; confirmed after the restore
+ *      landed, it put every block in twice. The writes are now worked out from
+ *      the calendar as it is when confirmed, nothing is written while it is
+ *      being read back, and the import is not offered while a restore is sent.
  *
  * The card is a client component; it runs here with a minimal stand-in for
- * React's state hooks (no DOM), so its real click handlers are exercised.
+ * React's hooks (no DOM), so its real click handlers are exercised. The page
+ * (CalendarApp) runs one level deep: its own hooks and effects, against a
+ * stand-in window and server; its children stay elements, never called.
  *
  * Run: node --conditions=react-server --import tsx tests/calendar-routine-card.test.ts
  */
@@ -31,27 +39,71 @@ import { isValidElement, type ReactNode } from "react";
 process.env.TZ = "America/Toronto";
 const ROOT = join(__dirname, "..");
 
-// ── A minimal hook runtime: state survives re-renders, effects never run ────
+// ── A minimal hook runtime: state survives re-renders; effects run only when a check flushes them ────
 // The module object the components' `import { useState } from "react"` reads at call time.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const R = require("react") as Record<string, unknown>;
 (globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
 let slots: unknown[] = [];
 let cursor = 0;
+let effects = new Map<number, () => void>();
+class Callback {
+  constructor(readonly deps: unknown[] | undefined, readonly fn: unknown) {}
+}
+class Effect {
+  constructor(readonly deps: unknown[] | undefined, public cleanup: unknown) {}
+}
+const sameDeps = (a?: unknown[], b?: unknown[]) => !!a && !!b && a.length === b.length && a.every((x, k) => Object.is(x, b[k]));
 R.useState = (init: unknown) => {
   const i = cursor++;
-  if (!(i in slots)) slots[i] = typeof init === "function" ? (init as () => unknown)() : init;
-  return [slots[i], (v: unknown) => (slots[i] = typeof v === "function" ? (v as (p: unknown) => unknown)(slots[i]) : v)];
+  // A setter keeps writing to its own mount, even when it fires after the next check mounted.
+  const own = slots;
+  if (!(i in own)) own[i] = typeof init === "function" ? (init as () => unknown)() : init;
+  return [own[i], (v: unknown) => (own[i] = typeof v === "function" ? (v as (p: unknown) => unknown)(own[i]) : v)];
 };
 R.useMemo = (fn: () => unknown) => fn();
-R.useRef = (current: unknown) => ({ current });
-R.useEffect = () => undefined;
+R.useCallback = (fn: unknown, deps?: unknown[]) => {
+  const i = cursor++;
+  const prev = slots[i];
+  if (prev instanceof Callback && sameDeps(prev.deps, deps)) return prev.fn;
+  slots[i] = new Callback(deps, fn);
+  return fn;
+};
+R.useRef = (current: unknown) => {
+  const i = cursor++;
+  if (!(i in slots)) slots[i] = { current };
+  return slots[i];
+};
+R.useEffect = (fn: () => unknown, deps?: unknown[]) => {
+  const i = cursor++;
+  const own = slots;
+  const prev = own[i];
+  if (prev instanceof Effect && sameDeps(prev.deps, deps)) return;
+  own[i] = new Effect(deps, prev instanceof Effect ? prev.cleanup : undefined);
+  effects.set(i, () => {
+    const fx = own[i] as Effect;
+    if (typeof fx.cleanup === "function") fx.cleanup();
+    fx.cleanup = fn();
+  });
+};
 function mount(render: () => unknown) {
   slots = [];
+  effects = new Map();
   return () => {
     cursor = 0;
     return render();
   };
+}
+/** Runs the effects the last render scheduled, in hook order. */
+function flushEffects() {
+  const due = [...effects.entries()].sort((a, b) => a[0] - b[0]);
+  effects = new Map();
+  for (const [, run] of due) run();
+}
+/** Runs every effect cleanup of the current mount (timers, listeners). */
+function unmount() {
+  effects = new Map();
+  for (const fx of slots) if (fx instanceof Effect && typeof fx.cleanup === "function") fx.cleanup();
 }
 
 type El = { type: unknown; props: Record<string, unknown> };
@@ -389,6 +441,225 @@ async function main() {
     const without = card(() => undefined)();
     assert.doesNotMatch(flat(without), /This browser also holds/);
   });
+
+  await check("RoutineRestore: tells the page when a restore is sent, and when it failed", async () => {
+    const told: boolean[] = [];
+    const restoring = () =>
+      mount(() =>
+        RoutineRestore({ info, prefs: DEFAULT_PREFS, calendarName: "Personal", now: FROM, onRestoring: (p) => void told.push(p), onRestored: () => undefined, onDismiss: () => undefined }),
+      );
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as typeof fetch;
+    const failed = restoring();
+    (button(failed(), /^Restore$/).props.onClick as () => void)();
+    const errors = captureErrors();
+    try {
+      (button(failed(), /^Add them$/).props.onClick as () => void)();
+      assert.deepEqual(told, [true], "told before the request goes out");
+      await settle();
+    } finally {
+      errors.restore();
+    }
+    assert.deepEqual(told, [true, false]);
+    told.length = 0;
+    globalThis.fetch = answer(201, { ok: true, status: "restored", created: [], adjusted: [], dropped: [] });
+    const saved = restoring();
+    (button(saved(), /^Restore$/).props.onClick as () => void)();
+    (button(saved(), /^Add them$/).props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(told, [true], "a restore that landed is handed on through onRestored, never called failed");
+  });
+
+  // ── 5. The page, run: the import writes from the calendar as it is when confirmed ──
+  // A client component's stylesheet import is the bundler's business.
+  (require as unknown as { extensions: Record<string, (m: { exports: unknown }) => void> }).extensions[".css"] = (m) => void (m.exports = {});
+  const { CalendarApp } = await import("../components/calendar/CalendarApp");
+  const { Sidebar } = await import("../components/calendar/Sidebar");
+  type EventOp = import("../lib/calendar/types").EventOp;
+  /** The elements a component returned, its children left uncalled. */
+  const shallow = (node: unknown, out: El[] = []): El[] => {
+    if (Array.isArray(node)) node.forEach((n) => shallow(n, out));
+    else if (isValidElement(node)) {
+      const el = node as unknown as El;
+      out.push(el);
+      shallow(el.props.children, out);
+    }
+    return out;
+  };
+  /** The text of the page's own markup (toasts included), children's left out. */
+  const ownText = (node: unknown): string => {
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(ownText).join(" ");
+    if (!isValidElement(node)) return "";
+    const el = node as unknown as El;
+    return typeof el.type === "function" ? "" : ownText(el.props.children as ReactNode);
+  };
+
+  /** CalendarApp on an empty calendar, with the routine restorable and this browser's old week saved. */
+  async function openPage() {
+    const server = { events: [] as EventRecord[], posts: [] as EventOp[][], reads: 0, unexpected: [] as string[], hold: null as Promise<void> | null };
+    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const cal = { id: "cal", name: "Personal", color: "tide", visible: true, isDefault: true, position: 0, createdAt: "", updatedAt: "" };
+    let seq = 0;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const path = String(url);
+      if (method === "GET" && path === "/api/calendar") {
+        if (server.hold) await server.hold;
+        server.reads += 1;
+        return json(200, { ok: true, calendars: [cal], events: server.events, prefs: DEFAULT_PREFS, truncated: false });
+      }
+      if (method === "GET" && path === "/api/calendar/routine") return json(200, { ok: true, ...info });
+      if (method === "POST" && path === "/api/calendar/events") {
+        const { ops } = JSON.parse(String(init?.body)) as { ops: EventOp[] };
+        server.posts.push(ops);
+        const results = ops.map((op) => {
+          if (op.op === "create") {
+            const row = record(op.event, `srv-${seq++}`);
+            server.events = [...server.events, row];
+            return { op: "create", id: row.id, tempId: op.tempId, event: row };
+          }
+          if (op.op === "delete") {
+            server.events = server.events.filter((r) => r.id !== op.id);
+            return { op: "delete", id: op.id };
+          }
+          throw new Error(`unexpected op ${op.op}`);
+        });
+        return json(200, { ok: true, results });
+      }
+      server.unexpected.push(`${method} ${path}`);
+      return json(500, { ok: false, error: "unexpected" });
+    }) as typeof fetch;
+    const stored = new Map([[`${legacy.LEGACY_KEY_PREFIX}.week`, JSON.stringify(createPlaceholderSchedule(FROM))]]);
+    (globalThis as unknown as { window: unknown }).window = {
+      innerWidth: 1280,
+      localStorage: {
+        get length() {
+          return stored.size;
+        },
+        key: (i: number) => [...stored.keys()][i] ?? null,
+        getItem: (k: string) => stored.get(k) ?? null,
+        setItem: (k: string, v: string) => void stored.set(k, String(v)),
+      },
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    };
+    const page = mount(() => CalendarApp());
+    let tree: unknown = page();
+    const of = <P,>(type: unknown) => shallow(tree).find((e) => e.type === type)?.props as P | undefined;
+    const p = {
+      server,
+      /** Renders, runs the effects, lets the requests answer, and renders again. */
+      async settle() {
+        for (let k = 0; k < 4; k++) {
+          flushEffects();
+          await settle();
+          tree = page();
+        }
+      },
+      render: () => void (tree = page()),
+      text: () => ownText(tree).replace(/\s+/g, " "),
+      card: () => of<Parameters<typeof RoutineRestore>[0]>(RoutineRestore),
+      dialog: () => of<Parameters<typeof LegacyImport>[0]>(LegacyImport),
+      sidebar: () => of<Parameters<typeof Sidebar>[0]>(Sidebar),
+    };
+    await p.settle();
+    assert.ok(p.card()?.onUseBrowserCopy, `precondition: the restore card offers this browser's week: ${p.text()}`);
+    assert.equal(p.sidebar()?.legacy, "add");
+    return p;
+  }
+  // A toast's 5-second timer must not hold the run open.
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    const t = realSetTimeout(fn, ms, ...rest);
+    if ((ms ?? 0) >= 1000) t.unref();
+    return t;
+  }) as typeof setTimeout;
+
+  await check("CalendarApp: a restore that lands while the import's confirm step is open turns it into a replace, never a second copy", async () => {
+    const p = await openPage();
+    try {
+      // Opened on the empty calendar (a restore still in flight), it plans to add.
+      p.card()!.onUseBrowserCopy!();
+      p.render();
+      assert.equal(p.dialog()?.adds, browserWeek.events.length);
+      assert.equal(p.dialog()?.replacing, 0, "planned on the empty calendar, it only adds");
+      // The restore lands under the open dialog and the calendar is read back.
+      p.server.events = restored;
+      p.card()!.onRestored({ status: "restored", created: restored, adjusted: [], dropped: [] });
+      await p.settle();
+      const shown = p.dialog()?.replacing;
+      p.dialog()!.onConfirm();
+      await p.settle();
+      assert.equal(p.server.posts.length, 1, "one request");
+      const ops = p.server.posts[0];
+      assert.deepEqual(
+        ops.filter((o) => o.op === "delete").map((o) => (o as { id: string }).id).sort(),
+        restored.map((r) => r.id).sort(),
+        "the restored routine is replaced, not doubled",
+      );
+      assert.equal(ops.filter((o) => o.op === "create").length, browserWeek.events.length);
+      const titles = wednesday(p.server.events);
+      assert.deepEqual(titles, [...new Set(titles)], `each block once on the server: ${titles.join(", ")}`);
+      assert.ok(titles.includes("Wake up") && titles.includes("Agent training / R&D"));
+      assert.equal(shown, restored.length, "and the dialog said so before it was confirmed");
+      assert.equal(p.dialog(), undefined, "the confirm step closed");
+      assert.deepEqual(p.server.unexpected, []);
+    } finally {
+      unmount();
+    }
+  });
+
+  await check("CalendarApp: confirmed while the calendar is still being read back, the import writes nothing and says so", async () => {
+    const p = await openPage();
+    try {
+      p.card()!.onUseBrowserCopy!();
+      p.render();
+      let release!: () => void;
+      p.server.hold = new Promise<void>((r) => (release = r));
+      p.server.events = restored;
+      p.card()!.onRestored({ status: "restored", created: restored, adjusted: [], dropped: [] });
+      await p.settle();
+      p.dialog()!.onConfirm();
+      await p.settle();
+      assert.equal(p.server.posts.length, 0, "nothing is written against a calendar that is not current");
+      assert.match(p.text(), /The calendar is still catching up, so nothing was imported yet\. Try again in a moment\./);
+      assert.ok(p.dialog(), "the confirm step stays open");
+      p.server.hold = null;
+      release();
+      await p.settle();
+      assert.equal(p.dialog()?.replacing, restored.length);
+      p.dialog()!.onConfirm();
+      await p.settle();
+      assert.equal(p.server.posts.length, 1);
+      const titles = wednesday(p.server.events);
+      assert.deepEqual(titles, [...new Set(titles)], `each block once on the server: ${titles.join(", ")}`);
+    } finally {
+      unmount();
+    }
+  });
+
+  await check("CalendarApp: from the moment a restore is sent until the calendar is read back, the browser week is not offered", async () => {
+    const p = await openPage();
+    try {
+      p.card()!.onRestoring!(true);
+      p.render();
+      assert.equal(p.sidebar()?.legacy, null, "the sidebar does not offer it");
+      assert.equal(p.card()?.onUseBrowserCopy, undefined, "nor does the card");
+      // The restore failed, but its rows were saved before the reply was lost: the read-back finds them.
+      const reads = p.server.reads;
+      p.server.events = restored;
+      p.card()!.onRestoring!(false);
+      await p.settle();
+      assert.equal(p.server.reads, reads + 1, "a failed restore is read back before the import is offered again");
+      assert.equal(p.sidebar()?.legacy, "replace", "offered again as a replace of the routine the server holds");
+      assert.equal(p.card(), undefined, "the calendar is not empty any more, so the card is gone");
+    } finally {
+      unmount();
+    }
+  });
+  globalThis.setTimeout = realSetTimeout;
 
   if (failures) {
     console.error(`calendar-routine-card: ${failures} check(s) failed`);
