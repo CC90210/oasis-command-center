@@ -399,12 +399,23 @@ const take = <T>(g: Generator<T>, n: number) => {
   const plan = planLegacyImport(doc, "cal", "America/Toronto", DEFAULT_PREFS);
   assert.ok(!plan.events.some((e) => e.title.startsWith("Shabbat")), "Shabbat blocks are computed now, never imported");
   assert.ok(!plan.events.some((e) => e.title === "Work"), "a Work container shown through its children is skipped");
-  assert.ok(plan.events.every((e) => e.recurrence?.freq === "WEEKLY" && e.recurrence.byWeekday?.length === 1));
+  // Weekly one-day series, plus single shortened Fridays (below).
+  assert.ok(plan.events.every((e) => (e.recurrence?.freq === "WEEKLY" && e.recurrence.byWeekday?.length === 1) || (!e.recurrence && new Date(e.start).getDay() === 5)));
   const run = plan.events.find((e) => e.title === "Run" && new Date(e.start).getDay() === 1);
   assert.ok(run && new Date(run.start).getHours() === 7 && new Date(run.start).getMinutes() === 30);
   // Mid-December Montréal candle lighting is ~3:55pm: the Friday R&D block
-  // (3:30-5pm) collides and must be named, not imported.
-  assert.ok(plan.skippedForShabbat.includes("Friday Agent training / R&D"), plan.skippedForShabbat.join(", "));
+  // (3:30-5pm) collides on winter Fridays. It goes through the routine's
+  // Shabbat splitter (routine.ts planAroundShabbat) instead of being dropped
+  // for the whole year: a series bounded at the checked horizon, with the
+  // clashing weeks taken out and shortened single Fridays in their place.
+  assert.deepEqual(plan.skippedForShabbat, []);
+  assert.deepEqual(plan.adjustedForShabbat, ["Friday Agent training / R&D"]);
+  const fridayRnd = plan.events.filter((e) => e.title === "Agent training / R&D" && new Date(e.start).getDay() === 5);
+  const rndSeries = fridayRnd.filter((e) => e.recurrence);
+  assert.equal(rndSeries.length, 1);
+  assert.ok(rndSeries[0].recurrence?.until && rndSeries[0].exdates.length > 0, "bounded, with the clashing weeks taken out");
+  assert.ok(fridayRnd.some((e) => !e.recurrence && new Date(e.end).getHours() === 16), "a shortened January Friday ends before 4:20pm candles");
+  assert.equal(plan.events.filter((e) => e.recurrence).length, 54, "6 days x 9 blocks, every one kept");
   for (const e of plan.events) assert.equal(shabbatConflict(e, DEFAULT_PREFS), null);
 }
 

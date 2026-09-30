@@ -46,7 +46,7 @@ import {
   greetingFor,
   usd,
 } from "@/components/os/today/model";
-import { loadCalendarStatus, loadContentWeek } from "@/components/os/today/loaders";
+import { loadCalendarStatus, loadContentWeek, loadTodayCalendar } from "@/components/os/today/loaders";
 import { briefPlanFor, empireLaneFromCheck, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
 import { operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
@@ -120,13 +120,15 @@ export async function FounderToday({
   });
   const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
   const calendarP = loadCalendarStatus(tenantId, viewer.userId, isOasisSurfaceTenant(viewer.tenantSlug));
+  // The viewer's own Schedule calendar (their time blocks), private to them.
+  const blocksP = loadTodayCalendar({ tenantId, userId: viewer.userId }, day);
 
   // The money block. Entered only when the capability says so — the point of
   // the branch is that these reads never happen otherwise, not that their
   // results get dropped afterwards. lib/goals/oasis-money is the same loader
   // /analytics uses; its figures are the Finances ledger and live Stripe.
   const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
-  const [reads, content, calendar] = await Promise.all([needsP, contentP, calendarP]);
+  const [reads, content, calendar, blocks] = await Promise.all([needsP, contentP, calendarP, blocksP]);
   const { sales, delivery, cash, routines } = reads;
 
   const paceSeries: GoalPacePoint[] = money?.paceSeries ?? [];
@@ -172,6 +174,7 @@ export async function FounderToday({
       feedHref={mayOpenOsHref(navInput, FEED_HREF) ? `${FEED_HREF}?tab=needs` : null}
       departments={cards}
       schedule={{
+        blocks,
         meetings: sales ? (sales.ok ? { ok: true, value: sales.value.meetingsToday } : { ok: false }) : null,
         partial: !!sales && sales.ok && sales.value.partial,
         calendar,

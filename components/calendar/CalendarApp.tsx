@@ -24,6 +24,7 @@ import { EventEditor } from "./EventEditor";
 import { EventPopover } from "./EventPopover";
 import { MonthView } from "./MonthView";
 import { QuickCreate } from "./QuickCreate";
+import { RoutineRestore, type RoutineInfo } from "./RoutineRestore";
 import { ScheduleView } from "./ScheduleView";
 import { ScopeDialog } from "./ScopeDialog";
 import { SettingsDialog } from "./SettingsDialog";
@@ -79,6 +80,9 @@ export function CalendarApp() {
   const [query, setQuery] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [legacy, setLegacy] = useState<string[] | null>(null);
+  // The weekly-routine restore card (OASIS only; the server decides).
+  const [routine, setRoutine] = useState<RoutineInfo | null>(null);
+  const [routineState, setRoutineState] = useState<"unchecked" | "checked" | "error" | "hidden">("unchecked");
   const lastUndo = useRef<EventOp[] | null>(null);
   const lastError = useRef<string>("");
 
@@ -113,6 +117,42 @@ export function CalendarApp() {
   const calMap = useMemo(() => new Map(calendars.map((c) => [c.id, c])), [calendars]);
   const visibleIds = useMemo(() => visibleCalendarIds(calendars), [calendars]);
   const defaultCalendarId = calendars.find((c) => c.isDefault)?.id ?? calendars[0]?.id ?? "";
+
+  // ── Weekly routine restore ─────────────────────────────────────────────
+  // An empty calendar asks the server once whether the old weekly routine can
+  // be restored here. Only the OASIS workspace answers yes (the route decides
+  // from the session), so a client never sees the card.
+  const emptyCalendar = data.load.status === "ready" && events.length === 0;
+  const routineAsked = useRef(false);
+  const checkRoutine = useCallback(async () => {
+    routineAsked.current = true;
+    try {
+      const res = await fetch("/api/calendar/routine", { credentials: "same-origin", cache: "no-store" });
+      const body = (await res.json().catch(() => null)) as ({ ok?: boolean; available?: boolean; restored?: boolean } & Partial<RoutineInfo>) | null;
+      if (!res.ok || !body?.ok) throw new Error(`routine check answered ${res.status}${body && "error" in body ? ` (${String((body as { error?: unknown }).error)})` : ""}`);
+      setRoutine(body.available && !body.restored && Array.isArray(body.blocks) ? (body as RoutineInfo) : null);
+      setRoutineState("checked");
+    } catch (err) {
+      console.error("[calendar.routine]", err);
+      setRoutineState("error");
+    }
+  }, []);
+  useEffect(() => {
+    if (emptyCalendar && !routineAsked.current) void checkRoutine();
+  }, [emptyCalendar, checkRoutine]);
+  const routineRestored = (result: { status: "already_restored" } | { status: "restored"; created: { recurrence: unknown }[]; adjusted: { label: string }[] }) => {
+    setRoutine(null);
+    setRoutineState("hidden");
+    void data.reload();
+    if (result.status === "already_restored") {
+      toast("Your weekly routine was already restored. The calendar has been refreshed.");
+      return;
+    }
+    const series = result.created.filter((e) => e.recurrence).length;
+    const singles = result.created.length - series;
+    const around = result.adjusted.length ? ` Planned around Shabbat: ${result.adjusted.map((a) => a.label).join(", ")}.` : "";
+    toast(`Restored your weekly routine: ${series} repeating events${singles ? ` and ${singles} shortened Fridays` : ""}.${around}`);
+  };
 
   // ── Visible range ──────────────────────────────────────────────────────
   const range = useMemo(() => {
@@ -341,8 +381,9 @@ export function CalendarApp() {
     if (!ok) return;
     writeLocal(IMPORTED_KEY, new Date().toISOString());
     setLegacy(null);
-    const skipped = plan.skippedForShabbat.length ? ` ${plan.skippedForShabbat.length} Friday block(s) overlap winter Shabbat and were left out: ${plan.skippedForShabbat.join(", ")}.` : "";
-    toast(`Imported ${plan.events.length} repeating events from your old weekly routine.${skipped}`);
+    const around = plan.adjustedForShabbat.length ? ` Planned around Shabbat (shortened or left out on the weeks that meet it): ${plan.adjustedForShabbat.join(", ")}.` : "";
+    const skipped = plan.skippedForShabbat.length ? ` Left out, every week falls inside Shabbat: ${plan.skippedForShabbat.join(", ")}.` : "";
+    toast(`Imported ${plan.events.length} events from your old weekly routine.${around}${skipped}`);
   };
 
   // ── Keyboard ───────────────────────────────────────────────────────────
@@ -457,11 +498,32 @@ export function CalendarApp() {
                   data.removeCalendar(c.id).then(() => toast(`Deleted ${c.name}`)).catch((e: Error) => toast(e.message, { tone: "error" }));
                 }}
                 onImportLegacy={() => void importLegacy()}
+                onOpenSettings={() => setPanel({ kind: "settings" })}
               />
             </aside>
           </>
         )}
-        <div role="region" aria-label="Calendar" className="min-w-0 flex-1">{body}</div>
+        <div role="region" aria-label="Calendar" className="flex min-w-0 flex-1 flex-col">
+          {emptyCalendar && routine && routineState === "checked" && (
+            <RoutineRestore
+              info={routine}
+              prefs={prefs}
+              calendarName={calMap.get(defaultCalendarId)?.name ?? "your calendar"}
+              now={now}
+              onRestored={routineRestored}
+              onDismiss={() => setRoutineState("hidden")}
+            />
+          )}
+          {emptyCalendar && routineState === "error" && (
+            <p role="alert" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-hairline bg-bg-panel px-4 py-2 text-[13px] text-status-warm">
+              Couldn&rsquo;t check for a weekly routine to restore.
+              <button type="button" className="font-semibold text-accent hover:underline" onClick={() => void checkRoutine()}>
+                Try again
+              </button>
+            </p>
+          )}
+          <div className="min-h-0 flex-1">{body}</div>
+        </div>
       </div>
 
       {panel?.kind === "view" && (

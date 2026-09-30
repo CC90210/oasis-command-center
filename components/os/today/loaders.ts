@@ -35,6 +35,11 @@ import { formatCents } from "@/lib/founders-finances/money";
 import { getTursoClient } from "@/lib/turso";
 import { listActiveConnections } from "@/lib/connections/store";
 import { providerById } from "@/lib/connections/registry";
+import { toDateKey } from "@/lib/calendar/dates";
+import { expandOccurrences } from "@/lib/calendar/recurrence";
+import { listCalendars, listEvents } from "@/lib/calendar/store";
+import type { CalendarRecord, EventRecord } from "@/lib/calendar/types";
+import type { CalendarDay } from "@/components/os/today/ScheduleGlance";
 import type { Persona } from "@/lib/role-surfaces";
 import {
   pickHotReplies,
@@ -248,6 +253,52 @@ export function loadCalendarStatus(tenantId: string, userId: string, oasisWorksp
       personal: { connected: status.connected, address: status.address ?? null },
       workspace: oasisWorkspace ? { configured: system !== null, address: system?.organizerEmail || null } : null,
     };
+  });
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Today's entries in the viewer's own Schedule calendar, in time order: the
+ * rows /schedule shows, expanded by the same recurrence code, from visible
+ * calendars only. Timed events count when they overlap the operator day;
+ * all-day events when their dates cover today's date key (their dates are
+ * wall dates, so comparing instants on a UTC server would pull in tomorrow's).
+ */
+export function calendarBlocksForDay(
+  events: EventRecord[],
+  calendars: CalendarRecord[],
+  day: Pick<OperatorDay, "startMs" | "endMs" | "todayKey">,
+): CalendarDay["blocks"] {
+  const visible = new Set(calendars.filter((c) => c.visible).map((c) => c.id));
+  return expandOccurrences(events, new Date(day.startMs - DAY_MS), new Date(day.endMs + DAY_MS))
+    .filter((o) => visible.has(o.event.calendarId))
+    .filter((o) =>
+      o.allDay
+        ? toDateKey(o.start) <= day.todayKey && day.todayKey < toDateKey(o.end)
+        : o.start.getTime() < day.endMs && o.end.getTime() > day.startMs,
+    )
+    .map((o) => ({
+      key: o.key,
+      title: o.event.title.trim() || "(No title)",
+      startMs: o.start.getTime(),
+      endMs: o.end.getTime(),
+      allDay: o.allDay,
+    }))
+    .sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.startMs - b.startMs || a.endMs - b.endMs);
+}
+
+/**
+ * The viewer's own calendar for today (lib/calendar/store, private to the
+ * viewer: every read filters on the session's tenant AND user). Read-only: a
+ * viewer who has never opened /schedule has no calendar yet, and looking at
+ * Today must not create one. A failed read is `{ ok: false }`, never "nothing
+ * today".
+ */
+export function loadTodayCalendar(owner: { tenantId: string; userId: string }, day: OperatorDay): Promise<Read<CalendarDay>> {
+  return read("calendar.events", async () => {
+    const [calendars, { events, truncated }] = await Promise.all([listCalendars(owner, { create: false }), listEvents(owner)]);
+    return { blocks: calendarBlocksForDay(events, calendars, day), partial: truncated };
   });
 }
 
