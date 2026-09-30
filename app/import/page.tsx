@@ -10,40 +10,40 @@
  * Server-side dedup against existing tenant rows of the same
  * entity_type keeps re-uploads idempotent — an operator can rerun the
  * same file after a partial failure without doubling their pipeline.
+ *
+ * GATE (2026-09-30). No link in the app reaches this page (a static scan found
+ * only the retired SunBiz placeholders and the unused SUN_NAV array), but it is
+ * OASIS's bulk lead import, with the pipeline assignment roster added on
+ * 2026-09-23, so it stays. Its rows land in the pipeline, so it asks the rail
+ * the Pipeline row's question, requireOsRoute("/pipeline"), as its first
+ * statement, and imports into the session's workspace, never a profile guess.
  */
 
 import { PageHeader } from "@/components/Card";
 import { ImportWizard } from "@/components/import/ImportWizard";
-import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
-import Link from "next/link";
+import { requireOsRoute } from "@/components/os/landings/page-gate";
 
 export const dynamic = "force-dynamic";
 
 export default async function ImportPage() {
-  const profile = await safe("import.profile", getActiveProfile(), null);
-  const hasTenant = !!profile?.tenant_id;
+  const viewer = await requireOsRoute("/pipeline");
+  const tenantId = viewer.surface.tenantId;
   let leadAssignmentOptions: Array<{ id: string; name: string }> | null = null;
-  if (profile?.tenant_id) {
-    const tenantSlug = await safe(
-      "import.tenant_slug",
-      resolveOwnedSlug(profile.tenant_id),
-      null,
+  const tenantSlug = await safe("import.tenant_slug", resolveOwnedSlug(tenantId), null);
+  if (isWebsiteSalesTenantSlug(tenantSlug)) {
+    const roster = await safe(
+      "import.pipeline_assignment_roster",
+      getOasisPipelineAssignmentRoster(tenantId),
+      [],
     );
-    if (isWebsiteSalesTenantSlug(tenantSlug)) {
-      const roster = await safe(
-        "import.pipeline_assignment_roster",
-        getOasisPipelineAssignmentRoster(profile.tenant_id),
-        [],
-      );
-      leadAssignmentOptions = roster.map((member) => ({
-        id: member.auth_user_id!,
-        name: member.display_name || member.full_name || member.email,
-      }));
-    }
+    leadAssignmentOptions = roster.map((member) => ({
+      id: member.auth_user_id!,
+      name: member.display_name || member.full_name || member.email,
+    }));
   }
 
   return (
@@ -53,19 +53,7 @@ export default async function ImportPage() {
         subtitle="Bulk-import leads, applications, lenders, or funded deals. Column mapping is auto-detected and duplicates are skipped before anything lands in your pipeline."
       />
 
-      {hasTenant ? (
-        <ImportWizard leadAssignmentOptions={leadAssignmentOptions} />
-      ) : (
-        <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted text-sm">
-          <p>Finish onboarding to connect this workspace before importing.</p>
-          <Link
-            href="/onboarding"
-            className="mt-3 inline-block btn-secondary !px-3 !py-1.5 text-xs"
-          >
-            Go to onboarding →
-          </Link>
-        </div>
-      )}
+      <ImportWizard leadAssignmentOptions={leadAssignmentOptions} />
     </div>
   );
 }

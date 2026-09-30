@@ -249,7 +249,7 @@ export function FormsListClient({
                             ? "Couldn't resolve your tenant — refresh and try again."
                             : !r.enabled
                               ? "Enable the form first — disabled forms refuse public submissions."
-                              : "Copy the public form URL. Anyone with this link can fill the form; a fresh lead is created on submit. For per-prospect personalized links, use Solara's mint flow."
+                              : "Copy the public form URL. Anyone with this link can fill the form; a fresh lead is created on submit. For a link tied to one lead, see Personalized links below."
                         }
                       >
                         {copiedId === r.id ? (
@@ -297,9 +297,9 @@ export function FormsListClient({
         <div>
           <div className="font-bold text-fg mb-1 flex items-center gap-1.5">
             <ExternalLink className="w-3 h-3 text-accent" />
-            Personalized links (Solara mint)
+            Personalized links
           </div>
-          For per-prospect outreach Solara can mint a tracked URL via{" "}
+          For outreach to one prospect, a tracked link tied to their lead is created through{" "}
           <code className="text-accent bg-bg-deep px-1 rounded">POST /api/forms/{`<id>`}/mint-link</code>
           {" "}with a <code className="text-accent">lead_id</code>. Opening
           the link transitions the existing lead to{" "}

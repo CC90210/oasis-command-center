@@ -14,15 +14,16 @@
  *   - Loading: "Scoring..."     (spinner)
  *   - Result:  the most recent score + rationale, persisted until next refresh
  *
- * Errors render inline below the button. Most likely error today is
- * "anthropic_key_missing" — the dashboard's Vercel env doesn't yet have
- * BRAVO_ANTHROPIC_API_KEY. The button surfaces that as a friendly hint
- * with the env-var name so CC can copy-paste the fix.
+ * Errors render inline below the button. When the AI call answers
+ * `ai_unavailable`, the reader gets AiNotSetUpNotice: an owner is linked to
+ * Settings > AI brain, anyone else is told to ask the owner. No setting name
+ * or hosting detail reaches the screen.
  */
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Sparkles, Loader2, AlertCircle } from "lucide-react";
+import { AiNotSetUpNotice } from "./AiNotSetUpNotice";
 
 type ScoreOk = { ok: true; score: number; reasoning: string; scored_at: string };
 type ScoreErr = { ok: false; error: string; message?: string };
@@ -32,11 +33,14 @@ export function ScoreLeadButton({
   existingScore,
   existingReasoning,
   existingScoredAt,
+  canConfigureAi = false,
 }: {
   leadId: string;
   existingScore?: number | null;
   existingReasoning?: string | null;
   existingScoredAt?: string | null;
+  /** The viewer owns the workspace settings: gets the link to Settings > AI brain. */
+  canConfigureAi?: boolean;
 }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -115,11 +119,7 @@ export function ScoreLeadButton({
           <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <div>
             {error.error === "ai_unavailable" ? (
-              <>
-                <span className="font-bold">AI key not configured. </span>
-                Set <code className="font-mono">BRAVO_ANTHROPIC_API_KEY</code> on the
-                dashboard&apos;s Vercel env to enable scoring.
-              </>
+              <AiNotSetUpNotice feature="AI scoring" canConfigureAi={canConfigureAi} />
             ) : (
               <>
                 <span className="font-bold">{error.error}: </span>
