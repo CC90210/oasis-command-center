@@ -8,6 +8,7 @@ import {
 } from "@/lib/prompts-library";
 import { ArrowLeft } from "lucide-react";
 import { PromptsLibraryFilter } from "@/components/playbook/PromptsLibraryFilter";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,10 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
 export default async function PromptsLibraryPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
+  // The departments this viewer may open (the rail's gate). A prompt whose
+  // department they cannot open is offered as Copy only, never as a link
+  // that answers "Page not found".
+  const openDepartments = await openAskDepartments();
   // Client-deployment prompts are hidden from the operator page (2026-08-04
   // consolidation audit). They're the "SSH'd into a client's machine"
   // toolkit — 17 entries that pushed CC's own daily prompts below the fold
@@ -66,7 +71,7 @@ export default async function PromptsLibraryPage() {
 
       <PageHeader
         title="Prompts Library"
-        subtitle="Current, reusable system messages. Open one in chat or copy it unchanged for your IDE."
+        subtitle="Current, reusable system messages. Hand one to the department that answers for it, or copy it unchanged for your IDE."
         action={
           <Tag tone="accent">
             {totalPrompts} prompts · {operatorPrompts.length} operator · {sharedPrompts.length} universal
@@ -80,9 +85,9 @@ export default async function PromptsLibraryPage() {
             Most messages route through the agent&apos;s standard reasoning. When you need to <strong className="text-fg">force a specific mode</strong> — pause crons, draft-only, private, voice-shift, correct a mistake — start the message with <code className="bg-bg-elev px-1.5 py-0.5 rounded text-accent">[OVERRIDE]</code> on its own line, then a context line, then the request.
           </p>
           <pre className="bg-bg-deep border border-bg-border rounded p-3 text-xs font-mono text-fg overflow-x-auto whitespace-pre">{`[OVERRIDE]
-Context: pause autonomous agent activity for the next 24h.
+Context: draft-only for the rest of today.
 
-Disable every cron in vercel.json by setting it to a date in the past...`}</pre>
+Do not send, post or publish anything. Prepare every draft and list them for my review.`}</pre>
           <p className="text-xs">
             The agent treats <code className="text-accent">[OVERRIDE]</code> messages as imperative + non-conversational. Foundational override prompts (badged below) are hard-coded and always available across both operator + client deployments.
           </p>
@@ -99,6 +104,7 @@ Disable every cron in vercel.json by setting it to a date in the past...`}</pre>
         operatorCategories={OPERATOR_CATEGORIES}
         clientCategories={[]}
         categoryDefs={PROMPT_CATEGORIES}
+        openDepartments={openDepartments}
       />
     </div>
   );

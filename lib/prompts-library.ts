@@ -14,8 +14,9 @@
  * Hard-coded prompts are foundational + cannot be deleted from the UI;
  * mutable prompts can be added/edited via the dashboard later.
  *
- * Each prompt routes to a specific agent + opens the chat composer
- * pre-filled. Click → /agents?agent=…&prompt=…
+ * Each prompt names the agent it was written for; the Playbook hands it to the
+ * department that answers for that agent (lib/os/chat-href.ts askDepartment),
+ * whose composer prefills it. Nothing is sent until the person presses Send.
  */
 
 export type PromptAgent = "bravo" | "atlas" | "maven" | "aura" | "hermes";
@@ -599,7 +600,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
 
 **4. MCP configs.** \`python scripts/audit_mcp_secrets.py\`. It sweeps every path in \`MCP_CONFIG_PATHS\`, including \`%APPDATA%\\\\Antigravity\\\\User\\\\mcp.json\` which lives outside the repo and was the source of a real plaintext-key leak. A plaintext credential in any config is a STOP-and-report, not an auto-fix.
 
-**5. Automations.** \`python scripts/integrations/supabase_tool.py select cron_jobs --project bravo --limit 50\`. Flag any job whose \`last_result\` starts with ERROR or FAILED, and any whose \`last_run_at\` is older than 2× its schedule interval — a silently dead cron is the most expensive failure here because nothing alerts on it.
+**5. Automations.** \`python scripts/integrations/turso_tool.py select cron_jobs --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --limit 50\`. Flag any job whose \`last_result\` starts with ERROR or FAILED, and any whose \`last_run_at\` is older than 2× its schedule interval — a silently dead cron is the most expensive failure here because nothing alerts on it.
 
 **6. File integrity.** \`brain/\`, \`memory/\`, \`skills/\`, \`scripts/\`: broken imports, dead cross-references, entry-point drift (\`python scripts/genome_sync.py --check\`), and stale inventory counts.
 
@@ -726,7 +727,7 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
     tags: ["daily", "kickoff", "pipeline", "inbound"],
     prompt: `Run my morning briefing. Pull everything live — if a source is unreachable, say so on its line rather than skipping it or estimating.
 
-**1. Pipeline movement (last 24h).** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\`. Read the table's own status values, don't assume an enum. Report: new leads since yesterday and where they came from, any status changes, and anyone sitting in an active stage untouched for 7+ days. Name the businesses, not just counts.
+**1. Pipeline movement (last 24h).** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\` (the rows the Pipeline page shows). Read each row's own \`data.stage\`, don't assume an enum. Report: new leads since yesterday and where they came from, any status changes, and anyone sitting in an active stage untouched for 7+ days. Name the businesses, not just counts.
 
 **2. Client delivery health.** For every active client engagement: anything due today or overdue, any blocker waiting on me, and anything waiting on THEM that I should chase. If a deliverable has slipped twice, flag it explicitly — that's the pattern worth catching early.
 
@@ -791,7 +792,7 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 **5. Re-run any pending install steps that the puller may have added:**
 - If \`install.sh\` / \`install.ps1\` changed since last sync, scan the diff for new \`npm i -g\` or \`brew install\` lines. Run them.
 - If \`bravo_cli/requirements.txt\` changed, \`pip install -r bravo_cli/requirements.txt\` inside the venv.
-- If there are new database migrations under \`database/\` or \`supabase/migrations/\`, surface them for CC to apply via the Supabase dashboard or migration tool.
+- If there are new database migrations under \`database/\`, surface them for CC to apply with \`python scripts/apply_turso_migration.py\`. Never apply one yourself.
 
 **6. Restart only the per-machine daemons this host owns:**
 - Windows: run \`python scripts/ops/fleet_watchdog.py up\` and \`python scripts/ops/fleet_watchdog.py status\` from the agent repo. Fleet Watchdog reconciles the enabled process list without restoring retired processes.
@@ -821,7 +822,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     tags: ["daily", "pipeline", "relationships", "inbound"],
     prompt: `Pick my three highest-leverage relationship moves for today.
 
-**Pull the real state first.** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\` for pipeline, plus \`lead_interactions\` for the last touch on each. Read status values from the data — don't assume the enum.
+**Pull the real state first.** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\` for pipeline, plus \`python scripts/integrations/turso_tool.py select lead_interactions --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "lead_id = ?" --param <lead id>\` for the last touch on each. Read stage values from each row's \`data.stage\` — don't assume the enum.
 
 **Scope: inbound and warm only.** OASIS runs an inbound-first motion — funnel, DMs, and content generate leads; we nurture and book a call. Cold outbound is on-demand and operator-approved, never a suggestion you volunteer. If a lead never initiated contact, it's out of scope for this ranking.
 
@@ -854,7 +855,7 @@ Draft-only. Do not call send_gateway or any send path — I approve every send m
     tags: ["daily", "pipeline", "sales", "inbound"],
     prompt: `Show me every lead currently in an active pipeline stage, with the next move on each.
 
-**Pull the data.** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\`, then \`lead_interactions\` for the history on each. Read the status values off the rows — don't assume an enum, and don't invent stages the tenant doesn't use.
+**Pull the data.** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\`, then \`python scripts/integrations/turso_tool.py select lead_interactions --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "lead_id = ?" --param <lead id>\` for the history on each. Read the stage values off each row's \`data.stage\` — don't assume an enum, and don't invent stages the tenant doesn't use.
 
 **For each lead give me:**
 - Business + contact name, and how they actually arrived (funnel, DM, referral, content)
