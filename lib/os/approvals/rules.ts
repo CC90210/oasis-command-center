@@ -84,6 +84,7 @@ export const APPROVAL_ACTION_KINDS = [
   "book_meeting",
   "send_invoice",
   "share_deliverable",
+  "send_slack_message",
 ] as const;
 export type ApprovalActionKind = (typeof APPROVAL_ACTION_KINDS)[number];
 
@@ -95,6 +96,7 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
   book_meeting: "Meeting",
   send_invoice: "Invoice",
   share_deliverable: "Deliverable",
+  send_slack_message: "Slack reply",
 };
 
 export const REQUESTER_TYPES = ["agent", "routine", "human"] as const;
@@ -112,6 +114,7 @@ export const DEFAULT_RISK: Record<ApprovalActionKind, RiskLevel> = {
   book_meeting: "outbound",
   send_invoice: "spend",
   share_deliverable: "data",
+  send_slack_message: "outbound",
 };
 
 /** Where a decision was made. v1 decides in the app only. */
@@ -358,10 +361,57 @@ export function validateGenericPayload(raw: unknown): Valid<Record<string, unkno
   return { ok: true, value: raw };
 }
 
+/**
+ * A department's reply in a Slack thread (lib/slack/jobs.ts drafts it from an
+ * @mention; lib/os/approvals/executors.ts posts it with chat.postMessage).
+ * The team and channel are the thread's own, from the verified Slack event,
+ * and the executor refuses a team that is not this workspace's connected one.
+ * `channel_name` and `department` are display only.
+ */
+export type SendSlackMessagePayload = {
+  team_id: string;
+  channel_id: string;
+  thread_ts: string;
+  text: string;
+  channel_name?: string;
+  department?: DepartmentKey;
+};
+
+/** Slack's own limit is 40,000; a department reply longer than this is not a reply. */
+export const SLACK_TEXT_MAX = 4_000;
+
+export function validateSendSlackMessagePayload(raw: unknown): Valid<SendSlackMessagePayload> {
+  if (!plainObject(raw)) return { ok: false, error: "payload_invalid" };
+  const team_id = typeof raw.team_id === "string" ? raw.team_id.trim() : "";
+  if (!/^T[A-Z0-9]{2,31}$/.test(team_id)) return { ok: false, error: "team_id_invalid", field: "team_id" };
+  const channel_id = typeof raw.channel_id === "string" ? raw.channel_id.trim() : "";
+  if (!/^C[A-Z0-9]{2,31}$/.test(channel_id)) return { ok: false, error: "channel_id_invalid", field: "channel_id" };
+  const thread_ts = typeof raw.thread_ts === "string" ? raw.thread_ts.trim() : "";
+  if (!/^\d{1,12}\.\d{1,9}$/.test(thread_ts)) return { ok: false, error: "thread_ts_invalid", field: "thread_ts" };
+  const text = typeof raw.text === "string" ? raw.text.replace(/\r\n/g, "\n").trim() : "";
+  if (!text) return { ok: false, error: "text_required", field: "text" };
+  if (text.length > SLACK_TEXT_MAX) return { ok: false, error: "text_too_long", field: "text" };
+  let channel_name: string | undefined;
+  if (typeof raw.channel_name === "string" && raw.channel_name.trim()) {
+    channel_name = raw.channel_name.trim().replace(/[^\w.-]/g, "").slice(0, 80) || undefined;
+  }
+  let department: DepartmentKey | undefined;
+  if (raw.department !== undefined && raw.department !== null) {
+    if (!isOneOf(DEPARTMENT_KEYS, raw.department)) return { ok: false, error: "department_invalid", field: "department" };
+    department = raw.department;
+  }
+  return {
+    ok: true,
+    value: { team_id, channel_id, thread_ts, text, ...(channel_name ? { channel_name } : {}), ...(department ? { department } : {}) },
+  };
+}
+
 export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<Record<string, unknown>> {
   switch (kind) {
     case "send_email":
       return validateSendEmailPayload(raw) as Valid<Record<string, unknown>>;
+    case "send_slack_message":
+      return validateSendSlackMessagePayload(raw) as Valid<Record<string, unknown>>;
     case "publish_post":
       return validatePublishPostPayload(raw) as Valid<Record<string, unknown>>;
     default:
@@ -374,6 +424,10 @@ export function previewFor(kind: ApprovalActionKind, payload: Record<string, unk
   if (kind === "send_email") {
     const body = typeof payload.body === "string" ? payload.body : "";
     return body.length > 280 ? `${body.slice(0, 279).trimEnd()}…` : body;
+  }
+  if (kind === "send_slack_message") {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    return text.length > 280 ? `${text.slice(0, 279).trimEnd()}${String.fromCharCode(0x2026)}` : text;
   }
   if (kind === "publish_post") {
     const labels = (Array.isArray(payload.platforms) ? payload.platforms : [])

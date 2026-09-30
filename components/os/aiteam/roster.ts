@@ -29,6 +29,8 @@ import type { Read } from "@/components/os/department/routines";
 import type { OsViewer } from "@/components/os/department/viewer";
 import { agentChannelKey, departmentChannelKey } from "@/lib/os/channel/outcome";
 import type { WebState } from "./TeammateRow";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -45,6 +47,12 @@ export type LeadTeammate = {
    * and a read that failed is `unknown`, never a green check.
    */
   web: WebState;
+  /**
+   * Where it lives in Slack: its mapped channels, or why it does not
+   * (lib/slack/status.ts). Absent for a department with no teammate: nothing
+   * answers there in Slack either.
+   */
+  slack?: SlackHome;
 };
 
 export type CustomTeammate = {
@@ -116,11 +124,12 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
     ...new Set(bindings.flatMap((b) => (b.binding.kind === "agent" ? [b.binding.agentSlug] : []))),
   ];
 
-  const [readiness, agents, custom, turns] = await Promise.all([
+  const [readiness, agents, custom, turns, slackPresence] = await Promise.all([
     workspaceChatReadiness(viewer),
     Promise.all(slugs.map((s) => getAgentBySlug(s, tenantId))),
     loadCustom(tenantId),
     readWorkspaceTurns(tenantId),
+    loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
   ]);
   // Key readiness, the same answer the channel gets: no slug or no key is Not
   // connected; an AI settings read that failed is unknown, not "not connected".
@@ -159,6 +168,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
       summary: led[0] ? departmentProfile(led[0].dept.key).purpose : "",
       departments,
       web: agent ? webOn(led.map((b) => departmentChannelKey(b.dept.key))) : "not_connected",
+      slack: slackHomeFor(slackPresence, led.map((b) => b.dept.key)),
     });
   }
   for (const { dept, binding } of bindings) {

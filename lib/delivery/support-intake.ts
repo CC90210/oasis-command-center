@@ -77,6 +77,7 @@ import {
 } from "@/lib/delivery/support-form";
 import { OASIS_DESK, findRegisteredDeskBySlug, listRegisteredDesks, type SupportDesk } from "@/lib/delivery/desks";
 import { isMissingCustomersSchema, matchCustomerByEmail } from "@/lib/os/customers/store";
+import { shadowSupportTriage } from "@/lib/jev/mode";
 
 /** Private object-storage bucket (a key prefix on R2) for ticket attachments. */
 export const SUPPORT_ATTACHMENT_BUCKET = "support-attachments";
@@ -495,10 +496,27 @@ async function handleDeskSubmission(
   // 6 + 7. Match and create.
   const { ticket } = await createTicketFromSubmission(db, desk, { ticketId, submissionId, sub, attachments }, now);
 
-  // 8. After the response, never before it.
+  // 8. After the response, never before it. Then, in the same task, the Jev
+  //    shadow (lib/jev/mode.ts): only when this desk's workspace has Jev on
+  //    and its own key connected, it asks Jev the ticket's priority and
+  //    category and records ONLY whether it agreed with what the requester
+  //    chose. It changes nothing on the ticket and never throws.
   const notify = deps.notify;
   const schedule = deps.schedule ?? scheduleAfterResponse;
-  schedule(() => runIntakeNotifications(db, desk.tenantId, ticket.id, notify ?? defaultNotifyDeps(), now));
+  schedule(async () => {
+    try {
+      await runIntakeNotifications(db, desk.tenantId, ticket.id, notify ?? defaultNotifyDeps(), now);
+    } finally {
+      await shadowSupportTriage(db, {
+        tenantId: desk.tenantId,
+        title: sub.title,
+        description: sub.description,
+        category: sub.category,
+        severity: sub.severity,
+        now,
+      });
+    }
+  });
 
   // The public form reads next_step / redirect_url / next_forms; the rest of
   // the generic response shape is kept so the client needs no special case.

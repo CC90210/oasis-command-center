@@ -139,6 +139,9 @@ export function credentialServiceFor(connectionId: string): string {
   return `connection:${connectionId}`;
 }
 
+/** The field an app install's bot token is stored under, inside its connection's service. */
+export const BOT_TOKEN_FIELD = "bot_token";
+
 // ── Stripe restricted keys ────────────────────────────────────────────────
 
 /**
@@ -193,6 +196,32 @@ export function checkStripeRestrictedKey(raw: unknown): StripeKeyCheck {
     };
   }
   return { ok: true, key, environment: m[1] as ConnectionEnvironment };
+}
+
+// ── Jev (TypeSafe) API keys ───────────────────────────────────────────────
+
+export type JevKeyCheck =
+  | { ok: true; key: string }
+  | { ok: false; error: "key_missing" | "format_invalid"; message: string };
+
+/**
+ * A TypeSafe API key, checked the way the installed typesafe-sdk 0.7.1 checks
+ * it (typesafe_sdk/_core/config.py resolve_and_validate_api_key): stripped,
+ * non-empty, printable ASCII with no whitespace. TypeSafe documents no prefix,
+ * so none is demanded; the live probe is what proves the key. Bounded length so
+ * a pasted page of text is refused before it is sent anywhere.
+ */
+export function checkJevApiKey(raw: unknown): JevKeyCheck {
+  const key = typeof raw === "string" ? raw.trim() : "";
+  if (!key) return { ok: false, error: "key_missing", message: "Paste your TypeSafe API key." };
+  if (key.length < 16 || key.length > 512 || !/^[\x21-\x7e]+$/.test(key)) {
+    return {
+      ok: false,
+      error: "format_invalid",
+      message: "That does not look like a TypeSafe API key. It should be one line of letters, digits and symbols, with no spaces.",
+    };
+  }
+  return { ok: true, key };
 }
 
 // ── Health ────────────────────────────────────────────────────────────────

@@ -29,12 +29,16 @@
  * "unknown" — Stripe could not be asked, which is not the same as "broken".
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import type { Client } from "@libsql/client";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
 import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
-import { STRIPE_READ_PERMISSIONS, providerById, type ProviderDef } from "@/lib/connections/registry";
+import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { probeJevKey } from "@/lib/jev/client";
+import { authTest as slackAuthTest } from "@/lib/slack/client";
 import {
+  BOT_TOKEN_FIELD,
   HEALTH_RECHECK_AFTER_MS,
   credentialServiceFor,
   isVerifiedHealthy,
@@ -318,18 +322,77 @@ export async function probeStripeRestrictedKey(
 /** A provider's live probe. `timeoutMs` bounds the whole probe (default: the provider's own deadline). */
 export type Probe = (credential: string, fetchImpl: FetchImpl, timeoutMs?: number) => Promise<ProbeResult>;
 
+/**
+ * A TypeSafe key has no account id to pin, so the connection pins a fingerprint
+ * of the key itself: the same key reconnects to its own row, and another key
+ * while one is live is a different account (disconnect first). Never the key.
+ */
+export function jevKeyFingerprint(key: string): string {
+  return `key:${createHash("sha256").update(key.trim()).digest("hex").slice(0, 16)}`;
+}
+
+/** Jev: list the models the key may use. Sends no data (lib/jev/client.ts probeJevKey). */
+async function probeJev(credential: string, fetchImpl: FetchImpl, timeoutMs?: number): Promise<ProbeResult> {
+  const r = await probeJevKey(credential, { fetchImpl, ...(timeoutMs ? { timeoutMs } : {}) });
+  return {
+    verdict: r.verdict,
+    code: r.code,
+    detail: r.detail,
+    latencyMs: r.latencyMs,
+    accountId: r.verdict === "healthy" ? jevKeyFingerprint(credential) : null,
+    accountLabel: r.verdict === "healthy" ? "TypeSafe API key" : null,
+    environment: null,
+  };
+}
+
+/** Slack: auth.test with the bot token. Its team is the account the connection is pinned to. */
+async function probeSlack(credential: string, fetchImpl: FetchImpl, timeoutMs?: number): Promise<ProbeResult> {
+  const started = Date.now();
+  const r = await slackAuthTest(credential, { fetchImpl, ...(timeoutMs ? { timeoutMs } : {}) });
+  const latencyMs = Date.now() - started;
+  if (r.ok) {
+    const teamId = typeof r.data.team_id === "string" ? r.data.team_id : null;
+    if (!teamId) {
+      return { verdict: "unknown", code: "account_unidentified", detail: "Slack did not say which workspace this token is for.", latencyMs, accountId: null, accountLabel: null, environment: null };
+    }
+    return { verdict: "healthy", code: null, detail: null, latencyMs, accountId: teamId, accountLabel: r.data.team ?? null, environment: null };
+  }
+  if (["invalid_auth", "account_inactive", "token_revoked", "token_expired", "not_authed"].includes(r.error)) {
+    return {
+      verdict: "down",
+      code: "key_rejected",
+      detail: "Slack no longer accepts OASIS's token for this workspace (the app was removed or the token revoked). Install it again.",
+      latencyMs,
+      accountId: null,
+      accountLabel: null,
+      environment: null,
+    };
+  }
+  return {
+    verdict: "unknown",
+    code: "provider_unreachable",
+    detail: `Slack did not answer the check (${r.error}). OASIS will check again.`,
+    latencyMs,
+    accountId: null,
+    accountLabel: null,
+    environment: null,
+  };
+}
+
 /** The live probe for each provider that has one. A provider without one cannot be green. */
 const PROBES: Readonly<Record<string, Probe>> = {
   stripe: (credential, fetchImpl, timeoutMs) => probeStripeRestrictedKey(credential, { fetchImpl, timeoutMs }),
+  jev: probeJev,
+  slack: probeSlack,
 };
 
 export function probeFor(provider: string): Probe | null {
   return PROBES[provider] ?? null;
 }
 
-/** Providers the health cron can re-probe: live, and holding a probe. */
-export function probedProviders(): string[] {
-  return Object.keys(PROBES).filter((id) => providerById(id)?.availability === "live");
+/** Providers the health cron can re-probe: live on this deployment, and holding a probe. */
+export function probedProviders(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  return Object.keys(PROBES).filter((id) => providerForEnv(id, env)?.availability === "live");
 }
 
 // ── Probe a stored connection ─────────────────────────────────────────────
@@ -360,6 +423,8 @@ const CREDENTIAL_FAILURE: Record<"missing" | "unreadable", { code: ProbeErrorCod
 /** The stored credential field for a provider. */
 function credentialFieldFor(provider: ProviderDef): string {
   if (provider.restrictedKey) return provider.restrictedKey.credentialField;
+  // An app install stores the bot token it was given (token-store saveBotToken).
+  if (provider.authKind === "app_install") return BOT_TOKEN_FIELD;
   throw new Error(`provider_has_no_stored_key:${provider.id}`);
 }
 
@@ -377,7 +442,7 @@ export async function probeStoredConnection(
   source: HealthCheckSource,
   actor: AuditActor,
 ): Promise<HealthRecordResult> {
-  const provider = providerById(row.provider);
+  const provider = providerForEnv(row.provider, process.env);
   const probe = provider && provider.availability === "live" ? probeFor(provider.id) : null;
   if (!provider || !probe) throw new Error(`provider_not_probeable:${row.provider}`);
 

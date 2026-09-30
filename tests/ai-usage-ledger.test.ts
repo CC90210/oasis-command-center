@@ -1071,7 +1071,10 @@ async function main() {
       ["app/api/chat/resume/route.ts", [/surface: "chat\.resume"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /return budgetRefusalResponse\(exhausted\)/]],
       ["app/api/chat/compact/route.ts", [/surface: "chat\.compact"/, /if \(isAiBudgetCode\(errorMessage\)\) return budgetRefusalResponse\(errorMessage\);/]],
       // The at-cap 402 itself is driven for real in tests/os-channels-honest.test.ts; a local model skips the cap.
-      ["app/api/agents/chat/route.ts", [/surface: "agents\.chat"/, /refuse\(ctx, 402, exhausted/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/]],
+      // The department turn is shared with Slack mentions (lib/os/department-agent.ts);
+      // the route maps its budget refusal to 402.
+      ["app/api/agents/chat/route.ts", [/prepareAgentTurn\(/, /refuse\(ctx, 402, exhausted/]],
+      ["lib/os/department-agent.ts", [/surface: "agents\.chat"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /status: 402, error: exhausted/]],
       ["app/api/agents/generate/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "agents\.generate"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/manifest/chat/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "manifest\.chat"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/gmail-templates/[id]/solara/route.ts", [/tenantId: sess\.tenantId,\s+surface: "gmail_templates\.solara"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],

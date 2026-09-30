@@ -323,7 +323,24 @@ const EXEMPT_HOSTS: Record<string, string> = {
   "api.mapbox.com": "SunBiz merchant application form only: address lookup fallback",
   "api.github.com": "reads OASIS's own repositories for agent knowledge; sends no personal information",
   "api.transferwise.com": "OASIS's own business bank account (founders' finances); sends no customer data",
+  "api.typesafe.ai":
+    "Jev (TypeSafe): only the key check runs (list models, no data) while lib/jev/mode.ts JEV_TEXT_PROCESSING_APPROVED is false; flipping it needs TypeSafe on /privacy (asserted below)",
 };
+
+// Jev may classify workspace text only in the same change that lists TypeSafe
+// as a processor: the exemption above is true only while the gate is shut.
+{
+  const jevMode = readFileSync(join(root, "lib/jev/mode.ts"), "utf8");
+  const gate = /export const JEV_TEXT_PROCESSING_APPROVED = (true|false);/.exec(jevMode);
+  assert.ok(gate, "lib/jev/mode.ts lost its JEV_TEXT_PROCESSING_APPROVED gate: TypeSafe could receive text unlisted.");
+  if (gate[1] === "true") {
+    assert.ok(
+      SUBPROCESSORS.some((s) => /TypeSafe/i.test(s.name)),
+      "Jev classifies workspace text (JEV_TEXT_PROCESSING_APPROVED = true) but TypeSafe is not on /privacy.",
+    );
+    assert.fail("Remove api.typesafe.ai from EXEMPT_HOSTS and map it to TypeSafe in HOST_TO_PROCESSOR: it now receives text.");
+  }
+}
 
 const HOST_TO_PROCESSOR: Record<string, string> = {
   "api.anthropic.com": "Anthropic PBC",

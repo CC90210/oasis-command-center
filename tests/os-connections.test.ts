@@ -501,7 +501,7 @@ async function main() {
   // ── 3. Registry ──────────────────────────────────────────────────────────
 
   await check("Stripe is the one live provider; every OAuth provider without app credentials is coming_soon", () => {
-    assert.deepEqual(registry.PROVIDERS.filter((p) => p.availability === "live").map((p) => p.id), ["stripe"]);
+    assert.deepEqual(registry.PROVIDERS.filter((p) => p.availability === "live").map((p) => p.id), ["stripe", "jev"]);
     const stripe = registry.providerById("stripe")!;
     assert.equal(stripe.authKind, "restricted_key");
     for (const id of ["meta", "quickbooks", "xero", "plaid", "slack", "gohighlevel", "zoom"]) {
@@ -516,7 +516,9 @@ async function main() {
       assert.ok(def, `${p.id} has no hub card`);
       assert.ok(def!.icon.kind === "svg" || def!.icon.reason, `${p.id}: no icon`);
       assert.equal(p.exclusive, (rules.EXCLUSIVE_PROVIDERS as readonly string[]).includes(p.id));
-      if (p.availability === "live") {
+      // Slack is live only where OASIS's Slack app is configured (liveWhenEnv),
+      // and its card says "app not configured yet" everywhere else.
+      if (p.availability === "live" || (p.liveWhenEnv?.length ?? 0) > 0) {
         assert.deepEqual(def!.live?.source, { kind: "tenant_connection", provider: p.id });
       } else {
         assert.equal(def!.live, null, `${p.id} is coming soon but its card has a connect path`);

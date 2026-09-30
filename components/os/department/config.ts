@@ -47,8 +47,9 @@ type DepartmentProfile = {
   purpose: string;
   /**
    * The apps this department works through, as the owner would name them.
-   * Labels only: no connection-health source exists yet (Phase 2
-   * tenant_connections), so no chip claims a status.
+   * Labels only, so no chip claims a status. Slack is not a label here: the
+   * department tab shows its REAL Slack state (lib/slack/status.ts, the mapped
+   * channels or why there are none) on its own line.
    */
   connections: readonly string[];
 };
@@ -57,7 +58,7 @@ type DepartmentProfile = {
 const PROFILES: Record<DepartmentKey, DepartmentProfile> = {
   chief_of_staff: {
     purpose: "Your coordinator. Ask for anything; it pulls from every department.",
-    connections: ["Google Calendar", "Slack", "Telegram"],
+    connections: ["Google Calendar", "Telegram"],
   },
   sales: {
     purpose: "Leads, follow-ups and booked calls.",

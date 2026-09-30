@@ -39,9 +39,10 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import {
   getTenantIntegrationBundle,
+  readTenantCredentialStrict,
   setTenantIntegrationBundle,
 } from "@/lib/tenant-integration-store";
-import { REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFor } from "@/lib/connections/rules";
+import { BOT_TOKEN_FIELD, REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFor } from "@/lib/connections/rules";
 import { alertConnectionWorsened } from "@/lib/connections/health";
 import {
   getConnection,
@@ -126,6 +127,47 @@ export function isConfirmedRefreshRefusal(err: unknown): boolean {
   if (!(err instanceof RefreshRefusedError)) return false;
   if (err.oauthError && REFRESH_REFUSAL_OAUTH_ERRORS.includes(err.oauthError)) return true;
   return err.httpStatus === 400 || err.httpStatus === 401;
+}
+
+// ── App-install bot tokens (Slack) ────────────────────────────────────────
+
+/**
+ * A non-rotating bot token from an app install (Slack's oauth.v2.access with
+ * token rotation OFF, the pilot decision). No refresh token and no expiry, so
+ * none of the lease machinery above applies: it is stored once, encrypted,
+ * under the connection's own credential service, and read back strictly (no
+ * env fallback). Removing the app in Slack revokes it; the health probe
+ * (auth.test) then turns the connection expired.
+ */
+export async function saveBotToken(
+  tenantId: string,
+  connectionId: string,
+  token: { bot_token: string; bot_user_id: string | null },
+  createdBy: string | null = null,
+): Promise<void> {
+  const bundle: Record<string, string> = { [BOT_TOKEN_FIELD]: token.bot_token };
+  if (token.bot_user_id) bundle.bot_user_id = token.bot_user_id;
+  const saved = await setTenantIntegrationBundle({
+    tenantId,
+    service: credentialServiceFor(connectionId),
+    bundle,
+    createdBy,
+  });
+  if (!saved.ok) throw new TokenStoreError("save_failed", saved.error);
+}
+
+export type BotTokenRead =
+  | { ok: true; token: string; botUserId: string | null }
+  | { ok: false; reason: "missing" | "unreadable" | "lookup_failed" };
+
+/** The connection's bot token, strictly: missing, unreadable and a failed lookup stay apart. */
+export async function readBotToken(tenantId: string, connectionId: string): Promise<BotTokenRead> {
+  const service = credentialServiceFor(connectionId);
+  const token = await readTenantCredentialStrict(tenantId, service, BOT_TOKEN_FIELD);
+  if (!token.ok) return token;
+  const bot = await readTenantCredentialStrict(tenantId, service, "bot_user_id");
+  if (!bot.ok && bot.reason === "lookup_failed") return bot;
+  return { ok: true, token: token.value, botUserId: bot.ok ? bot.value : null };
 }
 
 /** Save a whole token set atomically. */
