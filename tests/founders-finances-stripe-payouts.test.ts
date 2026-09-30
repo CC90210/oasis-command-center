@@ -12,9 +12,11 @@
  *     again, a second event for the same payout, the daily reconcile.
  *   - The contamination guard: an event from another Stripe account (Trytan's
  *     Arthrisil store has its own) never reaches the OASIS book. It names
- *     another account, or the pinned account's key cannot find it, or nothing
- *     is pinned: ignored and dead-lettered with ids only. A Stripe outage
- *     while checking fails the event (retried), it never skips the check.
+ *     another account, or the pinned account's key cannot find it, or the
+ *     configured key is another account's, or there is no key, or nothing is
+ *     pinned: ignored and dead-lettered with ids only; the signature alone
+ *     never books an event. A Stripe outage while checking fails the event
+ *     (retried), it never skips the check.
  *   - payment.received / refund.issued carry the client record the Stripe
  *     customer is linked to as the ledger's customer_id join.
  *
@@ -39,6 +41,8 @@ const PINNED = "acct_1RyM4HHj2zGc7I1J";
 
 /** api.stripe.com while a key is set: the pinned account's objects, and which events it holds. */
 const stripe = {
+  /** The account GET /v1/account names for the configured key (another company's = a key pasted into the wrong variable). */
+  keyAccount: PINNED,
   events: new Set<string>(),
   eventsDown: false,
   accountDown: false,
@@ -55,7 +59,7 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const list = (data: unknown[]) => json({ object: "list", data, has_more: false });
   const p = url.pathname;
-  if (p === "/v1/account") return stripe.accountDown ? json({ error: { message: "api_error" } }, 500) : json({ id: PINNED, settings: { dashboard: { display_name: "OASIS AI" } } });
+  if (p === "/v1/account") return stripe.accountDown ? json({ error: { message: "api_error" } }, 500) : json({ id: stripe.keyAccount, settings: { dashboard: { display_name: stripe.keyAccount === PINNED ? "OASIS AI" : "Arthrisil" } } });
   if (p.startsWith("/v1/events/")) {
     if (stripe.eventsDown) return json({ error: { message: "api_error" } }, 500);
     const id = decodeURIComponent(p.slice("/v1/events/".length));
@@ -311,14 +315,46 @@ async function main() {
     }
   });
 
-  await check("control: with no key, an OASIS event on the pinned book is proved by the endpoint's secret and recorded", async () => {
-    await ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_t5_nokey", amount: 2000, at: "2026-09-24T10:00:00Z" })));
-    assert.ok(await payment("ch_t5_nokey"));
+  await check("the configured key is Trytan's (GET /v1/account names acct_1TrytanArthrisil, not the pin) and a direct Trytan event arrives: never booked, dead-lettered, the signature proves nothing", async () => {
+    // Another company's key AND signing secret pasted into OASIS's variables: the event is signed, names no
+    // account, and the key would find it (it is that key's account's). Nothing of it may reach the OASIS book.
+    const before = await bookCounts();
+    const e = event("charge.succeeded", charge({ id: "ch_trytan_direct", amount: 14900, at: "2026-09-24T09:00:00Z", customer: "cus_arthrisil" }));
+    stripe.keyAccount = "acct_1TrytanArthrisil";
+    process.env.STRIPE_SECRET_KEY = "rk_live_trytan_store";
+    const calls = stripe.calls.length;
+    try {
+      const out = await ingest.handleStripeEvent(e);
+      assert.equal(out.status, "ignored");
+      assert.match(out.detail, /stripe_key_not_pinned_account/);
+    } finally {
+      stripe.keyAccount = PINNED;
+      delete process.env.STRIPE_SECRET_KEY;
+    }
+    assert.equal(await payment("ch_trytan_direct"), undefined, "no fin_payments row for the Trytan charge");
+    assert.deepEqual(await bookCounts(), before, "no payment, no entry, no ledger fact, no subscription");
+    assert.deepEqual(stripe.calls.slice(calls), ["/v1/account"], "only whose the key is was asked; the event was never looked up with another company's key");
+    const dl = (await deadLetters()).find((d) => d.key === `stripe:${e.id}`);
+    assert.equal(dl?.error, "foreign_stripe_account:stripe_key_not_pinned_account");
+    assert.doesNotMatch(dl!.payload, /14900|A Client|client@example/, "ids only");
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_stripe_events WHERE event_id = ?`, args: [String(e.id)] })).rows[0].status, "ignored");
+  });
+
+  await check("no Stripe key at all: an event on the pinned book is refused (stripe_key_missing), never booked on the endpoint's signature alone", async () => {
+    const before = await bookCounts();
+    const e = event("charge.succeeded", charge({ id: "ch_t5_nokey", amount: 2000, at: "2026-09-24T10:00:00Z" }));
+    const out = await ingest.handleStripeEvent(e);
+    assert.equal(out.status, "ignored");
+    assert.match(out.detail, /stripe_key_missing/);
+    assert.equal(await payment("ch_t5_nokey"), undefined);
+    assert.deepEqual(await bookCounts(), before);
+    assert.equal((await deadLetters()).find((d) => d.key === `stripe:${e.id}`)?.error, "foreign_stripe_account:stripe_key_missing");
   });
 
   // ── the ledger's customer join ──────────────────────────────────────────
   await check("payment.received and refund.issued carry the client record the Stripe customer is linked to (customer_id); none linked: null", async () => {
-    const TENANT = "oasis-books-t5";
+    // OASIS's own workspace (production's finance tenant): its Stripe key may come from STRIPE_SECRET_KEY.
+    const TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
     process.env.FOUNDERS_TENANT_IDS = TENANT;
     try {
       await raw.execute({
@@ -326,10 +362,12 @@ async function main() {
         args: [TENANT, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"],
       });
       const refundOf = (id: string, amount: number): Json => ({ id, object: "refund", amount, currency: "cad", created: epoch("2026-09-26T10:00:00Z"), status: "succeeded", charge: "ch_t5_linked", balance_transaction: null });
-      await ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_t5_linked", amount: 10000, at: "2026-09-25T10:00:00Z", customer: "cus_linked" })));
-      await ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_t5_unlinked", amount: 10000, at: "2026-09-25T11:00:00Z", customer: "cus_nobody" })));
-      await ingest.handleStripeEvent(
-        event("charge.refunded", { ...charge({ id: "ch_t5_linked", amount: 10000, at: "2026-09-25T10:00:00Z", customer: "cus_linked" }), amount_refunded: 2500, refunds: { object: "list", data: [refundOf("re_t5_linked", 2500)], has_more: false } }, { at: "2026-09-26T10:00:00Z" }),
+      await withKey(() => ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_t5_linked", amount: 10000, at: "2026-09-25T10:00:00Z", customer: "cus_linked" }))));
+      await withKey(() => ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_t5_unlinked", amount: 10000, at: "2026-09-25T11:00:00Z", customer: "cus_nobody" }))));
+      await withKey(() =>
+        ingest.handleStripeEvent(
+          event("charge.refunded", { ...charge({ id: "ch_t5_linked", amount: 10000, at: "2026-09-25T10:00:00Z", customer: "cus_linked" }), amount_refunded: 2500, refunds: { object: "list", data: [refundOf("re_t5_linked", 2500)], has_more: false } }, { at: "2026-09-26T10:00:00Z" }),
+        ),
       );
       const facts = async (key: string) =>
         (await raw.execute({ sql: `SELECT idempotency_key, customer_id, tenant_id FROM outcome_events WHERE event_key = ? ORDER BY idempotency_key`, args: [key] })).rows.map((r) => [String(r.idempotency_key), r.customer_id, r.tenant_id]);

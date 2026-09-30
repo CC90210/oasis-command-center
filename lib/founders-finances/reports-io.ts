@@ -157,17 +157,21 @@ export async function thresholdStatus(revenue: ThresholdRevenueCoverage, today =
 
 /**
  * fin_bank_transactions per account: how many ever recorded, still to review,
- * and the earliest IMPORTED one's date (a statement import or the Wise feed,
- * source 'import'). A line typed by hand or an Atlas draft says nothing about
- * whether the bank's deposits are on the books; an import does, from its date.
+ * and the IMPORTED ones' (a statement import or the Wise feed, source
+ * 'import') first and last dates and the months they fall in. A line typed by
+ * hand or an Atlas draft says nothing about whether the bank's deposits are on
+ * the books; imports do, over the months they cover (books-coverage.ts).
  */
 async function bankLineStats(entityId: string) {
-  return query<{ account_id: string; n: number; unreviewed: number; first_date: string | null }>(
+  const rows = await query<{ account_id: string; n: number; unreviewed: number; first_date: string | null; last_date: string | null; months: string | null }>(
     `SELECT account_id, COUNT(*) AS n, SUM(CASE WHEN status IN ('unreviewed', 'draft') THEN 1 ELSE 0 END) AS unreviewed,
-            MIN(CASE WHEN source = 'import' THEN posted_date END) AS first_date
+            MIN(CASE WHEN source = 'import' THEN posted_date END) AS first_date,
+            MAX(CASE WHEN source = 'import' THEN posted_date END) AS last_date,
+            GROUP_CONCAT(DISTINCT CASE WHEN source = 'import' THEN substr(posted_date, 1, 7) END) AS months
        FROM fin_bank_transactions WHERE entity_id = ? GROUP BY account_id`,
     [entityId],
   );
+  return rows.map((r) => ({ ...r, months: r.months ? r.months.split(",").filter(Boolean) : [] }));
 }
 
 type BankLineStats = Awaited<ReturnType<typeof bankLineStats>>;
@@ -185,6 +189,9 @@ function coverageOf(
     lines: ledger.lines,
     bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
     bankLinesFromByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.first_date])),
+    bankLinesToByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.last_date])),
+    bankLineMonthsByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.months])),
+    today: torontoToday(),
     book: business ? "business" : "personal",
     wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,
     unbookedPayouts: payoutsNotBooked,

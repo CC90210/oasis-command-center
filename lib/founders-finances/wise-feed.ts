@@ -37,6 +37,11 @@
  *     amount and currency, within BILL_MATCH_WINDOW_DAYS, closest date, each
  *     bill once) -> LINKED to that entry, nothing new posted; ambiguous ->
  *     left unreviewed for a founder with the candidates named;
+ *   - a debit that is the payment of a bill still OPEN (owed; e.g. a recurring
+ *     cost whose paying account nobody confirmed), dated between its bill date
+ *     and due date or within the window of either -> held for a founder to mark
+ *     the bill paid from chequing (the next sync links it); never booked as a
+ *     new expense, which would count the cost twice;
  *   - 2 to 4 debits that add up exactly to one such expense (an expense
  *     recorded as one amount, paid as several charges) -> held for a founder;
  *   - a Stripe payout -> booked as above;
@@ -239,21 +244,54 @@ export function tagStripePayouts(
 
 // ── resolving lines before any rule sees them ────────────────────────────
 
-/** An expense or paid bill on the books that a Wise debit may be. */
-export type BillCandidate = {
+type BillCandidateBase = {
   id: string;
-  /** The entry that moved the money out of the register account: an expense's own entry, a bill's payment entry. */
-  entryId: string;
   label: string;
   currency: string;
   totalCents: number;
-  /** The day the money left (expense date, or the day the bill was paid). */
+  /** The day the money left (expense date, or the day the bill was paid); for an OPEN bill, its bill date. */
   paidOn: string;
   /** The category of the bill's first line, shown on the linked bank line. */
   categoryId: string | null;
 };
 
+/** An expense or a PAID bill: the money already left the register account on the books. */
+export type PaidBillCandidate = BillCandidateBase & {
+  open?: false;
+  /** The entry that moved the money out of the register account: an expense's own entry, a bill's payment entry. */
+  entryId: string;
+};
+
+/**
+ * A bill still OPEN (owed, in Accounts payable): its cost is on the books,
+ * its payment is not. A Wise debit that is its payment is never linked to it
+ * (there is no payment entry to link) and never booked as a new expense (the
+ * cost would count twice): it is held for a founder to mark the bill paid.
+ * Recurring costs whose paying account nobody confirmed are recorded this way
+ * (bills-io.ts recordRecurringNow).
+ */
+export type OpenBillCandidate = BillCandidateBase & {
+  open: true;
+  entryId: null;
+  /** The due date; the debit may land anywhere from the bill date to it. */
+  dueOn: string;
+};
+
+/** An expense, a paid bill, or an open bill on the books that a Wise debit may be. */
+export type BillCandidate = PaidBillCandidate | OpenBillCandidate;
+
 export const BILL_MATCH_WINDOW_DAYS = 7;
+
+/**
+ * Days between a debit and a bill: from the day an expense or paid bill left
+ * the account; for an open bill, 0 anywhere from its bill date to its due
+ * date, else the days to the nearer of the two.
+ */
+function billGap(postedDate: string, b: BillCandidate): number {
+  if (!b.open) return dayGap(postedDate, b.paidOn);
+  if (postedDate >= b.paidOn && postedDate <= b.dueOn) return 0;
+  return Math.min(dayGap(postedDate, b.paidOn), dayGap(postedDate, b.dueOn));
+}
 
 /** The single item with the smallest distance, or null when there is none or a tie. */
 function uniqueClosest<T>(items: readonly T[], distance: (x: T) => number): T | null {
@@ -287,7 +325,7 @@ export function matchDebitsToBills(
   windowDays = BILL_MATCH_WINDOW_DAYS,
 ): { linked: Map<string, BillCandidate>; ambiguous: Map<string, BillCandidate[]> } {
   const fits = (l: DebitLike, b: BillCandidate) =>
-    l.amountCents < 0 && l.currency === b.currency.toUpperCase() && -l.amountCents === b.totalCents && dayGap(l.postedDate, b.paidOn) <= windowDays;
+    l.amountCents < 0 && l.currency === b.currency.toUpperCase() && -l.amountCents === b.totalCents && billGap(l.postedDate, b) <= windowDays;
   const linked = new Map<string, BillCandidate>();
   const used = new Set<string>();
   for (let progress = true; progress; ) {
@@ -296,12 +334,12 @@ export function matchDebitsToBills(
       if (linked.has(l.fitid)) continue;
       const bill = uniqueClosest(
         bills.filter((b) => !used.has(b.id) && fits(l, b)),
-        (b) => dayGap(l.postedDate, b.paidOn),
+        (b) => billGap(l.postedDate, b),
       );
       if (!bill) continue;
       const line = uniqueClosest(
         lines.filter((x) => !linked.has(x.fitid) && fits(x, bill)),
-        (x) => dayGap(x.postedDate, bill.paidOn),
+        (x) => billGap(x.postedDate, bill),
       );
       if (line !== l) continue;
       linked.set(l.fitid, bill);
@@ -333,7 +371,7 @@ export function debitsAddingUpToBills(lines: readonly DebitLike[], bills: readon
   const out = new Map<string, BillCandidate[]>();
   for (const b of bills) {
     const parts = lines.filter(
-      (l) => l.amountCents < 0 && l.currency === b.currency.toUpperCase() && -l.amountCents < b.totalCents && dayGap(l.postedDate, b.paidOn) <= windowDays,
+      (l) => l.amountCents < 0 && l.currency === b.currency.toUpperCase() && -l.amountCents < b.totalCents && billGap(l.postedDate, b) <= windowDays,
     );
     if (parts.length < 2 || parts.length > MAX_PART_CANDIDATES) continue;
     const hit = new Set<string>();
@@ -361,7 +399,9 @@ export type FeedResolution =
   /** "Check for Wise payments" already recorded this deposit against an invoice: set it aside. */
   | { kind: "invoice_payment" }
   /** This debit IS an expense/bill already on the books: link it, post nothing. */
-  | { kind: "bill"; bill: BillCandidate }
+  | { kind: "bill"; bill: PaidBillCandidate }
+  /** This debit looks like the payment of a bill still OPEN on the books: held for a founder to mark the bill paid; nothing posted. */
+  | { kind: "bill_open"; bill: OpenBillCandidate }
   /** Several expenses could be this debit: a founder decides. */
   | { kind: "bill_ambiguous"; bills: BillCandidate[] }
   /** This debit and others add up exactly to an expense already on the books as one amount: a founder decides. */
@@ -385,7 +425,7 @@ export type FeedPlanInput = {
   lines: ReadonlyMap<string, FeedLineState>;
   /** The opening balance in force, per currency. */
   openings: ReadonlyMap<string, OpeningMark>;
-  /** Unlinked paid bills/expenses on the register account around the window. */
+  /** Unlinked paid bills/expenses on the register account, and open bills, around the window. */
   bills: readonly BillCandidate[];
   windowDays?: number;
 };
@@ -411,7 +451,9 @@ export function planFeed(input: FeedPlanInput): Map<string, FeedResolution> {
   // Linking posts nothing. A link whose bank day and expense day fall on either
   // side of an opening balance's day does move that day's figure: the sync then
   // says to re-post the balance (wise-feed-io.ts staleOpeningNotes).
-  for (const [fitid, bill] of bills.linked) out.set(fitid, { kind: "bill", bill });
+  // An open bill's payment is never linked (nothing moved the money on the books yet) nor booked as new money
+  // (its cost is on the books already): held until a founder marks the bill paid.
+  for (const [fitid, bill] of bills.linked) out.set(fitid, bill.open ? { kind: "bill_open", bill } : { kind: "bill", bill });
 
   for (const r of open) {
     if (out.has(r.fitid)) continue;

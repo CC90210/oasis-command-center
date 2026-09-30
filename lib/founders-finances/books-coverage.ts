@@ -55,11 +55,19 @@
  * THE BOOK is INCOMPLETE when the cash is, and also when:
  *   - operating expenses start later than revenue (or are absent while
  *     revenue exists): the months before have revenue and no costs;
+ *   - after expenses start, a month has revenue and no operating expense at
+ *     all: that month's rent and software are not recorded;
  *   - no bank deposit is recorded from before the first revenue: revenue that
  *     did not come through Stripe (a Wise or e-Transfer payment, a client
  *     paying by wire) cannot be in the books, so every revenue total is a
  *     floor. This is also what makes the GST/QST threshold "unconfirmed"
- *     (tax.ts smallSupplierStatus).
+ *     (tax.ts smallSupplierStatus);
+ *   - the imported bank lines do not CONTINUE: a bank account's imports skip
+ *     a calendar month, or stop before the current one. One old statement
+ *     import is a start date, not a bank feed, and the months after it hold
+ *     no deposit the books can know about. Coverage is by calendar month
+ *     (a month with no imported line at all), so a quiet week is not a gap,
+ *     and a new month reads incomplete until its first line is imported.
  *
  * PURE: the loaders hand it the ledger they already loaded; tests run it bare.
  */
@@ -336,8 +344,9 @@ export type RevenueSources = {
   bankFrom: string | null;
   /**
    * Every rail revenue can arrive by is recorded: bank deposits are in the
-   * books from on or before the first revenue. False = every revenue total
-   * is a floor (off-Stripe revenue may be missing).
+   * books from on or before the first revenue, and every bank account's
+   * imports run without a missing month through the current one. False =
+   * every revenue total is a floor (off-Stripe revenue may be missing).
    */
   complete: boolean;
   /** In words, for the threshold and the banner: e.g. "Counts Stripe only; bank deposits and off-Stripe revenue are not recorded". */
@@ -364,7 +373,49 @@ export type BooksCoverage = {
 export type BooksCoverageInput = CashInput & {
   /** The earliest IMPORTED fin_bank_transactions.posted_date per account id (source 'import'); an account with none is absent or null. */
   bankLinesFromByAccount?: Readonly<Record<string, string | null | undefined>>;
+  /** The latest IMPORTED posted_date per account id; absent or null = not known. */
+  bankLinesToByAccount?: Readonly<Record<string, string | null | undefined>>;
+  /** The calendar months ("YYYY-MM") holding at least one IMPORTED line, per account id; absent = none known. */
+  bankLineMonthsByAccount?: Readonly<Record<string, readonly string[] | null | undefined>>;
+  /** Today (Toronto, YYYY-MM-DD): imported bank lines must reach this month for deposits to be on the books through now. */
+  today: string;
 };
+
+/** "2026-02" -> "Feb 2026". */
+function monthLabel(ym: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym);
+  return m ? `${MONTHS[Number(m[2]) - 1] ?? m[2]} ${m[1]}` : ym;
+}
+
+/** The month after "YYYY-MM". */
+function nextMonth(ym: string): string {
+  const y = Number(ym.slice(0, 4));
+  const m = Number(ym.slice(5, 7));
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+}
+
+/** Every month from `from` to `to` ("YYYY-MM"), both included; empty when `from` is later. */
+function monthsBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let m = from; m <= to && out.length < 1200; m = nextMonth(m)) out.push(m);
+  return out;
+}
+
+/** Sorted months as words, runs merged: "Feb 2026", "Feb to Aug 2026", "Dec 2026 to Jan 2027", joined with "and". */
+function monthsLabel(months: readonly string[]): string {
+  const sorted = [...new Set(months)].sort();
+  const runs: Array<[string, string]> = [];
+  for (const m of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && nextMonth(last[1]) === m) last[1] = m;
+    else runs.push([m, m]);
+  }
+  const words = runs.map(([a, b]) => {
+    if (a === b) return monthLabel(a);
+    return a.slice(0, 4) === b.slice(0, 4) ? `${monthLabel(a).slice(0, 3)} to ${monthLabel(b)}` : `${monthLabel(a)} to ${monthLabel(b)}`;
+  });
+  return words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
 
 /** "Stripe", "invoices and deposits recorded by hand", or both: what the revenue in the books came from. */
 function countedSources(stripe: boolean, other: boolean): string {
@@ -380,40 +431,65 @@ export function booksCoverage(input: BooksCoverageInput): BooksCoverage {
   let revenueFrom: string | null = null;
   let stripe = false;
   let other = false;
+  /** Months ("YYYY-MM") with revenue in force, and with an operating expense in force. */
+  const revenueMonths = new Set<string>();
+  const expenseMonths = new Set<string>();
   for (const l of input.lines) {
     if (!inForce(l)) continue;
     const a = typeOf.get(l.accountId);
     if (!a) continue;
     if (a.type === "expense" && l.cadDebitCents > 0 && !AUTOMATIC_EXPENSE_CODES.has(a.code)) {
       if (expensesFrom === null || l.entryDate < expensesFrom) expensesFrom = l.entryDate;
+      expenseMonths.add(l.entryDate.slice(0, 7));
     } else if (a.type === "revenue" && (l.cadCreditCents > 0 || l.cadDebitCents > 0)) {
       if (l.cadCreditCents > 0 && (revenueFrom === null || l.entryDate < revenueFrom)) revenueFrom = l.entryDate;
+      if (l.cadCreditCents > 0) revenueMonths.add(l.entryDate.slice(0, 7));
       if (l.source.startsWith("stripe")) stripe = true;
       else other = true;
     }
   }
 
   // Bank lines exist only for bank, cash and card accounts; the earliest one
-  // on a BANK account is where deposits start to be on the books.
+  // on a BANK account is where deposits start to be on the books. They are on
+  // the books only while the imports CONTINUE: an account whose imported lines
+  // stop short of this month, or skip a month, says nothing about the deposits
+  // after it or in it (one old statement import is not a bank feed).
   let bankFrom: string | null = null;
+  const thisMonth = input.today.slice(0, 7);
+  const continuityNotes: string[] = [];
+  const sources = countedSources(stripe, other);
   for (const [accountId, from] of Object.entries(input.bankLinesFromByAccount ?? {})) {
     if (!from || Number(input.bankLinesByAccount[accountId] || 0) === 0) continue;
-    if (!BALANCE_SUBTYPES.has(typeOf.get(accountId)?.subtype || "")) continue;
+    const account = typeOf.get(accountId);
+    if (!account || !BALANCE_SUBTYPES.has(account.subtype)) continue;
     if (bankFrom === null || from < bankFrom) bankFrom = from;
+    const to = input.bankLinesToByAccount?.[accountId] ?? null;
+    const held = new Set(input.bankLineMonthsByAccount?.[accountId] ?? []);
+    const missing = monthsBetween(from.slice(0, 7), thisMonth).filter((m) => !held.has(m));
+    if (missing.length === 0) continue;
+    const toMonth = to ? to.slice(0, 7) : null;
+    continuityNotes.push(
+      toMonth && missing.every((m) => m > toMonth)
+        ? `Bank deposits into ${account.name} are recorded from ${longDate(from)} to ${longDate(to as string)} only; revenue after that counts ${sources} only`
+        : `No bank line is imported into ${account.name} for ${monthsLabel(missing)}; revenue in ${missing.length === 1 ? "that month" : "those months"} counts ${sources} only`,
+    );
   }
 
-  const revenueComplete = bankFrom !== null && (revenueFrom === null || bankFrom <= revenueFrom);
-  let revenueNote: string | null = null;
-  if (!revenueComplete) {
-    if (bankFrom === null) {
-      revenueNote =
-        stripe || other
-          ? `Counts ${countedSources(stripe, other)} only; bank deposits and off-Stripe revenue are not recorded`
-          : "No revenue and no bank deposit is recorded, so revenue is unknown, not zero";
-    } else {
-      revenueNote = `Bank deposits are recorded from ${longDate(bankFrom)} only; revenue before then counts ${countedSources(stripe, other)} only`;
+  const revenueNotes: string[] = [];
+  if (bankFrom === null) {
+    revenueNotes.push(
+      stripe || other
+        ? `Counts ${sources} only; bank deposits and off-Stripe revenue are not recorded`
+        : "No revenue and no bank deposit is recorded, so revenue is unknown, not zero",
+    );
+  } else {
+    if (revenueFrom !== null && bankFrom > revenueFrom) {
+      revenueNotes.push(`Bank deposits are recorded from ${longDate(bankFrom)} only; revenue before then counts ${sources} only`);
     }
+    revenueNotes.push(...continuityNotes);
   }
+  const revenueComplete = revenueNotes.length === 0;
+  const revenueNote = revenueComplete ? null : revenueNotes.join(". ");
 
   const expenseGap =
     revenueFrom === null
@@ -423,8 +499,15 @@ export function booksCoverage(input: BooksCoverageInput): BooksCoverage {
         : expensesFrom > revenueFrom
           ? `Operating expenses are recorded from ${longDate(expensesFrom)} only; revenue from ${longDate(revenueFrom)}, so earlier costs are missing`
           : null;
+  // After expenses start, a month with revenue and no operating expense at all
+  // is a month whose costs are not recorded (rent and software recur monthly).
+  const bareMonths = expensesFrom === null ? [] : [...revenueMonths].filter((m) => m >= (expensesFrom as string).slice(0, 7) && !expenseMonths.has(m));
+  const bareMonthsGap =
+    bareMonths.length === 0
+      ? null
+      : `No operating expense is recorded for ${monthsLabel(bareMonths)}, ${bareMonths.length === 1 ? "a month" : "months"} with revenue, so ${bareMonths.length === 1 ? "its" : "their"} costs are missing`;
 
-  const gaps = [...cash.gaps, ...(expenseGap ? [expenseGap] : []), ...(revenueNote ? [revenueNote] : [])];
+  const gaps = [...cash.gaps, ...(expenseGap ? [expenseGap] : []), ...(bareMonthsGap ? [bareMonthsGap] : []), ...revenueNotes];
   const inUse = cash.accounts.filter((a) => BALANCE_SUBTYPES.has(a.subtype));
   // Payouts: none Stripe reported paid is left unbooked, and card money that
   // came into Stripe clearing has left it into a bank at least once (the same

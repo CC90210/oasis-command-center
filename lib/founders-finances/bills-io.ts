@@ -25,7 +25,10 @@
  * fin_audit_log ("recurring.paid_from_confirmed", the account in the detail),
  * made when the item is created with a paid-from account or later from Bills
  * & Expenses; changing the item's account without confirming it again leaves
- * it unconfirmed.
+ * it unconfirmed. A personal book holds no bills (createBill), so there the
+ * paying account is required when the item is created, cannot be cleared to
+ * "not known", and an older unconfirmed item is refused with what to do
+ * instead of becoming a bill the book cannot hold.
  */
 import "server-only";
 
@@ -393,6 +396,9 @@ export async function listAttachments(viewer: FinanceViewer, ownerType: "bill" |
 /** The audit action that records a founder's answer to "which account pays this recurring cost". */
 export const RECURRING_PAID_FROM_CONFIRMED = "recurring.paid_from_confirmed";
 
+/** A personal book's recurring cost with no account named: refused, since the bill it would become cannot exist there. */
+const PERSONAL_RECURRING_NEEDS_ACCOUNT = "choose the account that pays this recurring cost: personal books record expenses, not bills";
+
 /**
  * The account a founder last confirmed for a recurring item (null = never,
  * or confirmed as "not known"), as a SQL expression over `r` (the item).
@@ -450,6 +456,8 @@ function paidFromConfirmation(entityId: string, itemId: string, account: string 
 export async function confirmRecurringPaidFrom(viewer: FinanceViewer, itemId: string, raw: Record<string, unknown>): Promise<{ accountId: string | null }> {
   const entity = await requireRowEntity(viewer, "fin_recurring_items", itemId);
   const ref = typeof raw.account_id === "string" ? raw.account_id.trim() : "";
+  // A personal book has no bills to fall back on (createBill), so "not known" is not an answer there.
+  if (!ref && entity.kind !== "business") throw new FinanceInputError(PERSONAL_RECURRING_NEEDS_ACCOUNT);
   const account = ref ? (await resolvePaidFrom(entity, ref)).accountId : null;
   await writeBatch([
     { sql: `UPDATE fin_recurring_items SET paid_from_account_id = ? WHERE id = ? AND entity_id = ?`, args: [account, itemId, entity.id] },
@@ -481,6 +489,8 @@ export async function createRecurring(viewer: FinanceViewer, entityRef: string, 
   // confirms it); none means "not known yet", and each due date becomes a
   // bill to pay rather than an expense "paid" from an account on a guess.
   const ref = typeof raw.paid_from_account_id === "string" ? raw.paid_from_account_id.trim() : "";
+  // A personal book records expenses only, never a bill due (createBill): the account that pays it is required.
+  if (!ref && entity.kind !== "business") throw new FinanceInputError(PERSONAL_RECURRING_NEEDS_ACCOUNT);
   const paidFrom = ref ? (await resolvePaidFrom(entity, ref)).accountId : null;
   const id = newId("rec");
   await writeBatch([
@@ -563,6 +573,10 @@ export async function recordRecurringNow(viewer: FinanceViewer, itemId: string):
   const already = await queryOne<{ id: string }>(`SELECT id FROM fin_bills WHERE entity_id = ? AND source = 'recurring' AND source_ref = ?`, [entity.id, `${item.id}:${item.next_run_on}`]);
   if (already) return already.id;
   const confirmed = !!item.paid_from_account_id && item.confirmed_account_id === item.paid_from_account_id;
+  // A personal book cannot hold the bill an unconfirmed item becomes: say what to do, never book it from a guessed account.
+  if (!confirmed && entity.kind !== "business") {
+    throw new FinanceInputError(`Confirm which account pays "${item.name}" first: a personal book records it as an expense paid from that account, never as a bill.`);
+  }
   const billId = await createBill(viewer, entity.id, {
     kind: confirmed ? "expense" : "bill",
     vendor_name: item.name,

@@ -16,7 +16,8 @@
  *   - no workspace to say (no finance tenant): the book write still happens,
  *     the fact goes to ledger_dead_letters, never to a default tenant; no
  *     Stripe account pinned: the event itself is refused and dead-lettered
- *     (the contamination guard, 2026-09-30);
+ *     (the contamination guard, 2026-09-30), and every event here is proved
+ *     the pinned account's by its key first;
  *   - payloads hold ids and codes: no customer name or email reaches the ledger.
  *
  * Run: node --conditions=react-server --import tsx tests/finances-stripe-ledger-events.test.ts
@@ -32,8 +33,21 @@ process.env.TURSO_DB_PATH = dbFile;
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "STRIPE_SECRET_KEY", "FOUNDERS_TENANT_IDS", "STRIPE_FINANCE_WEBHOOK_SECRET"]) delete process.env[k];
 
-globalThis.fetch = (async (input: unknown) => {
-  throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
+// A webhook event is booked only when a key of the pinned account proves it is
+// that account's (stripe-ingest.ts stripeEventOrigin; no key = refused). The
+// key is OASIS's pinned account's: Stripe knows each event and no other object
+// (every other read is a 404, handled as "Stripe could not say").
+const STRIPE_KEY = "rk_live_ledger_events_test_only";
+process.env.STRIPE_SECRET_KEY = STRIPE_KEY;
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "ledger-events-test-only-field-key-000";
+globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+  const url = new URL(String(input));
+  if (url.host !== "api.stripe.com") throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
+  if ((init?.method || "GET").toUpperCase() !== "GET") throw new Error(`Stripe write attempted in test: ${url.pathname}`);
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+  if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
+  return json({ error: { type: "invalid_request_error", message: "No such object" } }, 404);
 }) as typeof fetch;
 
 const TENANT = "oasis-books-test";
@@ -125,8 +139,13 @@ async function main() {
     await raw.execute({ sql: `INSERT INTO fin_fx_rates (pair, rate_date, rate) VALUES ('USDCAD', ?, '1.3800')`, args: [`2026-09-${String(d).padStart(2, "0")}`] });
   }
   // With a finance tenant set, the Stripe key is read from the tenant's stored
-  // credentials; an empty store = no key, so events are processed from their payloads.
+  // credentials (a tenant other than OASIS's own never falls back to the env key).
   await raw.execute(`CREATE TABLE tenant_integration_credentials (tenant_id TEXT, service TEXT, field_key TEXT, encrypted_value TEXT)`);
+  const { encryptField } = await import("../lib/field-encryption");
+  await raw.execute({
+    sql: `INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'stripe', 'secret_key', ?)`,
+    args: [TENANT, encryptField(STRIPE_KEY)],
+  });
   const { ensureFinanceSeed } = await import("../lib/founders-finances/seed-io");
   const ingest = await import("../lib/founders-finances/stripe-ingest");
   const { BUSINESS_ENTITY_ID: B } = await import("../lib/founders-finances/chart");

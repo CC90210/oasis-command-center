@@ -13,8 +13,9 @@
  * account the key belongs to and compares it with the account a founder
  * pinned in Finances > Settings. Unpinned or different -> refuse, loudly.
  * The webhook needs the pin too (2026-09-30, stripe-ingest.ts
- * stripeEventOrigin): with nothing pinned an event is dead-lettered, never
- * booked; with a key of the pinned account, the event must exist in it.
+ * stripeEventOrigin): with nothing pinned, no key, or a key of another
+ * account, an event is dead-lettered, never booked; with a key of the pinned
+ * account, the event must exist in it.
  *
  * Plain fetch against the REST API, form-encoded, like
  * lib/website-sales-payment.ts. The key is never logged or returned.

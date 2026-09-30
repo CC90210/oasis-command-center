@@ -291,7 +291,7 @@ async function main() {
       ...entry("2026-01-20", "stripe_fee", [["B:5000", 2000, 0], ["B:1050", 0, 2000]]),
       ...entry("2026-09-01", "expense", [["B:5650", 269513, 0], ["B:1000", 0, 269513]]),
     ];
-    const base = { accounts, bankLinesByAccount: {}, book: "business" as const, wiseWritesEnabled: false };
+    const base = { accounts, bankLinesByAccount: {}, book: "business" as const, wiseWritesEnabled: false, today: "2026-09-30" };
     const cov = coverageMod.booksCoverage({ ...base, lines });
     assert.equal(cov.complete, false);
     assert.equal(cov.expensesFrom, "2026-09-01", "Stripe fees are not operating expenses");
@@ -307,7 +307,8 @@ async function main() {
       REVENUE_GAP,
     ]);
     assert.deepEqual(cov.cash, coverageMod.cashCoverage({ ...base, lines }), "the cash half is cash-coverage, unchanged");
-    // Complete: an opening balance, a payout into the bank, costs from before the first revenue, and a bank import from before it.
+    // Complete: an opening balance, a payout into the bank, costs from before the first revenue, and bank lines imported from before it through this month.
+    const janToSep = ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"];
     const whole = coverageMod.booksCoverage({
       ...base,
       lines: [
@@ -316,17 +317,96 @@ async function main() {
         ...entry("2026-01-10", "expense", [["B:5650", 1000, 0], ["B:1000", 0, 1000]]),
         ...entry("2026-01-25", "bank_txn", [["B:1000", 58000, 0], ["B:1050", 0, 58000]]),
       ],
-      bankLinesByAccount: { "B:1000": 4 },
+      bankLinesByAccount: { "B:1000": 40 },
       bankLinesFromByAccount: { "B:1000": "2026-01-02" },
+      bankLinesToByAccount: { "B:1000": "2026-09-28" },
+      bankLineMonthsByAccount: { "B:1000": janToSep },
     });
     assert.deepEqual([whole.complete, whole.gaps, whole.payoutsRecorded, whole.revenueSources.complete], [true, [], true, true]);
     // A bank import that starts after the first revenue still leaves the earlier months unconfirmed.
-    const late = coverageMod.booksCoverage({ ...base, lines, bankLinesByAccount: { "B:1000": 2 }, bankLinesFromByAccount: { "B:1000": "2026-09-05" } });
+    const late = coverageMod.booksCoverage({ ...base, lines, bankLinesByAccount: { "B:1000": 2 }, bankLinesFromByAccount: { "B:1000": "2026-09-05" }, bankLinesToByAccount: { "B:1000": "2026-09-20" }, bankLineMonthsByAccount: { "B:1000": ["2026-09"] } });
     assert.ok(late.gaps.includes("Bank deposits are recorded from Sep 5, 2026 only; revenue before then counts Stripe only"), late.gaps.join(" | "));
+    assert.equal(late.gaps.filter((g) => /^Bank deposits|^No bank line/.test(g)).length, 1, "it runs through this month: no continuity gap on top");
     // The old name is an alias of the same function.
     const cashAlias = await import("../lib/founders-finances/cash-coverage");
     assert.equal(cashAlias.cashCoverage, coverageMod.cashCoverage);
     assert.equal(cashAlias.incompleteBooksNote, coverageMod.incompleteBooksNote);
+  });
+
+  await check("booksCoverage: one old statement import (January only) is a start date, not a bank feed; a month with revenue and no cost is a gap; the threshold stays unconfirmed", async () => {
+    const accounts = [
+      { id: "B:1000", code: "1000", name: "Business chequing", type: "asset" as const, subtype: "bank" },
+      { id: "B:1050", code: "1050", name: "Stripe clearing", type: "asset" as const, subtype: "clearing" },
+      { id: "B:3900", code: "3900", name: "Retained earnings", type: "equity" as const, subtype: "retained_earnings" },
+      { id: "B:4010", code: "4010", name: "Subscription revenue", type: "revenue" as const, subtype: "revenue" },
+      { id: "B:5650", code: "5650", name: "Rent & occupancy", type: "expense" as const, subtype: "expense" },
+    ];
+    let n = 0;
+    const entry = (date: string, source: string, legs: Array<[string, number, number]>) => {
+      n += 1;
+      return legs.map(([accountId, d, c]) => ({ entryId: `s${n}`, entryDate: date, accountId, cadDebitCents: d, cadCreditCents: c, memo: "", entryMemo: "", source, status: "posted" }));
+    };
+    // The review's probe: an opening balance and 12 bank lines imported from 2026-01-01, all in January; a January
+    // expense; Stripe revenue on 01-20 and 09-05; a payout into the bank. Before the fix: complete, "ok, No action needed".
+    const lines = [
+      ...entry("2026-01-01", "opening_balance", [["B:1000", 500000, 0], ["B:3900", 0, 500000]]),
+      ...entry("2026-01-10", "expense", [["B:5650", 1000, 0], ["B:1000", 0, 1000]]),
+      ...entry("2026-01-20", "stripe_charge", [["B:1050", 10000, 0], ["B:4010", 0, 10000]]),
+      ...entry("2026-01-25", "bank_txn", [["B:1000", 10000, 0], ["B:1050", 0, 10000]]),
+      ...entry("2026-09-05", "stripe_charge", [["B:1050", 10000, 0], ["B:4010", 0, 10000]]),
+      ...entry("2026-09-06", "bank_txn", [["B:1000", 10000, 0], ["B:1050", 0, 10000]]),
+    ];
+    const jan = { bankLinesByAccount: { "B:1000": 12 }, bankLinesFromByAccount: { "B:1000": "2026-01-01" }, bankLinesToByAccount: { "B:1000": "2026-01-31" }, bankLineMonthsByAccount: { "B:1000": ["2026-01"] } };
+    const cov = coverageMod.booksCoverage({ accounts, lines, book: "business", wiseWritesEnabled: false, today: "2026-09-30", ...jan });
+    const STALE = "Bank deposits into Business chequing are recorded from Jan 1, 2026 to Jan 31, 2026 only; revenue after that counts Stripe only";
+    const BARE = "No operating expense is recorded for Sep 2026, a month with revenue, so its costs are missing";
+    assert.equal(cov.complete, false);
+    assert.equal(cov.revenueSources.complete, false);
+    assert.deepEqual(cov.gaps, [BARE, STALE]);
+    assert.equal(cov.revenueSources.note, STALE);
+    const { smallSupplierStatus } = await import("../lib/founders-finances/tax");
+    const threshold = smallSupplierStatus([{ label: "Q3 2026", revenueCents: 20000 }], cov.revenueSources);
+    assert.equal(threshold.level, "unconfirmed");
+    assert.doesNotMatch(threshold.message, /No action needed/);
+    assert.match(threshold.message, /^Bank deposits into Business chequing are recorded from Jan 1, 2026 to Jan 31, 2026 only/);
+    // A month skipped in the middle is named; the months around it are fine.
+    const holed = coverageMod.booksCoverage({
+      accounts,
+      lines: [...lines, ...entry("2026-09-01", "expense", [["B:5650", 1000, 0], ["B:1000", 0, 1000]])],
+      book: "business",
+      wiseWritesEnabled: false,
+      today: "2026-09-30",
+      ...jan,
+      bankLinesToByAccount: { "B:1000": "2026-09-28" },
+      bankLineMonthsByAccount: { "B:1000": ["2026-01", "2026-02", "2026-04", "2026-05", "2026-06", "2026-08", "2026-09"] },
+    });
+    assert.deepEqual(holed.gaps, ["No bank line is imported into Business chequing for Mar 2026 and Jul 2026; revenue in those months counts Stripe only"]);
+    // A new month with nothing imported yet is not on the books yet either.
+    const everyMonth = { "B:1000": ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"] };
+    const nextMonth = coverageMod.booksCoverage({
+      accounts,
+      lines: [...lines, ...entry("2026-09-01", "expense", [["B:5650", 1000, 0], ["B:1000", 0, 1000]])],
+      book: "business",
+      wiseWritesEnabled: false,
+      today: "2026-10-02",
+      ...jan,
+      bankLinesToByAccount: { "B:1000": "2026-09-28" },
+      bankLineMonthsByAccount: everyMonth,
+    });
+    assert.deepEqual(nextMonth.gaps, ["Bank deposits into Business chequing are recorded from Jan 1, 2026 to Sep 28, 2026 only; revenue after that counts Stripe only"]);
+    // Imports every month through this one, and a cost in every month with revenue: complete, and the threshold a real level.
+    const current = coverageMod.booksCoverage({
+      accounts,
+      lines: [...lines, ...entry("2026-09-01", "expense", [["B:5650", 1000, 0], ["B:1000", 0, 1000]])],
+      book: "business",
+      wiseWritesEnabled: false,
+      today: "2026-09-30",
+      ...jan,
+      bankLinesToByAccount: { "B:1000": "2026-09-28" },
+      bankLineMonthsByAccount: everyMonth,
+    });
+    assert.deepEqual([current.complete, current.gaps], [true, []]);
+    assert.equal(smallSupplierStatus([{ label: "Q3 2026", revenueCents: 20000 }], current.revenueSources).level, "ok");
   });
 
   await check("bankBalanceExcludesDeposits: chequing below zero only because paid bills post against it with no deposit and no bank line", () => {
@@ -375,17 +455,26 @@ async function main() {
     assert.match(text, /The books are incomplete, so these are not balances yet/);
   });
 
-  await check("Reports: the banner and a non-final subtitle; the CSV opens with the gaps as a comment line", async () => {
+  await check("Reports: the banner and a non-final subtitle; the CSV opens with the gaps as a real '#' comment line", async () => {
     const tree = await expand(await ReportsPage({ searchParams: sp({ kind: "pnl", from: "2026-01-01", to: "2026-10-01" }) }));
     assertBanner(tree, "Reports");
     assert.match(walk(tree).strings.join("\n"), /not final while the books are incomplete/);
     const res = await csvRoute.GET(new Request("http://localhost/api/founders/finances/reports?kind=pnl&from=2026-01-01&to=2026-10-01"));
     assert.equal(res.status, 200);
     const csv = (await res.text()).replace(/^\uFEFF/, "");
-    const first = csv.split(/\r?\n/)[0];
-    assert.match(first, /^"# Books incomplete: /, first);
-    assert.ok(first.includes(EXPENSE_GAP) && first.includes(REVENUE_GAP), first);
-    assert.match(csv.split(/\r?\n/)[1], /^OASIS AI Solutions/, "then the statement's own header");
+    const lines = csv.split("\r\n");
+    const first = lines[0];
+    // "#" is the line's first character (a quoted cell would start with '"', which no comment-skipping importer skips).
+    assert.match(first, /^# Books incomplete: /, first);
+    assert.doesNotMatch(first, /[",]/, "no comma or quote: nothing for a CSV reader to split or unquote");
+    const noCommas = (g: string) => g.replace(/,/g, "");
+    assert.ok(first.includes(noCommas(EXPENSE_GAP)) && first.includes(noCommas(REVENUE_GAP)), first);
+    assert.ok(first.includes("Sep 1 2026"), "a date keeps its words");
+    assert.match(lines[1], /^OASIS AI Solutions/, "then the statement's own header");
+    // A reader that skips '#' lines gets the statement exactly as a complete book's export starts.
+    const skipped = lines.filter((l) => !l.startsWith("#"));
+    assert.match(skipped[0], /^OASIS AI Solutions/);
+    assert.ok(skipped.some((l) => /^Code,Account,Amount \(CAD\)$/.test(l)), "the statement's rows follow unchanged");
   });
 
   await check("Taxes: the banner, the threshold 'unconfirmed' without a bank feed, Quebec copy, no GST/HST", async () => {
@@ -578,16 +667,50 @@ async function main() {
     assert.equal(Number((await raw.execute({ sql: `SELECT COUNT(*) FROM fin_bills WHERE source = 'recurring' AND source_ref LIKE ?`, args: [`${item}:%`] })).rows[0][0]), 3, "idempotent");
   });
 
+  await check("a personal book's recurring cost needs the account that pays it (a personal book holds no bills): refused without one, with what to do; confirmed, an expense from it", async () => {
+    const P = "fin_ent_cc";
+    const cat = categoryId(P, "5500");
+    const billsOf = async () => Number((await raw.execute({ sql: `SELECT COUNT(*) FROM fin_bills WHERE entity_id = ?`, args: [P] })).rows[0][0]);
+    await assert.rejects(
+      bills.createRecurring(cc, P, { name: "Streaming", amount: "11.99", currency: "CAD", cadence: "monthly", next_run_on: "2026-09-10", category_id: cat }),
+      /choose the account that pays this recurring cost: personal books record expenses, not bills/,
+    );
+    assert.equal(Number((await raw.execute({ sql: `SELECT COUNT(*) FROM fin_recurring_items WHERE entity_id = ?`, args: [P] })).rows[0][0]), 0, "no item without its account");
+    // An item from before (no paid-from, never confirmed): "Record" and the materializer refuse it by name, and book nothing.
+    await raw.execute({
+      sql: `INSERT INTO fin_recurring_items (id, entity_id, kind, name, category_id, paid_from_account_id, amount_cents, currency, cadence, next_run_on, created_by)
+            VALUES ('rec_personal_old', ?, 'expense', 'Gym', ?, NULL, 4500, 'CAD', 'monthly', '2026-09-05', 'test')`,
+      args: [P, cat],
+    });
+    await assert.rejects(bills.recordRecurringNow(cc, "rec_personal_old"), /Confirm which account pays "Gym" first: a personal book records it as an expense paid from that account, never as a bill\./);
+    await assert.rejects(bills.materializeDueRecurring(cc, P, "2026-09-30"), /recurring items not materialized: rec_personal_old@2026-09-05/);
+    assert.equal(await billsOf(), 0, "nothing booked on the personal book");
+    // "Not known" is no answer there either.
+    await assert.rejects(bills.confirmRecurringPaidFrom(cc, "rec_personal_old", { account_id: "" }), /choose the account that pays this recurring cost/);
+    // Confirmed: an expense paid from that account.
+    await bills.confirmRecurringPaidFrom(cc, "rec_personal_old", { account_id: accountId(P, "1000") });
+    const billId = await bills.recordRecurringNow(cc, "rec_personal_old");
+    const bill = (await raw.execute({ sql: `SELECT kind, status, paid_from_account_id FROM fin_bills WHERE id = ?`, args: [billId] })).rows[0];
+    assert.deepEqual([bill.kind, bill.status, bill.paid_from_account_id], ["expense", "paid", accountId(P, "1000")]);
+  });
+
   // ── complete books: no banner ──────────────────────────────────────────
   await check("complete books (opening balance, payout, bank import and costs from before the first revenue): no banner anywhere, live tiles, a real threshold level", async () => {
     await post("2026-01-01", "opening_balance", "ob-1000", [[SYS.chequing, 500000, 0], [SYS.retained, 0, 500000]]);
     await post("2026-01-10", "expense", "jan-cost", [["5100", 1500, 0], [SYS.chequing, 0, 1500]]);
     await post("2026-01-25", "bank_txn", "po_jan", [[SYS.chequing, 58000, 0], [SYS.stripeClearing, 0, 58000]]);
-    await raw.execute({
-      sql: `INSERT INTO fin_bank_transactions (id, entity_id, account_id, posted_date, description, amount_cents, currency, status, dedupe_hash, source, created_by)
-            VALUES ('bt-import-1', ?, ?, '2026-01-02', 'Opening statement line', 100, 'CAD', 'excluded', 'dh-1', 'import', 'test')`,
-      args: [B, chequing],
-    });
+    // Bank lines imported from before the first revenue, in every month through this one (a feed that continues).
+    const { torontoToday } = await import("../lib/founders-finances/fx");
+    const thisMonth = torontoToday().slice(0, 7);
+    for (let m = "2026-01", i = 1; m <= thisMonth; i += 1) {
+      await raw.execute({
+        sql: `INSERT INTO fin_bank_transactions (id, entity_id, account_id, posted_date, description, amount_cents, currency, status, dedupe_hash, source, created_by)
+              VALUES (?, ?, ?, ?, 'Statement line', 100, 'CAD', 'excluded', ?, 'import', 'test')`,
+        args: [`bt-import-${i}`, B, chequing, `${m}-01`, `dh-${i}`],
+      });
+      const [y, mo] = m.split("-").map(Number);
+      m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, "0")}`;
+    }
     const money = await expand(await MoneyPage());
     await assertNoBanner(money, "/money");
     const inTile = walk(money).elements.filter((e) => e.type === KpiTile).map((e) => e.props as { label: string; status: string }).find((t) => t.label === "In this month");

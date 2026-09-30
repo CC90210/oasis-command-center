@@ -21,6 +21,12 @@
  *     bill once) -> LINKED to that entry, nothing posted; ambiguous -> left
  *     unreviewed with the candidates named; debits adding up exactly to one
  *     such expense -> held with it named;
+ *   - a debit that is the payment of a bill still OPEN (owed: its cost is on
+ *     the books, its payment is not; every recurring cost whose paying account
+ *     nobody confirmed is one) -> HELD, naming the bill, for a founder to mark
+ *     it paid from chequing; the next sync then links the line to that
+ *     payment. Never posted as a new expense (the cost twice) and never linked
+ *     to the bill's own entry (that moved no money);
  *   - a Stripe payout -> out of 1050 Stripe clearing in Stripe's settlement
  *     currency/amount, into chequing in the currency it arrived in, the
  *     conversion difference through 1060 to FX gain/loss (never revenue) —
@@ -218,8 +224,47 @@ function openingMarks(openings: Map<string, ActiveOpening[]>): Map<string, Openi
   return out;
 }
 
-/** Paid bills/expenses that left `chequing` between `from` and `to` and that no bank line is linked to yet. */
+/**
+ * What a Wise debit between `from` and `to` may already be on the books as:
+ * paid bills/expenses that left `chequing` and that no bank line is linked to
+ * yet, and bills still OPEN (owed) whose bill date to due date overlaps the
+ * window. An open bill paid from Wise has its cost on the books but not its
+ * payment: the debit is neither new money nor a link, and the feed holds it
+ * (wise-feed.ts bill_open). Recurring costs whose paying account nobody
+ * confirmed are open bills (bills-io.ts recordRecurringNow), so without them
+ * here every such Wise debit would be booked a second time by a rule.
+ */
 async function billCandidates(entityId: string, chequing: string, from: string, to: string): Promise<BillCandidate[]> {
+  const [paid, open] = await Promise.all([paidBillCandidates(entityId, chequing, from, to), openBillCandidates(entityId, from, to)]);
+  return [...paid, ...open];
+}
+
+/** Bills still open (kind bill, status open) whose bill date to due date overlaps [from, to]. */
+async function openBillCandidates(entityId: string, from: string, to: string): Promise<BillCandidate[]> {
+  const rows = await query<{ id: string; vendor_name: string; currency: string; total_cents: number; bill_date: string; due_on: string; category_id: string | null }>(
+    `SELECT b.id, b.vendor_name, b.currency, b.total_cents, b.bill_date, COALESCE(b.due_date, b.bill_date) AS due_on,
+            (SELECT c.id FROM fin_bill_lines bl JOIN fin_categories c ON c.account_id = bl.account_id AND c.entity_id = b.entity_id
+              WHERE bl.bill_id = b.id ORDER BY bl.line_no, c.id LIMIT 1) AS category_id
+       FROM fin_bills b
+      WHERE b.entity_id = ? AND b.kind = 'bill' AND b.status = 'open'
+        AND b.bill_date <= ? AND COALESCE(b.due_date, b.bill_date) >= ?`,
+    [entityId, to, from],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    open: true as const,
+    entryId: null,
+    label: `open bill "${r.vendor_name}" (due ${r.due_on})`,
+    currency: r.currency,
+    totalCents: n(r.total_cents),
+    paidOn: r.bill_date,
+    dueOn: r.due_on < r.bill_date ? r.bill_date : r.due_on,
+    categoryId: r.category_id,
+  }));
+}
+
+/** Paid bills/expenses that left `chequing` between `from` and `to` and that no bank line is linked to yet. */
+async function paidBillCandidates(entityId: string, chequing: string, from: string, to: string): Promise<BillCandidate[]> {
   const rows = await query<{ id: string; kind: string; vendor_name: string; currency: string; total_cents: number; paid_on: string; link_entry_id: string | null; category_id: string | null }>(
     `SELECT b.id, b.kind, b.vendor_name, b.currency, b.total_cents, substr(COALESCE(b.paid_at, b.bill_date), 1, 10) AS paid_on,
             CASE WHEN b.kind = 'expense' THEN b.entry_id ELSE b.payment_entry_id END AS link_entry_id,
@@ -367,8 +412,22 @@ async function possibleDoubleNotes(entityId: string, chequing: string, from: str
   const pairs: Array<[string, BillCandidate[]]> = [...[...m.linked].map(([f, b]): [string, BillCandidate[]] => [f, [b]]), ...m.ambiguous];
   return pairs.map(([fitid, list]) => {
     const l = byFitid.get(fitid)!;
-    return `Possible double count: the Wise payment of ${centsToDecimal(-l.amountCents)} ${l.currency} on ${l.postedDate} ("${l.description.slice(0, 60)}") is categorised, and ${list.map((b) => b.label).join(" or ")} is also on the books. If they are the same payment, exclude the line in Transactions.`;
+    const openBill = list.some((b) => b.open);
+    return (
+      `Possible double count: the Wise payment of ${centsToDecimal(-l.amountCents)} ${l.currency} on ${l.postedDate} ("${l.description.slice(0, 60)}") is categorised, and ${list.map((b) => b.label).join(" or ")} is also on the books. ` +
+      (openBill
+        ? "If they are the same payment, exclude the line in Transactions and mark the open bill paid from Business chequing in Bills & Expenses (its cost is on the books already; its payment is not)."
+        : "If they are the same payment, exclude the line in Transactions.")
+    );
   });
+}
+
+/** What a founder does with a held line when a candidate is an OPEN bill: mark the bill paid, never exclude the line and leave the bill owed. */
+function openBillAdvice(bills: readonly BillCandidate[], parts: boolean): string {
+  if (!bills.some((b) => b.open)) return "";
+  return parts
+    ? " An open bill is not paid on the books yet: if these payments paid it, mark it paid from Business chequing in Bills & Expenses first, then exclude these lines."
+    : " An open bill is not paid on the books yet: if this line paid it, mark it paid from Business chequing in Bills & Expenses instead of excluding the line; the next sync links the two.";
 }
 
 // ── sync ─────────────────────────────────────────────────────────────────
@@ -420,12 +479,17 @@ function outcomeOf(r: FeedResolution): Outcome {
   }
 }
 
-function holdNote(r: FeedResolution): string | null {
+function holdNote(r: FeedResolution, row?: WiseFeedRow): string | null {
   switch (r.kind) {
+    case "bill_open":
+      return (
+        `${DECIDE_NOTE}this looks like the payment of ${r.bill.label}, ${centsToDecimal(r.bill.totalCents)} ${r.bill.currency}, which is still open (owed) in Bills & Expenses: its cost is on the books, its payment is not. ` +
+        `If this line paid it, mark that bill paid from Business chequing${row ? ` on ${row.postedDate}` : ""}; the next sync links this line to that payment and posts nothing new. Categorise it only if it is not that bill.`
+      );
     case "bill_ambiguous":
-      return `${DECIDE_NOTE}this could be ${r.bills.map((b) => b.label).join(" or ")}, already on the books. Exclude this line if it is one of them; categorise it only if it is not.`;
+      return `${DECIDE_NOTE}this could be ${r.bills.map((b) => b.label).join(" or ")}, already on the books. Exclude this line if it is one of them; categorise it only if it is not.${openBillAdvice(r.bills, false)}`;
     case "bill_parts":
-      return `${DECIDE_NOTE}this and other Wise payments add up exactly to ${r.bills.map((b) => `${b.label}, ${centsToDecimal(b.totalCents)} ${b.currency}`).join(" or ")}, already on the books as one amount. Exclude this line if it is part of it; categorise it only if it is not.`;
+      return `${DECIDE_NOTE}this and other Wise payments add up exactly to ${r.bills.map((b) => `${b.label}, ${centsToDecimal(b.totalCents)} ${b.currency}`).join(" or ")}, already on the books as one amount. Exclude this line if it is part of it; categorise it only if it is not.${openBillAdvice(r.bills, true)}`;
     case "before_opening":
       return `${OPENING_NOTE}dated on or before the opening balance of ${r.openingDate}, which was posted before this line arrived, so that balance already contains it. Re-post the opening balance on the Wise card, then sync again to book it on its own.`;
     case "conversion_unpaired":
@@ -771,7 +835,7 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           changed = true;
         }
       } else {
-        const text = holdNote(res);
+        const text = holdNote(res, row);
         if (text) setNote(line, text);
         count(fitid, outcomeOf(res));
       }

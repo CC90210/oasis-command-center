@@ -57,8 +57,9 @@
  *
  * ONLY OASIS'S STRIPE ACCOUNT (2026-09-30). A webhook event writes nothing to
  * the book unless it comes from the Stripe account a founder pinned
- * (stripeEventOrigin): nothing pinned, an event naming another account, or an
- * event the pinned account's key cannot find, is dead-lettered with ids only
+ * (stripeEventOrigin): nothing pinned, an event naming another account, no
+ * key, a key of another account, or an event the pinned account's key cannot
+ * find, is dead-lettered with ids only
  * and never reaches fin_payments, the journal or the ledger. The reconcile and
  * the pending-fee sync already read Stripe only through the pinned account's
  * verified key (stripe-io.ts getStripeClient).
@@ -238,33 +239,43 @@ async function customerRecordFor(tenant: LedgerTenant, stripeCustomerId: string 
  *   - nothing pinned: refused (nothing says whose account this is);
  *   - the event names an account (a Connect-style `account`) other than the
  *     pinned one: refused;
+ *   - the configured key belongs to another account (GET /v1/account says so:
+ *     stripe_account_mismatch): refused as stripe_key_not_pinned_account. The
+ *     variables hold another company's Stripe key, and very likely its
+ *     signing secret too, so the signature proves nothing about whose event
+ *     this is;
+ *   - no key at all: refused as stripe_key_missing. Nothing can compare the
+ *     event's account with the pin, and the signature alone is not that proof;
  *   - a key verified against the pinned account is configured: the event must
  *     exist in that account (GET /v1/events/{id}); Stripe answering 404 means
  *     another account sent it: refused. A 5xx, a 429 or a network failure is
  *     thrown, so the webhook answers 500 and Stripe retries: a transient
- *     failure never skips the check, and never refuses a real OASIS event;
- *   - no key, or a key belonging to another account (the pin still stands):
- *     the endpoint's signing secret, created in OASIS's own dashboard, is the
- *     proof, as before.
+ *     failure never skips the check, and never refuses a real OASIS event.
  * A refused event is marked ignored and dead-lettered to ledger_dead_letters
  * with ids only: the book, the payments table and the ledger never see it.
+ * An OASIS event refused while the key was missing or wrong is not lost: the
+ * daily reconcile (reconcileStripe, through the pinned account's verified
+ * key) books its charges, refunds, subscriptions and payouts once the key is
+ * fixed.
  */
-export type StripeEventOrigin = { ok: true; accountId: string; verified: "api" | "signature" } | { ok: false; reason: string; accountId: string | null };
+export type StripeEventOrigin = { ok: true; accountId: string; verified: "api" } | { ok: false; reason: string; accountId: string | null };
 
 export async function stripeEventOrigin(env: StripeEventEnvelope): Promise<StripeEventOrigin> {
   const pinned = await pinnedStripeAccount();
   if (!pinned) return { ok: false, reason: "stripe_account_unpinned", accountId: env.account };
   if (env.account && env.account !== pinned) return { ok: false, reason: "stripe_account_mismatch", accountId: env.account };
-  let key: string | null = null;
+  let key: string;
   try {
     key = (await getStripeClient()).key;
   } catch (e) {
     if (!(e instanceof StripeNotReady)) throw e;
     // Could not ask Stripe who the key belongs to: try again later, never skip the check.
     if (e.code === "stripe_account_unreachable") throw e;
-    // stripe_key_missing / stripe_account_mismatch: no key of the pinned account to ask with.
+    // The key is another company's: refused, whatever the signature says.
+    if (e.code === "stripe_account_mismatch") return { ok: false, reason: "stripe_key_not_pinned_account", accountId: env.account };
+    // No key (or the pin was cleared meanwhile): nothing can prove the event is the pinned account's.
+    return { ok: false, reason: e.code, accountId: env.account };
   }
-  if (!key) return { ok: true, accountId: pinned, verified: "signature" };
   try {
     await stripeRequest(key, "GET", `/v1/events/${encodeURIComponent(env.id)}`);
   } catch (e) {
@@ -1308,8 +1319,9 @@ async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promis
       if (!f) throw new Error(`${env.type} without a readable payout`);
       // The event carries the balance transaction as a bare id; what the
       // payout took from the Stripe balance (and its current status) needs
-      // the payout itself. Without a verified key it is recorded, held, and
-      // the next reconcile (which lists payouts expanded) completes it.
+      // the payout itself. When Stripe cannot say (a 4xx reading it) it is
+      // recorded from the event, held, and the next reconcile (which lists
+      // payouts expanded) completes it.
       const key = await readyKey();
       if (key) {
         const u = new URLSearchParams();

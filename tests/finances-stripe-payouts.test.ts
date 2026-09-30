@@ -27,9 +27,13 @@
  * charge settles into a USD balance (CA$100.00 -> US$72.26, fee US$4.42), so
  * Stripe clearing holds the charge in CAD and the fee in USD, and the USD
  * payout needs the CAD converted. api.stripe.com is served from fixtures
- * only inside withStripe (reads only); elsewhere there is no Stripe key and
- * events are processed from their payloads, exactly as the webhook does
- * without a verified key. The Bank of Canada is unreachable.
+ * only inside withStripe (reads only). A webhook event is booked only once a
+ * key of the pinned account proves it is that account's (stripe-ingest.ts
+ * stripeEventOrigin), so `deliver` holds such a key outside withStripe too:
+ * Stripe then knows the event and no other object (every other read is a
+ * 404), so the event is processed from its payload, as the webhook does when
+ * Stripe cannot say more. Elsewhere there is no Stripe key. The Bank of
+ * Canada is unreachable.
  *
  * Run: node --conditions=react-server --import tsx tests/finances-stripe-payouts.test.ts
  */
@@ -46,6 +50,8 @@ for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "STRIPE_SECRET_KEY", "FOU
 
 type Json = Record<string, unknown>;
 
+/** The pinned account's key `deliver` holds outside withStripe: Stripe answers whose an event is, and 404 for anything else. */
+const ORIGIN_KEY = "rk_live_payouts_origin_only";
 /** api.stripe.com while `serve` is on (reads only; any write throws): payouts, and what each payout pays out. */
 const stripe = { serve: false, payouts: [] as Json[], contents: {} as Record<string, Json[]> };
 globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
@@ -61,6 +67,14 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
     if (url.pathname === "/v1/payouts") return list(stripe.payouts);
     if (["/v1/charges", "/v1/refunds", "/v1/subscriptions", "/v1/invoice_payments"].includes(url.pathname)) return list([]);
     return json({ error: { message: "No such object" } }, 404);
+  }
+  // `deliver`'s key outside withStripe: whose each event is, and nothing else.
+  if (url.host === "api.stripe.com" && process.env.STRIPE_SECRET_KEY === ORIGIN_KEY) {
+    if ((init?.method || "GET").toUpperCase() !== "GET") throw new Error(`Stripe write attempted in test: ${url.pathname}`);
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+    if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
+    return json({ error: { type: "invalid_request_error", message: "No such object" } }, 404);
   }
   throw new Error(`network disabled in test: ${url.host}${url.pathname}`);
 }) as typeof fetch;
@@ -147,6 +161,20 @@ async function withStripe<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * A webhook delivery: handleStripeEvent with a key of the pinned account in
+ * place (the one withStripe set, else ORIGIN_KEY), as production has.
+ */
+async function deliverWith(handle: (raw: unknown) => Promise<{ status: string; detail: string }>, raw: unknown): Promise<{ status: string; detail: string }> {
+  if (process.env.STRIPE_SECRET_KEY) return handle(raw);
+  process.env.STRIPE_SECRET_KEY = ORIGIN_KEY;
+  try {
+    return await handle(raw);
+  } finally {
+    delete process.env.STRIPE_SECRET_KEY;
+  }
+}
+
+/**
  * Run `fn`; the first time a write batch that `match` picks is about to run,
  * run `race` first: the moment between a check and its write, where a
  * concurrent webhook, reconcile or founder lands. Test-only: the cached
@@ -184,6 +212,7 @@ async function main() {
 
   const { ensureFinanceSeed } = await import("../lib/founders-finances/seed-io");
   const ingest = await import("../lib/founders-finances/stripe-ingest");
+  const deliver = (raw: unknown) => deliverWith(ingest.handleStripeEvent, raw);
   const payouts = await import("../lib/founders-finances/stripe-payouts");
   const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
   const settingsIo = await import("../lib/founders-finances/settings-io");
@@ -195,7 +224,7 @@ async function main() {
   const { usdToCadCents, parseRateMicro } = await import("../lib/founders-finances/fx");
   const { accountId, SYS, BUSINESS_ENTITY_ID: B } = await import("../lib/founders-finances/chart");
   await ensureFinanceSeed();
-  // The account the key belongs to is pinned; without a key (most of this file) that changes nothing.
+  // The account the key belongs to is pinned: `deliver` and withStripe hold a key of it.
   await raw.execute({ sql: `UPDATE fin_settings SET stripe_account_id = 'acct_test_oasis' WHERE entity_id = ?`, args: [B] });
 
   const CHEQUING = accountId(B, SYS.chequing);
@@ -331,7 +360,7 @@ async function main() {
   // ── the webhook: a charge, then its payout ───────────────────────────────
   const charge = liveCharge({ id: "ch_payout_1", amount: 10_000, at: "2026-09-05T19:27:56Z", bt: { id: "txn_ch_payout_1", amount: 7226, fee: 442 } });
   await check("setup: a CA$100 charge settles into USD: CAD 100.00 in clearing, the USD 4.42 fee out of it", async () => {
-    const out = await ingest.handleStripeEvent(event("charge.succeeded", charge, "2026-09-05T19:28:00Z"));
+    const out = await deliver(event("charge.succeeded", charge, "2026-09-05T19:28:00Z"));
     assert.equal(out.status, "processed");
     assert.equal(await held(CLEARING, "CAD"), 10_000);
     assert.equal(await held(CLEARING, "USD"), -442);
@@ -343,7 +372,7 @@ async function main() {
   stripe.payouts = [P1];
   stripe.contents.po_live_1 = [bt("txn_ch_payout_1", "charge", "ch_payout_1", 7226, 442), bt("txn_po_live_1", "payout", "po_live_1", -6784)];
   await check("payout.paid with no payout account chosen: recorded 'unmapped', nothing posted, and the cash tile names it", async () => {
-    const out = await ingest.handleStripeEvent(event("payout.paid", P1));
+    const out = await deliver(event("payout.paid", P1));
     assert.equal(out.status, "processed");
     assert.equal((await row("po_live_1"))?.booking, "unmapped");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_live_1"), 0);
@@ -385,18 +414,18 @@ async function main() {
   });
 
   await check("a redelivered payout.paid (another event, same payout) books nothing twice", async () => {
-    const out = await ingest.handleStripeEvent(event("payout.paid", P1));
+    const out = await deliver(event("payout.paid", P1));
     assert.equal(out.status, "processed");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_live_1"), 1);
     assert.equal(await entries(payouts.PAYOUT_FX_SOURCE, "po_live_1"), 1);
     assert.equal(await held(CHEQUING, "USD"), 6784);
     const same = event("payout.paid", P1);
-    await ingest.handleStripeEvent(same);
-    assert.equal((await ingest.handleStripeEvent(same)).status, "duplicate", "the same event id is a no-op");
+    await deliver(same);
+    assert.equal((await deliver(same)).status, "duplicate", "the same event id is a no-op");
   });
 
   await check("payout.failed after it was booked: the payout entry is reversed on the day Stripe said so", async () => {
-    const out = await ingest.handleStripeEvent(event("payout.failed", { ...P1, status: "failed", failure_code: "account_closed" }, "2026-09-10T15:00:00Z"));
+    const out = await deliver(event("payout.failed", { ...P1, status: "failed", failure_code: "account_closed" }, "2026-09-10T15:00:00Z"));
     assert.equal(out.status, "processed");
     const p = await row("po_live_1");
     assert.equal(p?.booking, "reversed");
@@ -409,7 +438,7 @@ async function main() {
     assert.equal(await held(CLEARING, "USD"), 6784, "it is back in the Stripe balance");
     await booksBalance();
     // A failed payout never comes back to paid, whatever order the events arrive in.
-    await ingest.handleStripeEvent(event("payout.paid", P1));
+    await deliver(event("payout.paid", P1));
     assert.equal((await row("po_live_1"))?.stripe_status, "failed", "Stripe's own status stays failed");
     assert.equal((await row("po_live_1"))?.booking, "reversed");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_live_1"), 1);
@@ -417,14 +446,14 @@ async function main() {
 
   await check("payout.canceled before it landed: recorded 'not_booked', nothing posted", async () => {
     const P2 = payout({ id: "po_canceled", amount: 1_000, arrival: "2026-09-12", status: "canceled" });
-    await ingest.handleStripeEvent(event("payout.canceled", P2));
+    await deliver(event("payout.canceled", P2));
     assert.equal((await row("po_canceled"))?.booking, "not_booked");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_canceled"), 0);
     assert.equal(await entries(payouts.PAYOUT_FX_SOURCE, "po_canceled"), 0);
   });
 
-  await check("a payout the event names without its balance transaction (and no key to read it) is held, and says why", async () => {
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_no_bt", amount: 500, arrival: "2026-09-14", bt: null })));
+  await check("a payout the event names without its balance transaction (and Stripe cannot read the payout) is held, and says why", async () => {
+    await deliver(event("payout.paid", payout({ id: "po_no_bt", amount: 500, arrival: "2026-09-14", bt: null })));
     const p = await row("po_no_bt");
     assert.equal(p?.booking, "held");
     assert.match(String(p?.reason), /Stripe did not say what payout po_no_bt took from the Stripe balance/);
@@ -432,7 +461,7 @@ async function main() {
   });
 
   await check("a payout bigger than anything in clearing is held, and the cash tile lists every unbooked payout", async () => {
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_too_big", amount: 900_000, arrival: "2026-09-15" })));
+    await deliver(event("payout.paid", payout({ id: "po_too_big", amount: 900_000, arrival: "2026-09-15" })));
     assert.equal((await row("po_too_big"))?.booking, "held");
     const unbooked = await payoutsIo.unbookedPayouts();
     assert.deepEqual(unbooked.map((u) => u.id), ["po_no_bt", "po_too_big"], "oldest first");
@@ -464,7 +493,7 @@ async function main() {
         args: [B, CHEQUING, posting.entryId],
       },
     ]);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_from_bank", amount: 1_000, arrival: "2026-09-16" })));
+    await deliver(event("payout.paid", payout({ id: "po_from_bank", amount: 1_000, arrival: "2026-09-16" })));
     const p = await row("po_from_bank");
     assert.equal(p?.booking, "booked");
     assert.equal(p?.entry_id, posting.entryId, "the bank line's own entry");
@@ -472,14 +501,14 @@ async function main() {
     assert.equal(await entries(payouts.PAYOUT_FX_SOURCE, "po_from_bank"), 0);
     // A prefix of another payout's id never matches (po_from_ban is not po_from_bank), and a
     // bank line another payout owns is never adopted by its shape either.
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_from_ban", amount: 1_000, arrival: "2026-09-16" })));
+    await deliver(event("payout.paid", payout({ id: "po_from_ban", amount: 1_000, arrival: "2026-09-16" })));
     assert.notEqual((await row("po_from_ban"))?.entry_id, posting.entryId);
     // And the feed finds the Stripe booking to link its own line to.
     assert.equal(await payoutsIo.bookedPayoutEntry("po_from_bank"), null, "an adopted bank-line entry is the feed's own, not one to link to");
   });
 
   await check("a test-mode payout never enters the books", async () => {
-    const out = await ingest.handleStripeEvent({ ...event("payout.paid", payout({ id: "po_test_mode", amount: 100, arrival: "2026-09-16" })), livemode: false });
+    const out = await deliver({ ...event("payout.paid", payout({ id: "po_test_mode", amount: 100, arrival: "2026-09-16" })), livemode: false });
     assert.equal(out.status, "ignored");
     assert.equal(await row("po_test_mode"), undefined);
   });
@@ -512,11 +541,11 @@ async function main() {
     const eventSync = async () => (await raw.execute(ingest.LAST_SYNCED_EVENT_SQL)).rows[0][0];
     const eventBefore = await eventSync();
     await new Promise((r) => setTimeout(r, 20));
-    assert.equal((await ingest.handleStripeEvent({ ...event("payout.paid", payout({ id: "po_sync_test_mode", amount: 100, arrival: "2026-09-16" })), livemode: false })).status, "ignored");
-    assert.equal((await ingest.handleStripeEvent(event("customer.created", { id: "cus_sync", object: "customer" }))).status, "ignored");
+    assert.equal((await deliver({ ...event("payout.paid", payout({ id: "po_sync_test_mode", amount: 100, arrival: "2026-09-16" })), livemode: false })).status, "ignored");
+    assert.equal((await deliver(event("customer.created", { id: "cus_sync", object: "customer" }))).status, "ignored");
     const broken = event("charge.succeeded", { id: "not_a_charge", object: "charge" });
-    await assert.rejects(ingest.handleStripeEvent(broken), /without a readable charge/);
-    await assert.rejects(ingest.handleStripeEvent(broken), /without a readable charge/, "Stripe's retry fails again, and is claimed again");
+    await assert.rejects(deliver(broken), /without a readable charge/);
+    await assert.rejects(deliver(broken), /without a readable charge/, "Stripe's retry fails again, and is claimed again");
     assert.equal(await ingest.lastStripeSync(), before, "nothing reached the books");
     assert.equal(await eventSync(), eventBefore, "Settings' webhook half of Last synced did not move either");
     const received = String((await raw.execute(`SELECT MAX(received_at) FROM fin_stripe_events`)).rows[0][0]);
@@ -531,7 +560,7 @@ async function main() {
     assert.equal(imported.posted, 1, "the rule categorised it: Dr chequing / Cr Stripe clearing");
     const bankLine = await line("STRIPE TRANSFER");
     assert.ok(bankLine.entry_id);
-    const out = await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_csv_first", amount: 4_000, arrival: "2026-09-21" })));
+    const out = await deliver(event("payout.paid", payout({ id: "po_csv_first", amount: 4_000, arrival: "2026-09-21" })));
     assert.equal(out.detail, "payout po_csv_first booked");
     const p = await row("po_csv_first");
     assert.equal(p?.entry_id, bankLine.entry_id, "the bank line's entry");
@@ -549,7 +578,7 @@ async function main() {
 
   await check("the other order: a deposit categorised to Stripe clearing AFTER its payout was booked from Stripe is linked to that booking, never posted", async () => {
     await chargeInClearing("ch_usd_link", "2026-09-22", 2_500);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_stripe_first", amount: 2_500, arrival: "2026-09-23" })));
+    await deliver(event("payout.paid", payout({ id: "po_stripe_first", amount: 2_500, arrival: "2026-09-23" })));
     const p = await row("po_stripe_first");
     assert.equal(p?.booking, "booked");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_stripe_first"), 1);
@@ -572,7 +601,7 @@ async function main() {
     const { raced } = await withRace(
       (b) => b.includes("txn.categorized") && b.includes("STRIPE TRANSFER PO3"),
       async () => {
-        const out = await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_race_cat", amount: 1_500, arrival: "2026-09-25" })));
+        const out = await deliver(event("payout.paid", payout({ id: "po_race_cat", amount: 1_500, arrival: "2026-09-25" })));
         assert.equal(out.detail, "payout po_race_cat booked");
       },
       () => importCsv(`2026-09-25,STRIPE TRANSFER PO3,15.00`),
@@ -619,7 +648,7 @@ async function main() {
             },
           ]);
         },
-        () => ingest.handleStripeEvent(event("payout.paid", payout({ id, amount: 1_200, arrival: day }))),
+        () => deliver(event("payout.paid", payout({ id, amount: 1_200, arrival: day }))),
       );
       assert.ok(raced, `${id}: the bank line landed between the check and the write`);
       const p = await row(id);
@@ -650,7 +679,7 @@ async function main() {
     const rev = await buildReversal({ entityId: B, entryId: pulled.entryId, date: "2026-09-28", memo: "Excluded", createdBy: "test" });
     await writeBatch(rev.statements);
     await chargeInClearing("ch_usd_after_reversal", "2026-09-28", 700);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_not_the_reversal", amount: 700, arrival: "2026-09-28" })));
+    await deliver(event("payout.paid", payout({ id: "po_not_the_reversal", amount: 700, arrival: "2026-09-28" })));
     const p = await row("po_not_the_reversal");
     assert.equal(p?.booking, "booked");
     assert.notEqual(p?.entry_id, rev.entryId, "not the reversal");
@@ -693,12 +722,12 @@ async function main() {
         args: [B, CHEQUING, tagged.entryId],
       },
     ]);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_twin_a", amount: 900, arrival: "2026-09-28" })));
+    await deliver(event("payout.paid", payout({ id: "po_twin_a", amount: 900, arrival: "2026-09-28" })));
     const a = await row("po_twin_a");
     assert.equal(a?.booking, "booked");
     assert.notEqual(a?.entry_id, tagged.entryId, "po_twin_b's line is not po_twin_a's");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_twin_a"), 1, "po_twin_a booked on its own");
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_twin_b", amount: 900, arrival: "2026-09-29" })));
+    await deliver(event("payout.paid", payout({ id: "po_twin_b", amount: 900, arrival: "2026-09-29" })));
     const b = await row("po_twin_b");
     assert.equal(b?.booking, "booked", String(b?.reason));
     assert.equal(b?.entry_id, tagged.entryId, "po_twin_b adopts its own tagged line");
@@ -711,11 +740,11 @@ async function main() {
     await chargeInClearing("ch_cad_late", "2026-09-25", 5_000, "CAD");
     assert.equal(await held(CLEARING, "CAD"), 5_000, "CAD clearing holds the late charge (the paid-out one left whole)");
     const early = payout({ id: "po_cad_early", amount: 5_000, arrival: "2026-09-12", currency: "cad" });
-    await ingest.handleStripeEvent(event("payout.paid", early));
+    await deliver(event("payout.paid", early));
     const p = await row("po_cad_early");
     assert.equal(p?.booking, "held");
     assert.match(String(p?.reason), /took 50\.00 CAD from the Stripe balance, but Stripe clearing holds 0\.00 CAD on the books on 2026-09-12/);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_cad_late", amount: 5_000, arrival: "2026-09-26", currency: "cad" })));
+    await deliver(event("payout.paid", payout({ id: "po_cad_late", amount: 5_000, arrival: "2026-09-26", currency: "cad" })));
     assert.equal((await row("po_cad_late"))?.booking, "booked", "the payout after it is paid from it");
     assert.equal(await held(CLEARING, "CAD"), 0);
   });
@@ -744,7 +773,7 @@ async function main() {
     const clearingBefore = await held(CLEARING, "USD");
     await importCsv(`2026-09-17,STRIPE TRANSFER UNDONE,33.33`);
     const bankLine = await line("STRIPE TRANSFER UNDONE");
-    assert.equal((await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })))).detail, "payout po_undone booked");
+    assert.equal((await deliver(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })))).detail, "payout po_undone booked");
     assert.equal((await row("po_undone"))?.entry_id, bankLine.entry_id, "adopted from the bank line");
     const gapsBefore = (await payoutsIo.unbookedPayouts()).length;
 
@@ -769,7 +798,7 @@ async function main() {
     const reopened = await row("po_undone");
     assert.equal(reopened?.booking, "held");
     assert.equal(reopened?.reason, payoutsIo.UNDONE_REASON);
-    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })));
+    await deliver(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })));
     assert.equal((await row("po_undone"))?.booking, "held");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_undone"), 0, "never posted from Stripe");
     assert.equal(await held(CHEQUING, "USD"), chequingBefore + 3_333, "the deposit is not counted twice");
