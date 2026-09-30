@@ -22,6 +22,7 @@
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
+import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { QUICK_ACTIONS } from "@/lib/quick-actions";
 
 /** Which agent answers in a department's channel. */
@@ -211,12 +212,33 @@ const NEUTRAL_ASKS: Record<DepartmentKey, readonly SuggestedAsk[]> = {
   ],
 };
 
+/**
+ * OASIS's quick-action prompts were written for the operator chat and name the
+ * house agents ("No revenue or MRR figures, that's <finance agent>'s domain").
+ * On a department tab the prompt is shown (tooltip) and typed into the channel,
+ * so each house agent is written as the department it leads, first binding
+ * wins (Chief of Staff, Marketing, Finance): the prompt CC tuned still reads
+ * right, and no persona name reaches the screen.
+ */
+const HOUSE_AGENT_DEPARTMENT: Readonly<Record<string, string>> = (() => {
+  const out: Record<string, string> = {};
+  for (const [key, bound] of Object.entries(OASIS_BINDINGS) as Array<[DepartmentKey, { agentSlug: string }]>) {
+    const label = OS_DEPARTMENTS.find((d) => d.key === key)?.label;
+    if (label && !(bound.agentSlug in out)) out[bound.agentSlug] = label;
+  }
+  return out;
+})();
+
+function withDepartmentNames(text: string): string {
+  return text.replace(/\b(bravo|maven|atlas)\b/gi, (name) => HOUSE_AGENT_DEPARTMENT[name.toLowerCase()] ?? name);
+}
+
 export function suggestedAsksFor(key: DepartmentKey, opts: { oasis: boolean }): SuggestedAsk[] {
   if (opts.oasis) {
     const picked: SuggestedAsk[] = [];
     for (const [agent, title] of OASIS_ASK_TITLES[key]) {
       const qa = QUICK_ACTIONS.find((q) => q.agent === agent && q.title === title);
-      if (qa) picked.push({ title: qa.title, prompt: qa.prompt });
+      if (qa) picked.push({ title: withDepartmentNames(qa.title), prompt: withDepartmentNames(qa.prompt) });
     }
     if (picked.length > 0) return picked;
   }
