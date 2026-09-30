@@ -15,12 +15,22 @@ import Link from "next/link";
 import { Check } from "lucide-react";
 import type { TeammateHome } from "./roster";
 
-export type WebState = "ready" | "not_connected" | "not_set_up";
+/**
+ * ready          answering (a key on file, and no failed last turn)
+ * not_working    a key on file, but its channel's last turn failed; the
+ *                department header says "Not working" for the same reason
+ * not_connected  no AI account, or no agent settings, for this workspace
+ * not_set_up     no teammate behind this department yet
+ * unknown        a read behind the answer failed, so it is not known
+ */
+export type WebState = "ready" | "not_working" | "not_connected" | "not_set_up" | "unknown";
 
 const WEB_LABEL: Record<WebState, string> = {
   ready: "Web",
+  not_working: "Web · not working",
   not_connected: "Web · not connected",
   not_set_up: "Web · not set up",
+  unknown: "Web · couldn’t check",
 };
 
 function Initial({ name }: { name: string }) {
@@ -38,7 +48,11 @@ function Initial({ name }: { name: string }) {
 export function Homes({ web }: { web: WebState }) {
   return (
     <ul aria-label="Where it lives" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4">
-      <li className={`inline-flex items-center gap-1 ${web === "ready" ? "text-fg-muted" : "text-fg-dim"}`}>
+      <li
+        className={`inline-flex items-center gap-1 ${
+          web === "ready" ? "text-fg-muted" : web === "not_working" ? "text-status-hot" : "text-fg-dim"
+        }`}
+      >
         {web === "ready" && <Check className="h-3.5 w-3.5 text-status-engaged" strokeWidth={2} aria-hidden />}
         {WEB_LABEL[web]}
       </li>
