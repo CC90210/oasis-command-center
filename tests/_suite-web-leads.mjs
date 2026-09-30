@@ -89,9 +89,12 @@ const TESTS = [
   "tests/objection-catalog.test.ts",
   // The copy rules for every sentence a rep says out loud, plus the alternate
   // coverage that makes ObjectionCard's posture picker render at all. Listed
-  // here deliberately: tests/industry-automations.test.ts is in NO suite and
-  // has never run once, which is the failure mode this line avoids.
+  // here deliberately: tests/industry-automations.test.ts sat in NO suite and
+  // never ran, which is the failure mode this line avoids.
   "tests/objection-copy.test.ts",
+  // The battle card's per-industry automations. Registered 2026-09-29; until
+  // then it was the file the comment above names as never having run.
+  "tests/industry-automations.test.ts",
   // The authoring surface: dedup, batch parsing, write-path copy rules, and
   // the approval gate. Pure decisions only; the SQL is not covered and the
   // test says so in its own header.
