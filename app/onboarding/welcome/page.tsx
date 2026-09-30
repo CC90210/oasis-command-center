@@ -169,11 +169,19 @@ export default async function WelcomePage({
           <h1 className="text-2xl font-bold text-fg">
             Welcome{profile.full_name ? `, ${profile.full_name.split(" ")[0]}` : ""}
           </h1>
-          <p className="text-fg-muted text-sm">
-            You&apos;ve joined{" "}
-            <span className="text-fg font-semibold">{tenant?.name || "the workspace"}</span>. Let&apos;s
-            set up your personal preferences — takes about a minute.
-          </p>
+          {tenant ? (
+            <p className="text-fg-muted text-sm">
+              You&apos;ve joined{" "}
+              <span className="text-fg font-semibold">{tenant.name || "the workspace"}</span>. Let&apos;s
+              set up your personal preferences — takes about a minute.
+            </p>
+          ) : (
+            // An account with no workspace lands here after login (lib/auth-routing.ts).
+            // It has joined nothing, so the page does not say it has (2026-09-30 fix pass).
+            <p className="text-fg-muted text-sm">
+              Your account is not linked to a workspace yet. You can still set your personal preferences now.
+            </p>
+          )}
         </header>
 
         <WelcomeWizardClient

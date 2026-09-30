@@ -294,6 +294,22 @@ async function main() {
     assert.deepEqual(propValues(ok, "teammatesUnknown"), [false], "a good read is not 'unknown'");
   });
 
+  await check("an account with no workspace is not told it has joined one", async () => {
+    // Login sends a tenant-less account to the welcome page (lib/auth-routing.ts);
+    // the local E2E walk found it saying "You've joined the workspace".
+    const detached = u(5, "detached@nowhere.test", "Dee Tached");
+    await seedAuthUser(db, detached);
+    await seedProfile(db, detached, null, {});
+    setSessionCookie(await signFor(detached));
+    const { default: Welcome } = await import("../app/onboarding/welcome/page");
+    const text = textOf(await Welcome({ searchParams: Promise.resolve({}) })).join(" ");
+    assert.match(text, /not linked to a workspace/);
+    assert.doesNotMatch(text, /joined/);
+    setSessionCookie(await signFor(MEMBER));
+    const member = textOf(await Welcome({ searchParams: Promise.resolve({ settings: "1" }) })).join(" ");
+    assert.match(member, /joined\s+\|?\s*Bayside HVAC|joined.*Bayside HVAC/s);
+  });
+
   await check("the welcome page gives a member of an unset-up workspace no teammate and no fallback agent", async () => {
     await db.execute({ sql: `DELETE FROM tenant_manifests WHERE tenant_id = ?`, args: [BAYSIDE] });
     setSessionCookie(await signFor(MEMBER));

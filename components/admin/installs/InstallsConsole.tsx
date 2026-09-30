@@ -311,22 +311,34 @@ function NewWorkspace({ options }: { options: ConsoleOptions }) {
   );
 }
 
-function PendingInvites({ row, invites }: { row: InstallRow; invites: PendingOwnerInvite[] }) {
+/**
+ * The open owner invites of one workspace, each with a confirmed Revoke. The
+ * result is reported through `onOutcome` to the ROW, because a successful
+ * revoke refreshes the list and this component unmounts with its last invite.
+ */
+function PendingInvites({
+  row,
+  invites,
+  onOutcome,
+}: {
+  row: InstallRow;
+  invites: PendingOwnerInvite[];
+  onOutcome: (o: Outcome | null) => void;
+}) {
   const router = useRouter();
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [outcome, setOutcome] = useState<Outcome | null>(null);
 
   async function revoke(invite: PendingOwnerInvite) {
     setBusy(true);
-    setOutcome(null);
+    onOutcome(null);
     try {
       const { json } = await sendJson(`/api/admin/installs/${row.tenantId}/owner-invite`, { invite_id: invite.id }, "DELETE");
       const o = outcomeFrom(json, "The invite was not revoked. It may still work.");
-      setOutcome(o);
+      onOutcome(o.ok ? { ...o, message: `${o.message} (${invite.email})` } : o);
       if (o.ok) router.refresh();
     } catch {
-      setOutcome({ ok: false, message: "Could not reach the server. The invite was not revoked and may still work." });
+      onOutcome({ ok: false, message: "Could not reach the server. The invite was not revoked and may still work." });
     } finally {
       setBusy(false);
       setConfirmingId(null);
@@ -358,7 +370,6 @@ function PendingInvites({ row, invites }: { row: InstallRow; invites: PendingOwn
           </li>
         ))}
       </ul>
-      <OutcomeView outcome={outcome} />
     </div>
   );
 }
@@ -373,6 +384,7 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<Outcome | null>(null);
   const setupLabel = useMemo(() => {
     if (!row.manifestSlug) return row.runStatus === "failed" ? "Not set up (last attempt failed)" : "Not set up";
     return row.manifestSlug === row.slug ? "Set up" : `Set up under /${row.manifestSlug}`;
@@ -424,10 +436,11 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
           {row.ownerEmail ? (
             <span className="text-fg">{row.ownerName ? `${row.ownerName} · ` : ""}{row.ownerEmail}</span>
           ) : row.pendingOwnerInvites.length > 0 ? (
-            <PendingInvites row={row} invites={row.pendingOwnerInvites} />
+            <PendingInvites row={row} invites={row.pendingOwnerInvites} onOutcome={setInviteNotice} />
           ) : (
             "No owner yet"
           )}
+          <OutcomeView outcome={inviteNotice} />
         </td>
         <td className="px-3 py-2 text-fg">{row.members}</td>
         <td className="px-3 py-2 text-fg">{setupLabel}</td>
