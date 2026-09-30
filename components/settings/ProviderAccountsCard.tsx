@@ -41,9 +41,12 @@ import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/pro
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Props = {
-  /** Set of services-with-key resolved server-side via aiServicesWithKey(). */
-  connectedServices: Set<string>;
-  bridgeOnline: boolean;
+  /** Set of services-with-key resolved server-side via aiServicesWithKey().
+   *  null = that read failed: a card with no key known says "Couldn't check",
+   *  never "Not connected". */
+  connectedServices: Set<string> | null;
+  /** null = the bridge heartbeat could not be read. */
+  bridgeOnline: boolean | null;
   canManageTeam: boolean;
   /** The server's verified platform-operator verdict. Only the operator is offered the bridge install. */
   canInstallBridge: boolean;
@@ -61,20 +64,27 @@ export function ProviderAccountsCard({
   canInstallBridge,
 }: Props) {
   const router = useRouter();
-  // Server-rendered set, but track in state so connecting flips the UI
-  // immediately without waiting for the router refresh round-trip.
-  const [services, setServices] = useState<Set<string>>(initialServices);
+  // What the cards draw is the server's latest answer (the prop, which every
+  // router.refresh() hands back fresh) with this page's own connects and
+  // disconnects laid over it, so a click flips its card at once instead of
+  // waiting for the refresh round-trip. It is derived on every render, never
+  // copied into state: after a failed read the copy stayed empty, so the
+  // refresh that followed a connect showed the providers already on file as
+  // "Not connected". When the server read failed, `keysKnown` is false and a
+  // provider this page has not just connected reads "Couldn't check".
+  const keysKnown = initialServices !== null;
+  const [changedHere, setChangedHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const services = new Set(initialServices ?? []);
+  for (const [svc, connectedNow] of changedHere) {
+    if (connectedNow) services.add(svc);
+    else services.delete(svc);
+  }
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
 
   function markConnected(p: Provider) {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
-    setServices((prev) => {
-      if (prev.has(svc)) return prev;
-      const next = new Set(prev);
-      next.add(svc);
-      return next;
-    });
+    setChangedHere((prev) => new Map(prev).set(svc, true));
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -122,9 +132,13 @@ export function ProviderAccountsCard({
           >
             <Cloud className="w-3 h-3" />
             Cloud:{" "}
-            {anyConnected
-              ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected`
-              : "no provider connected"}
+            {/* After a failed read, a count can only come from this page's own
+                connects: it is a floor, not the total. */}
+            {!keysKnown && !anyConnected
+              ? "couldn't check"
+              : anyConnected
+                ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected${keysKnown ? "" : ", couldn't check the rest"}`
+                : "no provider connected"}
           </span>
           <span className="text-fg-dim">·</span>
           <span
@@ -133,7 +147,7 @@ export function ProviderAccountsCard({
             }`}
           >
             <Cpu className="w-3 h-3" />
-            Local bridge: {bridgeOnline ? "online" : "offline"}
+            Local bridge: {bridgeOnline === null ? "couldn't check" : bridgeOnline ? "online" : "offline"}
           </span>
         </div>
       </div>
@@ -176,6 +190,10 @@ export function ProviderAccountsCard({
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-status-engaged shrink-0">
                     <Check className="w-3 h-3" /> Connected
                   </span>
+                ) : !keysKnown ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-muted shrink-0">
+                    <AlertCircle className="w-3 h-3" /> Couldn&apos;t check
+                  </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-dim shrink-0">
                     <AlertCircle className="w-3 h-3" /> Not connected
@@ -195,7 +213,7 @@ export function ProviderAccountsCard({
                       : "text-accent hover:text-accent-bright"
                   }`}
                 >
-                  {connected ? "Replace key" : "Connect"} →
+                  {connected ? "Replace key" : keysKnown ? "Connect" : "Set key"} →
                 </button>
                 <span className="text-fg-dim text-[10px]">·</span>
                 <a
@@ -223,14 +241,10 @@ export function ProviderAccountsCard({
                         <DisconnectButton
                           provider={p}
                           onDisconnected={() => {
-                            // Optimistically clear from local state; the
+                            // Optimistically clear it on this page; the
                             // server source-of-truth will catch up on the
                             // next refresh.
-                            setServices((prev) => {
-                              const next = new Set(prev);
-                              next.delete(PROVIDER_TO_SERVICE[p]);
-                              return next;
-                            });
+                            setChangedHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
                             if (typeof window !== "undefined") {
                               window.dispatchEvent(
                                 new CustomEvent("oasis:agent-configs-changed"),
@@ -249,7 +263,9 @@ export function ProviderAccountsCard({
         })}
       </div>
 
-      {!anyConnected && !bridgeOnline && <NoProviderNotice canInstallBridge={canInstallBridge} />}
+      {/* Only a KNOWN "no key and no bridge" earns this warning; a read that
+          failed is not evidence that nothing is wired. */}
+      {keysKnown && !anyConnected && bridgeOnline === false && <NoProviderNotice canInstallBridge={canInstallBridge} />}
 
       {activeProvider && (
         <ConnectProviderDialog

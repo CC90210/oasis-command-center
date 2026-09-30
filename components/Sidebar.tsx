@@ -31,6 +31,11 @@ import type { OsNavSection } from "@/lib/os/types";
 import { demoHref } from "@/lib/demo-href";
 import { prefetchRememberedWebLeads } from "@/lib/web-leads/client-cache";
 
+/** A status field that is not a real boolean was not checked: null, not false. */
+function knownOrNull(v: unknown): boolean | null {
+  return v === true ? true : v === false ? false : null;
+}
+
 export function Sidebar({
   // Neutralized 2026-05-25 — these defaults used to silently fall
   // back to OASIS branding when a caller forgot to pass props,
@@ -114,9 +119,11 @@ export function Sidebar({
   // the layout never blocks first byte on the snapshot/bridge reads. A
   // failed fetch leaves the dots at their passed (off) values — chrome
   // degrades, the page does not.
+  // bridgeOnline is null when /api/shell/status could not read the pairings:
+  // the rail says "couldn't check", never "offline" (2026-09-29).
   const [fetchedStatus, setFetchedStatus] = useState<{
     primaryAgentLive: boolean;
-    bridgeOnline: boolean;
+    bridgeOnline: boolean | null;
   } | null>(null);
   // Cached per browser session (60s). MEASURED on production 2026-09-04: this
   // endpoint costs 1,540-2,475 ms and it fired on EVERY full page load, making
@@ -155,7 +162,7 @@ export function Sidebar({
           if (cancelled || !d) return;
           setFetchedStatus({
             primaryAgentLive: d.primaryAgentLive === true,
-            bridgeOnline: d.bridgeOnline === true,
+            bridgeOnline: knownOrNull(d.bridgeOnline),
           });
         })
         .catch(() => {});
@@ -168,11 +175,11 @@ export function Sidebar({
     try {
       const raw = sessionStorage.getItem(KEY);
       if (raw) {
-        const cached = JSON.parse(raw) as { at: number; primaryAgentLive: boolean; bridgeOnline: boolean };
+        const cached = JSON.parse(raw) as { at: number; primaryAgentLive: boolean; bridgeOnline: boolean | null };
         if (Date.now() - cached.at < TTL_MS) {
           setFetchedStatus({
             primaryAgentLive: cached.primaryAgentLive === true,
-            bridgeOnline: cached.bridgeOnline === true,
+            bridgeOnline: knownOrNull(cached.bridgeOnline),
           });
           return;
         }
@@ -187,7 +194,7 @@ export function Sidebar({
         if (cancelled || !d) return;
         const next = {
           primaryAgentLive: d.primaryAgentLive === true,
-          bridgeOnline: d.bridgeOnline === true,
+          bridgeOnline: knownOrNull(d.bridgeOnline),
         };
         setFetchedStatus(next);
         try {
@@ -204,8 +211,10 @@ export function Sidebar({
   const primaryAgentLive = deferStatus
     ? fetchedStatus?.primaryAgentLive ?? primaryAgentLiveProp
     : primaryAgentLiveProp;
-  const bridgeOnline = deferStatus
-    ? fetchedStatus?.bridgeOnline ?? bridgeOnlineProp
+  // Not `??`: a fetched null ("couldn't check") must not fall back to the
+  // passed-in false and read as "offline".
+  const bridgeOnline: boolean | null = deferStatus
+    ? fetchedStatus ? fetchedStatus.bridgeOnline : bridgeOnlineProp
     : bridgeOnlineProp;
   // Before the deferred read answers, the dots are UNKNOWN, not "off".
   const statusKnown = deferStatus ? fetchedStatus !== null : true;

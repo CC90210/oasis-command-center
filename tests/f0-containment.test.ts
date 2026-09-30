@@ -744,7 +744,9 @@ async function main() {
     // the gate is read from source: the verdict, the button and the hint all use it.
     const src = readFileSync(join(ROOT, "components", "automations", "AutomationsContent.tsx"), "utf8");
     assert.match(src, /const canInstallBridge = isOasisSurfaceTenant\(tenantSlug\);/, "the verdict is the workspace, not the viewer");
-    assert.match(src, /\{!bridgeOnline && canInstallBridge && \(\s*<Link\s+href="\/settings\/devices\/install"/, "the button needs the verdict");
+    // `=== false`, not `!`: a heartbeat that could not be read (null, F1.5) is
+    // "Couldn't check", never an offer to install.
+    assert.match(src, /\{bridgeOnline === false && canInstallBridge && \(\s*<Link\s+href="\/settings\/devices\/install"/, "the button needs the verdict");
     assert.match(src, /\{canInstallBridge \? \([\s\S]*?Install bridge[\s\S]*?\) : \(\s*"OASIS pairs a machine with your workspace directly\."/, "the hint needs it too");
     assert.equal((src.match(/Install bridge/g) || []).length, 2, "no other Install bridge text in the component");
   });

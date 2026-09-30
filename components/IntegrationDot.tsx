@@ -27,9 +27,11 @@ const KIND_ICON: Record<ConnectionKind, React.ReactNode> = {
  * `hasCredentials` means: for api_key / oauth, a key/token is on file;
  * for local_install / built_in / account_only, the side-channel says it's
  * present (FFmpeg installed, repo cloned with bundled skill, account linked).
+ * null means the page could not check (the key read failed): the card says
+ * "Couldn't check" where it would otherwise claim "Not connected".
  */
 export type IntegrationConnection = {
-  hasCredentials?: boolean;
+  hasCredentials?: boolean | null;
 };
 
 export function IntegrationDot({
@@ -60,6 +62,7 @@ export function IntegrationDot({
     health.last_ping_at &&
     Date.now() - new Date(health.last_ping_at).getTime() < 24 * 60 * 60 * 1000;
   const hasCreds = !!connection?.hasCredentials;
+  const credsUnknown = connection?.hasCredentials === null;
 
   let stateLabel: string;
   let stateTone: string;
@@ -87,6 +90,10 @@ export function IntegrationDot({
     stateLabel = "Configured · awaiting first ping";
     stateTone = "text-accent";
     dotColor = "bg-accent shadow-[0_0_10px_rgba(0,212,255,0.5)]";
+  } else if (credsUnknown) {
+    stateLabel = "Couldn't check";
+    stateTone = "text-fg-muted";
+    dotColor = "bg-fg-faint";
   } else {
     stateLabel = "Not connected";
     stateTone = "text-fg-dim";
@@ -141,7 +148,7 @@ export function IntegrationDot({
             onClick={() => setModalOpen(true)}
             className="text-xs text-accent hover:text-accent-bright inline-flex items-center gap-1 transition-colors font-bold"
           >
-            <KeyRound className="w-3 h-3" /> {hasCreds ? "Update key" : "Connect"}
+            <KeyRound className="w-3 h-3" /> {hasCreds ? "Update key" : credsUnknown ? "Set key" : "Connect"}
           </button>
         )}
         {signupUrl && (

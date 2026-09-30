@@ -28,8 +28,12 @@
  *     out of it into a bank or cash account.
  * A payout is recognised by its SHAPE, not a source name: one entry that
  * credits Stripe clearing and debits a bank or cash account. That is how a
- * payout lands today (a bank line categorised by the seeded "Stripe payouts
- * are transfers" rule) and how a future payout.paid handler would post it.
+ * payout lands from a bank line (categorised by the seeded "Stripe payouts
+ * are transfers" rule, or booked by the Wise feed) and how the payout.paid
+ * handler posts it (stripe-payouts-io.ts). Every payout Stripe reported paid
+ * that the books did NOT book (no bank account chosen for payouts, Stripe
+ * clearing short, no rate yet) is its own gap, named with its reason: one
+ * booked payout does not make the other eleven complete.
  * An opening balance is recognised the same way, whatever wrote it: the Wise
  * card's (source "opening_balance", wise-feed.ts OPENING_BALANCE_SOURCE), or
  * any posted entry that sets bank or cash accounts against the book's
@@ -137,6 +141,19 @@ export function incompleteBooksNote(coverage: Pick<CashCoverage, "complete" | "g
   return coverage.complete ? null : `Not a cash balance yet: ${coverage.gaps.join("; ")}.`;
 }
 
+/** A payout Stripe reported paid that the books have not booked (stripe-payouts-io.ts unbookedPayouts). */
+export type UnbookedPayout = { id: string; arrivalDate: string; booking: "held" | "unmapped"; reason: string };
+
+/** One gap for every payout the books did not book: how many, and why the oldest was not. */
+export function unbookedPayoutsGap(unbooked: readonly UnbookedPayout[]): string | null {
+  if (unbooked.length === 0) return null;
+  const count = `${plural(unbooked.length, "Stripe payout")} to the bank ${unbooked.length === 1 ? "is" : "are"} not booked`;
+  const reasons = new Set(unbooked.map((p) => p.reason));
+  if (reasons.size === 1) return `${count}: ${unbooked[0].reason}`;
+  const oldest = unbooked[0];
+  return `${count} (the oldest, ${shortDate(oldest.arrivalDate)}: ${oldest.reason})`;
+}
+
 export function cashCoverage(input: {
   accounts: readonly ReportAccount[];
   lines: readonly ReportLine[];
@@ -146,7 +163,11 @@ export function cashCoverage(input: {
   book: BookKind;
   /** Whether the Wise card can post an opening balance right now (wise-feed.ts WISE_FEED_WRITES_ENABLED). */
   wiseWritesEnabled: boolean;
+  /** Paid payouts not booked, oldest first. Only the business book has Stripe payouts; omitted = none. */
+  unbookedPayouts?: readonly UnbookedPayout[];
 }): CashCoverage {
+  const unbooked = input.unbookedPayouts ?? [];
+  let payoutGapSaid = false;
   const cashAccounts = input.accounts.filter((a) => BALANCE_SUBTYPES.has(a.subtype) || a.subtype === "clearing");
   const kindOf = new Map(input.accounts.map((a) => [a.id, a.subtype]));
   const byAccount = new Map<string, ReportLine[]>();
@@ -211,9 +232,17 @@ export function cashCoverage(input: {
           ),
       );
       covers = `Card charges less Stripe fees and refunds${span(firstDate, lastDate)}; ${
-        payoutRecorded ? "payouts to the bank are recorded" : "no payout to the bank is recorded, so this is not Stripe's balance"
+        unbooked.length > 0
+          ? `${plural(unbooked.length, "payout")} to the bank not booked, so this is not Stripe's balance`
+          : payoutRecorded
+            ? "payouts to the bank are recorded"
+            : "no payout to the bank is recorded, so this is not Stripe's balance"
       }`;
-      if (cardMoneyIn && !payoutRecorded) gaps.push("Stripe payouts to the bank are not recorded");
+      const payoutGap = unbookedPayoutsGap(unbooked);
+      if (payoutGap) {
+        gaps.push(payoutGap);
+        payoutGapSaid = true;
+      } else if (cardMoneyIn && !payoutRecorded) gaps.push("Stripe payouts to the bank are not recorded");
     } else if (BALANCE_SUBTYPES.has(a.subtype)) {
       covers = `${plural(entries, "entry", "entries")}${span(firstDate, lastDate)}; ${
         hasOpeningBalance ? "opening balance recorded" : "no opening balance"
@@ -236,6 +265,10 @@ export function cashCoverage(input: {
       covers,
     });
   }
+  // Stripe clearing held nothing to list (its charges are not in the books),
+  // yet Stripe reported payouts: still a gap, never silence.
+  const payoutGap = unbookedPayoutsGap(unbooked);
+  if (payoutGap && !payoutGapSaid) gaps.push(payoutGap);
 
   return {
     complete: gaps.length === 0,

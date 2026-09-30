@@ -28,7 +28,6 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import {
   streamChat,
   type ChatMessage,
-  type Provider,
 } from "@/lib/providers";
 import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
 import { operatorNameOverride } from "@/lib/operator-name";
@@ -55,14 +54,20 @@ import {
   streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
 } from "@/lib/cloud-tool-runner";
-import { resolveChatContext } from "@/lib/chat-auth";
+import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
 import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import {
+  addToSessionTotals,
+  fetchTenantVaultSecretsForRedaction,
+  persistAssistantTurn,
+  sessionTotalsDelta,
+  type TurnTokens,
+} from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
   formatAttachmentContext,
@@ -71,6 +76,15 @@ import {
   loadChatAttachmentsForTurn,
 } from "@/lib/chat-attachments";
 import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
+import {
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  budgetRefusalResponse,
+  modelCallMeter,
+  usageUnavailableResponse,
+} from "@/lib/ai/usage";
+import { sseErrorFrame } from "@/lib/ai/usage-codes";
+import { departmentForAgent } from "@/lib/os/approvals/rules";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -155,7 +169,7 @@ export async function POST(req: NextRequest) {
     // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope } = ctxResult;
+  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope, keySource } = ctxResult;
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
   // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
@@ -208,8 +222,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ---- The month's AI budget (lib/ai/usage.ts) ----------------------------
+  // A workspace already AT its cap gets a 402 and one plain sentence before
+  // anything is written or streamed. Every model call below still reserves for
+  // itself, so a turn that reaches the cap mid-loop stops with the same code.
+  // No cap for the month = nothing to check; a local model is never capped.
+  const billing = billingForKey(provider, keySource);
+  let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
+  try {
+    exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
+  } catch (err) {
+    console.error("[chat.budget] the AI budget could not be read", {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return usageUnavailableResponse();
+  }
+  if (exhausted) return budgetRefusalResponse(exhausted);
+
   // ---- Open or create chat_sessions row -----------------------------------
-  let sessionId = payload.session_id || null;
+  // A body-supplied session id is kept only when it is this person's session
+  // in this workspace; the turn's messages, totals and AI usage rows are filed
+  // under it.
+  let sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
   if (!sessionId) {
     const { data: created, error: createErr } = await service
       .from("chat_sessions")
@@ -264,9 +299,13 @@ export async function POST(req: NextRequest) {
   // freshly-paired bridges before their first heartbeat), bridgeAdvertisedTools
   // is null and the dashboard falls back to advertising every defer:true
   // tool in TOOL_DEFINITIONS (pre-Phase-F behavior).
-  const bridgeState = await getBridgeToolCapabilities(tenantId).catch(
-    () => ({ online: false, tools: null as string[] | null }),
-  );
+  // A failed pairings read (getBridgeToolCapabilities throws) is logged and
+  // gated as offline: bridge tools are never offered on a heartbeat nobody
+  // could read. This only gates tools; nothing here shows "offline".
+  const bridgeState = await getBridgeToolCapabilities(tenantId).catch((err) => {
+    console.error("[chat] bridge pairings read failed; bridge tools withheld this turn", err instanceof Error ? err.message : err);
+    return { online: false, tools: null as string[] | null };
+  });
   const bridgeOnline = bridgeState.online;
   const bridgeAdvertisedTools = bridgeState.tools;
 
@@ -557,10 +596,27 @@ export async function POST(req: NextRequest) {
   const persona = composePlanSystem(personaPreOverlay, effectivePlanMode);
   const startedAt = Date.now();
 
+  // One meter for the turn: every model call it makes (each tool-loop
+  // iteration, or the one plain stream) records its own ai_usage_events row
+  // for the SESSION's tenant, and the turn's cost is their sum.
+  const meter = modelCallMeter({
+    tenantId,
+    surface: cloudToolsMode === "tools" && supportsNativeTools ? "chat.tools" : "chat.stream",
+    ...billing,
+    departmentKey: departmentForAgent(agentKey),
+    sessionId,
+    teammateId: agentKey,
+    userId: user.id,
+  });
+
   // ---- Stream response back as SSE ----------------------------------------
   let assistantText = "";
   let usageIn = 0;
   let usageOut = 0;
+  // The loop's own token count when the turn ended (a done event, or a pause
+  // for a bridge tool); null when it ended with neither. The session's running
+  // totals are added from this and nothing else (lib/chat-persistence.ts).
+  let turnTokens: TurnTokens | null = null;
   let streamError: string | null = null;
 
   // Pre-fetch the tenant's vault values ONCE before the stream opens.
@@ -628,6 +684,7 @@ export async function POST(req: NextRequest) {
               // mode filters write tools out + appends the plan-mode
               // system overlay. "build" or undefined = no change.
               chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+              meter,
             },
             { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin }
           )
@@ -640,6 +697,7 @@ export async function POST(req: NextRequest) {
                     messages: stripped,
                     toolPalette,
                     chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+                    meter,
                   },
                   { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
                 );
@@ -673,6 +731,9 @@ export async function POST(req: NextRequest) {
               // re-checks this binding against the caller's resolved
               // identity so a captured signature can't replay across
               // tenants or under a different agent.
+              // The paused loop's calls have finished; resume_state carries
+              // their token count, and the resume adds only what comes after.
+              turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
               const sig = signResumeState(ev.resume_state, {
                 tenant_id: tenantId,
                 user_id: user.id,
@@ -693,10 +754,11 @@ export async function POST(req: NextRequest) {
             } else if (ev.type === "done") {
               usageIn = ev.inputTokens;
               usageOut = ev.outputTokens;
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         } else {
@@ -717,6 +779,7 @@ export async function POST(req: NextRequest) {
             baseUrl: isOllama ? apiKey : undefined,
             system: persona,
             messages: messagesForModel,
+            meter,
           })) {
             if (ev.type === "delta") {
               assistantText += ev.text;
@@ -724,13 +787,14 @@ export async function POST(req: NextRequest) {
             } else if (ev.type === "done") {
               usageIn = ev.inputTokens;
               usageOut = ev.outputTokens;
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               // Redact any operator/platform credential values before
               // emitting over SSE or persisting — provider error bodies
               // can echo headers / URLs that contain the API key.
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         }
@@ -853,16 +917,23 @@ export async function POST(req: NextRequest) {
         error: streamError,
         vaultSecrets: vaultSecretsForRedaction,
       });
-      const cost = estimateCostUsd(provider, model, usageIn, usageOut);
-      await service
-        .from("chat_sessions")
-        .update({
-          total_input_tokens: usageIn,
-          total_output_tokens: usageOut,
-          estimated_cost_usd: cost,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", sessionId);
+      // chat_sessions running totals. The turn's cost is what the ledger
+      // recorded for its model calls (ai_usage_events by session_id is the
+      // record). estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say
+      // "unknown", so the turn's tokens and cost are ADDED together, in one SQL
+      // increment shared with /api/chat/resume, and only when the turn has a
+      // token count and every call's cost is known (a local call is a known
+      // $0). Anything else adds nothing and only stamps updated_at: never this
+      // turn's tokens beside an older cost, never a $0 over the last known pair.
+      try {
+        await addToSessionTotals({ sessionId, tenantId, delta: sessionTotalsDelta({ end: turnTokens, meter }) });
+      } catch (err) {
+        console.error("[chat.session_totals] the session's running totals were not updated", {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (cfgScope) {
         let lastUsedUpdate = service
           .from("agent_model_config")
@@ -904,53 +975,6 @@ export async function POST(req: NextRequest) {
       "x-accel-buffering": "no",
     },
   });
-}
-
-/* ============================================================================
- * Cost estimation (rough — published per-1M-token pricing as of 2026-05).
- * Wrong is fine; we just want a directional number on the dashboard.
- * ============================================================================ */
-function estimateCostUsd(
-  provider: Provider,
-  model: string,
-  inTok: number,
-  outTok: number
-): number {
-  const m = model.toLowerCase();
-  let inP = 0;
-  let outP = 0;
-  if (provider === "anthropic") {
-    if (m.includes("opus")) {
-      inP = 15;
-      outP = 75;
-    } else if (m.includes("sonnet")) {
-      inP = 3;
-      outP = 15;
-    } else {
-      inP = 1;
-      outP = 5;
-    }
-  } else if (provider === "openai") {
-    if (m.includes("mini")) {
-      inP = 0.25;
-      outP = 2;
-    } else if (m.includes("codex")) {
-      inP = 3;
-      outP = 12;
-    } else {
-      inP = 2.5;
-      outP = 10;
-    }
-  } else if (provider === "google") {
-    if (m.includes("flash")) {
-      inP = 0.3;
-      outP = 1.2;
-    } else {
-      inP = 1.25;
-      outP = 5;
-    }
-  }
-  return ((inTok * inP) + (outTok * outP)) / 1_000_000;
 }
 
 function jsonError(status: number, message: string, code?: string) {

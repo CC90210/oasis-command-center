@@ -21,8 +21,11 @@
  */
 
 import "server-only";
+import type { CallEnd, ModelCall, ModelCallMeter } from "@/lib/ai/usage";
+import { meterRefusalCode } from "@/lib/ai/usage-codes";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+const EXTRACT_MAX_TOKENS = 1600;
 const EXTRACT_MODEL = "claude-sonnet-4-6";
 
 const SUPPORTED = new Set([
@@ -54,9 +57,16 @@ export type ExtractResult =
   | { ok: true; fields: Record<string, unknown> }
   | { ok: false; error: string };
 
+/**
+ * `meter` (lib/ai/usage.ts, surface "document_extract", billing "platform":
+ * the key below is OASIS's) records the call for the tenant whose document it
+ * is and reserves it against that tenant's monthly AI budget. A caller must say
+ * whose document this is; there is no default tenant.
+ */
 export async function extractApplicationFields(
   bytes: Buffer,
   mimeType: string,
+  meter: ModelCallMeter,
 ): Promise<ExtractResult> {
   /*
    * STILL ON THE PAID API, and deliberately so as of 2026-08-04.
@@ -86,33 +96,74 @@ export async function extractApplicationFields(
       ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } }
       : { type: "image", source: { type: "base64", media_type: mt, data: b64 } };
 
-  let res: Response;
+  const requestJson = JSON.stringify({
+    model: EXTRACT_MODEL,
+    max_tokens: EXTRACT_MAX_TOKENS,
+    system: EXTRACT_SYSTEM,
+    messages: [
+      { role: "user", content: [block, { type: "text", text: "Extract the application fields as JSON." }] },
+    ],
+  });
+  // The request's byte length is the reservation's prompt bound. For an
+  // attached PDF or image it is an estimate, not a bound; the call settles to
+  // the usage Anthropic reports.
+  let call: ModelCall;
   try {
-    res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify({
-        model: EXTRACT_MODEL,
-        max_tokens: 1600,
-        system: EXTRACT_SYSTEM,
-        messages: [
-          { role: "user", content: [block, { type: "text", text: "Extract the application fields as JSON." }] },
-        ],
-      }),
+    call = await meter.begin({
+      provider: "anthropic",
+      model: EXTRACT_MODEL,
+      maxOutputTokens: EXTRACT_MAX_TOKENS,
+      promptBytes: new TextEncoder().encode(requestJson).length,
     });
   } catch (e) {
-    return { ok: false, error: "network:" + (e instanceof Error ? e.message : "error") };
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    return { ok: false, error: `anthropic_${res.status}:${detail.slice(0, 200)}` };
+    return { ok: false, error: meterRefusalCode(e) };
   }
 
-  const body = (await res.json().catch(() => null)) as { content?: Array<{ type: string; text?: string }> } | null;
+  let body: {
+    content?: Array<{ type: string; text?: string }>;
+    usage?: Record<string, unknown>;
+  } | null;
+  let end: CallEnd = { outcome: "cancelled", usage: null };
+  try {
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+        },
+        body: requestJson,
+      });
+    } catch (e) {
+      end = { outcome: "error", errorCode: "network", usage: null };
+      return { ok: false, error: "network:" + (e instanceof Error ? e.message : "error") };
+    }
+    if (!res.ok) {
+      end = { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+      const detail = await res.text().catch(() => "");
+      return { ok: false, error: `anthropic_${res.status}:${detail.slice(0, 200)}` };
+    }
+    body = (await res.json().catch(() => null)) as typeof body;
+    const u = body?.usage;
+    const n = (v: unknown) => (typeof v === "number" ? v : null);
+    end = {
+      outcome: "ok",
+      usage:
+        n(u?.input_tokens) !== null && n(u?.output_tokens) !== null
+          ? {
+              inputTokens: n(u?.input_tokens),
+              outputTokens: n(u?.output_tokens),
+              cacheReadTokens: n(u?.cache_read_input_tokens) ?? 0,
+              cacheWriteTokens: n(u?.cache_creation_input_tokens) ?? 0,
+            }
+          : null,
+    };
+  } finally {
+    await call.finish(end);
+  }
+
   let text = (body?.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text || "")
