@@ -15,7 +15,14 @@ import {
   type ReportAccount,
   type ReportLine,
 } from "./reports";
-import { gstQstPeriodReport, quarterOf, smallSupplierStatus, trailingFourQuarters, type ThresholdStatus } from "./tax";
+import {
+  gstQstPeriodReport,
+  quarterOf,
+  smallSupplierStatus,
+  trailingFourQuarters,
+  type ThresholdRevenueCoverage,
+  type ThresholdStatus,
+} from "./tax";
 import { addDays, isIsoDate, torontoToday } from "./fx";
 import { accountId, BUSINESS_ENTITY_ID, CASH_SUBTYPES, SYS } from "./chart";
 import { balanceDueCents, effectiveInvoiceStatus } from "./invoice";
@@ -24,7 +31,7 @@ import { query, queryOne } from "./db";
 import { requireEntity, type EntityRow } from "./access-io";
 import { loadSettings } from "./settings-io";
 import { sweepOverdue } from "./invoices-io";
-import { cashCoverage } from "./cash-coverage";
+import { bankBalanceExcludesDeposits, booksCoverage, type BooksCoverage } from "./books-coverage";
 import { WISE_FEED_WRITES_ENABLED } from "./wise-feed";
 import { unbookedPayouts } from "./stripe-payouts-io";
 
@@ -138,18 +145,88 @@ export async function quarterlyRevenue(entityId: string, quarters: ReadonlyArray
   );
 }
 
-export async function thresholdStatus(today = torontoToday()): Promise<ThresholdStatus> {
+/**
+ * The small-supplier tracker. `revenue` is what the books can say about the
+ * revenue they sum (books-coverage.ts RevenueSources): without it the level
+ * is "unconfirmed", because a Stripe-only total is a floor, not a verdict.
+ */
+export async function thresholdStatus(revenue: ThresholdRevenueCoverage, today = torontoToday()): Promise<ThresholdStatus> {
   const quarters = trailingFourQuarters(today);
-  return smallSupplierStatus(await quarterlyRevenue(BUSINESS_ENTITY_ID, quarters));
+  return smallSupplierStatus(await quarterlyRevenue(BUSINESS_ENTITY_ID, quarters), revenue);
+}
+
+/**
+ * fin_bank_transactions per account: how many ever recorded, still to review,
+ * and the IMPORTED ones' (a statement import or the Wise feed, source
+ * 'import') first and last dates and the months they fall in. A line typed by
+ * hand or an Atlas draft says nothing about whether the bank's deposits are on
+ * the books; imports do, over the months they cover (books-coverage.ts).
+ */
+async function bankLineStats(entityId: string) {
+  const rows = await query<{ account_id: string; n: number; unreviewed: number; first_date: string | null; last_date: string | null; months: string | null }>(
+    `SELECT account_id, COUNT(*) AS n, SUM(CASE WHEN status IN ('unreviewed', 'draft') THEN 1 ELSE 0 END) AS unreviewed,
+            MIN(CASE WHEN source = 'import' THEN posted_date END) AS first_date,
+            MAX(CASE WHEN source = 'import' THEN posted_date END) AS last_date,
+            GROUP_CONCAT(DISTINCT CASE WHEN source = 'import' THEN substr(posted_date, 1, 7) END) AS months
+       FROM fin_bank_transactions WHERE entity_id = ? GROUP BY account_id`,
+    [entityId],
+  );
+  return rows.map((r) => ({ ...r, months: r.months ? r.months.split(",").filter(Boolean) : [] }));
+}
+
+type BankLineStats = Awaited<ReturnType<typeof bankLineStats>>;
+
+/** booksCoverage over rows already loaded: one place builds it, so every page says the same. */
+function coverageOf(
+  entity: EntityRow,
+  ledger: { accounts: ReportAccount[]; lines: ReportLine[] },
+  bankLines: BankLineStats,
+  payoutsNotBooked: Awaited<ReturnType<typeof unbookedPayouts>>,
+): BooksCoverage {
+  const business = entity.kind === "business";
+  return booksCoverage({
+    accounts: ledger.accounts,
+    lines: ledger.lines,
+    bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
+    bankLinesFromByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.first_date])),
+    bankLinesToByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.last_date])),
+    bankLineMonthsByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, r.months])),
+    today: torontoToday(),
+    book: business ? "business" : "personal",
+    wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,
+    unbookedPayouts: payoutsNotBooked,
+  });
+}
+
+/**
+ * What the book covers, for a page that shows figures built on it (Accounts,
+ * Reports, Taxes, Transactions, the CSV export). One wave of reads; pass the
+ * ledger a page already loaded to skip reading it twice. The ledger runs to
+ * tomorrow (Toronto), like the Overview, whatever range the page shows: a
+ * report of September still needs to say that January's costs are missing.
+ */
+export async function booksCoverageFor(
+  entity: EntityRow,
+  loaded?: Promise<{ accounts: ReportAccount[]; lines: ReportLine[] }>,
+): Promise<BooksCoverage> {
+  const tomorrow = addDays(torontoToday(), 1);
+  const [ledger, bankLines, payoutsNotBooked] = await Promise.all([
+    loaded ?? loadLedger(entity.id, tomorrow),
+    bankLineStats(entity.id),
+    entity.kind === "business" ? unbookedPayouts(entity.id) : Promise.resolve([]),
+  ]);
+  return coverageOf(entity, ledger, bankLines, payoutsNotBooked);
 }
 
 export async function taxOverview(viewer: FinanceViewer, range: { from?: string; to?: string }) {
   const entity = await requireEntity(viewer, BUSINESS_ENTITY_ID);
-  const q = quarterOf(torontoToday());
+  const today = torontoToday();
+  const q = quarterOf(today);
   const from = range.from && isIsoDate(range.from) ? range.from : q.from;
   const to = range.to && isIsoDate(range.to) ? range.to : q.to;
-  // Settings, the period sums and the threshold are independent reads.
-  const [settings, sums, threshold] = await Promise.all([
+  // Settings, the period sums, the quarterly revenue and what the book covers
+  // are independent reads; the threshold's level needs the last two.
+  const [settings, sums, quarters, coverage] = await Promise.all([
     loadSettings(entity.id),
     query<{ account_id: string; d: number; c: number }>(
       `SELECT l.account_id, COALESCE(SUM(l.cad_debit_cents), 0) AS d, COALESCE(SUM(l.cad_credit_cents), 0) AS c
@@ -158,8 +235,10 @@ export async function taxOverview(viewer: FinanceViewer, range: { from?: string;
         GROUP BY l.account_id`,
       [entity.id, from, to, accountId(entity.id, SYS.gstPayable), accountId(entity.id, SYS.qstPayable), accountId(entity.id, SYS.gstReceivable), accountId(entity.id, SYS.qstReceivable)],
     ),
-    thresholdStatus(),
+    quarterlyRevenue(entity.id, trailingFourQuarters(today)),
+    booksCoverageFor(entity),
   ]);
+  const threshold = smallSupplierStatus(quarters, coverage.revenueSources);
   const get =(code: string) => sums.find((s) => s.account_id === accountId(entity.id, code)) || { d: 0, c: 0 };
   const period = gstQstPeriodReport({
     registered: settings.gst_qst_registered === 1,
@@ -168,7 +247,7 @@ export async function taxOverview(viewer: FinanceViewer, range: { from?: string;
     gstItcCents: Number(get(SYS.gstReceivable).d) - Number(get(SYS.gstReceivable).c),
     qstItrCents: Number(get(SYS.qstReceivable).d) - Number(get(SYS.qstReceivable).c),
   });
-  return { entity, settings, threshold, period, from, to };
+  return { entity, settings, threshold, period, from, to, coverage };
 }
 
 /** Recent money received/refunded (Stripe + manual), business book. */
@@ -227,27 +306,41 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       [entity.id],
     );
   };
-  const [{ accounts, lines }, invoices, bankLines, threshold, payoutsNotBooked] = await Promise.all([
+  const [ledger, invoices, bankLines, quarters, payoutsNotBooked] = await Promise.all([
     loadLedger(entity.id, tomorrow),
     openInvoices(),
-    // One read for both bank figures: the lines still to review, and every
-    // line ever imported per account — "no bank lines to review" is only news
-    // when a bank feed or import exists at all (cash-coverage.ts).
-    query<{ account_id: string; n: number; unreviewed: number }>(
-      `SELECT account_id, COUNT(*) AS n, SUM(CASE WHEN status IN ('unreviewed', 'draft') THEN 1 ELSE 0 END) AS unreviewed
-         FROM fin_bank_transactions WHERE entity_id = ? GROUP BY account_id`,
-      [entity.id],
-    ),
-    business ? thresholdStatus(today) : Promise.resolve(null),
+    // One read for every bank figure: the lines still to review, every line
+    // ever imported per account — "no bank lines to review" is only news when
+    // a bank feed or import exists at all (books-coverage.ts) — and the first
+    // line's date, from which deposits are on the books.
+    bankLineStats(entity.id),
+    business ? quarterlyRevenue(entity.id, trailingFourQuarters(today)) : Promise.resolve(null),
     // Stripe payouts are the business book's alone.
     business ? unbookedPayouts(entity.id) : Promise.resolve([]),
   ]);
+  const { accounts, lines } = ledger;
+  // What the whole book covers, from the rows above (no extra read). The
+  // threshold's level needs it: a Stripe-only total is a floor.
+  const books = coverageOf(entity, ledger, bankLines, payoutsNotBooked);
+  const threshold = quarters ? smallSupplierStatus(quarters, books.revenueSources) : null;
   const unreviewed = bankLines.reduce((s, r) => s + Number(r.unreviewed || 0), 0);
   const balances = new Map<string, number>();
   for (const l of lines) balances.set(l.accountId, (balances.get(l.accountId) || 0) + l.cadDebitCents - l.cadCreditCents);
+  const bankLineCount = new Map(bankLines.map((r) => [r.account_id, Number(r.n || 0)]));
   const cashAccounts = accounts
     .filter((a) => CASH_SUBTYPES.has(a.subtype) || a.subtype === "credit_card")
-    .map((a) => ({ id: a.id, code: a.code, name: a.name, subtype: a.subtype, balanceCents: a.type === "asset" ? balances.get(a.id) || 0 : -(balances.get(a.id) || 0) }))
+    .map((a) => {
+      const balanceCents = a.type === "asset" ? balances.get(a.id) || 0 : -(balances.get(a.id) || 0);
+      return {
+        id: a.id,
+        code: a.code,
+        name: a.name,
+        subtype: a.subtype,
+        balanceCents,
+        // Below zero only because nothing records its deposits (books-coverage.ts): not an overdraft.
+        excludesDeposits: bankBalanceExcludesDeposits({ account: a, balanceCents, lines, bankLines: bankLineCount.get(a.id) || 0 }),
+      };
+    })
     .filter((a) => a.balanceCents !== 0 || a.subtype === "bank" || a.subtype === "clearing");
   const cashTotal = cashAccounts.filter((a) => a.subtype !== "credit_card").reduce((s, a) => s + a.balanceCents, 0);
   const series: Array<{ month: string; inCents: number; outCents: number }> = [];
@@ -280,16 +373,13 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
     overdueAr,
     overdueCount,
     unreviewed,
-    // Whether cashTotal may be called a balance, and what each account holds.
-    // Presentation only: cashTotal above is unchanged.
-    coverage: cashCoverage({
-      accounts,
-      lines,
-      bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
-      book: business ? "business" : "personal",
-      wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,
-      unbookedPayouts: payoutsNotBooked,
-    }),
+    // Whether cashTotal may be called a balance, and what each account holds
+    // (Today, the cash tile and Atlas's summary read it). Presentation only:
+    // cashTotal above is unchanged. `books` is the same coverage for the
+    // whole book: expenses from, revenue sources, payouts (the banner, the
+    // month tiles). Both come from coverageOf.
+    coverage: books.cash,
+    books,
     threshold,
   };
 }

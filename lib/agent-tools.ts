@@ -16,6 +16,7 @@ import { getServiceSupabase } from "./supabase-server";
 import { tenantSlugFor } from "./team";
 import { isOasisSurfaceTenant } from "./role-surfaces";
 import { loadOasisMoney } from "./goals/oasis-money";
+import { stripeSyncLine } from "./founders-finances/stripe-sync-status";
 
 export type ToolDeclaration = {
   name: string;
@@ -146,9 +147,16 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (isOasisSurfaceTenant(await tenantSlugFor(ctx.tenantId))) {
       if (!ctx.isAdmin) return { withheld: "Company revenue is visible to CC and Adon only." };
       const m = await loadOasisMoney(ctx.tenantId, "agent.mrr_today");
+      // "Connected" is said with a time, like every other surface: when the
+      // books last heard from Stripe (stripe-sync-status.ts), never a bare
+      // boolean the agent would read as "current".
+      const sync = m.stripeSync.ok ? stripeSyncLine(m.stripeSync.lastSyncAt, Date.now()) : null;
       return {
         source: "stripe_live",
         stripe_connected: m.stripeConnected,
+        stripe_sync: sync
+          ? { state: sync.state, note: sync.note, last_synced_at: m.stripeSync.ok ? m.stripeSync.lastSyncAt : null }
+          : { state: "unknown", note: "Stripe sync: couldn't check", last_synced_at: null },
         mrr: m.mrr
           ? {
               cents: m.mrr.mrr_cents,

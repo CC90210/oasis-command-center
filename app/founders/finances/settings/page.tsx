@@ -91,7 +91,8 @@ export default async function FinanceSettingsPage({ searchParams }: { searchPara
             { name: "payment_terms_days", label: "Payment terms (days)", type: "number", defaultValue: String(s.payment_terms_days) },
             { name: "payment_instructions", label: "Payment instructions (printed on invoices)", type: "textarea", defaultValue: s.payment_instructions, span: 3, placeholder: "Interac e-Transfer to billing@… · Wire details on request" },
             { name: "gst_qst_registered", label: "Registered for GST/QST", type: "checkbox", defaultValue: s.gst_qst_registered === 1 },
-            { name: "gst_number", label: "GST/HST number", defaultValue: s.gst_number, placeholder: "123456789RT0001" },
+            // Quebec: GST (federal, 5%) and QST (9.975%), never the harmonized HST of other provinces.
+            { name: "gst_number", label: "GST number", defaultValue: s.gst_number, placeholder: "123456789RT0001" },
             { name: "qst_number", label: "QST number", defaultValue: s.qst_number, placeholder: "1234567890TQ0001" },
             { name: "registration_effective_date", label: "Registered since", type: "date", defaultValue: s.registration_effective_date || "" },
           ]}

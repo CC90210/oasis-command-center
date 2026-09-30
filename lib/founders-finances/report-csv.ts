@@ -10,6 +10,27 @@ import { AGING_BUCKETS } from "./reports";
 type Cell = string | number;
 const d = centsToDecimalString;
 
+/**
+ * The CSV's first line when the book is incomplete, naming every gap, so an
+ * exported statement never travels without what it leaves out
+ * (books-coverage.ts). A real comment line: "#" is its first character, and
+ * it is written raw, before the RFC 4180 rows (toCsv), never as a quoted
+ * cell, which would start the line with a quote that no "#"-skipping importer
+ * recognises. So it can need no quoting at all: no comma (a date reads
+ * "Sep 1 2026"), no double quote and no line break. An importer that skips
+ * comment lines skips it whole; one that does not reads it as one cell.
+ * Complete books: "" (no line).
+ */
+export function coverageCsvComment(coverage: { complete: boolean; gaps: readonly string[] }): string {
+  if (coverage.complete || coverage.gaps.length === 0) return "";
+  const gaps = coverage.gaps.map((g) => (/[.!?]$/.test(g.trim()) ? g.trim() : `${g.trim()}.`)).join(" ");
+  const line = `# Books incomplete: these figures are only what the books record so far. ${gaps}`
+    .replace(/[\r\n]+/g, " ")
+    .replace(/"/g, "'")
+    .replace(/,/g, "");
+  return `${line}\r\n`;
+}
+
 function section(title: string, rows: AccountRow[], total: number): Cell[][] {
   return [[title], ...rows.map((r) => [r.code, r.name, d(r.amountCents)]), [`Total ${title.toLowerCase()}`, "", d(total)], []];
 }

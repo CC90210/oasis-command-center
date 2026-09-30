@@ -59,6 +59,17 @@ export async function GET(req: Request) {
       // means the books miss part of an account's story (cash-coverage.ts), so
       // the total is a ledger sum and must not be reported as a balance.
       cash_coverage: { complete: ov.coverage.complete, gaps: ov.coverage.gaps },
+      // What the whole book covers (books-coverage.ts): expenses from, revenue
+      // sources, opening balances, payouts. complete:false means every
+      // revenue, expense and profit figure here is what is recorded so far,
+      // not the business's result, and the threshold may be "unconfirmed".
+      books_coverage: {
+        complete: ov.books.complete,
+        gaps: ov.books.gaps,
+        expenses_from: ov.books.expensesFrom,
+        revenue_from: ov.books.revenueFrom,
+        revenue_complete: ov.books.revenueSources.complete,
+      },
       month: { in_cad_cents: ov.month.inCents, out_cad_cents: ov.month.outCents, revenue_cad_cents: ov.month.revenueCents, expense_cad_cents: ov.month.expenseCents },
       open_invoices: open.map((i) => ({
         id: i.id,

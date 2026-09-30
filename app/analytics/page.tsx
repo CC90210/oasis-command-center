@@ -6,7 +6,7 @@ import { safe } from "@/lib/api-helpers";
 import { formatMoney } from "@/lib/fmt";
 import { requireSystemSurface, resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
-import { analyticsMrrState, MRR_COPY } from "./mrr-state";
+import { analyticsMrrState, MRR_COPY, stripeMrrHint, wonCount } from "./mrr-state";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,8 @@ export default async function AnalyticsPage() {
   const noMoney = mrrState === "oasis" ? "unconfirmed" : mrrState;
 
   const totalLeads = pipeline?.total ?? 0;
-  const won = pipeline?.stages["won"] || 0;
+  // Won = every stage that means the lead became a client (Clients' own list), not the literal "won" stage.
+  const won = pipeline ? wonCount(pipeline.stages) : 0;
   const lost = pipeline?.stages["lost"] || 0;
   const conversion = totalLeads ? ((won / totalLeads) * 100).toFixed(1) : "—";
 
@@ -51,7 +52,7 @@ export default async function AnalyticsPage() {
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {money ? (
           <Stat
-            label="Net MRR"
+            label="MRR (Stripe)"
             value={
               money.mrr
                 ? `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`
@@ -59,7 +60,12 @@ export default async function AnalyticsPage() {
             }
             hint={
               money.mrr
-                ? `live Stripe${money.mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? ` · ≈ ${dollars(money.mrrUsdCents)} USD` : ""}`
+                ? // When the books last heard from Stripe, never a bare "live".
+                  stripeMrrHint(
+                    money.stripeSync.ok ? { lastSyncAt: money.stripeSync.lastSyncAt } : null,
+                    Date.now(),
+                    money.mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? dollars(money.mrrUsdCents) : null,
+                  )
                 : money.stripeConnected === false
                   ? "Stripe not connected yet — Finances → Settings"
                   : "Stripe unavailable"
@@ -67,7 +73,7 @@ export default async function AnalyticsPage() {
             accent
           />
         ) : (
-          <Stat label="Net MRR" value={MRR_COPY[noMoney].value} hint={MRR_COPY[noMoney].hint} accent />
+          <Stat label="MRR (Stripe)" value={MRR_COPY[noMoney].value} hint={MRR_COPY[noMoney].hint} accent />
         )}
         {pipeline === null ? (
           <>
@@ -78,7 +84,7 @@ export default async function AnalyticsPage() {
         ) : (
           <>
             <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
-            <Stat label="Won" value={won} />
+            <Stat label="Won" value={won} hint="Leads that became clients, at any delivery stage" />
             <Stat label="Lost" value={lost} />
           </>
         )}

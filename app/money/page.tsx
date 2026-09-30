@@ -1,6 +1,10 @@
 /**
  * /money — Money › Overview: the OASIS AI Solutions book at a glance, inside
- * the OS frame.
+ * the OS frame. The ONE Money overview (2026-09-30): /founders/finances
+ * redirects here, and the Finances tabs (Transactions, Invoices, Bills,
+ * Accounts, Reports, Taxes, Settings) sit on top of it, so Money is one
+ * section with one front page. The six-month chart, the recurring costs and
+ * the GST/QST threshold moved here from the old Finances overview.
  *
  * GATE: the Finances gate, unchanged and first. resolveFinanceViewer() is the
  * founders-portal gate (FOUNDERS_TENANT_IDS + capability) AND the session's
@@ -10,32 +14,28 @@
  * `finance_owner`); this is the wall, that is the sign.
  *
  * OASIS ONLY until fin_* carries tenant_id (plan, Risks: "Money-capability
- * flip"): the book is fin_ent_oasis and nothing else. The full tool stays at
- * /founders/finances; the rows below link into it rather than forking it.
+ * flip"): the book is fin_ent_oasis and nothing else.
  *
  * NUMBERS follow "unknown is not zero" (components/os/landings/money-model.ts):
  * a source that has not reported says "Not connected", a failed read says it
- * failed, and neither can print CA$0.00.
+ * failed, and neither can print CA$0.00. What the book does not cover is said
+ * once, at the top (BooksCoverageBanner), and the month tiles say "Partial"
+ * until it covers everything.
  */
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { after } from "next/server";
-import {
-  ArrowLeftRight,
-  ClipboardList,
-  FileText,
-  Landmark,
-  Receipt,
-  TrendingUp,
-  Wallet,
-} from "lucide-react";
+import type { ReactNode } from "react";
 import { Card } from "@/components/Card";
 import { KpiTile } from "@/components/os/KpiTile";
 import { PageFrame } from "@/components/os/PageFrame";
-import { LinkList, type LinkListItem } from "@/components/os/landings/LinkList";
 import { moneyTiles } from "@/components/os/landings/money-model";
-import { amountTone } from "@/components/founders/finances/ui";
+import { ActivityTable } from "@/components/founders/finances/ActivityTable";
+import { BooksCoverageBanner } from "@/components/founders/finances/BooksCoverageBanner";
+import { FinanceTabs } from "@/components/founders/finances/FinanceTabs";
+import { InOutChart } from "@/components/founders/finances/InOutChart";
 import { FinanceNotFound, resolveFinanceViewer, type EntityRow } from "@/lib/founders-finances/access-io";
+import { BANK_NOT_CONNECTED, incompleteBooksNote } from "@/lib/founders-finances/books-coverage";
 import { financeBook, loadOverviewPage } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { formatCents } from "@/lib/founders-finances/money";
@@ -43,19 +43,24 @@ import { formatCents } from "@/lib/founders-finances/money";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Money" };
 
-const ICON = { size: 16, strokeWidth: 1.75 } as const;
-
-const SECTIONS: LinkListItem[] = [
-  { href: "/founders/finances/transactions", label: "Transactions", description: "Bank and Stripe lines, categories, statement imports", icon: <ArrowLeftRight {...ICON} /> },
-  { href: "/founders/finances/invoices", label: "Invoices", description: "Draft, send and track what clients owe", icon: <FileText {...ICON} /> },
-  { href: "/founders/finances/bills", label: "Bills & expenses", description: "What the business pays, including recurring costs", icon: <Receipt {...ICON} /> },
-  { href: "/founders/finances/reports", label: "Reports", description: "Profit and loss, balance sheet, ledger, CSV export", icon: <ClipboardList {...ICON} /> },
-  { href: "/founders/finances/taxes", label: "Taxes", description: "GST/QST collected, paid and the registration threshold", icon: <Landmark {...ICON} /> },
-  { href: "/founders/finances/accounts", label: "Accounts", description: "Balances by account and owner equity", icon: <Wallet {...ICON} /> },
-  { href: "/analytics", label: "Analytics", description: "Revenue and pipeline trends", icon: <TrendingUp {...ICON} /> },
-];
-
 type Loaded = Awaited<ReturnType<typeof loadOverviewPage>>;
+
+const linkClass = "text-accent hover:underline";
+const CADENCE_LABEL: Record<string, string> = { weekly: "weekly", monthly: "monthly", quarterly: "quarterly", yearly: "yearly" };
+const LEVEL_TONE: Record<string, string> = {
+  ok: "text-status-engaged",
+  watch: "text-status-info",
+  warning: "text-status-warm",
+  exceeded: "text-status-hot",
+  unconfirmed: "text-status-warm",
+};
+const LEVEL_BAR: Record<string, string> = {
+  ok: "bg-status-engaged",
+  watch: "bg-status-info",
+  warning: "bg-status-warm",
+  exceeded: "bg-status-hot",
+  unconfirmed: "bg-status-warm",
+};
 
 export default async function MoneyPage() {
   const viewer = await resolveFinanceViewer();
@@ -75,8 +80,8 @@ export default async function MoneyPage() {
   });
   if (loaded) {
     // loadOverviewPage reads with sweep "deferred", which obliges the caller to
-    // persist overdue status itself. Same as /founders/finances: after the
-    // response, because nothing shown depends on it.
+    // persist overdue status itself: after the response, because nothing shown
+    // depends on it.
     after(() =>
       sweepOverdue(entity.id).then(
         () => undefined,
@@ -89,7 +94,7 @@ export default async function MoneyPage() {
   return (
     <PageFrame
       title="Overview"
-      subtitle="OASIS AI Solutions: cash, this month, and what you are owed. CAD unless marked US$."
+      subtitle="OASIS AI Solutions: cash, this month, what you are owed and what you pay every month. CAD unless marked US$."
       actions={
         <Link href="/founders/finances/invoices#new-invoice" prefetch={false} className="btn-primary">
           New invoice
@@ -97,6 +102,8 @@ export default async function MoneyPage() {
       }
     >
       <div className="space-y-6">
+        <FinanceTabs />
+        <BooksCoverageBanner coverage={loaded ? loaded.ov.books : null} figures="The figures below" />
         <section aria-label="Headline numbers" className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {tiles.headline.map(({ id, ...tile }) => (
             <KpiTile key={id} {...tile} />
@@ -108,44 +115,7 @@ export default async function MoneyPage() {
           ))}
         </section>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-          <div className="lg:col-span-3">
-            <Card
-              title="Recent transactions"
-              action={
-                <Link href="/founders/finances/transactions" prefetch={false} className="text-[13px] text-accent hover:underline">
-                  All transactions
-                </Link>
-              }
-              noPadding
-            >
-              {!loaded ? (
-                <p className="px-4 py-6 text-sm text-fg-muted">Couldn&rsquo;t load transactions. The error has been logged.</p>
-              ) : loaded.recent.length === 0 ? (
-                <p className="px-4 py-6 text-sm text-fg-muted">
-                  Nothing recorded yet.{" "}
-                  <Link href="/founders/finances/transactions#import" prefetch={false} className="text-accent hover:underline">
-                    Import a bank statement
-                  </Link>{" "}
-                  to start.
-                </p>
-              ) : (
-                <RecentTable rows={loaded.recent} />
-              )}
-              {loaded && loaded.ov.unreviewed > 0 && (
-                <p className="border-t border-hairline px-4 py-2.5 text-[13px]">
-                  <Link href="/founders/finances/transactions?status=unreviewed" prefetch={false} className="text-accent hover:underline">
-                    {loaded.ov.unreviewed} transaction{loaded.ov.unreviewed === 1 ? "" : "s"} need a category
-                  </Link>
-                </p>
-              )}
-            </Card>
-          </div>
-          <div className="lg:col-span-2">
-            <h2 className="mb-2 text-sm font-semibold text-fg">Finances</h2>
-            <LinkList items={SECTIONS} label="Finances sections" />
-          </div>
-        </div>
+        {loaded ? <Details loaded={loaded} /> : <p className="text-sm text-fg-muted">Couldn&rsquo;t load the rest of the overview. The error has been logged.</p>}
 
         <p className="text-xs text-fg-dim">Decision support, not accounting or tax advice.</p>
       </div>
@@ -153,33 +123,160 @@ export default async function MoneyPage() {
   );
 }
 
-function RecentTable({ rows }: { rows: Loaded["recent"] }) {
-  const th = "px-4 py-2 text-left text-xs font-medium text-fg-dim";
-  const td = "px-4 py-2.5 align-top";
+function Details({ loaded }: { loaded: Loaded }) {
+  const { ov, recurring, recent } = loaded;
+  const booksNote = incompleteBooksNote(ov.coverage);
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-hairline">
-            <th className={th}>Date</th>
-            <th className={th}>Description</th>
-            <th className={th}>Category</th>
-            <th className={`${th} text-right`}>Amount</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-hairline">
-          {rows.map((t) => (
-            <tr key={t.id}>
-              <td className={`${td} whitespace-nowrap tabular-nums text-fg-muted`}>{t.posted_date}</td>
-              <td className={`${td} text-fg`}>{t.description}</td>
-              <td className={`${td} text-fg-muted`}>{t.category_name || <span className="text-status-warm">Uncategorised</span>}</td>
-              <td className={`${td} whitespace-nowrap text-right tabular-nums ${amountTone(t.amount_cents)}`}>
-                {formatCents(t.amount_cents, t.currency)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <Card
+          title="Money in and out"
+          subtitle={ov.books.complete ? "Last six months, CAD" : "Last six months, CAD: what the books record so far (see above)"}
+          className="lg:col-span-2"
+        >
+          <InOutChart data={ov.series} />
+        </Card>
+        <Card title="Accounts" subtitle={booksNote ? "Ledger totals, CAD: the books are incomplete, so these are not balances yet" : "Balances today, CAD"}>
+          {ov.cashAccounts.length === 0 ? (
+            <p className="text-sm text-fg-muted">
+              No balances yet.{" "}
+              <Link href="/founders/finances/transactions#import" prefetch={false} className={linkClass}>
+                Import a bank statement
+              </Link>{" "}
+              to start.
+            </p>
+          ) : (
+            <ul className="divide-y divide-hairline">
+              {ov.cashAccounts.map((a) => (
+                <li key={a.id} className="py-2 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-fg-muted">{a.name}</span>
+                    <span className={`tabular-nums ${a.subtype === "credit_card" && a.balanceCents > 0 ? "text-status-warm" : "text-fg"}`}>
+                      {formatCents(a.balanceCents, "CAD")}
+                    </span>
+                  </div>
+                  {a.excludesDeposits && <div className="mt-0.5 text-xs text-status-warm">{BANK_NOT_CONNECTED}</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {ov.unreviewed > 0 && (
+            <Link href="/founders/finances/transactions?status=unreviewed" prefetch={false} className={`mt-3 block text-xs ${linkClass}`}>
+              {ov.unreviewed} transaction{ov.unreviewed === 1 ? "" : "s"} need a category
+            </Link>
+          )}
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card
+          title="Recurring expenses (monthly)"
+          subtitle={
+            recurring.rate
+              ? `Estimate in CAD. US$ converted at the ${recurring.rate.date} Bank of Canada rate (${recurring.rate.rate}).`
+              : "Estimate in CAD. Yearly costs divided by 12."
+          }
+          action={
+            <Link href="/founders/finances/bills#recurring" prefetch={false} className="text-xs text-fg-muted hover:text-fg">
+              Manage
+            </Link>
+          }
+          noPadding
+        >
+          {recurring.items.length === 0 ? (
+            <p className="p-5 text-sm text-fg-muted">
+              Nothing recurring yet.{" "}
+              <Link href="/founders/finances/bills#recurring" prefetch={false} className={linkClass}>
+                Add your subscriptions and rent
+              </Link>{" "}
+              on Bills &amp; Expenses.
+            </p>
+          ) : (
+            <table className="w-full text-sm">
+              <tbody className="divide-y divide-hairline">
+                {recurring.items.map((r) => (
+                  <tr key={r.id}>
+                    <td className="px-4 py-2.5 align-top text-fg">
+                      {r.name}
+                      <div className="text-xs text-fg-dim">
+                        {formatCents(r.amountCents, r.currency)} {CADENCE_LABEL[r.cadence] || r.cadence}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5 text-right align-top tabular-nums">
+                      {r.monthlyCadCents === null ? <span className="text-status-warm">{formatCents(r.monthlyCents, r.currency)}</span> : formatCents(r.monthlyCadCents, "CAD")}
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="px-4 py-2.5 font-semibold">Total per month</td>
+                  <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{formatCents(recurring.totalCadCents, "CAD")}</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          {recurring.unconverted > 0 && (
+            <p className="border-t border-hairline px-4 py-2 text-xs text-status-warm">
+              {recurring.unconverted} item{recurring.unconverted === 1 ? " is" : "s are"} not in the total: no exchange rate stored.{" "}
+              <Link href="/founders/finances/settings#exchange-rates" prefetch={false} className={linkClass}>
+                Fetch rates in Settings
+              </Link>
+            </p>
+          )}
+        </Card>
+
+        {ov.threshold && (
+          <Card
+            title="GST/QST registration threshold"
+            subtitle="Taxable revenue over the last four calendar quarters, current quarter to date"
+            action={
+              <Link href="/founders/finances/taxes" prefetch={false} className="text-xs text-fg-muted hover:text-fg">
+                Details
+              </Link>
+            }
+          >
+            <p className={`text-sm ${LEVEL_TONE[ov.threshold.level]}`}>{ov.threshold.message}</p>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-bg-elev">
+              <div className={`h-full ${LEVEL_BAR[ov.threshold.level]}`} style={{ width: `${Math.min(100, Math.round(ov.threshold.pct * 100))}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-fg-dim">
+              {formatCents(ov.threshold.totalCents, "CAD")} {ov.threshold.revenueComplete ? "of" : "recorded so far, of"} {formatCents(ov.threshold.thresholdCents, "CAD")}
+            </p>
+          </Card>
+        )}
+      </div>
+
+      <Card
+        title="Recent activity"
+        subtitle="Bank lines, payments, bills and expenses, newest first"
+        action={
+          <Link href="/founders/finances/transactions" prefetch={false} className="text-[13px] text-accent hover:underline">
+            All transactions
+          </Link>
+        }
+        noPadding
+      >
+        {recent.length === 0 ? (
+          <EmptyActivity />
+        ) : (
+          <ActivityTable rows={recent} />
+        )}
+      </Card>
+    </>
+  );
+}
+
+function EmptyActivity(): ReactNode {
+  return (
+    <p className="px-4 py-6 text-sm text-fg-muted">
+      Nothing recorded yet: no bank line, payment, bill or expense.{" "}
+      <Link href="/founders/finances/transactions#import" prefetch={false} className="text-accent hover:underline">
+        Import a bank statement
+      </Link>{" "}
+      or{" "}
+      <Link href="/founders/finances/bills#record" prefetch={false} className="text-accent hover:underline">
+        record an expense
+      </Link>
+      .
+    </p>
   );
 }

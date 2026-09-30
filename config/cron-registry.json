@@ -63,11 +63,11 @@
     },
     {
       "path": "/api/cron/finance-books?job=fx-refresh",
-      "schedule": "23 21 * * *"
+      "schedule": "47 21 * * *"
     },
     {
       "path": "/api/cron/finance-books?job=stripe-reconcile",
-      "schedule": "43 21 * * *"
+      "schedule": "53 21 * * *"
     },
     {
       "path": "/api/cron/finance-books?job=wise-reconcile",

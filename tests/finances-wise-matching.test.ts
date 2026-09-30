@@ -64,6 +64,8 @@ globalThis.fetch = (async (input: unknown) => {
   if (url.host === "api.stripe.com") {
     if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
     if (url.pathname === "/v1/payouts") return json({ object: "list", data: fixtures.payouts, has_more: false });
+    // A webhook event is proved to be the pinned account's before it is booked (stripe-ingest.ts stripeEventOrigin).
+    if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
   }
   throw new Error(`network disabled in test: ${url.host}${url.pathname}`);
 }) as typeof fetch;
@@ -797,37 +799,74 @@ async function main() {
     assert.equal(await native(chequing, "USD"), chequingBefore, "the US$20 is on the books once");
   });
 
-  // ── phase 10: the payout ADOPTS another bank line's entry between the feed's check and its write (CodeRabbit, PR #491) ──
+  // ── phase 10: a deposit entered by hand, then the Wise feed, then the payout (the #491 review, 2026-09-30) ──
+  // The sequence the #491 fix agent reproduced (chequing +1750 twice): a manual
+  // entry for the deposit exists and no payout has adopted it; the Wise feed
+  // posted its own line anyway; the payout event then adopted the Wise line by
+  // its tag and left the manual entry behind. Lead's decision: double-counted
+  // cash is worse than a held line, so the feed HOLDS its line while an
+  // unadopted entry of the payout's exact shape is on the books.
   usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24", "16:30"), value: 17.5, cur: "USD", ref: "TRANSFER-P7", running: 0, sender: "OASIS AI", payref: "5552103", desc: "Received money from OASIS AI with reference 5552103" });
   rerun(usdTx, 1000);
   publish();
   const poAdoptRace: Json = { id: "po_adopt_race", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 1750, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_7", amount: -1750, currency: "usd", fee: 0, net: -1750 } };
   fixtures.payouts.push(poAdoptRace);
-  // Stripe clearing covers the payout even after the line below takes its US$17.50, so only the gate can stop the feed.
+  // Stripe clearing covers the payout even after the line below takes its US$17.50, so only the hold can stop the feed.
   await usdCharge("ch_usd_p7", "2026-09-23", 4000);
 
-  await check("a payout that adopts another bank line's entry between the feed's check and its write: the feed's posting is refused (its gate), the deposit is on the books once", async () => {
+  await check("a deposit entered by hand, then the Wise feed, then the payout: the feed HOLDS its line (an unadopted entry of the payout's exact shape), the payout adopts the hand entry, the deposit is on the books once", async () => {
     const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
     const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
-    const { getTursoClient } = await import("../lib/turso");
-    // An uploaded statement's line for the same deposit, categorised to Stripe clearing; the payout has no row yet,
-    // so the feed's check (payoutBookedFromAnotherLine) finds nothing.
+    // 1. A manual bank entry for the deposit (Stripe clearing into chequing, US$17.50); no payout row yet, so nothing adopted it.
     await txns.createManualTransaction(cc, "oasis", { date: d("2026-09-24"), description: "STRIPE TRANSFER ADOPT RACE", amount: "17.50", currency: "USD", account_id: chequing, category_id: categoryId(B, SYS.stripeClearing) });
     const manual = (await raw.execute({ sql: `SELECT * FROM fin_bank_transactions WHERE description = 'STRIPE TRANSFER ADOPT RACE'`, args: [] })).rows[0];
     assert.ok(manual?.entry_id, "the manual line has its own entry");
     assert.equal(await payoutsIo.payoutBookedFromAnotherLine("po_adopt_race"), null, "nothing adopted it before the sync");
     const chequingBefore = await native(chequing, "USD");
-    // Test-only: the cached client's batch is shadowed so the payout adopts that entry just before the feed's write.
+    // 2. The Wise feed runs: it previews and then holds its own line for the payout, posting nothing.
+    const preview = (await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: true })).currencies.find((c) => c.currency === "USD")!;
+    const r = await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const usd = r.currencies.find((c) => c.currency === "USD")!;
+    assert.deepEqual([preview.stripe_payouts, preview.needs_review], [usd.stripe_payouts, usd.needs_review], "the preview says what the sync then does: held, not booked");
+    const p7 = await line("WISE-USD-CREDIT-TRANSFER-P7");
+    assert.deepEqual([p7.status, p7.entry_id], ["unreviewed", null], "held: the feed posted nothing for its line");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn' AND source_ref = ?`, [String(p7.id)]), 0, "no entry of the line's own");
+    assert.ok(String(p7.memo).includes(`Stripe payout po_adopt_race held: ${feedIo.PAYOUT_SHAPE_HOLD_REASON}`), `the plain reason: ${p7.memo}`);
+    assert.equal(await native(chequing, "USD"), chequingBefore, "nothing new in chequing");
+    // 3. The payout event arrives: with the Wise line held, it adopts the hand entry by its shape.
+    const adopted = await payoutsIo.recordStripePayout(payoutFacts(poAdoptRace)!);
+    assert.equal(adopted?.booking, "booked", adopted?.reason ?? "");
+    assert.equal(adopted?.entryId, manual.entry_id, "adopted the hand entry, not a Wise line or a new posting");
+    // 4. The deposit is on the books once, and the next sync holds the Wise line as that same deposit.
+    assert.equal(await native(chequing, "USD"), chequingBefore, "the US$17.50 is on the books once (the hand entry), not twice");
+    await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const held = await line("WISE-USD-CREDIT-TRANSFER-P7");
+    assert.deepEqual([held.status, held.entry_id], ["unreviewed", null]);
+    assert.match(String(held.memo), /Stripe payout po_adopt_race is already on the books from another bank line .*the same deposit a second time/);
+    assert.equal(await native(chequing, "USD"), chequingBefore);
+  });
+
+  // ── phase 10b: the same, with the hand entry landing between the feed's check and its write ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-25", "16:30"), value: 12.5, cur: "USD", ref: "TRANSFER-P8", running: 0, sender: "OASIS AI", payref: "5552104", desc: "Received money from OASIS AI with reference 5552104" });
+  rerun(usdTx, 1000);
+  publish();
+  const poHandRace: Json = { id: "po_hand_race", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-23"), amount: 1250, currency: "usd", arrival_date: arrival("2026-09-25"), balance_transaction: { id: "txn_8", amount: -1250, currency: "usd", fee: 0, net: -1250 } };
+  fixtures.payouts.push(poHandRace);
+  await usdCharge("ch_usd_p8", "2026-09-24", 4000);
+
+  await check("a hand entry of the payout's shape landing between the feed's check and its write: the feed's posting is refused (its gate), the deposit is on the books once", async () => {
+    const { getTursoClient } = await import("../lib/turso");
+    const chequingBefore = await native(chequing, "USD");
+    // Test-only: the cached client's batch is shadowed so a founder enters the deposit by hand just before the feed's write.
     const client = getTursoClient() as unknown as Record<string, unknown>;
     const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
     let raced = false;
     client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
       const b = JSON.stringify(stmts);
-      if (!raced && b.includes("txn.posted_by_feed") && b.includes("po_adopt_race")) {
+      if (!raced && b.includes("txn.posted_by_feed") && b.includes("po_hand_race")) {
         raced = true;
-        const adopted = await payoutsIo.recordStripePayout(payoutFacts(poAdoptRace)!);
-        assert.equal(adopted?.booking, "booked", adopted?.reason ?? "");
-        assert.equal(adopted?.entryId, manual.entry_id, "adopted the manual line's entry, not posted from Stripe");
+        delete client.batch;
+        await txns.createManualTransaction(cc, "oasis", { date: d("2026-09-25"), description: "STRIPE TRANSFER HAND RACE", amount: "12.50", currency: "USD", account_id: chequing, category_id: categoryId(B, SYS.stripeClearing) });
       }
       return original.call(this, stmts, ...rest);
     };
@@ -836,17 +875,16 @@ async function main() {
     } finally {
       delete client.batch;
     }
-    assert.ok(raced, "the adoption landed between the feed's check and its write");
-    const p7 = await line("WISE-USD-CREDIT-TRANSFER-P7");
-    assert.deepEqual([p7.status, p7.entry_id], ["unreviewed", null], "the feed posted nothing for its line");
-    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn' AND source_ref = ?`, [String(p7.id)]), 0, "no entry of the line's own");
-    assert.equal(await native(chequing, "USD"), chequingBefore, "the US$17.50 is on the books once (the manual line), not twice");
-    // The next sync sees the adoption and holds the line as the same deposit a second time.
+    assert.ok(raced, "the hand entry landed between the feed's check and its write");
+    const p8 = await line("WISE-USD-CREDIT-TRANSFER-P8");
+    assert.deepEqual([p8.status, p8.entry_id], ["unreviewed", null], "the feed posted nothing for its line");
+    assert.equal(await native(chequing, "USD"), chequingBefore + 1250, "the US$12.50 is on the books once (the hand entry), not twice");
+    // The next sync holds the line with the plain reason.
     await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
-    const held = await line("WISE-USD-CREDIT-TRANSFER-P7");
+    const held = await line("WISE-USD-CREDIT-TRANSFER-P8");
     assert.deepEqual([held.status, held.entry_id], ["unreviewed", null]);
-    assert.match(String(held.memo), /Stripe payout po_adopt_race is already on the books from another bank line .*the same deposit a second time/);
-    assert.equal(await native(chequing, "USD"), chequingBefore);
+    assert.ok(String(held.memo).includes(feedIo.PAYOUT_SHAPE_HOLD_REASON), String(held.memo));
+    assert.equal(await native(chequing, "USD"), chequingBefore + 1250);
   });
 
   await check("D, on screen: the Wise card says when an opening balance is in force and what posting again does", async () => {

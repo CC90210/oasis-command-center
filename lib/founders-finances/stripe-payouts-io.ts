@@ -308,6 +308,38 @@ function shapeArgs(row: Pick<PayoutRow, "id" | "arrival_date" | "currency" | "am
   ];
 }
 
+/**
+ * The Wise feed's hold (2026-09-30, the #491 review): an entry of this
+ * payout's exact shape that no payout has adopted yet, as a SQL condition on
+ * `e` (a fin_journal_entries row) with its args. The same shape a payout
+ * adopts (SHAPE_WHERE): posted, not a reversal, Stripe clearing credited, a
+ * bank or cash account debited the payout's amount in its currency, dated
+ * within PAYOUT_MATCH_WINDOW_DAYS of its arrival, owned by no payout, not
+ * another payout's tagged Wise line.
+ *
+ * WHY. A deposit entered by hand, then the Wise feed posting its own line for
+ * the same payout, then the payout event adopting the Wise line by its tag,
+ * left the hand entry behind: the deposit was in chequing twice (reproduced
+ * on #491: +1750 cents twice). Double-counted cash is worse than a held line,
+ * so while such an entry exists the feed holds its line for a founder, and
+ * posts nothing.
+ */
+export function unadoptedPayoutShape(p: { id: string; arrivalDate: string; currency: string; amountCents: number }): { sql: string; args: Array<string | number> } {
+  return { sql: SHAPE_WHERE, args: shapeArgs({ id: p.id, arrival_date: p.arrivalDate, currency: p.currency.toUpperCase(), amount_cents: p.amountCents }) };
+}
+
+/** The entry of this payout's exact shape already on the books and adopted by no payout (unadoptedPayoutShape), closest first; null when none. */
+export async function unadoptedPayoutShapedEntry(p: { id: string; arrivalDate: string; currency: string; amountCents: number }): Promise<{ entryId: string; entryDate: string } | null> {
+  if (p.amountCents <= 0) return null;
+  const shape = unadoptedPayoutShape(p);
+  const row = await queryOne<{ id: string; entry_date: string }>(
+    `SELECT e.id, e.entry_date FROM fin_journal_entries e WHERE ${shape.sql}
+      ORDER BY abs(julianday(e.entry_date) - julianday(?)), e.created_at, e.id LIMIT 1`,
+    [...shape.args, p.arrivalDate],
+  );
+  return row ? { entryId: row.id, entryDate: row.entry_date } : null;
+}
+
 /** The entry already on the books for this payout by its shape, closest to the arrival day first, and the account it debited. */
 async function existingPayoutEntry(row: PayoutRow): Promise<{ entry_id: string; account_id: string; entry_date: string } | null> {
   if (row.amount_cents <= 0) return null;

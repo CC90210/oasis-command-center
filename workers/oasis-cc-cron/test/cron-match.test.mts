@@ -107,4 +107,9 @@ test("the books' daily jobs each fire once a day, alone in their minute, in orde
     }
   }
   assert.deepEqual(fired.map((f) => f.job), order, "each job fires exactly once a day, in dependency order");
+  // The Bank of Canada publishes by 16:30 Eastern: 21:30 UTC in winter (EST).
+  // fx-refresh at 21:23 ran before it half the year (the #491 review), so it
+  // runs after 21:45 UTC, with the Stripe reconcile after it.
+  const fx = fired.find((f) => f.job === "fx-refresh");
+  assert.ok(fx && fx.minute >= 21 * 60 + 45, `fx-refresh fires after 21:45 UTC (fires at minute ${fx?.minute})`);
 });

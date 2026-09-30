@@ -1,11 +1,20 @@
 /**
  * /founders/finances/accounts — the business's chart of accounts with
  * balances, new accounts, and owner draws / contributions with the 50/50 view.
+ *
+ * Balances are ledger totals. While the book is incomplete the page says so
+ * first (BooksCoverageBanner), and a bank account that is below zero only
+ * because nothing records its deposits (paid bills posted against an account
+ * with no deposit and no bank line: books-coverage.ts
+ * bankBalanceExcludesDeposits) says "Bank not connected: balances exclude
+ * deposits" under its figure, so −CA$3,427.44 is never read as an overdraft.
  */
 import { Card, PageHeader } from "@/components/Card";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
+import { BooksCoverageBanner } from "@/components/founders/finances/BooksCoverageBanner";
 import { numClass, primaryButton, tableClass, tdClass } from "@/components/founders/finances/ui";
 import { financePage, loadAccountsPage, type SearchParams } from "@/lib/founders-finances/page-context";
+import { BANK_NOT_CONNECTED, bankBalanceExcludesDeposits } from "@/lib/founders-finances/books-coverage";
 import { CASH_SUBTYPES } from "@/lib/founders-finances/chart";
 import { naturalBalance } from "@/lib/founders-finances/ledger";
 import { formatCents } from "@/lib/founders-finances/money";
@@ -18,7 +27,7 @@ const TYPE_LABEL: Record<string, string> = { asset: "Assets", liability: "Liabil
 
 export default async function AccountsPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity } = await financePage(searchParams);
-  const { today, accounts, lines, equity } = await loadAccountsPage(viewer, entity);
+  const { today, accounts, lines, equity, coverage } = await loadAccountsPage(viewer, entity);
   const sums = new Map<string, { d: number; c: number }>();
   for (const l of lines) {
     const s = sums.get(l.accountId) || { d: 0, c: 0 };
@@ -27,18 +36,25 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
     sums.set(l.accountId, s);
   }
   const cashAccounts = accounts.filter((a) => CASH_SUBTYPES.has(a.subtype));
+  const bankLinesByCode = new Map(coverage.cash.accounts.map((a) => [a.code, a.bankLines]));
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Accounts"
-        subtitle="Every account in the books with its balance today, in CAD, plus what each owner has taken out or put in."
+        subtitle={
+          coverage.complete
+            ? "Every account in the books with its balance today, in CAD, plus what each owner has taken out or put in."
+            : "Every account in the books with its ledger total today, in CAD, plus what each owner has taken out or put in. The books are incomplete, so these are not balances yet."
+        }
         action={
           <a href="#owner-draws" className={primaryButton}>
             Record a draw
           </a>
         }
       />
+
+      <BooksCoverageBanner coverage={coverage} figures="The totals below" />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {TYPE_ORDER.map((type) => {
@@ -50,14 +66,16 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
                   {list.map((a) => {
                     const s = sums.get(a.id) || { d: 0, c: 0 };
                     const bal = naturalBalance(a.type, s.d, s.c);
+                    const noDeposits = bankBalanceExcludesDeposits({ account: a, balanceCents: bal, lines, bankLines: bankLinesByCode.get(a.code) ?? 0 });
                     return (
                       <tr key={a.id}>
                         <td className={`${tdClass} w-16 tabular-nums text-fg-dim`}>{a.code}</td>
                         <td className={tdClass}>
                           {a.name}
                           <span className="ml-2 text-[10px] uppercase tracking-wider text-fg-dim">{a.subtype.replace(/_/g, " ")}</span>
+                          {noDeposits && <div className="mt-0.5 text-[11px] text-status-warm">{BANK_NOT_CONNECTED}</div>}
                         </td>
-                        <td className={`${tdClass} ${numClass} ${bal === 0 ? "text-fg-dim" : "text-fg"}`}>{formatCents(bal, "CAD")}</td>
+                        <td className={`${tdClass} ${numClass} ${bal === 0 ? "text-fg-dim" : noDeposits ? "text-fg-muted" : "text-fg"}`}>{formatCents(bal, "CAD")}</td>
                       </tr>
                     );
                   })}
