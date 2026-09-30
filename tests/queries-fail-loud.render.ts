@@ -66,10 +66,10 @@ function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
 
 /**
  * One frame of a component with each useState slot preset and effects inert.
- * BridgeCliPanel reaches its heartbeat branches only after its browser probe
- * of the local bridge fails, and renderToStaticMarkup runs no effects, so this
- * hands it the post-probe state directly. Like framesOf, it knows useState and
- * useEffect only, so any other hook fails loudly here.
+ * BridgeCliPanel reaches its heartbeat branches only after its poll of
+ * /api/bridge/cli-status answers, and renderToStaticMarkup runs no effects, so
+ * this hands it the post-poll state directly. Like framesOf, it knows useState
+ * and useEffect only, so any other hook fails loudly here.
  */
 function frameWithState<P>(component: (props: P) => unknown, props: P, states: unknown[]): El {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
@@ -135,10 +135,24 @@ async function main() {
   const { AgentConfigEditor, BridgeToolAccess } = await import("../components/settings/AgentConfigEditor");
   const { OsRail } = await import("../components/os/OsRail");
   const { BridgeCliPanel } = await import("../components/BridgeCliPanel");
-  // The panel's state once its localhost probe has failed.
-  const probeFailed = { loading: false, reachable: false, data: null, error: "probe_failed" };
-  const cliPanel = (serverBridgeOnline: boolean | null) =>
-    renderToStaticMarkup(frameWithState(BridgeCliPanel, { serverBridgeOnline }, [probeFailed]));
+  // The panel's state once its poll of the server's CLI inventory answered.
+  const polled = (result: unknown) => ({ loading: false, result });
+  const noReport = polled({ kind: "body", status: 200, body: { ok: false, reason: "missing" } });
+  const cliPanel = (serverBridgeOnline: boolean | null, state: unknown = noReport) =>
+    renderToStaticMarkup(frameWithState(BridgeCliPanel, { serverBridgeOnline }, [state]));
+  const hint = "https://example.test/install";
+  const report = polled({
+    kind: "body",
+    status: 200,
+    body: {
+      ok: true,
+      data: {
+        claude: { installed: true, authenticated: true, version: "2.1.0", install_hint_url: hint },
+        codex: { installed: true, authenticated: false, version: null, install_hint_url: hint },
+        gemini: { installed: false, authenticated: false, version: null, install_hint_url: hint },
+      },
+    },
+  });
   const railSections = [
     {
       key: "team" as const,
@@ -209,6 +223,9 @@ async function main() {
     cliUnknown: cliPanel(null),
     cliOffline: cliPanel(false),
     cliOnline: cliPanel(true),
+    cliReport: cliPanel(true, report),
+    cliNetworkError: cliPanel(true, polled({ kind: "network_error", message: "fetch failed" })),
+    cliSignedOut: cliPanel(true, polled({ kind: "body", status: 401, body: { ok: false, reason: "unauthorized" } })),
   };
 
   // The same mounted card across a refresh. The key read fails, the operator

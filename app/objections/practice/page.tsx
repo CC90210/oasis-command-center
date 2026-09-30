@@ -27,7 +27,7 @@ export const dynamic = "force-dynamic";
 
 export default async function PracticePage() {
   const session = await resolveSessionContext();
-  if (!session.ok) redirect("/auth/login?next=/objections/practice");
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent("/objections/practice")}`);
   if (!mayViewObjectionLibrary(session)) redirect("/");
 
   let pool: PracticeObjection[] = [];

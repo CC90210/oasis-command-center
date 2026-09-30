@@ -132,6 +132,8 @@ for (const chart of ["GoalPaceChart", "PipelineFunnel"]) {
 }
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+/** /operations' tiles, from lib/admin/attention.ts (the /health numbers). */
+const OPS_TILES = ["Errors today", "Warnings today", "Failed automations", "Workers down", "Cold leads"];
 const CC = { id: "0f000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" };
 
 // ── A server-tree walker that awaits async components ─────────────────────
@@ -270,9 +272,10 @@ async function main() {
   await check("/operations: failed health counts and pairings say Couldn't check, never All clear or 0 bridges online", async () => {
     const { text, client } = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
     assert.equal(one(client, "BridgeCliPanel").serverBridgeOnline, null, "the CLI panel is told the heartbeat is unknown, not stale");
-    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+    for (const tile of OPS_TILES) {
       assert.match(text, new RegExp(`${tile} Couldn't check`), `${tile}: an unread count is not a number`);
     }
+    assert.doesNotMatch(text, /Stalled outbound/, "the retired SunBiz tile is gone");
     assert.doesNotMatch(text, /All clear/, "all clear needs every count read");
     assert.match(text, /Bridges: couldn't check/);
     assert.doesNotMatch(text, /\d+ bridge ?s? online/); // the walker spaces JSX text pieces
@@ -367,7 +370,10 @@ async function main() {
   // Last in phase 1: it leaves both cron tables in place for phase 2.
   await check("/operations: Failed automations sums two counts, so either one unread keeps it Couldn't check", async () => {
     const tile = async () => (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
-    await db.execute("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT, last_result TEXT)");
+    await db.execute(
+      `CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, action_type TEXT, owner_agent_key TEXT,
+         last_run_at TEXT, last_result TEXT, fail_count INTEGER DEFAULT 0, tenant_id TEXT NOT NULL)`,
+    );
     assert.match(await tile(), /Failed automations Couldn't check/, "tenant_cron_jobs unread, cron_jobs readable");
     await db.execute("ALTER TABLE cron_jobs RENAME TO cron_jobs_parked");
     await db.execute(
@@ -396,11 +402,20 @@ async function main() {
       encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
     CREATE TABLE application_lender_threads (id TEXT PRIMARY KEY, tenant_id TEXT, application_id TEXT, lender_id TEXT,
       recipient_email TEXT, status TEXT, sent_at TEXT);
+    CREATE TABLE health_check_runs (id TEXT PRIMARY KEY, tenant_id TEXT, check_id TEXT, verdict TEXT,
+      observed REAL, baseline REAL, reason TEXT, ran_at TEXT);
+    CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, first_failed_at TEXT,
+      last_alerted_at TEXT, repeat_n INTEGER);
   `);
   await db.batch(
     [
       { sql: "INSERT INTO tenant_records VALUES ('l1', ?, 'lead', '{\"stage\":\"won\",\"source\":\"referral\"}', ?, ?)", args: [OASIS, now, now] },
       { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL)", args: [OASIS] },
+      // OASIS's founder-booking check passed just now: a readable, healthy board.
+      {
+        sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-ok', ?, 'calendar.workspace_credential_usable', 'ok', NULL, ?)",
+        args: [OASIS, now],
+      },
     ],
     "write",
   );
@@ -413,7 +428,7 @@ async function main() {
     assert.equal(one(opsRender.client, "BridgeCliPanel").serverBridgeOnline, false);
     assert.match(ops, /No events recorded yet/);
     assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions|paired machines)/);
-    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+    for (const tile of OPS_TILES) {
       assert.match(ops, new RegExp(`${tile} 0 `), `${tile}: a readable empty count is a real 0`);
     }
     assert.match(ops, /All clear/);
@@ -434,6 +449,36 @@ async function main() {
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
     assert.match(settings.text, /Tool access: cloud only/);
     assert.equal((await (await shellStatus.GET()).json()).bridgeOnline, false);
+  });
+
+  // One count, two pages (lib/admin/attention.ts needsYouCount). /health's
+  // header counts the founder-booking check (a header saying "Nothing needs
+  // you" above a failing check is what lib/health/outcome-panel-data.ts exists
+  // to prevent), so /operations' All clear must count it too.
+  await check("/health's header and /operations' All clear agree: a failing founder-booking check needs you on both", async () => {
+    const pages = async () => ({
+      ops: (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text,
+      health: (await render(await HealthPage())).text,
+    });
+    const passing = await pages();
+    assert.match(passing.health, /Nothing needs you/);
+    assert.match(passing.ops, /All clear/);
+    assert.doesNotMatch(passing.ops, /Outcome checks:/);
+    await db.execute({
+      sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-fail', ?, 'calendar.workspace_credential_usable', 'failing', 'workspace credential rejected', ?)",
+      args: [OASIS, new Date(Date.now() + 1000).toISOString()],
+    });
+    try {
+      const failing = await pages();
+      for (const tile of OPS_TILES) {
+        assert.match(failing.ops, new RegExp(`${tile} 0 `), `${tile}: the alarm counts are still 0`);
+      }
+      assert.match(failing.health, /\b1 need ?s you/, "the header counts the failing check");
+      assert.doesNotMatch(failing.ops, /All clear/, "All clear reads the same count");
+      assert.match(failing.ops, /Outcome checks: 1 need ?s you/, "and says where it is");
+    } finally {
+      await db.execute("DELETE FROM health_check_runs WHERE id = 'hc-fail'");
+    }
   });
 
   // ── The client components draw the unknown they are handed ──────────────
@@ -513,13 +558,21 @@ async function main() {
     assert.match(plain(html.railOffline), /bridge offline/);
 
     // /operations hands BridgeCliPanel null when bridge_pairings could not be
-    // read. After its localhost probe fails, that is "Couldn't check", never
-    // the red "no recent heartbeat is on file" a known-false heartbeat earns.
+    // read. The panel reads the server's CLI inventory (2026-09-30: the bridge
+    // answers 401 to a browser); with no report yet, an unread heartbeat is
+    // "Couldn't check", never the "isn't checking in" a known-false one earns.
     const cliUnknown = plain(html.cliUnknown);
-    assert.match(cliUnknown, /Couldn't check the local bridge/);
-    assert.doesNotMatch(cliUnknown, /isn't reachable|no recent heartbeat/);
-    assert.match(plain(html.cliOffline), /Local bridge isn't reachable/, "a KNOWN stale heartbeat is still the red state");
-    assert.match(plain(html.cliOnline), /Bridge is online/);
+    assert.match(cliUnknown, /Couldn't check whether your computer is checking in/);
+    assert.doesNotMatch(cliUnknown, /isn't checking in/);
+    assert.match(plain(html.cliOffline), /Your computer isn't checking in/, "a KNOWN stale heartbeat is still the warm state");
+    assert.match(plain(html.cliOnline), /Your computer is checking in/);
+    assert.doesNotMatch(plain(html.cliOnline), /only renders when you load this page on the bridge machine/, "the old false claim is gone");
+    const cliReport = plain(html.cliReport);
+    assert.match(cliReport, /Claude Code Signed in/);
+    assert.match(cliReport, /Codex Installed, not signed in/);
+    assert.match(cliReport, /Gemini Not installed/);
+    assert.match(plain(html.cliNetworkError), /Couldn't check your computer's AI tools/);
+    assert.match(plain(html.cliSignedOut), /You're signed out/);
   });
 
   if (failures > 0) {
