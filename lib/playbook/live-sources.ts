@@ -28,6 +28,7 @@ import { BUSINESS_ENTITY_ID } from "@/lib/founders-finances/chart";
 import { AUTOMATION_ADD_ONS, WEBSITE_PACKAGES } from "@/lib/website-sales";
 import { SECURITY_MODEL_VERIFIED, securityModelMarkdown } from "./security-model";
 import { elementToMarkdown } from "./element-markdown";
+import { SMALL_SUPPLIER_RULE } from "./regulatory";
 import { isoFromLongDate } from "./status";
 import type { LiveSourceKey } from "./catalog";
 
@@ -191,7 +192,7 @@ function gstMarkdown(g: Awaited<ReturnType<typeof readGstQst>>): string {
     lines.push(
       "**Not registered for GST or QST.**",
       "",
-      "Invoices carry no GST or QST while the business is not registered. Registration becomes mandatory once taxable sales pass the small-supplier threshold over four consecutive calendar quarters; confirm the threshold and the date it was crossed with the accountant, and record the registration in Finances settings the day it is made.",
+      `Invoices carry no GST or QST while the business is not registered. ${SMALL_SUPPLIER_RULE} Record the registration in Finances settings the day it is made.`,
     );
   }
   lines.push("", `Legal name on invoices: ${g.legalName || "Missing - needs CC: the legal name"}`, "");

@@ -11,13 +11,17 @@
  *   Superseded  replaced; kept for the record.
  *   Unknown     the stored text could not be read. Never "Missing": an
  *               unreadable row is not an absent one.
+ *   Not set up  document storage does not exist yet (bravo__194 not
+ *               applied). Never "Missing" either: nobody has looked for the
+ *               text, because there is nowhere to keep it (the migration's
+ *               own contract).
  *
  * PURE. Callers pass the clock, so tests pin time.
  */
 
 import type { CatalogDoc } from "./catalog";
 
-export type DocStatus = "current" | "review_due" | "draft" | "missing" | "superseded" | "unknown";
+export type DocStatus = "current" | "review_due" | "draft" | "missing" | "superseded" | "unknown" | "not_set_up";
 
 export const STATUS_LABEL: Readonly<Record<DocStatus, string>> = {
   current: "Current",
@@ -26,6 +30,7 @@ export const STATUS_LABEL: Readonly<Record<DocStatus, string>> = {
   missing: "Missing",
   superseded: "Superseded",
   unknown: "Couldn't check",
+  not_set_up: "Not set up yet",
 };
 
 export const PLACEHOLDER_OPEN = "[[CC to confirm";
@@ -71,10 +76,12 @@ export function isReviewDue(sourceDate: string | null, reviewEveryDays: number |
 export type StatusInput =
   | { kind: "live"; sourceDate: string | null }
   | { kind: "stored"; row: StoredStatusFields | null }
-  | { kind: "unreadable" };
+  | { kind: "unreadable" }
+  | { kind: "storage_not_ready" };
 
 export function deriveStatus(doc: Pick<CatalogDoc, "reviewEveryDays">, input: StatusInput, now: Date): DocStatus {
   if (input.kind === "unreadable") return "unknown";
+  if (input.kind === "storage_not_ready") return "not_set_up";
   if (input.kind === "live") return isReviewDue(input.sourceDate, doc.reviewEveryDays, now) ? "review_due" : "current";
   const row = input.row;
   if (!row) return "missing";

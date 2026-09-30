@@ -36,6 +36,7 @@
  * Run: node --conditions=react-server --import tsx tests/playbook-docs.test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -191,6 +192,55 @@ function stringLiterals(src: string, file: string): string[] {
 
 const rel = (f: string) => relative(ROOT, f).split(sep).join("/");
 
+/**
+ * Every `href` a server element tree would draw. Plain server components
+ * (DrillCard, StepRow) are called to see what they return; a component that
+ * cannot run here (a client component using hooks under react-server) is
+ * descended through its children instead, which is where a page passes the
+ * links it builds.
+ */
+function collectHrefs(node: unknown, out: string[] = []): string[] {
+  if (node === null || node === undefined || typeof node === "boolean") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) collectHrefs(n, out);
+    return out;
+  }
+  if (!isValidElement(node)) return out;
+  const props = (node.props ?? {}) as Record<string, unknown>;
+  if (typeof props.href === "string") out.push(props.href);
+  if (typeof node.type === "function") {
+    let rendered: unknown;
+    try {
+      rendered = (node.type as (p: unknown) => unknown)(props);
+    } catch {
+      rendered = undefined;
+    }
+    if (rendered !== undefined && !(rendered instanceof Promise)) collectHrefs(rendered, out);
+  }
+  for (const v of Object.values(props)) {
+    if (isValidElement(v) || Array.isArray(v)) collectHrefs(v, out);
+  }
+  return out;
+}
+
+/** The first element in a server element tree `pick` accepts, without calling components. */
+function findElement(node: unknown, pick: (el: ReactNS.ReactElement) => boolean): ReactNS.ReactElement | null {
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = findElement(n, pick);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!isValidElement(node)) return null;
+  if (pick(node)) return node;
+  for (const v of Object.values((node.props ?? {}) as Record<string, unknown>)) {
+    const hit = findElement(v, pick);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /** Make every public fs read throw, run `fn`, restore. The Worker has no filesystem. */
 async function withoutFilesystem<T>(fn: () => Promise<T>): Promise<T> {
   const target = fs as unknown as Record<string, unknown>;
@@ -343,13 +393,68 @@ async function main() {
     assert.deepEqual(c.consumeAskParam("?q=hello"), { present: false, text: null, rest: "q=hello" });
     assert.deepEqual(c.consumeAskParam("?ask="), { present: true, text: null, rest: "" });
   });
-  await check("the department composer reads ?ask= through consumeAskParam, prefills only when the channel is ready, replaces the URL, and never sends", () => {
-    const src = readFileSync(join(ROOT, "components", "os", "department", "ComposerContext.tsx"), "utf8");
-    assert.match(src, /consumeAskParam\(window\.location\.search\)/);
-    assert.match(src, /if \(text && channelReady\) ask\(text\);/);
-    assert.match(src, /window\.history\.replaceState\(/);
-    assert.match(src, /askRead\.current = true;/, "read once");
-    assert.ok(!/fetch\(|\.submit\(|send\(/.test(src), "the composer context must never send");
+  await check("?ask= run against a window: the composer is prefilled, the URL is cleaned, and nothing is submitted, fetched or sent", async () => {
+    const c = await import("../lib/os/chat-href");
+    // Every door the read must NOT open records the attempt: the document (a
+    // form's requestSubmit, a button click), fetch, and a navigation.
+    const touched: string[] = [];
+    const g = globalThis as unknown as Record<string, unknown>;
+    const saved = { document: g.document, fetch: g.fetch };
+    const recorder = (name: string) =>
+      new Proxy(() => undefined, {
+        get: (_t, prop) => {
+          touched.push(`${name}.${String(prop)}`);
+          return recorder(`${name}.${String(prop)}`);
+        },
+        apply: () => {
+          touched.push(`${name}()`);
+          return recorder(`${name}()`);
+        },
+      });
+    const run = (search: string, channelReady: boolean) => {
+      const prefilled: string[] = [];
+      const replaced: string[] = [];
+      const location = { search, pathname: "/team/finance", hash: "#channel", assign: recorder("location.assign"), replace: recorder("location.replace") };
+      const win = { location, history: { state: { k: 1 }, replaceState: (_d: unknown, _u: string, url?: string | null) => void replaced.push(String(url)) } };
+      const out = c.applyAskParam(win, channelReady, (t) => void prefilled.push(t));
+      return { out, prefilled, replaced };
+    };
+    try {
+      g.document = recorder("document");
+      g.fetch = recorder("fetch");
+      const ready = run("?ask=Draft%20the%20tax%20calendar&tab=x", true);
+      assert.deepEqual(ready.prefilled, ["Draft the tax calendar"], "the composer is prefilled with the ask");
+      assert.equal(ready.out, "Draft the tax calendar");
+      assert.deepEqual(ready.replaced, ["/team/finance?tab=x#channel"], "the URL loses ?ask= and keeps the rest");
+      const notReady = run("?ask=Hello", false);
+      assert.deepEqual(notReady.prefilled, [], "a channel that cannot answer is not prefilled");
+      assert.deepEqual(notReady.replaced, ["/team/finance#channel"], "the URL is still cleaned");
+      const absent = run("?q=hello", true);
+      assert.deepEqual([absent.prefilled, absent.replaced], [[], []], "no ?ask=, nothing happens");
+    } finally {
+      g.document = saved.document;
+      g.fetch = saved.fetch;
+    }
+    assert.deepEqual(touched, [], `the ?ask= read reached past location and history: ${touched.join(", ")}`);
+  });
+  await check("the department composer's mount effect is exactly the one ?ask= read, once, and adds nothing to it", () => {
+    const file = join(ROOT, "components", "os", "department", "ComposerContext.tsx");
+    const src = readFileSync(file, "utf8");
+    const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const bodies: string[][] = [];
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "useEffect") {
+        const fn = n.arguments[0];
+        if (fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) && ts.isBlock(fn.body)) {
+          bodies.push(fn.body.statements.map((s) => s.getText(sf).replace(/\s+/g, " ")));
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    assert.deepEqual(bodies, [["if (askRead.current) return;", "askRead.current = true;", "applyAskParam(window, channelReady, ask);"]]);
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.ok(!/\bfetch\(|\.submit\(|requestSubmit|\bsend\(|\bdocument\./.test(code), "the composer context must never send");
   });
   await check("after a write the document page reloads from the server (a folded router.refresh showed stale Draft over a Current row)", () => {
     for (const f of ["app/playbook/business/[slug]/DocActions.tsx", "app/playbook/business/[slug]/IncidentRegister.tsx"]) {
@@ -366,8 +471,18 @@ async function main() {
       "app/playbook/client-deploy/page.tsx",
       "components/reasoning/QuickActionsGrid.tsx",
     ]) {
-      assert.match(readFileSync(join(ROOT, f), "utf8"), /askDepartment\(/, f);
+      assert.match(readFileSync(join(ROOT, f), "utf8"), /askDepartment\(|askIfOpen\(/, f);
     }
+  });
+  await check("askIfOpen links only to a department the viewer may open, and never a prompt it would cut", async () => {
+    const c = await import("../lib/os/chat-href");
+    assert.equal(c.askIfOpen("finance", "Tax?", ["finance"]), "/team/finance?ask=Tax%3F");
+    assert.equal(c.askIfOpen("finance", "Tax?", ["sales", "chief-of-staff"]), null);
+    assert.equal(c.askIfOpen("finance", "x".repeat(c.ASK_MAX_CHARS + 1), ["finance"]), null);
+    assert.equal(c.teamSlugOf("/team/marketing"), "marketing");
+    assert.equal(c.teamSlugOf("/team/finance?ask=x"), "finance");
+    assert.equal(c.teamSlugOf("/pipeline"), null);
+    assert.equal(c.teamSlugOf("/teams"), null);
   });
 
   // Migration and fixtures for the stored half.
@@ -429,6 +544,60 @@ async function main() {
 
   const { resolveDocsViewer } = await import("../lib/playbook/viewer");
   const docs = await import("../lib/playbook/documents");
+
+  // ── 3b. ask links follow the rail ────────────────────────────────────────
+  await check("a sales rep is handed no /team/<dept> link they cannot open (drills, client-deploy, prompts); a founder still is", async () => {
+    const { resolveOsViewer } = await import("../components/os/department/viewer");
+    const { departmentGate } = await import("../components/os/department/gate");
+    const { OS_DEPARTMENTS } = await import("../lib/os/departments");
+    const { teamSlugOf } = await import("../lib/os/chat-href");
+    const pageFor = (dir: string) => pages.get(playbookPages.find((f) => f.includes(`${sep}${dir}${sep}page.tsx`))!)!;
+    const drills = pageFor("drills");
+    const deploy = pageFor("client-deploy");
+    const prompts = pageFor("prompts");
+
+    const html: Record<string, string> = {};
+    const promptScenarios: Array<{ id: string; props: Record<string, unknown> }> = [];
+    const allowed: Record<string, Set<string>> = {};
+    const links: Record<string, string[]> = {};
+    for (const who of ["rep", "cc"] as const) {
+      await login(who);
+      const os = await resolveOsViewer();
+      assert.ok(os.ok, `${who}: the rail could not resolve the viewer`);
+      allowed[who] = new Set(OS_DEPARTMENTS.filter((d) => departmentGate(d.slug, os.navInput)).map((d) => d.slug));
+      links[who] = [...collectHrefs(await drills({})), ...collectHrefs(await deploy({}))];
+      const filter = findElement(await prompts({}), (el) => typeof el.props === "object" && el.props !== null && "openDepartments" in (el.props as object));
+      assert.ok(filter, "the prompts page renders the library filter");
+      const props = filter.props as Record<string, unknown>;
+      assert.deepEqual([...(props.openDepartments as string[])].sort(), [...allowed[who]].sort(), `${who}: the prompts library is told exactly the departments the rail opens`);
+      promptScenarios.push({ id: who, props });
+    }
+    // The fixture must be the case that matters: the rep may NOT open Marketing
+    // or Finance, and may open the Chief of Staff.
+    assert.ok(!allowed.rep.has("marketing") && !allowed.rep.has("finance"), `rep opens: ${[...allowed.rep].join(", ")}`);
+    assert.ok(allowed.rep.has("chief-of-staff") && allowed.cc.has("marketing"), "positive controls");
+
+    // The prompts library's cards are a client component: render them for real.
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/playbook-prompts.render.ts"], { encoding: "utf8", env, input: JSON.stringify(promptScenarios), cwd: ROOT });
+    assert.equal(r.status, 0, `the prompts render helper exited ${r.status}:\n${r.stderr}`);
+    Object.assign(html, JSON.parse(r.stdout) as Record<string, string>);
+    for (const who of ["rep", "cc"] as const) {
+      for (const m of (html[who] ?? "").matchAll(/href="([^"]+)"/g)) links[who].push(m[1].replace(/&amp;/g, "&"));
+    }
+
+    const teamLinks = (who: "rep" | "cc") => links[who].map((h) => teamSlugOf(h)).filter((s): s is string => s !== null);
+    const blocked = teamLinks("rep").filter((s) => !allowed.rep.has(s));
+    assert.deepEqual([...new Set(blocked)], [], "the rep was handed links to departments that 404 for them");
+    assert.ok(teamLinks("rep").includes("chief-of-staff"), "the rep still gets the asks they may open");
+    assert.ok(teamLinks("cc").includes("marketing"), "a founder still gets Ask Marketing");
+    assert.ok(/Ask Marketing/.test(html.cc ?? "") && !/Ask Marketing/.test(html.rep ?? ""), "the prompts library draws Ask Marketing for the founder only");
+  });
 
   await check("the privacy policy document is the live /privacy text, with Copy and Download", async () => {
     await login("cc");
@@ -581,6 +750,23 @@ async function main() {
     assert.equal((await draftRoute.POST(req("/api/playbook/docs/sales-enablement-guide/draft", { method: "POST", body: {} }), params("sales-enablement-guide"))).status, 403);
     assert.equal((await draftRoute.POST(req("/api/playbook/docs/okrs/draft", { method: "POST", body: {} }), params("okrs"))).status, 404);
     assert.equal((await markRoute.POST(req("/api/playbook/docs/sales-enablement-guide/mark-current", { method: "POST", body: { expected_version: 1 } }), params("sales-enablement-guide"))).status, 403);
+    // EDIT: a founder drafts a team document the rep can read; the rep's PUT
+    // over it is refused and the text stands.
+    await login("cc");
+    const drafted = await draftRoute.POST(req("/api/playbook/docs/sales-enablement-guide/draft", { method: "POST", body: {} }), params("sales-enablement-guide"));
+    assert.equal(drafted.status, 200, await drafted.clone().text());
+    const before = (await db.execute({ sql: "SELECT body_md, version FROM playbook_docs WHERE tenant_id = ? AND slug = 'sales-enablement-guide'", args: [OASIS] })).rows[0];
+    await login("rep");
+    const readable = await oneRoute.GET(req("/api/playbook/docs/sales-enablement-guide"), params("sales-enablement-guide"));
+    assert.equal(readable.status, 200, "the rep can read the team document");
+    const put = await oneRoute.PUT(
+      req("/api/playbook/docs/sales-enablement-guide", { method: "PUT", body: { body_md: "# Rep rewrite", expected_version: Number(before.version) } }),
+      params("sales-enablement-guide"),
+    );
+    assert.equal(put.status, 403, await put.clone().text());
+    const after = (await db.execute({ sql: "SELECT body_md, version FROM playbook_docs WHERE tenant_id = ? AND slug = 'sales-enablement-guide'", args: [OASIS] })).rows[0];
+    assert.deepEqual([after.body_md, Number(after.version)], [before.body_md, Number(before.version)], "the rep's edit changed the document");
+    assert.equal((await oneRoute.PUT(req("/api/playbook/docs/okrs", { method: "PUT", body: { body_md: "x", expected_version: 1 } }), params("okrs"))).status, 404, "a founders document is a 404 to the rep");
   });
   await check("writes are refused cross-origin (CSRF)", async () => {
     await login("cc");
@@ -619,6 +805,27 @@ async function main() {
     await login("rep");
     assert.equal((await inc.GET()).status, 404);
     assert.equal((await inc.POST(req("/api/playbook/incidents", { method: "POST", body: entry }))).status, 404);
+  });
+  await check("a correction must name an entry that exists in this register; a real one appends", async () => {
+    const inc = await import("../app/api/playbook/incidents/route");
+    await login("cc");
+    const entry = {
+      personal_info: "Name and email of one lead",
+      circumstances: "Correction of the test entry",
+      occurred_period: "2026-09-29",
+      aware_at: "2026-09-30",
+      risk_assessment: "Low sensitivity, one person",
+      measures: "Access revoked",
+    };
+    const n0 = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM privacy_incidents WHERE tenant_id = ?", args: [OASIS] })).rows[0].n);
+    const bad = await inc.POST(req("/api/playbook/incidents", { method: "POST", body: { ...entry, corrects_id: "no-such-entry" } }));
+    assert.equal(bad.status, 400, await bad.clone().text());
+    assert.deepEqual(await bad.json(), { ok: false, error: "invalid_field", field: "corrects_id" });
+    const n1 = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM privacy_incidents WHERE tenant_id = ?", args: [OASIS] })).rows[0].n);
+    assert.equal(n1, n0, "a correction of nothing was recorded");
+    const first = (await db.execute({ sql: "SELECT id FROM privacy_incidents WHERE tenant_id = ? ORDER BY recorded_at LIMIT 1", args: [OASIS] })).rows[0].id as string;
+    const ok = await inc.POST(req("/api/playbook/incidents", { method: "POST", body: { ...entry, corrects_id: first } }));
+    assert.equal(ok.status, 201, await ok.clone().text());
   });
 
   // ── 6. import ───────────────────────────────────────────────────────────
@@ -685,6 +892,29 @@ async function main() {
     const row = await db.execute({ sql: "SELECT body_md FROM playbook_docs WHERE slug = 'law25-incident-register'", args: [] });
     assert.ok(!String(row.rows[0].body_md).includes("Overwrite attempt"));
   });
+  await check("an imported document a founder edits in the app becomes the founder's: the next changed import skips it", async () => {
+    const imp = await import("../app/api/internal/playbook/import/route");
+    process.env.BRIDGE_BEARER_TOKEN_OASIS_AI_CC = IMPORT_TOKEN;
+    const auth = { authorization: `Bearer ${IMPORT_TOKEN}` };
+    // decisions-log was imported above (source 'import', version 1).
+    const start = (await db.execute({ sql: "SELECT source, version, body_md FROM playbook_docs WHERE tenant_id = ? AND slug = 'decisions-log'", args: [OASIS] })).rows[0];
+    assert.equal(start.source, "import");
+    await login("cc");
+    const edited = `${String(start.body_md)}\n- 2026-09-30: CC's own added decision.\n`;
+    const put = await oneRoute.PUT(req("/api/playbook/docs/decisions-log", { method: "PUT", body: { body_md: edited, expected_version: Number(start.version) } }), params("decisions-log"));
+    assert.equal(put.status, 200, await put.clone().text());
+    const res = await imp.POST(req("/api/internal/playbook/import", { method: "POST", headers: auth, body: { docs: [{ slug: "decisions-log", body_md: "# Decisions log\n\nimported v2", source_ref: "BEA memory/DECISIONS.md" }] } }));
+    const body = (await res.json()) as { skipped: number; updated?: number; results: Array<{ status: string; error?: string }> };
+    assert.equal(body.skipped, 1, JSON.stringify(body));
+    const row = (await db.execute({ sql: "SELECT source, source_ref, body_md, version FROM playbook_docs WHERE tenant_id = ? AND slug = 'decisions-log'", args: [OASIS] })).rows[0];
+    assert.equal(row.body_md, edited, "the import replaced the founder's edit");
+    assert.equal(row.source, "in_app");
+    assert.equal(row.source_ref, "BEA memory/DECISIONS.md", "where it was first imported from stays on record");
+    const v = await resolveDocsViewer();
+    assert.ok(v.ok);
+    const resolved = await docs.resolveDoc(v, "decisions-log", db, new Date());
+    assert.equal(resolved?.sourceLabel, "Edited in the app (first imported from BEA memory/DECISIONS.md)");
+  });
   await check("the secret scanner fires on each planted shape and not on ordinary prose", async () => {
     const { findSecret } = await import("../lib/playbook/import");
     assert.equal(findSecret("-----BEGIN RSA PRIVATE KEY-----"), "private_key_block");
@@ -708,6 +938,7 @@ async function main() {
     assert.equal(status.deriveStatus(d, { kind: "stored", row: row({ status: "current", source_updated_at: "2026-05-01" }) }, now), "review_due");
     assert.equal(status.deriveStatus(d, { kind: "stored", row: row({ status: "superseded" }) }, now), "superseded");
     assert.equal(status.deriveStatus(d, { kind: "unreadable" }, now), "unknown");
+    assert.equal(status.deriveStatus(d, { kind: "storage_not_ready" }, now), "not_set_up");
     assert.equal(status.deriveStatus(d, { kind: "live", sourceDate: "2026-01-01" }, now), "review_due");
     assert.equal(status.deriveStatus(d, { kind: "live", sourceDate: null }, now), "current", "no recorded date is not overdue");
     assert.equal(status.isoFromLongDate("September 28, 2026"), "2026-09-28");
@@ -793,6 +1024,87 @@ async function main() {
       console.error = originalError;
       await db.execute("ALTER TABLE fin_settings_offline RENAME TO fin_settings");
     }
+  });
+  await check("the list reads an unreadable GST/QST status as Couldn't check, never Current", async () => {
+    await login("cc");
+    const v = await resolveDocsViewer();
+    assert.ok(v.ok && v.founder);
+    const gstRow = async () => (await docs.listDocs(v, db, new Date("2026-09-30T12:00:00Z"))).rows.find((r) => r.doc.slug === "gst-qst-registration");
+    assert.equal((await gstRow())?.status, "current", "control: a readable status is current");
+    await db.execute("ALTER TABLE fin_settings RENAME TO fin_settings_offline");
+    const originalError = console.error;
+    console.error = () => undefined;
+    try {
+      const row = await gstRow();
+      assert.equal(row?.status, "unknown");
+      assert.equal(row?.sourceDate, null);
+    } finally {
+      console.error = originalError;
+      await db.execute("ALTER TABLE fin_settings_offline RENAME TO fin_settings");
+    }
+  });
+  await check("before bravo__194 is applied, stored documents read 'Not set up yet', never Missing, on the list and on the page", async () => {
+    await login("cc");
+    const v = await resolveDocsViewer();
+    assert.ok(v.ok && v.founder);
+    // A database with no playbook tables at all: the migration not applied.
+    const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "playbook-bare-")), "bare.db")}` });
+    const originalError = console.error;
+    console.error = () => undefined;
+    try {
+      const { rows, storage } = await docs.listDocs(v, bare, new Date("2026-09-30T12:00:00Z"));
+      assert.equal(storage, "table_missing");
+      const stored = rows.filter((r) => r.doc.source.kind === "stored");
+      assert.ok(stored.length > 0);
+      assert.deepEqual([...new Set(stored.map((r) => r.status))], ["not_set_up"]);
+      assert.equal(rows.filter((r) => r.status === "missing").length, 0, "nothing reads Missing while storage does not exist");
+      assert.equal(rows.filter((r) => r.doc.required && r.status === "missing").length, 0, "no required document is counted missing");
+      const one = await docs.resolveDoc(v, "okrs", bare, new Date("2026-09-30T12:00:00Z"));
+      assert.equal(one?.status, "not_set_up");
+      assert.equal(one?.storage, "table_missing");
+      assert.equal(one?.canDraft, false);
+      assert.equal(status.STATUS_LABEL.not_set_up, "Not set up yet");
+    } finally {
+      console.error = originalError;
+      bare.close();
+    }
+  });
+  await check("drafts state facts the product holds: the delivery stages Projects tracks, both small-supplier triggers, the partnership registration rule", async () => {
+    const tpl = await import("../lib/playbook/templates");
+    const rules = await import("../lib/delivery/rules");
+    const ctx = {
+      today: "2026-09-30",
+      legal: tpl.legalFacts(),
+      finance: { ok: true as const, value: { registered: false, gstNumber: "", qstNumber: "", effectiveDate: null, legalName: "OASIS AI Solutions" } },
+      goal: { ok: true as const, value: null },
+    };
+    const delivery = tpl.renderTemplate({ slug: "delivery-checklist" }, ctx);
+    const stagesLine = delivery.split("\n").find((l) => /the stages Projects tracks/.test(l)) ?? "";
+    assert.equal(stagesLine, `- ${rules.PROJECT_STAGES.map((s) => rules.PROJECT_STAGE_LABELS[s]).join(", ")} (the stages Projects tracks).`);
+    const tax = tpl.renderTemplate({ slug: "quebec-tax-calendar" }, ctx);
+    const live = await import("../lib/playbook/live-sources");
+    const gst = (await live.renderLiveSource("gst_qst_status", db)).markdown;
+    for (const [name, text] of [["tax calendar", tax], ["GST/QST document", gst]] as const) {
+      assert.match(text, /CA\$30,000/, `${name}: the threshold`);
+      assert.match(text, /in a single calendar quarter/, `${name}: the single-quarter trigger`);
+      assert.match(text, /over the last four consecutive calendar quarters/, `${name}: the four-quarter trigger`);
+    }
+    const neq = tpl.renderTemplate({ slug: "enterprise-registration" }, ctx);
+    assert.match(neq, /general partnership formed in Quebec must be registered whatever its name/);
+  });
+  await check("the security model, repeated to clients, names no internal agent", async () => {
+    const sm = await import("../lib/playbook/security-model");
+    const text = [sm.securityModelMarkdown(), sm.SECURITY_SUMMARY, ...sm.SECURITY_SECTIONS.map((s) => `${s.title} ${s.subtitle} ${s.body}`)].join("\n");
+    assert.doesNotMatch(text, /bravo|maven|atlas|conaugh/i);
+    assert.match(text, /field-encryption key \(a Cloudflare Worker secret\)/);
+  });
+  await check("the client onboarding SOP does not present the harness provisioning script as a working path", async () => {
+    const pb = await import("../lib/playbooks");
+    const body = pb.loadPlaybook("07-new-client-onboarding").body;
+    const step1 = body.split(/^## /m).find((s) => s.startsWith("Step 1")) ?? "";
+    assert.match(step1, /Missing - needs CC: there is no working way to create a client workspace and its first owner/);
+    assert.match(step1, /does not work either/);
+    assert.doesNotMatch(body, /created from the BEA harness with/);
   });
   await check("visibility rule: founders see all four levels, every other persona three, and the SQL clause matches", async () => {
     const vis = await import("../lib/playbook/visibility");

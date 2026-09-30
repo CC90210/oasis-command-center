@@ -143,6 +143,11 @@ export default async function BusinessDocPage({ params }: { params: Promise<{ sl
           </article>
         ) : r.bodyError ? (
           <p className="text-sm text-fg-muted">{r.bodyError}</p>
+        ) : r.status === "not_set_up" ? (
+          <div className="space-y-2 text-sm text-fg-muted">
+            <p className="font-semibold text-fg">Not set up yet</p>
+            <p>This document is kept in document storage, which is not set up yet, so whether it has been written is not known here.</p>
+          </div>
         ) : (
           <div className="space-y-2 text-sm text-fg-muted">
             <p className="font-semibold text-fg">Missing - needs CC</p>

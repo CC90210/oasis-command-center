@@ -18,7 +18,7 @@ import Link from "next/link";
 import { ArrowRight, Check, Copy, Search, ShieldAlert, User as UserIcon, Users, X } from "lucide-react";
 import { Card } from "@/components/Card";
 import { copyText } from "@/lib/clipboard";
-import { askDepartment, departmentForAgent, departmentLabel, fitsAskLink } from "@/lib/os/chat-href";
+import { askIfOpen, departmentForAgent, departmentLabel, fitsAskLink } from "@/lib/os/chat-href";
 import type {
   PromptCategory,
   PromptEntry,
@@ -31,6 +31,12 @@ type Props = {
   operatorCategories: PromptCategory[];
   clientCategories: PromptCategory[];
   categoryDefs: Record<PromptCategory, CategoryDef>;
+  /**
+   * The departments the viewer may open, computed on the server with the
+   * rail's gate (lib/playbook/ask-access.ts). A prompt whose department is not
+   * in it gets Copy only: a sales rep's "Ask Finance" would be a 404.
+   */
+  openDepartments: readonly string[];
 };
 
 export function PromptsLibraryFilter({
@@ -38,6 +44,7 @@ export function PromptsLibraryFilter({
   operatorCategories,
   clientCategories,
   categoryDefs,
+  openDepartments,
 }: Props) {
   const [query, setQuery] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -141,7 +148,7 @@ export function PromptsLibraryFilter({
                     <Card key={cat} title={def.label} subtitle={def.description}>
                       <div className="grid sm:grid-cols-2 gap-2.5">
                         {list.map((p) => (
-                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
+                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} open={openDepartments} />
                         ))}
                       </div>
                     </Card>
@@ -170,7 +177,7 @@ export function PromptsLibraryFilter({
                     <Card key={cat} title={def.label} subtitle={def.description}>
                       <div className="grid sm:grid-cols-2 gap-2.5">
                         {list.map((p) => (
-                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
+                          <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} open={openDepartments} />
                         ))}
                       </div>
                     </Card>
@@ -190,7 +197,7 @@ export function PromptsLibraryFilter({
               <Card title="Agent tooling + shared routines" subtitle="Use these in any OASIS workspace.">
                 <div className="grid sm:grid-cols-2 gap-2.5">
                   {sharedPrompts.map((p) => (
-                    <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} />
+                    <PromptCard key={p.id} p={p} copied={copiedId === p.id} onCopy={copyPrompt} open={openDepartments} />
                   ))}
                 </div>
               </Card>
@@ -202,11 +209,23 @@ export function PromptsLibraryFilter({
   );
 }
 
-function PromptCard({ p, copied, onCopy }: { p: PromptEntry; copied: boolean; onCopy: (prompt: PromptEntry) => void }) {
+function PromptCard({
+  p,
+  copied,
+  onCopy,
+  open,
+}: {
+  p: PromptEntry;
+  copied: boolean;
+  onCopy: (prompt: PromptEntry) => void;
+  open: readonly string[];
+}) {
   // The department that answers for this prompt's agent (lib/os/chat-href.ts).
-  // A prompt too long for a link is offered as Copy only, never cut to fit.
+  // A prompt too long for a link, or whose department this viewer may not
+  // open, is offered as Copy only, never cut to fit or linked to a 404.
   const dept = departmentForAgent(p.agent);
-  const href = fitsAskLink(p.prompt) ? askDepartment(dept, p.prompt) : null;
+  const tooLong = !fitsAskLink(p.prompt);
+  const href = askIfOpen(dept, p.prompt, open);
   const isOverride = p.category === "system_override";
   return (
     <div className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3">
@@ -233,9 +252,9 @@ function PromptCard({ p, copied, onCopy }: { p: PromptEntry; copied: boolean; on
             <Link href={href} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-accent hover:border-accent/50 transition-colors">
               Ask {departmentLabel(dept)} <ArrowRight className="w-3 h-3" />
             </Link>
-          ) : (
+          ) : tooLong && open.includes(dept) ? (
             <span className="text-[11px] text-fg-dim">Too long for a link: copy it into the {departmentLabel(dept)} channel.</span>
-          )}
+          ) : null}
           <button type="button" onClick={() => onCopy(p)} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-fg hover:border-fg-dim transition-colors" aria-label={`Copy ${p.title} prompt`}>
             {copied ? <Check className="w-3 h-3 text-status-engaged" /> : <Copy className="w-3 h-3" />}
             {copied ? "Copied" : "Copy prompt"}

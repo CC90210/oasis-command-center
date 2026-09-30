@@ -63,6 +63,25 @@ export function askDepartment(dept: AskDepartmentSlug, prompt: string): string {
   return body ? `${base}?${ASK_PARAM}=${encodeURIComponent(body)}` : base;
 }
 
+/**
+ * The ask link for `prompt`, or null when the viewer may not open `dept` or
+ * the prompt does not fit in a link. `open` is the set of departments the
+ * server computed for this viewer with the rail's own gate
+ * (lib/playbook/ask-access.ts openAskDepartments): every OASIS member reads the
+ * Playbook, but a sales rep cannot open Marketing or Finance, and a link to a
+ * department they cannot open is a "Page not found".
+ */
+export function askIfOpen(dept: AskDepartmentSlug, prompt: string, open: readonly string[]): string | null {
+  if (!open.includes(dept) || !fitsAskLink(prompt)) return null;
+  return askDepartment(dept, prompt);
+}
+
+/** The department slug a `/team/<slug>` href opens, or null for any other href. */
+export function teamSlugOf(href: string): string | null {
+  const m = /^\/team\/([a-z-]+)(?:[?#/]|$)/.exec(href);
+  return m ? m[1] : null;
+}
+
 /** The department's label ("Chief of Staff"), for link text. */
 export function departmentLabel(dept: AskDepartmentSlug): string {
   const row = OS_DEPARTMENTS.find((d) => d.slug === dept);
@@ -122,4 +141,31 @@ export function consumeAskParam(search: string): { present: boolean; text: strin
   const text = (params.get(ASK_PARAM) || "").trim().slice(0, ASK_MAX_CHARS);
   params.delete(ASK_PARAM);
   return { present: true, text: text || null, rest: params.toString() };
+}
+
+/** The part of `window` the composer's `?ask=` read touches, and nothing else. */
+export type AskWindow = {
+  location: { search: string; pathname: string; hash: string };
+  history: { state: unknown; replaceState(data: unknown, unused: string, url?: string | null): void };
+};
+
+/**
+ * The department composer's one read of `?ask=` (ComposerContext calls this
+ * once, on mount, with `window`): hand the text to `prefill` when the channel
+ * can answer, then replace the URL without the parameter. It returns the text
+ * it prefilled (null when none).
+ *
+ * It only PREFILLS. It touches the location and history it is given and
+ * nothing else: no form, no fetch, no send. Sending stays the person's own
+ * keystroke (tests/playbook-docs.test.ts runs it against a window whose every
+ * other door records the attempt).
+ */
+export function applyAskParam(win: AskWindow, channelReady: boolean, prefill: (text: string) => void): string | null {
+  const { present, text, rest } = consumeAskParam(win.location.search);
+  if (!present) return null;
+  const filled = text && channelReady ? text : null;
+  if (filled) prefill(filled);
+  const clean = `${win.location.pathname}${rest ? `?${rest}` : ""}${win.location.hash}`;
+  win.history.replaceState(win.history.state, "", clean);
+  return filled;
 }

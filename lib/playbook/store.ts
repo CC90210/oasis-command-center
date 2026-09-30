@@ -256,6 +256,11 @@ export async function createDraft(
  * again: an edited text needs marking current again. Refused with `conflict`
  * when the document moved past `expectedVersion`, `unchanged` when the text is
  * the same.
+ *
+ * An edit makes the text the founder's: `source` becomes `in_app` (the
+ * migration's "drafted or edited here"), so a later harness import answers
+ * `in_app_owned` instead of replacing it. `source_ref` is kept, so where an
+ * imported document first came from stays on record.
  */
 export async function updateBody(
   db: Client,
@@ -271,7 +276,7 @@ export async function updateBody(
   if (cur.body_md !== null && sha256Hex(cur.body_md) === sha) return { ok: false, reason: "unchanged" };
   const results = await batch(db, [
     {
-      sql: `UPDATE playbook_docs SET body_md = ?, content_sha256 = ?, status = 'draft', approved_by = NULL, approved_at = NULL,
+      sql: `UPDATE playbook_docs SET body_md = ?, content_sha256 = ?, status = 'draft', source = 'in_app', approved_by = NULL, approved_at = NULL,
               version = version + 1, updated_by = ?, updated_at = ?
             WHERE tenant_id = ? AND slug = ? AND version = ? AND status != 'superseded'`,
       args: [body, sha, actor, now, tenantId, slug, expectedVersion],
@@ -330,8 +335,9 @@ export type ImportInput = {
 /**
  * The harness import. A new document lands as a draft; a changed one replaces
  * the text of a document the import owns and returns it to draft. The same
- * hash is `unchanged` (a no-op, no version). A document drafted or edited in
- * the app is `in_app_owned`: an import never overwrites a founder's text.
+ * hash is `unchanged` (a no-op, no version). A document drafted in the app, or
+ * an imported one a founder has since edited (updateBody sets source =
+ * 'in_app'), is `in_app_owned`: an import never overwrites a founder's text.
  */
 export async function importDoc(db: Client, input: ImportInput): Promise<WriteResult<{ version: number; action: "created" | "updated" }>> {
   const { tenantId, doc, body, sourceRef, sourceUrl, sourceUpdatedAt, actor, now } = input;

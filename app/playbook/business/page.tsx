@@ -34,7 +34,7 @@ export default async function BusinessDocsPage() {
 
   const counts = rows.reduce<Record<DocStatus, number>>(
     (acc, r) => ({ ...acc, [r.status]: acc[r.status] + 1 }),
-    { current: 0, review_due: 0, draft: 0, missing: 0, superseded: 0, unknown: 0 },
+    { current: 0, review_due: 0, draft: 0, missing: 0, superseded: 0, unknown: 0, not_set_up: 0 },
   );
   const requiredMissing = rows.filter((r) => r.doc.required && r.status === "missing").length;
 
@@ -55,6 +55,7 @@ export default async function BusinessDocsPage() {
             {counts.draft > 0 && <Tag tone="info">{counts.draft} draft</Tag>}
             <Tag tone="hot">{counts.missing} missing</Tag>
             {counts.unknown > 0 && <Tag>{counts.unknown} couldn&apos;t check</Tag>}
+            {counts.not_set_up > 0 && <Tag>{counts.not_set_up} not set up yet</Tag>}
           </div>
         }
       />

@@ -51,6 +51,10 @@ export function docsDb(): Client | null {
 
 function storedSource(row: StoredDoc): { label: string; date: string | null } {
   if (row.source === "import") return { label: `Imported (${row.source_ref || "harness"})`, date: row.source_updated_at ?? row.updated_at };
+  // An imported document a founder edited keeps where it came from.
+  if (row.source_ref && row.source_ref !== "template") {
+    return { label: `Edited in the app (first imported from ${row.source_ref})`, date: row.approved_at ?? row.updated_at };
+  }
   return { label: "Written in the app", date: row.approved_at ?? row.updated_at };
 }
 
@@ -96,6 +100,11 @@ export async function listDocs(viewer: DocsViewer, db: Client | null, now: Date)
       return { doc, status: deriveStatus(doc, { kind: "live", sourceDate: b.date }, now), sourceLabel: b.label, sourceDate: b.date };
     }
     if (storage === "read_failed") return { doc, status: "unknown" as DocStatus, sourceLabel: "Stored document", sourceDate: null };
+    // No storage yet (bravo__194 not applied) is "not set up", never "missing":
+    // nobody looked for the text, there is nowhere to keep it yet.
+    if (storage === "table_missing") {
+      return { doc, status: deriveStatus(doc, { kind: "storage_not_ready" }, now), sourceLabel: "Document storage (not set up yet)", sourceDate: null };
+    }
     const row = stored.get(doc.slug) ?? null;
     // A row whose own visibility the reader may not see was not fetched: it
     // reads as missing to them, never as a hint that it exists.
@@ -171,10 +180,15 @@ export async function resolveDoc(viewer: DocsViewer, slug: string, db: Client | 
     const v = await listVersions(db, viewer.tenantId, doc.slug);
     versions = v.ok ? v.value : null;
   }
-  const s = row ? storedSource(row) : { label: "Not written yet", date: null };
+  const s =
+    storage === "table_missing"
+      ? { label: "Document storage (not set up yet)", date: null }
+      : row
+        ? storedSource(row)
+        : { label: "Not written yet", date: null };
   return {
     doc,
-    status: deriveStatus(doc, { kind: "stored", row }, now),
+    status: storage === "table_missing" ? deriveStatus(doc, { kind: "storage_not_ready" }, now) : deriveStatus(doc, { kind: "stored", row }, now),
     sourceLabel: s.label,
     sourceDate: s.date,
     body: row?.body_md ?? null,

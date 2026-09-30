@@ -12,7 +12,8 @@ import {
   Handshake,
 } from "lucide-react";
 import { PROMPTS_LIBRARY } from "@/lib/prompts-library";
-import { askDepartment, departmentForAgent, departmentLabel, fitsAskLink } from "@/lib/os/chat-href";
+import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 
 export const dynamic = "force-dynamic";
 
@@ -270,12 +271,16 @@ const PHASES: Phase[] = [
   },
 ];
 
-function StepRow({ step }: { step: Phase["steps"][number] }) {
+function StepRow({ step, open }: { step: Phase["steps"][number]; open: readonly string[] }) {
   const prompt = step.promptId ? PROMPT_BY_ID.get(step.promptId) : null;
   // The step's prompt goes to the department that answers for its agent
-  // (lib/os/chat-href.ts); the channel prefills it and never sends it.
+  // (lib/os/chat-href.ts); the channel prefills it and never sends it. Only
+  // when the viewer may open that department (a link to one they cannot open
+  // is a 404); a department link in the step follows the same rule.
   const promptDept = prompt ? departmentForAgent(prompt.agent) : null;
-  const promptHref = prompt && promptDept && fitsAskLink(prompt.prompt) ? askDepartment(promptDept, prompt.prompt) : null;
+  const promptHref = prompt && promptDept ? askIfOpen(promptDept, prompt.prompt, open) : null;
+  const ctaSlug = step.cta ? teamSlugOf(step.cta.href) : null;
+  const cta = step.cta && (ctaSlug === null || open.includes(ctaSlug)) ? step.cta : null;
   return (
     <li className="border-l-2 border-bg-border pl-4 py-2 hover:border-accent/40 transition-colors">
       <div className="flex items-start gap-2">
@@ -292,12 +297,12 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
                 <Sparkles className="w-3 h-3" /> Ask {promptDept ? departmentLabel(promptDept) : ""}
               </Link>
             )}
-            {step.cta && (
+            {cta && (
               <Link
-                href={step.cta.href}
+                href={cta.href}
                 className="text-[11px] text-fg-muted hover:text-accent inline-flex items-center gap-1"
               >
-                {step.cta.label} →
+                {cta.label} →
               </Link>
             )}
           </div>
@@ -310,6 +315,7 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
 export default async function ClientDeployPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
+  const open = await openAskDepartments();
   const totalSteps = PHASES.reduce((acc, p) => acc + p.steps.length, 0);
 
   return (
@@ -423,7 +429,7 @@ export default async function ClientDeployPage() {
             <p className="text-sm text-fg-muted leading-relaxed mb-4">{phase.body}</p>
             <ul className="space-y-1">
               {phase.steps.map((step, i) => (
-                <StepRow key={i} step={step} />
+                <StepRow key={i} step={step} open={open} />
               ))}
             </ul>
           </Card>

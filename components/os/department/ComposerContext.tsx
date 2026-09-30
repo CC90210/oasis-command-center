@@ -17,7 +17,7 @@
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { consumeAskParam } from "@/lib/os/chat-href";
+import { applyAskParam } from "@/lib/os/chat-href";
 
 /** `nonce` changes on every ask, so asking the same thing twice still refills. */
 export type ComposerDraft = { text: string; nonce: number };
@@ -52,16 +52,14 @@ export function ComposerProvider({
   // useSearchParams follow it) without refetching the page; useRouter would
   // also tie this provider to a mounted router, which a server render of the
   // tab (tests/os-channels-honest) does not have. The ref keeps a re-render
-  // from reading the parameter a second time.
+  // from reading the parameter a second time. applyAskParam
+  // (lib/os/chat-href.ts) is the whole read; this effect adds nothing to it,
+  // and tests/playbook-docs.test.ts pins both halves.
   const askRead = useRef(false);
   useEffect(() => {
     if (askRead.current) return;
     askRead.current = true;
-    const { present, text, rest } = consumeAskParam(window.location.search);
-    if (!present) return;
-    if (text && channelReady) ask(text);
-    const clean = `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`;
-    window.history.replaceState(window.history.state, "", clean);
+    applyAskParam(window, channelReady, ask);
   }, [ask, channelReady]);
 
   const value = useMemo(() => ({ draft, ask, channelReady }), [draft, ask, channelReady]);

@@ -16,6 +16,7 @@ export const STATUS_TONE: Readonly<Record<DocStatus, TagTone>> = {
   missing: "hot",
   superseded: "neutral",
   unknown: "neutral",
+  not_set_up: "neutral",
 };
 
 /** "2026-09-28" or an ISO time -> "Sep 28, 2026". Null -> "date not recorded". Unparseable -> the raw text. */

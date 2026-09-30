@@ -8,6 +8,7 @@ import {
 } from "@/lib/prompts-library";
 import { ArrowLeft } from "lucide-react";
 import { PromptsLibraryFilter } from "@/components/playbook/PromptsLibraryFilter";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,10 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
 export default async function PromptsLibraryPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
+  // The departments this viewer may open (the rail's gate). A prompt whose
+  // department they cannot open is offered as Copy only, never as a link
+  // that answers "Page not found".
+  const openDepartments = await openAskDepartments();
   // Client-deployment prompts are hidden from the operator page (2026-08-04
   // consolidation audit). They're the "SSH'd into a client's machine"
   // toolkit — 17 entries that pushed CC's own daily prompts below the fold
@@ -99,6 +104,7 @@ Do not send, post or publish anything. Prepare every draft and list them for my 
         operatorCategories={OPERATOR_CATEGORIES}
         clientCategories={[]}
         categoryDefs={PROMPT_CATEGORIES}
+        openDepartments={openDepartments}
       />
     </div>
   );

@@ -7,6 +7,8 @@
  * cannot be marked current unchecked.
  */
 
+import { PROJECT_STAGES, PROJECT_STAGE_LABELS } from "@/lib/delivery/rules";
+import { ENTERPRISE_REGISTRATION_RULE, SMALL_SUPPLIER_RULE } from "../regulatory";
 import { confirm, money, type TemplateContext } from "./context";
 import { doc, entityLine, header, section, type DocTemplate } from "./shared";
 
@@ -45,7 +47,7 @@ export const enterpriseRegistration: DocTemplate = (ctx) =>
     header(
       "Enterprise registration (NEQ)",
       ctx,
-      `Whether ${ctx.legal.entity} is registered with the Registraire des entreprises du Quebec. A business carried on under a name that is not its owners' own names must be registered.`,
+      `Whether ${ctx.legal.entity} is registered with the Registraire des entreprises du Quebec. ${ENTERPRISE_REGISTRATION_RULE}`,
     ),
     section(
       "Status",
@@ -120,7 +122,7 @@ export const quebecTaxCalendar: DocTemplate = (ctx) =>
     section(
       "GST/QST",
       `- ${gstLine(ctx)}`,
-      "- Registration becomes mandatory once taxable sales pass the small-supplier threshold over four consecutive calendar quarters. Record the registration in Finances settings the day it is made, then add the filing dates here.",
+      `- ${SMALL_SUPPLIER_RULE} Record the registration in Finances settings the day it is made, then add the filing dates here.`,
     ),
     section("Set aside", `- ${confirm("the share of each payment received that is set aside for tax, as the accountant recommends")}`),
   );
@@ -307,7 +309,9 @@ export const salesEnablementGuide: DocTemplate = (ctx) =>
 export const deliveryChecklist: DocTemplate = (ctx) =>
   doc(
     header("Delivery checklist and QA gate", ctx, "What ships at each stage of a website build, and the checks nothing passes without."),
-    section("Stages", "- Onboarding, in build, client review, launched (the delivery stages Projects tracks)."),
+    // The stages Projects actually tracks (lib/delivery/rules.ts), never a
+    // list typed here that the product does not use.
+    section("Stages", `- ${PROJECT_STAGES.map((s) => PROJECT_STAGE_LABELS[s]).join(", ")} (the stages Projects tracks).`),
     section("Each stage", `- ${confirm("the checklist for each stage")}`),
     section("QA gate", `- ${confirm("the checks a build must pass before the client sees it (forms deliver, mobile layout, analytics, SEO basics)")}`),
   );

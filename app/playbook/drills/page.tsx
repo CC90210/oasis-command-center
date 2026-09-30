@@ -1,7 +1,8 @@
 import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { askDepartment, departmentForAgent, departmentLabel } from "@/lib/os/chat-href";
+import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 import {
   ArrowLeft, ScanFace, Repeat, Mic, BarChart3, Calendar, Clock,
   Sparkles, Target, MessageSquare, TrendingUp, Sword, Brain, Zap,
@@ -270,6 +271,9 @@ const CATEGORY_TONE: Record<Drill["category"], string> = {
 export default async function DrillsPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
+  // The departments this viewer may open (the rail's gate): a rep is never
+  // handed an "Ask Finance" or a "Marketing channel" link that 404s.
+  const open = await openAskDepartments();
   const core = DRILLS.filter((d) => d.intensity === "core");
   const advanced = DRILLS.filter((d) => d.intensity === "advanced");
 
@@ -324,7 +328,7 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {core.map((d) => (
-            <DrillCard key={d.num} drill={d} />
+            <DrillCard key={d.num} drill={d} open={open} />
           ))}
         </div>
       </Card>
@@ -336,7 +340,7 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {advanced.map((d) => (
-            <DrillCard key={d.num} drill={d} />
+            <DrillCard key={d.num} drill={d} open={open} />
           ))}
         </div>
       </Card>
@@ -350,12 +354,16 @@ export default async function DrillsPage() {
   );
 }
 
-function DrillCard({ drill: d }: { drill: Drill }) {
+function DrillCard({ drill: d, open }: { drill: Drill; open: readonly string[] }) {
   const Icon = DRILL_ICONS[d.icon];
   // The drill's prompt goes to the department that answers for its agent
-  // (lib/os/chat-href.ts); the channel prefills it and never sends it.
+  // (lib/os/chat-href.ts); the channel prefills it and never sends it. Only
+  // when the viewer may open that department; a department channel link
+  // follows the same rule.
   const chatDept = d.chat ? departmentForAgent(d.chat.agent) : null;
-  const chatHref = d.chat && chatDept ? askDepartment(chatDept, d.chat.prompt) : null;
+  const chatHref = d.chat && chatDept ? askIfOpen(chatDept, d.chat.prompt, open) : null;
+  const linkSlug = d.link ? teamSlugOf(d.link.href) : null;
+  const link = d.link && (linkSlug === null || open.includes(linkSlug)) ? d.link : null;
   return (
     <Card>
       <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">
@@ -386,7 +394,7 @@ function DrillCard({ drill: d }: { drill: Drill }) {
         <span className="text-accent font-bold uppercase tracking-wider">Output → </span>
         <span className="text-fg-muted italic">{d.output}</span>
       </div>
-      {(chatHref || d.link) && (
+      {(chatHref || link) && (
         <div className="mt-3 flex items-center gap-3 flex-wrap text-xs">
           {chatHref && (
             <Link
@@ -396,9 +404,9 @@ function DrillCard({ drill: d }: { drill: Drill }) {
               <Sparkles size={12} /> Ask {chatDept ? departmentLabel(chatDept) : ""}
             </Link>
           )}
-          {d.link && (
-            <Link href={d.link.href} className="text-fg-muted hover:text-accent inline-flex items-center gap-1">
-              <BarChart3 size={12} /> {d.link.label}
+          {link && (
+            <Link href={link.href} className="text-fg-muted hover:text-accent inline-flex items-center gap-1">
+              <BarChart3 size={12} /> {link.label}
             </Link>
           )}
           {d.intensity === "advanced" && (

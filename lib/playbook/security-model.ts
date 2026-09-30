@@ -61,8 +61,11 @@ export const SECURITY_SECTIONS: readonly SecuritySection[] = [
     subtitle: "Worker secrets for the deployment; AES-256-GCM for workspace keys.",
     body: [
       "- Deployment secrets (the encryption key, the session key, provider keys) are Cloudflare Worker secrets. They are not in the code or the repository.",
-      "- AI provider keys a workspace connects are encrypted before storage (`lib/field-encryption.ts`): AES-256-GCM, which detects tampering, with the key derived by scrypt from `BRAVO_FIELD_ENCRYPTION_KEY` and a fixed deploy-wide salt. They are stored as `base64(iv).base64(authTag).base64(ciphertext)` in `agent_model_config.encrypted_api_key`.",
-      "- Known limit: one encryption key serves every workspace, with no key id and no rotation. Rotating `BRAVO_FIELD_ENCRYPTION_KEY` today would make every stored key unreadable.",
+      // The key's variable name (lib/field-encryption.ts) carries an internal
+      // agent's name, and these are words repeated to clients: say what the
+      // key is, not what it is called.
+      "- AI provider keys a workspace connects are encrypted before storage (`lib/field-encryption.ts`): AES-256-GCM, which detects tampering, with the key derived by scrypt from the deployment's field-encryption key (a Cloudflare Worker secret) and a fixed deploy-wide salt. They are stored as `base64(iv).base64(authTag).base64(ciphertext)` in `agent_model_config.encrypted_api_key`.",
+      "- Known limit: one encryption key serves every workspace, with no key id and no rotation. Rotating the field-encryption key today would make every stored key unreadable.",
     ].join("\n"),
   },
   {

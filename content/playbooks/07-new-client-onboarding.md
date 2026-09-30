@@ -21,9 +21,12 @@ Audience: operator
 
 ## Step 1 - Create the workspace and its first owner
 
-Today a client workspace and its first owner are created from the BEA harness with `scripts/provision_client_tenant.py` (it reads `CLIENT_EMAIL`, `CLIENT_PASSWORD`, `CLIENT_BRAND` and `CLIENT_FULL_NAME` from the environment, so no credential sits in the command). An owner cannot be invited from inside the app: the invite form never offers the Owner role.
+**Missing - needs CC: there is no working way to create a client workspace and its first owner on the current stack yet.**
 
-**Missing - needs CC:** confirm this is the path to use until the in-app client setup ships, and who sends the owner their first password.
+- The app does not do it. Sign-up is invite-only and no longer creates a workspace, and an owner cannot be invited from inside the app: the invite form never offers the Owner role.
+- The old harness script (`scripts/provision_client_tenant.py` in BEA) does not work either. It creates the owner's sign-in through the previous database's hosted auth service, which did not move to Turso: on the current stack that call is refused, and nothing the app reads is written. Do not run it for a client.
+
+Until an owner-provisioning path is built and has been run once end to end, stop at this step and tell CC the client is ready to be set up. CC decides who creates the workspace and who sends the owner their first password.
 
 ## Step 2 - The owner invites their team
 
