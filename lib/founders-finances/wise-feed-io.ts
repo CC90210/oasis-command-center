@@ -681,11 +681,15 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           actor,
           fixedRates: rates.get(row.postedDate) ? { USD: (rates.get(row.postedDate) as { rate: string }).rate } : undefined,
           detail: { payout: p.id, fx_cents: built.fxCents, fitid },
-          // The webhook or the reconcile may book it from Stripe after the check above: then this posts
-          // nothing, and the next sync links the line to that booking.
+          // The webhook or the reconcile may book it after the checks above: from Stripe (then the next
+          // sync links the line to that booking), or by adopting another bank line's entry, whatever that
+          // entry's source (then the next sync holds this line as the same deposit again). Either way the
+          // payout's row names a posted entry, and this posts nothing.
           gate: {
-            sql: `NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')`,
-            args: [entity.id, PAYOUT_SOURCE, p.id],
+            sql: `NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')
+                  AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts sp JOIN fin_journal_entries se ON se.id = sp.entry_id
+                                   WHERE sp.id = ? AND sp.entity_id = ? AND sp.booking = 'booked' AND se.status = 'posted')`,
+            args: [entity.id, PAYOUT_SOURCE, p.id, p.id, entity.id],
           },
         });
         const r = await writeBatch([...posting.posting, ...posting.link]);

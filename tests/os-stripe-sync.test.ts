@@ -10,7 +10,8 @@
  * event or completed reconcile (stripe-ingest.ts lastStripeSync).
  *
  * Pure: the copy (lib/founders-finances/stripe-sync-status.ts), the Today
- * Finance card's Stripe line (components/os/today/model.ts), plus a source
+ * Finance card's Stripe line (components/os/today/model.ts), the Finance
+ * tab's MRR tile (components/os/department/money-rules.ts), plus a source
  * check that each surface prints that line and no "Connected" of its own.
  *
  * Run: node --conditions=react-server --import tsx tests/os-stripe-sync.test.ts
@@ -20,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { STRIPE_SYNC_STALE_AFTER_MS, stripeSyncLine, syncedAgo } from "../lib/founders-finances/stripe-sync-status";
 import { buildDepartmentCards, stripeConnection, FINANCE_STRIPE_HREF } from "../components/os/today/model";
+import { mrrTile } from "../components/os/department/money-rules";
 
 const root = join(__dirname, "..");
 const NOW = Date.parse("2026-09-29T20:00:00Z");
@@ -86,6 +88,26 @@ check("Today's Finance card carries the line, pinned or not, with or without a g
   }
 });
 
+check("the Finance tab's MRR tile is live only while Stripe's sync is; stale or unreadable is not live, and the amount stays visible (CodeRabbit, PR #491)", () => {
+  const mrr = { mrr_cents: 7_200, currency: "cad", active_subscriptions: 1 };
+  assert.deepEqual(mrrTile(mrr, { ok: true, lastSyncAt: ago(3 * H) }, NOW), {
+    label: "MRR",
+    value: "CA$72",
+    status: "live",
+    hint: "1 live Stripe subscription · Last synced 3 hours ago",
+  });
+  const stale = mrrTile(mrr, { ok: true, lastSyncAt: ago(5 * 24 * H) }, NOW);
+  assert.equal(stale.status, "error", "a sync five days old is not live");
+  assert.equal(stale.hint, "CA$72 from 1 live Stripe subscription · Last synced 5 days ago", "the amount stays visible, with how old it is");
+  const unread = mrrTile(mrr, { ok: false }, NOW);
+  assert.equal(unread.status, "error", "a sync time that could not be read is not live");
+  assert.equal(unread.hint, "CA$72 from 1 live Stripe subscription · Stripe sync: couldn't check");
+  const never = mrrTile({ mrr_cents: 0, currency: "CAD", active_subscriptions: 0 }, { ok: true, lastSyncAt: null }, NOW);
+  assert.deepEqual([never.status, never.emptyText, never.hint], ["no_data", "Never synced", "CA$0 from 0 live Stripe subscriptions"], "never synced: no confident zero");
+  for (const t of [stale, unread, never]) assert.equal(t.value, null, "only a live tile carries the figure as its value");
+  assert.equal(mrrTile({ ...mrr, currency: "usd", active_subscriptions: 2 }, { ok: true, lastSyncAt: ago(H) }, NOW).value, "$72", "USD has no CA prefix");
+});
+
 check("every surface that reports Stripe prints the sync line, never a Connected of its own", () => {
   const today = readFileSync(join(root, "components/today/FounderToday.tsx"), "utf8");
   assert.match(today, /stripeSync: money\?\.stripeSync \?\? null/, "Today passes the sync read to the Finance card");
@@ -103,8 +125,10 @@ check("every surface that reports Stripe prints the sync line, never a Connected
   const ingestSrc = readFileSync(join(root, "lib/founders-finances/stripe-ingest.ts"), "utf8");
   assert.match(ingestSrc, /SELECT \(\$\{LAST_SYNCED_EVENT_SQL\}\) AS event_at/, "lastStripeSync reads the same condition");
   const numbers = readFileSync(join(root, "components/os/department/numbers.ts"), "utf8");
-  assert.match(numbers, /stripeSyncLine\(money\.stripeSync\.lastSyncAt, Date\.now\(\)\)\.note/, "the Finance tab's MRR tile says when Stripe last synced");
-  for (const [name, src] of [["settings", settings], ["numbers", numbers]] as const) {
+  assert.match(numbers, /mrrTile\(money\.mrr, money\.stripeSync, Date\.now\(\)\)/, "the Finance tab's MRR tile is built from the sync read");
+  const moneyRules = readFileSync(join(root, "components/os/department/money-rules.ts"), "utf8");
+  assert.match(moneyRules, /stripeSyncLine\(sync\.lastSyncAt, nowMs\)/, "and says when Stripe last synced");
+  for (const [name, src] of [["settings", settings], ["numbers", numbers], ["money-rules", moneyRules]] as const) {
     assert.doesNotMatch(src, /["'>]Connected["'<]/, `${name} prints no bare Connected`);
   }
 });

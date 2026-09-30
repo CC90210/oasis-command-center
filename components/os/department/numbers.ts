@@ -57,8 +57,8 @@ import {
   operatorDayAt,
 } from "@/components/os/today/brief-load";
 import { needsYouTotal } from "@/components/os/today/model";
-import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { tileCount } from "./count-rules";
+import { mrrTile } from "./money-rules";
 import {
   empireReadFor,
   failedRoutinesHref,
@@ -469,15 +469,8 @@ async function financeNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
       money.stripeConnected === false
         ? { label: "MRR", value: null, status: "not_connected", hint: "Stripe", ...(stripeHref ? { connectHref: stripeHref } : {}) }
         : money.mrr
-          ? {
-              label: "MRR",
-              value: `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`,
-              status: "live",
-              // A pinned account is not a synced one: say when Stripe last reached the books.
-              hint: `${n(money.mrr.active_subscriptions)} live Stripe subscription${money.mrr.active_subscriptions === 1 ? "" : "s"} · ${
-                money.stripeSync.ok ? stripeSyncLine(money.stripeSync.lastSyncAt, Date.now()).note : "Stripe sync: couldn't check"
-              }`,
-            }
+          ? // Live only while Stripe's sync is; stale or unreadable keeps the amount in the hint (./money-rules.ts).
+            mrrTile(money.mrr, money.stripeSync, Date.now())
           : failed("MRR", "Stripe unavailable"),
       !goal
         ? { label: "Goal pace", value: null, status: "live", hint: "No active revenue goal" }
