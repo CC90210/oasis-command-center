@@ -673,6 +673,8 @@ async function main() {
     assert.match(widget, /setError\(getString\(errBody\?\.error\) \|\| `http_\$\{res\.status\}`\);/);
     assert.match(widget, /setError\(getString\(e\?\.error\) \|\| `resume_http_\$\{resumeRes\.status\}`\);/);
     assert.deepEqual(codes.sseErrorFrame("ai_budget_exhausted"), { code: "ai_budget_exhausted", message: "This month's AI budget is used. The owner can raise it." });
+    // Mid-stream, the widget shows the SSE error's `message`: a budget it could not read is the sentence too.
+    assert.deepEqual(codes.sseErrorFrame("ai_usage_unavailable"), { code: "ai_usage_unavailable", message: codes.AI_USAGE_UNAVAILABLE_SENTENCE });
     assert.deepEqual(codes.sseErrorFrame("anthropic_401:x"), { message: "anthropic_401:x" });
   });
 

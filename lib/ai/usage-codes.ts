@@ -44,11 +44,14 @@ export const AI_BUDGET_SENTENCES: Record<AiBudgetCode, string> = {
 };
 
 /**
- * The SSE `error` frame for a stream error message: a budget refusal carries
- * its code and the owner's sentence; any other message passes through as before.
+ * The SSE `error` frame for a stream error message: a budget refusal, or a
+ * budget that could not be read, carries its code and the owner's sentence (the
+ * chat widget shows `message`); any other message passes through as before.
  */
-export function sseErrorFrame(message: string): { message: string; code?: AiBudgetCode } {
-  return isAiBudgetCode(message) ? { code: message, message: AI_BUDGET_SENTENCES[message] } : { message };
+export function sseErrorFrame(message: string): { message: string; code?: AiBudgetCode | typeof AI_USAGE_UNAVAILABLE } {
+  if (isAiBudgetCode(message)) return { code: message, message: AI_BUDGET_SENTENCES[message] };
+  if (message === AI_USAGE_UNAVAILABLE) return { code: message, message: AI_USAGE_UNAVAILABLE_SENTENCE };
+  return { message };
 }
 
 /**

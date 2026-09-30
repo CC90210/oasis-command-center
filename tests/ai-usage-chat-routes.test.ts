@@ -440,6 +440,34 @@ async function main() {
     }
   });
 
+  await check("a price table that cannot be read once the stream is open: the error frame carries the sentence the widget shows, and no provider is asked", async () => {
+    // The pre-stream check reads only the budget, so the stream opens; the
+    // call's own begin() then cannot read the prices and refuses the call.
+    // components/ChatWidget.tsx shows an SSE error's `message`, so the owner
+    // must read the sentence there, not the code.
+    await db.executeMultiple(`
+      ALTER TABLE model_prices RENAME TO model_prices_saved;
+      CREATE TABLE model_prices (provider TEXT NOT NULL);
+    `);
+    try {
+      await login(USERS.openOwner);
+      sent = [];
+      provider = () => anthropicOk("should not be sent", 1, 1);
+      const { res, events } = await settledTurn("c-open", "Anything else");
+      assert.equal(res.status, 200);
+      const errors = events.filter((e) => e.event === "error");
+      assert.deepEqual(errors.map((e) => e.data), [{ code: "ai_usage_unavailable", message: UNAVAILABLE }], JSON.stringify(events));
+      assert.equal(sent.length, 0, "a provider was asked");
+      // `message` is the field the widget shows for an SSE error.
+      assert.match(readFileSync(join(process.cwd(), "components/ChatWidget.tsx"), "utf8"), /const msg = String\(parsed\.message \|\| "stream_error"\);/);
+    } finally {
+      await db.executeMultiple(`
+        DROP TABLE model_prices;
+        ALTER TABLE model_prices_saved RENAME TO model_prices;
+      `);
+    }
+  });
+
   console.error = realError;
   if (failures > 0) {
     for (const l of logged.slice(-12)) realError(...l);
