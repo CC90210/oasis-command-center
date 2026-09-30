@@ -18,7 +18,8 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import ts from "typescript";
 import { OS_REDIRECTS } from "../lib/os/redirects";
 import { MARKETING_HOME_PATH } from "../lib/marketing/routes";
 
@@ -93,6 +94,253 @@ assert.ok(!literals.some(([from]) => from === "/money"), "/money must not redire
 assert.match(block![1], /\[MARKETING_HOME_PATH\]:\s*"\/"/);
 assert.ok(routeExists(MARKETING_HOME_PATH), `${MARKETING_HOME_PATH} must exist for the "/" rewrite to land`);
 
+// ── every internal link in the app lands somewhere (2026-09-30) ───────────
+//
+// The audit found links that answered 404 to whoever clicked them: seven
+// redirects to /auth/login (a route that never existed; sign-in is /login) on
+// the Training and Objections pages, the Drips activity table linking each lead
+// to /leads/<id> (never a route; leads open at /pipeline/<id>), and SunBiz pages
+// linking /leads. Nothing checked, because each link is a string. So every
+// LITERAL internal href and redirect target in app/, components/ and lib/ is
+// read here with the TypeScript parser (comments are never mistaken for code)
+// and must resolve to a page, a route handler, a public file or a redirect.
+// A `${...}` segment matches any [param] folder. A page whose first statement
+// is notFound() (a retired route: /start, /configure...) and a route handler
+// that only answers the retired 404 (/contacts, /metrics, /templates...:
+// lib/os/retired-routes.ts) do NOT count as existing, so nothing may link to
+// one. Paths under /t/ are the tenant
+// catch-all's (app/t/[slug]/[...path]) and are exempt, as are the template
+// navs in lib/manifest/templates.ts: finalizeManifestFromWizard rewrites every
+// one of them under /t/<slug>.
+
+const ROOT = process.cwd();
+const ROUTE_FILES = ["route.ts", "route.tsx", "route.js"];
+const META_ROUTES: Record<string, string> = { "sitemap.ts": "/sitemap.xml", "robots.ts": "/robots.txt" };
+
+/** A page file whose default export does nothing but call notFound(). */
+function isRetiredPage(file: string): boolean {
+  const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
+  for (const st of sf.statements) {
+    const isDefault =
+      ts.isFunctionDeclaration(st) &&
+      (ts.getCombinedModifierFlags(st) & ts.ModifierFlags.ExportDefault) === ts.ModifierFlags.ExportDefault;
+    if (!isDefault || !st.body) continue;
+    const first = st.body.statements[0];
+    return (
+      !!first &&
+      ts.isExpressionStatement(first) &&
+      ts.isCallExpression(first.expression) &&
+      ts.isIdentifier(first.expression.expression) &&
+      first.expression.expression.text === "notFound"
+    );
+  }
+  return false;
+}
+
+/** The app/ folder a URL lands in for `files`, or null. Same walk as routeExists. */
+function resolveDir(urlPath: string, files: string[]): string | null {
+  const segments = urlPath.split(/[?#]/)[0].split("/").filter(Boolean);
+  const has = (dir: string) => files.some((f) => existsSync(join(dir, f)));
+  const walk = (dir: string, i: number): string | null => {
+    if (i === segments.length && has(dir)) return dir;
+    for (const child of childDirs(dir)) {
+      const next = join(dir, child);
+      if (/^\(.+\)$/.test(child)) {
+        const r = walk(next, i);
+        if (r) return r;
+      } else if (/^\[\[\.\.\..+\]\]$/.test(child)) {
+        if (has(next)) return next;
+      } else if (/^\[\.\.\..+\]$/.test(child)) {
+        if (i < segments.length && has(next)) return next;
+      } else if (i < segments.length && (child === segments[i] || /^\[[^.\]]+\]$/.test(child))) {
+        const r = walk(next, i + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return walk(APP, 0);
+}
+
+function livePage(urlPath: string): boolean {
+  const dir = resolveDir(urlPath, PAGE_FILES);
+  if (!dir) return false;
+  const file = PAGE_FILES.map((f) => join(dir, f)).find((f) => existsSync(f))!;
+  return !isRetiredPage(file);
+}
+
+/**
+ * A route handler that only answers the retired 404 (lib/os/retired-routes.ts:
+ * /contacts, /metrics, /templates...). It exists so the status is a real 404,
+ * not so anything can link to it.
+ */
+function isRetiredRoute(file: string): boolean {
+  return /from\s+["']@\/lib\/os\/retired-routes["']/.test(readFileSync(file, "utf8"));
+}
+
+function liveRoute(urlPath: string): boolean {
+  const dir = resolveDir(urlPath, ROUTE_FILES);
+  if (!dir) return false;
+  const file = ROUTE_FILES.map((f) => join(dir, f)).find((f) => existsSync(f))!;
+  return !isRetiredRoute(file);
+}
+
+const NEXT_CONFIG_REDIRECTS = [...readFileSync(join(ROOT, "next.config.js"), "utf8").matchAll(/source:\s*"(\/[^"]*)"/g)]
+  .map((m) => m[1])
+  .filter((s) => !s.includes(":"));
+const REDIRECT_SOURCES = new Set<string>([...Object.keys(OS_REDIRECTS), ...literals.map(([from]) => from), MARKETING_HOME_PATH, ...NEXT_CONFIG_REDIRECTS]);
+
+function resolves(urlPath: string): boolean {
+  const pathOnly = urlPath.split(/[?#]/)[0] || "/";
+  if (REDIRECT_SOURCES.has(pathOnly)) return true;
+  if (livePage(pathOnly)) return true;
+  if (liveRoute(pathOnly)) return true;
+  const metaFile = Object.entries(META_ROUTES).find(([, url]) => url === pathOnly);
+  if (metaFile && existsSync(join(APP, metaFile[0]))) return true;
+  const pub = join(ROOT, "public", pathOnly);
+  return existsSync(pub) && statSync(pub).isFile();
+}
+
+/**
+ * A literal as a URL path: `${...}` becomes a [param] segment. A placeholder
+ * glued to other text inside a segment ends the literal there (`/x${q}` is
+ * /x); one at the very start means the URL is computed, not literal.
+ */
+const PARAM = "\u0000";
+function literalPath(node: ts.Node): string | null {
+  let text: string;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) text = node.text;
+  else if (ts.isTemplateExpression(node)) text = node.head.text + node.templateSpans.map((s) => PARAM + s.literal.text).join("");
+  else return null;
+  if (!text.startsWith("/") || text.startsWith("//")) return null;
+  const pathPart = text.split(/[?#]/)[0];
+  const out: string[] = [];
+  for (const seg of pathPart.split("/").slice(1)) {
+    if (seg === PARAM) out.push("__param__");
+    else if (seg.includes(PARAM)) {
+      const before = seg.slice(0, seg.indexOf(PARAM));
+      if (before) out.push(before);
+      break;
+    } else out.push(seg);
+  }
+  return "/" + out.join("/");
+}
+
+const NAVIGATION_CALLS = new Set(["redirect", "permanentRedirect", "push", "replace"]);
+type Found = { file: string; line: number; path: string; source: string };
+
+/** Every literal internal href / navigation target in one source text. */
+function linksIn(src: string, file: string): Found[] {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const found: Found[] = [];
+  const add = (node: ts.Node | undefined) => {
+    if (!node) return;
+    const inner = ts.isJsxExpression(node) ? node.expression : ts.isParenthesizedExpression(node) ? node.expression : node;
+    if (!inner) return;
+    const path = literalPath(inner);
+    if (path) found.push({ file, line: sf.getLineAndCharacterOfPosition(inner.getStart()).line + 1, path, source: inner.getText() });
+  };
+  const visit = (n: ts.Node) => {
+    if (ts.isJsxAttribute(n) && n.name.getText() === "href") add(n.initializer);
+    else if (ts.isPropertyAssignment(n) && n.name.getText().replace(/["']/g, "") === "href") add(n.initializer);
+    else if (ts.isCallExpression(n)) {
+      const callee = n.expression;
+      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+      // push/replace only on a router, never Array.prototype.push.
+      const onRouter = !ts.isPropertyAccessExpression(callee) || /router/i.test(callee.expression.getText());
+      if (NAVIGATION_CALLS.has(name) && onRouter) add(n.arguments[0]);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+// The extractor itself, against the exact shapes this check exists to catch.
+{
+  const sample = [
+    'redirect("/auth/login?next=/training");',
+    "const a = <a href={`/leads/${r.leadId}`}>x</a>;",
+    'const nav = [{ href: "/pipeline", label: "P" }];',
+    "router.push(`/sequences/${id}/edit`);",
+    "items.push('/not-a-link');",
+    "// <a href=\"/in-a-comment\">",
+    "const b = <a href={`${base}/computed`}>x</a>;",
+    "const c = <a href={`/pipeline${qs ? `?${qs}` : \"\"}`}>x</a>;",
+  ].join("\n");
+  const got = linksIn(sample, "sample.tsx").map((f) => f.path);
+  assert.deepEqual(got, ["/auth/login", "/leads/__param__", "/pipeline", "/sequences/__param__/edit", "/pipeline"]);
+  assert.equal(resolves("/auth/login"), false, "/auth/login never existed");
+  assert.equal(resolves("/leads/abc"), false, "/leads/<id> never existed");
+  assert.equal(resolves("/login?next=%2Ftraining"), true);
+  assert.equal(resolves("/pipeline/abc"), true);
+  assert.equal(resolves("/api/health"), true, "a route handler resolves");
+  assert.equal(resolves("/welcome"), true, "a next.config redirect source resolves");
+  assert.equal(resolves("/start"), false, "a page that only calls notFound() is retired, not a destination");
+  assert.equal(resolves("/contacts"), false, "a route that only answers the retired 404 is not a destination");
+}
+
+/**
+ * Dead links in files this change may not edit, each named with its owner.
+ * An entry here is a TODO with a test behind it: the check below fails when
+ * the link is fixed and the entry is left behind, so the list can only shrink.
+ */
+const KNOWN_DEAD: ReadonlyArray<{ file: string; path: string; why: string }> = [
+  {
+    file: "lib/manifest/seeds.ts",
+    path: "/templates",
+    why: "SUN_SEED nav, the retired SunBiz workspace (retired 2026-09-28). seeds.ts belongs to OASIS OS track T7.",
+  },
+  {
+    file: "lib/manifest/seeds.ts",
+    path: "/metrics",
+    why: "SUN_SEED nav, the retired SunBiz workspace (retired 2026-09-28). seeds.ts belongs to OASIS OS track T7.",
+  },
+  {
+    file: "app/playbook/page.tsx",
+    path: "/templates",
+    why:
+      "SUNBIZ_SECTIONS, the SunBiz playbook card. /playbook opens only in OASIS's workspace since #479, so it " +
+      "never renders; the page belongs to OASIS OS track T2, which should delete the section.",
+  },
+];
+const EXEMPT_FILES = new Set(["lib/manifest/templates.ts"]);
+
+function sourceFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name.startsWith(".")) continue;
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) sourceFiles(p, out);
+    else if (/\.(tsx?|jsx?)$/.test(name)) out.push(p);
+  }
+  return out;
+}
+
+const all: Found[] = [];
+for (const base of ["app", "components", "lib"]) {
+  for (const file of sourceFiles(join(ROOT, base))) {
+    const rel = relative(ROOT, file).replace(/\\/g, "/");
+    if (EXEMPT_FILES.has(rel)) continue;
+    all.push(...linksIn(readFileSync(file, "utf8"), rel));
+  }
+}
+assert.ok(all.length > 300, `the link scan found only ${all.length} literals; the extractor is broken`);
+
+const dead = all.filter((f) => !f.path.startsWith("/t/") && f.path !== "/t" && !resolves(f.path));
+const unexpected = dead.filter((d) => !KNOWN_DEAD.some((k) => k.file === d.file && k.path === d.path));
+assert.deepEqual(
+  unexpected.map((d) => `${d.file}:${d.line}  ${d.source}  ->  ${d.path}`),
+  [],
+  "these links land on no page, route handler, public file or redirect (or on a retired page)",
+);
+for (const k of KNOWN_DEAD) {
+  assert.ok(
+    dead.some((d) => d.file === k.file && d.path === k.path),
+    `KNOWN_DEAD lists ${k.file} -> ${k.path}, which no longer dead-ends. Delete the entry.`,
+  );
+}
+
 console.log(
-  `os-redirects: OK — ${Object.keys(OS_REDIRECTS).length} OS redirect(s) + ${literals.length} literal(s), every target is a page`,
+  `os-redirects: OK — ${Object.keys(OS_REDIRECTS).length} OS redirect(s) + ${literals.length} literal(s), every target is a page; ` +
+    `${all.length} literal internal links checked (${KNOWN_DEAD.length} known dead, owned elsewhere)`,
 );

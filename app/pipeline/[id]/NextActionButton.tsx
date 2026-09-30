@@ -5,11 +5,13 @@
  *
  * Phase 5b. Same shape as ScoreLeadButton but a different endpoint and
  * a different display (action sentence + rationale, no numeric score).
+ * `ai_unavailable` renders AiNotSetUpNotice, as ScoreLeadButton does.
  */
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Compass, Loader2, AlertCircle } from "lucide-react";
+import { AiNotSetUpNotice } from "./AiNotSetUpNotice";
 
 type ActionOk = { ok: true; action: string; rationale: string; generated_at: string };
 type ActionErr = { ok: false; error: string; message?: string };
@@ -19,11 +21,14 @@ export function NextActionButton({
   existingAction,
   existingRationale,
   existingAt,
+  canConfigureAi = false,
 }: {
   leadId: string;
   existingAction?: string | null;
   existingRationale?: string | null;
   existingAt?: string | null;
+  /** The viewer owns the workspace settings: gets the link to Settings > AI brain. */
+  canConfigureAi?: boolean;
 }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -97,7 +102,7 @@ export function NextActionButton({
         </div>
       ) : !error ? (
         <div className="text-xs text-fg-muted italic">
-          Click Recommend to have Bravo read this lead&apos;s history and suggest the next step.
+          Click Recommend to have your AI teammate read this lead&apos;s history and suggest the next step.
         </div>
       ) : null}
 
@@ -106,11 +111,7 @@ export function NextActionButton({
           <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <div>
             {error.error === "ai_unavailable" ? (
-              <>
-                <span className="font-bold">AI key not configured. </span>
-                Set <code className="font-mono">BRAVO_ANTHROPIC_API_KEY</code> on the
-                dashboard&apos;s Vercel env to enable next-move recommendations.
-              </>
+              <AiNotSetUpNotice feature="AI next-move recommendation" canConfigureAi={canConfigureAi} />
             ) : (
               <>
                 <span className="font-bold">{error.error}: </span>

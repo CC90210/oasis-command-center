@@ -128,7 +128,10 @@ export async function POST(req: Request) {
       // The EMAIL, not a display name. Two people use this tab, and the old
       // fallback hardcoded "adon" — so any drop by a profile with no display
       // name set was attributed to the wrong person, permanently and silently.
-      contributed_by: founder.email || founder.displayName || "unknown@oasisai.work",
+      // With neither on the profile, the profile id: a real handle for who
+      // dropped it. It used to write an invented "unknown@" address on our own
+      // domain, which exists nowhere, into the row (tests/verified-mailboxes.test.ts).
+      contributed_by: founder.email || founder.displayName || `profile:${founder.profileId}`,
       extraction: t
         ? { source_kind: t.kind, extractor: t.extractor, external_id: t.externalId, inspirable: t.inspirable }
         : {},

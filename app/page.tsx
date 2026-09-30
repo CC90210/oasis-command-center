@@ -50,6 +50,8 @@ import { RepToday } from "@/components/today/RepToday";
 import { DeliveryToday } from "@/components/today/DeliveryToday";
 import { ManagerToday } from "@/components/today/ManagerToday";
 import { MarketingToday } from "@/components/today/MarketingToday";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
 export const dynamic = "force-dynamic";
 
@@ -140,8 +142,21 @@ export default async function TodayPage() {
           <h2 className="text-sm font-semibold text-fg">We could not confirm your workspace</h2>
           <p className="mt-2 text-sm leading-[22px] text-fg-muted">
             You are signed in, but this account is not currently linked to a workspace, so nothing has been loaded.
-            This is an account-linking problem, not missing data. Sign out and back in — if it persists, send CC your
-            account email and he can relink it.
+            This is an account-linking problem, not missing data. Sign out and back in. If it persists, send us the
+            email you sign in with through the{" "}
+            <a
+              href={SUPPORT_FORM_PATH}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent underline-offset-2 hover:underline"
+            >
+              support form
+            </a>{" "}
+            or to{" "}
+            <a href={`mailto:${CONTACT_EMAIL}`} className="text-accent underline-offset-2 hover:underline">
+              {CONTACT_EMAIL}
+            </a>{" "}
+            and we will relink it.
           </p>
           <div className="mt-4">
             <Link href="/login" prefetch={false} className="btn-secondary inline-flex items-center">
