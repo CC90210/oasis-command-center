@@ -72,8 +72,11 @@ type Coverage = {
   unexplainedExclusions: string[];
 };
 
-const TEST_FILE = /\.test\.(?:ts|mts|mjs)$/;
-const PATH_TOKEN = /(?<![\w/.-])tests\/[\w./@[\]-]+\.(?:ts|mts|mjs)\b/g;
+// Every extension tsx will run: .ts/.tsx/.js/.jsx and their .m/.c forms. A
+// narrower list lets a new file such as a .test.tsx render test sit
+// unregistered with this gate green, which is the failure it exists to stop.
+const TEST_FILE = /\.test\.(?:[cm]?[jt]sx?)$/;
+const PATH_TOKEN = /(?<![\w/.-])tests\/[\w./@[\]-]+\.(?:[cm]?[jt]sx?)\b/g;
 
 /**
  * Groups the CI workflow runs: `npm run test:*` inside a step's `run:` value
@@ -255,19 +258,42 @@ function coverage(src: Sources): Coverage {
   assert.deepEqual(typo.unknownGroups, ["test:nope"], "CI running a group package.json lacks is caught");
   const noRunner = coverage({ ...base, readRunner: () => null });
   assert.deepEqual(noRunner.unreadableRunners, ["tests/_runner.mjs"], "a runner with no readable TESTS list is caught, not read as empty");
+  const tsx = coverage({
+    ...base,
+    scripts: { ...base.scripts, "test:a": "node --import tsx tests/render.test.tsx && node --import tsx tests/legacy.test.cjs" },
+    testFiles: ["tests/render.test.tsx", "tests/legacy.test.cjs"],
+    exists: (f) => f === "tests/render.test.tsx" || f === "tests/legacy.test.cjs",
+    excluded: {},
+  });
+  assert.deepEqual(
+    [...tsx.covered].sort(),
+    ["tests/legacy.test.cjs", "tests/render.test.tsx"],
+    "a group that names a .test.tsx or .test.cjs file covers it, and nothing reads it as a runner",
+  );
+  assert.deepEqual(tsx.unreadableRunners, [], "a .test.tsx registration is a test file, not a runner");
 
   // Discovery walks subdirectories: a nested test nobody registered is still
   // found, and paths come back repository-relative with forward slashes.
+  // Every extension tsx runs is a test file, not only .ts/.mts/.mjs.
   const scratch = mkdtempSync(path.join(tmpdir(), "suite-coverage-"));
   try {
     mkdirSync(path.join(scratch, "tests", "security", "deep"), { recursive: true });
     writeFileSync(path.join(scratch, "tests", "top.test.ts"), "");
     writeFileSync(path.join(scratch, "tests", "security", "deep", "nested.test.mts"), "");
     writeFileSync(path.join(scratch, "tests", "security", "helper.ts"), "");
+    writeFileSync(path.join(scratch, "tests", "render.test.tsx"), "");
+    writeFileSync(path.join(scratch, "tests", "security", "probe.test.js"), "");
+    writeFileSync(path.join(scratch, "tests", "security", "probe.test.cts"), "");
     assert.deepEqual(
       listTestFiles(scratch),
-      ["tests/security/deep/nested.test.mts", "tests/top.test.ts"],
-      "nested test files are discovered; helpers are not",
+      [
+        "tests/render.test.tsx",
+        "tests/security/deep/nested.test.mts",
+        "tests/security/probe.test.cts",
+        "tests/security/probe.test.js",
+        "tests/top.test.ts",
+      ],
+      "nested test files of every extension tsx runs are discovered; helpers are not",
     );
   } finally {
     rmSync(scratch, { recursive: true, force: true });
