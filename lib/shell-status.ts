@@ -54,8 +54,10 @@ const LIVE_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * The two dot values, resolved in parallel and individually isolated — one
- * failing read renders its dot "off", never a 500 (same safe() degradation
- * the layout used when these lived there).
+ * failing read never 500s the route (same safe() degradation the layout used
+ * when these lived there). bridgeOnline is null when the pairings could not
+ * be read (getBridgeOnline throws): the rail says "couldn't check", not
+ * "offline" (2026-09-29).
  *
  * KNOWN LIMIT, INHERITED NOT INTRODUCED (Codex P2, 2026-09-01):
  * agent_state_snapshot has NO tenant_id column — it is per-agent_name
@@ -72,7 +74,7 @@ const LIVE_WINDOW_MS = 15 * 60 * 1000;
 export async function getShellStatus(
   agent: string,
   tenantId: string | null,
-): Promise<{ primaryAgentLive: boolean; bridgeOnline: boolean }> {
+): Promise<{ primaryAgentLive: boolean; bridgeOnline: boolean | null }> {
   const [snap, bridgeOnline] = await Promise.all([
     safe(
       "shell_status.agent_state_snapshot",
@@ -87,7 +89,7 @@ export async function getShellStatus(
       })(),
       { data: null as { last_tick_at?: string | null } | null },
     ),
-    safe("shell_status.bridge_online", getBridgeOnline(tenantId), false),
+    safe("shell_status.bridge_online", getBridgeOnline(tenantId), null),
   ]);
   const lastTick = snap.data?.last_tick_at;
   return {

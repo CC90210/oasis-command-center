@@ -36,6 +36,7 @@ import { REPORT_KINDS, listPayments, loadLedger, overview, runReport, taxOvervie
 import { loadSettings } from "./settings-io";
 import { importHistory, listRules, listTransactions } from "./transactions-io";
 import { query, queryOne } from "./db";
+import { LAST_SYNCED_EVENT_SQL, STRIPE_RECONCILED_ACTION } from "./stripe-ingest";
 
 export type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 type Sp = Record<string, string | string[] | undefined>;
@@ -231,14 +232,31 @@ export async function loadTaxesPage(viewer: FinanceViewer, sp: Sp) {
   return taxOverview(viewer, { from: param(sp, "from") || undefined, to: param(sp, "to") || undefined });
 }
 
-/** Settings, minus the Stripe account check (a network call) which the page streams separately. */
+/**
+ * Settings, minus the Stripe account check (a network call) which the page
+ * streams separately. `lastEvent.at` is the newest delivery of any kind (the
+ * webhook line); `synced_at` the newest live event that reached the books and
+ * `reconciled_at` the newest completed Stripe reconcile, the two facts
+ * stripe-ingest.ts lastStripeSync reads for "Last synced". `bankAccounts` are
+ * the choices for where Stripe payouts land.
+ */
 export async function loadSettingsPage(viewer: FinanceViewer, entity: EntityRow) {
-  const [settings, rules, categories, lastFx, lastEvent] = await Promise.all([
+  const [settings, rules, categories, lastFx, lastEvent, bankAccounts] = await Promise.all([
     loadSettings(entity.id),
     listRules(viewer, entity.id),
     entityCategories(entity.id),
     queryOne<{ d: string | null }>(`SELECT MAX(rate_date) AS d FROM fin_fx_rates`),
-    queryOne<{ at: string | null; n: number }>(`SELECT MAX(received_at) AS at, COUNT(*) AS n FROM fin_stripe_events`),
+    queryOne<{ at: string | null; n: number; synced_at: string | null; reconciled_at: string | null }>(
+      `SELECT MAX(received_at) AS at, COUNT(*) AS n,
+              (${LAST_SYNCED_EVENT_SQL}) AS synced_at,
+              (SELECT MAX(created_at) FROM fin_audit_log WHERE entity_id = ? AND action = ?) AS reconciled_at
+         FROM fin_stripe_events`,
+      [entity.id, STRIPE_RECONCILED_ACTION],
+    ),
+    query<{ id: string; code: string; name: string }>(
+      `SELECT id, code, name FROM fin_accounts WHERE entity_id = ? AND subtype = 'bank' AND archived = 0 ORDER BY code`,
+      [entity.id],
+    ),
   ]);
-  return { settings, rules, categories, lastFx, lastEvent };
+  return { settings, rules, categories, lastFx, lastEvent, bankAccounts };
 }

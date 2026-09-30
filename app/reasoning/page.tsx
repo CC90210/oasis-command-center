@@ -30,11 +30,11 @@ export default async function ReasoningPage() {
   // Agent decisions tape is scoped by tenant_id + enabled agents — see
   // recentDecisions() docstring for the schema-debt explanation. Without
   // this, a SunBiz user would see CC's OASIS Bravo decisions because the
-  // table has no tenant_id column yet.
+  // table has no tenant_id column yet. A failed read is null → "Couldn't check".
   const decisions = await safe(
     "reasoning.recent_decisions",
     recentDecisions(profile?.tenant_id ?? null, enabled, 20),
-    []
+    null
   );
 
   const quickActions = quickActionsFor(enabled);

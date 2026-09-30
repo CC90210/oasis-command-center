@@ -135,6 +135,11 @@ jobs:
             "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry
                                       /api/cron/reconcile-website-sales-payments" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
+            # The books' daily upkeep (lib/founders-finances/books-cron.ts).
+            "23 21 * * *")   ROUTES="/api/cron/finance-books?job=fx-refresh" ;;
+            "43 21 * * *")   ROUTES="/api/cron/finance-books?job=stripe-reconcile" ;;
+            "7 22 * * *")    ROUTES="/api/cron/finance-books?job=wise-reconcile" ;;
+            "29 22 * * *")   ROUTES="/api/cron/finance-books?job=wise-sync" ;;
             "")
               # Manual workflow_dispatch: drive the paths that move mail plus
               # the watchdog. Deliberately not everything — a hand-run should

@@ -72,6 +72,8 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
     return inv ? json(inv) : json({ error: { message: "No such invoice" } }, 404);
   }
   if (p === "/v1/refunds") return list([]);
+  // The reconcile also lists payouts (tests/finances-stripe-payouts.test.ts covers them); none here.
+  if (p === "/v1/payouts") return list([]);
   if (p === "/v1/subscriptions") {
     return list([{ id: "sub_live", object: "subscription", status: "active", currency: "cad", livemode: true, customer: { id: "cus_live", name: "Client", email: "client@example.test" }, items: { data: [{ quantity: 1, price: { unit_amount: 10000, currency: "cad", recurring: { interval: "month", interval_count: 1 } } }] } }]);
   }
@@ -130,6 +132,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(root, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   const rates: Array<[string, string]> = [];
   for (let d = 12; d <= 22; d++) rates.push([`2026-06-${d}`, "1.3700"]);
   for (let d = 1; d <= 24; d++) rates.push([`2026-09-${String(d).padStart(2, "0")}`, "1.3800"]);

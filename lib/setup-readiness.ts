@@ -144,7 +144,14 @@ export async function loadReadinessReport(args: {
           .in("service", credentialServices)
           .then((r) => (r.data || []) as { service: string }[])
       : Promise.resolve([] as { service: string }[]),
-    needsAiCheck ? aiServicesWithKey(tenantId) : Promise.resolve(new Set<string>()),
+    // null = the key read failed (aiServicesWithKey throws): the item says
+    // "Couldn't check", never "No AI provider key on file".
+    needsAiCheck
+      ? aiServicesWithKey(tenantId).catch((err) => {
+          console.error("[setup-readiness] AI key read failed", err instanceof Error ? err.message : err);
+          return null;
+        })
+      : Promise.resolve(new Set<string>()),
   ]);
 
   const credentialPresent = new Set<string>();
@@ -164,6 +171,15 @@ export async function loadReadinessReport(args: {
     }
 
     if (kind === "ai_provider") {
+      if (aiKeySet === null) {
+        tenant.push({
+          key: `tenant.${req.service}`,
+          label: req.label,
+          status: "info",
+          detail: "Couldn't check the AI provider keys just now. This is not the same as none on file; reload to try again.",
+        });
+        continue;
+      }
       const haveAny = aiKeySet.size > 0;
       tenant.push({
         key: `tenant.${req.service}`,
