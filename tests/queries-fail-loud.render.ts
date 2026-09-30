@@ -88,6 +88,7 @@ async function main() {
     last_ping_at: null,
     last_error: null,
     metadata: {},
+    updated_at: "2026-09-29T00:00:00Z",
   };
   const out: Record<string, string> = {
     dotUnknown: renderToStaticMarkup(React.createElement(IntegrationDot, { health, connection: { hasCredentials: null } })),
