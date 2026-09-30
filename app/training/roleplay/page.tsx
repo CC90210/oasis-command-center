@@ -26,7 +26,7 @@ const DIFFICULTY_LABEL: Record<string, string> = {
 
 export default async function RoleplayIndexPage() {
   const session = await resolveSessionContext();
-  if (!session.ok) redirect("/auth/login?next=/training/roleplay");
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent("/training/roleplay")}`);
   if (!mayViewTraining(session)) redirect("/");
 
   return (

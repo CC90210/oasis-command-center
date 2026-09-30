@@ -51,13 +51,29 @@ export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
  * changed when they did not. /privacy promises to update this date whenever
  * it changes, so bump it in the same commit as any edit to the policy.
  */
-export const PRIVACY_LAST_UPDATED = "September 28, 2026";
+export const PRIVACY_LAST_UPDATED = "September 30, 2026";
+
+/**
+ * Every address the legal pages publish. Each one must be a mailbox a person
+ * actually reads, listed in config/verified-mailboxes.json;
+ * tests/verified-mailboxes.test.ts fails the build otherwise.
+ *
+ * Until 2026-09-30 these were four role aliases (privacy@, legal@, dmca@,
+ * support@) that had never been created: CC confirmed privacy@ did not exist,
+ * the Gmail send-as list held only conaugh@, and no mail had ever reached any of
+ * the four. A privacy request, a legal notice or a DMCA takedown sent to them
+ * went nowhere, while the policy promised a 30-day answer. They now point at
+ * the one verified inbox. To bring a role address back, create it as a Google
+ * Workspace alias, send it a test message, add it to verified-mailboxes.json,
+ * and only then change it here.
+ */
+const VERIFIED_INBOX = "conaugh@oasisai.work";
 
 export const LEGAL_CONTACTS = {
-  privacy: "privacy@oasisai.work",
-  legal: "legal@oasisai.work",
-  dmca: "dmca@oasisai.work",
-  support: "support@oasisai.work",
+  privacy: VERIFIED_INBOX,
+  legal: VERIFIED_INBOX,
+  dmca: VERIFIED_INBOX,
+  support: VERIFIED_INBOX,
 } as const;
 
 /**
