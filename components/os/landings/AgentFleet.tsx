@@ -8,6 +8,11 @@
  *
  * Server component. Signals come from fleet-data.ts; when those reads failed,
  * every agent says "status unknown" rather than "never seen".
+ *
+ * Running (2026-09-30) means one of the agent's processes on the operator's
+ * machine checked in within 5 minutes; "Last task" (its last reasoning tick)
+ * is its own line, so a quiet loop no longer reads as a dead agent and a stale
+ * tick no longer reads as a running one.
  */
 
 import { Card, Tag } from "@/components/Card";
@@ -49,10 +54,15 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
           const status = !fleet.signalsKnown
             ? "status unknown"
             : signal?.live
-              ? `live · ${signal.tickCount !== null ? `tick ${signal.tickCount}` : "ping"}`
+              ? `Running · ${signal.runningCount} of ${signal.processCount} process${signal.processCount === 1 ? "" : "es"} checked in`
               : signal?.lastSignalAt
-                ? `idle · ${timeAgo(signal.lastSignalAt)}`
-                : "never seen";
+                ? `Not running · last check-in ${timeAgo(signal.lastSignalAt)}`
+                : "No process has reported";
+          const lastTask = !fleet.signalsKnown
+            ? null
+            : signal?.lastTaskAt
+              ? `Last task ${timeAgo(signal.lastTaskAt)}${signal.tickCount !== null ? ` (tick ${signal.tickCount})` : ""}`
+              : "No task recorded";
           return (
             <li key={key} className="space-y-3 px-4 py-4">
               <div className="flex flex-wrap items-start gap-3">
@@ -72,6 +82,7 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
                 </div>
                 <div className="shrink-0 text-right text-xs tabular-nums text-fg-muted">
                   <div>{status}</div>
+                  {lastTask && <div className="mt-0.5 text-fg-dim">{lastTask}</div>}
                   {total > 0 && <div className="mt-0.5 text-fg-dim">{total} highlighted</div>}
                 </div>
               </div>
@@ -133,7 +144,7 @@ function CatalogColumn({
             <li key={e.name} className="text-xs leading-snug">
               <div className="flex flex-wrap items-baseline gap-1.5">
                 <span className="font-medium text-fg">{prettifyEntryName(e.name)}</span>
-                <span className="text-[11px] text-fg-dim">· {prettifyMeta(e.meta)}</span>
+                {prettifyMeta(e.meta) && <span className="text-[11px] text-fg-dim">· {prettifyMeta(e.meta)}</span>}
               </div>
               <div className="mt-0.5 text-[11px] text-fg-muted">{e.desc}</div>
             </li>
@@ -159,9 +170,17 @@ export function prettifyEntryName(raw: string): string {
     .join(" ");
 }
 
+/**
+ * Hosts OASIS left (Turso replaced Supabase on 2026-08-09; the Command Center
+ * runs on Cloudflare): a catalog entry still tagged with one shows no host
+ * rather than a wrong one. "vercel" meant the hosted dashboard, now "cloud".
+ */
+const RETIRED_LOCATION: Record<string, string> = { supabase: "", vercel: "cloud" };
+
 /** Cron strings in plain English ("0 3 * * *" → "daily at 3:00 AM UTC"); locations pass through. */
 export function prettifyMeta(meta: string): string {
   if (!meta) return "";
+  if (meta in RETIRED_LOCATION) return RETIRED_LOCATION[meta];
   const cronMatch = meta.match(/^(\d+|\*)\s+(\d+|\*)\s+(\*)\s+(\*)\s+(\*)$/);
   if (cronMatch) {
     const [, min, hour] = cronMatch;

@@ -180,7 +180,11 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["lib/tenant-access.ts", /profile\.isPlatformOperator === true/],
   ["lib/tenant-access.ts", /await isPlatformOperatorForAuthUser\(user\.id, user\.email\)/],
   ["lib/chat-auth.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);/],
-  ["lib/chat-shell-props.ts", /isAdmin: isPlatformOperator,[\s\S]*isAdmin: isPlatformOperator,/],
+  // The persistent chat is the Coding harness (2026-09-30): the verified
+  // verdict gates it entirely, then drives isAdmin.
+  ["lib/chat-shell-props.ts", /if \(!isPlatformOperator\) return null;[\s\S]*isAdmin: isPlatformOperator,/],
+  // /api/usage's platform key (the chat's Ready check) follows the same rule.
+  ["app/api/usage/route.ts", /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\);[\s\S]*const fallback = isOperator \? operatorPlatformFallback\(\) : null;/],
   ["lib/auth-routing.ts", /const isEmpireOperator = await isPlatformOperatorForAuthUser\(authUserId, email\);/],
   ["app/layout.tsx", /isPlatformOperator: await platformOperatorP,/],
   ["app/layout.tsx", /isPlatformOperator: platformOperator,/],

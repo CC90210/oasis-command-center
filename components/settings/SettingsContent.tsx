@@ -65,7 +65,8 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest } from "@/lib/manifest/loader";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
-import { resolveAgentKey } from "@/lib/agents";
+import { FAMILY_AGENT_KEYS, resolveAgentKey } from "@/lib/agents";
+import { teammateNamesFor, workspaceAgentsSubtitle } from "@/lib/os/teammate-names";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
@@ -176,6 +177,23 @@ export async function SettingsContent({
   const canManageTenant = canManageWorkspaceSettings(teamProfile, viewerAccess?.canSeeSystemSurfaces);
   const canSeeTeamPerformance = viewerAccess?.canSeeTeamPerformance === true;
   const oasisSalesWorkspace = isOasisSurfaceTenant(tenant?.slug ?? null);
+  // What each agent is called on screen: the department it leads IN THIS
+  // WORKSPACE, never the persona behind it (lib/os/teammate-names.ts). Computed
+  // here, once, with the same OASIS flag the AI Team roster and the department
+  // tabs use, so the profile picker, the provider overrides, the workspace card
+  // and a client's own /team tabs all agree.
+  const teammateScope = { oasis: oasisSalesWorkspace };
+  const teammateNames = teammateNamesFor(
+    [
+      ...new Set([
+        ...manifestAgentKeys,
+        ...enabledAgents,
+        ...(manifest?.agents || []).map((a) => a.slug),
+        ...FAMILY_AGENT_KEYS,
+      ]),
+    ],
+    teammateScope,
+  );
 
   // Every authenticated persona owns their profile, password and personal
   // connections. Non-admins stop here: no credential vault, AI/provider
@@ -264,6 +282,7 @@ export async function SettingsContent({
                   key={manifestAgentKeys.join(":")}
                   profile={profile}
                   tenantAgents={manifestAgentKeys}
+                  agentNames={teammateNames}
                 />
               </SafeBoundary>
             </SettingsSection>
@@ -307,8 +326,11 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
+          {/* id="revenue-goal": Today's Goal pace card links
+              /settings/team#revenue-goal, and OpenSectionOnHash opens it. */}
           {show("team") && canManageTenant && oasisSalesWorkspace && (
             <SettingsSection
+              id="revenue-goal"
               defaultOpen={focused}
               title="Revenue goal"
               subtitle="The one goal Today counts down to: money collected in a period, computed from the Finances ledger. MRR is never typed — it is read live from Stripe."
@@ -418,6 +440,7 @@ export async function SettingsContent({
                 <SafeBoundary label="Override an agent's provider">
                   <AgentConfigEditor
                     agentKeys={enabledChatAgentKeys}
+                    agentLabels={teammateNames}
                     bridgeOnline={bridgeOnline}
                     canInstallBridge={isOperator}
                     globallyConnectedServices={connectedAiSet ? Array.from(connectedAiSet) : null}
@@ -448,14 +471,15 @@ export async function SettingsContent({
               to be wrong. Provider selection lives in AI Setup and, per agent,
               in the override table above. */}
 
-          {/* Workspace agents (Bravo / Atlas / Maven add-on picker).
-              Owner-only — non-owners see a read-only view of which
-              agents the workspace has, but cannot toggle. Core agents
-              (Solara/Helios for SunBiz) render as locked. */}
+          {/* Workspace agents. Owner-only toggles; non-owners see a read-only
+              list. Every agent is named for the department it leads
+              (lib/os/teammate-names.ts), never by persona. Add-ons are OASIS
+              house agents, so only OASIS's own workspace is offered them: a
+              client's department teammates are set up with OASIS. */}
           {show("ai") && !previewMode && manifest?.agents && (
             <Card
               title="Workspace agents"
-              subtitle="Manage which agents this workspace can use. Core agents are always on; add C-suite agents (Bravo / Atlas / Maven / Aura / Hermes) when your team needs them."
+              subtitle={workspaceAgentsSubtitle(teammateScope)}
             >
               <SafeBoundary label="Workspace agents">
                 <AgentMarketplaceCard
@@ -467,6 +491,8 @@ export async function SettingsContent({
                     core: a.core,
                   }))}
                   isOwner={canManageTenant}
+                  teammateNames={teammateNames}
+                  offerAddOns={oasisSalesWorkspace}
                 />
               </SafeBoundary>
             </Card>

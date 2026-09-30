@@ -81,7 +81,9 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
     textClass: "text-accent",
     description:
       "Your CEO, COO, and CTO in one — your right hand and second brain. Bravo runs the day: ranks the leads worth calling first, drafts your outbound, finalizes today's plan, runs the daily briefing, ships the code, and keeps the whole agent family rowing in the same direction.",
-    askMeAbout: "Run the daily briefing · Draft a follow-up to Jonathan · What's blocking $5K?",
+    // Generic on purpose (2026-09-30): the old line named a real prospect
+    // and a revenue figure that went stale; this copy renders on the fleet.
+    askMeAbout: "Run the daily briefing · Draft a follow-up to a warm lead · What's blocking this week's goal?",
     setup_questions: [
       {
         id: "primary_business",
@@ -91,15 +93,9 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
         required: true,
         placeholder: "OASIS AI Solutions — AI agents for SMBs",
       },
-      {
-        id: "mrr_target_usd",
-        label: "Current MRR target (USD)",
-        description: "Bravo uses this as the daily north-star metric.",
-        type: "number",
-        required: true,
-        placeholder: "10000",
-        default: 10000,
-      },
+      // No MRR-target question (2026-09-30): it pre-filled an invented
+      // 10000 that then rode into the agent's prompt as a target. Revenue
+      // goals live in the revenue_goals table, from real numbers only.
       {
         id: "tone",
         label: "Outreach voice",

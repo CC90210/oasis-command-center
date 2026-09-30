@@ -188,7 +188,18 @@ export type BridgeAuthResult =
        *  has a per-user identity column on this table. */
       isOperator: boolean;
     }
-  | { ok: false; status: number; error: string };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      /** Set on bridge_not_configured only: that caller passed the tenant gate,
+       *  so who they are is already known. The OASIS fleet control route uses
+       *  it to name the missing bridge to the operator in an OASIS workspace
+       *  and still answer everyone else with a 404 that names nothing. Never
+       *  serialized into a response. */
+      isOperator?: boolean;
+      tenantSlug?: string;
+    };
 
 export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   // Imported lazily to keep this module's import graph small for the /chat
@@ -259,7 +270,7 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   }
 
   const target = resolveBridgeTarget(tenantRow);
-  if (!target) return { ok: false, status: 503, error: "bridge_not_configured" };
+  if (!target) return { ok: false, status: 503, error: "bridge_not_configured", isOperator, tenantSlug: tenantRow.slug };
   return {
     ok: true,
     target,

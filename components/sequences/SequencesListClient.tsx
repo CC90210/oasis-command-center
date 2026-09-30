@@ -60,7 +60,17 @@ function cadenceStats(steps: Array<{ channel: string; delay_minutes: number }>) 
   };
 }
 
-const STARTER_SEQUENCE_TEMPLATE = {
+/**
+ * What "New sequence" creates before the owner has written a word.
+ *
+ * It is created OFF and signs as nobody. It used to be created live and signed
+ * "Solara, SunBiz Funding" in every workspace, OASIS's clients included, so a
+ * client who clicked New sequence and closed the editor had a drip that texted
+ * and emailed their prospects as another company's agent the next time one
+ * opened a form. The owner writes the copy and turns it on in the editor
+ * (tests/client-route-gating.test.ts pins both halves).
+ */
+export const STARTER_SEQUENCE_TEMPLATE = {
   trigger_event: "BRAVO_RECORD_STATUS_CHANGED",
   trigger_filter: {
     entity: "lead",
@@ -71,17 +81,16 @@ const STARTER_SEQUENCE_TEMPLATE = {
     {
       channel: "sms",
       delay_minutes: 5,
-      body: "Hi {{lead.contact_name}} — saw you opened the application. Any questions I can answer?",
-      from_label: "Solara",
+      body: "Hi {{lead.contact_name}}, saw you opened the application. Any questions I can answer?",
     },
     {
       channel: "email",
       delay_minutes: 60 * 24,
       subject: "Quick question on your application",
-      body: "Hi {{lead.contact_name}},\n\nNoticed you started the application earlier — wanted to check if anything was unclear or holding you up. Reply here and I'll get back to you fast.\n\n— Solara, SunBiz Funding",
+      body: "Hi {{lead.contact_name}},\n\nNoticed you started the application earlier. Wanted to check if anything was unclear or holding you up. Reply here and I'll get back to you fast.",
     },
   ],
-  enabled: true,
+  enabled: false,
   one_per_lead: true,
 };
 
@@ -203,7 +212,7 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
           <div className="text-sm">No drip sequences yet.</div>
           <div className="text-xs mt-1 text-fg-dim">
             Click <span className="text-fg">New sequence</span> to scaffold one (2-step
-            viewed_application drip). Edit the steps and hit Save to put it live.
+            viewed_application drip). It starts off: write the steps, tick Enabled and hit Save to put it live.
           </div>
         </div>
       ) : (
@@ -308,10 +317,10 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
         merchant receives from that sequence, and how many land in their first day,
         first week, and first month. To tune it, open the sequence and add/remove
         steps or change the delay before each. (For actual send VOLUME across all
-        leads, see the Metrics tab.){" "}
+        leads, see the Volume tab.){" "}
         Each sequence has a trigger (e.g. lead.stage → viewed_application) and an
         ordered list of steps (SMS or email, with a delay before each). When the
-        triggering event lands on Bravo&apos;s event bus, the bridge-side{" "}
+        triggering event lands on the event bus, the bridge-side{" "}
         <code className="text-accent bg-bg-deep px-1 rounded">sequence-runner</code> PM2
         daemon enrolls the lead, fires the first step after its delay, and continues
         through the steps until done. Sends route through{" "}
