@@ -358,6 +358,64 @@ export function subscriptionFacts(raw: unknown): SubscriptionFacts | null {
   };
 }
 
+/**
+ * A payout: Stripe moving money from the Stripe balance to a bank account.
+ * `amountCents` / `currency` are what reaches the bank. The settlement is what
+ * left the Stripe balance, read from the payout's balance transaction
+ * (amount < 0 for a normal payout, so it is negated here; its fee is an
+ * instant payout's fee). Null when the balance transaction was not expanded:
+ * the side of Stripe clearing a payout relieves is then unknown, never
+ * assumed to be `currency`.
+ */
+export type PayoutFacts = {
+  payoutId: string;
+  /** Stripe's own status: paid | pending | in_transit | canceled | failed. */
+  status: string;
+  amountCents: number;
+  currency: string;
+  /** Stripe's arrival day, YYYY-MM-DD (arrival_date is midnight UTC of that day). */
+  arrivalDate: string;
+  created: number;
+  livemode: boolean;
+  settlementCents: number | null;
+  settlementCurrency: string | null;
+  feeCents: number;
+  balanceTxnId: string | null;
+  /** The external account's Stripe id (ba_… / card_…), never a bank number. */
+  destinationId: string | null;
+  failureCode: string | null;
+};
+
+export function payoutFacts(raw: unknown): PayoutFacts | null {
+  const p = asObj(raw);
+  const id = str(p?.id);
+  const amount = int(p?.amount);
+  const currency = normalizeCurrencyCode(p?.currency);
+  const arrival = int(p?.arrival_date);
+  const created = int(p?.created);
+  const status = str(p?.status);
+  if (!p || !id || !id.startsWith("po_") || amount === null || !currency || arrival === null || created === null || !status) return null;
+  const bt = asObj(p.balance_transaction);
+  const btAmount = int(bt?.amount);
+  const btCurrency = normalizeCurrencyCode(bt?.currency);
+  const btFee = int(bt?.fee);
+  return {
+    payoutId: id,
+    status,
+    amountCents: amount,
+    currency,
+    arrivalDate: new Date(arrival * 1000).toISOString().slice(0, 10),
+    created,
+    livemode: p.livemode === true,
+    settlementCents: btAmount !== null && btCurrency ? -btAmount : null,
+    settlementCurrency: btAmount !== null && btCurrency ? btCurrency : null,
+    feeCents: btFee !== null && btFee > 0 ? btFee : 0,
+    balanceTxnId: idOf(p.balance_transaction),
+    destinationId: idOf(p.destination),
+    failureCode: str(p.failure_code),
+  };
+}
+
 export type StripeEventEnvelope = {
   id: string;
   type: string;

@@ -16,6 +16,7 @@ import { WiseCard } from "@/components/founders/finances/WiseCard";
 import { primaryButton, tableClass, tdClass } from "@/components/founders/finances/ui";
 import { financePage, loadSettingsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { stripeConnectionStatus } from "@/lib/founders-finances/stripe-io";
+import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,10 @@ async function StripeStatus({ entitySlug }: { entitySlug: string }) {
 
 export default async function FinanceSettingsPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity } = await financePage(searchParams);
-  const { settings: s, rules, categories, lastFx, lastEvent } = await loadSettingsPage(viewer, entity);
+  const { settings: s, rules, categories, lastFx, lastEvent, bankAccounts } = await loadSettingsPage(viewer, entity);
+  // A connected Stripe is shown as when the books last heard from it, never as a bare word.
+  const lastSync = [lastEvent?.at, lastEvent?.reconciled_at].filter((t): t is string => !!t).sort().pop() ?? null;
+  const sync = stripeSyncLine(lastSync, Date.now());
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -98,10 +102,33 @@ export default async function FinanceSettingsPage({ searchParams }: { searchPara
           <Suspense fallback={<p className="text-fg-muted">Checking which Stripe account the key belongs to…</p>}>
             <StripeStatus entitySlug={entity.slug} />
           </Suspense>
+          <p>
+            <span className={sync.state === "live" ? "text-fg" : "text-status-warm"}>{sync.note}</span>
+            <span className="text-fg-muted"> (the newest webhook event or daily reconcile)</span>
+          </p>
           <p className="text-xs text-fg-dim">
             Webhook endpoint: <span className="font-mono">/api/webhooks/stripe-finance</span> · events received: {lastEvent?.n ?? 0}
             {lastEvent?.at && <> · last {lastEvent.at.slice(0, 16).replace("T", " ")} UTC</>}
+            {lastEvent?.reconciled_at && <> · last reconcile {lastEvent.reconciled_at.slice(0, 16).replace("T", " ")} UTC</>}
           </p>
+          <ActionForm
+            action="stripe.payout_account"
+            hidden={{ entity: entity.slug }}
+            submitLabel="Save"
+            resetOnSuccess={false}
+            columns={3}
+            fields={[
+              {
+                name: "account_id",
+                label: "Stripe payouts land in",
+                type: "select",
+                defaultValue: s.stripe_payout_account_id || "",
+                options: [{ value: "", label: "Not chosen: payouts are recorded, not booked" }, ...bankAccounts.map((a) => ({ value: a.id, label: `${a.code} ${a.name}` }))],
+                hint: "A payout is a transfer out of Stripe clearing into this account, never revenue. Until one is chosen, each payout is listed on the Overview as not booked.",
+                span: 2,
+              },
+            ]}
+          />
         </div>
       </Card>
 

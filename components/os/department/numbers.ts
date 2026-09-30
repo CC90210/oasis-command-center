@@ -57,6 +57,7 @@ import {
   operatorDayAt,
 } from "@/components/os/today/brief-load";
 import { needsYouTotal } from "@/components/os/today/model";
+import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { tileCount } from "./count-rules";
 import {
   empireReadFor,
@@ -472,7 +473,10 @@ async function financeNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
               label: "MRR",
               value: `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`,
               status: "live",
-              hint: `${n(money.mrr.active_subscriptions)} live Stripe subscription${money.mrr.active_subscriptions === 1 ? "" : "s"}`,
+              // A pinned account is not a synced one: say when Stripe last reached the books.
+              hint: `${n(money.mrr.active_subscriptions)} live Stripe subscription${money.mrr.active_subscriptions === 1 ? "" : "s"} · ${
+                money.stripeSync.ok ? stripeSyncLine(money.stripeSync.lastSyncAt, Date.now()).note : "Stripe sync: couldn't check"
+              }`,
             }
           : failed("MRR", "Stripe unavailable"),
       !goal
