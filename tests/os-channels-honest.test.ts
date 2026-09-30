@@ -799,17 +799,19 @@ async function main() {
     assert.equal(sent.length, 1);
     assert.equal(sent[0].method, "POST");
     assert.equal(sent[0].url, "https://openrouter.ai/api/v1/chat/completions");
-    assert.equal(sent[0].body?.max_tokens, 1);
+    assert.equal(sent[0].body?.max_tokens, 16, "OpenRouter's provider floor, not 1");
   });
-  await check("every hosted provider gets a POST completion capped at one token", async () => {
-    for (const [p, url, cap] of [
-      ["anthropic", "https://api.anthropic.com/v1/messages", (b: Record<string, unknown>) => b.max_tokens],
-      ["openai", "https://api.openai.com/v1/chat/completions", (b: Record<string, unknown>) => b.max_completion_tokens],
-      ["openrouter", "https://openrouter.ai/api/v1/chat/completions", (b: Record<string, unknown>) => b.max_tokens],
+  await check("every hosted provider gets a POST completion at its smallest accepted cap", async () => {
+    // One token everywhere except OpenRouter, where some providers refuse max_tokens below 16.
+    for (const [p, url, cap, want] of [
+      ["anthropic", "https://api.anthropic.com/v1/messages", (b: Record<string, unknown>) => b.max_tokens, 1],
+      ["openai", "https://api.openai.com/v1/chat/completions", (b: Record<string, unknown>) => b.max_completion_tokens, 1],
+      ["openrouter", "https://openrouter.ai/api/v1/chat/completions", (b: Record<string, unknown>) => b.max_tokens, 16],
       [
         "google",
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
         (b: Record<string, unknown>) => (b.generationConfig as { maxOutputTokens?: number }).maxOutputTokens,
+        1,
       ],
     ] as const) {
       const seen: Sent[] = [];
@@ -823,7 +825,7 @@ async function main() {
       assert.equal(seen.length, 1, p);
       assert.equal(seen[0].method, "POST", p);
       assert.equal(seen[0].url, url, p);
-      assert.equal(cap(seen[0].body!), 1, p);
+      assert.equal(cap(seen[0].body!), want, p);
     }
     // Anthropic's drained balance (400) and a Google bad key (400) are not the same failure.
     const credit = await probeProvider("anthropic", "k", { fetchImpl: async () => anthropicCredit() });

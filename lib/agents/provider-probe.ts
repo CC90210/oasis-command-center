@@ -49,6 +49,8 @@ export const PROBE_MODEL: Record<Exclude<Provider, "ollama">, string> = {
 };
 
 const PROBE_TEXT = "Reply with one word: ok";
+/** OpenRouter's floor: "some providers enforce a minimum max_tokens of 16" (its chat-completions docs). */
+export const OPENROUTER_MIN_MAX_TOKENS = 16;
 
 export type ProbeRequest = { url: string; init: RequestInit };
 
@@ -106,12 +108,14 @@ export function buildProbeRequest(
       },
     };
   }
+  // Some OpenRouter providers refuse max_tokens below 16 ("below minimum value"),
+  // which would read a good key as broken. 16 tokens still cost next to nothing.
   return {
     url: "https://openrouter.ai/api/v1/chat/completions",
     init: {
       method: "POST",
       headers: { ...json, authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: PROBE_TEXT }] }),
+      body: JSON.stringify({ model, max_tokens: OPENROUTER_MIN_MAX_TOKENS, messages: [{ role: "user", content: PROBE_TEXT }] }),
     },
   };
 }
