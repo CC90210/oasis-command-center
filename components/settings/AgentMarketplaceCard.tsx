@@ -9,14 +9,17 @@
  * cannot remove them.
  *
  * Non-core slots:
- *   - Already in manifest, enabled=true       → "Enabled" toggle (can remove)
- *   - Already in manifest, enabled=false      → "Disabled" toggle (can enable)
+ *   - Already in manifest, enabled=true       → "Enabled" toggle (Disable)
+ *   - Already in manifest, enabled=false      → "Disabled" toggle (Enable)
  *   - Not in manifest yet                     → "+ Add to workspace" button
+ *   - Remove, only where Add brings it back   → a house agent in OASIS's own
+ *     workspace (it returns to Available add-ons). Nowhere else: an action
+ *     with no way back is a trapdoor.
  *
- * NAMES. Every agent is shown by the department it leads (Chief of Staff,
- * Sales, Marketing, Client Success, Finance, Operations) or, for a house agent
- * with no department, by its job: `teammateNames`, computed on the server from
- * lib/os/teammate-names.ts. The persona names behind them are OASIS's internal
+ * NAMES. Every agent is shown by the department it leads IN THIS WORKSPACE
+ * (Chief of Staff, Sales, Marketing, Client Success, Finance, Operations) or,
+ * when it leads none here, by its job: `teammateNames`, computed on the server
+ * from lib/os/teammate-names.ts with the workspace's own bindings. The persona names behind them are OASIS's internal
  * vocabulary and are not printed here, in any workspace. An agent a workspace
  * built itself keeps the name its owner gave it (manifest display_name).
  *
@@ -65,6 +68,14 @@ export function AgentMarketplaceCard({ initialAgents, isOwner, teammateNames, of
   const addOnCandidates = offerAddOns
     ? FAMILY_AGENT_KEYS.filter((k) => !knownSlugs.has(k.toLowerCase()))
     : [];
+  // Remove is offered only where Add brings the agent back: a house agent in
+  // OASIS's own workspace, which returns to "Available add-ons" once removed.
+  // A client workspace has no Add list, and neither does an agent a workspace
+  // built itself, so removing either had no way back while the confirmation
+  // promised one. Those keep Disable / Enable, which take the agent out of the
+  // chat picker and can be undone.
+  const canRemove = (slug: string) =>
+    offerAddOns && FAMILY_AGENT_KEYS.some((k) => k.toLowerCase() === slug.toLowerCase());
 
   /** A known house agent by its department; anything else by the name its workspace gave it. */
   const nameOf = (slug: string, displayName?: string) =>
@@ -239,18 +250,20 @@ export function AgentMarketplaceCard({ initialAgents, isOwner, teammateNames, of
                           Enable
                         </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!confirm(`Remove ${name} from this workspace? You can add it back any time.`)) return;
-                          void callToggle({ action: "remove", slug: a.slug }, name);
-                        }}
-                        disabled={isBusy}
-                        className="inline-flex items-center justify-center rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-fg-dim hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
-                        title="Remove from workspace"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                      {canRemove(a.slug) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!confirm(`Remove ${name} from this workspace? It moves to Available add-ons below, where you can add it back.`)) return;
+                            void callToggle({ action: "remove", slug: a.slug }, name);
+                          }}
+                          disabled={isBusy}
+                          className="inline-flex items-center justify-center rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-fg-dim hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                          title="Remove from workspace"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
                     </>
                   )}
                 </div>

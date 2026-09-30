@@ -7,11 +7,13 @@
  * This must include its own <html><body> shell since the parent layout
  * has already failed, and its own styles, since the stylesheet the layout
  * imports may not have loaded. The help copy is components/ErrorHelp.tsx,
- * shared with app/error.tsx: try again, then send us the code.
+ * shared with app/error.tsx: try again, then send us the code; on a page a
+ * client's prospect opens (/f/, /sign/, /unsubscribe), no OASIS contact.
  */
 
 import { useEffect } from "react";
-import { ErrorHelp } from "@/components/ErrorHelp";
+import { usePathname } from "next/navigation";
+import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
 
 export default function GlobalError({
   error,
@@ -20,6 +22,7 @@ export default function GlobalError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const prospectFacing = isProspectFacingPath(usePathname());
   useEffect(() => {
     console.error("[global-error.tsx]", error);
   }, [error]);
@@ -52,7 +55,7 @@ export default function GlobalError({
           <h1 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
             Something went wrong
           </h1>
-          <ErrorHelp digest={error.digest} inline />
+          <ErrorHelp digest={error.digest} inline prospectFacing={prospectFacing} />
           <button
             onClick={() => reset()}
             style={{

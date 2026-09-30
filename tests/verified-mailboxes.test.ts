@@ -22,6 +22,13 @@
  *   5. The rendered /privacy, /terms, /dmca and /unsubscribe pages (the page
  *      components themselves, not their source) show at least one oasisai.work
  *      address, and every one they show is verified.
+ *   6. EVERY oasisai.work address written anywhere in app/, components/ and
+ *      lib/ is accounted for: a verified mailbox, a teammate identity (a login
+ *      the code names as a person, never publishable: checks 2 and 5 accept
+ *      mailboxes only), or an illustration listed with its file and reason.
+ *      Checks 2 and 3 alone let any other invented address through: the
+ *      marketing ingest wrote "unknown@oasisai.work" into production rows as
+ *      contributed_by, and /login showed every client "you@oasisai.work".
  *
  * To publish a new address: create it in Google Workspace, send it a test
  * message, add it to config/verified-mailboxes.json, then use it.
@@ -49,8 +56,13 @@ stub("next/link", {
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
 
-const config = JSON.parse(readFileSync(join(ROOT, "config/verified-mailboxes.json"), "utf8")) as { mailboxes: string[] };
+const config = JSON.parse(readFileSync(join(ROOT, "config/verified-mailboxes.json"), "utf8")) as {
+  mailboxes: string[];
+  identities: { addresses: string[] };
+  illustrations: Array<{ file: string; address: string; why: string }>;
+};
 const VERIFIED = new Set(config.mailboxes);
+const IDENTITIES = new Set(config.identities.addresses);
 
 const DOMAIN_ADDRESS = /[a-z0-9._%+-]+@oasisai\.work/gi;
 const ROLE_ALIAS =
@@ -67,25 +79,29 @@ function files(dir: string, out: string[] = []): string[] {
 }
 const rel = (p: string) => relative(ROOT, p).replace(/\\/g, "/");
 
-/** Strings and href/props reachable in a server-rendered element tree. */
-function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
+/**
+ * Strings and href/props reachable in a server-rendered element tree. Client
+ * components with hooks cannot be called here (react-server exports no hooks):
+ * pass them as `opaque` and their string props are read instead.
+ */
+function textOf(node: unknown, out: string[] = [], depth = 0, opaque: ReadonlySet<unknown> = new Set()): string[] {
   if (depth > 80 || node === null || node === undefined || typeof node === "boolean") return out;
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
     return out;
   }
   if (Array.isArray(node)) {
-    for (const n of node) textOf(n, out, depth + 1);
+    for (const n of node) textOf(n, out, depth + 1, opaque);
     return out;
   }
   if (isValidElement(node)) {
     const props = (node.props ?? {}) as Record<string, unknown>;
-    if (typeof node.type === "function") {
-      textOf((node.type as (p: unknown) => unknown)(props), out, depth + 1);
+    if (typeof node.type === "function" && !opaque.has(node.type)) {
+      textOf((node.type as (p: unknown) => unknown)(props), out, depth + 1, opaque);
       return out;
     }
     for (const [k, v] of Object.entries(props)) {
-      if (k === "children") textOf(v, out, depth + 1);
+      if (k === "children") textOf(v, out, depth + 1, opaque);
       else if (typeof v === "string") out.push(v);
     }
   }
@@ -108,9 +124,17 @@ async function main() {
 
   await check("the verified list is lowercase oasisai.work addresses, no role aliases unless deliberate", () => {
     assert.ok(config.mailboxes.length > 0, "config/verified-mailboxes.json lists no mailbox");
-    for (const m of config.mailboxes) {
+    for (const m of [...config.mailboxes, ...config.identities.addresses]) {
       assert.equal(m, m.toLowerCase(), `${m} must be lowercase`);
       assert.match(m, /^[a-z0-9._%+-]+@oasisai\.work$/, `${m} is not an oasisai.work address`);
+    }
+    for (const id of config.identities.addresses) {
+      // A role alias is a contact by definition; listing it as a person's login
+      // would be the way round this test.
+      assert.doesNotMatch(id, new RegExp(ROLE_ALIAS.source, "i"), `${id} is a role alias, not a teammate's login`);
+    }
+    for (const ill of config.illustrations) {
+      assert.ok(ill.why && ill.why.length > 20, `illustration ${ill.address} in ${ill.file} needs its reason`);
     }
   });
 
@@ -148,6 +172,34 @@ async function main() {
     assert.deepEqual(bad, [], `unverified role aliases:\n${bad.join("\n")}`);
   });
 
+  await check("6. every oasisai.work address in app/, components/ and lib/ is a mailbox, an identity or a listed illustration", () => {
+    const bad: string[] = [];
+    const usedIllustrations = new Set<string>();
+    let seen = 0;
+    for (const f of source) {
+      const file = rel(f);
+      for (const m of readFileSync(f, "utf8").matchAll(DOMAIN_ADDRESS)) {
+        seen += 1;
+        const address = m[0].toLowerCase();
+        if (VERIFIED.has(address) || IDENTITIES.has(address)) continue;
+        const ill = config.illustrations.find((i) => i.file === file && i.address === address);
+        if (ill) {
+          usedIllustrations.add(`${ill.file} ${ill.address}`);
+          continue;
+        }
+        bad.push(`${file}: ${m[0]}`);
+      }
+    }
+    assert.ok(seen > 10, `the scan found only ${seen} addresses; it is broken`);
+    assert.deepEqual(bad, [], `oasisai.work addresses nobody verified, and no teammate logs in as:\n${bad.join("\n")}`);
+    for (const ill of config.illustrations) {
+      assert.ok(
+        usedIllustrations.has(`${ill.file} ${ill.address}`),
+        `config/verified-mailboxes.json lists the illustration ${ill.address} in ${ill.file}, which no longer has it. Delete the entry.`,
+      );
+    }
+  });
+
   await check("4. every address in docs/compliance/*.json is verified", () => {
     const bad: string[] = [];
     let seen = 0;
@@ -168,9 +220,13 @@ async function main() {
     "/unsubscribe": async () =>
       (await import("../app/unsubscribe/page")).default({ searchParams: Promise.resolve({}) }),
   };
+  // The opt-out form is a client island (hooks); its own markup is rendered in
+  // tests/client-route-gating.render.ts. Its manual fallback is ManualOptOut,
+  // which the page and 5b render here.
+  const UnsubscribeForm = (await import("../app/unsubscribe/UnsubscribeForm")).default;
   for (const [path, page] of Object.entries(rendered)) {
     await check(`5. ${path} renders only verified oasisai.work addresses`, async () => {
-      const text = textOf(await page()).join("\n");
+      const text = textOf(await page(), [], 0, new Set([UnsubscribeForm])).join("\n");
       const found = [...text.matchAll(DOMAIN_ADDRESS)].map((m) => m[0].toLowerCase());
       assert.ok(found.length > 0, `${path} rendered no oasisai.work address at all; the page must name a contact`);
       const bad = [...new Set(found.filter((a) => !VERIFIED.has(a)))];

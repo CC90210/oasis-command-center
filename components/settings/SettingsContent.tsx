@@ -66,7 +66,7 @@ import { getManifest } from "@/lib/manifest/loader";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { FAMILY_AGENT_KEYS, resolveAgentKey } from "@/lib/agents";
-import { teammateNamesFor } from "@/lib/os/teammate-names";
+import { teammateNamesFor, workspaceAgentsSubtitle } from "@/lib/os/teammate-names";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
@@ -177,17 +177,23 @@ export async function SettingsContent({
   const canManageTenant = canManageWorkspaceSettings(teamProfile, viewerAccess?.canSeeSystemSurfaces);
   const canSeeTeamPerformance = viewerAccess?.canSeeTeamPerformance === true;
   const oasisSalesWorkspace = isOasisSurfaceTenant(tenant?.slug ?? null);
-  // What each agent is called on screen: the department it leads, never the
-  // persona behind it (lib/os/teammate-names.ts). Computed here, once, so the
-  // profile picker, the provider overrides and the workspace card agree.
-  const teammateNames = teammateNamesFor([
-    ...new Set([
-      ...manifestAgentKeys,
-      ...enabledAgents,
-      ...(manifest?.agents || []).map((a) => a.slug),
-      ...FAMILY_AGENT_KEYS,
-    ]),
-  ]);
+  // What each agent is called on screen: the department it leads IN THIS
+  // WORKSPACE, never the persona behind it (lib/os/teammate-names.ts). Computed
+  // here, once, with the same OASIS flag the AI Team roster and the department
+  // tabs use, so the profile picker, the provider overrides, the workspace card
+  // and a client's own /team tabs all agree.
+  const teammateScope = { oasis: oasisSalesWorkspace };
+  const teammateNames = teammateNamesFor(
+    [
+      ...new Set([
+        ...manifestAgentKeys,
+        ...enabledAgents,
+        ...(manifest?.agents || []).map((a) => a.slug),
+        ...FAMILY_AGENT_KEYS,
+      ]),
+    ],
+    teammateScope,
+  );
 
   // Every authenticated persona owns their profile, password and personal
   // connections. Non-admins stop here: no credential vault, AI/provider
@@ -473,7 +479,7 @@ export async function SettingsContent({
           {show("ai") && !previewMode && manifest?.agents && (
             <Card
               title="Workspace agents"
-              subtitle="The AI teammates this workspace runs, one per department: Chief of Staff, Sales, Marketing, Client Success, Finance and Operations. Core teammates are always on."
+              subtitle={workspaceAgentsSubtitle(teammateScope)}
             >
               <SafeBoundary label="Workspace agents">
                 <AgentMarketplaceCard

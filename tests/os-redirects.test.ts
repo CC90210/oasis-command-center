@@ -105,8 +105,10 @@ assert.ok(routeExists(MARKETING_HOME_PATH), `${MARKETING_HOME_PATH} must exist f
 // read here with the TypeScript parser (comments are never mistaken for code)
 // and must resolve to a page, a route handler, a public file or a redirect.
 // A `${...}` segment matches any [param] folder. A page whose first statement
-// is notFound() (a retired route: /start, /contacts, /metrics...) does NOT count
-// as existing, so nothing may link to one. Paths under /t/ are the tenant
+// is notFound() (a retired route: /start, /configure...) and a route handler
+// that only answers the retired 404 (/contacts, /metrics, /templates...:
+// lib/os/retired-routes.ts) do NOT count as existing, so nothing may link to
+// one. Paths under /t/ are the tenant
 // catch-all's (app/t/[slug]/[...path]) and are exempt, as are the template
 // navs in lib/manifest/templates.ts: finalizeManifestFromWizard rewrites every
 // one of them under /t/<slug>.
@@ -167,6 +169,22 @@ function livePage(urlPath: string): boolean {
   return !isRetiredPage(file);
 }
 
+/**
+ * A route handler that only answers the retired 404 (lib/os/retired-routes.ts:
+ * /contacts, /metrics, /templates...). It exists so the status is a real 404,
+ * not so anything can link to it.
+ */
+function isRetiredRoute(file: string): boolean {
+  return /from\s+["']@\/lib\/os\/retired-routes["']/.test(readFileSync(file, "utf8"));
+}
+
+function liveRoute(urlPath: string): boolean {
+  const dir = resolveDir(urlPath, ROUTE_FILES);
+  if (!dir) return false;
+  const file = ROUTE_FILES.map((f) => join(dir, f)).find((f) => existsSync(f))!;
+  return !isRetiredRoute(file);
+}
+
 const NEXT_CONFIG_REDIRECTS = [...readFileSync(join(ROOT, "next.config.js"), "utf8").matchAll(/source:\s*"(\/[^"]*)"/g)]
   .map((m) => m[1])
   .filter((s) => !s.includes(":"));
@@ -176,7 +194,7 @@ function resolves(urlPath: string): boolean {
   const pathOnly = urlPath.split(/[?#]/)[0] || "/";
   if (REDIRECT_SOURCES.has(pathOnly)) return true;
   if (livePage(pathOnly)) return true;
-  if (resolveDir(pathOnly, ROUTE_FILES)) return true;
+  if (liveRoute(pathOnly)) return true;
   const metaFile = Object.entries(META_ROUTES).find(([, url]) => url === pathOnly);
   if (metaFile && existsSync(join(APP, metaFile[0]))) return true;
   const pub = join(ROOT, "public", pathOnly);
@@ -259,6 +277,7 @@ function linksIn(src: string, file: string): Found[] {
   assert.equal(resolves("/api/health"), true, "a route handler resolves");
   assert.equal(resolves("/welcome"), true, "a next.config redirect source resolves");
   assert.equal(resolves("/start"), false, "a page that only calls notFound() is retired, not a destination");
+  assert.equal(resolves("/contacts"), false, "a route that only answers the retired 404 is not a destination");
 }
 
 /**

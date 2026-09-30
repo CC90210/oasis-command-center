@@ -8,8 +8,9 @@
  *
  *   1. The legacy SunBiz and placeholder pages are retired: /contacts, /embed,
  *      /offers, /lenders, /funded-deals, /applications, /sms, /email-blast,
- *      /metrics, /templates and /renewals answer 404 to a client owner and to
- *      CC alike.
+ *      /metrics, /templates and /renewals answer HTTP 404 to a client owner and
+ *      to CC alike. Each is a route handler (lib/os/retired-routes.ts): a page
+ *      calling notFound() drew the right screen with a 200 status.
  *   2. /commissions asks the rail: a client owner gets a 404 (it is OASIS's
  *      commission ledger), an OASIS closer and CC still open it.
  *   3. /forms, /sequences and /import ask the rail too: a client owner opens
@@ -23,14 +24,25 @@
  *      printed the 0.
  *   6. Settings > AI brain for a client owner, and Profile's agent picker, name
  *      no OASIS persona (Bravo, Atlas, Maven, Aura, Hermes, Solara, Helios) and
- *      say neither "empire" nor "C-suite"; teammates are named by department.
- *      OASIS's own owner is not offered add-ons by persona name either.
+ *      say neither "empire" nor "C-suite"; teammates are named by the
+ *      department they lead IN THAT WORKSPACE (departmentChannelFor with the
+ *      viewer's flag, as the client's own /team tabs read it), so a client
+ *      never sees "Chief of Staff", "Marketing" or "Finance" on an agent its
+ *      own tabs call not set up. OASIS's own owner is not offered add-ons by
+ *      persona name either. Remove is offered only where Add brings the agent
+ *      back: never in a client workspace, and in OASIS's only for a house agent,
+ *      which then reappears under Available add-ons.
  *   7. Today's "we could not confirm your workspace" screen sends the person to
  *      the support form and the verified inbox, not to "CC".
  *   8. The error boundaries say what to do (try again, then send the code
  *      through the support form or by email) and never mention the hosting
- *      provider's logs. The AI-not-set-up notice gives an owner the Settings
- *      link and nobody a setting name.
+ *      provider's logs. On a page a client's prospect opens (/f/, /sign/,
+ *      /unsubscribe) they name no OASIS contact and link nowhere into the OS.
+ *      The AI-not-set-up notice gives an owner the Settings link and nobody a
+ *      setting name.
+ *  10. /unsubscribe with no address in the link lets the recipient type it,
+ *      and the opt-out goes through /api/unsubscribe (the store every sender
+ *      checks) instead of only "email us".
  *   9. Goal pace's "Set one in Settings" lands on Settings > Team, whose
  *      Revenue goal section carries the id the link's fragment opens.
  *
@@ -41,7 +53,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
@@ -334,15 +346,31 @@ async function main() {
     "contacts", "embed", "offers", "lenders", "funded-deals", "applications",
     "sms", "email-blast", "metrics", "templates", "renewals",
   ];
+  // A page calling notFound() drew the not-found screen with HTTP 200 (the root
+  // loading.tsx streams the shell first). Each retired folder is now only a
+  // route handler, which answers before anything renders: the status here is
+  // the status the browser gets.
   for (const route of RETIRED) {
-    const page = (await import(`../app/${route}/page`)).default as () => unknown;
-    await check(`/${route} is retired: 404 for a client owner and for CC`, async () => {
+    await check(`/${route} is retired: its GET answers HTTP 404 with the not-found page, and no page renders`, async () => {
+      assert.equal(existsSync(join(ROOT, `app/${route}/page.tsx`)), false, `app/${route}/page.tsx would render with a 200`);
+      const src = readFileSync(join(ROOT, `app/${route}/route.ts`), "utf8");
+      assert.deepEqual(
+        [...src.matchAll(/^import .*$/gm)].map((m) => m[0]),
+        ['import { retiredRouteResponse } from "@/lib/os/retired-routes";'],
+        "a retired route imports nothing else",
+      );
+      assert.doesNotMatch(src, /export (async )?function (POST|PUT|PATCH|DELETE)/, "a retired route accepts no writes");
+      const mod = (await import(`../app/${route}/route`)) as { GET: () => Response };
       for (const who of ["client", "cc"] as const) {
         await login(who);
-        assert.equal(await outcome(() => page()), "404", `${who} opened /${route}`);
+        const res = mod.GET();
+        assert.equal(res.status, 404, `${who} got HTTP ${res.status} for /${route}`);
+        assert.match(res.headers.get("content-type") || "", /^text\/html/);
+        assert.equal(res.headers.get("x-robots-tag"), "noindex");
+        const body = await res.text();
+        assert.match(body, /<h1>Page not found<\/h1>/);
+        assert.doesNotMatch(body, /SunBiz|Sun Biz|Solara|Helios|Bravo|OASIS/i, "the 404 names nothing internal");
       }
-      const src = readFileSync(join(ROOT, `app/${route}/page.tsx`), "utf8");
-      assert.doesNotMatch(src, /^import (?!\{ notFound \} from "next\/navigation")/m, "a retired page imports nothing else");
     });
   }
 
@@ -468,6 +496,13 @@ async function main() {
   }
 
   // ── client components, rendered where React is whole ─────────────────────
+  const { FAMILY_AGENT_KEYS } = await import("../lib/agents");
+  const isHouse = (slug: string) => FAMILY_AGENT_KEYS.some((k) => k.toLowerCase() === slug.toLowerCase());
+  type CardAgent = { slug: string; display_name: string; enabled: boolean; core?: boolean };
+  const cardAgents = (who: "client" | "cc") =>
+    ((captured[who]?.marketplace?.initialAgents as CardAgent[] | undefined) ?? []);
+  /** OASIS's card with one removable house agent taken out, as a Remove leaves it. */
+  const removedFromCc = cardAgents("cc").find((a) => a.core !== true && isHouse(a.slug)) ?? null;
   const html: Record<string, Record<string, string>> = {};
   for (const who of ["client", "cc"] as const) {
     await check(`client components render for ${who} (tests/client-route-gating.render.ts)`, () => {
@@ -482,32 +517,104 @@ async function main() {
       const r = spawnSync(process.execPath, ["--import", "tsx", "tests/client-route-gating.render.ts"], {
         encoding: "utf8",
         env,
-        input: JSON.stringify({ marketplace: c.marketplace, agentConfig: c.agentConfig, profileEditor: c.profileEditor }),
+        input: JSON.stringify({
+          marketplace: c.marketplace,
+          agentConfig: c.agentConfig,
+          profileEditor: c.profileEditor,
+          marketplaceAfterRemove:
+            who === "cc" && removedFromCc && c.marketplace
+              ? { ...c.marketplace, initialAgents: cardAgents("cc").filter((a) => a.slug !== removedFromCc.slug) }
+              : null,
+        }),
       });
       assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
       html[who] = JSON.parse(r.stdout) as Record<string, string>;
     });
   }
 
-  await check("Settings > AI brain, client owner: no persona name, no 'empire', no 'C-suite'; teammates by department", () => {
+  await check("Settings > AI brain, client owner: no persona name, no 'empire', no 'C-suite'", () => {
     const c = captured.client;
     const pageText = [c.serverText, readable(html.client.marketplace), readable(html.client.agentConfig)].join("\n");
     assert.doesNotMatch(pageText, PERSONA_NAMES, `persona or OASIS-internal wording on a client's Settings > AI brain:\n${pageText.match(PERSONA_NAMES)?.[0]}`);
-    assert.match(readable(html.client.marketplace), /Chief of Staff/, "the Chief of Staff teammate is named for its department");
-    assert.match(readable(html.client.agentConfig), /Chief of Staff/, "the override rows use the department name too");
     assert.equal(c.marketplace?.offerAddOns, false, "a client is not offered OASIS's house agents");
     assert.doesNotMatch(readable(html.client.marketplace), /Available add-ons/);
   });
-  await check("Profile's primary-agent picker, client owner: department names, no persona", () => {
+
+  // The names must agree with the client's own department tabs, which read
+  // departmentChannelFor(key, { oasis: false }): only departments bound there
+  // may name an agent, and only the agent bound to them.
+  const { OS_DEPARTMENTS } = await import("../lib/os/departments");
+  const { departmentChannelFor } = await import("../components/os/department/config");
+  const { workspaceAgentsSubtitle } = await import("../lib/os/teammate-names");
+  await check("Settings > AI brain, client owner: a teammate carries a department name only where the client's own tab binds it", () => {
+    const names = (captured.client.marketplace?.teammateNames ?? {}) as Record<string, { name: string }>;
+    assert.ok(Object.keys(names).length > 0, "no teammate names were handed to the card");
+    for (const [slug, { name }] of Object.entries(names)) {
+      for (const dept of OS_DEPARTMENTS) {
+        if (!name.split(" · ").includes(dept.label)) continue;
+        const bound = departmentChannelFor(dept.key, { oasis: false });
+        assert.ok(
+          bound.kind === "agent" && bound.agentSlug.toLowerCase() === slug.toLowerCase(),
+          `${slug} is called "${name}" on a client's Settings, but that client's ${dept.label} tab says ${bound.kind === "agent" ? `it is ${bound.agentSlug}` : "not set up"}`,
+        );
+      }
+    }
+    // The client manifest runs bravo, atlas and maven; none leads a department there.
+    const card = readable(html.client.marketplace);
+    const overrides = readable(html.client.agentConfig);
+    for (const text of [card, overrides, readable(html.client.profileEditor)]) {
+      assert.doesNotMatch(text, /Chief of Staff|Marketing|Finance|Operations/, "a department the client's tabs call not set up (or do not have)");
+    }
+    assert.match(card, /General assistant/, "the general agent is named for its job");
+    // The card's subtitle lists only the departments bound for a client.
+    const subtitle = workspaceAgentsSubtitle({ oasis: false });
+    assert.ok(captured.client.serverText.includes(subtitle), "the client's card does not carry the client subtitle");
+    assert.match(subtitle, /\(Sales and Client Success\)/);
+    assert.doesNotMatch(subtitle, /Chief of Staff|Marketing|Finance|Operations/);
+  });
+  await check("Profile's primary-agent picker, client owner: job names, no persona", () => {
     const text = readable(html.client.profileEditor);
     assert.doesNotMatch(text, PERSONA_NAMES, text.match(PERSONA_NAMES)?.[0]);
-    assert.match(text, /Chief of Staff/);
+    assert.match(text, /General assistant/);
   });
-  await check("Settings > AI brain, OASIS owner: add-ons offered, still by department or job, never by persona", () => {
+  await check("Settings > AI brain, OASIS owner: add-ons offered, by department or job, never by persona", () => {
     const text = readable(html.cc.marketplace);
     assert.equal(captured.cc.marketplace?.offerAddOns, true);
     assert.doesNotMatch([captured.cc.serverText, text, readable(html.cc.agentConfig)].join("\n"), PERSONA_NAMES);
-    assert.match(text, /Chief of Staff/);
+    assert.match(text, /Chief of Staff/, "in OASIS's workspace the Chief of Staff teammate is named for its department");
+    const subtitle = workspaceAgentsSubtitle({ oasis: true });
+    assert.ok(captured.cc.serverText.includes(subtitle));
+    assert.match(subtitle, /\(Chief of Staff, Sales, Marketing, Client Success, Finance and Operations\)/);
+  });
+
+  // ── Remove only where Add brings it back ────────────────────────────────
+  const REMOVE = 'title="Remove from workspace"';
+  const count = (s: string, needle: string) => s.split(needle).length - 1;
+  await check("Workspace agents, client owner: no Remove (there is no Add list to bring it back); Disable / Enable instead", () => {
+    const markup = html.client.marketplace;
+    const nonCore = cardAgents("client").filter((a) => a.core !== true);
+    assert.ok(nonCore.length > 0, "the client fixture has no removable teammate; this check would be vacuous");
+    assert.equal(count(markup, REMOVE), 0, "a client owner can remove a teammate with no way to add it back");
+    assert.equal(
+      count(markup, ">Disable</button>") + count(markup, ">Enable</button>"),
+      nonCore.length,
+      "every non-core teammate keeps a reversible Disable / Enable",
+    );
+    const src = readFileSync(join(ROOT, "components/settings/AgentMarketplaceCard.tsx"), "utf8");
+    assert.doesNotMatch(src, /add it back any time/, "the confirmation promises a way back the card may not have");
+  });
+  await check("Workspace agents, OASIS owner: Remove only on house agents, and a removed one is back under Available add-ons", () => {
+    const markup = html.cc.marketplace;
+    const removable = cardAgents("cc").filter((a) => a.core !== true && isHouse(a.slug));
+    assert.equal(count(markup, REMOVE), removable.length, "Remove shows on an agent that Add cannot bring back");
+    assert.ok(removedFromCc, "OASIS's card has no removable house agent; the round trip below would be vacuous");
+    const names = (captured.cc.marketplace?.teammateNames ?? {}) as Record<string, { name: string }>;
+    const name = names[removedFromCc.slug]?.name ?? removedFromCc.display_name;
+    const after = html.cc.marketplaceAfterRemove;
+    assert.ok(after, "the after-remove card did not render");
+    const addOns = readable(after.slice(after.indexOf("Available add-ons")));
+    assert.ok(after.includes("Available add-ons"), "after a Remove, OASIS's card has no Available add-ons section");
+    assert.ok(addOns.includes(name) && addOns.includes("Add to workspace"), `${name} did not come back as an add-on after Remove`);
   });
 
   await check("/forms and /sequences, client workspace: no SunBiz agent in the copy, no link to the retired Metrics", () => {
@@ -550,6 +657,61 @@ async function main() {
     for (const f of ["app/error.tsx", "app/global-error.tsx"]) {
       assert.doesNotMatch(readFileSync(join(ROOT, f), "utf8"), /vercel/i, `${f} mentions Vercel`);
     }
+  });
+  const { PROSPECT_FACING_PREFIXES, isProspectFacingPath } = await import("../components/ErrorHelp");
+  await check("the error boundaries on a page a client's prospect opens: try again and the code, no OASIS contact, no link into the OS", () => {
+    for (const id of ["form", "personalForm", "sign", "unsubscribe"]) {
+      for (const kind of ["error", "globalError"]) {
+        const markup = html.client[`${kind}:${id}`];
+        assert.ok(markup, `${kind}:${id} did not render`);
+        const text = readable(markup);
+        assert.match(text, /Something went wrong/);
+        assert.match(text, /Try again/);
+        assert.match(text, /contact the business that sent you here and give them the code below/);
+        assert.match(text, /digest-4471/, "the code stays: it is how the business finds the failure with us");
+        assert.ok(!markup.includes(SUPPORT_FORM_PATH), `${kind}:${id} sends a client's prospect to OASIS's support form`);
+        assert.ok(!markup.includes(CONTACT_EMAIL), `${kind}:${id} names OASIS's founder to a client's prospect`);
+        assert.doesNotMatch(markup, /mailto:|OASIS/i);
+        assert.ok(!markup.includes('href="/"'), `${kind}:${id} links a prospect into the operator's Today`);
+      }
+    }
+    assert.match(readable(html.client["error:prospectNoDigest"]), /tell them what you were doing/);
+    assert.doesNotMatch(readable(html.client["error:prospectNoDigest"]), /Error code/);
+    // The same pages middleware serves without a session; and nothing wider.
+    const middleware = readFileSync(join(ROOT, "middleware.ts"), "utf8");
+    for (const prefix of PROSPECT_FACING_PREFIXES) {
+      assert.ok(middleware.includes(`"${prefix}",`), `${prefix} is not a public path in middleware.ts`);
+    }
+    for (const p of ["/fleet", "/signup", "/unsubscribe-x", "/settings/ai", "/", "/forms"]) {
+      assert.equal(isProspectFacingPath(p), false, `${p} is an OASIS page`);
+    }
+    for (const p of ["/f/client-co/intake", "/sign/abc", "/unsubscribe", "/unsubscribe?email=a%40b.co"]) {
+      assert.equal(isProspectFacingPath(p), true, p);
+    }
+  });
+
+  // ── 10. /unsubscribe with no address in the link ────────────────────────
+  await check("/unsubscribe with no address in the link: the recipient types it, and it goes through /api/unsubscribe", async () => {
+    const unsubscribe = (await import("../app/unsubscribe/page")).default;
+    const UnsubscribeForm = (await import("../app/unsubscribe/UnsubscribeForm")).default;
+    const tree = await unsubscribe({ searchParams: Promise.resolve({}) });
+    const form = walk(tree).elements.find((e) => e.type === UnsubscribeForm);
+    assert.ok(form, "the no-address page offers only 'email us': that opt-out never reaches email_suppressions");
+    assert.equal(form.props.email, "");
+    const typed = html.client.unsubscribeTyped;
+    const input = /<input[^>]*>/.exec(typed)?.[0] ?? "";
+    assert.match(input, /type="email"/, "no field to type the address into");
+    assert.match(input, /name="email"/);
+    assert.match(input, /required=""/);
+    assert.match(readable(typed), /Confirm unsubscribe/);
+    const { MANUAL_UNSUBSCRIBE_HREF } = await import("../app/unsubscribe/ManualOptOut");
+    assert.ok(typed.includes(`href="${MANUAL_UNSUBSCRIBE_HREF}"`), "writing to the inbox stays as the fallback");
+    const linked = html.client.unsubscribeLinked;
+    assert.doesNotMatch(linked, /<input/, "an address from the link is shown, not edited");
+    assert.ok(linked.includes("reader@example.com"));
+    const src = readFileSync(join(ROOT, "app/unsubscribe/UnsubscribeForm.tsx"), "utf8");
+    assert.match(src, /fetch\("\/api\/unsubscribe"/);
+    assert.match(src, /JSON\.stringify\(\{ email: submitted, brand, token \}\)/, "the typed address is what gets posted");
   });
   const { AiNotSetUpNotice, AI_SETTINGS_HREF } = await import("../app/pipeline/[id]/AiNotSetUpNotice");
   await check("AI not set up: an owner gets the Settings link, nobody gets a setting name", () => {

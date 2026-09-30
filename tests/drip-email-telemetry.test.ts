@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const migration = readFileSync("database/125_drip_email_events.sql", "utf8");
 for (const column of [
@@ -74,11 +74,13 @@ assert.match(sequenceBuilder, /Optional custom HTML/);
 assert.match(sequenceBuilder, /body_html/);
 
 // /templates (the SunBiz HTML + drip template library) was retired on
-// 2026-09-30: the page is a bare notFound(). tests/client-route-gating.test.ts
-// runs it; this only pins that nothing was left mounted behind it.
-const templatesPage = readFileSync("app/templates/page.tsx", "utf8");
-assert.match(templatesPage, /notFound\(\);/);
-assert.doesNotMatch(templatesPage, /DripEmailTemplatesSection/);
+// 2026-09-30: the folder holds only a route handler answering the retired 404
+// (lib/os/retired-routes.ts). tests/client-route-gating.test.ts runs it; this
+// only pins that nothing was left mounted behind it.
+const templatesRoute = readFileSync("app/templates/route.ts", "utf8");
+assert.match(templatesRoute, /return retiredRouteResponse\(\);/);
+assert.doesNotMatch(templatesRoute, /DripEmailTemplatesSection/);
+assert.equal(existsSync("app/templates/page.tsx"), false, "a page next to the retired route would render again");
 
 const dripLibrary = readFileSync("components/templates/DripEmailTemplatesSection.tsx", "utf8");
 assert.match(dripLibrary, /Jordan direct/);

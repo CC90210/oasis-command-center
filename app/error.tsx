@@ -15,12 +15,17 @@
  * hosting provider's function logs, which only an operator can open. The digest
  * stays because it is the one thing that lets us find the failure in the
  * Worker's logs from their message.
+ *
+ * It is also the boundary for the public pages a client's own prospects open
+ * (/f/<client>/<form>, /sign/<token>, /unsubscribe): there it names no OASIS
+ * contact and drops the link to Today, an operator page (components/ErrorHelp.tsx).
  */
 
 import { useEffect } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
-import { ErrorHelp } from "@/components/ErrorHelp";
+import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
 
 export default function ErrorBoundary({
   error,
@@ -29,6 +34,7 @@ export default function ErrorBoundary({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const prospectFacing = isProspectFacingPath(usePathname());
   useEffect(() => {
     // The Worker's logs capture console output; this is the diagnostic record.
     console.error("[error.tsx]", error);
@@ -43,7 +49,7 @@ export default function ErrorBoundary({
           </div>
           <h1 className="text-base font-bold text-fg">Something went wrong</h1>
         </div>
-        <ErrorHelp digest={error.digest} />
+        <ErrorHelp digest={error.digest} prospectFacing={prospectFacing} />
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <button
             onClick={() => reset()}
@@ -51,9 +57,11 @@ export default function ErrorBoundary({
           >
             <RefreshCw className="w-4 h-4" /> Try again
           </button>
-          <Link href="/" className="btn-secondary inline-flex items-center gap-1.5 text-sm">
-            <Home className="w-4 h-4" /> Today
-          </Link>
+          {prospectFacing ? null : (
+            <Link href="/" className="btn-secondary inline-flex items-center gap-1.5 text-sm">
+              <Home className="w-4 h-4" /> Today
+            </Link>
+          )}
         </div>
       </div>
     </div>
