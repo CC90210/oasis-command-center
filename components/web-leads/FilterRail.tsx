@@ -85,6 +85,7 @@ export function activeFilterCount(filters: WebLeadFilters): number {
     filters.industries.length +
     (filters.noSiteOnly ? 1 : 0) +
     (filters.ownerOnly ? 1 : 0) +
+    (filters.due ? 1 : 0) +
     (filters.enrichment !== "all" ? 1 : 0)
   );
 }
@@ -222,6 +223,28 @@ function FilterTree({
       {/* The owner's name is the difference between "is the owner in?" and
           "can I speak to Marie?". Sits beside the website filter because a rep
           picks both the same way: what do I know before I dial. */}
+      {/* WHAT YOU ALREADY OWE, above the "what do I know before I dial"
+          filters, because a promise you made outranks a lead you might like.
+
+          Until this shipped, a rep could record a callback and never see it
+          again: dispositionPatch REQUIRES a future date for the attempted and
+          voicemail dispositions, so the promise was always stored, and nothing
+          in the product ever read it back. On a cold week deferrals are most of
+          what the week produces.
+
+          Pair it with My leads. The filter deliberately does not force that
+          scope -- a control that silently rewrites the view is how surprising
+          behaviour gets built -- and the pool only shows unheld leads anyway. */}
+      <label className={ROW}>
+        <input
+          type="checkbox"
+          className={BOX}
+          checked={filters.due}
+          onChange={() => set({ due: !filters.due })}
+        />
+        <span>Callback due or overdue</span>
+      </label>
+
       <label className={ROW}>
         <input
           type="checkbox"

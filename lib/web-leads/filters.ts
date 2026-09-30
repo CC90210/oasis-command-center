@@ -117,6 +117,24 @@ export type WebLeadFilters = {
    */
   ownerOnly: boolean;
   /**
+   * Only leads this rep already owes a call, soonest first.
+   *
+   * WHY THIS EXISTS. `dispositionPatch` REQUIRES a future `next_action_at` for
+   * the attempted and voicemail dispositions and refuses the write without one,
+   * so the promise a rep makes on a call has always been recorded. Nothing ever
+   * read it back. A rep said "call me in two weeks", the date was stored, and no
+   * screen in this product mentioned it again. On a cold week deferrals are most
+   * of what the week produces, so the single largest category of work the board
+   * knew about was the one category it could not show.
+   *
+   * It is a FILTER rather than a view because "due" is inherently about the
+   * caller's own book: it composes with trade, province and enrichment tier, and
+   * a rep filtering to trades in BC still wants to see what they owe there. A
+   * fifth view would have needed its own scope mapping and would have collided
+   * with the pool/team semantics that PR #237 settled.
+   */
+  due: boolean;
+  /**
    * How much we know about a lead before the rep dials.
    *
    * Distinct from `ownerOnly`, which asks only "is there a name". This ranks
@@ -166,6 +184,7 @@ export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   industries: EMPTY_LIST,
   noSiteOnly: false,
   ownerOnly: false,
+  due: false,
   enrichment: "all",
   openNow: false,
   band: "all",
@@ -213,6 +232,7 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
     ownerOnly: sp.get("owner") === "1",
+    due: sp.get("due") === "1",
     enrichment: parseEnrichment(sp.get("enrich")),
     openNow: sp.get("open") === "1",
     // Unrecognised values fall back to the default rather than throwing: these
@@ -244,6 +264,7 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   put("ind", f.industries);
   if (f.noSiteOnly) sp.set("nosite", "1");
   if (f.ownerOnly) sp.set("owner", "1");
+  if (f.due) sp.set("due", "1");
   if (f.enrichment !== "all") sp.set("enrich", f.enrichment);
   if (f.openNow) sp.set("open", "1");
   if (f.query) sp.set("q", f.query);
