@@ -3,11 +3,17 @@
  * (docs/os-revamp/PLAN.md decision 5; the `customers` table, migration
  * bravo__188).
  *
- * THE LIST is the workspace's client records: status (lifecycle), owner, open
- * tickets and active projects on the workspace's own desk, last touch and
- * tags, with filters and "New client". Ticket and project counts are for the
- * desk's team (owners and admins); for anyone else they are unknown — an em
- * dash, never 0.
+ * THE LIST is the workspace's client records: health, status (lifecycle),
+ * owner, open tickets and active projects on the workspace's own desk, last
+ * touch and tags, with filters and "New client". Ticket and project counts,
+ * health signals and last touch are for the desk's team (owners and admins);
+ * for anyone else they are unknown — an em dash, never 0. LAST TOUCH is the
+ * latest ACTIVITY (lib/os/customers/activity.ts lastTouchFor), never the
+ * record's updated_at. Current clients come first; clients whose engagement
+ * ended are listed under PAST CLIENTS below them.
+ *
+ * IMPORT STRIPE CUSTOMERS (OASIS, founders who may open Money) turns the
+ * Stripe customers in OASIS's books into records, after the privacy question.
  *
  * NOT YET CLIENT RECORDS (OASIS only). Before client records existed, OASIS's
  * clients were assembled from what it already records (components/os/landings/
@@ -44,11 +50,18 @@ import {
   loadWorkspaceDirectory,
   ownerName,
   ownerOptions,
+  type ListedClient,
 } from "@/components/os/landings/clients-records-data";
-import { ConvertToClientButton, NewClientButton } from "@/components/os/landings/clients-actions";
+import {
+  ConvertToClientButton,
+  EndDealEngagementButton,
+  ImportStripeButton,
+  NewClientButton,
+} from "@/components/os/landings/clients-actions";
+import { ClientHealthBadge } from "@/components/os/landings/client-health-badge";
 import { clientsViewerFromSurface } from "@/lib/os/customers/session";
 import { CUSTOMER_LIFECYCLES, CUSTOMER_LIFECYCLE_LABELS, isOneOf } from "@/lib/os/customers/rules";
-import type { CustomerListRow } from "@/lib/os/customers/store";
+import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
 
@@ -80,6 +93,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
   const canOpen = (href: string) => mayOpenOsHref(viewer.navInput, href);
   const owners = ownerOptions(directory);
 
+  const moneyReadable = records.state === "ok" && records.value.money === "read";
   const actions = (
     <>
       {canOpen("/tickets") && (
@@ -87,6 +101,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
           Support desk
         </Link>
       )}
+      {cv.canWrite && cv.tenantId === DELIVERY_TENANT_ID && moneyReadable && <ImportStripeButton />}
       {cv.canWrite && records.state !== "not_set_up" && <NewClientButton owners={owners} defaultOwner={cv.userId} />}
     </>
   );
@@ -95,8 +110,15 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
   const rows = records.state === "ok" ? records.value.rows : [];
   const filtered = Boolean(filters.lifecycle || filters.q || filters.owner || filters.includeArchived);
   const byLifecycle = (l: string) => rows.filter((r) => r.lifecycle === l).length;
-  const sumOrNull = (pick: (r: CustomerListRow) => number | null) =>
+  const sumOrNull = (pick: (r: ListedClient) => number | null) =>
     rows.some((r) => pick(r) === null) ? null : rows.reduce((n, r) => n + (pick(r) ?? 0), 0);
+  // Past clients (the engagement ended) sit under their own heading unless a
+  // status filter already chose what to show.
+  const splitPast = !filters.lifecycle;
+  const currentRows = splitPast ? rows.filter((r) => r.lifecycle !== "churned") : rows;
+  const pastRows = splitPast ? rows.filter((r) => r.lifecycle === "churned") : [];
+  const atRisk = rows.filter((r) => r.health.level === "at_risk").length;
+  const healthUnknown = rows.some((r) => r.lifecycle !== "churned" && r.health.level === "unknown");
 
   // ── the pipeline-derived clients (OASIS) ─────────────────────────────────
   const derivedApplies = sources.wonDeals.state !== "not_applicable";
@@ -123,7 +145,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
   // not decide it. Null when client records cannot be read.
   const converted =
     built && records.state === "ok"
-      ? await loadConvertedLeads(cv, built.rows.map((r) => leadIdOf(r.key)).filter((x): x is string => x !== null))
+      ? await loadConvertedLeads(cv, [...built.rows, ...built.past].map((r) => leadIdOf(r.key)).filter((x): x is string => x !== null))
       : null;
   const convertedLeads = converted?.state === "ok" ? converted.value : null;
   const derivedRows = built
@@ -158,18 +180,29 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
         {records.state === "ok" && (
           <>
             {!filtered && !records.value.truncated && (
-              <section className={`grid grid-cols-2 gap-3 ${cv.desk ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
+              <section className={`grid grid-cols-2 gap-3 ${cv.desk ? "md:grid-cols-5" : "md:grid-cols-2"}`}>
                 <KpiTile label="Active" value={byLifecycle("active")} status="live" />
                 <KpiTile label="Onboarding" value={byLifecycle("onboarding")} status="live" />
                 {/* Desk counts are the owners' and admins' to read; for anyone
                     else the tile is not drawn rather than shown as a 0. */}
                 {cv.desk && (
                   <>
+                    <KpiTile
+                      label="At risk"
+                      value={atRisk}
+                      status="live"
+                      hint={healthUnknown ? "some clients' signals could not be read" : "overdue, failed, missed or quiet"}
+                    />
                     <KpiTile label="Open tickets" value={sumOrNull((r) => r.open_ticket_count)} status="live" hint="on your support desk" />
                     <KpiTile label="Active projects" value={sumOrNull((r) => r.active_project_count)} status="live" hint="discovery, building or review" />
                   </>
                 )}
               </section>
+            )}
+            {records.value.money === "error" && (
+              <p role="alert" className="text-[13px] text-status-warm">
+                Couldn&rsquo;t check who may read the books, so payment signals are left out of health. The error has been logged.
+              </p>
             )}
 
             <nav aria-label="Client status" className="flex flex-wrap gap-1 border-b border-hairline">
@@ -232,7 +265,24 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
                 </div>
               </Card>
             ) : (
-              <CustomersTable rows={rows} directory={directory} deskKnown={cv.desk !== null} />
+              <>
+                {currentRows.length > 0 ? (
+                  <CustomersTable rows={currentRows} directory={directory} deskKnown={cv.desk !== null} />
+                ) : (
+                  <Card>
+                    <p className="py-4 text-[13px] text-fg-muted">No current clients. Every client record here is a past engagement.</p>
+                  </Card>
+                )}
+                {pastRows.length > 0 && (
+                  <section className="space-y-3">
+                    <div>
+                      <h2 className="text-sm font-semibold text-fg">Past clients</h2>
+                      <p className="mt-0.5 text-[13px] text-fg-muted">Engagements that ended. Their history stays on each record.</p>
+                    </div>
+                    <CustomersTable rows={pastRows} directory={directory} deskKnown={cv.desk !== null} />
+                  </section>
+                )}
+              </>
             )}
             {records.value.truncated && <p className="text-xs text-fg-dim">Showing the first 500 clients. Narrow the filters to see the rest.</p>}
           </>
@@ -244,7 +294,9 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
               <h2 className="text-sm font-semibold text-fg">Not yet client records</h2>
               <p className="mt-0.5 max-w-prose text-[13px] leading-5 text-fg-muted">
                 Clients recorded before client records existed: deals won in Pipeline, delivery projects and open tickets.
-                {cv.canWrite ? " Convert a won deal to give it a record." : ""}
+                {cv.canWrite
+                  ? " Convert a won deal to give it a record, or mark it ended to file it under Past clients. Nothing here changes until you click."
+                  : ""}
               </p>
             </div>
             {sources.wonDeals.state === "not_allowed" ? (
@@ -281,6 +333,19 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
                     <p className="py-4 text-[13px] text-fg-muted">Nothing left to convert: no won deals, projects or open tickets outside client records.</p>
                   </Card>
                 ) : null}
+                {built && built.past.length > 0 && (
+                  <div className="space-y-2">
+                    <h3 className="text-[13px] font-semibold text-fg">Past clients in Pipeline</h3>
+                    <p className="text-[13px] text-fg-muted">Deals whose engagement ended. They are past clients, not clients to convert.</p>
+                    <ClientsTable
+                      rows={built.past}
+                      deliveryHidden={deliveryHidden}
+                      floors={built.floors}
+                      convertedLeads={convertedLeads ? Object.fromEntries(convertedLeads) : null}
+                      canConvert={false}
+                    />
+                  </div>
+                )}
                 {built && built.unlinkedTickets !== null && built.unlinkedTickets > 0 && (
                   <p className="text-[13px] text-fg-muted">
                     {shownCount(built.unlinkedTickets, built.floors.unlinkedTickets)} open ticket
@@ -331,12 +396,17 @@ function Count({ value, hidden, floor = false }: { value: number | null; hidden:
 const th = "px-4 py-2 text-left text-xs font-medium text-fg-dim";
 const td = "px-4 py-2.5 align-middle";
 
-function latest(...isos: Array<string | null>): string | null {
-  let best: string | null = null;
-  for (const iso of isos) {
-    if (iso && (!best || Date.parse(iso) > Date.parse(best))) best = iso;
+/** Last touch as the list prints it: the latest activity, "None yet", or a dash when it could not be read. */
+function LastTouch({ at }: { at: string | null | undefined }) {
+  if (at === undefined) {
+    return (
+      <span className="text-fg-dim" title="Owners and admins only, or it could not be read">
+        —
+      </span>
+    );
   }
-  return best;
+  if (at === null) return <span className="text-fg-dim">None yet</span>;
+  return <span title={at}>{timeAgo(at)}</span>;
 }
 
 /** The workspace's client records. */
@@ -345,17 +415,18 @@ function CustomersTable({
   directory,
   deskKnown,
 }: {
-  rows: readonly CustomerListRow[];
+  rows: readonly ListedClient[];
   directory: Parameters<typeof ownerName>[1];
   deskKnown: boolean;
 }) {
   return (
     <Card noPadding>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-sm">
+        <table className="w-full min-w-[840px] text-sm">
           <thead>
             <tr className="border-b border-hairline">
               <th className={th}>Name</th>
+              <th className={th}>Health</th>
               <th className={th}>Status</th>
               <th className={th}>Owner</th>
               <th className={`${th} text-right`}>Open tickets</th>
@@ -365,7 +436,6 @@ function CustomersTable({
           </thead>
           <tbody className="divide-y divide-hairline">
             {rows.map((r) => {
-              const touch = latest(r.updated_at, r.last_ticket_at);
               const sub = [r.company_name && r.company_name !== r.display_name ? r.company_name : null, r.primary_email]
                 .filter(Boolean)
                 .join(" · ");
@@ -379,6 +449,9 @@ function CustomersTable({
                     {sub && <div className="text-xs text-fg-dim">{sub}</div>}
                     {r.tags.length > 0 && <div className="mt-0.5 text-xs text-fg-dim">{r.tags.join(" · ")}</div>}
                   </td>
+                  <td className={td}>
+                    <ClientHealthBadge health={r.health} />
+                  </td>
                   <td className={`${td} text-fg-muted`}>{CUSTOMER_LIFECYCLE_LABELS[r.lifecycle]}</td>
                   <td className={`${td} text-fg-muted`}>{ownerName(r.owner_user_id, directory) ?? (r.owner_user_id ? "—" : "No owner")}</td>
                   <td className={`${td} text-right tabular-nums`}>
@@ -387,8 +460,8 @@ function CustomersTable({
                   <td className={`${td} text-right tabular-nums`}>
                     <Count value={r.active_project_count} hidden={!deskKnown} />
                   </td>
-                  <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`} title={touch ?? undefined}>
-                    {touch ? timeAgo(touch) : "—"}
+                  <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`}>
+                    <LastTouch at={r.last_touch} />
                   </td>
                 </tr>
               );
@@ -461,7 +534,12 @@ function ClientsTable({
                         Open record
                       </Link>
                     ) : leadId && canConvert ? (
-                      <ConvertToClientButton leadId={leadId} />
+                      // A won deal whose engagement already ended goes to Past
+                      // as a record, instead of sitting among current clients.
+                      <div className="flex flex-col items-start gap-1.5">
+                        <ConvertToClientButton leadId={leadId} />
+                        <EndDealEngagementButton leadId={leadId} />
+                      </div>
                     ) : (
                       <span className="text-[13px] text-fg-dim">{convertedLeads === null ? "—" : "Not a record yet"}</span>
                     )}

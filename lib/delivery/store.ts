@@ -24,10 +24,19 @@
  * customer_id (migration bravo__188) is READ through `t.*` / `p.*`, so it is
  * simply absent before that migration, and it is only ever WRITTEN when it has
  * a value — so OASIS's desk keeps working on a database that has not had 188.
+ *
+ * THE LEDGER. This module is the catalog owner of ticket.opened,
+ * ticket.first_response and ticket.resolved (lib/ledger/catalog.ts). Each is
+ * emitted in the SAME db.batch as the ticket write it records (a ticket and
+ * its ledger row commit together), carrying the ticket's client record
+ * (customer_id) so the client's Activity tab shows it in the same request.
+ * outcome_events (migration bravo__190) must exist: a desk write without it
+ * fails loudly rather than landing unrecorded.
  */
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
   CLIENT_VISIBLE_MATCHES,
   commentScope,
@@ -963,6 +972,56 @@ export async function updateTask(
 }
 
 // ---------------------------------------------------------------------------
+// Ticket events for the Business Ledger (this module owns them)
+// ---------------------------------------------------------------------------
+
+export const DELIVERY_LEDGER_PRODUCER = "lib/delivery/store.ts";
+
+type TicketEventKind = "opened" | "first_response" | "resolved";
+
+const TICKET_EVENT_KEYS: Record<TicketEventKind, string> = {
+  opened: "ticket.opened",
+  first_response: "ticket.first_response",
+  resolved: "ticket.resolved",
+};
+
+function ticketEvent(
+  kind: TicketEventKind,
+  args: {
+    tenantId: string;
+    ticketId: string;
+    customerId: string | null;
+    actorUserId: string | null;
+    /** The n in the catalog's key shape: the occurrence of this event on this ticket. */
+    n: number;
+    payload: Record<string, unknown>;
+    conditional: boolean;
+  },
+  now: Date,
+): LedgerStatement {
+  const input = {
+    tenantId: args.tenantId,
+    eventKey: TICKET_EVENT_KEYS[kind],
+    eventVersion: 1,
+    occurredAt: now,
+    subject: { type: "ticket", id: args.ticketId },
+    customerId: args.customerId,
+    actor: args.actorUserId ? { type: "human" as const, id: args.actorUserId } : { type: "system" as const, id: null },
+    source: "native" as const,
+    idempotencyKey: `tkt:${args.ticketId}:${kind}:${args.n}`,
+    confidence: "verified" as const,
+    payload: args.payload,
+    producer: DELIVERY_LEDGER_PRODUCER,
+  };
+  return args.conditional ? emitIfChanged(input, now) : emit(input, now);
+}
+
+/** A ledger id or null: a free-text actor (the support form's "system") is not an id. */
+function actorId(userId: string | null | undefined): string | null {
+  return userId && /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$/.test(userId) && userId !== "system" ? userId : null;
+}
+
+// ---------------------------------------------------------------------------
 // Tickets — writes
 // ---------------------------------------------------------------------------
 
@@ -1033,9 +1092,25 @@ export async function createTicket(
   // bravo__188 still takes every ticket OASIS's desk files today.
   const customerCol = input.customer_id ? ", customer_id" : "";
   const customerVal = input.customer_id ? ", ?" : "";
+  // ticket.opened rides in the same batch as the insert, conditional on it
+  // (a lost numbering race writes neither). priority is the severity code,
+  // channel the intake it came through.
+  const opened = ticketEvent(
+    "opened",
+    {
+      tenantId,
+      ticketId: id,
+      customerId: input.customer_id ?? null,
+      actorUserId: actorId(input.reporter_user_id),
+      n: 1,
+      payload: { priority: input.severity, channel: input.source },
+      conditional: true,
+    },
+    now,
+  );
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
-      await db.execute({
+      await db.batch([{
         sql: `INSERT INTO support_tickets
                 (id, tenant_id, ticket_seq, ticket_number, title, description, category, severity, status, source,
                  project_id, client_tenant_id, client_name, client_email, client_company, client_match, project_hint,
@@ -1069,7 +1144,7 @@ export async function createTicket(
           ...(input.customer_id ? [input.customer_id] : []),
           tenantId,
         ],
-      });
+      }, opened], "write");
       return { ticket: (await getTicket(db, reader, id))!, created: true };
     } catch (err) {
       const e = err as { message?: string; code?: string };
@@ -1278,6 +1353,30 @@ export async function updateTicket(
   const stmts: InStatement[] = [
     { sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`, args: [...args, tenantId, id] },
   ];
+  if (changes.status === "resolved" && fromStatus !== "resolved") {
+    // The n-th resolution of this ticket (a reopened ticket resolves again).
+    const prior = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM outcome_events
+            WHERE tenant_id = ? AND subject_type = 'ticket' AND subject_id = ? AND event_key = ?`,
+      args: [tenantId, id, TICKET_EVENT_KEYS.resolved],
+    });
+    const customerAfter = sets.includes("customer_id = ?") ? args[sets.indexOf("customer_id = ?")] : s(cur.customer_id);
+    stmts.push(
+      ticketEvent(
+        "resolved",
+        {
+          tenantId,
+          ticketId: id,
+          customerId: customerAfter ?? null,
+          actorUserId: actorId(author.userId),
+          n: Number(rows(prior)[0]?.n ?? 0) + 1,
+          payload: {},
+          conditional: true,
+        },
+        now,
+      ),
+    );
+  }
   if (notes.length) {
     stmts.push({
       sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
@@ -1312,9 +1411,10 @@ export async function addTicketComment(
   now: Date,
 ): Promise<CommentResult> {
   requireTenant(tenantId);
+  // SELECT * so customer_id is simply absent before migration bravo__188.
   const cur = rows(
     await db.execute({
-      sql: "SELECT status, first_response_at FROM support_tickets WHERE tenant_id = ? AND id = ?",
+      sql: "SELECT * FROM support_tickets WHERE tenant_id = ? AND id = ?",
       args: [tenantId, ticketId],
     }),
   )[0];
@@ -1335,11 +1435,6 @@ export async function addTicketComment(
   const reopened = input.author_type === "client" && (status === "waiting_on_client" || status === "resolved");
   const sets = ["updated_at = ?"];
   const args: Array<string | null> = [at];
-  if (firstResponse) {
-    // COALESCE: set once, even if two public replies race.
-    sets.push("first_response_at = COALESCE(first_response_at, ?)");
-    args.push(at);
-  }
   if (reopened) {
     sets.push("status = 'open'", "resolved_at = NULL", "closed_at = NULL");
   }
@@ -1347,6 +1442,30 @@ export async function addTicketComment(
     sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
     args: [...args, tenantId, ticketId],
   });
+  if (firstResponse) {
+    // Set once: only the reply that finds it still empty sets it, even if two
+    // public replies race, and only that reply records ticket.first_response.
+    stmts.push({
+      sql: "UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL",
+      args: [at, tenantId, ticketId],
+    });
+    const opened = Date.parse(String(cur.created_at ?? ""));
+    stmts.push(
+      ticketEvent(
+        "first_response",
+        {
+          tenantId,
+          ticketId,
+          customerId: s(cur.customer_id),
+          actorUserId: actorId(input.author.userId),
+          n: 1,
+          payload: Number.isNaN(opened) ? {} : { response_minutes: Math.max(0, Math.round((now.getTime() - opened) / 60_000)) },
+          conditional: true,
+        },
+        now,
+      ),
+    );
+  }
   await db.batch(stmts, "write");
   return {
     ok: true,

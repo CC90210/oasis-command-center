@@ -25,6 +25,7 @@ import { LIST_LIMIT, listProjects, listTickets } from "@/lib/delivery/store";
 import type { OsPageViewer } from "@/components/os/landings/page-gate";
 import {
   CLIENT_STAGES,
+  ENDED_LEAD_STAGES,
   type ClientLead,
   type ClientProject,
   type ClientTicket,
@@ -49,7 +50,8 @@ async function loadWonDeals(viewer: OsPageViewer): Promise<SourceState<ClientLea
     const r = await listRecords({
       tenant_id: viewer.surface.tenantId,
       entity: "lead",
-      whereIn: { stage: CLIENT_STAGES },
+      // Won deals, and deals whose engagement ended (listed under Past by the model).
+      whereIn: { stage: [...CLIENT_STAGES, ...ENDED_LEAD_STAGES] },
       sort: "-updated_at",
       limit: CLIENTS_LEAD_LIMIT,
     });

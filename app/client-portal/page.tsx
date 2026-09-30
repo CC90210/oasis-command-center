@@ -51,8 +51,17 @@ type RoiSnapshot = {
   ai_actions_taken: number;
 };
 
-async function getRecentRoi(tenantId: string, days = 30): Promise<RoiSnapshot[]> {
-  if (!tursoConfigured()) return [];
+/**
+ * The last `days` of the nightly ROI roll-up. A failed read is "error", never
+ * an empty list: zeros would tell the client their AI did nothing.
+ */
+type RoiState = { state: "ok"; rows: RoiSnapshot[] } | { state: "error" };
+
+async function getRecentRoi(tenantId: string, days = 30): Promise<RoiState> {
+  if (!tursoConfigured()) {
+    console.error("[client-portal.roi] Turso is not configured on this deployment");
+    return { state: "error" };
+  }
   try {
     const db = getTursoClient();
     const r = await db.execute({
@@ -63,16 +72,20 @@ async function getRecentRoi(tenantId: string, days = 30): Promise<RoiSnapshot[]>
             ORDER BY snapshot_date ASC`,
       args: [tenantId, `-${days} days`],
     });
-    return r.rows.map((row) => ({
-      snapshot_date: String(row.snapshot_date ?? ""),
-      messages_handled: Number(row.messages_handled ?? 0),
-      leads_processed: Number(row.leads_processed ?? 0),
-      hours_saved_est: Number(row.hours_saved_est ?? 0),
-      avg_response_sec: Number(row.avg_response_sec ?? 0),
-      ai_actions_taken: Number(row.ai_actions_taken ?? 0),
-    }));
-  } catch {
-    return [];
+    return {
+      state: "ok",
+      rows: r.rows.map((row) => ({
+        snapshot_date: String(row.snapshot_date ?? ""),
+        messages_handled: Number(row.messages_handled ?? 0),
+        leads_processed: Number(row.leads_processed ?? 0),
+        hours_saved_est: Number(row.hours_saved_est ?? 0),
+        avg_response_sec: Number(row.avg_response_sec ?? 0),
+        ai_actions_taken: Number(row.ai_actions_taken ?? 0),
+      })),
+    };
+  } catch (err) {
+    console.error("[client-portal.roi]", err);
+    return { state: "error" };
   }
 }
 
@@ -80,10 +93,13 @@ export default async function ClientPortalPage() {
   const profile = await safe("client-portal.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
 
-  const [snapshots, delivery] = await Promise.all([
-    tenantId ? safe("client-portal.roi", getRecentRoi(tenantId, 30), []) : Promise.resolve([] as RoiSnapshot[]),
+  const [roi, delivery] = await Promise.all([
+    tenantId ? getRecentRoi(tenantId, 30) : Promise.resolve<RoiState>({ state: "ok", rows: [] }),
     getDeliveryPanel(),
   ]);
+  const snapshots = roi.state === "ok" ? roi.rows : [];
+  // No snapshot (or a failed read) is "not known yet", shown as a dash, never as 0.
+  const known = roi.state === "ok" && snapshots.length > 0;
 
   const totals = snapshots.reduce(
     (acc, s) => ({
@@ -110,20 +126,34 @@ export default async function ClientPortalPage() {
         subtitle="How your AI is performing — the numbers that prove the value."
       />
 
+      <section
+        aria-label="Support"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-bg-border bg-bg-panel px-4 py-3"
+      >
+        <p className="text-sm text-fg-muted">
+          Something not working, or need a change? Report it and you get a ticket number and a reply from the OASIS team.
+        </p>
+        <a href={SUPPORT_FORM_PATH} className="btn-secondary text-xs">
+          Report an issue ({SUPPORT_FORM_PATH})
+        </a>
+      </section>
+
+      {roi.state === "error" && <LoadError what="your AI's numbers" />}
+
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Stat
           label="Messages Handled"
-          value={totals.messages.toLocaleString()}
+          value={known ? totals.messages.toLocaleString() : "—"}
           accent
         />
         <Stat
           label="Hours Saved"
-          value={`${totals.hours.toFixed(1)}h`}
+          value={known ? `${totals.hours.toFixed(1)}h` : "—"}
           hint="estimated manual work replaced"
         />
         <Stat
           label="Leads Processed"
-          value={totals.leads.toLocaleString()}
+          value={known ? totals.leads.toLocaleString() : "—"}
         />
         <Stat
           label="Avg Response"
@@ -133,7 +163,9 @@ export default async function ClientPortalPage() {
       </section>
 
       <Card title="AI Actions · 30 Days" subtitle="Total autonomous actions your AI agent performed">
-        {snapshots.length === 0 ? (
+        {roi.state === "error" ? (
+          <EmptyState message="Couldn't load your AI's numbers. The error has been logged." />
+        ) : snapshots.length === 0 ? (
           <EmptyState message="ROI data will appear here once the nightly snapshot starts running. Check back tomorrow." />
         ) : (
           <div className="space-y-2">
@@ -233,14 +265,14 @@ export default async function ClientPortalPage() {
               Total AI Actions
             </div>
             <div className="text-2xl font-bold text-accent">
-              {totals.actions.toLocaleString()}
+              {known ? totals.actions.toLocaleString() : "—"}
             </div>
           </div>
           <div className="p-4 bg-bg-elev rounded-lg border border-bg-border">
             <div className="text-fg-muted text-xs uppercase tracking-wider mb-1">
               Days Tracked
             </div>
-            <div className="text-2xl font-bold">{snapshots.length}</div>
+            <div className="text-2xl font-bold">{roi.state === "error" ? "—" : snapshots.length}</div>
           </div>
         </div>
       </Card>

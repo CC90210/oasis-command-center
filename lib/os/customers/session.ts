@@ -94,6 +94,29 @@ const MESSAGES: Record<string, string> = {
   support_desk_unavailable: "The support desk is not set up in this database yet (migration bravo__188).",
   oasis_desk_is_seeded: "OASIS's support form is already on.",
   tenant_not_found: "This workspace could not be found.",
+  // The client record's composer (POST /api/clients/[id]/reply).
+  confirmation_required: "Confirm the send first. Nothing was sent.",
+  agent_drafts_need_approval: "An agent's draft goes to Feed for approval; it is never sent from here.",
+  oasis_mailbox_not_configured: "The OASIS mailbox is not configured on this deployment, so nothing was sent.",
+  no_mailbox:
+    "This workspace has no mailbox connected for client email yet, so nothing was sent. Connect your own mailbox for this workspace in Settings, then send again.",
+  client_has_no_email: "This client has no email address. Add one with Edit details, then write to them.",
+  to_not_this_client: "That address is not this client's. Write to the client's main address or one of its contacts.",
+  channel_not_supported: "Only email can be sent from a client record for now.",
+  drafted_by_agent_required: "Name the agent that drafted this email.",
+  // Linking the client's own workspace (POST /api/clients/[id]/link-workspace).
+  operator_only: "Only the platform operator can link a client's workspace.",
+  oasis_only: "This is only available in OASIS's own workspace.",
+  client_tenant_id_invalid: "Choose a workspace from the list.",
+  client_tenant_not_found: "That workspace does not exist.",
+  client_tenant_is_this_workspace: "A client cannot be linked to your own workspace.",
+  client_tenant_taken: "That workspace is already linked to another client record.",
+  client_workspace_link_not_set_up:
+    "Linking a client's workspace needs migration bravo__195, which is not applied to this database yet. Nothing was changed.",
+  // Importing Stripe customers (POST /api/clients/import-stripe).
+  finance_owners_only: "Importing from the books is for OASIS's founders (the same people who can open Money).",
+  privacy_confirmation_required:
+    "Confirm the privacy question first: Stripe subscribers can be private individuals, and only their name and email are recorded.",
 };
 
 function humanize(code: string): string {
