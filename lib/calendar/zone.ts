@@ -89,6 +89,16 @@ export function wallDateKey(instant: Date, tz: string): string {
   return `${p.y}-${String(p.m + 1).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
 }
 
+/**
+ * A Date whose LOCAL fields show the instant's wall-clock time in `tz`. For
+ * display-side helpers that read getDay()/getDate(): the repeat choices of a
+ * Toronto Monday 23:00 event must say Monday even in a Paris browser.
+ */
+export function wallAsLocal(instant: Date, tz: string): Date {
+  const w = wallParts(instant, tz);
+  return new Date(w.y, w.m, w.d, w.h, w.mi, w.s);
+}
+
 /** Weekday (0 = Sunday) of an instant in `tz`. */
 export function wallWeekday(instant: Date, tz: string): number {
   const p = wallParts(instant, tz);

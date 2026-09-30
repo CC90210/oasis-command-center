@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -86,13 +87,12 @@ const PHASES: Phase[] = [
     duration: "8 min — install + pair",
     icon: "terminal",
     body:
-      "Run the one-line installer. The wizard pairs the machine to your dashboard automatically (HMAC-based self-pair, no token paste required).",
+      "Paused until the desktop runner ships: the one-line installer and its wizard, which paired the machine to your dashboard automatically, clone a repository that is private since 2026-09-29.",
     steps: [
       {
-        title: "Send the OS-detected install command",
+        title: "Paused: installing on a client's machine",
         detail:
-          "From /configure, the appropriate one-liner is auto-detected. Copy it, send to client. They paste, hit Enter, the wizard runs through their pre-collected answers.",
-        cta: { label: "Open /configure", href: "/configure" },
+          "Paused until the desktop runner ships. Do not send a client the install script, and do not grant a client's machine access to the harness repository: it went private on 2026-09-29 to contain it, and every install path clones it. /install.ps1 and /install.sh are operator-only, and /configure, which generated the client's one-liner, is retired. The steps below apply once the runner replaces this one.",
       },
       {
         title: "Watch for the auto-pair confirmation",
@@ -305,7 +305,9 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
   );
 }
 
-export default function ClientDeployPage() {
+export default async function ClientDeployPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const totalSteps = PHASES.reduce((acc, p) => acc + p.steps.length, 0);
 
   return (

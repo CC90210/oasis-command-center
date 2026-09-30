@@ -77,6 +77,10 @@ export function validateRecurrence(v: unknown): Result<Recurrence | null> {
     if (r.monthlyMode !== "day" && r.monthlyMode !== "nth") return fail("recurrence_monthly_invalid");
     out.monthlyMode = r.monthlyMode;
   }
+  if (r.nth !== undefined && r.nth !== null) {
+    if (!(r.nth === -1 || (Number.isInteger(r.nth) && (r.nth as number) >= 1 && (r.nth as number) <= 4))) return fail("recurrence_nth_invalid");
+    out.nth = r.nth as number;
+  }
   if (r.until !== undefined && r.until !== null) {
     if (!isDateKey(r.until)) return fail("recurrence_until_invalid");
     out.until = r.until;
