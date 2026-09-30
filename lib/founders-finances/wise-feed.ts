@@ -260,6 +260,16 @@ export type PaidBillCandidate = BillCandidateBase & {
   open?: false;
   /** The entry that moved the money out of the register account: an expense's own entry, a bill's payment entry. */
   entryId: string;
+  /**
+   * A paid BILL only: the days it was owed, bill date to due date. "Mark
+   * paid" is often clicked days after the money left (a Wise line the feed
+   * held as an open bill's payment, then paid a week later), and the
+   * payment's date is then the click, not the debit: a debit anywhere in the
+   * owed span is still that payment, so the next sync links it instead of
+   * letting a rule book the cost a second time. Absent for an expense.
+   */
+  owedFrom?: string;
+  owedTo?: string;
 };
 
 /**
@@ -282,15 +292,24 @@ export type BillCandidate = PaidBillCandidate | OpenBillCandidate;
 
 export const BILL_MATCH_WINDOW_DAYS = 7;
 
+/** 0 anywhere from `from` to `to`, else the days to the nearer of the two. */
+function spanGap(postedDate: string, from: string, to: string): number {
+  if (postedDate >= from && postedDate <= to) return 0;
+  return Math.min(dayGap(postedDate, from), dayGap(postedDate, to));
+}
+
 /**
  * Days between a debit and a bill: from the day an expense or paid bill left
- * the account; for an open bill, 0 anywhere from its bill date to its due
- * date, else the days to the nearer of the two.
+ * the account, or for a paid bill from its owed span (bill date to due date)
+ * when that is nearer; for an open bill, 0 anywhere from its bill date to its
+ * due date, else the days to the nearer of the two.
  */
 function billGap(postedDate: string, b: BillCandidate): number {
-  if (!b.open) return dayGap(postedDate, b.paidOn);
-  if (postedDate >= b.paidOn && postedDate <= b.dueOn) return 0;
-  return Math.min(dayGap(postedDate, b.paidOn), dayGap(postedDate, b.dueOn));
+  if (!b.open) {
+    const fromPayment = dayGap(postedDate, b.paidOn);
+    return b.owedFrom && b.owedTo ? Math.min(fromPayment, spanGap(postedDate, b.owedFrom, b.owedTo)) : fromPayment;
+  }
+  return spanGap(postedDate, b.paidOn, b.dueOn);
 }
 
 /** The single item with the smallest distance, or null when there is none or a tie. */

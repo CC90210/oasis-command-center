@@ -621,6 +621,19 @@ async function main() {
     await assert.rejects(bills.payBill(cc, billId, { date: "2026-09-12" }), /choose the account the bill was paid from/);
   });
 
+  await check("Bills & Expenses: 'Mark paid' asks the day the money left ('Paid on', up to today), never books the payment on the day of the click by itself", async () => {
+    const BillsPage = (await import("../app/founders/finances/bills/page")).default;
+    const { SelectAction } = await import("../components/founders/finances/SelectAction");
+    const { torontoToday } = await import("../lib/founders-finances/fx");
+    const tree = walk(await BillsPage({ searchParams: sp() }));
+    const pay = tree.elements.filter((e) => e.type === SelectAction && e.props.action === "bill.pay").map((e) => e.props);
+    assert.ok(pay.length >= 1, "an open bill has a Mark paid control (the recurring bills above are open)");
+    for (const p of pay) {
+      assert.deepEqual(p.date, { name: "date", label: "Paid on", defaultValue: torontoToday(), max: torontoToday() }, "a date field the founder can set");
+      assert.ok(!("date" in (p.payload as Record<string, unknown>)), "the payload carries no fixed date that would override the founder's");
+    }
+  });
+
   await check("a confirmed paid-from books the recurring cost as paid from it; 'Paid by CC personally' credits CC's owner equity (3000) and counts as CC's contribution", async () => {
     const item = await bills.createRecurring(cc, B, { name: "ChatGPT", amount: "28.00", currency: "CAD", cadence: "monthly", next_run_on: "2026-09-15", category_id: categoryId(B, "5100"), paid_from_account_id: bills.PAID_BY_OWNER.cc });
     const [row] = (await bills.listRecurring(cc, B)).filter((r) => r.id === item);

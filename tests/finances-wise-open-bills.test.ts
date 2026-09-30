@@ -246,6 +246,30 @@ async function main() {
     assert.match(String((await line("WISE-USD-DEBIT-CARD-AI")).memo), /^Wise feed: this looks like the payment of open bill "AI subscriptions"/, "the other open bill's line is still held");
   });
 
+  await check("a founder marks the AI bill paid TODAY, 9 days after the Wise debit (the day of the click, the Bills page's default): the next sync still links the line to that payment, 'Apply rules' books nothing, the cost and the payment are on the books once", async () => {
+    // The debit landed on d0 + 1; the bill is marked paid on the day the founder clicks.
+    await bills.payBill(cc, billIds["AI subscriptions"], { account_id: chequing, date: today });
+    const paidBill = await billRow(billIds["AI subscriptions"]);
+    assert.equal(paidBill.status, "paid");
+    await feedIo.syncWiseFeed(cc, { since }, { dryRun: false });
+    const l = await line("WISE-USD-DEBIT-CARD-AI");
+    assert.deepEqual([l.status, l.entry_id], ["posted", paidBill.payment_entry_id], "linked to the bill's payment entry, whatever day it was marked paid");
+    assert.match(String(l.memo), /^Matched to bill "AI subscriptions" .* already on the books; nothing new was posted\./);
+    await txns.applyRulesToUnreviewed(cc, "oasis");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn'`), 0, "no bank line posted anything");
+    await costsOnce();
+    assert.equal(await native(chequing, "USD"), -2799 - 42000, "Turso and the AI bill left chequing once each");
+    assert.equal((await native(chequing, "USD")) + (await pending("USD")), wiseMove.USD, "chequing + what still waits = Wise");
+  });
+
+  await check("matcher: a PAID bill still matches a debit anywhere in the span it was owed (bill date to due date) when it was marked paid days later; an expense does not get that span", () => {
+    const paidLate = { ...paid("gusto", "2026-10-20", 5000), owedFrom: "2026-10-01", owedTo: "2026-10-05" };
+    assert.equal(plan([row("P1", "2026-10-03", -5000)], [paidLate]).get("P1")?.kind, "bill", "paid on the 20th, owed 1st to 5th: the debit on the 3rd is its payment");
+    assert.equal(plan([row("P2", "2026-10-12", -5000)], [paidLate]).get("P2")?.kind, "bill", "7 days after the due date");
+    assert.equal(plan([row("P3", "2026-09-20", -5000)], [paidLate]).get("P3"), undefined, "more than the window before the bill date and the payment: new money");
+    assert.equal(plan([row("P4", "2026-10-03", -5000)], [paid("rent", "2026-10-20", 5000)]).get("P4"), undefined, "an expense matches only near the day it was paid");
+  });
+
   await check("the reverse order: a Wise debit a rule booked BEFORE its bill was recorded is reported as a possible double count, saying to exclude it AND mark the bill paid", async () => {
     // The Cloudflare charge arrives and the founder's 'cloudflare' rule books it: no bill of that amount exists yet.
     await txns.createRule(cc, "oasis", { pattern: "cloudflare", category_id: categoryId(B, "5900"), direction: "out" });
@@ -263,6 +287,22 @@ async function main() {
     assert.ok(note, r.notes.join(" | "));
     assert.ok(note!.includes(`open bill "Cloudflare" (due ${day}) is also on the books.`), note);
     assert.match(note!, /If they are the same payment, exclude the line in Transactions and mark the open bill paid from Business chequing/);
+  });
+
+  await check("a bill marked paid on its BILL date, weeks before the Wise debit near its due date: the daily sync's 7-day window still finds it by the span it was owed and links the line; the founder's rule never books the cost again", async () => {
+    const billDate = addDays(today, -25);
+    const due = addDays(today, -1);
+    await txns.createRule(cc, "oasis", { pattern: "bookkeeping", category_id: categoryId(B, "5700"), direction: "out" });
+    const id = await bills.createBill(cc, B, { kind: "bill", vendor_name: "Bookkeeping", bill_date: billDate, due_date: due, subtotal: "300.00", currency: "CAD", category_id: categoryId(B, "5700") });
+    await bills.payBill(cc, id, { account_id: chequing, date: billDate });
+    cadTx.push({ dir: "DEBIT", kind: "TRANSFER", at: at(due), value: -300, cur: "CAD", ref: "TRANSFER-BOOKS", desc: "Sent money to Bookkeeping Co" });
+    statements.CAD = statementOf("CAD", cadTx, 5000);
+    await feedIo.syncWiseFeed(cc, { days: 7 }, { dryRun: false });
+    const l = await line("WISE-CAD-DEBIT-TRANSFER-BOOKS");
+    const b = await billRow(id);
+    assert.deepEqual([l.status, l.entry_id, l.rule_id], ["posted", b.payment_entry_id, null], "linked to the bill's payment, not booked by the rule");
+    assert.equal(await native(acct("5700"), "CAD"), 30000, "the cost once");
+    assert.equal((await native(chequing, "CAD")) + (await pending("CAD")), wiseMove.CAD - 30000, "chequing + what still waits = Wise");
   });
 
   if (failures) {

@@ -136,13 +136,15 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
                     <td className={`${tdClass} space-y-1 text-right`}>
                       {b.status === "open" && (
                         <div>
+                          {/* The day the money left, not the day of the click: the Wise feed links its line by that day. */}
                           <SelectAction
                             action="bill.pay"
-                            payload={{ bill_id: b.id, date: today }}
+                            payload={{ bill_id: b.id }}
                             name="account_id"
                             options={paidFromOptions}
                             placeholder="Paid from…"
                             label="Mark paid"
+                            date={{ name: "date", label: "Paid on", defaultValue: today, max: today }}
                           />
                         </div>
                       )}

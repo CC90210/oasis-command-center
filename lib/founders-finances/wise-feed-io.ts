@@ -263,17 +263,36 @@ async function openBillCandidates(entityId: string, from: string, to: string): P
   }));
 }
 
-/** Paid bills/expenses that left `chequing` between `from` and `to` and that no bank line is linked to yet. */
+/**
+ * Paid bills/expenses that left `chequing` and that no bank line is linked to
+ * yet: paid between `from` and `to`, or (a bill) owed then, from its bill date
+ * to its due date. A bill marked paid days after the money left carries the
+ * click's date as its payment date; its owed span is when the debit landed
+ * (wise-feed.ts PaidBillCandidate owedFrom/owedTo).
+ */
 async function paidBillCandidates(entityId: string, chequing: string, from: string, to: string): Promise<BillCandidate[]> {
-  const rows = await query<{ id: string; kind: string; vendor_name: string; currency: string; total_cents: number; paid_on: string; link_entry_id: string | null; category_id: string | null }>(
+  const rows = await query<{
+    id: string;
+    kind: string;
+    vendor_name: string;
+    currency: string;
+    total_cents: number;
+    paid_on: string;
+    bill_date: string;
+    due_on: string;
+    link_entry_id: string | null;
+    category_id: string | null;
+  }>(
     `SELECT b.id, b.kind, b.vendor_name, b.currency, b.total_cents, substr(COALESCE(b.paid_at, b.bill_date), 1, 10) AS paid_on,
+            b.bill_date, COALESCE(b.due_date, b.bill_date) AS due_on,
             CASE WHEN b.kind = 'expense' THEN b.entry_id ELSE b.payment_entry_id END AS link_entry_id,
             (SELECT c.id FROM fin_bill_lines bl JOIN fin_categories c ON c.account_id = bl.account_id AND c.entity_id = b.entity_id
               WHERE bl.bill_id = b.id ORDER BY bl.line_no, c.id LIMIT 1) AS category_id
        FROM fin_bills b
       WHERE b.entity_id = ? AND b.status = 'paid' AND b.paid_from_account_id = ?
-        AND substr(COALESCE(b.paid_at, b.bill_date), 1, 10) BETWEEN ? AND ?`,
-    [entityId, chequing, from, to],
+        AND (substr(COALESCE(b.paid_at, b.bill_date), 1, 10) BETWEEN ? AND ?
+             OR (b.kind = 'bill' AND b.bill_date <= ? AND COALESCE(b.due_date, b.bill_date) >= ?))`,
+    [entityId, chequing, from, to, to, from],
   );
   const withEntry = rows.filter((r) => r.link_entry_id);
   if (withEntry.length === 0) return [];
@@ -296,6 +315,7 @@ async function paidBillCandidates(entityId: string, chequing: string, from: stri
       totalCents: n(r.total_cents),
       paidOn: r.paid_on,
       categoryId: r.category_id,
+      ...(r.kind === "bill" ? { owedFrom: r.bill_date, owedTo: r.due_on < r.bill_date ? r.bill_date : r.due_on } : {}),
     }));
 }
 

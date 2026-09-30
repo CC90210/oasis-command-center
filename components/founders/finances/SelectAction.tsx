@@ -7,7 +7,9 @@
  * to /api/founders/finances/actions like ActionForm, shows the server's
  * message on failure, and refreshes the page on success. With `required`, the
  * button stays disabled until something is chosen: there is no default
- * answer to click through.
+ * answer to click through. With `date`, a date field sits beside the choice
+ * and is sent under its name ("Paid on" for a bill: the day the money left,
+ * which is often not the day the founder clicks).
  */
 
 import { useRouter } from "next/navigation";
@@ -25,6 +27,7 @@ export function SelectAction({
   defaultValue = "",
   required = true,
   confirm,
+  date,
 }: {
   action: string;
   payload: Record<string, unknown>;
@@ -38,9 +41,12 @@ export function SelectAction({
   defaultValue?: string;
   required?: boolean;
   confirm?: string;
+  /** A date sent with the choice (a bill's payment day). Required when given: the button waits for it. */
+  date?: { name: string; label: string; defaultValue: string; max?: string };
 }) {
   const router = useRouter();
   const [value, setValue] = useState(defaultValue);
+  const [day, setDay] = useState(date?.defaultValue ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -58,15 +64,28 @@ export function SelectAction({
           </option>
         ))}
       </select>
+      {date && (
+        <input
+          type="date"
+          name={date.name}
+          aria-label={date.label}
+          title={date.label}
+          value={day}
+          max={date.max}
+          onChange={(e) => setDay(e.target.value)}
+          className={`${inputClass} w-auto py-1 text-xs`}
+        />
+      )}
       <button
         type="button"
-        disabled={busy || (required && !value)}
+        disabled={busy || (required && !value) || (!!date && !day)}
         className={quietButton}
         onClick={async () => {
           if (confirm && !window.confirm(confirm)) return;
           setBusy(true);
           setErr(null);
-          const r = await postFinanceAction({ action, ...payload, [name]: value }).catch((e: unknown) => ({ ok: false, message: e instanceof Error ? e.message : "Network error." }));
+          const body = { action, ...payload, [name]: value, ...(date ? { [date.name]: day } : {}) };
+          const r = await postFinanceAction(body).catch((e: unknown) => ({ ok: false, message: e instanceof Error ? e.message : "Network error." }));
           setBusy(false);
           if (!r.ok) {
             setErr(r.message || "Failed.");
