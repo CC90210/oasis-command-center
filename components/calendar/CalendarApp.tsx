@@ -629,6 +629,7 @@ export function CalendarApp() {
       {legacyAsk && (
         <LegacyImport
           adds={legacyAsk.plan.events.length}
+          singles={legacyAsk.plan.events.filter((e) => !e.recurrence).length}
           replacing={legacyAsk.writes.replacing}
           calendarName={calMap.get(defaultCalendarId)?.name ?? "your calendar"}
           adjusted={legacyAsk.plan.adjustedForShabbat}

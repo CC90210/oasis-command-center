@@ -15,6 +15,8 @@ import { useDialogFocus } from "./ui";
 type Props = {
   /** Events the import writes. */
   adds: number;
+  /** Of those, the ones that do not repeat: single weeks shortened for Shabbat. */
+  singles: number;
   /** Rows of the restored routine it removes (0: nothing is removed). */
   replacing: number;
   calendarName: string;
@@ -29,7 +31,17 @@ type Props = {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-export function LegacyImport({ adds, replacing, calendarName, adjusted, skipped, busy, onConfirm, onCancel }: Props) {
+/** "54 repeating events and 19 single events shortened for Shabbat": the shortened weeks do not repeat. */
+function whatItAdds(adds: number, singles: number): string {
+  const repeating = adds - singles;
+  const parts = [
+    repeating > 0 ? plural(repeating, "repeating event", "repeating events") : "",
+    singles > 0 ? plural(singles, "single event shortened for Shabbat", "single events shortened for Shabbat") : "",
+  ].filter(Boolean);
+  return parts.join(" and ");
+}
+
+export function LegacyImport({ adds, singles, replacing, calendarName, adjusted, skipped, busy, onConfirm, onCancel }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const cancel = () => {
     if (!busy) onCancel();
@@ -65,8 +77,7 @@ export function LegacyImport({ adds, replacing, calendarName, adjusted, skipped,
             </>
           ) : (
             <p className="text-fg">
-              This adds {plural(adds, "repeating event", "repeating events")} to {calendarName}, from the week last saved in this browser on the
-              old Schedule page.
+              This adds {whatItAdds(adds, singles)} to {calendarName}, from the week last saved in this browser on the old Schedule page.
             </p>
           )}
           {adjusted.length > 0 && <p>Planned around Shabbat (shortened or left out on the weeks that meet it): {adjusted.join(", ")}.</p>}

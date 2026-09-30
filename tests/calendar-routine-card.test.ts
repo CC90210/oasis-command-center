@@ -190,6 +190,7 @@ async function main() {
     const tree = mount(() =>
       LegacyImport({
         adds: 54,
+        singles: 0,
         replacing: 0,
         calendarName: "Personal",
         adjusted: [],
@@ -209,6 +210,16 @@ async function main() {
     assert.match(add.text, /This adds 54 repeating events to Personal/);
     (button(add.tree, /^Add them$/).props.onClick as () => void)();
     assert.deepEqual(add.calls, ["confirm"]);
+
+    // The browser week as planned: the shortened Fridays are single events, not repeating ones.
+    const singles = browserWeek.events.filter((e) => !e.recurrence).length;
+    assert.ok(singles > 0, "precondition: the saved week has Fridays shortened for Shabbat");
+    const mixed = dialog({ adds: browserWeek.events.length, singles });
+    assert.match(
+      mixed.text,
+      new RegExp(`This adds ${browserWeek.events.length - singles} repeating events and ${singles} single events shortened for Shabbat to Personal`),
+    );
+    assert.doesNotMatch(mixed.text, new RegExp(`${browserWeek.events.length} repeating`), "never counts a single week as a repeating event");
 
     const replace = dialog({ replacing: 37 });
     assert.match(replace.text, /Replace the restored routine\?/);
@@ -240,6 +251,17 @@ async function main() {
     assert.match(src, /<LegacyImport[\s\S]*?onConfirm=\{\(\) => void importLegacy\(\)\}/);
     assert.match(src, /restoredRoutineIds\(events\)\.length \? "replace" : "add"/);
     assert.match(src, /setRoutineSyncing\(true\);\s*void data\.reload\(\)\.finally\(\(\) => setRoutineSyncing\(false\)\)/);
+    assert.match(src, /singles=\{legacyAsk\.plan\.events\.filter\(\(e\) => !e\.recurrence\)\.length\}/, "the dialog is told which events do not repeat");
+  });
+
+  await check("CalendarApp: the restore card shows only on an EMPTY calendar; a client's first paint has no city and no lock", () => {
+    const src = readFileSync(join(ROOT, "components/calendar/CalendarApp.tsx"), "utf8");
+    // Restoring on top of events already there (a browser-week import, say) would put every block in twice.
+    assert.match(src, /const emptyCalendar = data\.load\.status === "ready" && events\.length === 0;/);
+    assert.match(src, /\{emptyCalendar && routine && routineState === "checked" && \(\s*<RoutineRestore/);
+    assert.match(src, /if \(emptyCalendar && !routineAsked\.current\) void checkRoutine\(\);/, "the server is asked only for an empty calendar");
+    const data = readFileSync(join(ROOT, "components/calendar/useCalendarData.ts"), "utf8");
+    assert.match(data, /useState<CalendarPrefs>\(NEUTRAL_PREFS\)/, "until the server answers: no place, no Shabbat lock");
   });
 
   // ── 3. The restore request ─────────────────────────────────────────────────
@@ -330,6 +352,30 @@ async function main() {
     await settle();
     assert.deepEqual(seen, [{ ok: true, status: "restored", created: [], adjusted: [], dropped: [] }]);
     assert.doesNotMatch(flat(view()), /Could not|could not/);
+  });
+
+  await check("RoutineRestore: Edit times reaches the server; only the edited block is sent, and an unedited restore sends none", async () => {
+    const bodies: unknown[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, status: "restored", created: [], adjusted: [], dropped: [] }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    const edited = card(() => undefined);
+    (button(edited(), /^Edit times$/).props.onClick as () => void)();
+    const wake = elements(edited()).find((e) => e.type === "input" && e.props["aria-label"] === "Wake up starts");
+    assert.ok(wake, "the Wake up start time is editable");
+    (wake.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: "06:00" } });
+    (button(edited(), /^Restore with these times$/).props.onClick as () => void)();
+    (button(edited(), /^Add them$/).props.onClick as () => void)();
+    await settle();
+    const plain = card(() => undefined);
+    (button(plain(), /^Restore$/).props.onClick as () => void)();
+    (button(plain(), /^Add them$/).props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(bodies, [{ times: [{ key: "wake-up", startMinute: 360, endMinute: 420 }] }, {}]);
   });
 
   await check("RoutineRestore: with this browser's old week saved, the card offers it as the alternative", () => {

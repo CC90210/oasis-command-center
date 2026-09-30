@@ -357,12 +357,17 @@ async function main() {
   let restoredCount = 0;
   await check("POST: restores the routine into CC's default calendar with his edited times; the second call is already_restored", async () => {
     await login("cc");
+    // A second calendar exists, added after the default: the routine still goes into the DEFAULT one.
+    const ccOwner = { tenantId: OASIS, userId: USERS.cc.id };
+    await store.listCalendars(ccOwner);
+    const side = await store.createCalendar(ccOwner, { name: "Side projects", color: "moss" });
     const res = await route.POST(post({ times: [{ key: "wake-up", startMinute: 360, endMinute: 390 }] }));
     assert.equal(res.status, 201);
     const body = await res.json();
     assert.equal(body.status, "restored");
     const [personal] = await store.listCalendars({ tenantId: OASIS, userId: USERS.cc.id });
     assert.equal(body.calendarId, personal.id);
+    assert.notEqual(body.calendarId, side.id, "never the other calendar");
     assert.ok(personal.isDefault);
     restoredCount = body.created.length;
     assert.ok(restoredCount >= 18);
@@ -441,6 +446,46 @@ async function main() {
     await login("adon");
     assert.equal((await put({ ...DEFAULT_PREFS, shabbatProtection: false })).status, 200);
     assert.equal((await store.getPrefs({ tenantId: OASIS, userId: USERS.adon.id })).shabbatProtection, false, "an OASIS member's saved row wins too");
+  });
+
+  await check("Prefs: a PUT that leaves keys out fills them from the viewer's OWN workspace defaults", async () => {
+    await login("clientOwner");
+    const res = await prefsRoute.PUT(
+      new Request(`${ORIGIN}/api/calendar/prefs`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", origin: ORIGIN, "x-forwarded-host": new URL(ORIGIN).host },
+        body: JSON.stringify({ weekStartsOn: 1 }),
+      }),
+    );
+    assert.equal(res.status, 200);
+    const saved = await store.getPrefs({ tenantId: CLIENT, userId: USERS.clientOwner.id });
+    assert.deepEqual([saved.weekStartsOn, saved.location, saved.shabbatProtection], [1, null, false], "a client is never handed OASIS's city or lock");
+  });
+
+  await check("Prefs: a saved row that no longer validates falls back to the workspace's defaults, loudly; OASIS keeps the lock", async () => {
+    const stale = JSON.stringify({ weekStartsOn: 9 });
+    const at = new Date().toISOString();
+    await raw.batch(
+      [OASIS, CLIENT].map((tenant) => ({
+        sql: "INSERT INTO calendar_prefs (id, tenant_id, user_id, prefs, updated_at) VALUES (?, ?, 'u-stale', ?, ?)",
+        args: [`${tenant}:u-stale`, tenant, stale, at],
+      })),
+      "write",
+    );
+    const logged: unknown[][] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    let oasis: import("../lib/calendar/types").CalendarPrefs;
+    let client: import("../lib/calendar/types").CalendarPrefs;
+    try {
+      oasis = await store.getPrefs({ tenantId: OASIS, userId: "u-stale" });
+      client = await store.getPrefs({ tenantId: CLIENT, userId: "u-stale" });
+    } finally {
+      console.error = orig;
+    }
+    assert.deepEqual([oasis.shabbatProtection, oasis.location?.label], [true, "Montréal"], "an OASIS member's lock is never silently turned off");
+    assert.deepEqual([client.shabbatProtection, client.location], [false, null], "a client is never handed OASIS's city");
+    assert.equal(logged.filter((a) => String(a[0]).startsWith("[calendar.prefs]")).length, 2, "each fallback is logged");
   });
 
   raw.close();
