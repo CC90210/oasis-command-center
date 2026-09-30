@@ -274,15 +274,22 @@ async function bankFeedBooking(payoutId: string): Promise<{ entry_id: string; ac
  * the payout's amount in the currency it arrived in, dated within
  * PAYOUT_MATCH_WINDOW_DAYS of its arrival, and not already another payout's.
  * A reversal (ledger-io.ts buildReversal, source 'reversal') undoes money,
- * it never lands any: one that happens to have the shape never counts.
+ * it never lands any: one that happens to have the shape never counts. Nor
+ * does a bank line the Wise feed tagged as ANOTHER payout: two payouts of the
+ * same amount days apart (a fixed-price subscription) would otherwise swap
+ * lines, and the one whose line was taken would stay held for good.
  * `e` is the entry.
  */
 const SHAPE_WHERE = `e.entity_id = ? AND e.status = 'posted' AND e.source <> 'reversal' AND e.entry_date BETWEEN ? AND ?
   AND EXISTS (SELECT 1 FROM fin_journal_lines c WHERE c.entry_id = e.id AND c.account_id = ? AND c.credit_cents > 0)
   AND EXISTS (SELECT 1 FROM fin_journal_lines b JOIN fin_accounts a ON a.id = b.account_id
                WHERE b.entry_id = e.id AND a.subtype IN ('bank', 'cash') AND b.currency = ? AND b.debit_cents = ?)
-  AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = e.id)`;
-function shapeArgs(row: Pick<PayoutRow, "arrival_date" | "currency" | "amount_cents">): Array<string | number> {
+  AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = e.id)
+  AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions ot WHERE ot.entry_id = e.id
+                   AND substr(ot.description, 1, ?) = ? AND NOT (ot.description = ? OR substr(ot.description, 1, ?) = ?))`;
+function shapeArgs(row: Pick<PayoutRow, "id" | "arrival_date" | "currency" | "amount_cents">): Array<string | number> {
+  const tag = payoutBankLineName("po_");
+  const name = payoutBankLineName(row.id);
   return [
     E,
     addDays(row.arrival_date, -PAYOUT_MATCH_WINDOW_DAYS),
@@ -290,6 +297,11 @@ function shapeArgs(row: Pick<PayoutRow, "arrival_date" | "currency" | "amount_ce
     accountId(E, SYS.stripeClearing),
     row.currency,
     row.amount_cents,
+    tag.length,
+    tag,
+    name,
+    name.length + 1,
+    `${name} `,
   ];
 }
 
@@ -618,6 +630,20 @@ export async function unbookedPayouts(entityId: string = E): Promise<UnbookedPay
     [entityId],
   );
   return rows.map((r) => ({ id: r.id, amountCents: n(r.amount_cents), currency: r.currency, arrivalDate: r.arrival_date, booking: r.booking, reason: r.reason || "" }));
+}
+
+/**
+ * A payout on the books from a bank line the feed cannot link to: adopted by
+ * its shape (an uploaded statement's line, an untagged line, a hand-made
+ * entry). The Wise feed holds its own line for that payout instead of posting
+ * it: it is the same deposit on the books a second time.
+ */
+export async function payoutBookedFromAnotherLine(payoutId: string, entityId: string = E): Promise<{ entryDate: string } | null> {
+  return queryOne<{ entryDate: string }>(
+    `SELECT e.entry_date AS entryDate FROM fin_stripe_payouts p JOIN fin_journal_entries e ON e.id = p.entry_id
+      WHERE p.id = ? AND p.entity_id = ? AND p.booking = 'booked' AND e.status = 'posted' AND e.source <> ?`,
+    [payoutId, entityId, PAYOUT_SOURCE],
+  );
 }
 
 /**

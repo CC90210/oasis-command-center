@@ -668,6 +668,41 @@ async function main() {
     assert.equal(await held(CHEQUING, "USD"), chequingBefore + 800);
   });
 
+  await check("two payouts of the same amount days apart: a bank line the Wise feed tagged as one is never adopted by the other's shape (CodeRabbit, PR #491)", async () => {
+    await chargeInClearing("ch_usd_twin", "2026-09-27", 900);
+    const tagged = await buildPosting({
+      entityId: B,
+      entryDate: "2026-09-29",
+      memo: "Stripe payout po_twin_b: a transfer out of Stripe clearing, not revenue.",
+      source: "bank_txn",
+      sourceRef: "txn_twin_b",
+      createdBy: "test",
+      lines: [
+        { accountId: CHEQUING, currency: "USD", debitCents: 900 },
+        { accountId: CLEARING, currency: "USD", creditCents: 900 },
+      ],
+    });
+    await writeBatch([
+      ...tagged.statements,
+      {
+        sql: `INSERT INTO fin_bank_transactions (id, entity_id, account_id, posted_date, description, amount_cents, currency, status, entry_id, dedupe_hash, fitid, source, created_by)
+              VALUES ('txn_twin_b', ?, ?, '2026-09-29', 'Stripe payout po_twin_b — Received money from OASIS AI', 900, 'USD', 'posted', ?, 'h_twin_b', 'WISE-USD-CREDIT-TWIN-B', 'import', 'test')`,
+        args: [B, CHEQUING, tagged.entryId],
+      },
+    ]);
+    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_twin_a", amount: 900, arrival: "2026-09-28" })));
+    const a = await row("po_twin_a");
+    assert.equal(a?.booking, "booked");
+    assert.notEqual(a?.entry_id, tagged.entryId, "po_twin_b's line is not po_twin_a's");
+    assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_twin_a"), 1, "po_twin_a booked on its own");
+    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_twin_b", amount: 900, arrival: "2026-09-29" })));
+    const b = await row("po_twin_b");
+    assert.equal(b?.booking, "booked", String(b?.reason));
+    assert.equal(b?.entry_id, tagged.entryId, "po_twin_b adopts its own tagged line");
+    assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_twin_b"), 0);
+    await booksBalance();
+  });
+
   // ── what converts, and as of when ─────────────────────────────────────────
   await check("Stripe clearing is read as of the arrival day: a charge booked after a payout never funds it", async () => {
     await chargeInClearing("ch_cad_late", "2026-09-25", 5_000, "CAD");

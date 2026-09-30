@@ -86,7 +86,7 @@ import {
 } from "./wise-feed";
 import { wiseStatement, WiseNotReady } from "./wise-io";
 import { recordedRefs } from "./wise-reconcile";
-import { bookedPayoutEntry } from "./stripe-payouts-io";
+import { bookedPayoutEntry, payoutBookedFromAnotherLine } from "./stripe-payouts-io";
 import { PAYOUT_SOURCE } from "./stripe-payouts";
 
 const FEED_CURRENCIES = ["CAD", "USD"] as const;
@@ -533,6 +533,10 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           count(fitid, fromStripe.bankAccountId === chequing ? "stripe_payout" : "needs_review");
           continue;
         }
+        if (await payoutBookedFromAnotherLine(r.payout.id, entity.id)) {
+          count(fitid, "needs_review");
+          continue;
+        }
         const row = rowByFitid.get(fitid) as WiseFeedRow;
         const cur = (r.payout.settlementCurrency || "").toUpperCase();
         const clearing = cur ? (await stripeClearingCents(entity.id, acct.stripeClearing, cur)) - (taken.get(cur) || 0) : undefined;
@@ -641,6 +645,13 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
             handled.add(line.id);
             changed = true;
           }
+          continue;
+        }
+        // Booked from another bank line already (an uploaded statement's, adopted by its shape): this line is that deposit again.
+        const elsewhere = await payoutBookedFromAnotherLine(p.id, entity.id);
+        if (elsewhere) {
+          setNote(line, `${DECIDE_NOTE}Stripe payout ${p.id} is already on the books from another bank line (${elsewhere.entryDate}), so this is the same deposit a second time. Exclude this line; do not categorise it.`);
+          count(fitid, "needs_review");
           continue;
         }
         const settleCur = (p.settlementCurrency || "").toUpperCase();

@@ -768,6 +768,35 @@ async function main() {
     assert.equal(await native(chequing, "USD"), chequingBefore + 3000);
   });
 
+  // ── phase 9: the payout is already on the books from another bank line (an uploaded statement's) ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24", "16:00"), value: 20, cur: "USD", ref: "TRANSFER-P6", running: 0, sender: "OASIS AI", payref: "5552102", desc: "Received money from OASIS AI with reference 5552102" });
+  rerun(usdTx, 1000);
+  publish();
+  const poTwice: Json = { id: "po_twice", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 2000, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_6", amount: -2000, currency: "usd", fee: 0, net: -2000 } };
+  fixtures.payouts.push(poTwice);
+  // Stripe clearing still holds the USD after the line below takes its US$20, so nothing but the
+  // booking already on the books stops the feed from booking the payout again.
+  await usdCharge("ch_usd_p6", "2026-09-23", 4000);
+
+  await check("a payout already on the books from another bank line (adopted by its shape): the feed holds its own line for it, never posts it again", async () => {
+    const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
+    const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
+    // An uploaded statement's line, categorised to Stripe clearing, before the payout event.
+    await txns.createManualTransaction(cc, "oasis", { date: d("2026-09-24"), description: "STRIPE TRANSFER", amount: "20.00", currency: "USD", account_id: chequing, category_id: categoryId(B, SYS.stripeClearing) });
+    const booked = await payoutsIo.recordStripePayout(payoutFacts(poTwice)!);
+    assert.equal(booked?.booking, "booked", booked?.reason ?? "");
+    const chequingBefore = await native(chequing, "USD");
+    const preview = (await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: true })).currencies.find((c) => c.currency === "USD")!;
+    const r = await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const usd = r.currencies.find((c) => c.currency === "USD")!;
+    assert.ok(usd.needs_review >= 1);
+    assert.deepEqual([preview.stripe_payouts, preview.needs_review], [usd.stripe_payouts, usd.needs_review], "the preview says what the sync then does: held, not booked");
+    const p6 = await line("WISE-USD-CREDIT-TRANSFER-P6");
+    assert.deepEqual([p6.status, p6.entry_id], ["unreviewed", null], "held, not posted");
+    assert.match(String(p6.memo), /Stripe payout po_twice is already on the books from another bank line .*the same deposit a second time/);
+    assert.equal(await native(chequing, "USD"), chequingBefore, "the US$20 is on the books once");
+  });
+
   await check("D, on screen: the Wise card says when an opening balance is in force and what posting again does", async () => {
     const src = readFileSync(join(root, "components/founders/finances/WiseCard.tsx"), "utf8");
     assert.match(src, /l\.existing &&/, "renders the balance in force");
