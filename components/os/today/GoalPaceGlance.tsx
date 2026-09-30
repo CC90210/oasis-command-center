@@ -17,6 +17,14 @@
 import Link from "next/link";
 import { usd, type GoalPaceView } from "@/components/os/today/model";
 
+/**
+ * Where the goal is set: Settings > Team > Revenue goal. /settings alone opens
+ * Profile, which has no goal field, so "Set one in Settings" used to land on a
+ * page with nothing to set. The fragment opens the collapsed section
+ * (components/settings/OpenSectionOnHash.tsx).
+ */
+export const REVENUE_GOAL_SETTINGS_HREF = "/settings/team#revenue-goal";
+
 const STATUS_TEXT: Record<Extract<GoalPaceView, { kind: "live" }>["status"], string> = {
   met: "text-status-engaged",
   on_track: "text-fg",
@@ -42,7 +50,7 @@ export function GoalPaceGlance({ view, detailHref }: { view: GoalPaceView; detai
         {view.kind === "no_goal" ? (
           <p className="text-[13px] text-fg-muted">
             No revenue goal is set for this period.{" "}
-            <Link href="/settings" prefetch={false} className="font-medium text-accent hover:underline">
+            <Link href={REVENUE_GOAL_SETTINGS_HREF} prefetch={false} className="font-medium text-accent hover:underline">
               Set one in Settings
             </Link>
           </p>

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { LegalPage, LegalSection, LegalCallout } from "@/components/legal/LegalPage";
-import { LEGAL_CONTACTS, LEGAL_ENTITY } from "@/lib/legal/constants";
+import { LEGAL_CONTACTS, LEGAL_ENTITY, LEGAL_PRINCIPAL_PLACE } from "@/lib/legal/constants";
 
 export const metadata: Metadata = {
   title: "DMCA & Copyright Notices",
@@ -37,7 +37,7 @@ export default function DmcaPage() {
           <div className="mt-1 text-white/65">
             <a href={`mailto:${LEGAL_CONTACTS.dmca}`}>{LEGAL_CONTACTS.dmca}</a>
           </div>
-          <div className="mt-1 text-white/50">Montreal, Quebec, Canada</div>
+          <div className="mt-1 text-white/50">{LEGAL_PRINCIPAL_PLACE}</div>
         </div>
         <p className="text-white/55">
           Notices sent to any other address may not receive a timely response.

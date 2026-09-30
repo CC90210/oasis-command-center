@@ -23,7 +23,7 @@ export const dynamic = "force-dynamic";
 
 export default async function TrainingPage() {
   const session = await resolveSessionContext();
-  if (!session.ok) redirect("/auth/login?next=/training");
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent("/training")}`);
   if (!mayViewTraining(session)) redirect("/");
 
   const repUserId = repIdFor(session);

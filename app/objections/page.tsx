@@ -29,7 +29,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ObjectionsPage() {
   const session = await resolveSessionContext();
-  if (!session.ok) redirect("/auth/login?next=/objections");
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent("/objections")}`);
   if (!mayViewObjectionLibrary(session)) redirect("/");
 
   const canApprove = mayApproveObjections(session);

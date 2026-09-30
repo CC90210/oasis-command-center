@@ -176,6 +176,9 @@ async function main() {
       claimed_at TEXT, completed_at TEXT
     );
   `);
+  // The router records every request in ai_usage_events (lib/ai/usage.ts);
+  // tests/ai-usage-ledger.test.ts pins those rows.
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__192_ai_usage.sql"), "utf8"));
   const jobs = async (tenantId: string | null) =>
     Number(
       (

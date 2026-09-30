@@ -39,6 +39,9 @@ export const TURN_FAILURE_CODES = [
   // The reply broke off.
   "provider_error", //         an error we could not read a status from
   "stream_failed", //          the stream threw mid-reply
+  // The workspace's monthly AI budget (lib/ai/usage.ts): no provider was asked.
+  "ai_budget_exhausted", //    the month's cap is used (HTTP 402)
+  "ai_budget_unpriced_model", // a cap is set and the model has no verified price (HTTP 402)
 ] as const;
 
 export type TurnFailureCode = (typeof TURN_FAILURE_CODES)[number];
@@ -62,6 +65,9 @@ const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
   "provider_403",
   "provider_429",
   "provider_5xx",
+  // One budget per workspace per month, shared by every channel.
+  "ai_budget_exhausted",
+  "ai_budget_unpriced_model",
 ]);
 
 export function isAccountScoped(code: TurnFailureCode): boolean {
@@ -109,10 +115,13 @@ export function classifyProviderStatus(status: number, detail: string): TurnFail
  *   `provider_temporarily_unavailable:<provider>_<status>`   5xx and 429
  *   `local_model_temporarily_unavailable:<status>`           Ollama 5xx and 429
  *   `missing_api_key`                                        no key reached it
+ *   `ai_budget_exhausted` / `ai_budget_unpriced_model`       the budget refused it
+ *                                                            (lib/ai/usage-codes.ts)
  */
 export function classifyStreamError(message: string): TurnFailureCode {
   const msg = String(message || "");
   if (msg === "missing_api_key") return "agent_not_configured";
+  if (msg === "ai_budget_exhausted" || msg === "ai_budget_unpriced_model") return msg;
   const busy = /^(?:provider|local_model)_temporarily_unavailable:(?:[a-z]+_)?(\d{3})\b/.exec(msg);
   if (busy) return classifyProviderStatus(Number(busy[1]), "");
   const refused = /^(?:openrouter|anthropic|openai|google|ollama)_(\d{3}):([\s\S]*)$/.exec(msg);
@@ -137,6 +146,7 @@ const ROUTE_ERRORS = {
   profile_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   workspace_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   config_unavailable: "We could not read this workspace's AI settings just now. Try again in a moment.",
+  ai_usage_unavailable: "We could not check this workspace's AI budget just now. Try again in a moment.",
   // Client-side: the request never reached the route, or the stream closed
   // with no text and no reason.
   network: "Could not reach the server. Check your connection and try again.",
@@ -220,6 +230,19 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
     sentence: "The reply stopped partway. Try again.",
     short: "the last reply stopped partway",
     fix: null,
+  },
+  // Same words as lib/ai/usage-codes.ts AI_BUDGET_SENTENCES (tests/ai-usage-ledger.test.ts
+  // pins them equal; this file stays import-free).
+  ai_budget_exhausted: {
+    sentence: "This month's AI budget is used. The owner can raise it.",
+    short: "this month's AI budget is used",
+    fix: null,
+  },
+  ai_budget_unpriced_model: {
+    sentence:
+      "This workspace has a monthly AI budget, and the AI model it uses has no verified price, so it can't run under that budget. The owner can pick another model.",
+    short: "the AI model has no verified price",
+    fix: OPEN_AI_SETTINGS,
   },
 };
 
