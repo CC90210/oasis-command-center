@@ -9,9 +9,33 @@
  * never as zero or "no".
  */
 
-import type { IncidentInput } from "./store";
+import type { Incident, IncidentInput } from "./store";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The register form, filled to correct `entry`: its own values (the founder
+ * changes what was wrong) and `corrects_id` set to its full id. The register
+ * page shows each entry's short id and a Correct button that opens this; the
+ * full id is what the route checks, so a founder never has to find or type it.
+ * The values are the form's own strings, so they round-trip through
+ * parseIncident unchanged.
+ */
+export function correctionDraft(entry: Incident): Record<string, string> {
+  return {
+    personal_info: entry.personal_info,
+    circumstances: entry.circumstances,
+    occurred_period: entry.occurred_period,
+    aware_at: entry.aware_at,
+    persons_count: entry.persons_count === null ? "" : String(entry.persons_count),
+    serious_risk: entry.serious_risk === null ? "unknown" : entry.serious_risk === 1 ? "yes" : "no",
+    risk_assessment: entry.risk_assessment,
+    cai_notified_at: entry.cai_notified_at ?? "",
+    persons_notified_at: entry.persons_notified_at ?? "",
+    measures: entry.measures,
+    corrects_id: entry.id,
+  };
+}
 
 function text(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;

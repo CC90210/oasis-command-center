@@ -241,6 +241,23 @@ function findElement(node: unknown, pick: (el: ReactNS.ReactElement) => boolean)
   return null;
 }
 
+/**
+ * The text a server element tree carries in its children and in props that
+ * hold elements (a PageHeader's `action`), without calling components: what
+ * a page itself writes, such as the list header's count tags.
+ */
+function textOf(node: unknown): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (!isValidElement(node)) return "";
+  let out = "";
+  for (const [k, v] of Object.entries((node.props ?? {}) as Record<string, unknown>)) {
+    if (k === "children" || isValidElement(v) || Array.isArray(v)) out += ` ${textOf(v)}`;
+  }
+  return out;
+}
+
 /** Make every public fs read throw, run `fn`, restore. The Worker has no filesystem. */
 async function withoutFilesystem<T>(fn: () => Promise<T>): Promise<T> {
   const target = fs as unknown as Record<string, unknown>;
@@ -827,6 +844,55 @@ async function main() {
     const ok = await inc.POST(req("/api/playbook/incidents", { method: "POST", body: { ...entry, corrects_id: first } }));
     assert.equal(ok.status, 201, await ok.clone().text());
   });
+  await check("a founder corrects an entry from the register itself: each row shows its id and a Correct button that fills the form with the entry and its full id", async () => {
+    // Before this, the register showed no entry's id and the form asked for one
+    // typed by hand, while the route accepts only a full id that exists: a
+    // correction could not be recorded from the page at all.
+    const inc = await import("../app/api/playbook/incidents/route");
+    const { correctionDraft, parseIncident } = await import("../lib/playbook/incidents");
+    await login("cc");
+    const list = (await (await inc.GET()).json()) as { incidents: Array<import("../lib/playbook/store").Incident> };
+    const original = list.incidents.find((i) => !i.corrects_id);
+    assert.ok(original, "the register has an entry to correct");
+
+    // The form the Correct button opens: the entry's own values and its full id.
+    const draft = correctionDraft(original);
+    assert.equal(draft.corrects_id, original.id);
+    const parsed = parseIncident(draft);
+    assert.ok(parsed.ok, `the correction form does not validate: ${JSON.stringify(parsed)}`);
+    assert.equal(parsed.entry.corrects_id, original.id);
+    for (const k of ["personal_info", "circumstances", "occurred_period", "aware_at", "persons_count", "serious_risk", "risk_assessment", "cai_notified_at", "persons_notified_at", "measures"] as const) {
+      assert.equal(parsed.entry[k], original[k], `the correction form changed ${k}`);
+    }
+    const n0 = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM privacy_incidents WHERE tenant_id = ?", args: [OASIS] })).rows[0].n);
+    const posted = await inc.POST(req("/api/playbook/incidents", { method: "POST", body: { ...draft, measures: `${draft.measures} (corrected)` } }));
+    assert.equal(posted.status, 201, await posted.clone().text());
+    const newId = ((await posted.json()) as { id: string }).id;
+    const row = (await db.execute({ sql: "SELECT corrects_id FROM privacy_incidents WHERE tenant_id = ? AND id = ?", args: [OASIS, newId] })).rows[0];
+    assert.equal(row?.corrects_id, original.id, "the correction names the entry it corrects");
+    const n1 = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM privacy_incidents WHERE tenant_id = ?", args: [OASIS] })).rows[0].n);
+    assert.equal(n1, n0 + 1, "a correction appends; the original stays");
+
+    // What the page draws: each entry's short id and its own Correct button.
+    const incidents = (((await (await inc.GET()).json()) as { incidents: Array<import("../lib/playbook/store").Incident> }).incidents);
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/playbook-incidents.render.ts"], {
+      encoding: "utf8", env, cwd: ROOT, input: JSON.stringify([{ id: "cc", props: { incidents, state: "ok" } }]),
+    });
+    assert.equal(r.status, 0, `the incidents render helper exited ${r.status}:\n${r.stderr}`);
+    const html = (JSON.parse(r.stdout) as Record<string, string>).cc ?? "";
+    for (const i of incidents) {
+      const short = i.id.slice(0, 8);
+      assert.ok(html.includes(`title="${i.id}"`) && html.includes(`>${short}<`), `entry ${short} does not show its id`);
+      assert.ok(html.includes(`aria-label="Correct entry ${short}"`), `entry ${short} has no Correct button`);
+    }
+    assert.doesNotMatch(html, /Corrects entry \(id, optional\)/, "the register still asks for an id typed by hand");
+  });
 
   // ── 6. import ───────────────────────────────────────────────────────────
   await check("the import fails closed without its bearer, and refuses a wrong one", async () => {
@@ -1067,6 +1133,25 @@ async function main() {
     } finally {
       console.error = originalError;
       bare.close();
+    }
+  });
+  await check("the list header counts missing documents only from a storage read: not set up is never '0 missing'", async () => {
+    // Unknown is never zero: with storage not set up (or unreadable) nobody has
+    // looked for the stored texts, so the header must not say "0 missing".
+    await login("cc");
+    const missingTag = /\b\d+ missing\b/;
+    const control = textOf(await listPage({}));
+    assert.match(control, missingTag, "control: with storage readable the header counts what is missing");
+    await db.execute("ALTER TABLE playbook_docs RENAME TO playbook_docs_offline");
+    const originalError = console.error;
+    console.error = () => undefined;
+    try {
+      const text = textOf(await listPage({}));
+      assert.match(text, /\d+ not set up yet/, "the header says how many are not set up");
+      assert.doesNotMatch(text, missingTag, `the header claims a missing count it could not read: ${text.match(missingTag)?.[0]}`);
+    } finally {
+      console.error = originalError;
+      await db.execute("ALTER TABLE playbook_docs_offline RENAME TO playbook_docs");
     }
   });
   await check("drafts state facts the product holds: the delivery stages Projects tracks, both small-supplier triggers, the partnership registration rule", async () => {

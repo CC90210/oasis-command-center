@@ -53,7 +53,9 @@ export default async function BusinessDocsPage() {
             <Tag tone="engaged">{counts.current} current</Tag>
             {counts.review_due > 0 && <Tag tone="warm">{counts.review_due} review due</Tag>}
             {counts.draft > 0 && <Tag tone="info">{counts.draft} draft</Tag>}
-            <Tag tone="hot">{counts.missing} missing</Tag>
+            {/* Only a read of document storage can say how many are missing.
+                Not set up, or unreadable, is unknown: no "0 missing" then. */}
+            {storage === "ok" && <Tag tone="hot">{counts.missing} missing</Tag>}
             {counts.unknown > 0 && <Tag>{counts.unknown} couldn&apos;t check</Tag>}
             {counts.not_set_up > 0 && <Tag>{counts.not_set_up} not set up yet</Tag>}
           </div>
