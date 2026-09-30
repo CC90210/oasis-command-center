@@ -12,6 +12,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { disconnectSlack } from "@/components/settings/slack-disconnect-action";
 
 export function SlackDisconnect({ teamName, retentionDays }: { teamName: string | null; retentionDays: number }) {
   const router = useRouter();
@@ -19,14 +20,15 @@ export function SlackDisconnect({ teamName, retentionDays }: { teamName: string 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The request never throws: a failure, including one that never reached
+  // OASIS, is the sentence under the button (slack-disconnect-action.ts).
   async function disconnect() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/connections/slack/disconnect", { method: "POST" });
-      const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!res.ok || body?.ok !== true) {
-        setError(String(body?.message ?? `Not disconnected (HTTP ${res.status}).`));
+      const done = await disconnectSlack();
+      if (!done.ok) {
+        setError(done.text);
         return;
       }
       setConfirming(false);

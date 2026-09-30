@@ -41,6 +41,8 @@ import { getTenant } from "@/lib/queries";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
+import { adminGetUser } from "@/lib/turso-auth-admin";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
@@ -170,16 +172,39 @@ export function mentionPrompt(job: SlackMentionJob, question: string): string {
   ].join("\n");
 }
 
-/** Is this workspace teammate the verified platform operator (lib/platform-operator.ts)? */
+/**
+ * Is this workspace teammate the verified platform operator (lib/platform-operator.ts)?
+ * Asked with the AUTH user's own email, never user_profiles.email: that is a
+ * column, and a profile email set to an operator alias is exactly the squat the
+ * platform check exists to refuse. An auth record that cannot be read is "not
+ * the operator" (the platform key bills OASIS; it fails closed).
+ */
 async function isOperatorTeammate(db: Client, tenantId: string, profileId: string | null): Promise<boolean> {
   if (!profileId) return false;
   const rs = await db.execute({
-    sql: "SELECT auth_user_id, email FROM user_profiles WHERE id = ? AND tenant_id = ? AND deactivated_at IS NULL LIMIT 1",
+    sql: "SELECT auth_user_id FROM user_profiles WHERE id = ? AND tenant_id = ? AND deactivated_at IS NULL LIMIT 1",
     args: [profileId, tenantId],
   });
-  const r = rs.rows[0] as unknown as { auth_user_id: string | null; email: string | null } | undefined;
+  const r = rs.rows[0] as unknown as { auth_user_id: string | null } | undefined;
   if (!r?.auth_user_id) return false;
-  return isPlatformOperatorForAuthUser(String(r.auth_user_id), r.email ? String(r.email) : null);
+  let authEmail: string | null;
+  try {
+    const auth = await adminGetUser(getServiceSupabase(), String(r.auth_user_id));
+    if (!auth.ok) {
+      console.error("[slack.jobs] the teammate's auth record could not be read; not the operator", { tenantId, error: auth.error });
+      return false;
+    }
+    authEmail = auth.value.email;
+  } catch (err) {
+    // An auth store this deployment cannot read is not a reason to drop the
+    // mention: the turn runs on the workspace's own key, and the log says why.
+    console.error("[slack.jobs] the teammate's auth record could not be read; not the operator", {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+  return isPlatformOperatorForAuthUser(String(r.auth_user_id), authEmail);
 }
 
 export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDeps): Promise<JobOutcome> {

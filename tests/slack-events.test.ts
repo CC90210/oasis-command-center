@@ -30,6 +30,10 @@ delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
 process.env.BRAVO_FIELD_ENCRYPTION_KEY = "slack-events-test-field-encryption-passphrase";
 process.env.PUBLIC_APP_URL = "https://oasisai.work";
+// Auth records live in Turso, as in production (the Slack job reads a
+// teammate's AUTH email for the platform-operator check).
+process.env.EMPIRE_AUTH_BACKEND = "turso";
+process.env.AUTH_SESSION_SECRET = "slack-events-test-session-secret-long-enough-0001";
 process.env.SLACK_SIGNING_SECRET = "slack-events-test-signing-secret-0001";
 process.env.SLACK_CLIENT_ID = "1234.5678";
 process.env.SLACK_CLIENT_SECRET = "slack-events-test-client-secret";
@@ -67,8 +71,14 @@ const CUSTOMER_A = "cust-alpha-1";
 
 // ── Slack, mocked at the fetch boundary ─────────────────────────────────────
 
-type SlackUserFixture = { team_id: string; email?: string; name: string; is_restricted?: boolean; is_ultra_restricted?: boolean; is_bot?: boolean };
+type SlackUserFixture = { team_id: string; email?: string; name: string; is_restricted?: boolean; is_ultra_restricted?: boolean; is_bot?: boolean; is_stranger?: boolean };
 const SLACK_USERS: Record<string, SlackUserFixture> = {
+  // A member who is made a guest later (the day-long cache must not outlive that).
+  UFLIP1: { team_id: TEAM_A, email: "flip@alpha.test", name: "Fay Flip" },
+  // Slack Connect: Slack reports the connected team id but marks the user a stranger.
+  USTRANGER1: { team_id: TEAM_A, email: "stranger@else.test", name: "Stan Stranger", is_stranger: true },
+  // A bot user whose message carries no bot_id.
+  UBOTUSER1: { team_id: TEAM_A, name: "Zap Bot", is_bot: true },
   UMEMBER1: { team_id: TEAM_A, email: "member@alpha.test", name: "Mia Member" },
   UOWNER1: { team_id: TEAM_A, email: "owner@alpha.test", name: "Olly Owner" },
   UGUEST1: { team_id: TEAM_A, email: "guest@elsewhere.test", name: "Gus Guest", is_restricted: true },
@@ -115,6 +125,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         is_bot: u.is_bot === true,
         is_restricted: u.is_restricted === true,
         is_ultra_restricted: u.is_ultra_restricted === true,
+        ...(u.is_stranger ? { is_stranger: true } : {}),
         profile: { email: u.email, display_name: u.name, real_name: u.name },
       },
     });
@@ -172,7 +183,7 @@ async function main() {
   const db = createClient({ url: `file:${dbFile}` });
   await db.executeMultiple(`
     CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
-      session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+      session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT, raw_user_meta_data TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT, deactivated_at TEXT);
@@ -1179,6 +1190,251 @@ async function main() {
     assert.equal(r.identitiesDeleted, 1);
     assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE external_user_id = 'UOLDPERSON'"), 0);
     assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities"), identitiesBefore - 1, "people looked up recently stay");
+  });
+
+  // ── 7. Independent verification (2026-09-30): guards no earlier check held ──
+
+  await check("Slack's own time orders the mirror; a private-channel message and a future-dated request are refused", async () => {
+    const ahead = await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0CLIENTS", "from the future")), Math.floor(Date.now() / 1000) + 6 * 60), deps());
+    assert.equal(ahead.status, 401, "six minutes AHEAD is outside the window too");
+    assert.equal(ahead.body.error, "stale_timestamp");
+    const group = await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0CLIENTS", "private one", { channel_type: "group" }))), deps());
+    assert.equal(group.body.ignored, "not_a_channel", "only public-channel messages (message.channels) are mirrored");
+    const writtenSec = Math.floor(Date.now() / 1000) - 2 * 3600;
+    const late = await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0CLIENTS", "written two hours ago", { ts: `${writtenSec}.000100` }))), deps());
+    assert.equal(late.body.mirrored, true);
+    const row = (
+      await db.execute({
+        sql: "SELECT created_at FROM conversation_events WHERE tenant_id = ? AND json_extract(metadata, '$.text') = 'written two hours ago'",
+        args: [ALPHA],
+      })
+    ).rows[0];
+    assert.equal(String(row?.created_at), new Date(writtenSec * 1000).toISOString(), "dated when it was written in Slack, not when OASIS got it");
+  });
+
+  await check("a person's Slack status is re-checked after a day: a member made a guest stops being mirrored", async () => {
+    const first = await events.handleSlackEvents(signed(eventBody(message("UFLIP1", "C0CLIENTS", "flip one"))), deps());
+    assert.equal(first.body.mirrored, true);
+    SLACK_USERS.UFLIP1 = { ...SLACK_USERS.UFLIP1, is_restricted: true };
+    const cachedAnswer = await events.handleSlackEvents(signed(eventBody(message("UFLIP1", "C0CLIENTS", "flip two"))), deps());
+    assert.equal(cachedAnswer.body.mirrored, true, "inside a day the cached answer stands");
+    await db.execute({ sql: "UPDATE external_identities SET checked_at = ? WHERE external_user_id = 'UFLIP1'", args: [new Date(Date.now() - 25 * 3_600_000).toISOString()] });
+    const stale = await events.handleSlackEvents(signed(eventBody(message("UFLIP1", "C0CLIENTS", "flip three"))), deps());
+    assert.equal(stale.body.dropped, "guest", "a day later Slack is asked again, and the guest is dropped");
+  });
+
+  await check("Slack's is_stranger marks another company's user even when the team id looks like ours", async () => {
+    const r = await events.handleSlackEvents(signed(eventBody(message("USTRANGER1", "C0CLIENTS", "hello from outside"))), deps());
+    assert.equal(r.body.dropped, "external_user");
+  });
+
+  await check("a bot user whose message has no bot_id is dropped every time, and never cached as a person", async () => {
+    const before = (await slackRows()).length;
+    for (const text of ["beep", "boop"]) {
+      const r = await events.handleSlackEvents(signed(eventBody(message("UBOTUSER1", "C0CLIENTS", text))), deps());
+      assert.equal(r.body.ignored, "bot", text);
+    }
+    const jobsBefore = dispatched.length;
+    const m = await events.handleSlackEvents(signed(eventBody(mention("UBOTUSER1", "C0CLIENTS", "Client Success hi"))), deps());
+    assert.equal(m.body.ignored, "bot");
+    assert.equal(dispatched.length, jobsBefore, "a bot's mention starts no job");
+    assert.equal((await slackRows()).length, before);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE external_user_id = 'UBOTUSER1'"), 0);
+  });
+
+  await check("a mention with nothing after it gets a one-line ask, and no model is called", async () => {
+    let prepared = 0;
+    const job = { ...dispatched[0], eventId: "EvEMPTYQ001", text: `<@${BOT_A}>`, channelDepartment: "client_success" as const };
+    const out = await jobs.runSlackMentionJob(job, {
+      db,
+      now,
+      prepare: (async () => {
+        prepared += 1;
+        return { ok: false, status: 500, error: "should_not_run" };
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    });
+    assert.deepEqual({ outcome: out.outcome, reason: (out as { reason: string }).reason }, { outcome: "notice", reason: "empty_question" });
+    assert.equal(prepared, 0);
+    assert.match(String(posts[posts.length - 1].body.text), /^Ask Client Success a question after the mention/);
+  });
+
+  await check("the owner's card shows a long draft in full and escaped; the approved reply is posted as exactly the words approved", async () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}: invoice <#C0${i}> & terms > net 30, pay <https://pay.test|here> <!channel>`);
+    const draft = lines.join("\n");
+    assert.ok(draft.length > 3000 && draft.length <= rules.SLACK_TEXT_MAX, `a draft of ${draft.length} characters`);
+    const r = await events.handleSlackEvents(signed(eventBody(mention("UOWNER1", "C0CLIENTS", "Client Success draft the long note"), { eventId: "EvLONGCARD1" })), deps());
+    assert.equal(r.body.dispatched, true, JSON.stringify(r.body));
+    const out = await jobs.runSlackMentionJob(dispatched[dispatched.length - 1], turnDeps(draft));
+    assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    const card = ephemerals[ephemerals.length - 1].body;
+    assert.equal(card.user, "UOWNER1");
+    const sections = (card.blocks as Array<{ type: string; text?: { text: string } }>).filter((b) => b.type === "section").map((b) => String(b.text?.text));
+    for (const s of sections) assert.ok(s.length <= 3000, `Slack refuses a section of ${s.length} characters`);
+    const unescape = (s: string) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    const shown = sections
+      .slice(1)
+      .map((s) => s.split("\n").map((l) => unescape(l.replace(/^>/, ""))).join("\n"))
+      .join("\n");
+    assert.equal(shown, draft, "every word the Approve button binds to is on the card");
+    assert.doesNotMatch(sections.join("\n"), /<!channel>|<https:|<#C/, "no live Slack markup on the card");
+
+    const id = (out as { approvalId: string }).approvalId;
+    const row = await approvalsStore.getApprovalInTenant(db, ALPHA, id);
+    const postsBefore = posts.length;
+    const pressed = await pressApprove("UOWNER1", `${id}|${row!.payload_hash}`);
+    assert.match(String(pressed.replaced), /The reply is posted/);
+    assert.equal(posts.length, postsBefore + 1);
+    const posted = String(posts[posts.length - 1].body.text);
+    assert.doesNotMatch(posted, /<!channel>|<https:|<#C/, "nothing in an approved draft pings the channel, mentions anyone or hides a link");
+    assert.equal(unescape(posted), draft, "Slack shows exactly the approved words");
+    const mirrored = (await slackRows(ALPHA)).filter((x) => x.meta.direction === "outbound").at(-1);
+    assert.equal(mirrored?.meta.text, draft, "the conversation keeps the approved words as written");
+  });
+
+  await check("a posted reply needs a live token: an expired Slack connection posts nothing", async () => {
+    await db.execute("UPDATE tenant_connections SET status = 'expired' WHERE id = 'conn-slack-a'");
+    try {
+      const postsBefore = posts.length;
+      const out = await send.postSlackReply(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0CLIENTS", threadTs: "1727700000.000100", text: "x", department: "sales", approvalId: "x" });
+      assert.equal(out.ok, false);
+      assert.equal((out as { reason: string }).reason, "slack_token_rejected");
+      assert.equal(posts.length, postsBefore);
+    } finally {
+      await db.execute("UPDATE tenant_connections SET status = 'connected' WHERE id = 'conn-slack-a'");
+    }
+  });
+
+  await check("Jev's shadow is asked only about general channels, never about a department's or a message that @mentions OASIS", async () => {
+    const seen: string[] = [];
+    const d = { ...deps(), onGeneralMessage: (m: { text: string }) => void seen.push(m.text) };
+    await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0GENERAL", "general chatter"))), d);
+    await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0CLIENTS", "client chatter"))), d);
+    await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0GENERAL", `<@${BOT_A}> Sales anyone?`))), d);
+    assert.deepEqual(seen, ["general chatter"]);
+  });
+
+  await check("a channel can be linked only to one of this workspace's own clients", async () => {
+    await db.execute({ sql: "INSERT INTO customers VALUES ('cust-bravo-1', ?, 'Bravo Client', NULL, NULL, ?, ?)", args: [BRAVO_CO, stamp, stamp] });
+    const r = await routing.saveChannelRoute(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0OTHERCL", channelName: "other", department: null, customerId: "cust-bravo-1", createdBy: null, now: now() });
+    assert.deepEqual(r, { ok: false, error: "unknown_customer" });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_channel_routes WHERE channel_id = 'C0OTHERCL'"), 0);
+  });
+
+  await check("a press's response_url is used only when it is Slack's own", async () => {
+    const client = await import("../lib/slack/client");
+    assert.equal(client.isSlackResponseUrl("https://hooks.slack.com/actions/T0ALPHA/1/x"), true);
+    for (const u of ["https://evil.test/hook", "http://hooks.slack.com/actions/x", "https://hooks.slack.com.evil.test/x"]) {
+      assert.equal(client.isSlackResponseUrl(u), false, u);
+    }
+    assert.deepEqual(await client.respondToAction("https://evil.test/hook", { text: "x" }), { ok: false, error: "response_url_not_slack" });
+    const { id, hash } = await pendingSlackApproval("EvRESPURL01");
+    const payload = { type: "block_actions", team: { id: TEAM_A }, user: { id: "UOWNER1" }, response_url: "https://evil.test/collect", actions: [{ action_id: send.APPROVE_ACTION_ID, value: `${id}|${hash}` }] };
+    const accepted = await interactivity.acceptSlackInteraction(signed(new URLSearchParams({ payload: JSON.stringify(payload) }).toString()), { db, now });
+    assert.equal(accepted.responseUrl, null);
+  });
+
+  await check("a queued job's signature expires after a day", async () => {
+    const stale = String(Math.floor(Date.now() / 1000) - 25 * 3600);
+    assert.equal(await jobSig.verifySlackJob({ secret: SECRET, timestamp: stale, signature: await jobSig.signSlackJob(SECRET, stale, "{}"), body: "{}", nowMs: Date.now() }), false);
+    const fresh = String(Math.floor(Date.now() / 1000) - 60);
+    assert.equal(await jobSig.verifySlackJob({ secret: SECRET, timestamp: fresh, signature: await jobSig.signSlackJob(SECRET, fresh, "{}"), body: "{}", nowMs: Date.now() }), true);
+  });
+
+  await check("Chat apps reads the onboarding answer 'we use Slack', and only that shape of it", async () => {
+    const settings = await import("../lib/slack/settings");
+    const env = { SLACK_CLIENT_ID: "x", SLACK_CLIENT_SECRET: "y", SLACK_SIGNING_SECRET: "z", CONNECTIONS_OAUTH_STATE_SECRET: "w".repeat(40) };
+    const asked = async (manifest: unknown) => {
+      await db.execute({ sql: "UPDATE tenant_manifests SET manifest = ? WHERE tenant_id = ?", args: [JSON.stringify(manifest), BRAVO_CO] });
+      return (await settings.loadSlackSettings(db, BRAVO_CO, { env, nowMs: Date.now() })).askedForSlack;
+    };
+    try {
+      assert.equal(await asked({ integrations: { chat_apps: ["slack"], jev: "off" } }), true);
+      assert.equal(await asked({ integrations: { chat_apps: ["telegram"] } }), false);
+      assert.equal(await asked({ integrations: ["slack"] }), false, "the old array shape says nothing about chat apps");
+      assert.equal(await asked({}), false);
+    } finally {
+      await db.execute({ sql: "UPDATE tenant_manifests SET manifest = '{}' WHERE tenant_id = ?", args: [BRAVO_CO] });
+    }
+  });
+
+  await check("the Disconnect button's request never throws: a request that cannot reach OASIS is said, not swallowed", async () => {
+    const action = await import("../components/settings/slack-disconnect-action");
+    type F = Parameters<typeof action.disconnectSlack>[0];
+    const realError = console.error;
+    console.error = () => undefined;
+    try {
+      const offline = (async () => {
+        throw new TypeError("Failed to fetch");
+      }) as unknown as F;
+      assert.deepEqual(await action.disconnectSlack(offline), { ok: false, text: "Not disconnected: could not reach OASIS. Try again." });
+      assert.deepEqual(await action.disconnectSlack((async () => new Response("<html>bad gateway</html>", { status: 502 })) as unknown as F), {
+        ok: false,
+        text: "Not disconnected (HTTP 502).",
+      });
+    } finally {
+      console.error = realError;
+    }
+    const refused = (async () => new Response(JSON.stringify({ ok: false, message: "Only an owner or admin can disconnect." }), { status: 403 })) as unknown as F;
+    assert.deepEqual(await action.disconnectSlack(refused), { ok: false, text: "Only an owner or admin can disconnect." });
+    const done = (async (url: string, init?: RequestInit) => {
+      assert.equal(url, "/api/connections/slack/disconnect");
+      assert.equal(init?.method, "POST");
+      return new Response(JSON.stringify({ ok: true, disconnected: true }), { status: 200 });
+    }) as unknown as F;
+    assert.deepEqual(await action.disconnectSlack(done), { ok: true });
+    const component = read("components/settings/SlackDisconnect.tsx");
+    assert.match(component, /disconnectSlack\(\)/);
+    assert.doesNotMatch(component, /fetch\(/, "the component makes no raw request that could reject unseen");
+  });
+
+  await check("the platform key in Slack follows the AUTH user's email, never a profile email set to the operator alias", async () => {
+    // OASIS's Slack, routed to OASIS; CC (the operator) and another OASIS owner
+    // whose PROFILE email was changed to CC's alias. The auth records say who is who.
+    await connect(OASIS, "T0OASIS", "conn-slack-oasis", TOKEN_A, BOT_A);
+    await db.batch(
+      [
+        { sql: "INSERT INTO tenant_manifests VALUES ('m-oasis', ?, 'oasis-ai-cc', '{}', 1, 1, ?, ?)", args: [OASIS, stamp, stamp] },
+        { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-cc', 'conaugh@oasisai.work')", args: [] },
+        { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-squat', 'squat@oasis.test')", args: [] },
+        {
+          sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+                VALUES ('p-cc', 'auth-cc', 'conaugh@oasisai.work', ?, 'owner', 1, ?, ?)`,
+          args: [OASIS, stamp, stamp],
+        },
+        {
+          sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+                VALUES ('p-squat', 'auth-squat', 'conaugh@oasisai.work', ?, 'owner', 1, ?, ?)`,
+          args: [OASIS, stamp, stamp],
+        },
+      ],
+      "write",
+    );
+    const savedKey = process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
+    process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = "slack-events-test-not-a-platform-key";
+    const realError = console.error;
+    console.error = () => undefined;
+    try {
+      const fallbackFor = async (profileId: string, eventId: string) => {
+        let seen: unknown = "not called";
+        const job = { ...dispatched[0], tenantId: OASIS, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
+        await jobs.runSlackMentionJob(job, {
+          db,
+          now,
+          prepare: (async (req: { platformFallback: unknown }) => {
+            seen = req.platformFallback;
+            return { ok: false, status: 412, error: "agent_not_configured" };
+          }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+        });
+        return seen;
+      };
+      const cc = await fallbackFor("p-cc", "EvOPERCC001");
+      assert.ok(cc && typeof cc === "object", "CC, the verified operator, gets the platform key");
+      assert.equal(await fallbackFor("p-squat", "EvOPERSQ001"), null, "a profile email set to the alias is not the operator");
+    } finally {
+      console.error = realError;
+      if (savedKey === undefined) delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
+      else process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = savedKey;
+    }
   });
 
   // Anti-vacuity: the real network is still not reachable from here.

@@ -121,8 +121,13 @@ export async function resolveSlackIdentity(
   const isBot = u.is_bot === true;
   const displayName =
     (u.profile?.display_name || "").trim() || (u.profile?.real_name || "").trim() || (u.real_name || "").trim() || (u.name || "").trim() || null;
+  // A bot is not a person, and is never cached as one: external_identities
+  // has no bot flag, so a cached bot would read as a teammate on its next
+  // message. Every bot message is looked up (most never get here: Slack marks
+  // them with bot_id, which the events route drops first).
+  if (isBot) return { ok: true, identity: { slackUserId: input.slackUserId, displayName, profileId: null, isGuest, isExternal, isBot }, cached: false };
   // Only a full member of the connected team may be linked to a teammate.
-  const profileId = isGuest || isExternal || isBot || u.deleted ? null : await teammateByEmail(db, input.tenantId, u.profile?.email ?? null);
+  const profileId = isGuest || isExternal || u.deleted ? null : await teammateByEmail(db, input.tenantId, u.profile?.email ?? null);
 
   const nowIso = input.now.toISOString();
   await db.execute({

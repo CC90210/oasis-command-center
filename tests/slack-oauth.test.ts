@@ -80,11 +80,17 @@ async function login(user: U | null) {
 }
 
 // Slack's install endpoints, at the fetch boundary. Each code maps to a team.
-const CODES: Record<string, { team: string; name: string; token: string }> = {
+// `enterprise`: an Enterprise Grid org-wide install (Slack sends no team).
+// `authTeam`: the team auth.test answers for, when it is not the installed one.
+const CODES: Record<string, { team: string; name: string; token: string; enterprise?: boolean; authTeam?: string }> = {
   "code-alpha": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-alpha-install-token" },
   "code-alpha-2": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-alpha-install-token-2" },
   "code-bravo-same-team": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-bravo-attempt" },
   "code-alpha-other-team": { team: "T0SECOND", name: "Second Slack", token: "xoxb-second-token" },
+  "code-enterprise": { team: "T0ENTERPRISE", name: "Org Slack", token: "xoxb-enterprise-token", enterprise: true },
+  "code-user-token": { team: "T0USERTOK", name: "User Token Slack", token: "xoxp-user-token-not-a-bot" },
+  "code-race": { team: "T0RACE", name: "Race Slack", token: "xoxb-race-token" },
+  "code-mismatch": { team: "T0MISMATCH", name: "Mismatch Slack", token: "xoxb-mismatch-token", authTeam: "T0ELSEWHERE" },
 };
 // The team's channels, as conversations.info reports them.
 const CHANNELS: Record<string, { name: string; is_member: boolean; is_archived: boolean; is_ext_shared: boolean }> = {
@@ -104,12 +110,20 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     exchanges.push(form);
     const c = CODES[form.code];
     if (!c || form.client_secret !== SLACK_ENV.SLACK_CLIENT_SECRET) return json({ ok: false, error: "invalid_code" });
-    return json({ ok: true, access_token: c.token, token_type: "bot", scope: "app_mentions:read,chat:write", bot_user_id: "UBOT", team: { id: c.team, name: c.name } });
+    return json({
+      ok: true,
+      access_token: c.token,
+      token_type: "bot",
+      scope: "app_mentions:read,chat:write",
+      bot_user_id: "UBOT",
+      team: c.enterprise ? null : { id: c.team, name: c.name },
+      ...(c.enterprise ? { is_enterprise_install: true, enterprise: { id: "E0ORG", name: c.name } } : {}),
+    });
   }
   if (url.pathname === "/api/auth.test") {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
     const c = Object.values(CODES).find((x) => x.token === token);
-    return json(c ? { ok: true, team_id: c.team, team: c.name } : { ok: false, error: "invalid_auth" });
+    return json(c ? { ok: true, team_id: c.authTeam ?? c.team, team: c.name } : { ok: false, error: "invalid_auth" });
   }
   if (url.pathname === "/api/conversations.info") {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
@@ -461,6 +475,93 @@ async function main() {
       rows.map((r) => [String(r.tenant_id), String(r.department)]),
       [[BRAVO_CO, "sales"]],
     );
+  });
+
+  // ── 4. Independent verification (2026-09-30): install guards no earlier check held ──
+
+  await check("unmapping takes a real channel id only; a real one is removed", async () => {
+    await login(USERS.ownerB);
+    const del = (id: string) => channelsRoute.DELETE(new NextRequest(`https://oasisai.work/api/slack/channels?channel_id=${encodeURIComponent(id)}`, { method: "DELETE" }));
+    const bad = await del("C0CLIENTS' OR 1=1");
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as { error: string }).error, "invalid_channel");
+    assert.equal(await routesOf(BRAVO_CO), 1, "nothing removed");
+    const ok = await del("C0CLIENTS");
+    assert.equal(ok.status, 200);
+    assert.equal(((await ok.json()) as { removed: boolean }).removed, true);
+    assert.equal(await routesOf(BRAVO_CO), 0);
+  });
+
+  const liveSlackOf = async (tenantId: string) => count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", [tenantId]);
+  const botTokensOf = async (tenantId: string) => count("SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND field_key = 'bot_token'", [tenantId]);
+
+  await check("an Enterprise Grid org-wide install and a token that is not a bot token are refused, and nothing is stored", async () => {
+    await login(USERS.ownerA);
+    assert.equal(await liveSlackOf(ALPHA), 0, "Alpha disconnected above");
+    for (const [code, reason] of [["code-enterprise", "enterprise_install_unsupported"], ["code-user-token", "not_a_bot_token"]] as const) {
+      const state = stateFrom(await authorize()).state;
+      const res = await callback({ code, state });
+      assert.equal(landed(res).searchParams.get("reason"), reason, code);
+      assert.equal(await liveSlackOf(ALPHA), 0, `${code}: no connection`);
+      assert.equal(await botTokensOf(ALPHA), 0, `${code}: no token stored`);
+    }
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE external_key IN ('T0ENTERPRISE', 'T0USERTOK')"), 0);
+  });
+
+  await check("a team routed to another workspace mid-install (the race after the check) leaves nothing behind: no connection, no token", async () => {
+    await login(USERS.ownerA);
+    const state = stateFrom(await authorize()).state;
+    const bravoConn = String((await db.execute({ sql: "SELECT id FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [BRAVO_CO] })).rows[0].id);
+    // Bravo routes T0RACE between Alpha's check and Alpha's own route insert.
+    let raced = false;
+    const racingDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (stmt: Parameters<typeof db.execute>[0]) => {
+            const sql = typeof stmt === "string" ? stmt : stmt.sql;
+            if (!raced && /INSERT INTO provider_webhook_routes/.test(sql)) {
+              raced = true;
+              await target.execute({
+                sql: "INSERT INTO provider_webhook_routes (id, tenant_id, provider, external_key, connection_id, created_at) VALUES ('route-race', ?, 'slack', 'T0RACE', ?, ?)",
+                args: [BRAVO_CO, bravoConn, new Date().toISOString()],
+              });
+            }
+            return target.execute(stmt);
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const install = await import("../lib/slack/install");
+    const done = await install.completeSlackInstall(
+      { db: racingDb, now: () => new Date() },
+      {
+        provider: registry.providerForEnv("slack", process.env)!,
+        state,
+        code: "code-race",
+        redirectUri: "https://oasisai.work/api/connections/slack/callback",
+        session: { tenantId: ALPHA, userId: USERS.ownerA.id, email: USERS.ownerA.email },
+      },
+    );
+    assert.equal(raced, true, "the race happened");
+    assert.deepEqual(done, { ok: false, failure: "team_connected_elsewhere" });
+    assert.equal(await liveSlackOf(ALPHA), 0, "the claim is undone");
+    assert.equal(await botTokensOf(ALPHA), 0, "the saved token is deleted");
+    const routes = (await db.execute("SELECT tenant_id FROM provider_webhook_routes WHERE external_key = 'T0RACE'")).rows.map((r) => String(r.tenant_id));
+    assert.deepEqual(routes, [BRAVO_CO]);
+    await db.execute("DELETE FROM provider_webhook_routes WHERE id = 'route-race'");
+  });
+
+  await check("an install whose token answers for another Slack team is recorded as down, never green", async () => {
+    await login(USERS.ownerA);
+    const state = stateFrom(await authorize()).state;
+    await callback({ code: "code-mismatch", state });
+    const conn = (await db.execute({ sql: "SELECT external_account_id, last_health_verdict, last_health_code FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [ALPHA] })).rows;
+    assert.equal(conn.length, 1);
+    assert.equal(conn[0].external_account_id, "T0MISMATCH");
+    assert.equal(conn[0].last_health_verdict, "down");
+    assert.equal(conn[0].last_health_code, "account_mismatch");
   });
 
   globalThis.fetch = realFetch;

@@ -87,7 +87,11 @@ function slackFailureMessage(error: string): string {
 export async function postSlackReply(db: Client, args: SlackPostArgs, opts: { fetchImpl?: SlackFetch; now?: () => Date } = {}): Promise<SlackPostOutcome> {
   const token = await slackTokenFor(db, args.tenantId, args.teamId);
   if (!token.ok) return token;
-  const posted = await postMessage(token.token, { channel: args.channelId, thread_ts: args.threadTs, text: args.text }, { fetchImpl: opts.fetchImpl });
+  // Posted as the words that were approved. Slack reads &, < and > in a
+  // message as its own markup (<!channel> pings everyone, <@U..> mentions,
+  // <https://..|label> hides a link behind a label), none of which the
+  // approver saw as such: escaped, the thread shows exactly the approved text.
+  const posted = await postMessage(token.token, { channel: args.channelId, thread_ts: args.threadTs, text: escapeMrkdwn(args.text) }, { fetchImpl: opts.fetchImpl });
   if (!posted.ok) {
     const unknown = posted.error === "timeout" || posted.error === "network_error";
     return { ok: false, reason: unknown ? "delivery_unknown" : `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
@@ -169,10 +173,47 @@ export function approvalNoticeBlocks(input: { departmentLabel: string; openUrl: 
   ];
 }
 
+/** Raw draft characters per card section: escaped (at most 5 characters each) and quoted, a piece stays under Slack's 3,000. */
+export const CARD_PIECE_MAX = 500;
+
 /**
- * The review card: the draft, word for word, and the Approve button bound to
- * exactly those words. Sent ONLY with chat.postEphemeral, to one owner or
- * admin (postApprovalRequest), never into the channel.
+ * The draft in pieces of at most CARD_PIECE_MAX characters, split at line ends
+ * where it can be and inside a longer line only where it must (never inside a
+ * character). Every character of the draft is in exactly one piece, in order.
+ */
+export function draftPieces(draft: string): string[] {
+  const pieces: string[] = [];
+  let current: string[] = [];
+  let size = 0;
+  const flush = () => {
+    if (current.length) pieces.push(current.join("\n"));
+    current = [];
+    size = 0;
+  };
+  for (const line of draft.split("\n")) {
+    const chars = Array.from(line);
+    const segments: string[] = [];
+    for (let i = 0; i < chars.length; i += CARD_PIECE_MAX) segments.push(chars.slice(i, i + CARD_PIECE_MAX).join(""));
+    if (segments.length === 0) segments.push("");
+    for (const seg of segments) {
+      const len = Array.from(seg).length;
+      // +1: the line end that joins it to the piece so far.
+      if (current.length && size + 1 + len > CARD_PIECE_MAX) flush();
+      size += (current.length ? 1 : 0) + len;
+      current.push(seg);
+    }
+  }
+  flush();
+  return pieces;
+}
+
+/**
+ * The review card: the draft, word for word and in full, and the Approve
+ * button bound to exactly those words. A section holds 3,000 characters, so a
+ * long draft runs over several sections rather than being cut: the Approve
+ * button binds to the whole draft, so the whole draft is what is shown. Sent
+ * ONLY with chat.postEphemeral, to one owner or admin (postApprovalRequest),
+ * never into the channel.
  */
 export function approvalCardBlocks(input: {
   departmentLabel: string;
@@ -181,18 +222,20 @@ export function approvalCardBlocks(input: {
   payloadHash: string;
   openUrl: string | null;
 }): unknown[] {
-  const quoted = escapeMrkdwn(input.draft)
-    .split("\n")
-    .map((l) => `>${l}`)
-    .join("\n");
+  const quote = (piece: string) =>
+    escapeMrkdwn(piece)
+      .split("\n")
+      .map((l) => `>${l}`)
+      .join("\n");
   const blocks: unknown[] = [
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `Only you can see this. *${escapeMrkdwn(input.departmentLabel)}* drafted this reply. Nothing is posted until it is approved.\n${quoted}`.slice(0, 2900),
+        text: `Only you can see this. *${escapeMrkdwn(input.departmentLabel)}* drafted this reply. Nothing is posted until it is approved.`,
       },
     },
+    ...draftPieces(input.draft).map((piece) => ({ type: "section", text: { type: "mrkdwn", text: quote(piece) } })),
     {
       type: "actions",
       elements: [
