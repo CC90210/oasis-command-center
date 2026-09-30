@@ -3,7 +3,10 @@
  *
  *   GET     the connected workspace's public channels (conversations.list, with
  *           the workspace's own bot token), each with its current mapping, plus
- *           this workspace's client records to link a channel to.
+ *           this workspace's client records to link a channel to. Mapped
+ *           channels missing from the page come back as `orphaned` when the
+ *           page is complete (Slack no longer lists them) and as `beyond_page`
+ *           when it is truncated (unproven either way; still unmappable).
  *   PUT     { channel_id, channel_name, department | null, customer_id | null }
  *           maps one channel. department null = a general channel (mirrored,
  *           answered only when @mentioned). A department is accepted only when
