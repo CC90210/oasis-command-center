@@ -29,13 +29,16 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2, Check, Copy, X, Clock, AlertCircle, Apple, Monitor, Terminal } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import { operatorBridgeCommand } from "@/lib/bridge-install-command";
 import { bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 
 export function InstallBridgeModal({ onClose, installRepo }: { onClose: () => void; installRepo: string }) {
   // All pairing state + side effects (mint, countdown, polling, retry)
   // live in the shared hook. This file is now render-only.
-  const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing(installRepo);
+  const { os, setOs, mode, setMode, code, secondsLeft, phase, error, retryMint } = useBridgePairing();
+  // The operator's command: pair-only, or the full install from the private
+  // repo passed in by the operator-gated server component.
+  const oneLiner = code ? operatorBridgeCommand(os, code, mode, installRepo) : "";
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -135,7 +138,7 @@ export function InstallBridgeModal({ onClose, installRepo }: { onClose: () => vo
                 </div>
                 <p className="text-[11px] text-fg-dim leading-relaxed">
                   {mode === "install"
-                    ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI (gh) signed in with access to it."
+                    ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."
                     : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
                 </p>
               </div>

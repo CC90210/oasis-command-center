@@ -9,14 +9,19 @@
  * a client component (InstallBridgeWizard) so the polling, OS detection,
  * and clipboard interactions can run client-side.
  *
- * Operator only since 2026-09-29 (F0 containment). The full install pulls the
- * harness repo, which went private that day, and Settings › Devices is already
- * operator-only for the same reason: the bridge gives an agent a shell on the
- * paired machine. A verified platform operator (resolvePlatformOperator) gets
- * the wizard, with the repo name passed in from here. Any other signed-in
- * viewer, a client included, gets a private-beta notice with no command, no
- * pair code and no repository name, and the support form to ask for access,
- * the same answer /download gives. Pinned by tests/f0-containment.test.ts.
+ * Split by viewer since 2026-09-29 (F0 containment). The full install pulls
+ * the harness repo, which went private that day, and Settings › Devices is
+ * already operator-only for the same reason: the bridge gives an agent a shell
+ * on the paired machine. A verified platform operator (resolvePlatformOperator)
+ * gets the full wizard, with the repo name passed in from here.
+ *
+ * Every other signed-in viewer, a client included, gets pair-only mode
+ * (PairBridgeOnly): a one-time code and the self-contained command that links
+ * a computer which already has the bridge. It clones nothing, and the page
+ * carries no install command, no repository name and nothing the harness
+ * names. Beside it, the private-beta notice says a new install is done by
+ * OASIS, with the support form to ask for one. Pinned by
+ * tests/f0-containment.test.ts.
  */
 
 import Link from "next/link";
@@ -28,6 +33,7 @@ import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { HARNESS_REPO } from "@/lib/install-scripts";
 import { InstallBridgeWizard } from "./InstallBridgeWizard";
+import { PairBridgeOnly } from "./PairBridgeOnly";
 
 export const dynamic = "force-dynamic";
 
@@ -35,32 +41,39 @@ export default async function BridgeInstallPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login?next=/settings/devices/install");
   // Fails closed: a membership lookup error is logged inside and answers "not
-  // an operator", which renders the private-beta notice.
+  // an operator", which renders the pair-only page.
   const op = await resolvePlatformOperator();
 
-  const header = (
-    <PageHeader
-      title="Install the local bridge"
-      subtitle="Give your agents full Claude Code parity — file system, bash, every MCP — by pairing this machine to your tenant."
-      action={
-        <Link
-          href="/settings#devices"
-          className="text-xs text-fg-muted hover:text-fg inline-flex items-center gap-1"
-        >
-          <ArrowLeft className="w-3 h-3" /> Back to Settings
-        </Link>
-      }
-    />
+  const back = (
+    <Link
+      href={op.operator ? "/settings#devices" : "/settings"}
+      className="text-xs text-fg-muted hover:text-fg inline-flex items-center gap-1"
+    >
+      <ArrowLeft className="w-3 h-3" /> Back to Settings
+    </Link>
   );
 
   if (!op.operator) {
     return (
       <div className="space-y-6 animate-fade-in">
-        {header}
+        <PageHeader
+          title="Pair the local bridge"
+          subtitle="Link a computer that already has the OASIS bridge to your workspace, so your agents can work with its files and tools."
+          action={back}
+        />
+        <PairBridgeOnly />
         <BridgePrivateBeta />
       </div>
     );
   }
+
+  const header = (
+    <PageHeader
+      title="Install the local bridge"
+      subtitle="Give your agents full Claude Code parity — file system, bash, every MCP — by pairing this machine to your tenant."
+      action={back}
+    />
+  );
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -112,15 +125,15 @@ export default async function BridgeInstallPage() {
   );
 }
 
-/** What a signed-in viewer who is not the verified platform operator sees. */
+/** Beside the pair-only card for everyone who is not the verified platform operator: how a NEW computer gets the bridge. */
 function BridgePrivateBeta() {
   return (
     <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-3">
       <h2 className="text-base font-bold text-fg">The local bridge is in private beta</h2>
       <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
-        The bridge lets your agents work with the files and tools on a computer
-        you pair. While it is in beta, OASIS sets it up with each workspace
-        directly, so there is no install command here yet.
+        Pairing above is for a computer that already has the bridge. Installing
+        it on a new computer is done by OASIS with each workspace while the
+        bridge is in beta, so there is no install command here.
       </p>
       {/* A plain <a>: the support form renders outside the dashboard shell. */}
       <a href={SUPPORT_FORM_PATH} className="btn-primary inline-flex items-center gap-2">

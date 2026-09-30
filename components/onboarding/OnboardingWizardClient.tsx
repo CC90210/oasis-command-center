@@ -22,6 +22,7 @@ import {
   type WizardQuestion,
 } from "@/lib/manifest/templates";
 import { AGENT_REGISTRY } from "@/lib/agents";
+import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Answers = Record<string, string | string[]>;
 
@@ -102,7 +103,18 @@ function slugifyClient(name: string): string {
     .slice(0, 62) || "tenant";
 }
 
-export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
+/**
+ * canInstallBridge: the server's verified platform-operator verdict
+ * (app/onboarding/wizard/page.tsx). Only the operator is offered the bridge
+ * install at the end; see OnboardingDoneChoices.
+ */
+export function OnboardingWizardClient({
+  userEmail,
+  canInstallBridge,
+}: {
+  userEmail?: string;
+  canInstallBridge: boolean;
+}) {
   const [step, setStep] = useState<Step>("industry");
   // Tenant slug returned by /api/onboarding/wizard on successful create.
   // The done step uses this to link directly to the new tenant's dashboard
@@ -753,63 +765,90 @@ export function OnboardingWizardClient({ userEmail }: { userEmail?: string }) {
         )}
 
         {step === "done" && (
-          <section className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-8 space-y-6">
-            <div className="text-center space-y-2">
-              <CheckCircle2 className="h-10 w-10 text-emerald-300 mx-auto" />
-              <div className="text-xl font-bold">Your workspace is live.</div>
-              <p className="text-sm text-fg-muted max-w-md mx-auto">
-                Manifest saved, agents enabled, branding applied. Two ways
-                to use it from here — pick what fits your setup.
-              </p>
-            </div>
-
-            {/* Two CTAs side-by-side. Pair-a-machine is the recommended path
-                for operators with a local computer (unlocks CLI chat, file
-                access, automations). Open-the-dashboard is the no-machine
-                path for cloud-only operators. */}
-            <div className="grid sm:grid-cols-2 gap-3">
-              <Link
-                href="/settings/devices/install"
-                className="rounded-xl border-2 border-accent bg-accent/10 p-5 hover:bg-accent/20 transition-colors flex flex-col gap-2"
-              >
-                <div className="flex items-center gap-2">
-                  <Download className="w-5 h-5 text-accent" />
-                  <div className="font-bold text-fg">Pair a machine</div>
-                  <span className="ml-auto text-[10px] uppercase tracking-wider text-accent font-bold">
-                    Recommended
-                  </span>
-                </div>
-                <p className="text-xs text-fg-muted leading-relaxed">
-                  Run one command on your laptop / desktop. Unlocks CLI chat
-                  with your Claude subscription, local file access, and the
-                  automations engine. ~1 minute.
-                </p>
-              </Link>
-
-              <Link
-                href={doneSlug ? `/t/${doneSlug}` : "/"}
-                className="rounded-xl border border-bg-border bg-bg-elev p-5 hover:border-accent-muted/40 transition-colors flex flex-col gap-2"
-              >
-                <div className="flex items-center gap-2">
-                  <ArrowRight className="w-5 h-5 text-fg-muted" />
-                  <div className="font-bold text-fg">Open dashboard now</div>
-                </div>
-                <p className="text-xs text-fg-muted leading-relaxed">
-                  Go straight to your workspace. Chat runs in cloud mode
-                  with your saved API key. You can pair a machine later
-                  from Settings → Devices.
-                </p>
-              </Link>
-            </div>
-          </section>
+          <OnboardingDoneChoices
+            canInstallBridge={canInstallBridge}
+            dashboardHref={doneSlug ? `/t/${doneSlug}` : "/"}
+          />
         )}
       </div>
     </div>
   );
 }
 
-function Header({ step }: { step: Step }) {
-  const labels: Record<Step, string> = {
+/**
+ * The "workspace is live" step. Its own function with no hooks so
+ * tests/f0-containment.test.ts renders both versions for real.
+ *
+ * The "Pair a machine" card goes to /settings/devices/install, which installs
+ * the bridge for the verified platform operator only (F0 containment,
+ * 2026-09-29). Everyone else would land on a page with nothing to install, so
+ * for them the card, its "Recommended" badge and the "pair later from
+ * Settings → Devices" line (an operator-only section) are all gone, and the
+ * dashboard card takes the full width instead of leaving an empty slot.
+ */
+export function OnboardingDoneChoices({
+  canInstallBridge,
+  dashboardHref,
+}: {
+  canInstallBridge: boolean;
+  dashboardHref: string;
+}) {
+  const pairCard = canInstallBridge === true;
+  return (
+    <section className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-8 space-y-6">
+      <div className="text-center space-y-2">
+        <CheckCircle2 className="h-10 w-10 text-emerald-300 mx-auto" />
+        <div className="text-xl font-bold">Your workspace is live.</div>
+        <p className="text-sm text-fg-muted max-w-md mx-auto">
+          {pairCard
+            ? "Manifest saved, agents enabled, branding applied. Two ways to use it from here — pick what fits your setup."
+            : "Manifest saved, agents enabled, branding applied."}
+        </p>
+      </div>
+
+      {/* Operator: two CTAs side by side. Pair-a-machine is the recommended
+          path with a local computer (CLI chat, file access, automations);
+          Open-the-dashboard is the no-machine path. Everyone else: the
+          dashboard card alone. */}
+      <div className={pairCard ? "grid sm:grid-cols-2 gap-3" : "grid gap-3"}>
+        <BridgeInstallLink
+          canInstallBridge={pairCard}
+          className="rounded-xl border-2 border-accent bg-accent/10 p-5 hover:bg-accent/20 transition-colors flex flex-col gap-2"
+        >
+          <div className="flex items-center gap-2">
+            <Download className="w-5 h-5 text-accent" />
+            <div className="font-bold text-fg">Pair a machine</div>
+            <span className="ml-auto text-[10px] uppercase tracking-wider text-accent font-bold">
+              Recommended
+            </span>
+          </div>
+          <p className="text-xs text-fg-muted leading-relaxed">
+            Run one command on your laptop / desktop. Unlocks CLI chat
+            with your Claude subscription, local file access, and the
+            automations engine. ~1 minute.
+          </p>
+        </BridgeInstallLink>
+
+        <Link
+          href={dashboardHref}
+          className="rounded-xl border border-bg-border bg-bg-elev p-5 hover:border-accent-muted/40 transition-colors flex flex-col gap-2"
+        >
+          <div className="flex items-center gap-2">
+            <ArrowRight className="w-5 h-5 text-fg-muted" />
+            <div className="font-bold text-fg">Open dashboard now</div>
+          </div>
+          <p className="text-xs text-fg-muted leading-relaxed">
+            {pairCard
+              ? "Go straight to your workspace. Chat runs in cloud mode with your saved API key. You can pair a machine later from Settings → Devices."
+              : "Go straight to your workspace. Chat runs in cloud mode with your saved API key."}
+          </p>
+        </Link>
+      </div>
+    </section>
+  );
+}
+
+function Header({ step }: { step: Step }) {  const labels: Record<Step, string> = {
     industry: "Pick your industry",
     questions: "Tell us about your operation",
     agents: "Pick your agents",

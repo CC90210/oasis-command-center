@@ -384,6 +384,7 @@ export async function SettingsContent({
                   connectedServices={connectedAiSet}
                   bridgeOnline={bridgeOnline}
                   canManageTeam={canManageTenant}
+                  canInstallBridge={isOperator}
                 />
               </SafeBoundary>
             </SettingsSection>
@@ -412,6 +413,7 @@ export async function SettingsContent({
                   <AgentConfigEditor
                     agentKeys={enabledChatAgentKeys}
                     bridgeOnline={bridgeOnline}
+                    canInstallBridge={isOperator}
                     globallyConnectedServices={Array.from(connectedAiSet)}
                     agentPalettes={Object.fromEntries(
                       (manifest?.agents || []).map((a) => [

@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -304,7 +305,9 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
   );
 }
 
-export default function ClientDeployPage() {
+export default async function ClientDeployPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const totalSteps = PHASES.reduce((acc, p) => acc + p.steps.length, 0);
 
   return (

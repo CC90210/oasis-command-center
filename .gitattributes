@@ -15,9 +15,9 @@
 *.wasm binary
 *.ico binary
 
-# lib/install-scripts.ts embeds the install scripts as String.raw templates, so
-# the bytes of the file ARE the bytes served. Git on Windows (core.autocrlf=true)
-# would check it out with CRLF, and a build from that checkout would serve
-# install.sh with a carriage return on every line, which bash rejects.
-# tests/f0-containment.test.ts pins the sha256 of both scripts.
+# lib/install-scripts.ts embeds the install scripts as String.raw templates. It is
+# pinned to LF only so its bytes on disk match on every platform; this line does
+# not decide what gets served. JavaScript turns a CRLF inside any template literal,
+# String.raw included, into LF, so even a CRLF checkout serves LF scripts. What
+# guards the served bytes is the sha256 pin in tests/f0-containment.test.ts.
 lib/install-scripts.ts text eol=lf

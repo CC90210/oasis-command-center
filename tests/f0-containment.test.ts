@@ -13,10 +13,19 @@
  *      else back to /download.
  *   3. /install.ps1 and /install.sh are operator-only routes (404 for anyone
  *      else) serving the same bytes the public/ files did (sha256-pinned), and
- *      nothing under public/ serves them any more. The bridge pairing wizard
- *      (/settings/devices/install) shows its install command to the operator
- *      only, the harness repo name reaches no client page and no client
- *      bundle, and the client-deploy runbook says the client install is paused.
+ *      nothing under public/ serves them any more. The bridge pairing page
+ *      (/settings/devices/install) gives the operator the install wizard and
+ *      every other signed-in viewer pair-only mode (for a computer that already
+ *      has the bridge), with no install command and nothing of the harness; the
+ *      harness repo name reaches no client page and no client bundle, and the
+ *      client-deploy runbook says the client install is paused.
+ *   3b. Every "Install bridge" call to action (onboarding's last step,
+ *      Settings › AI, /sequences) is the operator's only, through
+ *      BridgeInstallLink; a client sees a plain line or nothing. /automations
+ *      is a named known gap (see the allowlist in that section).
+ *   3c. Every /playbook page 404s for anyone outside an OASIS workspace (by
+ *      tenant id and slug), renders for OASIS members, and signed-out visitors
+ *      are sent to /login by middleware.
  *   4. /start, /configure and /demo/sun: middleware sends a signed-out visitor
  *      to /login (they are off the public list, like any unknown path), and a
  *      signed-in viewer gets the 404. No string literal in app, components, lib,
@@ -113,6 +122,9 @@ stub("next/image", {
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const SQUAT_TENANT = "5a5a5a5a-0000-4000-8000-00000000005a";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
+// A workspace that claimed the slug "oasis" (on OASIS_SURFACE_TENANT_SLUGS, but
+// no OASIS tenant row owns it). Its id is not OASIS's, so /playbook stays shut.
+const SLUG_CLAIM_TENANT = "7c7c7c7c-0000-4000-8000-00000000007c";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -120,6 +132,9 @@ const USERS = {
   cc: u(1, "conaugh@oasisai.work"), // hardcoded default alias; OASIS owner
   squatter: u(2, "squatter@alias.test"), // alias email, owns only its own workspace
   client: u(3, "owner@client.test"), // not an alias; owner of a client workspace
+  rep: u(4, "rep@oasis-team.test"), // an OASIS opener: a member, not an owner, not an operator
+  claimer: u(5, "owner@slug-claim.test"), // owns the workspace that claimed the "oasis" slug
+  newbie: u(6, "newbie@client.test"), // a client who has not finished onboarding yet
 } as const;
 type Viewer = keyof typeof USERS | "anonymous";
 const NON_OPERATORS: Viewer[] = ["anonymous", "client", "squatter"];
@@ -265,9 +280,23 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'squatter-co', 'Squatter Co')", args: [SQUAT_TENANT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis', 'Slug Claimer')", args: [SLUG_CLAIM_TENANT] },
       profile(USERS.cc, OASIS, "owner"),
       profile(USERS.squatter, SQUAT_TENANT, "owner"),
       profile(USERS.client, CLIENT, "owner"),
+      profile(USERS.claimer, SLUG_CLAIM_TENANT, "owner"),
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner,
+                onboarding_completed_at, agents_enabled, updated_at)
+              VALUES (?, ?, ?, ?, 'opener', 0, ?, '["bravo"]', ?)`,
+        args: [`p-${USERS.rep.id}`, USERS.rep.id, USERS.rep.email, OASIS, stamp, stamp],
+      },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner,
+                onboarding_completed_at, agents_enabled, updated_at)
+              VALUES (?, ?, ?, ?, 'owner', 1, NULL, '["bravo"]', ?)`,
+        args: [`p-${USERS.newbie.id}`, USERS.newbie.id, USERS.newbie.email, CLIENT, stamp],
+      },
     ],
     "write",
   );
@@ -284,10 +313,19 @@ async function main() {
   const { SUPPORT_FORM_PATH } = await import("../lib/delivery/support-form");
   const bridgeInstallPage = (await import("../app/settings/devices/install/page")).default;
   const { InstallBridgeWizard } = await import("../app/settings/devices/install/InstallBridgeWizard");
-  const { installOneLiner } = await import("../hooks/useBridgePairing");
+  const { PairBridgeOnly, PairOnlyView, clientPairCommand } = await import("../app/settings/devices/install/PairBridgeOnly");
+  const { installOneLiner, operatorBridgeCommand } = await import("../lib/bridge-install-command");
+  const { bridgePairCommand } = await import("../lib/bridge-install-guidance");
+  const { BridgeInstallLink, BridgeStatusBanner, BRIDGE_INSTALL_PATH } = await import("../components/settings/BridgeInstallLink");
+  const { OnboardingDoneChoices, OnboardingWizardClient } = await import("../components/onboarding/OnboardingWizardClient");
+  const onboardingWizardPage = (await import("../app/onboarding/wizard/page")).default;
+  const { NoProviderNotice } = await import("../components/settings/ProviderAccountsCard");
+  const { BridgeToolAccess } = await import("../components/settings/AgentConfigEditor");
+  const playbookAccess = await import("../lib/playbook-access");
   const clientDeployPage = (await import("../app/playbook/client-deploy/page")).default;
   const { demoHref } = await import("../lib/demo-href");
   OPAQUE.add(InstallBridgeWizard);
+  OPAQUE.add(PairBridgeOnly);
 
   console.log("f0-containment:");
 
@@ -466,12 +504,13 @@ async function main() {
     const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
     assert.equal(sha(INSTALL_PS1), "aff59e7d0ddc7a39b2910ce3eb14d4dc0d0ac6b276dc9ed5d42dced4a0574b83", "install.ps1 drifted");
     assert.equal(sha(INSTALL_SH), "451d0f14356d77eb34dea999e16933a827d79607e0207750405b43971a4b7aba", "install.sh drifted");
-    // The two usual ways it drifts, named so the failure says which. String.raw
-    // keeps this a backslash-n (a plain template would make it a real newline
-    // and break the base64 decode), and .gitattributes pins the file to LF so a
-    // Windows checkout cannot put a carriage return on every served line.
+    // The usual way it drifts, named so the failure says which: String.raw keeps
+    // this a backslash-n, and a plain template would make it a real newline and
+    // break the base64 decode. Line endings need no check of their own: a
+    // template literal turns every CRLF in the source into LF, String.raw
+    // included, so a CRLF checkout of lib/install-scripts.ts still serves LF.
+    // The sha256 pins above are the guard.
     assert.ok(INSTALL_SH.includes("tr -d '\\n'"), "install.sh lost its literal \\n");
-    assert.ok(!INSTALL_PS1.includes("\r") && !INSTALL_SH.includes("\r"), "LF line endings, as the committed files had");
   });
   await check("HARNESS_REPO is the repo both scripts clone", () => {
     assert.ok(INSTALL_PS1.includes(`$Repo = '${HARNESS_REPO}'`));
@@ -485,34 +524,94 @@ async function main() {
     await login("anonymous");
     await assert.rejects(bridgeInstallPage(), /NEXT_REDIRECT;\/login\?next=\/settings\/devices\/install/);
   });
+  // Everyone else who is signed in gets pair-only mode: a code and the
+  // self-contained command that links a computer which already has the bridge.
+  // It clones nothing, so nothing of the harness may reach their screen.
+  const HARNESS_LEAKS = [
+    "CEO-Agent", "CC90210", "raw.githubusercontent", "gh api", "gh auth", "install.ps1", "install.sh",
+    "git clone", "BRAVO", "Bravo", "/download", "/settings#devices",
+  ];
+  const PAIR_CODE = "ABC-DEF-GHJ";
+  const OSES = ["windows", "macos", "linux"] as const;
   for (const viewer of ["client", "squatter"] as const) {
-    await check(`${viewer}: /settings/devices/install is a private-beta notice, with no command and no repo`, async () => {
+    await check(`${viewer}: /settings/devices/install is pair-only mode plus the private-beta notice, with no install command and no repo`, async () => {
       await login(viewer);
       const tree = await bridgeInstallPage();
-      assert.deepEqual(elementsOf(tree, InstallBridgeWizard), [], "the pairing wizard must not mount for a non-operator");
+      assert.deepEqual(elementsOf(tree, InstallBridgeWizard), [], "the install wizard must not mount for a non-operator");
+      const pairOnly = elementsOf(tree, PairBridgeOnly);
+      assert.equal(pairOnly.length, 1, "pair-only mode mounts for a signed-in non-operator");
+      assert.deepEqual(Object.keys((pairOnly[0].props ?? {}) as object), [], "pair-only mode is handed no repository");
       const page = textOf(tree).join("\n");
+      assert.match(page, /Pair the local bridge/);
       assert.match(page, /The local bridge is in private beta/);
-      assert.ok(page.includes(SUPPORT_FORM_PATH), "Ask for access goes to the support form");
-      for (const leak of ["CEO-Agent", "CC90210", "raw.githubusercontent", "BRAVO_PAIR_CODE", "gh api", "install.ps1", "install.sh"]) {
-        assert.ok(!page.includes(leak), `${leak} shown to a ${viewer}`);
-      }
+      assert.ok(page.includes(SUPPORT_FORM_PATH), "Ask for access (a new install) goes to the support form");
+      for (const leak of HARNESS_LEAKS) assert.ok(!page.includes(leak), `${leak} shown to a ${viewer}`);
     });
   }
-  await check("operator: /settings/devices/install mounts the wizard with the repo passed in", async () => {
+  await check("pair-only mode, in every phase and on every OS, shows the redeem command and nothing of the harness", () => {
+    for (const os of OSES) {
+      const command = clientPairCommand(os, PAIR_CODE);
+      assert.ok(command.includes(PAIR_CODE) && command.includes("/api/auth/pair-code/redeem"), `${os}: ${command}`);
+      assert.ok(command.includes("OASIS_PAIR_CODE"), `${os}: the client's variable name is neutral`);
+      for (const phase of ["mint", "command", "watching", "connected"] as const) {
+        for (const error of [null, "mint_failed"]) {
+          const view = PairOnlyView({
+            os, onOs: () => undefined, code: PAIR_CODE, command, secondsLeft: 600, phase, error,
+            onRetry: () => undefined, copied: false, onCopy: () => undefined,
+          });
+          const text = textOf(view).join("\n");
+          if (phase === "command" || phase === "watching") assert.ok(text.includes(command), `${os}/${phase}: the command is shown`);
+          for (const leak of HARNESS_LEAKS) assert.ok(!text.includes(leak), `${os}/${phase}: ${leak} in pair-only mode`);
+        }
+      }
+    }
+  });
+  await check("pair-only mode loads no module that carries the install command or the operator's names", () => {
+    // PairBridgeOnly, the hook and the command helpers it imports are what a
+    // client's browser loads for this page. The full install lives in
+    // lib/bridge-install-command.ts, imported by the two operator surfaces only.
+    const clientModules = [
+      "app/settings/devices/install/PairBridgeOnly.tsx",
+      "hooks/useBridgePairing.ts",
+      "lib/bridge-install-guidance.ts",
+    ];
+    for (const rel of clientModules) {
+      for (const lit of stringLiterals(readFileSync(join(ROOT, rel), "utf8"), rel)) {
+        assert.ok(!/bridge-install-command|InstallBridgeWizard|install-scripts/.test(lit), `${rel} imports ${lit}`);
+        for (const leak of ["CEO-Agent", "CC90210", "raw.githubusercontent", "gh api", "install.ps1", "install.sh", "git clone", "BRAVO"]) {
+          assert.ok(!lit.includes(leak), `${rel} carries "${leak}" in ${lit.slice(0, 60)}`);
+        }
+      }
+    }
+  });
+  await check("operator: /settings/devices/install mounts the full install wizard with the repo passed in", async () => {
     await login("cc");
     const tree = await bridgeInstallPage();
     const wizards = elementsOf(tree, InstallBridgeWizard);
     assert.equal(wizards.length, 1);
     assert.equal((wizards[0].props as { installRepo?: unknown }).installRepo, HARNESS_REPO);
+    assert.deepEqual(elementsOf(tree, PairBridgeOnly), [], "the operator gets the full wizard, which has its own pair-only mode");
     assert.ok(!(await renderBridgeInstall()).includes("in private beta"));
   });
   await check("the operator's full-install command reads the private repo through gh, not an anonymous raw URL", () => {
-    for (const os of ["windows", "macos", "linux"] as const) {
-      const cmd = installOneLiner(os, "ABC-DEF-GHJ", HARNESS_REPO);
+    for (const os of OSES) {
+      const cmd = operatorBridgeCommand(os, PAIR_CODE, "install", HARNESS_REPO);
+      assert.equal(cmd, installOneLiner(os, PAIR_CODE, HARNESS_REPO));
       const file = os === "windows" ? "install.ps1" : "install.sh";
       assert.ok(cmd.includes(`gh api`) && cmd.includes(`repos/${HARNESS_REPO}/contents/${file}`), `${os}: ${cmd}`);
-      assert.ok(cmd.includes("BRAVO_PAIR_CODE") && cmd.includes("ABC-DEF-GHJ"), `${os} lost the pair code`);
+      assert.ok(cmd.includes("BRAVO_PAIR_CODE") && cmd.includes(PAIR_CODE), `${os} lost the pair code`);
       assert.ok(!cmd.includes("raw.githubusercontent"), `${os}: an anonymous raw URL is a 404 on a private repo`);
+      // The operator's own pair-only mode keeps the variable names its machines read.
+      const pair = operatorBridgeCommand(os, PAIR_CODE, "pair", HARNESS_REPO);
+      assert.equal(pair, bridgePairCommand(os, PAIR_CODE, "BRAVO"));
+      assert.ok(pair.includes("BRAVO_PAIR_CODE") && !pair.includes("gh api") && !pair.includes(HARNESS_REPO));
+    }
+  });
+  await check("the operator wizard says what the clone needs: gh signed in with git credentials", () => {
+    for (const rel of ["app/settings/devices/install/InstallBridgeWizard.tsx", "components/settings/InstallBridgeModal.tsx"]) {
+      const src = readFileSync(join(ROOT, rel), "utf8");
+      assert.ok(src.includes("`gh auth login` choosing HTTPS") && src.includes("`gh auth setup-git`"), `${rel}: the git-credential step is missing`);
+      assert.ok(!src.includes("(gh) signed in with access to it"), `${rel}: still says a gh session is enough`);
     }
   });
   await check("no client-bundled module carries the harness repo name", () => {
@@ -531,11 +630,181 @@ async function main() {
     }
     assert.deepEqual(hits, []);
   });
-  await check("the client-deploy runbook pauses the client install instead of routing around it", () => {
-    const page = textOf(clientDeployPage()).join("\n");
+  await check("the client-deploy runbook pauses the client install instead of routing around it", async () => {
+    await login("cc");
+    const page = textOf(await clientDeployPage()).join("\n");
     assert.match(page, /Paused: installing on a client's machine/);
     assert.match(page, /do not grant a client's machine access to the harness repository/);
     assert.ok(!/send them the file|needs GitHub access/i.test(page), "the runbook still tells the operator to ship the script");
+  });
+
+  // ── 3b. install calls to action are the operator's only ────────────────
+  // /settings/devices/install installs for the operator alone; for anyone else
+  // an "Install bridge" button is a dead end. Every such button goes through
+  // BridgeInstallLink, which renders nothing unless handed the verified verdict.
+  const hasInstallLink = (node: unknown) => textOf(node).includes(BRIDGE_INSTALL_PATH);
+  await check("BridgeInstallLink renders the install link for the operator and nothing for anyone else", () => {
+    assert.ok(hasInstallLink(BridgeInstallLink({ canInstallBridge: true, children: "Install bridge" })));
+    assert.equal(BridgeInstallLink({ canInstallBridge: false, children: "Install bridge" }), null);
+    // Only a real `true` opens it: a truthy non-boolean is not a verdict.
+    assert.equal(BridgeInstallLink({ canInstallBridge: "yes" as unknown as boolean, children: "x" }), null);
+  });
+  await check("onboarding's last step: the operator gets the recommended pair card, a client the dashboard card alone", () => {
+    const client = OnboardingDoneChoices({ canInstallBridge: false, dashboardHref: "/t/client-co" });
+    const clientText = textOf(client).join("\n");
+    assert.ok(!hasInstallLink(client), "a client is not sent to the install route");
+    for (const gone of ["Pair a machine", "Recommended", "Settings → Devices", "Two ways"]) {
+      assert.ok(!clientText.includes(gone), `a client still sees "${gone}"`);
+    }
+    assert.ok(clientText.includes("/t/client-co") && clientText.includes("Open dashboard now"));
+    const grids = elementsOf(client, "div").filter((d) => /\bgrid\b/.test(String((d.props as { className?: string }).className)));
+    assert.equal(grids.length, 1);
+    assert.ok(!String((grids[0].props as { className?: string }).className).includes("grid-cols-2"), "no empty second column for a client");
+    const operator = OnboardingDoneChoices({ canInstallBridge: true, dashboardHref: "/" });
+    const operatorText = textOf(operator).join("\n");
+    assert.ok(hasInstallLink(operator) && operatorText.includes("Recommended") && operatorText.includes("Pair a machine"));
+  });
+  await check("the onboarding wizard page hands the client's wizard canInstallBridge=false and the operator's true", async () => {
+    await login("newbie");
+    const clientEl = (await onboardingWizardPage()) as ReactNS.ReactElement;
+    assert.ok(isValidElement(clientEl) && clientEl.type === OnboardingWizardClient, "the wizard renders for a client mid-onboarding");
+    assert.equal((clientEl.props as { canInstallBridge?: unknown }).canInstallBridge, false);
+    // The operator is onboarded, so the page would redirect; clear it for the
+    // one call and put it back.
+    await db.execute({ sql: "UPDATE user_profiles SET onboarding_completed_at = NULL WHERE auth_user_id = ?", args: [USERS.cc.id] });
+    try {
+      await login("cc");
+      const opEl = (await onboardingWizardPage()) as ReactNS.ReactElement;
+      assert.equal((opEl.props as { canInstallBridge?: unknown }).canInstallBridge, true);
+    } finally {
+      await db.execute({ sql: "UPDATE user_profiles SET onboarding_completed_at = ? WHERE auth_user_id = ?", args: [stamp, USERS.cc.id] });
+    }
+  });
+  await check("Settings › AI: the no-provider notice and an agent's offline strip offer the bridge to the operator only", () => {
+    const clientNotice = NoProviderNotice({ canInstallBridge: false });
+    assert.ok(!hasInstallLink(clientNotice) && textOf(clientNotice).join(" ").includes("connect a cloud provider above"));
+    assert.ok(!/local bridge/i.test(textOf(clientNotice).join(" ")), "a client is not told to install the bridge");
+    assert.ok(hasInstallLink(NoProviderNotice({ canInstallBridge: true })));
+    const clientStrip = BridgeToolAccess({ bridgeOnline: false, canInstallBridge: false });
+    const clientStripText = textOf(clientStrip).join(" ");
+    assert.ok(!hasInstallLink(clientStrip) && !/Install\s+the\s+bridge/i.test(clientStripText) && clientStripText.includes("cloud mode"));
+    assert.ok(hasInstallLink(BridgeToolAccess({ bridgeOnline: false, canInstallBridge: true })));
+    assert.ok(!hasInstallLink(BridgeToolAccess({ bridgeOnline: true, canInstallBridge: true })), "no install link once the bridge is online");
+    // Both cards get the verdict from SettingsContent's verified operator check.
+    const settings = readFileSync(join(ROOT, "components", "settings", "SettingsContent.tsx"), "utf8");
+    assert.equal(settings.match(/canInstallBridge=\{isOperator\}/g)?.length, 2, "ProviderAccountsCard and AgentConfigEditor both get isOperator");
+    assert.match(settings, /show\("ai"\) && isOperator && \(\s*<SafeBoundary label="Local CLI providers">\s*<LocalCliProvidersCard/, "the CLI card (which links the install) stays operator-only");
+  });
+  await check("/sequences: the offline banner offers Install bridge to the operator only", () => {
+    const props = {
+      bridgeOnline: false, online: "on", offline: "Jobs are paused.",
+      operatorHint: "Click Install bridge to restore them.", clientHint: "OASIS pairs it with each workspace directly.",
+    };
+    const client = BridgeStatusBanner({ ...props, canInstallBridge: false });
+    const clientText = textOf(client).join(" ");
+    assert.ok(!hasInstallLink(client) && !clientText.includes("Install bridge"), "a client gets no install button or hint");
+    assert.ok(clientText.includes("Jobs are paused.") && clientText.includes("OASIS pairs it"), "a client gets the plain line");
+    const operator = BridgeStatusBanner({ ...props, canInstallBridge: true });
+    assert.ok(hasInstallLink(operator) && textOf(operator).join(" ").includes("Click Install bridge"));
+    assert.ok(!hasInstallLink(BridgeStatusBanner({ ...props, bridgeOnline: true, canInstallBridge: true })), "no button once online");
+    // The page hands the banner the verified operator verdict. It mounts client
+    // components that cannot load in this process, so the wiring is read from
+    // source.
+    const src = readFileSync(join(ROOT, "app", "sequences", "page.tsx"), "utf8");
+    assert.match(src, /const isOperator = await isPlatformOperator\(\);/, "/sequences: the verdict");
+    assert.match(src, /<BridgeStatusBanner\s+bridgeOnline=\{bridgeOnline\}\s+canInstallBridge=\{isOperator\}/, "/sequences: the banner gets it");
+  });
+  await check("no client-reachable file links the install route except through BridgeInstallLink", () => {
+    const INSTALL_ROUTE = /^\/settings\/devices\/install(?:[?#]|$)/;
+    // Files that may name the route. Each says why.
+    const ALLOWED = new Map([
+      ["components/settings/BridgeInstallLink.tsx", "the gate itself"],
+      ["components/settings/SettingsContent.tsx", "inside the Settings › Devices section, which is show(\"devices\") && isOperator (os-connectors test)"],
+      ["components/settings/LocalCliProvidersCard.tsx", "mounted only under show(\"ai\") && isOperator (asserted above)"],
+      ["lib/setup-readiness.ts", "readiness data with no caller in app/ or components/"],
+      // KNOWN GAP, not a pass: a client founder reaches /automations
+      // (requireSystemSurface admits any founder) and still sees Install bridge.
+      // tests/client-surface-isolation.test.ts forbids any viewer check in this
+      // component, so gating it needs a decision; raised on PR #479.
+      ["components/automations/AutomationsContent.tsx", "KNOWN GAP: see the comment above"],
+    ]);
+    const hits: string[] = [];
+    for (const dir of ["app", "components", "lib", "hooks"]) {
+      for (const file of sourceFiles(join(ROOT, dir))) {
+        const rel = relative(ROOT, file).split(sep).join("/");
+        if (ALLOWED.has(rel)) continue;
+        for (const lit of stringLiterals(readFileSync(file, "utf8"), file)) if (INSTALL_ROUTE.test(lit)) hits.push(`${rel}: ${lit}`);
+      }
+    }
+    assert.deepEqual(hits, []);
+  });
+
+  // ── 3c. /playbook is OASIS's own material ──────────────────────────────
+  // The nav hides Playbook outside OASIS; every page now enforces it. The page
+  // list is read from disk, so a new page without the guard fails here.
+  const playbookPages = sourceFiles(join(ROOT, "app", "playbook")).filter((f) => /[\\/]page\.tsx$/.test(f));
+  const playbookSlug = readdirSync(join(ROOT, "content", "playbooks")).find((n) => n.endsWith(".md") && n !== "INDEX.md")!.replace(/\.md$/, "");
+  const renderPlaybookPage = async (file: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS test harness, absolute Windows path
+    const page = (require(file) as { default: (props: unknown) => unknown }).default;
+    return page(file.includes("[slug]") ? { params: Promise.resolve({ slug: playbookSlug }) } : {});
+  };
+  const playbookName = (file: string) => relative(join(ROOT, "app"), file).split(sep).join("/");
+  await check("every /playbook route is covered (index, [slug], prompts, client-deploy, onboarding, script and the rest)", () => {
+    const names = playbookPages.map(playbookName).sort();
+    for (const want of ["playbook/page.tsx", "playbook/[slug]/page.tsx", "playbook/prompts/page.tsx", "playbook/client-deploy/page.tsx", "playbook/onboarding/page.tsx", "playbook/script/page.tsx"]) {
+      assert.ok(names.includes(want), `${want} not found`);
+    }
+    assert.ok(names.length >= 11, names.join(", "));
+  });
+  for (const viewer of ["client", "squatter", "claimer"] as const) {
+    await check(`${viewer} (another workspace): every /playbook page is a 404`, async () => {
+      await login(viewer);
+      for (const file of playbookPages) assert.equal(await is404(() => renderPlaybookPage(file)), true, playbookName(file));
+    });
+  }
+  for (const viewer of ["cc", "rep"] as const) {
+    await check(`${viewer} (OASIS member): every /playbook page renders`, async () => {
+      await login(viewer);
+      for (const file of playbookPages) {
+        const out = await renderPlaybookPage(file);
+        assert.ok(isValidElement(out), `${playbookName(file)} did not render for ${viewer}`);
+      }
+    });
+  }
+  await check("anonymous: middleware sends /playbook routes to /login, as before", async () => {
+    await login("anonymous");
+    for (const path of ["/playbook", "/playbook/client-deploy", "/playbook/prompts", "/playbook/script", `/playbook/${playbookSlug}`]) {
+      const res = await middleware(new NextRequest(`https://oasisai.work${path}`));
+      assert.equal(res.status, 307, path);
+      assert.equal(new URL(res.headers.get("location") || "").pathname, "/login", path);
+    }
+  });
+  await check("the /playbook rule needs OASIS's tenant id AND an OASIS slug, and a failed lookup is a no", async () => {
+    assert.equal(playbookAccess.isOasisPlaybookWorkspace({ tenantId: OASIS, tenantSlug: "oasis-ai-cc" }), true);
+    assert.equal(playbookAccess.isOasisPlaybookWorkspace({ tenantId: SLUG_CLAIM_TENANT, tenantSlug: "oasis" }), false);
+    assert.equal(playbookAccess.isOasisPlaybookWorkspace({ tenantId: OASIS, tenantSlug: "client-co" }), false);
+    assert.equal(playbookAccess.isOasisPlaybookWorkspace({ tenantId: null, tenantSlug: null }), false);
+    await login("cc");
+    await db.execute("ALTER TABLE user_profiles RENAME TO user_profiles_offline");
+    const originalError = console.error;
+    console.error = () => undefined;
+    try {
+      assert.equal(await playbookAccess.mayReadPlaybook(), false);
+    } finally {
+      console.error = originalError;
+      await db.execute("ALTER TABLE user_profiles_offline RENAME TO user_profiles");
+    }
+    assert.equal(await playbookAccess.mayReadPlaybook(), true, "restored");
+  });
+  await check("no /api route serves playbook or prompt-library content", () => {
+    const hits: string[] = [];
+    for (const file of sourceFiles(join(ROOT, "app", "api"))) {
+      for (const lit of stringLiterals(readFileSync(file, "utf8"), file)) {
+        if (/lib\/playbooks|lib\/prompts-library|content\/playbooks|docs\/playbooks|^playbooks$/.test(lit)) hits.push(`${relative(ROOT, file)}: ${lit}`);
+      }
+    }
+    assert.deepEqual(hits, []);
   });
 
   // ── 4. retired routes ────────────────────────────────────────────────

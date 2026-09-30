@@ -9,20 +9,22 @@
  *   - Live countdown of the code's 15-min TTL; auto re-mint on expiry
  *   - 2-second poll of /api/devices for a new pairing row created after
  *     the moment the code was minted; flip to "connected" on detection
- *   - Pre-built OS-specific one-liner (PowerShell on Windows, bash else)
  *
- * Two consumers as of 2026-05-15:
+ * Consumers:
  *   - components/settings/InstallBridgeModal.tsx — modal opened from
- *     Settings → Devices
+ *     Settings → Devices (operator)
  *   - app/settings/devices/install/InstallBridgeWizard.tsx — dedicated
- *     /settings/devices/install page
+ *     /settings/devices/install page (operator)
+ *   - app/settings/devices/install/PairBridgeOnly.tsx — the same page for
+ *     every other signed-in viewer: pair an already-installed bridge only
  *
- * Operator only since 2026-09-29 (F0 containment). The full install pulls the
- * harness repo, which went private that day, so the repo name is a required
- * argument rather than a constant here: both consumers get it as a prop from a
- * server component that verified the platform operator, and everyone else is
- * shown a private-beta notice instead of this flow. The name never reaches a
- * client bundle or a client's page.
+ * Since 2026-09-29 (F0 containment) the hook builds no command. It mints the
+ * code, counts down and polls; each surface builds its own command from the
+ * code. The operator's wizard and modal add the full install
+ * (lib/bridge-install-command.ts, with the private harness repo passed in as a
+ * prop from an operator-gated server component). The client pair-only page
+ * builds the pair-only command alone (lib/bridge-install-guidance.ts), so this
+ * module, which all three load, carries no install command and no repository.
  *
  * Both used to duplicate this whole state machine character-for-character.
  * Any change (new schema, new install flow, different polling cadence)
@@ -30,7 +32,7 @@
  * and lets the two surfaces stay tiny render-only wrappers.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 export type OS = "windows" | "macos" | "linux";
 
@@ -50,7 +52,6 @@ export type BridgePairing = {
   mode: PairMode;
   setMode: (m: PairMode) => void;
   code: string | null;
-  oneLiner: string;
   /** Seconds remaining on the current code's TTL. 0 if no code yet. */
   secondsLeft: number;
   phase: Phase;
@@ -67,61 +68,9 @@ function detectOS(): OS {
   return "windows";
 }
 
-/**
- * Full-install command for a brand-new machine. `repo` is private, so an
- * anonymous raw.githubusercontent.com fetch is a 404 for everyone; both forms
- * read the installer through the GitHub CLI's authenticated API instead, the
- * same fallback /install.ps1 and /install.sh use. PowerShell decodes the base64
- * `content` as UTF-8 (a native pipe would decode it with the console code
- * page); bash takes the raw media type straight into `bash`.
- *
- * The env-var placement is the one verified 2026-05-10: PowerShell sets it
- * before iex runs, and bash puts it on `bash` (not `gh`) so the shell that runs
- * the script inherits it.
- */
-export function installOneLiner(os: OS, code: string, repo: string): string {
-  const winShell = `$env:BRAVO_PAIR_CODE="${code}"; iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((gh api repos/${repo}/contents/install.ps1 --jq .content) -join '')))`;
-  const nixShell = `gh api -H "Accept: application/vnd.github.raw" repos/${repo}/contents/install.sh | BRAVO_PAIR_CODE=${code} bash`;
-  return os === "windows" ? winShell : nixShell;
-}
-
-/**
- * Pair-only command — for a machine that ALREADY has the agent installed.
- * It does NOT clone, install deps, or run the wizard. It just calls the
- * unauthenticated redeem endpoint (the pair code is the credential),
- * receives the bridge token, and writes it to ~/.oasis/bridge_token (0600) —
- * exactly what bravo_cli/local_bridge.py reads on every heartbeat. The
- * operator then starts/restarts their bridge daemon to pick it up.
- *
- * Self-contained on purpose (one paste, no repo dependency): bash uses the
- * always-present python3; Windows uses Invoke-RestMethod. BRAVO_DASHBOARD_URL
- * overrides the default dashboard host if set.
- */
-function oneLinerForPair(os: OS, code: string): string {
-  const nixPair =
-    `BRAVO_PAIR_CODE="${code}" python3 -c "` +
-    "import os,json,platform,socket,urllib.request as u;from pathlib import Path;" +
-    "c=os.environ['BRAVO_PAIR_CODE'].strip().upper();" +
-    "b=os.environ.get('BRAVO_DASHBOARD_URL','https://oasisai.work').rstrip('/');" +
-    "d=json.dumps({'code':c,'machine':{'label':platform.node() or 'machine','fingerprint':platform.system()+'|'+platform.machine()+'|'+socket.gethostname()}}).encode();" +
-    "r=u.Request(b+'/api/auth/pair-code/redeem',data=d,headers={'content-type':'application/json'},method='POST');" +
-    "t=json.loads(u.urlopen(r,timeout=20).read())['bridge']['token'];" +
-    "p=Path.home()/'.oasis';p.mkdir(parents=True,exist_ok=True);f=p/'bridge_token';f.write_text(t);os.chmod(f,0o600);" +
-    "print('paired ->',str(f))\"";
-  const winPair =
-    `$env:BRAVO_PAIR_CODE="${code}"; ` +
-    "$b=if($env:BRAVO_DASHBOARD_URL){$env:BRAVO_DASHBOARD_URL.TrimEnd('/')}else{'https://oasisai.work'}; " +
-    "$body=@{code=$env:BRAVO_PAIR_CODE.ToUpper();machine=@{label=$env:COMPUTERNAME;fingerprint=('windows|'+$env:PROCESSOR_ARCHITECTURE+'|'+$env:COMPUTERNAME)}} | ConvertTo-Json -Compress; " +
-    "$r=Invoke-RestMethod -Method Post -Uri ($b+'/api/auth/pair-code/redeem') -ContentType 'application/json' -Body $body; " +
-    "$d=Join-Path $HOME '.oasis'; New-Item -ItemType Directory -Force -Path $d | Out-Null; " +
-    "Set-Content -Path (Join-Path $d 'bridge_token') -Value $r.bridge.token -NoNewline; Write-Host 'paired'";
-  return os === "windows" ? winPair : nixPair;
-}
-
 type DeviceLite = { id: string; created_at: string; revoked_at: string | null };
 
-/** `installRepo`: the private harness repo, from a server-verified operator page. */
-export function useBridgePairing(installRepo: string): BridgePairing {
+export function useBridgePairing(): BridgePairing {
   const [os, setOs] = useState<OS>("windows");
   // Default "install" preserves the existing fresh-machine behavior; the
   // operator flips to "pair" for an already-provisioned machine.
@@ -228,18 +177,12 @@ export function useBridgePairing(installRepo: string): BridgePairing {
     };
   }, [phase, mintedAt]);
 
-  const oneLiner = useMemo(
-    () => (code ? (mode === "pair" ? oneLinerForPair(os, code) : installOneLiner(os, code, installRepo)) : ""),
-    [os, code, mode, installRepo],
-  );
-
   return {
     os,
     setOs,
     mode,
     setMode,
     code,
-    oneLiner,
     secondsLeft,
     phase,
     error,
