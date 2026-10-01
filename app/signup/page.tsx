@@ -122,11 +122,12 @@ function InviteSignup({
   }, []);
 
   /**
-   * Join the workspace with the session we hold. On success, open the app:
-   * "/" resolves the workspace from the session, and the onboarding gate sends
-   * an owner whose workspace is not set up yet to the setup wizard. On failure,
-   * show the sentence for the code (never the code) and offer a retry when the
-   * invite is still valid.
+   * Join the workspace with the session we hold. On success, open the app
+   * where every sign-in lands: /auth/land asks lib/auth-routing.ts
+   * homePathForTenant (Today, "/", for a workspace like theirs), and the
+   * onboarding gate sends an owner whose workspace is not set up yet to the
+   * setup wizard. On failure, show the sentence for the code (never the code)
+   * and offer a retry when the invite is still valid.
    */
   async function joinWorkspace(): Promise<void> {
     const rr = await fetch("/api/auth/redeem-invite", {
@@ -143,7 +144,7 @@ function InviteSignup({
     setJoinRetry(false);
     // Full-page assign: the session is an httpOnly cookie and server
     // components must re-render with it.
-    window.location.assign("/");
+    window.location.assign("/auth/land?next=%2F");
   }
 
   async function onRetryJoin() {
@@ -294,18 +295,14 @@ function InviteSignup({
         // Intentionally omit ?invite= from the /login URL — the
         // server-side finalize step above already redeemed the token,
         // so re-passing it would make LoginForm call redeem-invite a
-        // second time and fail with "invalid_or_expired". Pass next=
-        // pointing directly at the tenant workspace (e.g. /t/sun)
-        // when finalize gave us a tenant_slug, so the invitee skips
-        // the redundant new-tenant wizard entirely (2026-05-29 fix).
-        // Fall back to "/" when no slug — /auth/land + the welcome
-        // page's own redirect catch the legacy path.
-        const finalSlug = body.tenant_slug?.trim();
-        const nextPath = finalSlug ? `/t/${finalSlug}` : "/";
+        // second time and fail with "invalid_or_expired". next= is Today
+        // ("/"): sign-in resolves the workspace from the session, so the
+        // invitee skips the new-tenant wizard and lands in the OS shell
+        // (W1a, U1-05; it was /t/<slug>, the legacy manifest shell).
         const loginUrl =
           `/login?email=${encodeURIComponent(email)}` +
           `&fresh=1` +
-          `&next=${encodeURIComponent(nextPath)}`;
+          `&next=${encodeURIComponent("/")}`;
         router.push(loginUrl);
         router.refresh();
         return;
@@ -326,13 +323,12 @@ function InviteSignup({
         setErr(inviteRedeemMessage(body));
         return;
       }
-      // Invitees skip the new-tenant wizard and land directly in
-      // their tenant workspace (2026-05-29 fix). Falls back to "/"
-      // when no slug was resolvable — the welcome page's own
-      // redirect catches the legacy path.
-      const slug = body.tenant_slug?.trim();
-      router.push(slug ? `/t/${slug}` : "/");
-      router.refresh();
+      // Invitees skip the new-tenant wizard and land where every sign-in
+      // lands: /auth/land asks homePathForTenant, which is Today ("/") for a
+      // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
+      // manifest shell). A full page load, as joinWorkspace() above does:
+      // this page is full-bleed and the root layout must render the OS shell.
+      window.location.assign("/auth/land?next=%2F");
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : "Sign up failed");
     } finally {

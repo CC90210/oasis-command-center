@@ -84,7 +84,7 @@ export type CustomTeammate = {
   summary: string;
   /** Turned on in this workspace's manifest. */
   enabled: boolean;
-  /** Its chat, when the workspace has a chat slug. */
+  /** Its chat (/agents/<slug>, an OS page), when the workspace has a chat slug. */
   webHref: string | null;
   /**
    * Whether that chat can answer, by the leads' own rule: a chat slug and an
@@ -103,7 +103,7 @@ export type CustomTeammate = {
 export type AiTeam = {
   leads: LeadTeammate[];
   custom: Read<CustomTeammate[]>;
-  /** The builder, for owners/admins of a workspace the builder accepts. */
+  /** The builder (/agents/new, an OS page), for owners/admins of a workspace the builder accepts. */
   builderHref: string | null;
 };
 
@@ -320,14 +320,18 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
             category: c.category,
             summary: c.summary,
             enabled: c.enabled,
-            webHref: readiness.slug ? `/t/${readiness.slug}/agent/${encodeURIComponent(c.slug)}` : null,
+            // The AI team's own OS pages (W1a, U1-04): the chat and the
+            // builder read the session's workspace, so no slug rides in the
+            // URL. They were /t/<slug>/agent/<agent> and
+            // /t/<slug>/marketplace/new, under the legacy manifest sidebar.
+            webHref: readiness.slug ? `/agents/${encodeURIComponent(c.slug)}` : null,
             ...webOn([agentChannelKey(c.slug)]),
             toggle: switchFor(c),
           })),
         }
       : custom,
     // The builder page itself refuses anyone below owner/admin
-    // (app/t/[slug]/marketplace/new), and needs a slug it recognises.
-    builderHref: owner && readiness.slug ? `/t/${readiness.slug}/marketplace/new` : null,
+    // (app/agents/new), and needs a slug it recognises.
+    builderHref: owner && readiness.slug ? "/agents/new" : null,
   };
 }

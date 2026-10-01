@@ -56,39 +56,67 @@ export type DepartmentChannelBinding =
 
 export type SuggestedAsk = { title: string; prompt: string };
 
+/**
+ * One app a department works through: the name the owner knows it by, and the
+ * Connections hub card it arrives through (a lib/os/connectors.ts slug: Gmail,
+ * Google Calendar and Google Meet all come through Google Workspace).
+ */
+export type DepartmentApp = { label: string; connector: string };
+
 type DepartmentProfile = {
   /** One-line subtitle under the department name. */
   purpose: string;
   /**
-   * The apps this department works through, as the owner would name them.
-   * Labels only, so no chip claims a status. Slack is not a label here: the
-   * department tab shows its REAL Slack state (lib/slack/status.ts, the mapped
-   * channels or why there are none) on its own line.
+   * The apps this department works through. The tab shows each one with the
+   * real status of its hub card (resolveConnectorStatus, the same words
+   * Settings > Connections shows), so a name never stands in for a connection
+   * nobody made. Slack is not listed here: the department tab shows its REAL
+   * Slack state (lib/slack/status.ts, the mapped channels or why there are
+   * none) on its own line.
    */
-  connections: readonly string[];
+  connections: readonly DepartmentApp[];
 };
 
 // Written for any business. No OASIS names, no agent names, no CC.
 const PROFILES: Record<DepartmentKey, DepartmentProfile> = {
   chief_of_staff: {
     purpose: "Your coordinator. Ask for anything; it pulls from every department.",
-    connections: ["Google Calendar", "Telegram"],
+    connections: [
+      { label: "Google Calendar", connector: "google-workspace" },
+      { label: "Telegram", connector: "telegram" },
+    ],
   },
   sales: {
     purpose: "Leads, follow-ups and booked calls.",
-    connections: ["Gmail", "Google Calendar", "Twilio SMS"],
+    connections: [
+      { label: "Gmail", connector: "google-workspace" },
+      { label: "Google Calendar", connector: "google-workspace" },
+      { label: "Twilio SMS", connector: "twilio" },
+    ],
   },
   marketing: {
     purpose: "Forms, content, campaigns and ads.",
-    connections: ["Meta Ads", "Instagram", "Constant Contact"],
+    connections: [
+      { label: "Meta Ads", connector: "meta" },
+      { label: "Instagram", connector: "meta" },
+      { label: "Constant Contact", connector: "constant-contact" },
+    ],
   },
   client_success: {
     purpose: "Projects, support tickets and client health.",
-    connections: ["Zoom", "Google Meet", "Twilio SMS"],
+    connections: [
+      { label: "Zoom", connector: "zoom" },
+      { label: "Google Meet", connector: "google-workspace" },
+      { label: "Twilio SMS", connector: "twilio" },
+    ],
   },
   finance: {
     purpose: "Cash, collections and revenue against goal.",
-    connections: ["Stripe", "QuickBooks", "Bank feed"],
+    connections: [
+      { label: "Stripe", connector: "stripe" },
+      { label: "QuickBooks", connector: "quickbooks" },
+      { label: "Bank feed", connector: "plaid" },
+    ],
   },
   operations: {
     purpose: "Routines, connections and the health of the machine.",
@@ -328,7 +356,8 @@ const HOUSE_AGENT_DEPARTMENT: Readonly<Record<string, string>> = (() => {
   return out;
 })();
 
-function withDepartmentNames(text: string): string {
+/** The same rule for any system string a screen prints (the Feed's publisher and event names). */
+export function withDepartmentNames(text: string): string {
   return text.replace(/\b(bravo|maven|atlas)\b/gi, (name) => HOUSE_AGENT_DEPARTMENT[name.toLowerCase()] ?? name);
 }
 

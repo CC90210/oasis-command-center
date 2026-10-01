@@ -48,7 +48,7 @@ export default async function WelcomePage({
   // link. When present, we render the wizard regardless of tenant
   // state so existing employees can re-edit their timezone / default
   // agent / briefing channel. Without this opt-in flag, tenant-attached
-  // invitees auto-redirect to /t/<slug> (2026-05-29 fix — see below).
+  // invitees auto-redirect to Today (see below).
   const sp = await searchParams;
   const fromSettings = sp?.settings === "1";
 
@@ -80,19 +80,19 @@ export default async function WelcomePage({
 
   // Invitees joining an existing tenant don't need the new-tenant
   // scaffolding wizard. If they have a tenant attachment AND that
-  // tenant resolves to a Command Center profile (sun, suga, etc.),
-  // skip the wizard and land them in their workspace. The
-  // personalisation flow stays available via Settings → Personal,
-  // which appends ?settings=1 so this redirect won't fire for the
-  // re-entrant path (CC bug report 2026-05-29). Without the opt-in
-  // flag, every invitee was being forced through a redundant 3-step
-  // wizard before reaching /t/<slug>.
+  // tenant resolves to a Command Center profile, skip the wizard and
+  // land them where every sign-in lands: /auth/land asks
+  // lib/auth-routing.ts homePathForTenant, which is Today ("/") for a
+  // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
+  // manifest shell). The personalisation flow stays available via
+  // Settings → Personal, which appends ?settings=1 so this redirect won't
+  // fire for the re-entrant path (CC bug report 2026-05-29).
   if (!fromSettings && tenant) {
     const profileSlug = resolveClientProfileSlug(tenant);
     if (profileSlug) {
       // Through the claim refresh: a session that still carries a "welcome"
       // gate claim would otherwise be sent straight back here (Turso auth).
-      redirect(`/api/auth/onboarding-refresh?next=${encodeURIComponent(`/t/${profileSlug}`)}`);
+      redirect(`/api/auth/onboarding-refresh?next=${encodeURIComponent("/auth/land?next=%2F")}`);
     }
   }
 

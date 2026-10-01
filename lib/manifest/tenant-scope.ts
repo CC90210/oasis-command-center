@@ -28,12 +28,56 @@
 
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import type { Tenant } from "@/lib/supabase";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { getManifest } from "./loader";
 import { getManifestRow, getManifestSlugForTenant } from "./persistence";
 import { resolveEnabledAgentSlugs } from "./agent-roster";
 import { OASIS_SEED_TENANT_IDS } from "./seeds";
+
+/**
+ * The two facts the ownership rule reads. resolveDataTenant and
+ * ownsSlugOrThrow differ only in what a FAILED read means, so they share the
+ * rule itself (ownsUnder) and cannot disagree about who owns a slug.
+ */
+type OwnershipReads = {
+  /** The manifest row that claims `slug` (only its tenant binding matters), or null when none does. */
+  row: (slug: string) => Promise<{ tenant_id: string | null } | null>;
+  /** The caller's tenants row. Read only when no manifest row claims the slug. */
+  tenant: (tenantId: string) => Promise<Pick<Tenant, "slug" | "custom_fields"> | null>;
+};
+
+async function ownsUnder(slug: string, userTenantId: string, reads: OwnershipReads): Promise<boolean> {
+  const row = await reads.row(slug);
+  if (row) return !!row.tenant_id && row.tenant_id === userTenantId;
+  const userSlug = resolveClientProfileSlug(await reads.tenant(userTenantId));
+  return !!userSlug && userSlug.toLowerCase() === slug.toLowerCase();
+}
+
+/** A failed read answers "no row" / "no tenant": preview mode for a renderer, 403 for a write API. */
+const LENIENT_READS: OwnershipReads = {
+  row: (slug) => getManifestRow(slug).catch(() => null),
+  tenant: async (tenantId) => (await getTenant(tenantId).catch(() => null)) || null,
+};
+
+/**
+ * A failed read THROWS. getTenant answers a failed read with null, so these
+ * read the columns the rule needs themselves.
+ */
+const STRICT_READS: OwnershipReads = {
+  row: async (slug) => {
+    const r = await getServiceSupabase().from("tenant_manifests").select("tenant_id").eq("slug", slug).maybeSingle();
+    if (r.error) throw new Error(`tenant_manifests read failed: ${r.error.message}`);
+    return (r.data as { tenant_id: string | null } | null) ?? null;
+  },
+  tenant: async (tenantId) => {
+    const r = await getServiceSupabase().from("tenants").select("slug, custom_fields").eq("id", tenantId).maybeSingle();
+    if (r.error) throw new Error(`tenants read failed: ${r.error.message}`);
+    return (r.data as Pick<Tenant, "slug" | "custom_fields"> | null) ?? null;
+  },
+};
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -46,16 +90,20 @@ export async function resolveDataTenant(
   userTenantId: string | null
 ): Promise<string | null> {
   if (!userTenantId) return null;
-  const row = await getManifestRow(slug).catch(() => null);
-  if (row?.tenant_id && row.tenant_id === userTenantId) return userTenantId;
-  if (!row) {
-    const tenant = await getTenant(userTenantId).catch(() => null);
-    const userSlug = resolveClientProfileSlug(tenant || null);
-    if (userSlug && userSlug.toLowerCase() === slug.toLowerCase()) {
-      return userTenantId;
-    }
-  }
-  return null;
+  return (await ownsUnder(slug, userTenantId, LENIENT_READS)) ? userTenantId : null;
+}
+
+/**
+ * ownsSlug for a page GATE (lib/tenant-access.ts requireOwnedTenantSlug): the
+ * same rule, but a read that fails THROWS instead of answering "not yours".
+ * resolveDataTenant's null is right for a renderer (preview mode) and a write
+ * API (403); a gate turns it into the 404 a stranger gets, so a Turso blip
+ * would 404 a workspace's own owner with nothing in the logs to tell it from a
+ * refusal (W1a review R3).
+ */
+export async function ownsSlugOrThrow(slug: string, userTenantId: string | null): Promise<boolean> {
+  if (!userTenantId) return false;
+  return ownsUnder(slug, userTenantId, STRICT_READS);
 }
 
 /**

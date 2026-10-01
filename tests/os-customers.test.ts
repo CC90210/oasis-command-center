@@ -261,6 +261,22 @@ async function main() {
     assert.ok(c);
     assert.deepEqual((await store.listContacts(db, CLIENT_A, acme.id)).map((x) => x.name), ["Dana"]);
     assert.equal(await store.matchCustomerByEmail(db, CLIENT_A, "DANA@acme.test"), acme.id, "a contact's email matches the client");
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "DANA@acme.test"), true, "a contact's email is a client's address");
+  });
+  await check("a contact listed at two clients: no single match, but a client's address", async () => {
+    const made = await store.createCustomer(db, CLIENT_A, input({ display_name: "Birch Plumbing", primary_email: "office@birch.test" }), null, T0);
+    assert.ok(made.ok);
+    const other = made.ok ? made.customer : null!;
+    assert.ok(await store.addContact(db, CLIENT_A, acme.id, { name: "Lee", email: "books@ledger.test", phone: null, role: "Bookkeeper" }, T0));
+    assert.ok(await store.addContact(db, CLIENT_A, other.id, { name: "Lee", email: "books@ledger.test", phone: null, role: "Bookkeeper" }, T0));
+    assert.equal(await store.matchCustomerByEmail(db, CLIENT_A, "books@ledger.test"), null, "which client is never guessed");
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "Books@Ledger.test"), true, "but it is a client's address");
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "office@birch.test"), true, "a client's primary address");
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "stranger@nowhere.test"), false);
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, ""), false);
+    await store.updateCustomer(db, CLIENT_A, other.id, { archived: true }, T0);
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "office@birch.test"), false, "an archived client's address is not a current client's");
+    assert.equal(await store.isCustomerEmail(db, CLIENT_A, "books@ledger.test"), true, "still a contact at a current client");
   });
 
   // ── isolation, store level ─────────────────────────────────────────────
@@ -272,6 +288,7 @@ async function main() {
     const contactId = (await store.listContacts(db, CLIENT_A, acme.id))[0].id;
     assert.equal(await store.removeContact(db, CLIENT_B, acme.id, contactId), false);
     assert.equal(await store.matchCustomerByEmail(db, CLIENT_B, "dana@acme.test"), null);
+    assert.equal(await store.isCustomerEmail(db, CLIENT_B, "dana@acme.test"), false, "A's client is not B's");
     assert.deepEqual(await store.listContacts(db, CLIENT_B, acme.id), []);
     assert.equal((await store.getCustomer(db, CLIENT_A, acme.id))!.display_name, "Acme Roofing", "A's record is untouched");
     await assert.rejects(store.listCustomers(db, "", {}), /a tenant id is required/, "an unscoped read refuses to run");

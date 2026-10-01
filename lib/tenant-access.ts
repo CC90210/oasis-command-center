@@ -15,7 +15,9 @@
  * Service-role read of the tenants row stays out of the hot path: the layout
  * already has the profile + tenant slug; this helper just compares strings.
  */
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { resolveSessionContext } from "./api-auth";
+import { ownsSlugOrThrow } from "./manifest/tenant-scope";
 import { isPlatformOperatorForAuthUser } from "./platform-operator";
 import { getServiceSupabase, getSessionUser } from "./supabase-server";
 
@@ -106,4 +108,42 @@ export async function requireTenantPreviewAccess(slug: string): Promise<void> {
   if (!canPreviewTenantSlug(access, target)) {
     redirect("/");
   }
+}
+
+/**
+ * Server-side gate for the /t/<slug> pages that show ONE workspace's agents
+ * or manifest (marketplace, marketplace/<agent>, marketplace/new, editor): the
+ * session's active workspace must own the slug (ownsSlug, the records API's
+ * own rule), or the viewer is a verified platform operator. Anyone else gets
+ * the 404 a missing workspace gets, so the answer confirms nothing about the
+ * workspace behind the slug.
+ *
+ * Those pages checked only manifestExists, and middleware only checks for a
+ * session, so any signed-in user could read another workspace's enabled
+ * agents, their display names and prompt overlays, its private agents' prompts
+ * and its whole manifest (W1a security finding).
+ *
+ * An outage is an error, never a quiet 404: a failed profile read throws
+ * (resolveSessionContext), and so does a failed manifest-row or tenants read
+ * (ownsSlugOrThrow; ownsSlug would answer it "not yours"), logged here first.
+ *
+ * Answers which way the viewer got in: "own" (the session's workspace owns the
+ * slug) or "operator" (a verified operator looking at another workspace). A
+ * page that hands off to an OS route reading only the session's workspace
+ * moves an "own" viewer only.
+ */
+export async function requireOwnedTenantSlug(slug: string): Promise<"own" | "operator"> {
+  const target = slug.trim().toLowerCase();
+  const session = await resolveSessionContext();
+  if (!session.ok) notFound();
+  let own: boolean;
+  try {
+    own = await ownsSlugOrThrow(target, session.tenantId);
+  } catch (err) {
+    console.error("[tenant-access.owned_slug]", { slug: target, tenant_id: session.tenantId }, err);
+    throw err;
+  }
+  if (own) return "own";
+  if (await isPlatformOperatorForAuthUser(session.userId, session.email)) return "operator";
+  notFound();
 }

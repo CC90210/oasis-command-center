@@ -19,14 +19,13 @@ import {
   manifestPrimaryAgentSlug,
 } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS, isUnprovisionedManifest } from "@/lib/manifest/seeds";
-import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { getTenantManifestForUser, ownsSlug } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
-import { matchesPathPrefix } from "@/lib/path-prefix";
-import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
-// NOTE: lib/marketing/* above is the PUBLIC marketing SITE (/home, /work, ...).
-// lib/founders/* below is the private founders portal. Different concerns,
-// similar words — keep them apart.
+import { isFullBleedPath } from "@/lib/os/full-bleed";
+// NOTE: the PUBLIC marketing SITE (/home, /work, ...) is lib/marketing/*, read
+// here through lib/os/full-bleed.ts. lib/founders/* below is the private
+// founders portal. Different concerns, similar words - keep them apart.
 import { foundersAllowlist } from "@/lib/founders/gate";
 import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import { FOUNDERS_NAV } from "@/lib/portals/registry";
@@ -48,6 +47,10 @@ import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
+import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
+import { connectionsDot, connectionsHealth } from "@/lib/os/connectors";
+import { withDeadline } from "@/lib/os/deadline";
+import type { ConnectionsStatus } from "@/components/os/RailFooter";
 import { PerfVitals } from "@/components/PerfVitals";
 import { ClientErrorReporter } from "@/components/ClientErrorReporter";
 
@@ -80,6 +83,12 @@ export const metadata: Metadata = {
 /** The only seed slugs the public demo cookie may select. /api/demo/sun, which set it, was deleted 2026-09-29; a browser can still carry one until it expires. */
 const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
 
+/**
+ * The rail's Connections dot is chrome: past this budget the shell draws no
+ * dot (not measured) rather than hold every page for it (lib/os/deadline.ts).
+ */
+const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;
+
 export default async function RootLayout({
   children,
 }: {
@@ -96,39 +105,23 @@ export default async function RootLayout({
   const perfT0 = Date.now();
   const perfSpans: PerfSpan[] = [];
   // Paths that render edge-to-edge (no operator sidebar, no footer, no
-  // tenant manifest resolution). Anything aimed at a prospect / pre-auth
-  // visitor or a fresh signup walks through here. Mirrors middleware.ts
-  // PUBLIC_PATH_PREFIXES — kept as a separate list because middleware
-  // also lists API routes that aren't page-rendered.
-  const FULL_BLEED_PREFIXES = [
-    // Public marketing site + the three legal pages, from the shared
-    // registry. "/home" is the rewrite target for an anonymous "/" —
-    // middleware re-stamps x-pathname so it lands here. Never add "/"
-    // itself: the matcher would swallow every route in the app and strip
-    // the operator chrome site-wide.
-    ...ALL_MARKETING_PATHS,
-    "/welcome",   // legacy URL; next.config.js 308s it to "/" before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
-    "/download",
-    "/login",
-    "/signup",
-    "/forgot-password",
-    "/auth/callback",
-    "/auth/reset-password",
-    "/onboarding",
-    "/f/",        // public form pages (anonymous + personalized)
-    "/invite/",   // pre-signup invite landing
-  ];
-  // Boundary-aware match, same rule as middleware's isPublic(). A raw
-  // startsWith() would let a future "/workflows" or "/aboutus" route
-  // silently inherit the marketing chrome (and skip the profile
-  // resolution the dashboard needs) purely because of a shared prefix.
-  const isFullBleed = FULL_BLEED_PREFIXES.some((p) => matchesPathPrefix(pathname, p));
+  // tenant manifest resolution): every public page middleware.ts lets an
+  // anonymous visitor open, plus /onboarding and /desktop-link. The list and
+  // its rules live in lib/os/full-bleed.ts, where tests/shell-boundary.test.ts
+  // holds it to middleware's PUBLIC_PATH_PREFIXES.
+  const isFullBleed = isFullBleedPath(pathname);
 
   let profile = null;
   let resolvedPrimaryAgent: string | null = null;
   let tenantProfileSlug: string | null = null;
   /** The viewer's workspace's own name (tenants.name), for the shell header. */
   let tenantName: string | null = null;
+  /**
+   * The viewer's tenants.slug, lowercased: also the viewer's OWN /t/<slug>.
+   * Typed through `as` because it is assigned inside the async read below, and
+   * a plain `= null` would narrow it to null where it is compared.
+   */
+  let tenantRawSlug = null as string | null;
   let demoProfileSlug: string | null = null;
   let pathOverrideSlug: string | null = null;
   // Props for the persistent ChatWidget hoisted into MainShell (2026-06-18).
@@ -248,6 +241,7 @@ export default async function RootLayout({
           // surrounding safe() already expects.
           const tenant = await getTenant(tenantId);
           tenantName = tenant?.name ?? null;
+          tenantRawSlug = tenant?.slug?.trim().toLowerCase() || null;
           return resolveClientProfileSlug({
             slug: tenant?.slug || "",
             custom_fields: tenant?.custom_fields || {},
@@ -257,16 +251,26 @@ export default async function RootLayout({
       ), perfSpans);
     }
 
-    // Path slug wins when present and not in demo. Lets `/t/<slug>/...`
-    // render that tenant's manifest for any operator who's allowed to
-    // preview it. The /t/[slug]/page.tsx + /t/[slug]/[...path]/page.tsx
-    // already call requireTenantPreviewAccess (redirects unauthorized
-    // callers before the layout body renders), but mirroring the same
-    // gate here keeps the layout from doing wasted manifestExists work
-    // on redirect-bound requests AND prevents the chrome from briefly
-    // resolving to the wrong tenant if a future code path skips the
-    // page-level guard.
-    if (!demoProfileSlug && pathTenantSlug) {
+    // `/t/<slug>/...` renders ANOTHER workspace's manifest shell only as a
+    // verified platform operator's preview. The viewer's OWN workspace never
+    // takes this branch, whatever the URL (W1a, U1-02): /t/<own-slug>/leads
+    // renders inside the viewer's OS rail with the breadcrumb and Ask, like
+    // every other page of their workspace. It used to set the override for the
+    // own slug too (canPreviewTenantSlug admits it), which switched the OS shell
+    // off and drew the legacy manifest sidebar around the workspace's own pages.
+    //
+    // "Own" is the slug the shell resolves from (tenantProfileSlug), the
+    // tenants row's slug, and a slug the workspace's manifest row claims
+    // (ownsSlug, the records API's rule), so a workspace whose manifest was
+    // saved under another slug is still on its own shell.
+    //
+    // The /t/[slug] pages carry their own gates (requireTenantPreviewAccess,
+    // the marketplace's owner-or-operator check); mirroring the operator half
+    // here keeps the layout from resolving another tenant's chrome for a
+    // request the page is about to refuse.
+    const ownPathSlug =
+      !!pathTenantSlug && (pathTenantSlug === tenantProfileSlug || pathTenantSlug === tenantRawSlug);
+    if (!demoProfileSlug && pathTenantSlug && !ownPathSlug) {
       const allowed = canPreviewTenantSlug(
         {
           isPlatformOperator: await platformOperatorP,
@@ -276,8 +280,11 @@ export default async function RootLayout({
         pathTenantSlug,
       );
       if (allowed) {
-        const exists = await manifestExists(pathTenantSlug);
-        if (exists) pathOverrideSlug = pathTenantSlug;
+        const [exists, owned] = await Promise.all([
+          manifestExists(pathTenantSlug),
+          ownsSlug(pathTenantSlug, tenantId),
+        ]);
+        if (exists && !owned) pathOverrideSlug = pathTenantSlug;
       }
     }
 
@@ -323,12 +330,37 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
+  // The rail's Connections dot, for the owners and admins who get the door
+  // (showConnections below): one summary of the statuses Settings > Connections
+  // shows (lib/os/connectors.ts connectionsHealth), started here so it runs
+  // beside the manifest read instead of after it. Null is no dot: nothing set
+  // up, an unverified app or a failed read is never drawn green.
+  const surfaceForConnections = viewerSurface?.ok ? viewerSurface : null;
+  const connectionsStatusP: Promise<ConnectionsStatus | null> =
+    !isFullBleed && !demoMode && !pathOverrideSlug && navPersona === "founder" && surfaceForConnections
+      ? timed(
+          "connections",
+          safe(
+            "layout.connections_status",
+            withDeadline(
+              loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId }).then(
+                (facts) => connectionsDot(connectionsHealth(facts, Date.now())),
+              ),
+              RAIL_CONNECTIONS_DEADLINE_MS,
+              "layout.connections",
+            ),
+            null,
+          ),
+          perfSpans,
+        )
+      : Promise.resolve(null);
   // The viewer's tenant id lets an OASIS operator whose tenant-slug read
   // degraded (manifestSlug null → "default") keep OASIS_SEED instead of the
   // unprovisioned placeholder; it changes nothing for any other tenant.
   const manifest = isFullBleed
     ? null
     : await timed("manifest", getManifest(manifestSlug, profile?.tenant_id ?? null), perfSpans);
+  const connectionsMeasured = await connectionsStatusP;
   // One `[perf]` line per shell render: the measured session tax. This is
   // the P1 before/after number; remove only when the instant-load work ends.
   logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);
@@ -377,10 +409,11 @@ export default async function RootLayout({
   // Finances is narrower than the founders gate: only the two owners.
   // Cosmetic here — its pages 404 for anyone else (access-io.ts).
   const financeOwner = isFinanceOwnerEmail(profile?.email);
-  // Rows for the manifest shell (the /t/<own-slug> path only — demo and
-  // preview shells close the gate above). The OS rail carries the same two
-  // gates as Growth › Content and Money › Overview, via buildOsNav's
-  // `founders` input below.
+  // Rows for the manifest shell's nav. That shell now renders only for an
+  // operator's preview of another workspace and the demo shell, and the gate
+  // above is closed on both, so these rows are drawn nowhere today; the OS
+  // rail carries the same two gates as Growth › Content and Money › Overview,
+  // via buildOsNav's `founders` input below.
   const foundersNavItems: NavItem[] = foundersGateOpen
     // Labels and hrefs come from FOUNDERS_NAV, NOT from a second hardcoded list
     // here. Hardcoding them is what let the sidebar and the header chips in
@@ -395,9 +428,10 @@ export default async function RootLayout({
   // ── OASIS OS rail ────────────────────────────────────────────────────────
   // Every workspace's OWN shell renders the OS rail, computed by the pure
   // buildOsNav from the viewer's persona, capabilities, operator status,
-  // workspace and modules. The /t/<slug> path shells and the demo shell keep
-  // the manifest nav: they render a workspace's stored manifest (another tenant's,
-  // for a preview), and demo mode rewrites every link to the demo landing.
+  // workspace and modules, including its own /t/<slug> pages. An operator's
+  // /t/<slug> preview of ANOTHER workspace and the demo shell keep the
+  // manifest nav: they render that workspace's stored manifest, and demo mode
+  // rewrites every link to the demo landing.
   //
   // An unprovisioned workspace (UNPROVISIONED_SEED) gets Today only, and a
   // viewer whose persona did not resolve gets the same — buildOsNav fails
@@ -405,6 +439,8 @@ export default async function RootLayout({
   const osShell = !isFullBleed && !!manifest && !demoMode && !pathOverrideSlug;
   const viewerTenantSlug = viewerSurface?.ok ? viewerSurface.tenantSlug : null;
   const provisioned = !!manifest && !isUnprovisionedManifest(manifest);
+  // Connections are workspace configuration: owners/admins only.
+  const showConnections = osShell && provisioned && navPersona === "founder";
   const osSections: OsNavSection[] | null = osShell
     ? buildOsNav({
         persona: navPersona,
@@ -515,11 +551,8 @@ export default async function RootLayout({
               // (the manifest nav above is then only the preview/demo shells').
               sections={osSections}
               isOperator={isOperator}
-              // Connections are workspace configuration: owners/admins only.
-              showConnections={osShell && provisioned && navPersona === "founder"}
-              // No connection-health source exists yet (Phase 2), so no dot:
-              // an unmeasured status is not a green one.
-              connectionsStatus={null}
+              showConnections={showConnections}
+              connectionsStatus={showConnections ? connectionsMeasured : null}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"

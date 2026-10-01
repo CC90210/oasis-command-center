@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { NextRequest } from "next/server";
 import { matchesPathPrefix } from "../lib/path-prefix";
-import { isPublic } from "../middleware";
+import { isPublic, middleware } from "../middleware";
 
 const cases: Array<[string, string, boolean]> = [
   ["/api/cron", "/api/cron", true],
@@ -186,4 +187,64 @@ for (const gated of ["/api/quests", "/api/quests/anything"]) {
   assert.equal(isPublic(gated), false, `${gated} must stay session-gated — it is CC's task list`);
 }
 
-console.log("middleware-prefix ok");
+/**
+ * /link-expired, through the REAL middleware, with no session (W1a, U1-18).
+ *
+ * /api/track/click sends a click it cannot attribute to /link-expired, a page
+ * that belongs to no company. The visitor is someone's email recipient, usually
+ * with no account, and was being sent to /login?next=/link-expired: "Sign in to
+ * Command Center" for a product they do not use. The session gate is armed here
+ * (Turso auth with a secret) and proven armed by /pipeline, so a pass-through
+ * for /link-expired means the public list let it through, not that no gate ran.
+ *
+ * The same run pins that middleware does NOT move the AI team's old builder and
+ * teammate-chat URLs (lib/os/redirects.ts OS_VIEWER_MOVES): it cannot tell
+ * whether the OS page serves the viewer, and a 308 to /agents/new sent every
+ * client owner's Build click to a 404, cached by the browser as permanent
+ * (W1a review R1). Signed out they meet the session gate like any page; the
+ * page itself moves the viewers the OS route serves.
+ */
+async function anonymously(path: string): Promise<Response> {
+  process.env.EMPIRE_AUTH_BACKEND = "turso";
+  process.env.AUTH_SESSION_SECRET = "middleware-prefix-test-secret-long-enough-0001";
+  return middleware(new NextRequest(`https://oasisai.work${path}`));
+}
+
+async function throughMiddleware(): Promise<void> {
+  const gated = await anonymously("/pipeline");
+  assert.equal(gated.status, 307, "precondition: the session gate is armed for an anonymous page request");
+  assert.equal(new URL(gated.headers.get("location") || "").pathname, "/login");
+
+  assert.equal(isPublic("/link-expired"), true, "/link-expired is on the public list");
+  for (const notPublic of ["/link-expired-admin", "/link"]) {
+    assert.equal(isPublic(notPublic), false, `${notPublic} must not inherit /link-expired`);
+  }
+  const res = await anonymously("/link-expired");
+  assert.equal(res.status, 200, "an anonymous visitor reaches /link-expired");
+  assert.equal(res.headers.get("location"), null, "no redirect, so no 'Sign in to Command Center'");
+  assert.equal(res.headers.get("x-middleware-next"), "1", "middleware passes the request through to the page");
+
+  for (const old of [
+    "/t/acme-roofing/marketplace/new",
+    "/t/acme-roofing/marketplace/new?template=setter",
+    "/t/acme-roofing/marketplace/new?edit=outreach-sniper",
+    "/t/acme-roofing/agent/outreach-sniper",
+    "/t/acme-roofing/agent/%73dr",
+    "/t/acme-roofing/marketplace",
+  ]) {
+    const res2 = await anonymously(old);
+    assert.notEqual(res2.status, 308, `${old}: middleware made a permanent move`);
+    assert.equal(res2.status, 307, `${old} meets the session gate like any page`);
+    const location = new URL(res2.headers.get("location") || "");
+    assert.equal(location.pathname, "/login", `${old} was moved somewhere other than sign-in`);
+    assert.equal(location.searchParams.get("next"), new URL(old, "https://oasisai.work").pathname, `${old}: sign-in returns to the page`);
+  }
+}
+
+throughMiddleware().then(
+  () => console.log("middleware-prefix ok"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);

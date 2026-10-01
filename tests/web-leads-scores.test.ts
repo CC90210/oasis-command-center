@@ -358,7 +358,9 @@ assert.doesNotThrow(
   // Advancing on a failed write loses the call silently: the rep sees the queue
   // move, believes it was logged, and it was not. The failure branch must
   // return before next() is reached.
-  const logFn = src.match(/const log = useCallback\([\s\S]*?\n {4}\[lead, note, pending, next\],/);
+  // Anchored on the leading dependencies only, so adding one (callbackPreset)
+  // does not hide the callback from this check.
+  const logFn = src.match(/const log = useCallback\([\s\S]*?\n {4}\[lead, note, pending, next(?:, \w+)*\],/);
   assert.ok(logFn, "CallMode must have its log() callback");
   const failureBranch = logFn[0].match(/if \(!r\.ok\)[\s\S]*?\n {8}\}/);
   assert.ok(failureBranch, "log() must handle a non-ok response");

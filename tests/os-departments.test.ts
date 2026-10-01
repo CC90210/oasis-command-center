@@ -30,8 +30,10 @@ import {
   suggestedAsksFor,
 } from "../components/os/department/config";
 import { tileCount } from "../components/os/department/count-rules";
-import { statusFor } from "../components/os/department/StatusPill";
+import { headerStatus, statusFor } from "../components/os/department/StatusPill";
+import type { ChannelState } from "../components/os/department/channel";
 import {
+  departmentBoundRows,
   describeSchedule,
   failedWithin,
   lastRunLabel,
@@ -39,6 +41,7 @@ import {
   routinesForDepartment,
   type RoutineRow,
 } from "../components/os/department/routine-rules";
+import { connectorBySlug } from "../lib/os/connectors";
 import { TEAMMATE_TEMPLATES } from "../components/os/aiteam/templates";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import { ALL_MODULES, resolveOsModules } from "../lib/os/modules";
@@ -493,7 +496,62 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   assert.match(numbers, /capped: d\.truncated/, "a breach item carries its read's cap");
   const page = read("app/team/[dept]/page.tsx");
   assert.match(page, /numbers\.attention\.some\(\(item\) => item\.capped === true\)/);
-  assert.match(page, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
+  assert.match(page, /statusFor\(channel\.kind !== "not_connected", needsYou, needsYouCapped\)/);
+}
+
+// ── 12. A real count survives an AI account that could not be read (W2a) ──
+// headerStatus returned "Couldn't check" whenever the account read failed,
+// before looking at the counts: a department with breached tickets hid its
+// number behind a failed read of something else.
+{
+  const unchecked: ChannelState = { kind: "unknown", reason: "We could not check this workspace's AI account just now." };
+  const notConnected: ChannelState = { kind: "not_connected", reason: "No AI account is connected for this workspace yet.", action: null };
+  // The page asks statusFor with every channel not KNOWN to be unconnected.
+  const asked = (channel: ChannelState, n: number, capped = false) => statusFor(channel.kind !== "not_connected", n, capped);
+  assert.deepEqual(headerStatus(asked(unchecked, 3), unchecked), { kind: "needs_you", count: 3, capped: false }, "the count stands");
+  assert.deepEqual(headerStatus(asked(unchecked, 2, true), unchecked), { kind: "needs_you", count: 2, capped: true }, "a floor stands too");
+  assert.deepEqual(headerStatus(asked(unchecked, 0), unchecked), { kind: "unknown" }, "nothing counted: Couldn't check, never Working");
+  assert.deepEqual(headerStatus(asked(unchecked, 0, true), unchecked), { kind: "unknown" });
+  assert.deepEqual(headerStatus(asked(notConnected, 3), notConnected), { kind: "not_connected" }, "a channel known to be unconnected still says so");
+}
+
+// ── 13. The Empire lane counts only OASIS department work (W2a, decision 17) ─
+{
+  const row = (id: string, agentKey: string): RoutineRow => ({
+    id, agentKey, name: id, description: "", schedule: "0 9 * * *", enabled: true, lastRunAt: null, lastRunStatus: null, lane: "empire",
+  });
+  const rows = [row("b", "bravo"), row("m", "maven"), row("a", "atlas"), row("s", "sdr"), row("x", "aura"), row("h", "hermes"), row("n", "")];
+  assert.deepEqual(
+    departmentBoundRows(rows, OASIS_BOUND_SLUGS).map((r) => r.id),
+    ["b", "m", "a", "s"],
+    "jobs owned by an agent no OASIS department is bound to never reach Today or the Operations tab",
+  );
+  assert.deepEqual(departmentBoundRows(rows, []), [], "no bindings, no Empire rows");
+  assert.match(read("components/os/department/routines.ts"), /value: departmentBoundRows\(rows, OASIS_BOUND_SLUGS\)/);
+}
+
+// ── 14. Department apps carry their hub card's status, and no stale copy ────
+{
+  for (const d of OS_DEPARTMENTS) {
+    for (const app of departmentProfile(d.key).connections) {
+      assert.ok(connectorBySlug(app.connector), `${d.slug}: "${app.label}" names connector "${app.connector}", which the hub does not have`);
+    }
+  }
+  const page = read("app/team/[dept]/page.tsx");
+  assert.match(page, /status: connectorFacts && def \? resolveConnectorStatus\(def, connectorFacts, nowMs\) : null/);
+  assert.match(page, /canManageConnections && profile\.connections\.length > 0\s*\? loadConnectorFacts\(/, "only owners and admins read the facts");
+  const panel = read("components/os/department/OverviewPanel.tsx");
+  assert.match(panel, /\{app\.status && <StatusLine status=\{app\.status\} \/>\}/);
+  // The three code sites that still said no connection-health source exists.
+  for (const [file, stale] of [
+    ["components/os/department/OverviewPanel.tsx", /not measured yet/],
+    ["components/os/department/numbers.ts", /not measured yet/],
+    ["components/os/department/config.ts", /Labels only|no connection-health source/],
+    ["components/os/RailFooter.tsx", /Phase 2|no\s+connection-health source/],
+    ["app/layout.tsx", /No connection-health source|connectionsStatus=\{null\}/],
+  ] as const) {
+    assert.doesNotMatch(read(file), stale, `${file} still claims connection health is not measured`);
+  }
 }
 
 console.log(
