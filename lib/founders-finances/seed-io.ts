@@ -14,6 +14,8 @@
  */
 import "server-only";
 
+import { cache } from "react";
+import { settledOnce } from "@/lib/runtime/settled-once";
 import { seedStatements, type SeedStatement } from "./chart";
 import { n, queryOne, writeBatch } from "./db";
 
@@ -56,19 +58,22 @@ async function seedIfMissing(): Promise<void> {
   await writeBatch(statements.map((st) => ({ sql: st.sql, args: st.args })));
 }
 
-let seeded: Promise<void> | null = null;
+/**
+ * Only a FINISHED check is shared across requests. This used to be a
+ * module-level promise, so a request arriving while another request's check
+ * was in flight awaited that request's read; the Workers runtime cancels such
+ * a waiter as hung, and an aborted check left the promise pending for the
+ * isolate's lifetime (2026-10-01 pipeline incident; lib/runtime/settled-once.ts).
+ * cache() still shares one check within a request. A failure is not
+ * remembered: the next call checks again.
+ */
+const seedCheck = settledOnce(cache(seedIfMissing));
 
 export function ensureFinanceSeed(): Promise<void> {
-  if (!seeded) {
-    seeded = seedIfMissing().catch((e) => {
-      seeded = null; // retry next call rather than caching a failure
-      throw e;
-    });
-  }
-  return seeded;
+  return seedCheck.get();
 }
 
 /** Tests only: forget the per-process memo. */
 export function resetFinanceSeedMemo(): void {
-  seeded = null;
+  seedCheck.reset();
 }

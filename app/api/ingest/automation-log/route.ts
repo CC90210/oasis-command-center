@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { createClient, type Client } from "@libsql/client";
+import { LIBSQL_CLIENT_OPTIONS } from "@/lib/turso";
 
 export const runtime = "nodejs";
 
@@ -30,7 +31,7 @@ function oasisDb(): Client {
   if (!url || !token) {
     throw new Error("OASIS_TURSO_DATABASE_URL / OASIS_TURSO_AUTH_TOKEN not set");
   }
-  _oasis = createClient({ url, authToken: token });
+  _oasis = createClient({ url, authToken: token, ...LIBSQL_CLIENT_OPTIONS });
   return _oasis;
 }
 
