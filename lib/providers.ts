@@ -144,8 +144,8 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
   {
     value: "google",
     label: "Google Gemini",
-    tagline: "Free tier available via AI Studio",
-    hint: "Direct to Gemini via AI Studio. Free tier available.",
+    tagline: "Paid tier only. The free AI Studio tier may train on your data.",
+    hint: "Direct to Gemini via AI Studio. Paid tier only: the free AI Studio tier may train on your data, so it is not for a workspace's clients.",
     signup: "https://aistudio.google.com/",
     apiKey: "https://aistudio.google.com/apikey",
     docs: "https://ai.google.dev/gemini-api/docs",

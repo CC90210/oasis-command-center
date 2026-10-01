@@ -207,10 +207,10 @@ export function ConnectorDrawer({
               <StatusLine status={status} />
               {status.detail && <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">{status.detail}</p>}
               {!live && def.plannedFor && (
+                // The state, not a release promise: "scheduled for the next
+                // release" was a date nobody had set.
                 <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
-                  {def.plannedFor === "Phase 2"
-                    ? "Scheduled for the next release of OASIS OS. It cannot be connected yet."
-                    : "Planned for a later release. It cannot be connected yet."}
+                  Nothing is built for it yet, so it cannot be connected.
                 </p>
               )}
             </section>

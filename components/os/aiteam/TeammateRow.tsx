@@ -2,13 +2,17 @@
  * TeammateRow — one AI teammate on the AI Team roster: initial, name, what it
  * does, which departments it leads, and where it lives.
  *
- * WHERE IT LIVES IS STATED, NOT IMPLIED. Web is the department channel (or the
- * custom teammate's chat) and says whether it can answer. Slack is the
- * workspace's real state (lib/slack/status.ts): the channels mapped to the
- * department, "by @mention" when none is, "not connected", or "app not set up"
- * where OASIS's Slack app is not on this deployment. Custom teammates do not
- * answer in Slack, so their rows say nothing about it. Telegram teammates do not
- * exist yet and read "Phase 2" rather than a toggle that does nothing.
+ * WHERE IT LIVES IS STATED, NOT IMPLIED. "App channel" is the department
+ * channel (or the custom teammate's chat) inside this app and says whether it
+ * can answer, with the reason when it cannot ("not working: AI account refused
+ * the request (check billing)"). It used to be labelled "Web", which read as a
+ * web-access capability and sent the owner hunting for a tool setting when the
+ * cause was the provider's last refusal (S4-01). Slack is the workspace's real
+ * state (lib/slack/status.ts): the channels mapped to the department, "by
+ * @mention" when none is, "not connected", or "app not set up" where OASIS's
+ * Slack app is not on this deployment. Custom teammates do not answer in Slack,
+ * so their rows say nothing about it. Telegram carries alerts only today: no
+ * teammate answers there, and the row says that rather than naming a phase.
  *
  * Server component. Dense rows on a hairline list, the same density as the
  * rail and the channel; no card grid.
@@ -30,12 +34,17 @@ import type { SlackHome } from "@/lib/slack/status";
 export type WebState = "ready" | "not_working" | "not_connected" | "not_set_up" | "unknown";
 
 const WEB_LABEL: Record<WebState, string> = {
-  ready: "Web",
-  not_working: "Web · not working",
-  not_connected: "Web · not connected",
-  not_set_up: "Web · not set up",
-  unknown: "Web · couldn’t check",
+  ready: "App channel",
+  not_working: "App channel · not working",
+  not_connected: "App channel · not connected",
+  not_set_up: "App channel · not set up",
+  unknown: "App channel · couldn’t check",
 };
+
+/** The chip's text: the state, and for a failure the short reason the header gives. */
+export function webLabel(web: WebState, reason?: string | null): string {
+  return web === "not_working" && reason ? `${WEB_LABEL[web]}: ${reason}` : WEB_LABEL[web];
+}
 
 function Initial({ name }: { name: string }) {
   const letter = (name.trim().charAt(0) || "?").toUpperCase();
@@ -64,7 +73,7 @@ function slackLabel(slack: SlackHome): string {
   }
 }
 
-export function Homes({ web, slack }: { web: WebState; slack?: SlackHome }) {
+export function Homes({ web, webReason, slack }: { web: WebState; webReason?: string | null; slack?: SlackHome }) {
   return (
     <ul aria-label="Where it lives" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4">
       <li
@@ -73,14 +82,14 @@ export function Homes({ web, slack }: { web: WebState; slack?: SlackHome }) {
         }`}
       >
         {web === "ready" && <Check className="h-3.5 w-3.5 text-status-engaged" strokeWidth={2} aria-hidden />}
-        {WEB_LABEL[web]}
+        {webLabel(web, webReason)}
       </li>
       {slack && (
         <li className={slack.kind === "channels" || slack.kind === "mention_only" ? "text-fg-muted" : "text-fg-dim"}>
           {slackLabel(slack)}
         </li>
       )}
-      <li className="text-fg-dim">Telegram · Phase 2</li>
+      <li className="text-fg-dim">Telegram · alerts only</li>
     </ul>
   );
 }
@@ -91,6 +100,7 @@ export function TeammateRow({
   meta,
   departments,
   web,
+  webReason,
   slack,
   href,
   badge,
@@ -101,6 +111,8 @@ export function TeammateRow({
   meta?: string;
   departments?: readonly TeammateHome[];
   web: WebState;
+  /** Why the app channel is not working, in the header's short words (lib/os/channel/outcome failureCopy). */
+  webReason?: string | null;
   /** Where it lives in Slack; absent for teammates that do not answer there. */
   slack?: SlackHome;
   /** Where the name links: the teammate's channel or chat. */
@@ -137,7 +149,7 @@ export function TeammateRow({
             ))}
           </div>
         )}
-        <Homes web={web} slack={slack} />
+        <Homes web={web} webReason={webReason} slack={slack} />
       </div>
       {badge && (
         <span className="shrink-0 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-medium leading-4 text-fg-muted">

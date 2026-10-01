@@ -484,6 +484,17 @@ type AgentConfig = {
   has_key: boolean;
 };
 
+/**
+ * The provider /model is pinned to for an agent: the one whose key is saved on
+ * its row. A key belongs to its provider, so a row with a key only takes that
+ * provider's models; /api/agent-config answers 409 provider_mismatch to any
+ * other provider without a new key (S4-09). No row, or no key: null, not pinned.
+ */
+function modelPickerProvider(configs: AgentConfig[], agentKey: string): string | null {
+  const row = configs.find((c) => c.agent_key === agentKey);
+  return row?.has_key ? row.provider : null;
+}
+
 type Props = {
   agentKeys: string[];
   defaultAgent?: string;
@@ -675,15 +686,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }));
     }
     if (slashArgCommand === "model") {
-      // Surface models the operator actually has providers configured
-      // for first — those are the only ones /model can successfully
-      // switch to. If no configs are loaded yet, show the full registry
-      // as a fallback (better than an empty menu mid-onboarding).
+      // A row with a saved key is pinned to that key's provider: only its
+      // models are offered (modelPickerProvider). Otherwise, surface models
+      // the operator actually has providers configured for — those are the
+      // only ones /model can successfully switch to. If no configs are
+      // loaded yet, show the full registry as a fallback (better than an
+      // empty menu mid-onboarding).
+      const pinned = modelPickerProvider(configs, agent);
       const configuredProviders = new Set(configs.map((c) => c.provider));
       const flat: ArgCandidate[] = [];
       for (const [provider, models] of Object.entries(PROVIDER_MODELS)) {
-        const isConfigured = configuredProviders.has(provider) || configs.length === 0;
-        if (!isConfigured) continue;
+        const offered = pinned ? provider === pinned : configuredProviders.has(provider) || configs.length === 0;
+        if (!offered) continue;
         for (const m of models) {
           flat.push({ value: m, label: m, hint: provider });
         }
@@ -691,7 +705,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, configs, agentDisplayName, targetLabels]);
+  }, [slashArgCommand, agentKeys, agent, configs, agentDisplayName, targetLabels]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
@@ -1686,19 +1700,27 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
       case "model": {
         const requested = args.trim();
+        // A saved key pins this agent to its provider (modelPickerProvider):
+        // the listing and the switch stay inside it, and switching providers
+        // means pasting that provider's key in Settings.
+        const pinned = modelPickerProvider(configs, agent);
         if (!requested) {
           // No args — list the models available across the operator's
           // configured providers so they don't have to guess. Falls back
           // to the full registry when no configs are loaded.
-          const known = configs.length
-            ? Array.from(
-                new Set(
-                  configs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
-                ),
-              )
-            : Object.values(PROVIDER_MODELS).flat();
+          const known = pinned
+            ? PROVIDER_MODELS[pinned as keyof typeof PROVIDER_MODELS] || []
+            : configs.length
+              ? Array.from(
+                  new Set(
+                    configs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
+                  ),
+                )
+              : Object.values(PROVIDER_MODELS).flat();
           appendSystem(
-            `Usage: /model <id>. Examples: ${known.slice(0, 6).join(", ")}${known.length > 6 ? ", ..." : ""}.`,
+            `Usage: /model <id>. Examples: ${known.slice(0, 6).join(", ")}${known.length > 6 ? ", ..." : ""}.${
+              pinned ? ` This agent's saved key is for ${pinned}, so only ${pinned} models apply here.` : ""
+            }`,
           );
           return;
         }
@@ -1706,6 +1728,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         if (!provider) {
           appendSystem(
             `Unknown model "${requested}". Use a model id from one of: ${Object.keys(PROVIDER_MODELS).join(", ")}. Tip: /model with no arg lists examples.`,
+          );
+          return;
+        }
+        if (pinned && provider !== pinned) {
+          appendSystem(
+            `${requested} is a ${provider} model, and this agent's saved key is for ${pinned}. To switch providers, paste a ${provider} key in Settings (AI provider accounts). The current model stays active.`,
           );
           return;
         }

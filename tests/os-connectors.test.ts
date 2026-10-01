@@ -49,6 +49,7 @@ import {
   type SettingsSectionKey,
 } from "../components/settings/settings-sections";
 import { OASIS_ADDONS } from "../components/settings/addons";
+import { PROVIDER_REGISTRY } from "../lib/providers";
 import { watchPopup } from "../components/os/connections/popup-watch";
 import { FOCUSABLE_SELECTOR, trapTab } from "../components/os/connections/focus-trap";
 
@@ -381,7 +382,24 @@ assert.equal(
   "Slack app not configured yet",
 );
 assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
-assert.match(read("app/settings/chat-apps/page.tsx"), /Coming in Phase 2/);
+// Telegram teammates are a state ("not built yet"), never an era word or a
+// release promise (S2-11, S4-12, S5-F07's register).
+assert.match(read("app/settings/chat-apps/page.tsx"), /Telegram teammates are not built yet/);
+assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /Phase 2|Coming soon/);
+assert.match(read("app/settings/notifications/page.tsx"), /Choosing what notifies you is not built yet/);
+assert.doesNotMatch(read("app/settings/notifications/page.tsx"), /Phase 2|arrives with/);
+assert.match(read("components/os/aiteam/TeammateRow.tsx"), /Telegram · alerts only/);
+assert.doesNotMatch(read("components/os/aiteam/TeammateRow.tsx"), /Phase 2/);
+// The connector drawer's coming-soon note is the state too, not a date:
+// "scheduled for the next release" promised a release nobody had scheduled.
+assert.match(read("components/os/connections/ConnectorDrawer.tsx"), /Nothing is built for it yet, so it cannot be connected\./);
+assert.doesNotMatch(read("components/os/connections/ConnectorDrawer.tsx"), /next release|later release|=== "Phase 2"/);
+// The Google Gemini card never nudges an owner toward the free AI Studio tier,
+// which may train on a client's data (S2-09): paid tier only, and it says why.
+const gemini = PROVIDER_REGISTRY.find((p) => p.value === "google")!;
+assert.equal(gemini.tagline, "Paid tier only. The free AI Studio tier may train on your data.");
+assert.match(gemini.hint, /Paid tier only/);
+assert.doesNotMatch(`${gemini.tagline} ${gemini.hint}`, /free tier available/i);
 
 // Search: by name, keyword and category label; nonsense matches nothing.
 assert.ok(connectorMatches(connectorBySlug("gohighlevel")!, "ghl"));

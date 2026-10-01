@@ -7,9 +7,9 @@
  * failed read is "Status unavailable", never "not set up" — the reader throws
  * on purpose so those two can't be confused.
  *
- * Choosing which events notify you has no store yet; that arrives with the
- * Feed's approvals (Phase 2), and the page says so rather than rendering
- * toggles that save nowhere.
+ * Choosing which events notify you has no store yet, and the page says so,
+ * as a state with no release promise, rather than rendering toggles that
+ * save nowhere.
  */
 
 import Link from "next/link";
@@ -73,11 +73,11 @@ export default async function SettingsNotificationsPage() {
         <section className="rounded-xl border border-hairline bg-bg-panel px-4 py-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h2 className="text-sm font-semibold text-fg">Choose what notifies you</h2>
-            <StatusLine status={{ kind: "coming_soon", label: "Coming in Phase 2" }} />
+            <StatusLine status={{ kind: "coming_soon", label: "Not built yet" }} />
           </div>
           <p className="mt-1 text-[13px] leading-5 text-fg-muted">
-            Picking which events reach you, and where, arrives with approvals in the Feed. Until then, the alerts
-            your workspace already sends keep going where they go today.
+            Choosing what notifies you is not built yet. The alerts your workspace already sends keep going where
+            they go today.
           </p>
         </section>
       </div>
