@@ -9,7 +9,8 @@
  *
  *   send_email    lib/integrations/oasis-shared-gmail-send.ts, the OASIS
  *                 mailbox: suppression check (fail-closed), brand-vs-mailbox
- *                 guard, OASIS footer, Message-Id from the idempotency key. It
+ *                 guard, OASIS footer, Message-Id from the idempotency key; an
+ *                 email to a client goes as support mail (emailPurposeFor). It
  *                 is OASIS's mailbox, so the brand must resolve to "oasis" for
  *                 THIS tenant (lib/email/brand-for-tenant.ts, fail-closed); a
  *                 client workspace has no in-app sender yet and is told so.
@@ -50,6 +51,7 @@ import type { EmailSigner } from "@/lib/config/email-signature";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendOasisSharedGmail, type OasisSharedSendResult } from "@/lib/integrations/oasis-shared-gmail-send";
+import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
@@ -158,6 +160,18 @@ function emailReadiness(tenant: ExecutorTenant): string | null {
   return null;
 }
 
+/**
+ * An approved email to one of OASIS's CLIENTS is support mail: from
+ * support@oasisai.work once its credential is set, replies to support@, the
+ * support footer. An agent's draft to a client is filed against the client's
+ * record (lib/os/customers/conversations.ts proposeClientEmail: target_ref
+ * "customer:<id>"). Anything else (a lead, a prospect) stays sales mail from
+ * the shared mailbox, exactly as before.
+ */
+export function emailPurposeFor(approval: Pick<ApprovalRow, "target_ref">): OasisMailPurpose {
+  return (approval.target_ref || "").startsWith("customer:") ? "support" : "sales";
+}
+
 /** What each OasisSharedSendResult reason means to the person who pressed Approve. */
 export function emailFailureMessage(reason: string, error: string): string {
   switch (reason) {
@@ -222,6 +236,7 @@ const sendEmail: Executor = {
       body,
       signer: ctx.deps.signerFor(approverEmail, "oasis"),
       idempotencyKey: ctx.approval.idempotency_key,
+      purpose: emailPurposeFor(ctx.approval),
     });
     if (sent.ok) {
       return {

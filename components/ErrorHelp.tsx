@@ -4,8 +4,8 @@
  *
  * Shared by app/error.tsx and app/global-error.tsx so the two cannot drift.
  * Both used to say "check the Vercel function logs": a hosting provider this
- * app has left, and a log no client can open. The address is CONTACT_EMAIL, the
- * one verified inbox (config/verified-mailboxes.json).
+ * app has left, and a log no client can open. The address is CONTACT_EMAIL,
+ * OASIS's support inbox (verified in config/verified-mailboxes.json).
  *
  * PROSPECT-FACING PAGES GET NO OASIS CONTACT. app/error.tsx is the root
  * boundary, so it also catches a crash on the pages a client's own prospects

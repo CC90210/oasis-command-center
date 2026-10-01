@@ -36,7 +36,7 @@ delete process.env.TURSO_DB_URL;
 process.env.EMPIRE_AUTH_BACKEND = "turso";
 process.env.AUTH_SESSION_SECRET = "os-approvals-test-secret-that-is-long-enough-000001";
 // Dry-run is the deployment default; nothing in this file may be able to send.
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "BRAVO_FORCE_DRY_RUN", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD"]) {
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "BRAVO_FORCE_DRY_RUN", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "SUPPORT_GMAIL_USER", "SUPPORT_GMAIL_APP_PASSWORD"]) {
   delete process.env[k];
 }
 

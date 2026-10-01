@@ -19,6 +19,7 @@
  */
 
 import { resolveBookingUrl } from "@/lib/booking-link";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 
 /** Where an anonymous "/" is rewritten to. Never redirect — a redirect
  *  would move the brand apex to /home in the address bar and in search. */
@@ -96,19 +97,15 @@ export const SITE_ORIGIN = "https://oasisai.work";
 export const BOOKING_URL = resolveBookingUrl();
 
 /**
- * The address a prospect should actually write to.
+ * The address a prospect or a client should write to: support@oasisai.work.
  *
- * NOT lib/legal/constants.ts's LEGAL_CONTACTS.support. Those four role
- * aliases (privacy@ / legal@ / dmca@ / support@) are what the legal pages
- * publish, and at least support@ has no mailbox behind it — a contact
- * route on the marketing site that silently bounces is worse than no
- * contact route at all. This is the founder's real, monitored inbox.
- *
- * The legal pages deliberately still use their own constants: those
- * addresses appear in an audited policy document and changing them is a
- * change to a published legal commitment, not a copy tweak.
+ * Re-exported from lib/legal/constants.ts (OASIS_SUPPORT_EMAIL), never retyped,
+ * so the marketing site, the error pages, the setup page, the opt-out page and
+ * the legal pages cannot publish two different addresses. Until 2026-10-01 this
+ * was the founder's own inbox; since support@ exists as its own Workspace user,
+ * the founder's address is an identity (his login, his calendar), not a contact.
  */
-export const CONTACT_EMAIL = "conaugh@oasisai.work";
+export const CONTACT_EMAIL = OASIS_SUPPORT_EMAIL;
 
 /** The live B2B qualification funnel the inline CTA form feeds. */
 export const AUDIT_FUNNEL = {
