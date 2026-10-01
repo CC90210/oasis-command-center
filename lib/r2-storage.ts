@@ -123,9 +123,32 @@ function encodePath(path: string): string {
     .join("/");
 }
 
-function stamps() {
-  const now = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+function stamps(atMs: number = Date.now()) {
+  const now = new Date(atMs).toISOString().replace(/[:-]|\.\d{3}/g, "");
   return { amz: now, date: now.slice(0, 8) };
+}
+
+/** SigV4 refuses a presigned URL that claims to live longer than a week. */
+const MAX_PRESIGN_SEC = 7 * 24 * 60 * 60;
+
+/**
+ * The signing window for a read URL: its lifetime, at most an hour.
+ *
+ * A URL stamped to the second is a new URL on every render, and the browser
+ * caches by URL - so every router.refresh() (each Approve or Archive in the
+ * Library), every view toggle and every revisit re-downloaded every cover and
+ * restarted any playing video. Signed at the START of a window instead, with
+ * the window added to its lifetime, one object keeps ONE URL for the whole
+ * window, and the URL still lives at least as long as the caller asked from
+ * the moment it was handed out (at most twice that).
+ *
+ * The window scales with the lifetime so a short-lived URL stays short-lived: a
+ * 60-second link to a bank statement is good for at most 120 seconds, never an
+ * hour. Upload (PUT) URLs are not windowed; nothing caches them.
+ */
+function readWindowSec(expiresInSec: number): number {
+  const window = Math.min(Math.floor(expiresInSec), 3600);
+  return window >= 1 && expiresInSec + window <= MAX_PRESIGN_SEC ? window : 0;
 }
 
 /**
@@ -151,15 +174,20 @@ function presign(
   bucket: string,
   path: string,
   expiresInSec: number,
+  windowSec = 0,
 ): string {
   const { key, secret, bucket: r2Bucket } = cfg();
-  const { amz, date } = stamps();
+  // Signed at the start of the window, alive for the window on top of the
+  // lifetime asked for: see readWindowSec. windowSec 0 is "now, exactly".
+  const nowMs = Date.now();
+  const windowMs = windowSec * 1000;
+  const { amz, date } = stamps(windowMs ? Math.floor(nowMs / windowMs) * windowMs : nowMs);
   const canonicalUri = `/${r2Bucket}/${encodePath(objectKey(bucket, path))}`;
   const q = new URLSearchParams({
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
     "X-Amz-Credential": `${key}/${date}/${REGION}/${SERVICE}/aws4_request`,
     "X-Amz-Date": amz,
-    "X-Amz-Expires": String(expiresInSec),
+    "X-Amz-Expires": String(expiresInSec + windowSec),
     "X-Amz-SignedHeaders": "host",
   });
   const canonicalQuery = [...q.entries()]
@@ -179,7 +207,7 @@ function presign(
 }
 
 function presignGet(bucket: string, path: string, expiresInSec: number): string {
-  return presign("GET", bucket, path, expiresInSec);
+  return presign("GET", bucket, path, expiresInSec, readWindowSec(expiresInSec));
 }
 
 /**
