@@ -458,6 +458,8 @@ const TESTS = [
   "tests/support-inbox-wire.test.ts",
   "tests/support-inbox-ingest.test.ts",
   "tests/support-inbox-drafts.test.ts",
+  "tests/support-inbox-health.test.ts",
+  "tests/support-inbox-rules.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
