@@ -71,6 +71,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ExternalLink, Loader2, Phone, X } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import type { CallOutcome } from "@/lib/web-leads/outcome";
+import { DEFAULT_NEXT_ACTION_PRESET, NEXT_ACTION_PRESETS, nextActionForOutcome } from "@/lib/web-leads/next-action-presets";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { useAudit, biggestGaps, SCORE_STATE_WORDS } from "./useAudit";
@@ -226,6 +227,9 @@ export function CallMode({
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<CallOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // When No answer, Connected and Interested come back due. Deliberately NOT
+  // reset when the cursor moves: a rep picks a cadence once per block of calls.
+  const [callbackPreset, setCallbackPreset] = useState<string>(DEFAULT_NEXT_ACTION_PRESET);
   const [lastLogged, setLastLogged] = useState<{
     label: string;
     business: string;
@@ -289,7 +293,12 @@ export function CallMode({
       setError(null);
       const business = lead.name;
       const label = OUTCOMES.find((o) => o.key === outcome)?.label || outcome;
-      const signature = JSON.stringify([lead.id, outcome, trimmedNote]);
+      // The outcome route REQUIRES a future date for every outcome that keeps
+      // the lead open (#488). Computed at click time, so a retry recomputes it;
+      // the signature keys on the preset, not the instant, so that retry still
+      // reuses the requestId and cannot log the call twice.
+      const nextActionAt = nextActionForOutcome(outcome, callbackPreset);
+      const signature = JSON.stringify([lead.id, outcome, trimmedNote, callbackPreset]);
       const requestId =
         submissionRef.current?.signature === signature
           ? submissionRef.current.requestId
@@ -299,7 +308,7 @@ export function CallMode({
         const r = await fetch(`/api/web-leads/${encodeURIComponent(lead.id)}/outcome`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ outcome, note: trimmedNote || undefined, requestId }),
+          body: JSON.stringify({ outcome, note: trimmedNote || undefined, requestId, nextActionAt }),
         });
         const body = await r.json().catch(() => ({})) as {
           error?: string;
@@ -318,6 +327,8 @@ export function CallMode({
               ? "Add the reason before logging Not interested."
               : body.error === "note_too_long"
                 ? `Keep the call note to ${MAX_CALL_NOTE_LENGTH.toLocaleString()} characters or fewer.`
+              : body.error === "next_action_required" || body.error === "next_action_invalid" || body.error === "next_action_not_future"
+                ? "The callback date was not accepted. Pick a Call back option and log again."
                 : body.error === "tracking_failed"
                   ? "The call and Pipeline update are saved, but its timeline entry is not. Try again; this retry will repair it without duplicating the call."
                   : body.error === "ownership_changed"
@@ -339,7 +350,7 @@ export function CallMode({
         setPending(null);
       }
     },
-    [lead, note, pending, next],
+    [lead, note, pending, next, callbackPreset],
   );
 
   // Focus the exit button on mount so the overlay owns the keyboard immediately
@@ -359,7 +370,7 @@ export function CallMode({
       // and skips four leads. Checked against the live target, not a ref, so
       // any future input in this overlay is covered by the same guard.
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) {
+      if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.tagName === "SELECT" || t.isContentEditable)) {
         if (e.key === "Escape") (t as HTMLTextAreaElement).blur();
         return;
       }
@@ -614,6 +625,19 @@ export function CallMode({
               ))}
             </div>
 
+            <label className="mt-2 flex min-h-11 items-center justify-between gap-3 text-xs font-semibold text-fg-muted lg:mt-3">
+              Call back
+              <select
+                value={callbackPreset}
+                onChange={(e) => setCallbackPreset(e.target.value)}
+                className="min-h-11 rounded-lg border border-bg-border bg-bg-deep px-2 text-sm text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+              >
+                {NEXT_ACTION_PRESETS.map((p) => (
+                  <option key={p.key} value={p.key}>{p.label}</option>
+                ))}
+              </select>
+            </label>
+
             <textarea
               ref={noteRef}
               value={note}
@@ -629,7 +653,7 @@ export function CallMode({
             {/* The keyboard sentence is desktop-only; the rest is true on both. */}
             <p className="mt-1.5 text-[11px] text-fg-dim">
               <span className="hidden lg:inline"><Key>N</Key> jumps here. </span>
-              A reason is required for Not interested. Logging moves to the next lead.
+              A reason is required for Not interested. No answer, Connected and Interested set a callback. Logging moves to the next lead.
             </p>
 
             {error && <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">{error}</p>}
