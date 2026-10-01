@@ -35,7 +35,6 @@ import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoi
 import { evidenceFrom } from "../lib/web-leads/evidence";
 import { PRESENCE_EXPLAINED_CODES } from "../lib/web-leads/presence-evidence";
 import { DIM_HUES, PILLAR_HUES } from "../components/web-leads/battle-hud";
-import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
 import { assessTrust, isShellSuspect, STALE_AFTER_DAYS } from "../lib/web-leads/trust";
 import { validatedRecheckUrl, isPrivateIpv4 } from "../lib/web-leads/recheck-url";
@@ -729,7 +728,11 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // Copy is hand-written and rendered verbatim. Nothing on this page is
   // generated per lead, ever.
   assert.doesNotMatch(src, /claudeMessages|anthropic|openai|generateText/i, `${view} must never generate copy per lead`);
-  assert.match(src, /remedyFor/, `${view} must render the hand-written remedy copy`);
+  // Re-aimed, not relaxed (compact card, 2026-10-01): the "one thing to lead
+  // with" line that called remedyFor directly is gone (it duplicated the
+  // script, which is built from the same worst gap). The hand-written remedy
+  // copy still renders on every failing check, through the shared RemedyLines.
+  assert.match(src, /<RemedyLines code=/, `${view} must render the hand-written remedy copy`);
   assert.match(src, /selectAngle/, `${view} must render the hand-written angle copy`);
 
   // All three spoken beats reach the screen, in order. Rendering the opener and
@@ -799,17 +802,19 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // The opening-script assertion below is untouched on purpose: this file exists
   // so an edit cannot silently collapse it, and an edit amending a neighbouring
   // default is exactly the shape of edit that would.
+  //
+  // THE COMPACT CARD (Adon, 2026-10-01): fifteen blocks became seven. The
+  // reference material folded into two closed drawers -- "before-dial" (history,
+  // directory facts, trust) and "proof" (rivals, failing checks, presence, raw
+  // crawl) -- and "lead-with" and "shape" are deleted, not hidden. The three
+  // sections read mid-call ("opening", "brushoffs", "fixes") keep their ids
+  // and stay OPEN, so a rep's saved collapse choices still apply to them.
   for (const [id, open] of [
-    ["facts", false],
-    ["presence", true],
-    ["lead-with", true],
+    ["before-dial", false],
     ["opening", true],
     ["brushoffs", true],
-    ["shape", true],
     ["fixes", true],
-    ["competitors", true],
-    ["faults", false],
-    ["evidence", false],
+    ["proof", false],
   ] as const) {
     assert.match(
       src,
@@ -950,7 +955,7 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
 
   // Every closed-by-default section carries a teaser. A closed section with no
   // teaser is a mystery drawer, and a rep will not open a mystery mid-call.
-  for (const id of ["facts", "brushoffs", "faults", "evidence"]) {
+  for (const id of ["before-dial", "brushoffs", "proof"]) {
     assert.match(
       src,
       new RegExp(`id="${id}"[\\s\\S]{0,600}?teaser=`),
@@ -981,19 +986,12 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   );
   assert.match(shell, /Expand all/, "the toolbar must offer the one-click return to everything-open");
 
-  // The graphs' interactivity is selection, and selection is buttons in the
-  // dimension list -- the radar's pointer targets are a convenience layered on
-  // top, because the radar is display:none below `sm`. If the buttons go, the
-  // phone loses the interaction entirely.
-  assert.match(src, /aria-pressed=\{active\}/, `${view}: the dimension list must be the accessible selection path`);
-
   // 8c. THE HUD PALETTE (Adon, 2026-09-01): colour is IDENTITY, never verdict.
-  // Every dimension must have its own fixed hue in DIM_HUES (now in
-  // battle-hud.ts, shared by the SVG hologram and the WebGL radar so two
-  // charts can never disagree about which blue is "trust") -- one area
-  // falling through to the grey fallback breaks the "this colour IS trust"
-  // coding on the radar, the list, and the fix ranking at once. The verdict
-  // colours stay banned by web-leads-guards.test.ts; this asserts the
+  // Every dimension keeps its own fixed hue in DIM_HUES (battle-hud.ts). The
+  // radar that first wore them is gone (compact card, 2026-10-01), but the
+  // capability catalogue and its rows still do, so one area falling through to
+  // the grey fallback still breaks the "this colour IS trust" coding. The
+  // verdict colours stay banned by web-leads-guards.test.ts; this asserts the
   // identity half of the rule.
   const hud = read("components/web-leads/battle-hud.ts");
   for (const key of DIMENSION_KEYS) {
@@ -1003,51 +1001,27 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
       `battle-hud.ts: dimension "${key}" must carry a fixed identity hue in DIM_HUES`,
     );
   }
-  // The four SVG hologram layers must all exist -- they are the ONLY radar on
-  // phones, under reduced motion, and wherever WebGL is unavailable. Lose one
-  // and the fallback either goes flat (no shadow/data separation) or dead
-  // (no hits).
-  for (const layerName of ['layer="base"', 'layer="shadow"', 'layer="data"', 'layer="hits"']) {
-    assert.ok(src.includes(layerName), `${view}: the hologram stack must render ${layerName}`);
-  }
 
-  // 8d. THE WEBGL RADAR (Adon, 2026-09-01: "3D imaging... a big leap"). The
-  // operator overrode the no-chart-library weight rule for this one chart;
-  // what survives is its cost discipline, and THAT is what gets pinned:
-  const r3d = read("components/web-leads/Radar3D.tsx");
-  // three.js must be code-split: a static import would put ~600KB into the
-  // shared bundle for every rep on every surface, including the phones and
-  // reduced-motion users who never see the scene.
-  assert.match(r3d, /await import\("three"\)/, "Radar3D must lazy-load three.js inside an effect");
-  assert.doesNotMatch(
-    r3d,
-    /^import (?!type\b)[^\n]*from "three"/m,
-    "Radar3D must not import three statically -- `import type` only, so the runtime library stays code-split",
-  );
-  // A rep pages through many leads a shift; a leaked GL context per lead
-  // kills the tab by lunch.
-  assert.match(r3d, /renderer\.dispose\(\)/, "Radar3D must dispose the WebGL renderer on unmount");
-  // The mount gate: never on phones (state, not CSS -- hidden canvas still
-  // downloads the library), never under reduced motion, and one frame late so
-  // the reduced-motion preference has actually been read.
-  assert.match(
-    src,
-    /drawn && !reduced && desktop && gl !== "off"/,
-    `${view}: the WebGL radar must be gated on drawn + reduced-motion + desktop + not-failed`,
-  );
-  // The failure path must exist and must fall back, not blank: onStatus(false)
-  // flips gl to "off", which re-mounts nothing and keeps the SVG stack.
-  assert.match(src, /onStatus=\{\(ok\) => setGl\(ok \? "on" : "off"\)\}/, `${view}: the 3D radar must report failure so the SVG fallback stays`);
-  // Both Codex-found blank-radar holes, pinned (2026-09-01): the SVG hides on
-  // the LIVE condition (so a reduced-motion flip after init brings it back),
-  // and a lost GL context reports failure instead of freezing over a hidden
-  // fallback.
-  assert.match(
-    src,
-    /const glLive = drawn && !reduced && desktop && gl === "on"/,
-    `${view}: the SVG fallback must key on the full is-3D-actually-visible condition, not on gl alone`,
-  );
-  assert.match(r3d, /webglcontextlost/, "Radar3D must fall back to the SVG when the GL context is lost");
+  // 8d. THE CHARTS ARE DELETED, NOT HIDDEN (compact card, Adon 2026-10-01).
+  // The SVG hologram radar, the WebGL radar, the 3D competitor arena, the
+  // designation plate, the sound layer and the hero particle field were
+  // removed because none of them told a rep what to say. Their pins (the
+  // hologram layers, the three.js code-split, the GL dispose and fallback
+  // gates) are retired WITH them: a pin on code that no longer exists guards
+  // nothing. What replaces them is this: the deleted pieces stay deleted, so
+  // nobody wires a 600KB WebGL scene back into the card a rep reads mid-call
+  // without deciding to.
+  for (const gone of [
+    "components/web-leads/Radar3D.tsx",
+    "components/web-leads/CompetitorArena3D.tsx",
+    "components/web-leads/battle-sfx.ts",
+    "lib/web-leads/lead-profile.ts",
+  ]) {
+    assert.ok(!fs.existsSync(path.join(process.cwd(), gone)), `${gone} was deleted with the compact card; restoring it is a decision, not a drift`);
+  }
+  for (const name of ["<Radar", "<DesignationPlate", "<DimensionShape", "<CompetitorArena3D", "<ParticleField", "<DistributionStrip", "<TiltCard", "from \"three\"", "sfx."]) {
+    assert.ok(!src.includes(name), `${view}: ${name} was removed with the compact card and must not return silently`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,14 +1192,19 @@ const MODEL_CODES = [
   // and the total is asserted, so losing any one surface fails.
   const measuredUses = (src.match(/<MeasuredLine code=/g) || []).length;
   const rowMeasuredUses = (capabilityRow.match(/<MeasuredLine code=/g) || []).length;
-  assert.ok(measuredUses >= 2, `${view}: the measured line must reach the faults list and the detail panel (found ${measuredUses})`);
+  //
+  // TWO SURFACES SINCE THE COMPACT CARD (2026-10-01). The dimension detail
+  // panel under the radar was the third surface, and it was DELETED with the
+  // radar, not hidden. Every surface that still exists is counted: the
+  // failing-check list in the proof drawer, and the capability drill-down.
+  assert.ok(measuredUses >= 1, `${view}: the measured line must reach the failing-check list (found ${measuredUses})`);
   assert.ok(
     rowMeasuredUses >= 1,
-    `CapabilityRow: the measured line must reach the capability drill-down, which is the third surface and used to be FixFirst's (found ${rowMeasuredUses})`,
+    `CapabilityRow: the measured line must reach the capability drill-down, which used to be FixFirst's (found ${rowMeasuredUses})`,
   );
   assert.ok(
-    measuredUses + rowMeasuredUses >= 3,
-    `the measured line must reach all three detail surfaces a rep can open on a failing check (found ${measuredUses + rowMeasuredUses})`,
+    measuredUses + rowMeasuredUses >= 2,
+    `the measured line must reach both detail surfaces a rep can open on a failing check (found ${measuredUses + rowMeasuredUses})`,
   );
   assert.match(src, /of 100 points earned/, `${view} must show the area score's arithmetic`);
   assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);
@@ -1685,262 +1664,28 @@ for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-le
 }
 
 // ---------------------------------------------------------------------------
-// 8e. THE DESIGNATION (round 5, Adon: "really outlining the graph of what
-//     type of bad it is"). lead-profile.ts names the SHAPE of a scored
-//     profile from hand-written tables; the plate on the card renders it
-//     verbatim. What gets pinned: the tables are COMPLETE (a crater in any
-//     dimension has a name -- one missing entry and the plate says less than
-//     the chart), no entry is a stub, the classifier is TOTAL (every profile
-//     in a sweep classifies -- a plate that can render blank is a question
-//     mark on the most prominent line of the section), and each ordered rule
-//     actually fires on the profile shape it exists for.
-// ---------------------------------------------------------------------------
-
-{
-  const mkDim = (key: string, score: number) => ({
-    key,
-    label: key,
-    score,
-    weight: 1,
-    checks: [],
-    missing: [],
-  });
-  const profile = (scores: Record<string, number>) => DIMENSION_KEYS.map((k) => mkDim(k, scores[k] ?? 70));
-
-  // The crater table covers every dimension, and nothing in either table is a
-  // stub. A one-word `meaning` or an empty `play` is a plate that stamps a
-  // name and then has nothing for the rep to SAY about it.
-  for (const key of DIMENSION_KEYS) {
-    const entry = CRATER_DESIGNATIONS[key];
-    assert.ok(entry, `lead-profile.ts: no crater designation for "${key}" -- a collapse there would render a generic label`);
-    assert.ok(entry.name.length >= 8, `${key}: crater name is a stub`);
-    assert.ok(entry.meaning.length >= 40, `${key}: crater meaning is a stub`);
-    assert.ok(entry.play.length >= 40, `${key}: crater play is a stub`);
-  }
-  assert.equal(
-    Object.keys(CRATER_DESIGNATIONS).length,
-    DIMENSION_KEYS.length,
-    "one crater designation per dimension, no extras -- an extra entry is dead copy nothing can select",
-  );
-  for (const [code, entry] of Object.entries(SHAPE_DESIGNATIONS)) {
-    assert.ok(entry.name.length >= 8, `${code}: shape name is a stub`);
-    assert.ok(entry.meaning.length >= 40, `${code}: shape meaning is a stub`);
-    assert.ok(entry.play.length >= 40, `${code}: shape play is a stub`);
-  }
-
-  // Each ordered rule fires on the shape it exists for.
-  for (const key of DIMENSION_KEYS) {
-    const d = designateLead(profile({ [key]: 20 }), 62);
-    assert.equal(d.code, `crater_${key}`, `one collapsed area (${key} at 20, rest 70) must classify as that crater`);
-    assert.deepEqual(d.primary, [key], `the ${key} crater's defining area must be ${key} itself`);
-  }
-  assert.equal(designateLead(profile(Object.fromEntries(DIMENSION_KEYS.map((k) => [k, 30]))), 30).code, "rebuild", "everything under 45 must classify as the rebuild");
-  assert.equal(designateLead(profile({ conversion: 72 }), 80).code, "contender", "a high composite with no crater must classify as the contender");
-  assert.equal(
-    designateLead(profile({ conversion: 40, trust: 42 }), 58).code,
-    "two_front",
-    "two areas dragging together (40/42 against a 70 field) must classify as the two-front fight",
-  );
-  assert.equal(
-    designateLead(profile({ conversion: 55, trust: 60, design: 62, mobile: 65, content: 68, performance: 70, discoverability: 72 }), 62).code,
-    "erosion",
-    "spread-out decay with no dominant crater must fall through to erosion",
-  );
-  // Rule ORDER: a deep crater on a site whose composite still clears the
-  // contender floor is sold as the crater -- "strong contender" above a
-  // radar with one axis on the floor is the plate contradicting the chart.
-  assert.equal(
-    designateLead(profile({ discoverability: 30 }), 78).code,
-    "crater_discoverability",
-    "a deep crater must outrank the contender floor",
-  );
-
-  // Totality sweep: every profile in a coarse grid classifies to a designation
-  // with words on it, and every defining area it names is real. 6^3 shapes x 7
-  // rotations covers all rule boundaries without a combinatorial test.
-  const GRID = [0, 20, 40, 60, 80, 100];
-  for (const worst of GRID) {
-    for (const mid of GRID) {
-      for (const rest of GRID) {
-        for (const key of DIMENSION_KEYS) {
-          const scores: Record<string, number> = Object.fromEntries(DIMENSION_KEYS.map((k) => [k, rest]));
-          scores[key] = worst;
-          scores[DIMENSION_KEYS[(DIMENSION_KEYS.indexOf(key) + 3) % DIMENSION_KEYS.length]] = mid;
-          const composite = Math.round(Object.values(scores).reduce((a, b) => a + b, 0) / DIMENSION_KEYS.length);
-          const d = designateLead(profile(scores), composite);
-          assert.ok(d && d.name.length >= 8 && d.meaning.length >= 40 && d.play.length >= 40, `unclassifiable profile: ${JSON.stringify(scores)}`);
-          assert.ok(d.primary.length >= 1 && d.primary.length <= 3, `designation for ${JSON.stringify(scores)} names ${d.primary.length} defining areas`);
-          for (const p of d.primary) assert.ok(DIMENSION_KEYS.includes(p), `designation names unknown area "${p}"`);
-        }
-      }
-    }
-  }
-
-  // The plate is ON the card, inside the shape section, rendering the
-  // hand-written entry verbatim -- name, meaning AND play. A plate that
-  // renders only the name is a verdict with no sentence to say.
-  const src = read("components/web-leads/BattleCard.tsx");
-  assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
-  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} selected=\{dimSel\} onSelect=\{setDimSel\} reduced=\{reduced\} \/>/, "the designation plate must open the shape section, on the section's shared selection");
-  assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
-  assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
-  assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
-}
-
-// ---------------------------------------------------------------------------
-// 8f. THE HUD FACES (round 5): every font the card declares must exist as a
+// 8f. THE CARD'S FACES: every font the card declares must exist as a
 //     vendored file. next/font/local fails the BUILD on a missing file, but
 //     only when the importing route builds -- this catches a lost woff2 at
 //     test time, with a message that names the file instead of a webpack
-//     stack. And the three faces stay three: display (Chakra Petch), numeral
-//     (Orbitron, the hero score only), telemetry (JetBrains Mono).
+//     stack. Two faces since the compact card (2026-10-01): display (Chakra
+//     Petch) for labels and telemetry (JetBrains Mono). Orbitron left with
+//     the animated score ring it existed for.
 // ---------------------------------------------------------------------------
 
 {
   const view = "components/web-leads/BattleCard.tsx";
   const src = read(view);
   const declared = [...src.matchAll(/path: "\.\.\/\.\.\/(app\/fonts\/[^"]+)"/g)].map((m) => m[1]);
-  assert.ok(declared.length >= 6, `${view} declares only ${declared.length} font files -- the three-face system lost a weight`);
+  assert.ok(declared.length >= 5, `${view} declares only ${declared.length} font files -- the two-face system lost a weight`);
   for (const rel of declared) {
     assert.ok(fs.existsSync(path.join(process.cwd(), rel)), `${view} declares ${rel} but the file is not vendored -- the build will fail on it`);
   }
-  for (const face of ["ChakraPetch-", "Orbitron-700", "JetBrainsMono-"]) {
+  for (const face of ["ChakraPetch-", "JetBrainsMono-"]) {
     assert.ok(declared.some((p) => p.includes(face)), `${view} lost the ${face} face`);
   }
-  // Orbitron is the hero score's dial face and nothing else's: one declared
-  // weight, worn via --battle-numeral exactly once. The moment it spreads,
-  // it stops reading as an instrument and starts reading as a theme.
-  assert.equal(declared.filter((p) => p.includes("Orbitron")).length, 1, "Orbitron stays a single weight");
-  assert.equal((src.match(/--battle-numeral\)/g) || []).length, 1, "the numeral face is worn by the hero score alone");
-}
-
-// ---------------------------------------------------------------------------
-// 8g. ROUND 5 OF THE WEBGL RADAR: bloom is a TREATMENT, labels are DOM.
-//     What gets pinned is the failure discipline, same as 8d: the bloom
-//     modules load in a try whose catch leaves the round-4 direct render
-//     (never a blank chart because a postprocessing chunk failed), the
-//     screen-blend composite is only applied on the bloomed path, the
-//     composer's targets are disposed with everything else, and the
-//     projected labels ride OUTSIDE the GL scene as aria-hidden DOM -- the
-//     dimension list beside the chart stays the accessible path.
-// ---------------------------------------------------------------------------
-
-{
-  const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /UnrealBloomPass/, "Radar3D must attempt the bloom treatment");
-  assert.match(r3d, /catch \{\s*composer = null;\s*\}/, "a failed postprocessing import must fall back to the direct render, not blank the chart");
-  assert.match(r3d, /mixBlendMode = "screen"/, "the bloomed path must composite onto the panel via screen blend (bloom cannot render on a transparent canvas)");
-  const stripped = stripComments(r3d);
-  assert.ok(
-    !/setClearColor\(0x000000, 1\)/.test(stripped.split("try")[0] || ""),
-    "the opaque clear colour belongs to the bloomed path only -- setting it unconditionally black-boxes the fallback render",
-  );
-  assert.match(r3d, /composer\?\.dispose\?\.\(\)/, "the composer's render targets must be disposed with the renderer");
-  // composer.dispose() does NOT dispose added passes, and UnrealBloomPass
-  // owns its own pyramid of render targets -- without per-pass disposal,
-  // paging through leads leaks GPU memory until the tab dies. (Codex review,
-  // 2026-09-01.)
-  assert.match(r3d, /passDisposers\.push/, "each postprocessing pass that can dispose must be collected for teardown");
-  assert.match(r3d, /for \(const disposePass of passDisposers\) disposePass\(\)/, "the collected passes must actually be disposed in cleanup");
-  assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
-  assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
-  assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");
-}
-
-// ---------------------------------------------------------------------------
-// 8h. ROUND 7 — THE STAGE IS OPERATED, NOT WATCHED. What gets pinned is,
-//     as ever, the failure discipline rather than the theatre: inertia must
-//     DECAY (an undamped spin is a chart that never stops moving), a focus
-//     flight must take the SHORTEST turn (the long way past five beams is
-//     disorientation as a feature), the boot must CLAMP and complete, every
-//     hand-rolled shader material must ride the disposal registry, the
-//     double-click reset must be torn down with the scene, and hover must
-//     never steal selection (a camera chasing casual pointer travel is a
-//     chart that will not hold still mid-sentence).
-// ---------------------------------------------------------------------------
-
-{
-  const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /rotVel \*= Math\.pow\(0\.94, dt \* 60\)/, "a released spin must decay toward rest, frame-rate-normalized -- undamped inertia never stops, and unnormalized decay runs 2x on a 120Hz display");
-  assert.match(r3d, /const nearestTurn/, "a focus flight must rotate the shortest way to the chosen beam");
-  // The rotation SIGN: a three.js Y-rotation by R moves azimuth a to a - R,
-  // so facing the camera (+PI/2) needs R = a - PI/2. The inverted form
-  // coincides for the first pillar only, so the bug survives an eyeball
-  // test on the default selection. (Codex review P1, 2026-09-01.)
-  assert.match(r3d, /nearestTurn\(rotY, focusPillar\.azimuth - Math\.PI \/ 2\)/, "focus must rotate the beam TOWARD the camera, not behind the stage");
-  // A selection made while the scene was still initializing must still get
-  // its flight: the change detector seeds from a capture taken BEFORE the
-  // async load, not from whatever the ref says once loading finishes.
-  // (Codex review P2, 2026-09-01.)
-  assert.match(r3d, /const mountSel = selectedRef\.current;[\s\S]{0,900}?\(async \(\) =>/, "the mount selection must be captured before the async init");
-  assert.match(r3d, /let lastSelSeen = mountSel/, "the change detector must diff against the pre-init capture");
-  assert.match(r3d, /bootT = Math\.min\(1,/, "the boot assembly must clamp at complete -- an unclamped boot re-eases forever");
-  assert.match(r3d, /addEventListener\("dblclick", onDblClick\)/, "double-click must reset the camera to the home orbit");
-  assert.match(r3d, /removeEventListener\("dblclick", onDblClick\)/, "the dblclick listener must be torn down with the scene");
-  // Every hand-rolled ShaderMaterial goes through the disposal registry --
-  // rule 4 gained two new material classes this round and both must die
-  // with the scene.
-  const shaderMats = (r3d.match(/new THREE\.ShaderMaterial/g) || []).length;
-  const trackedShaderMats = (r3d.match(/track\(new THREE\.ShaderMaterial/g) || []).length;
-  assert.ok(shaderMats >= 2, "round 7 hand-rolls the sheath and surface shaders");
-  assert.equal(trackedShaderMats, shaderMats, "every ShaderMaterial must be tracked for disposal");
-  // Selection is a TAP: the pointerup path guards on !dragging via the
-  // TAP_SLOP travel threshold, and the hover path sets only hoverKey.
-  assert.match(r3d, /const TAP_SLOP/, "tap-vs-drag must be distinguished by a travel threshold");
-  assert.match(r3d, /if \(pointerDown && !dragging\) \{[\s\S]{0,200}?selectRef\.current/, "selection must fire on tap release, never mid-drag");
-  assert.doesNotMatch(r3d, /hoverKey = pick\(e\);\s*[^\n]*\n\s*[^\n]*selectRef\.current/, "hover must highlight only -- it must never select");
-  // The score surface's shader may respond to the viewpoint but never to
-  // time: rule 5, in GLSL. The sheath shader is the decorated exception and
-  // carries the uTime term on purpose.
-  assert.ok(!/SURFACE_FRAG[\s\S]*?uTime[\s\S]*?varying/.test(r3d.slice(r3d.indexOf("SURFACE_FRAG"), r3d.indexOf("export function Radar3D"))), "the score surface shader must not animate by itself");
-
-  // The shared-selection wiring: the plate's chips are buttons on the same
-  // state as the list and the stage.
-  const src = read("components/web-leads/BattleCard.tsx");
-  assert.match(src, /const \[dimSel, setDimSel\] = useState<string \| null>\(null\)/, "ScoredBody must own the shape section's one selection");
-  assert.match(src, /<DimensionShape[\s\S]{0,400}?selected=\{dimSel\}/, "the dimension list must read the shared selection");
-  assert.match(src, /designation\.primary\.map[\s\S]{0,700}?aria-pressed=\{active\}/, "the plate's defining-area chips must be accessible toggles on the shared selection");
-}
-
-// ---------------------------------------------------------------------------
-// 8i. ROUND 8 — SOUND AND THE DECODE, AT ZERO COST. The pins are the safety
-//     properties: sound ships OFF and silent-by-structure (a rep is on the
-//     phone next to this card -- a HUD that beeps into a live call is
-//     sabotage dressed as polish), no audio FILE may ever join the repo
-//     (the palette is synthesized; a file is a cost, a licence and a
-//     fetch), the already-enabled unlock is a one-time gesture (autoplay
-//     policy, honoured rather than fought), and the designation decode
-//     renders settled under reduced motion with the real name on the
-//     aria-label so assistive tech never hears a scramble frame.
-// ---------------------------------------------------------------------------
-
-{
-  const sfxSrc = read("components/web-leads/battle-sfx.ts");
-  assert.match(sfxSrc, /oasis\.battlecard\.sfx/, "the sound preference must persist per rep");
-  assert.match(sfxSrc, /enabled = window\.localStorage\.getItem\(KEY\) === "1"/, "sound must be OFF unless the rep explicitly turned it on");
-  assert.match(sfxSrc, /\{ once: true, capture: true \}/, "the already-enabled unlock must be a one-time gesture listener");
-  assert.doesNotMatch(sfxSrc, /\.(mp3|wav|ogg|m4a|webm)\b/, "no audio files, ever -- the palette is synthesized from oscillators");
-  const gainM = sfxSrc.match(/const GAIN = (0\.\d+)/);
-  assert.ok(gainM && parseFloat(gainM[1]) <= 0.06, "the volume ceiling must stay under a phone call");
-  assert.match(sfxSrc, /if \(!enabled \|\| !ctx \|\| ctx\.state !== "running"\) return/, "play must be a no-op unless opted in AND gesture-unlocked");
-
-  const src = read("components/web-leads/BattleCard.tsx");
-  assert.match(src, /aria-pressed=\{sfxOn\}/, "the SFX toggle must be an accessible toggle");
-  assert.match(src, /if \(reduced\) \{ setDisplay\(text\); return; \}/, "the decode must render settled under reduced motion");
-  assert.match(src, /aria-label=\{designation\.name\}/, "assistive tech must hear the real designation, never the scramble");
-
-  const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /disarmSfx = sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount, keeping the disarm");
-  // The arm flag is module-global: a stage unmounting before any gesture
-  // must disarm, or every later stage refuses to arm and SFX shows "on"
-  // while permanently silent -- and the disarm must live in the OUTER
-  // teardown, because an unmount during the async init never builds
-  // `cleanup` at all. (Codex review P2 + follow-up, 2026-09-01.)
-  assert.match(r3d, /dead = true;\s*disarmSfx\(\);/, "the unlock arm must be released in the outer teardown, which runs on every unmount path");
-  assert.match(read("components/web-leads/battle-sfx.ts"), /armUnlock\(el: HTMLElement\): \(\) => void/, "armUnlock must hand back a disarm");
-  assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
-  assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
-  assert.match(r3d, /lockT = Math\.min\(1,/, "the lock-on burst must clamp -- an unclamped burst re-fires forever");
+  assert.ok(!declared.some((p) => p.includes("Orbitron")), `${view}: the Orbitron dial face left with the score ring`);
+  assert.equal((src.match(/--battle-numeral/g) || []).length, 0, `${view}: nothing may wear a numeral face the card no longer declares`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1957,13 +1702,6 @@ for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-le
 // ---------------------------------------------------------------------------
 
 {
-  const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /const damp = \(k: number, dt: number\)/, "per-frame damping must be frame-rate-normalized");
-  assert.match(r3d, /camPos\.lerp\(wantPos, damp\(/, "the camera flight must use normalized damping");
-  assert.match(r3d, /p\.selMix \+= \(\(active \? 1 : 0\) - p\.selMix\) \* damp\(/, "selection emphasis must blend, never snap");
-  assert.match(r3d, /p\.hotMix \+= \(\(hot \? 1 : 0\) - p\.hotMix\) \* damp\(/, "hover emphasis must blend, never snap");
-  assert.doesNotMatch(r3d, /scale\.x = p\.mesh\.scale\.z = active \?/, "the selected beam's scale must ride the damped mix, not a ternary snap");
-
   const src = read("components/web-leads/BattleCard.tsx");
   // RE-AIMED, NOT RELAXED (Task 5, 2026-09-14): `Meter` moved to
   // components/web-leads/audit-parts.tsx so the capability catalogue could
@@ -1974,7 +1712,7 @@ for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-le
   const bars = src + read("components/web-leads/audit-parts.tsx");
   assert.doesNotMatch(bars, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
   const scaleXDraws = (bars.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
-  assert.ok(scaleXDraws >= 2, `both the Meter and the head-to-head track must draw via scaleX (found ${scaleXDraws})`);
+  assert.ok(scaleXDraws >= 1, `the shared Meter must draw via scaleX (found ${scaleXDraws}); the head-to-head track that was the second bar left with the compact card`);
   // One meter, not two. The catalogue's copy is gone; if a second one comes
   // back, the tick overlay is the first thing it loses.
   assert.doesNotMatch(
@@ -1992,18 +1730,6 @@ for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-le
   // every section's registration effect on every state change -- an
   // unregister/re-register cascade that reorders the tab strip and can
   // loop. (Codex review P1, 2026-09-02.)
-  assert.match(r3d, /new IntersectionObserver/, "the render loop must pause when the stage is out of view -- an always-mounted closed drawer would otherwise burn GPU forever (Codex P2, 2026-09-02)");
-  // Zero-area edge-touch counts as isIntersecting per spec -- the collapsed
-  // drawer's clip rect can touch the host's edge, which is exactly the case
-  // the observer exists for. Positive area required.
-  // The visibility predicate and the observer threshold must share ONE
-  // cutoff constant: every misalignment strands the loop in one direction
-  // (edge-touch counts as visible; 0 -> positive is unobservable; the
-  // downward crossing fires while the ratio is still positive). Three
-  // Codex rounds, one constant.
-  assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio >= HIDE_RATIO/, "the visibility predicate must use the shared cutoff");
-  assert.match(r3d, /\{ threshold: \[0, HIDE_RATIO\] \}/, "the observer threshold must be the same shared cutoff");
-  assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
   const shell = read("components/web-leads/BattleSection.tsx");
   assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
   assert.match(shell, /const reportOpen = useCallback\(/, "reportOpen must be identity-stable for the same reason");

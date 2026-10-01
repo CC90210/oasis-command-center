@@ -21,14 +21,22 @@
  *     wins over a load already in flight;
  *   - a libSQL client built with LIBSQL_CLIENT_OPTIONS starts every statement
  *     at once, while the library default queues the 21st (so this can fail);
- *   - every module-scope libSQL client passes LIBSQL_CLIENT_OPTIONS;
- *   - no server module keeps a promise, or a map of promises, at module scope.
- *     (The scan reads declarations. A promise stored in a plain object field
- *     is not detected; settled-once.ts is the pattern to use instead.)
+ *   - the hazard itself: with the default, a queued statement is started from
+ *     ANOTHER request's async context; with the option, from its own;
+ *   - every module-scope libSQL client passes LIBSQL_CLIENT_OPTIONS and does
+ *     not override its concurrency; nothing closes or reconnects the shared
+ *     client (that would fail every request's in-flight statements);
+ *   - two static scans: no module-scope declaration typed as a promise or a
+ *     map of promises, and no module-scope Map that has a promise put into it
+ *     (the shape lib/web-leads/cache.ts had, which the first scan missed).
+ *     Static scans cannot see every shape (a promise in a plain object field,
+ *     an alias type); lib/runtime/settled-once.ts and the web-leads cache's
+ *     marker-and-poll memo are the patterns to use.
  *
  * Run: node --conditions=react-server --import tsx tests/worker-request-isolation.test.ts
  */
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { createClient } from "@libsql/client";
@@ -59,12 +67,16 @@ function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 
-/** Server source files: app/, lib/ and middleware.ts, without tests. */
+/**
+ * Server source files, without tests: app/, lib/, middleware.ts, the Worker's
+ * own entry (worker-entry.ts) and every Worker under workers/ (the cron Worker
+ * runs on the same runtime, so the same rules apply to its module state).
+ */
 function serverSources(): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
-      if (name === "node_modules" || name === "__tests__" || name.startsWith(".")) continue;
+      if (name === "node_modules" || name === "__tests__" || name === "test" || name.startsWith(".")) continue;
       const abs = join(dir, name);
       if (statSync(abs).isDirectory()) walk(abs);
       else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name)) out.push(relative(ROOT, abs).split(sep).join("/"));
@@ -72,11 +84,23 @@ function serverSources(): string[] {
   };
   walk(join(ROOT, "app"));
   walk(join(ROOT, "lib"));
-  out.push("middleware.ts");
+  walk(join(ROOT, "workers"));
+  out.push("middleware.ts", "worker-entry.ts");
   return out;
 }
 
 const USE_CLIENT = /^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/\s*)*["']use client["']/;
+
+/**
+ * Source with comments blanked, so a scan never matches prose. Line comments
+ * are only those that start a line or follow whitespace, which leaves URLs in
+ * strings ("https://...") alone. Newlines are kept, so line numbers still hold.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
+    .replace(/(^|[ \t])\/\/[^\n]*/gm, (_m, lead: string) => lead);
+}
 
 /** The text of the call that starts at `open` (the index of its "("), parentheses balanced. */
 function callText(src: string, open: number): string {
@@ -175,12 +199,52 @@ async function main() {
     assert.equal(await startedStatements({ ...LIBSQL_CLIENT_OPTIONS }, 25), 25);
   });
 
+  // The hazard itself. Request A keeps 20 statements in flight; request B runs
+  // one more. Node's AsyncLocalStorage stands in for workerd's request
+  // context: the context a fetch is ISSUED in is the request the runtime ties
+  // that I/O to. With the shared queue, A's completion issues B's fetch, so B's
+  // read belongs to A (in workerd: B is canceled as hung, and stays stuck
+  // forever if A is canceled). With the option, B issues its own.
+  async function contextOfRequestBStatement(extra: Record<string, unknown>): Promise<string | undefined> {
+    const als = new AsyncLocalStorage<string>();
+    let issuedIn: string | undefined;
+    const fakeFetch = ((req: Request) => {
+      const context = als.getStore();
+      return (async () => {
+        const body = await req.text();
+        if (body.includes("'from b'")) {
+          issuedIn = context;
+          return new Promise<Response>(() => {});
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        throw new Error("request A's statement ends");
+      })();
+    }) as unknown as typeof fetch;
+    const client = createClient({ url: "https://request-isolation.invalid", authToken: "test", fetch: fakeFetch, ...extra });
+    als.run("request A", () => {
+      for (let i = 0; i < 20; i += 1) void client.execute("SELECT 'from a'").catch(() => undefined);
+    });
+    als.run("request B", () => {
+      void client.execute("SELECT 'from b'").catch(() => undefined);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return issuedIn;
+  }
+
+  await check("with the library default, request B's statement is issued from request A's context (the hazard)", async () => {
+    assert.equal(await contextOfRequestBStatement({}), "request A");
+  });
+
+  await check("with LIBSQL_CLIENT_OPTIONS, request B's statement is issued from its own context", async () => {
+    assert.equal(await contextOfRequestBStatement({ ...LIBSQL_CLIENT_OPTIONS }), "request B");
+  });
+
   // -- static guards -------------------------------------------------------
-  await check("every module-scope libSQL client passes LIBSQL_CLIENT_OPTIONS", () => {
+  await check("every module-scope libSQL client passes LIBSQL_CLIENT_OPTIONS without overriding its concurrency", () => {
     const moduleScope: string[] = [];
     const missing: string[] = [];
     for (const file of serverSources()) {
-      const src = read(file);
+      const src = stripComments(read(file));
       if (!/import\s*\{[^}]*\bcreateClient\b[^}]*\}\s*from\s*["']@libsql\/client["']/.test(src)) continue;
       const topLevel = new Set([...src.matchAll(/^(?:export\s+)?(?:let|var|const)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
       for (const m of src.matchAll(/\bcreateClient\(/g)) {
@@ -193,23 +257,43 @@ async function main() {
         if (!atModuleScope) continue;
         const where = `${file}:${src.slice(0, at).split("\n").length}`;
         moduleScope.push(where);
-        if (!callText(src, at + "createClient".length).includes("LIBSQL_CLIENT_OPTIONS")) missing.push(where);
+        const args = callText(src, at + "createClient".length);
+        if (!args.includes("LIBSQL_CLIENT_OPTIONS") || /\bconcurrency\s*:/.test(args)) missing.push(where);
       }
     }
     for (const known of ["lib/turso.ts", "app/api/ingest/automation-log/route.ts"]) {
       assert.ok(moduleScope.some((w) => w.startsWith(`${known}:`)), `the scan no longer finds the module-scope client in ${known}`);
     }
-    assert.deepEqual(missing, [], "module-scope libSQL clients without LIBSQL_CLIENT_OPTIONS (a shared statement queue)");
+    assert.deepEqual(missing, [], "module-scope libSQL clients without LIBSQL_CLIENT_OPTIONS, or overriding its concurrency (a shared statement queue)");
   });
 
-  await check("no server module keeps a promise or a map of promises at module scope", () => {
+  await check("nothing closes or reconnects the shared libSQL client", () => {
+    const offenders: string[] = [];
+    for (const file of serverSources()) {
+      const src = stripComments(read(file));
+      for (const m of src.matchAll(/(?:getTursoClient\(\)|\b_cached)\s*\??\.\s*(?:close|reconnect)\s*\(/g)) {
+        offenders.push(`${file}:${src.slice(0, m.index ?? 0).split("\n").length}`);
+      }
+    }
+    assert.deepEqual(offenders, [], "closing the isolate's one client fails every request's in-flight statements");
+  });
+
+  await check("the scans reach every Worker's source, not only app/ and lib/", () => {
+    const scanned = serverSources();
+    for (const f of ["worker-entry.ts", "workers/oasis-cc-cron/src/index.ts", "middleware.ts"]) {
+      assert.ok(scanned.includes(f), `the scan no longer reads ${f}`);
+    }
+    assert.ok(!scanned.some((f) => /\/test\//.test(f)), "test folders stay out of the scan");
+  });
+
+  await check("no server module declares a promise, or a map typed to hold promises, at module scope", () => {
     const offenders: string[] = [];
     const patterns = [
       /^(?:export\s+)?(?:let|var)\s+([A-Za-z_$][\w$]*)\s*:[^=;\n]*\bPromise</gm,
       /^(?:export\s+)?(?:let|var|const)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=\s*new\s+(?:Map|WeakMap)\s*<[^\n]*\bPromise</gm,
     ];
     for (const file of serverSources()) {
-      const src = read(file);
+      const src = stripComments(read(file));
       if (USE_CLIENT.test(src)) continue;
       for (const re of patterns) {
         for (const m of src.matchAll(re)) {
@@ -218,6 +302,29 @@ async function main() {
       }
     }
     assert.deepEqual(offenders, [], "use lib/runtime/settled-once.ts (and React cache() for one request) instead");
+  });
+
+  await check("no module-scope Map has a promise put into it", () => {
+    const scannedMaps: string[] = [];
+    const offenders: string[] = [];
+    for (const file of serverSources()) {
+      const src = stripComments(read(file));
+      if (USE_CLIENT.test(src)) continue;
+      const maps = [...src.matchAll(/^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]*)?=\s*new\s+(?:Map|WeakMap)\b/gm)].map((m) => m[1]);
+      for (const name of maps) {
+        scannedMaps.push(`${file}#${name}`);
+        for (const m of src.matchAll(new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\.set\\(`, "g"))) {
+          const at = (m.index ?? 0) + m[0].length - 1;
+          const args = callText(src, at);
+          // A promise, a promise chain, or an un-awaited load/fetch call going into an isolate-wide map.
+          if (/\bpromise\b|\.then\(|\.catch\(|(?<!await\s+)\b(?:load|fetch)\(/i.test(args)) {
+            offenders.push(`${file}:${src.slice(0, at).split("\n").length} ${name}.set${args.slice(0, 80)}`);
+          }
+        }
+      }
+    }
+    assert.ok(scannedMaps.includes("lib/web-leads/cache.ts#store"), "the scan no longer reaches the web-leads cache's map");
+    assert.deepEqual(offenders, [], "an isolate-wide map is shared by every request: keep settled values in it, never a pending promise");
   });
 
   await check("the finance seed and the entity table share only settled values", () => {

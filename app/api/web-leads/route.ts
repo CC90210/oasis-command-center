@@ -33,6 +33,7 @@ import {
   PAGE_SIZE,
   WEBDEV_TENANT_ID,
 } from "@/lib/web-leads/data";
+import { CacheWaitTimeout } from "@/lib/web-leads/cache";
 import { fetchScoreIndex } from "@/lib/web-leads/scores";
 import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
@@ -176,6 +177,14 @@ export async function GET(req: NextRequest) {
       },
     );
   } catch (err) {
+    // Another request is still loading these tables and this one waited its
+    // full allowance: retryable, and not a server fault (lib/web-leads/cache.ts).
+    if (err instanceof CacheWaitTimeout) {
+      return NextResponse.json(
+        { ok: false, error: err.message, code: "cache_wait_timeout" },
+        { status: 503, headers: { "Retry-After": "5" } },
+      );
+    }
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "leads_failed" },
       { status: 500 },

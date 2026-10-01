@@ -4,17 +4,21 @@
  *
  * One Cloudflare Worker isolate serves many requests at once, and module-level
  * state is shared by all of them. A module-level promise that is still PENDING
- * is the trap. Request A starts the read; request B awaits A's promise; the
- * runtime ties that read to request A. If A finishes or is aborted first (a fast
- * click aborts the previous navigation), the runtime cancels B's continuation
- * and then kills B as hung: "The Workers runtime canceled this request because
- * it detected that your Worker's code had hung". The promise also never
- * settles, so every later request in that isolate waits on it as well.
+ * is a trap. Request A starts the read and request B awaits A's promise; the
+ * read's I/O belongs to request A. That holds only while A stays alive: if A is
+ * canceled before the read settles, the promise never settles, and every later
+ * request in that isolate waits on it until the isolate is recycled. When a
+ * promise is SETTLED from another request's continuation after its own request
+ * was canceled, the runtime logs "A promise was resolved or rejected from a
+ * different request context than the one it was created in" and kills the
+ * waiter: "The Workers runtime canceled this request because it detected that
+ * your Worker's code had hung".
  *
- * Production evidence, 2026-10-01 (the pipeline incident): the runtime logged
- * "A promise was resolved or rejected from a different request context than
- * the one it was created in" at the same seconds as the hung /pipeline, /,
- * /team/*, /money and /agents navigations that showed "Something went wrong".
+ * The 2026-10-01 pipeline incident logged exactly those two lines on the hung
+ * /pipeline, /, /team/*, /money and /agents navigations. The cause proven in
+ * the runtime was the shared libSQL statement queue (lib/turso.ts
+ * LIBSQL_CLIENT_OPTIONS: 10 of 12 requests killed before, 0 after); the finance
+ * memos that used this helper's predecessor were the same shape, a latent risk.
  *
  * settledOnce(load) keeps only a SETTLED value at module scope. Until one
  * exists, each caller runs `load` itself, so a request only ever awaits its own

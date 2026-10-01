@@ -95,7 +95,8 @@ const ENTITY_COLS = "id, slug, name, kind, owner_key, base_currency";
  * request that awaited another request's pending read was canceled by the
  * Workers runtime as hung (2026-10-01 pipeline incident; see
  * lib/runtime/settled-once.ts). cache() shares one read within a request, and
- * a failed read is not remembered.
+ * a failed read is not remembered across requests (within one request, cache()
+ * hands later callers the same rejection).
  */
 const entityTable = settledOnce(
   cache(async (): Promise<EntityRow[]> => {
