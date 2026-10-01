@@ -24,18 +24,22 @@
  * Finance → atlas). Anything else is unattributed and shows under "All
  * departments" only.
  *
- * NAMES ON THE TAPE (feedSystemName, feedPublisherLabel, displayPayload). The
- * system names a row carries (its publisher, its event name, the agent its
- * payload names) never print a house agent or the operator
- * (lib/os/channel/identity.ts): a house agent is written as the department it
- * leads, and a workspace other than OASIS never reads an OASIS producer's
- * internal name. The row's own data (a subject, a note, a lead's name) is the
- * workspace's and prints as written: "Atlas Roofing" is a lead, not an agent.
+ * NAMES ON THE TAPE (feedSystemName, feedPublisherLabel, feedAgentName,
+ * displayPayload, feedSummary). The system names a row carries (its publisher,
+ * its event name, the agent its payload names) never print a house agent or
+ * the operator (lib/os/channel/identity.ts): a house agent is written as the
+ * department it leads, and a workspace other than OASIS never reads an OASIS
+ * producer's internal name ("Workspace" instead). The row's own data (a
+ * subject, a note, a lead's name) is the workspace's: in OASIS it prints as
+ * written ("Atlas Roofing" is a lead, not an agent); anywhere else a summary
+ * that still names a house agent or the operator is not shown at all, because
+ * free text cannot be told apart from a lead's name and is never rewritten.
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
 import { formatPublisher } from "@/lib/event-bus-display";
 import { namesPersona } from "@/lib/os/channel/identity";
+import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { withDepartmentNames } from "@/components/os/department/config";
 
 export type FeedEventRow = {
@@ -104,25 +108,59 @@ export function feedPublisherLabel(publisher: string | null, oasisWorkspace: boo
   return feedSystemName(formatPublisher(slug)) ?? "Workspace";
 }
 
+/**
+ * The name an agent field in a row's payload prints, by the publisher
+ * column's own rule (FeedView: the department, else feedPublisherLabel). A
+ * producer bound to a department (PUBLISHER_DEPARTMENT, `dept:<key>`) reads as
+ * that department. Any other value is a slug like "bravo_scheduler",
+ * "maven-publisher" or "oasis_lead_stage_engine": OASIS reads it formatted
+ * through the persona rule ("Chief of Staff scheduler"), every other workspace
+ * reads "Workspace". The slug is formatted before the rule runs because the
+ * persona pattern's word boundary does not split "bravo_scheduler".
+ */
+export function feedAgentName(value: string, oasisWorkspace: boolean): string {
+  const dept = departmentForEvent({ publisher_agent: value });
+  if (dept) return OS_DEPARTMENTS.find((d) => d.key === dept)?.label ?? "Workspace";
+  return feedPublisherLabel(value, oasisWorkspace);
+}
+
 /** Payload keys that hold an agent's name: system identifiers a summary can print. */
 const AGENT_PAYLOAD_KEYS: readonly string[] = ["agent", "agent_key", "source_agent", "publisher", "publisher_agent"];
 
 /**
  * The payload a row's summary is built from (lib/event-projection.ts prints
  * "bravo · tick" and "agent=bravo"), with each agent name written through
- * feedSystemName ("Workspace" where it names someone no screen may). Only
- * those identifier fields change; the row's own data is left as written.
+ * feedAgentName for this viewer. Only those identifier fields change; the
+ * row's own data is left for feedSummary.
  */
-export function displayPayload(payload: unknown): unknown {
+export function displayPayload(payload: unknown, oasisWorkspace: boolean): unknown {
   const p = payloadObject(payload);
   let out: Record<string, unknown> | null = null;
   for (const key of AGENT_PAYLOAD_KEYS) {
     const v = p[key];
-    if (typeof v !== "string" || !namesPersona(v)) continue;
+    if (typeof v !== "string" || !v.trim()) continue;
+    const name = feedAgentName(v, oasisWorkspace);
+    if (name === v) continue;
     out = out ?? { ...p };
-    out[key] = feedSystemName(v) ?? "Workspace";
+    out[key] = name;
   }
   return out ?? payload;
+}
+
+/**
+ * A row's one-line summary as this viewer may read it, or null for no line.
+ * Its agent names are already this viewer's (displayPayload). What is left is
+ * the row's own data: in OASIS it prints as written; in any other workspace a
+ * summary that still names a house agent or the operator ("Bravo synced 12
+ * leads for Conaugh", a send to the operator's mailbox) is dropped, never
+ * rewritten, so a client's lead called "Atlas Roofing" is never printed as
+ * "Finance Roofing" either.
+ */
+export function feedSummary(summary: string, oasisWorkspace: boolean): string | null {
+  const text = summary.trim();
+  if (!text) return null;
+  if (!oasisWorkspace && namesPersona(text)) return null;
+  return text;
 }
 
 /** The department that produced a row, or null when nothing says. */

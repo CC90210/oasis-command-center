@@ -441,6 +441,23 @@ async function main() {
   }
   assert.equal(full.items.find((i) => i.id === "sla-breached")?.href, "/tickets?sla=breached");
   assert.equal(full.unavailable.length, 0);
+  // Review is the lead rows the cycle left behind and today's schedule. Bank
+  // lines to categorise are "info" too, but they are owner work, and they
+  // count (W2a review R2: the finance backlog is part of the count).
+  assert.deepEqual(
+    full.items.filter(isReviewItem).map((i) => i.id).sort(),
+    ["follow-ups-carried", "meetings-today", "no-next-step"],
+    "only the named rows are Review rows",
+  );
+  const bankOnly = buildNeedsYou({
+    sales: null,
+    delivery: null,
+    inbound: null,
+    cash: { ok: true, value: { ...cashLive.value, overdueCount: 0, overdueLabel: null } },
+    nowMs: now,
+  });
+  assert.deepEqual(bankOnly.items.map((i) => [i.id, i.tone, isReviewItem(i)]), [["bank-review", "info", false]]);
+  assert.deepEqual(needsYouTotal(bankOnly), { total: 4, capped: false }, "4 bank lines to categorise are 4 things waiting on the owner");
 
   // ── Review: drawn, never counted (W2a, CC decision 1, 2026-10-01) ─────────
   // OASIS's count held 46 open leads with no next step and 20 follow-ups
@@ -599,6 +616,9 @@ async function main() {
   );
   const missText = render(createElement(NeedsYouList, { needsYou: withMiss }));
   assert.match(missText, /Needs you 1 item 1 1 follow-up is past due Fresh Miss 1 Review /, `actionable rows first, then Review: ${missText.slice(0, 160)}`);
+  const bankText = render(createElement(NeedsYouList, { needsYou: bankOnly }));
+  assert.match(bankText, /Needs you 4 items 4 4 bank transactions to categorise /, `bank lines wait and count: ${bankText.slice(0, 160)}`);
+  assert.doesNotMatch(bankText, /Review|Nothing needs you/, `bank lines are not a Review row: ${bankText}`);
 
   // ── Honest day-one cards (W2a: U2-12, U2-13, U7-13) ──────────────────────
   const oneCard = (key: DepartmentKey, over: Partial<Parameters<typeof buildDepartmentCards>[0]>) =>

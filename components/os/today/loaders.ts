@@ -42,7 +42,7 @@ import { formatCents } from "@/lib/founders-finances/money";
 import { getTursoClient } from "@/lib/turso";
 import { listActiveConnections } from "@/lib/connections/store";
 import { providerById } from "@/lib/connections/registry";
-import { listTenantIntegrationStatus } from "@/lib/tenant-integration-store";
+import { getTenantIntegrationPresenceForStatus } from "@/lib/tenant-integration-store";
 import { toDateKey } from "@/lib/calendar/dates";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { listCalendars, listEvents } from "@/lib/calendar/store";
@@ -225,19 +225,19 @@ const ZERNIO_PROVIDERS: readonly string[] = ["zernio", "late"];
 
 /**
  * Has this workspace connected its own Zernio account? A live
- * Connections-framework row for it, or a Late key in the workspace's key store
- * (the reader the Credentials panel uses: presence only, never a value). Either
- * read failing is a throw: "not connected" would be a guess.
+ * Connections-framework row for it, or a Zernio/Late API key in the
+ * workspace's key store, read for those services alone (the strict status
+ * reader: presence only, never a value). Any of these reads failing, or a
+ * Zernio/Late key that will not decrypt, is a throw: "not connected" would be
+ * a guess. Another app's unreadable key is not this question's answer, so it
+ * never turns the Marketing card into "Couldn't load".
  */
 async function zernioConnected(tenantId: string): Promise<boolean> {
   const [connections, keys] = await Promise.all([
     listActiveConnections(getTursoClient(), tenantId),
-    listTenantIntegrationStatus(tenantId),
+    Promise.all(ZERNIO_PROVIDERS.map((service) => getTenantIntegrationPresenceForStatus(tenantId, service, ["api_key"]))),
   ]);
-  return (
-    connections.some((c) => ZERNIO_PROVIDERS.includes(c.provider)) ||
-    keys.some((k) => ZERNIO_PROVIDERS.includes(k.service) && k.has_value)
-  );
+  return connections.some((c) => ZERNIO_PROVIDERS.includes(c.provider)) || keys.some((k) => k.api_key === true);
 }
 
 /**

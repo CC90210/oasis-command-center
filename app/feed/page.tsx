@@ -50,9 +50,10 @@ import {
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
 import { loadPendingApprovals, loadRecentDecisions } from "@/components/os/approvals/load";
 import { loadViewerNeedsYou } from "@/components/os/today/brief-load";
-import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
+import { isReviewItem, needsYouTotal, type NeedsYou } from "@/components/os/today/model";
 import { NeedsYouRows } from "@/components/os/today/NeedsYouList";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
+import { safe } from "@/lib/api-helpers";
 import { floorCount } from "@/lib/os/count";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { mayOpenOsHref } from "@/lib/os/nav";
@@ -92,12 +93,28 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
   // What is waiting on this viewer. Read first: it decides the default tab and
   // the Needs-you count. Unfiltered, the count is Today's (every source, one
   // list); filtered by a department, its approvals (rows carry no department).
+  // Today's reads reject when one of them never answers (W0's deadlines). On
+  // Today that is the page; here it is one tab's count and rows, so a hung
+  // read degrades to the approvals count, as a floor, with a note, and never
+  // takes the tape down with it.
   const scope = approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput });
-  const [pending, needs] = await Promise.all([
+  const [pending, needsRead] = await Promise.all([
     loadPendingApprovals({ scope, tenantSlug, department: dept, limit: FEED_APPROVALS_SHOWN }),
-    dept ? Promise.resolve(null) : loadViewerNeedsYou({ viewer: viewer.surface, navInput: viewer.navInput, approvalsLimit: 1 }),
+    dept
+      ? Promise.resolve(null)
+      : safe<NeedsYou | "unread">(
+          "feed.needs_you",
+          loadViewerNeedsYou({ viewer: viewer.surface, navInput: viewer.navInput, approvalsLimit: 1 }),
+          "unread",
+        ),
   ]);
-  const waiting = needs ? needsYouTotal(needs) : pending.ok ? { total: pending.value.total, capped: false } : null;
+  const needsUnread = needsRead === "unread";
+  const needs = needsUnread ? null : needsRead;
+  const waiting = needs
+    ? needsYouTotal(needs)
+    : pending.ok
+      ? { total: pending.value.total, capped: needsUnread }
+      : null;
   // Rows other than approvals (which are drawn as full cards above them).
   const needsRows = needs?.items ?? [];
   const rowsWaiting = needsRows.some((item) => !isReviewItem(item));
@@ -157,7 +174,7 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
                   </p>
                 </div>
               </Card>
-            ) : pending.value.items.length === 0 && !rowsWaiting ? (
+            ) : pending.value.items.length === 0 && !rowsWaiting && !needsUnread ? (
               <NeedsYouEmpty department={deptLabel ?? null} />
             ) : pending.value.items.length > 0 ? (
               <section aria-label="Waiting on you" className="space-y-3">
@@ -187,6 +204,12 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
             {unchecked.length > 0 && (
               <p className="text-xs text-status-warm">
                 Couldn&rsquo;t check {unchecked.join(", ")} just now. This list may be incomplete; reload in a minute.
+              </p>
+            )}
+            {needsUnread && (
+              <p className="text-xs text-status-warm">
+                Couldn&rsquo;t check the rest of what Today lists just now, so only approvals are counted here. Reload in a
+                minute.
               </p>
             )}
 

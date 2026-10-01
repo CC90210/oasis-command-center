@@ -904,16 +904,22 @@ export function buildNeedsYou(input: {
 }
 
 /**
- * A row to look over, not a thing waiting on the viewer: open leads with no
- * next step, follow-ups promised before this cycle began, today's booked
- * meetings, bank lines to categorise (every "info" row). Needs you draws them
- * under a "Review" heading below the rows that need the viewer, and the count
- * leaves them out: on 2026-09-30 OASIS's Today counted 66 of them (46 leads
- * with no next step, 20 follow-ups carried over from before the 2026-09-23
- * cycle) as things waiting on CC, so the number could never reach zero.
+ * The rows to look over, not things waiting on the viewer: open leads with no
+ * next step, follow-ups promised before this cycle began, and today's booked
+ * meetings (the schedule lists them; one that passes with no outcome comes
+ * back as "meeting-outcomes", which counts). Needs you draws them under a
+ * "Review" heading below the rows that need the viewer, and the count leaves
+ * them out: on 2026-09-30 OASIS's Today counted 66 of them (46 leads with no
+ * next step, 20 follow-ups carried over from before the 2026-09-23 cycle) as
+ * things waiting on CC, so the number could never reach zero.
+ *
+ * Named by row, not by tone: bank lines to categorise are "info" too, and they
+ * are owner work that stays in the count (the finance backlog).
  */
-export function isReviewItem(item: Pick<NeedsYouItem, "tone">): boolean {
-  return item.tone === "info";
+const REVIEW_ROW_IDS: ReadonlySet<string> = new Set(["follow-ups-carried", "no-next-step", "meetings-today"]);
+
+export function isReviewItem(item: Pick<NeedsYouItem, "id">): boolean {
+  return REVIEW_ROW_IDS.has(item.id);
 }
 
 /**

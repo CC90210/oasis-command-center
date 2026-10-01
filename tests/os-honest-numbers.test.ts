@@ -42,6 +42,8 @@ delete process.env.TURSO_DB_URL;
 delete process.env.TURSO_AUTH_TOKEN;
 delete process.env.STRIPE_SECRET_KEY;
 delete process.env.FOUNDERS_TENANT_IDS;
+// Test-only key for the key store's ciphertexts (the Zernio key check reads one).
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "os-honest-numbers-field-key-long-enough-0001";
 // The OASIS workspace calendar identity (fake values; nothing calls Google).
 process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID = "test-client-id";
 process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET = "test-client-secret";
@@ -965,6 +967,30 @@ async function main() {
       await raw.execute("DELETE FROM tenant_connections WHERE id IN ('zc-a', 'zc-b')");
     }
   });
+  // W2a review (W2A-R4): the key check decrypted EVERY stored credential and
+  // threw on any unreadable one, so another app's key (Twilio, Stripe) turned
+  // the Marketing card into "Couldn't load".
+  await check("content I/O (W2A-R4): only a Zernio/Late key answers 'is Zernio connected'; another app's unreadable key does not", async () => {
+    const { encryptField } = await import("../lib/field-encryption");
+    const zernioOf = async (tenant: string) => {
+      const r = await loaders.loadContentWeek(tenant);
+      return r.ok ? r.value.zernioConnected : "failed";
+    };
+    const keyRow = (id: string, service: string, field: string, value: string) => ({
+      sql: "INSERT INTO tenant_integration_credentials (id, tenant_id, service, field_key, encrypted_value) VALUES (?, ?, ?, ?, ?)",
+      args: [id, TENANT_B, service, field, value],
+    });
+    await raw.batch([keyRow("k-twilio", "twilio", "auth_token", "not-a-ciphertext")], "write");
+    try {
+      assert.equal(await zernioOf(TENANT_B), false, "a Twilio key nobody can read says nothing about Zernio");
+      await raw.batch([keyRow("k-late", "late", "api_key", encryptField("late-test-key"))], "write");
+      assert.equal(await zernioOf(TENANT_B), true, "a saved Late key is Zernio");
+      await raw.execute("UPDATE tenant_integration_credentials SET encrypted_value = 'garbled' WHERE id = 'k-late'");
+      assert.equal(await zernioOf(TENANT_B), "failed", "a Late key that will not decrypt is 'Couldn't load', never a guess");
+    } finally {
+      await raw.execute("DELETE FROM tenant_integration_credentials WHERE id IN ('k-twilio', 'k-late')");
+    }
+  });
 
   // Hot replies: lead_interactions does not exist yet, so the read FAILS.
   await check("inbound I/O: a failed lead_interactions read is 'Couldn't check', never 'no hot replies'", async () => {
@@ -1162,6 +1188,50 @@ async function main() {
     } finally {
       await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
       await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
+    }
+  });
+  // W2a review (W2A-R5): the tile dropped the old tile's link to the hub, and
+  // it counted the viewer's own Google link, so two people in one workspace
+  // could read two different workspace numbers.
+  await check("Operations tab I/O (W2A-R5): an owner gets the link to fix a non-zero count; the count is the workspace's, whoever looks", async () => {
+    await raw.batch(
+      [
+        { sql: "INSERT INTO integrations_health (tenant_id, service, status, last_ping_at) VALUES (?, 'gws', 'healthy', ?)", args: [TENANT_A, at(60_000)] },
+        connectionRow("st-a", TENANT_A, "stripe", "expired", "down"),
+      ],
+      "write",
+    );
+    // The personal-link read needs the table's real columns; B's owner links their own Google.
+    await raw.executeMultiple(`
+      ALTER TABLE user_integration_credentials ADD COLUMN last_tested_at TEXT;
+      ALTER TABLE user_integration_credentials ADD COLUMN last_test_ok INTEGER;
+      ALTER TABLE user_integration_credentials ADD COLUMN last_test_error TEXT;
+      ALTER TABLE user_integration_credentials ADD COLUMN updated_at TEXT;
+    `);
+    await raw.execute({
+      sql: "INSERT INTO user_integration_credentials (id, tenant_id, user_id, service, field_key, encrypted_value) VALUES ('g-b', ?, ?, 'gmail_oauth', 'refresh_token', 'stored')",
+      args: [TENANT_B, osViewer(TENANT_B, false).surface.userId],
+    });
+    try {
+      type ConnTile = { status: string; value: unknown; hint?: string; emptyText?: string; action?: { label: string; href: string } };
+      const connTile = async (viewer: ReturnType<typeof osViewer>, tenant: string) =>
+        tile((await numbersMod.loadDepartmentNumbers(deptOf("operations"), viewer, await loadTenantRoutines(tenant))).tiles, "Connections needing attention") as
+          | ConnTile
+          | undefined;
+      const owner = await connTile(operatorViewer(), TENANT_A);
+      assert.deepEqual([owner?.value, owner?.action], ["1", { label: "Open Connections", href: "/settings/connections" }], "the owner can fix it from the tile");
+      const worker = await connTile(osViewer(TENANT_A, true, { persona: "worker" }), TENANT_A);
+      assert.deepEqual([worker?.value, worker?.action], ["1", undefined], "the same number; only an owner or admin manages connections");
+      const { KpiTile } = await import("../components/os/KpiTile");
+      assert.match(render(createElement(KpiTile, owner as never)), /Connections needing attention 1 Of 2 apps set up Open Connections/);
+      // B's owner has their own Google linked; B has set up nothing. The hub
+      // card says "Your account linked", but the workspace has no app set up.
+      const b = await connTile(osViewer(TENANT_B, false), TENANT_B);
+      assert.deepEqual([b?.status, b?.emptyText, b?.action], ["no_data", "No apps connected yet", undefined], "a personal link is not the workspace's app");
+    } finally {
+      await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
+      await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
+      await raw.execute("DELETE FROM user_integration_credentials WHERE id = 'g-b'");
     }
   });
   // Verify-fix (2026-09-29): a failed operator lookup answered "not the

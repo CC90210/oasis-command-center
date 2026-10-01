@@ -294,7 +294,18 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   // or the rail draws no dot (lib/os/deadline.ts, W0).
   assert.match(layout, /withDeadline\(\s*loadConnectorFacts\(\{[^}]*\}\)\.then\([\s\S]*?\),\s*RAIL_CONNECTIONS_DEADLINE_MS,\s*"layout\.connections",\s*\)/);
   assert.match(layout, /const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;/);
-  assert.match(read("components/os/department/numbers.ts"), /connectionTile\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
+  // The Operations tile counts the same statuses, as the WORKSPACE's number:
+  // the viewer's own Google link is left out (W2A-R5), and the tile links an
+  // owner or admin to the hub.
+  assert.match(
+    read("components/os/department/numbers.ts"),
+    /connectionTile\(connectionsHealth\(\{ \.\.\.facts, personalGoogleLinked: null \}, Date\.now\(\)\), viewer\.surface\.persona === "founder"\)/,
+  );
+  // Why it is left out: the same workspace, one person with their own Google
+  // linked, would count an app set up that the workspace has not set up.
+  const linked: ConnectorFacts = { ...EMPTY, personalGoogleLinked: true };
+  assert.equal(connectionsHealth(linked, NOW).setUp, 1, "precondition: a personal link counts as set up on the hub");
+  assert.equal(connectionsHealth({ ...linked, personalGoogleLinked: null }, NOW).setUp, 0);
 }
 
 // A saved key nobody tested is set up, not connected.

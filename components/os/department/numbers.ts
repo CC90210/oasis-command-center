@@ -540,9 +540,11 @@ async function clientSuccessNumbers(viewer: OsViewer): Promise<DepartmentNumbers
  * Connections dot and the hub's cards cannot disagree. The tile used to claim
  * health checks were unmeasured while Today listed connections needing
  * attention from those same checks. An app whose status could not be read
- * makes the count a floor; nothing readable at all is "Couldn't load".
+ * makes the count a floor; nothing readable at all is "Couldn't load". An
+ * owner or admin (who manages connections) gets the way to fix a non-zero
+ * count from the tile itself.
  */
-function connectionTile(h: ConnectionsHealth): KpiTileProps {
+function connectionTile(h: ConnectionsHealth, canManage: boolean): KpiTileProps {
   const label = "Connections needing attention";
   if (h.setUp === 0 && h.unknown > 0) return failed(label, "Connection status could not be read");
   if (h.setUp === 0) return { label, value: null, status: "no_data", emptyText: "No apps connected yet" };
@@ -551,6 +553,7 @@ function connectionTile(h: ConnectionsHealth): KpiTileProps {
     value: tileCount(h.attention, h.unknown > 0),
     status: "live",
     hint: `Of ${n(h.setUp)} app${h.setUp === 1 ? "" : "s"} set up${h.unknown > 0 ? `; ${n(h.unknown)} could not be checked` : ""}`,
+    ...(canManage && h.attention > 0 ? { action: { label: "Open Connections", href: CONNECTIONS_HREF } } : {}),
   };
 }
 
@@ -575,7 +578,9 @@ async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>)
                 ? `Last clean run ${formatOperatorDate({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }, new Date(health.value.lastSuccessAt))}`
                 : "No clean run recorded yet",
             },
-      connectionTile(connectionsHealth(facts, Date.now())),
+      // The workspace's number: the viewer's own Google link (a per-person
+      // fact the hub reports) must not make two people see different counts.
+      connectionTile(connectionsHealth({ ...facts, personalGoogleLinked: null }, Date.now()), viewer.surface.persona === "founder"),
     ],
     attention: health.ok ? failureAttention(health.value) : [],
   };

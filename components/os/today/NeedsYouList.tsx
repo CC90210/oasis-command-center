@@ -14,8 +14,8 @@
  *
  * Under them, "Review": rows to look over that are not waiting on anyone, and
  * are not in the count (model.ts isReviewItem): open leads with no next step,
- * follow-ups promised before this cycle began, today's booked meetings, bank
- * lines to categorise.
+ * follow-ups promised before this cycle began, today's booked meetings. Bank
+ * lines to categorise are owner work: they wait above, and count.
  *
  * An empty list says so, and a source that could not be read is named under
  * it — "nothing needs you" is only claimed when every source answered.

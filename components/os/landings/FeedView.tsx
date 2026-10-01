@@ -19,6 +19,7 @@ import {
   departmentForEvent,
   displayPayload,
   feedPublisherLabel,
+  feedSummary,
   feedSystemName,
   type FeedEventRow,
   type FeedTab,
@@ -151,9 +152,11 @@ export function FeedRows({
         {rows.map((row) => {
           // The wire name (BRAVO_RECORD_STATUS_CHANGED) never reaches the
           // screen, not even as a tooltip: the label is the projected one,
-          // and every system name passes feed-model's naming rule.
-          const ev = projectEvent({ ...row, payload: displayPayload(row.payload) });
+          // every system name passes feed-model's naming rule, and the
+          // summary is this viewer's (feedSummary).
+          const ev = projectEvent({ ...row, payload: displayPayload(row.payload, oasisWorkspace) });
           const label = feedSystemName(ev.label) ?? "Activity";
+          const summary = ev.summary !== "—" ? feedSummary(ev.summary, oasisWorkspace) : null;
           const dept = departmentForEvent(row);
           const who = dept ? departmentLabels[dept] ?? null : null;
           const when = ev.published_at || row.created_at;
@@ -174,9 +177,7 @@ export function FeedRows({
                   {(sev === "error" || sev === "critical") && <Tag tone="hot">Failed</Tag>}
                   {(sev === "warn" || sev === "warning") && <Tag tone="warm">Warning</Tag>}
                 </div>
-                {ev.summary && ev.summary !== "—" && (
-                  <p className="mt-0.5 truncate text-[13px] leading-5 text-fg-muted">{ev.summary}</p>
-                )}
+                {summary && <p className="mt-0.5 truncate text-[13px] leading-5 text-fg-muted">{summary}</p>}
               </div>
             </li>
           );
