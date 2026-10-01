@@ -700,7 +700,10 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   const drawer = read("components/os/connections/ConnectorDrawer.tsx");
   assert.match(drawer, /<ServiceKeysForm/);
   assert.match(drawer, /def\.yourAccount === "google" && personalGoogle[\s\S]{0,400}<PersonalIntegrationsPanel/);
-  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return openDrawer\(def\.slug\)/);
+  // What a click does is connectorClickAction (keys open the drawer), proven by
+  // render in tests/connections-everywhere.test.ts; the hub acts on it.
+  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return "drawer"/);
+  assert.match(hub, /const next = connectorClickAction\(def, embedded\);\s*if \(next === "drawer" \|\| !action\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
   // Google's sign-in comes back to its drawer, not to a removed anchor.
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);

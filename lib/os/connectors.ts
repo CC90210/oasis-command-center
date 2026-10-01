@@ -157,11 +157,24 @@ export type ConnectorDef = {
   /** The provider's own setup documentation (opens in a new tab). */
   docs?: { href: string; label: string };
   /**
-   * The ways a workspace can connect this app, each with whether it exists
-   * today (Slack: OASIS's own app, or a workspace's own app). A path that is
-   * not built says so and offers "Ask OASIS for it" in the drawer.
+   * The ways a workspace connects this app, each for one kind of workspace
+   * (Slack: OASIS's own workspace uses the OASIS app; a client workspace uses
+   * its own app). A viewer is shown only its own (ConnectorStatus.paths), with
+   * its state on this deployment; a path that is not built says so and offers
+   * "Ask OASIS for it" in the drawer.
    */
-  paths?: readonly { title: string; body: string; built: boolean }[];
+  paths?: readonly ConnectorPath[];
+};
+
+export type ConnectorPath = {
+  /** Whose workspace connects this way: OASIS's own, or a client's. */
+  audience: "oasis" | "client";
+  title: string;
+  body: string;
+  /** False: nothing is built for it yet. */
+  built: boolean;
+  /** It needs OASIS's own app on this deployment (Worker secrets), so appNotConfigured decides its state. */
+  needsOasisApp: boolean;
 };
 
 /** Settings › Connections with this app's drawer open. */
@@ -209,7 +222,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "intuit", "qbo", "bookkeeping"],
     live: null,
-    pendingNote: "Needs OASIS's own Intuit app and Intuit's app assessment before it can connect to live books.",
+    pendingNote: "Nothing in OASIS connects to QuickBooks yet. Live books need an app that has passed Intuit's app assessment.",
   },
   {
     slug: "xero",
@@ -223,7 +236,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "bookkeeping"],
     live: null,
-    pendingNote: "Needs OASIS's own Xero app before it can connect to your books.",
+    pendingNote: "Nothing in OASIS connects to Xero yet.",
   },
   {
     slug: "plaid",
@@ -237,7 +250,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Shows cash on hand and runway in Finance", "Read-only: OASIS never moves money"],
     keywords: ["bank", "banking", "cash", "transactions"],
     live: null,
-    pendingNote: "Needs OASIS's own Plaid account approved before it can link a bank.",
+    pendingNote: "Nothing in OASIS connects to Plaid yet. Linking real bank accounts needs Plaid's production approval.",
   },
 
   // Calendar & email
@@ -307,7 +320,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Writes call notes and follow-ups for Sales and Client Success"],
     keywords: ["video", "calls", "recording", "transcript"],
     live: null,
-    pendingNote: "Needs OASIS's own Zoom app and Zoom Marketplace review before it can connect.",
+    pendingNote: "Nothing in OASIS connects to Zoom yet. An app other Zoom accounts can install needs Zoom Marketplace review.",
   },
   {
     slug: "fathom",
@@ -368,16 +381,23 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     },
     pendingNote: "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here.",
     seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
+    // CC, 2026-10-01: a client brings its own Slack app ("the client is
+    // responsible for obtaining the API key"); OASIS's own workspace uses the
+    // OASIS app, which OASIS sets up. Each viewer is shown only its own path.
     paths: [
       {
-        title: "OASIS's Slack app",
-        body: "How every workspace connects, OASIS's own included: press Add to Slack under Chat apps and your Slack admin approves the app in your Slack. OASIS then holds a token for your Slack workspace only, and Disconnect deletes it.",
+        audience: "oasis",
+        title: "The OASIS Slack app",
+        body: "OASIS's own workspace connects with the OASIS Slack app, set up by OASIS on this deployment: an owner or admin presses Add to Slack under Chat apps and approves it in Slack. Disconnect deletes the token OASIS holds.",
         built: true,
+        needsOasisApp: true,
       },
       {
+        audience: "client",
         title: "Your own Slack app",
-        body: "For a Slack whose admin does not allow outside apps: your admin creates the app in your Slack and gives OASIS its credentials. Not built yet.",
+        body: "Your Slack admin creates a Slack app in your Slack and gives OASIS its client ID, client secret and signing secret.",
         built: false,
+        needsOasisApp: false,
       },
     ],
   },
@@ -494,7 +514,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     keywords: ["facebook", "instagram", "ads", "lead ads", "advertising"],
     live: null,
-    pendingNote: "Needs OASIS's own Meta app, Business Verification and Meta's App Review before it can connect.",
+    pendingNote: "Nothing in OASIS connects to Meta yet. An app that manages other businesses' ads needs Meta's App Review.",
   },
   {
     slug: "zernio",
@@ -545,7 +565,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Imports your leads and pipeline into OASIS", "Sends texts through your GoHighLevel number"],
     keywords: ["ghl", "highlevel", "crm", "import"],
     live: null,
-    pendingNote: "Needs OASIS's own GoHighLevel app before it can import your contacts.",
+    pendingNote: "Nothing in OASIS connects to GoHighLevel yet.",
   },
 
   // AI models
@@ -596,6 +616,20 @@ export type ConnectorStatus = {
   detail?: string;
   /** The connected account, as the provider named it (framework connections only). */
   account?: string;
+  /**
+   * The ways THIS workspace connects the app (ConnectorDef.paths for its kind
+   * of workspace), each with its state on this deployment, for the drawer.
+   */
+  paths?: readonly ConnectorPathStatus[];
+};
+
+export type ConnectorPathStatus = {
+  title: string;
+  body: string;
+  /** "Available", "Not set up on this deployment" or "Not built yet". */
+  state: string;
+  /** Not built: the drawer offers "Ask OASIS for it". */
+  requestable: boolean;
 };
 
 /**
@@ -650,6 +684,12 @@ export type ConnectorFacts = {
    * (Slack without its Worker secrets). Their cards say so and offer nothing.
    */
   appNotConfigured?: readonly string[] | null;
+  /**
+   * The workspace is OASIS's own (true) or a client's (false), which decides
+   * the connection paths it is shown (Slack: the OASIS app, or its own app).
+   * Unknown (absent): no per-workspace path is shown.
+   */
+  oasisWorkspace?: boolean | null;
 };
 
 /** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
@@ -869,6 +909,23 @@ function frameworkStatus(
   }
 }
 
+/** The paths for the viewer's kind of workspace; none when it is not known. */
+function viewerPaths(def: ConnectorDef, facts: ConnectorFacts): readonly ConnectorPath[] {
+  if (!def.paths || typeof facts.oasisWorkspace !== "boolean") return [];
+  const audience = facts.oasisWorkspace ? "oasis" : "client";
+  return def.paths.filter((p) => p.audience === audience);
+}
+
+/**
+ * A path's state from what is true on this deployment, never from the static
+ * `built` flag alone: a built path that needs OASIS's app, where that app is
+ * not set up, is not "Available".
+ */
+function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathStatus {
+  const state = !p.built ? "Not built yet" : p.needsOasisApp && oasisAppMissing ? "Not set up on this deployment" : "Available";
+  return { title: p.title, body: p.body, state, requestable: !p.built };
+}
+
 /**
  * The status a card shows. Pure: the same facts and `nowMs` always give the
  * same words, which is what lets the test feed it hostile inputs.
@@ -892,17 +949,31 @@ export function resolveConnectorStatus(
 
   const source = def.live.source;
   if (source.kind === "tenant_connection") {
+    // The ways THIS workspace connects (Slack: OASIS's own workspace uses the
+    // OASIS app, a client its own app), each with its state here.
+    const mine = viewerPaths(def, facts);
+    const oasisAppMissing = !!facts.appNotConfigured?.includes(source.provider);
+    const paths = mine.length > 0 ? mine.map((p) => pathStatus(p, oasisAppMissing)) : undefined;
+    const withPaths = (s: ConnectorStatus): ConnectorStatus => (paths ? { ...s, paths } : s);
     // An app OASIS itself has not been given on this deployment cannot be
     // connected, whatever the facts say: say so rather than offer a dead button.
-    if (facts.appNotConfigured?.includes(source.provider)) {
-      return {
+    // A workspace whose own way in does not need OASIS's app is not held to it.
+    if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {
+      return withPaths({
         kind: "coming_soon",
         label: `${def.name} app not configured yet`,
         detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
-      };
+      });
     }
-    if (!facts.connections) return UNKNOWN;
-    return frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs);
+    if (!facts.connections) return withPaths(UNKNOWN);
+    // A workspace whose every way in is not built yet cannot connect, unless it
+    // already is: the state, with the request in the drawer, never "Not connected".
+    const connected = facts.connections.some((c) => c.provider === source.provider && c.status !== "revoked");
+    if (!connected && mine.length > 0 && mine.every((p) => !p.built)) {
+      const how = mine[0].title.charAt(0).toLowerCase() + mine[0].title.slice(1);
+      return withPaths({ kind: "coming_soon", label: "Not built yet", detail: `Connecting ${def.name} with ${how} is not built yet.` });
+    }
+    return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }
   if (source.kind === "tenant_keys" || source.kind === "oauth_tokens") {
     if (!facts.keyRows) return UNKNOWN;

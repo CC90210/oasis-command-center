@@ -26,7 +26,7 @@ import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
-import { listTenantIntegrationStatus } from "@/lib/tenant-integration-store";
+import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import { listUserIntegrationStatus } from "@/lib/user-integration-store";
 import { listActiveConnections } from "@/lib/connections/store";
 import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
@@ -129,7 +129,16 @@ export async function loadConnectorFacts(input: {
     loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
   ]);
-  return { keyRows, heartbeats, personalGoogleLinked, connections, appNotConfigured: appNotConfiguredProviders() };
+  return {
+    keyRows,
+    heartbeats,
+    personalGoogleLinked,
+    connections,
+    appNotConfigured: appNotConfiguredProviders(),
+    // OASIS's own workspaces, by id (the env-credential tenants): they connect
+    // OASIS's apps; every other workspace is a client and is shown its own path.
+    oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
+  };
 }
 
 /**

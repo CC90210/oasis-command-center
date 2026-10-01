@@ -72,6 +72,24 @@ const CUSTOM_KEYS = {
   words: ["custom", "key", "keys", "secret", "token", "webhook", "api", "env", "other"],
 };
 
+/**
+ * What clicking a card does. Keys (and an app that is not built) open the
+ * drawer, where the app is set up or requested; only an OAuth popup or a page
+ * link leaves it. Inside the workspace setup (`embedded`) a Settings page is
+ * not reachable yet, so a page link opens the drawer, which says where.
+ */
+export function connectorClickAction(def: ConnectorDef, embedded: boolean): "drawer" | "popup" | "navigate" {
+  const action = def.live?.connect;
+  if (!action || action.kind === "key_form" || action.kind === "keys") return "drawer";
+  if (action.kind === "link") return embedded ? "drawer" : "navigate";
+  return "popup";
+}
+
+/** The drawer a `?app=` deep link opens on the first render (not after it), or null. */
+function deepLinkedApp(initialApp: string | null): string | null {
+  return initialApp && initialApp !== "custom-keys" && connectorBySlug(initialApp) ? initialApp : null;
+}
+
 export function ConnectionsHub({
   statuses,
   supportHref,
@@ -94,9 +112,11 @@ export function ConnectionsHub({
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [drawerSlug, setDrawerSlug] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [customOpen, setCustomOpen] = useState(false);
+  // A deep link opens its drawer in the first render, so the page arrives with
+  // it open rather than opening a moment later.
+  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => deepLinkedApp(initialApp));
+  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkedApp(initialApp) !== null);
+  const [customOpen, setCustomOpen] = useState(() => initialApp === "custom-keys");
   const [banner, setBanner] = useState<NoticeValue>(null);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
@@ -182,15 +202,11 @@ export function ConnectionsHub({
   const connect = useCallback(
     (def: ConnectorDef) => {
       const action = def.live?.connect;
-      // Keys are set up in the drawer itself (form, Test, Remove), so the card
-      // opens the drawer; only an OAuth popup or a page link leaves it.
-      if (!action || action.kind === "key_form" || action.kind === "keys") return openDrawer(def.slug);
-      // Inside the workspace setup a Settings page is not reachable yet: the
-      // drawer says where the app is set up instead of leaving the setup.
-      if (embedded && action.kind === "link") return openDrawer(def.slug);
+      const next = connectorClickAction(def, embedded);
+      if (next === "drawer" || !action) return openDrawer(def.slug);
       setDrawerOpen(false);
-      if (action.kind === "popup") return runPopup(def, action.href, action.messageSource);
-      router.push(action.href);
+      if (next === "popup" && action.kind === "popup") return runPopup(def, action.href, action.messageSource);
+      if (action.kind === "link") router.push(action.href);
     },
     [openDrawer, router, runPopup, embedded],
   );

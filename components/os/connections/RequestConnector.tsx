@@ -31,7 +31,18 @@ export function connectorRequestTicket(input: { name: string; reason?: string | 
   };
 }
 
-export function RequestConnector({ name, reason, from }: { name: string; reason?: string | null; from: string }) {
+export function RequestConnector({
+  name,
+  reason,
+  from,
+  buttonClassName = "btn-primary w-full",
+}: {
+  name: string;
+  reason?: string | null;
+  from: string;
+  /** The drawer's full-width button by default; a page row passes a smaller one. */
+  buttonClassName?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeValue>(null);
@@ -71,7 +82,7 @@ export function RequestConnector({ name, reason, from }: { name: string; reason?
   return (
     <div className="space-y-2">
       <Notice notice={notice} />
-      <button type="button" onClick={request} disabled={busy || sent !== null} className="btn-primary w-full">
+      <button type="button" onClick={request} disabled={busy || sent !== null} className={buttonClassName}>
         {sent ? `Asked for ${name}` : busy ? "Sending..." : `Ask OASIS for ${name}`}
       </button>
     </div>

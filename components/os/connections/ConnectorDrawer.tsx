@@ -190,8 +190,12 @@ export function ConnectorDrawer({
 
   // An app set up in the drawer has its actions in the body, not down here. An
   // app that is not built files a request the OASIS team sees (no dead chip).
+  // A live app this workspace cannot connect here (its way in is not built,
+  // or needs an app this deployment lacks) offers no connect button: the body
+  // says why, and requests what is not built.
+  const blocked = !!live && status?.kind === "coming_soon";
   const footer =
-    def && !setUpHere ? (
+    def && !setUpHere && !blocked ? (
       <footer className="border-t border-hairline px-5 py-4">
         {live ? (
           elsewhere ? (
@@ -255,18 +259,20 @@ export function ConnectorDrawer({
 
           {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={status?.label} />}
 
-          {def.paths && def.paths.length > 0 && (
+          {status?.paths && status.paths.length > 0 && (
+            // This workspace's own way in, with its state here (resolved on the
+            // server for the viewer's kind of workspace: lib/os/connectors.ts).
             <section>
-              <h3 className="mb-2 text-xs font-medium text-fg-dim">How a workspace connects {def.name}</h3>
+              <h3 className="mb-2 text-xs font-medium text-fg-dim">How your workspace connects {def.name}</h3>
               <ul className="space-y-3">
-                {def.paths.map((p) => (
+                {status.paths.map((p) => (
                   <li key={p.title} className="rounded-lg border border-hairline bg-bg-raised px-3 py-3">
                     <div className="text-[13px] font-medium text-fg">
                       {p.title}
-                      <span className="ml-2 text-[12px] font-normal text-fg-dim">{p.built ? "Available" : "Not built yet"}</span>
+                      <span className="ml-2 text-[12px] font-normal text-fg-dim">{p.state}</span>
                     </div>
                     <p className="mt-1 text-[13px] leading-5 text-fg-muted">{p.body}</p>
-                    {!p.built && (
+                    {p.requestable && (
                       <div className="mt-3">
                         <RequestConnector key={`${def.slug}:${p.title}`} name={`${def.name} (${p.title})`} reason={p.body} from={requestFrom} />
                       </div>

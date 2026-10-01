@@ -9,7 +9,7 @@
  * re-reads every status from the server (router.refresh), never guesses one.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ConnectorDrawer } from "@/components/os/connections/ConnectorDrawer";
 import { connectorBySlug, type ConnectorStatus } from "@/lib/os/connectors";
@@ -18,12 +18,16 @@ export function ConnectorDrawerButton({
   slug,
   status,
   label,
+  ariaLabel,
   className,
   requestFrom,
 }: {
   slug: string;
   status: ConnectorStatus;
-  label: string;
+  /** The button's content: words, or a whole chip (Settings > Chat apps' not-built apps). */
+  label: ReactNode;
+  /** Needed when `label` is not plain words. */
+  ariaLabel?: string;
   className?: string;
   /** Where a "not built yet" request was filed from. */
   requestFrom: string;
@@ -38,7 +42,7 @@ export function ConnectorDrawerButton({
   if (!def) return null;
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} className={className}>
+      <button type="button" onClick={() => setOpen(true)} className={className} aria-label={ariaLabel}>
         {label}
       </button>
       <ConnectorDrawer
