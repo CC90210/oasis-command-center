@@ -236,15 +236,20 @@ async function main() {
     const src = read("components/today/FounderToday.tsx");
     assert.match(
       src,
-      /const moneyP = showFinancials\s*\?\s*withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)\s*:\s*Promise\.resolve\(null\);/,
+      /withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)/,
       "the founder money read must run under TODAY_READ_DEADLINE_MS",
+    );
+    assert.doesNotMatch(src, /await\s+(?:withDeadline\(\s*)?loadOasisMoney\(/, "the money read is awaited on its own again (serially, before the other blocks)");
+    assert.match(
+      src,
+      /const moneyP = showFinancials\s*\?\s*withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)\s*:\s*Promise\.resolve\(null\);/,
+      "the money read is started with the other blocks, and only behind showFinancials",
     );
     assert.match(
       src,
       /const \[money, reads, content, calendar, blocks\] = await Promise\.all\(\[moneyP, needsP, contentP, calendarP, blocksP\]\);/,
       "the money read must be awaited with the other blocks, not on its own first",
     );
-    assert.doesNotMatch(src, /await\s+(?:withDeadline\(\s*)?loadOasisMoney\(/, "the money read is awaited on its own again (serially, before the other blocks)");
     assert.equal((src.match(/loadOasisMoney\(/g) ?? []).length, 1, "loadOasisMoney is called more than once; is the second call under the deadline?");
     assert.match(src, /import \{ withDeadline \} from "@\/lib\/os\/deadline"/);
     assert.match(src, /import \{ TODAY_READ_DEADLINE_MS, [^}]*\} from "@\/components\/os\/today\/loaders"/);
