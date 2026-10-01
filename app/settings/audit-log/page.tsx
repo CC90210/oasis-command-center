@@ -97,6 +97,10 @@ export default async function AuditLogPage({
       : getActivityFeed(profile.tenant_id, {
           actor: actorFilter,
           limit: 200,
+          // This page renders the count and the leads behind a folded row
+          // (About); the Operations and Sales panels do not, so they keep
+          // every row.
+          group: true,
           oasis: isOasisSurfaceTenant(surface.tenantSlug),
           ...(salesTeamScope
             ? {

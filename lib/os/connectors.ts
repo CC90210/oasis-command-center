@@ -129,7 +129,7 @@ export type ConnectorDef = {
   does: readonly string[];
   /** Extra search terms. */
   keywords?: readonly string[];
-  /** null = not built yet. The card says "Coming soon" and opens the drawer. */
+  /** null = not built yet. The card says "Not built yet" and opens the drawer. */
   live: { source: ConnectorStatusSource; connect: ConnectorConnect } | null;
   /** When a not-yet-built connector is expected. */
   plannedFor?: "Phase 2" | "Later";
@@ -167,7 +167,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     does: [
       "Re-checks the key with Stripe every hour, so this card shows within the hour if Stripe stops accepting it",
-      "Will feed revenue and recurring income into Finance once the Finance sync ships (next release)",
+      "Will feed revenue and recurring income into Finance once the Finance sync exists; nothing flows from this key into Finance yet",
       "Never charges a card, issues a refund or moves money: the key it accepts is read-only",
     ],
     keywords: ["payments", "billing", "mrr", "invoices", "restricted key"],
@@ -801,10 +801,13 @@ export function resolveConnectorStatus(
   nowMs: number,
 ): ConnectorStatus {
   // No status source: nothing below may run, so no fact can turn it green.
+  // The label is the state, never an era or a promise: Chat apps and the
+  // drawer say "not built yet" for the same apps, and "Coming soon" /
+  // "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
   if (!def.live) {
     return {
       kind: "coming_soon",
-      label: def.plannedFor === "Later" ? "Planned" : "Coming soon",
+      label: "Not built yet",
       detail: def.pendingNote,
     };
   }

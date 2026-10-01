@@ -52,9 +52,8 @@ export default async function SettingsBillingPage() {
           ) : (
             <>
               <p className="mt-1 text-[13px] leading-5 text-fg-muted">
-                Your plan and invoices are handled directly with OASIS for now, so there is nothing to pay or change
-                on this page. Self-serve billing, with your plan, usage and past invoices, is coming in a later
-                release.
+                Self-serve billing is not built yet. Your plan and invoices are handled directly with OASIS, so there
+                is nothing to pay or change on this page.
               </p>
               <a
                 href={SUPPORT_FORM_PATH}

@@ -149,6 +149,19 @@ async function main() {
   assert.match(widget, /const pinned = modelPickerProvider\(configs, agent\);\s+const configuredProviders/, "the picker's candidates are pinned");
   assert.match(widget, /if \(pinned && provider !== pinned\) \{/, "/model <id> refuses another provider's model");
 
+  // ── The Settings editor shows the 409's sentence, not its slug ────────────
+  // ChatWidget pre-empts the 409 client-side; the editor is the one surface
+  // that hits it (switch the provider dropdown on a row with a saved key), and
+  // it used to print "provider_mismatch" (W3A-R2).
+  const editor = readFileSync(join(ROOT, "components/settings/AgentConfigEditor.tsx"), "utf8");
+  const saveBody = editor.slice(editor.indexOf("async function save("), editor.indexOf("async function save(") + 2000);
+  assert.match(
+    saveBody,
+    /error: j\.message \|\| j\.error \|\| `http_\$\{res\.status\}`/,
+    "save() reads the route's message before its error slug",
+  );
+  assert.match(editor, /row\.error && \(/, "the row's error is rendered");
+
   console.log("agent-config-provider-switch: ok");
 }
 

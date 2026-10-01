@@ -212,20 +212,29 @@ async function main() {
   assert.deepEqual(humans(formerOnly.activeActors), ["CC", "OASIS Rep"]);
 
   // ── 2. One bulk claim is one row, and it names the leads ──────────────────
-  const folded = feed.rows.find((r) => r.count === 30);
-  assert.ok(folded, `thirty identical rows did not fold: ${JSON.stringify(feed.rows.map((r) => [r.id, r.count]))}`);
+  // Folding is opt-in. The Operations tracker and the Sales panel print
+  // `actor · action` alone, so a thirty-lead claim folded there would read as
+  // one lead and the other twenty-nine would vanish; only a caller that renders
+  // the count (the Activity log page) asks for it (W3A-R1).
+  assert.equal(feed.rows.length, 32, "without `group`: 30 claims + the older claim + the former teammate's call, each its own row");
+  assert.ok(feed.rows.every((r) => r.count === undefined && r.items === undefined), "no folded row unless asked for");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const grouped = await getActivityFeed(TENANT, { members, agents, db: db as any, group: true });
+  assert.deepEqual(grouped.errors, []);
+  const folded = grouped.rows.find((r) => r.count === 30);
+  assert.ok(folded, `thirty identical rows did not fold: ${JSON.stringify(grouped.rows.map((r) => [r.id, r.count]))}`);
   assert.equal(folded!.items?.length, 30);
   assert.equal(folded!.action, "stage_changed");
   assert.equal(folded!.actor, "CC");
   assert.ok(folded!.items!.every((item) => /^Business \d+$/.test(item.target)), `rows must name the lead: ${JSON.stringify(folded!.items!.map((i) => i.target))}`);
   assert.ok(!folded!.items!.some((item) => item.target === "Leaked"), "another workspace's record never names a row");
   assert.match(folded!.detail, /^Lead claimed and moved prospect pool/, "the writer's words, not web_leads_claim");
-  assert.ok(!feed.rows.some((r) => r.detail === "web_leads_claim" || r.target === "lead-0"), "no raw identifier is rendered");
+  assert.ok(!grouped.rows.some((r) => r.detail === "web_leads_claim" || r.target === "lead-0"), "no raw identifier is rendered");
   assert.equal(groupSummary(folded!), "30 leads");
-  const old = feed.rows.find((r) => r.id === "li:claim-old");
+  const old = grouped.rows.find((r) => r.id === "li:claim-old");
   assert.ok(old && !old.count, "the same action three minutes earlier is its own row");
   assert.equal(old!.target, "Old Business", "a JSON-string data column still names the lead");
-  assert.equal(feed.rows.length, 3, "30 claims + the older claim + the former teammate's call");
+  assert.equal(grouped.rows.length, 3, "with `group`: 30 claims fold into one, plus the older claim and the former teammate's call");
   assert.ok(db.queriedTables.includes("tenant_records"), "lead names come from one batched read");
 
   // The folding rule itself: same actor+action+source within two minutes, consecutive only.
@@ -292,6 +301,17 @@ async function main() {
   assert.match(page, /formerActors/, "the former group reads the former roster");
   assert.match(page, /ActivityActorChips/);
   assert.match(page, /canSeeTeamPerformance\) redirect\("\/settings"\)/, "the gate is unchanged");
+  // Folding is asked for only where the count is rendered: this page does
+  // (About reads row.count); a panel that prints `actor · action` alone must not.
+  assert.match(page, /group: true/, "the page asks for folded rows because it renders row.count");
+  assert.match(page, /row\.count/, "the page renders the count behind a folded row");
+  for (const panel of ["components/settings/OperationsTrackerPanel.tsx", "components/settings/SalesTeamOperationsPanel.tsx"]) {
+    const src = readFileSync(join(ROOT, panel), "utf8");
+    assert.match(src, /getActivityFeed\(/, `${panel}: still reads the feed`);
+    if (!/row\.count/.test(src)) {
+      assert.doesNotMatch(src, /group:\s*true/, `${panel}: prints actor · action with no count, so it must not fold rows`);
+    }
+  }
 
   console.log("activity-log-roster: ok");
 }

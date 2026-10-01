@@ -83,6 +83,7 @@ async function main() {
   const oasisText = oasis.text.join(" ");
   assert.match(oasisText, /This is OASIS's own workspace\. Nothing is billed here\./, "the plan section says nothing is billed");
   assert.doesNotMatch(oasisText, /Ask OASIS about your plan|handled directly with OASIS|coming in a later release/, "no customer copy for the vendor");
+  assert.doesNotMatch(oasisText, /later release|coming|soon|next release/i, "no release promise on the vendor's page either");
   assert.equal(count(oasis, "Built by OASIS"), OASIS_ADDONS.length, "every card says Built by OASIS");
   assert.equal(count(oasis, "Ask OASIS to add this"), 0, "OASIS never asks itself to add its own app");
   assert.equal(count(oasis, "Added by OASIS on request"), 0);
@@ -97,6 +98,10 @@ async function main() {
   const client = await render(await SettingsBillingPage());
   const clientText = client.text.join(" ");
   assert.match(clientText, /handled directly with OASIS/, "the plan section names who handles billing");
+  assert.match(clientText, /Self-serve billing is not built yet\./, "the state, in the register's words");
+  // A client-visible page never promises a release (S5-F07's register): the
+  // old copy said self-serve billing "is coming in a later release" (W3A-R3).
+  assert.doesNotMatch(clientText, /later release|coming|soon|next release/i, "no release promise on the client's page");
   assert.doesNotMatch(clientText, /Nothing is billed here|Built by OASIS|Install guide/, "no vendor copy for a client");
   assert.equal(count(client, "Ask OASIS to add this"), OASIS_ADDONS.length, "every card can be requested");
   assert.equal(count(client, "Added by OASIS on request"), OASIS_ADDONS.length);

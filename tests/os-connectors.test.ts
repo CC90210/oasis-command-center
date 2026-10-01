@@ -207,7 +207,17 @@ for (const def of CONNECTOR_CATALOG) {
   if (!def.live) {
     assert.equal(s.kind, "coming_soon", `${def.slug} has no status source but resolved to "${s.kind}"`);
     assert.doesNotMatch(s.label, /connected/i);
+    // The state, in the same words Chat apps uses for the same apps; "Coming
+    // soon" / "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
+    assert.equal(s.label, "Not built yet", `${def.slug} (${def.plannedFor}): a card with nothing behind it says so`);
   }
+}
+assert.match(read("app/settings/chat-apps/page.tsx"), /label: "Not built yet"/, "Chat apps and Connections say it the same way");
+// No card's copy promises a release: the Stripe card said the Finance sync
+// "ships (next release)".
+for (const def of CONNECTOR_CATALOG) {
+  const copy = [def.summary, ...def.reads, ...def.does, def.pendingNote ?? ""].join(" ");
+  assert.doesNotMatch(copy, /next release|later release|coming soon|Phase 2|ships? (in|next)/i, `${def.slug}: a release promise on the card`);
 }
 assert.equal(resolveConnectorStatus(connectorBySlug("stripe")!, GREEN, NOW).kind, "connected");
 assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN, NOW).kind, "connected");

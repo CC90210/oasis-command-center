@@ -359,6 +359,14 @@ export type ActivityFeedOptions = {
    * called (lib/os/teammate-names). Omitted: read off the manifest.
    */
   oasis?: boolean;
+  /**
+   * Fold consecutive identical rows (groupActivityRows) into one row carrying
+   * `count` and `items`. Only a caller that renders the count may ask for it:
+   * a panel that prints `actor · action` alone would show a 30-lead bulk claim
+   * as one lead and lose the other 29. Off by default; `limit` then counts rows,
+   * with it on, folded rows.
+   */
+  group?: boolean;
   /** Test/consumer injection: production callers omit these. */
   db?: ReturnType<typeof getServiceSupabase>;
   members?: MemberRow[];
@@ -681,5 +689,11 @@ export async function getActivityFeed(
     );
     rows = match ? rows.filter((row) => row.actorKey === match.key) : [];
   }
-  return { rows: groupActivityRows(rows).slice(0, limit), actors, activeActors, formerActors, errors };
+  return {
+    rows: (opts.group ? groupActivityRows(rows) : rows).slice(0, limit),
+    actors,
+    activeActors,
+    formerActors,
+    errors,
+  };
 }
