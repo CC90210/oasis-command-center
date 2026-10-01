@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { getServiceSupabase } from "@/lib/supabase-server";
 import { classifyOptOut } from "@/lib/sms-opt-out";
+import { normalTwilioMessagingServiceSid, normalTwilioNumber } from "@/lib/twilio/shared";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 type TenantResolution = { tenantId: string; ownerUserId: string | null };
@@ -100,25 +101,40 @@ export async function resolveTwilioInboundTenant(
   messagingServiceSid = "",
 ): Promise<TenantResolution | null> {
   if (toNumber) {
-    onDbOperation?.();
-    const account = await db.from("channel_accounts")
-      .select("tenant_id,owner_user_id")
-      .eq("provider", "twilio")
-      .eq("is_active", true)
-      .eq("from_phone", toNumber)
-      .order("tenant_id", { ascending: true })
-      .limit(2)
-      .maybeSingle();
-    if (!account.error && account.data) {
-      const row = account.data as { tenant_id?: unknown; owner_user_id?: unknown };
-      if (typeof row.tenant_id === "string" && row.tenant_id) {
-        return {
-          tenantId: row.tenant_id,
-          ownerUserId: typeof row.owner_user_id === "string" ? row.owner_user_id : null,
-        };
+    // The indexed path (W10a R6): each workspace's saved sender is a
+    // channel_accounts row (lib/twilio/sender-route.ts), found by the number OR
+    // the messaging service in one read (indexes from bravo__201). Both values
+    // are checked against Twilio's own formats first, so neither can carry
+    // anything into the filter but a number or an MG SID.
+    const routeNumber = normalTwilioNumber(toNumber);
+    const routeService = normalTwilioMessagingServiceSid(messagingServiceSid);
+    const arms = [
+      ...(routeNumber ? [`from_phone.eq.${routeNumber}`] : []),
+      ...(routeService ? [`twilio_messaging_service_sid.eq.${routeService}`] : []),
+    ];
+    if (arms.length > 0) {
+      onDbOperation?.();
+      const account = await db.from("channel_accounts")
+        .select("tenant_id,owner_user_id")
+        .eq("provider", "twilio")
+        .eq("is_active", true)
+        .or(arms.join(","))
+        .order("tenant_id", { ascending: true })
+        .limit(2)
+        .maybeSingle();
+      if (!account.error && account.data) {
+        const row = account.data as { tenant_id?: unknown; owner_user_id?: unknown };
+        if (typeof row.tenant_id === "string" && row.tenant_id) {
+          return {
+            tenantId: row.tenant_id,
+            ownerUserId: typeof row.owner_user_id === "string" ? row.owner_user_id : null,
+          };
+        }
+      } else if (account.error) {
+        // Two workspaces claim this sender (or the read failed): the scan below
+        // decides, and refuses an ambiguous one.
+        console.warn("[webhooks.twilio.sms-inbound] channel account lookup degraded", account.error.message);
       }
-    } else if (account.error) {
-      console.warn("[webhooks.twilio.sms-inbound] channel account lookup degraded", account.error.message);
     }
 
     onDbOperation?.();

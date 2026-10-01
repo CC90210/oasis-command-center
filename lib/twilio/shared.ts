@@ -20,6 +20,27 @@ export function twilioWebhookUrls(origin: string): { inbound: string; status: st
   return { inbound: `${base}${TWILIO_INBOUND_PATH}`, status: `${base}${TWILIO_STATUS_PATH}` };
 }
 
+/** A number Twilio can text from, as Twilio writes it (and the store validates it). */
+export const TWILIO_E164 = /^\+[1-9]\d{6,14}$/;
+/** A messaging service SID: MG and 32 hex characters. */
+export const TWILIO_MESSAGING_SERVICE_SID = /^MG[0-9a-fA-F]{32}$/;
+
+/** A number as the webhook routing row and its lookup both hold it, or null when it is not E.164. */
+export function normalTwilioNumber(value: string): string | null {
+  const v = value.trim();
+  return TWILIO_E164.test(v) ? v : null;
+}
+
+/**
+ * One spelling for a messaging service SID: MG then lower-case hex, the way
+ * Twilio sends it. The routing row and the webhook's lookup both use it, so a
+ * SID pasted in upper case still matches.
+ */
+export function normalTwilioMessagingServiceSid(value: string): string | null {
+  const v = value.trim();
+  return TWILIO_MESSAGING_SERVICE_SID.test(v) ? `MG${v.slice(2).toLowerCase()}` : null;
+}
+
 /**
  * Every outcome of a Twilio connection test. Only `connected` is a pass;
  * `unreachable` is not a verdict on the keys (Twilio did not answer).

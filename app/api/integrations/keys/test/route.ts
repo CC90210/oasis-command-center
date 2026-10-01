@@ -20,6 +20,7 @@ import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-acce
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { probeTwilioConnection } from "@/lib/twilio/connection";
 import { twilioWebhookUrls } from "@/lib/twilio/shared";
+import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,6 +73,10 @@ export async function POST(req: NextRequest) {
     ),
   );
 
+  // Twilio: the test also writes the workspace's webhook routing row, which
+  // picks up OASIS's own deployment number too (never stored, so never saved).
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "tested") : undefined;
+
   return NextResponse.json({
     ok: result.ok,
     service,
@@ -81,6 +86,7 @@ export async function POST(req: NextRequest) {
     // reads; the card turns the stored state back into the same words.
     state: result.state ?? null,
     message: result.message ?? null,
+    ...(routing ? { routing } : {}),
   });
 }
 

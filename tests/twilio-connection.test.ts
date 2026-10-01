@@ -266,6 +266,23 @@ async function check(name: string, fn: () => Promise<void> | void) {
 
 const root = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
+
+/** channel_accounts as it is live (Turso, read 2026-10-01), foreign key dropped; bravo__201 adds its two indexes. */
+const CHANNEL_ACCOUNTS_DDL = `
+  CREATE TABLE "channel_accounts" (
+    "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    "tenant_id" TEXT NOT NULL, "provider" TEXT NOT NULL, "owner_user_id" TEXT, "display_name" TEXT,
+    "from_email" TEXT, "from_phone" TEXT, "texttorrent_act_as_email" TEXT,
+    "twilio_messaging_service_sid" TEXT, "twilio_phone_sid" TEXT,
+    "capabilities" TEXT NOT NULL DEFAULT '{}', "credential_ref" TEXT,
+    "is_active" INTEGER NOT NULL DEFAULT 1, "is_dry_run" INTEGER NOT NULL DEFAULT 0,
+    "metadata" TEXT NOT NULL DEFAULT '{}',
+    "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY ("id"));
+  CREATE UNIQUE INDEX "ux_channel_accounts_phone" ON "channel_accounts" (tenant_id, provider, from_phone) WHERE (from_phone IS NOT NULL);
+  CREATE INDEX "idx_channel_accounts_owner" ON "channel_accounts" (tenant_id, owner_user_id);
+`;
 const INBOUND_URL = "https://oasisai.work/api/webhooks/twilio/sms-inbound";
 const STATUS_URL = "https://oasisai.work/api/webhooks/twilio/sms-status";
 
@@ -300,7 +317,6 @@ async function main() {
     CREATE TABLE user_integration_credentials (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, service TEXT,
       field_key TEXT, encrypted_value TEXT, last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT, updated_at TEXT);
     CREATE TABLE tenant_manifests (tenant_id TEXT, slug TEXT, manifest TEXT);
-    CREATE TABLE channel_accounts (tenant_id TEXT, owner_user_id TEXT, provider TEXT, is_active INTEGER, from_phone TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT);
     CREATE TABLE sms_agent_jobs (id TEXT PRIMARY KEY, tenant_id TEXT, provider TEXT, provider_message_id TEXT,
       from_phone TEXT, to_phone TEXT, phone_last10 TEXT, body TEXT, lead_id TEXT, appointment_id TEXT, interaction_id TEXT,
@@ -314,6 +330,10 @@ async function main() {
     CREATE TABLE sunbiz_phone_suppressions (tenant_id TEXT, phone_last10 TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  // The webhook routing table and its indexes (W10a R6). The code is also
+  // proven to route before bravo__201 exists (section 7).
+  await db.executeMultiple(CHANNEL_ACCOUNTS_DDL);
+  await db.executeMultiple(read("database/turso/bravo__201_channel_accounts_twilio_lookup.sql"));
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0, onboarded: string | null = stamp) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
@@ -751,6 +771,186 @@ async function main() {
       assert.deepEqual([none.ok, !none.ok && none.error], [false, "missing_twilio_credentials"]);
     } finally {
       delete process.env.LIVE_SEND_TWILIO;
+    }
+  });
+
+  // W10a R3: the card may say only what the send gate does. It used to promise
+  // that a send made while live texting was off "is recorded as a test"; no
+  // path records anything, and the gate makes no Twilio call at all.
+  await check("the Twilio card promises only what the live-send gate does: nothing goes to Twilio while it is off, and no record is claimed", async () => {
+    const does = connectors.connectorBySlug("twilio")!.does;
+    const gate = does.find((d) => /live texting/i.test(d));
+    assert.equal(gate, "Sends only while live texting is switched on. While it is off, OASIS asks Twilio to send nothing, so no text leaves your number");
+    assert.ok(does.every((d) => !/record|for OASIS|test send/i.test(d)), does.join(" | "));
+    const before = calls.length;
+    const off = await direct.sendSmsDirectTwilio({ tenantId: ALPHA, to: "+15145550199", body: "while off" });
+    assert.equal(!off.ok && off.error, "live_send_disabled");
+    assert.equal(callsSince(before).length, 0, "the gate asks Twilio nothing");
+  });
+
+  // -- 7. Routing: the webhooks find a workspace by an index (W10a R6) -------------
+
+  const { encryptField } = await import("../lib/field-encryption");
+  const { createTursoPostgrest } = await import("../lib/turso-postgrest");
+  const { getServiceSupabase } = await import("../lib/supabase-server");
+  const inbound = await import("../lib/sms/twilio-inbound");
+  const routeOf = async (tenantId: string) =>
+    (
+      await db.execute({
+        sql: "SELECT from_phone, twilio_messaging_service_sid, is_active FROM channel_accounts WHERE tenant_id = ? AND provider = 'twilio'",
+        args: [tenantId],
+      })
+    ).rows.map((r) => [r.from_phone ?? null, r.twilio_messaging_service_sid ?? null, Number(r.is_active)]);
+  const removeKey = async (field_key: string) =>
+    toRes(await keysRoute.DELETE(jsonReq("https://oasisai.work/api/integrations/keys", "DELETE", { service: "twilio", field_key })));
+  const jobsFor = async (messageSid: string) =>
+    (await db.execute({ sql: "SELECT tenant_id FROM sms_agent_jobs WHERE provider_message_id = ?", args: [messageSid] })).rows.map((r) => String(r.tenant_id));
+
+  await check("saving a Twilio sender writes the workspace's one routing row (its number, or its messaging service), never a second", async () => {
+    assert.deepEqual(await routeOf(ALPHA), [["+14165550101", null, 1]]);
+    assert.deepEqual(await routeOf(CHARLIE), [["+14165550103", null, 1]]);
+    assert.deepEqual(await routeOf(DELTA), [[null, MG_D, 1]]);
+    assert.deepEqual(await routeOf(BRAVO_CO), [], "keys with no sender: nothing to route");
+    await login(USERS.ownerA);
+    const again = await saveKey("from_number", "+14165550101");
+    assert.equal(again.body.routing, "synced", again.text);
+    assert.deepEqual(await routeOf(ALPHA), [["+14165550101", null, 1]], "saved again: the same row");
+    assert.equal((await runTest()).body.routing, "synced", "Test writes it too");
+  });
+
+  // Thirty more workspaces with a saved number: more than the old scan reads
+  // (above 25 it refused every incoming text and delivery report).
+  const DECOYS = Array.from({ length: 30 }, (_, i) => `d0d0d0d0-0000-4000-8000-${String(i).padStart(12, "0")}`);
+  await check("with thirty more workspaces' numbers saved, the scan alone refuses everyone; the routing row still finds each owner", async () => {
+    await db.batch(
+      DECOYS.map((t, i) => ({
+        sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'twilio', 'from_number', ?)",
+        args: [t, encryptField(`+1647555${1000 + i}`)],
+      })),
+      "write",
+    );
+    // A number stored with no routing row, as every sender was before this
+    // change: only the scan can find it, and past its cap it gives up.
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'twilio', 'from_number', ?)",
+      args: [ECHO, encryptField("+14165550177")],
+    });
+    try {
+      assert.equal(await inbound.resolveTwilioInboundTenant(getServiceSupabase(), "+14165550177", {}), null, "the cliff the routing row removes");
+      const a = inboundParams("+14165550101", "in-alpha-crowd");
+      const ra = await toRes(await inboundRoute.POST(twilioPost(INBOUND_URL, a, twilioSign(ACCT_A.token, INBOUND_URL, a))));
+      assert.equal(ra.status, 200, ra.text);
+      assert.deepEqual(await jobsFor(a.MessageSid), [ALPHA]);
+      // A messaging-service workspace, found by its service SID.
+      const d = { ...inboundParams("+14165550104", "in-delta-crowd"), AccountSid: ACCT_D.sid, MessagingServiceSid: MG_D };
+      const rd = await toRes(await inboundRoute.POST(twilioPost(INBOUND_URL, d, twilioSign(ACCT_D.token, INBOUND_URL, d))));
+      assert.equal(rd.status, 200, rd.text);
+      assert.deepEqual(await jobsFor(d.MessageSid), [DELTA]);
+      // And a delivery report from Alpha's number.
+      const p = statusParams("read");
+      assert.equal((await statusRoute.POST(twilioPost(STATUS_URL, p, twilioSign(ACCT_A.token, STATUS_URL, p)))).status, 204);
+    } finally {
+      await db.execute({
+        sql: `DELETE FROM tenant_integration_credentials WHERE tenant_id IN (${DECOYS.map(() => "?").join(", ")}) OR (tenant_id = ? AND field_key = 'from_number')`,
+        args: [...DECOYS, ECHO],
+      });
+    }
+  });
+
+  await check("the lookup is ONE index search by number or messaging service (bravo__201), reads no credential; before that migration it still routes", async () => {
+    // Two copies of the routing rows written above, each on its own database
+    // so a query plan never holds the shared file: one with bravo__201 applied,
+    // one without it (a deploy and its migration are not atomic).
+    const rows = (await db.execute("SELECT id, tenant_id, provider, from_phone, twilio_messaging_service_sid, is_active FROM channel_accounts")).rows;
+    const copy = async (withMigration: boolean) => {
+      const c = createClient({ url: ":memory:" });
+      await c.executeMultiple(CHANNEL_ACCOUNTS_DDL);
+      if (withMigration) await c.executeMultiple(read("database/turso/bravo__201_channel_accounts_twilio_lookup.sql"));
+      for (const r of rows) {
+        await c.execute({
+          sql: "INSERT INTO channel_accounts (id, tenant_id, provider, from_phone, twilio_messaging_service_sid, is_active) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [r.id, r.tenant_id, r.provider, r.from_phone ?? null, r.twilio_messaging_service_sid ?? null, r.is_active],
+        });
+      }
+      return c;
+    };
+    const after = await copy(true);
+    const before = await copy(false);
+    // The resolver's own query, captured through the production query builder.
+    const seen: Array<{ sql: string; args: unknown[] }> = [];
+    const recording = new Proxy(after, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (stmt: unknown) => {
+            const s = stmt as string | { sql: string; args?: unknown };
+            seen.push(typeof s === "string" ? { sql: s, args: [] } : { sql: s.sql, args: (s.args ?? []) as unknown[] });
+            return target.execute(stmt as never);
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const shim = createTursoPostgrest(recording as typeof after);
+    const cases: Array<[string, string, string, RegExp]> = [
+      ["+14165550101", "", ALPHA, /idx_channel_accounts_from_phone/],
+      ["+14165550104", MG_D, DELTA, /idx_channel_accounts_twilio_mg/],
+    ];
+    try {
+      for (const [to, mg, owner, index] of cases) {
+        seen.length = 0;
+        const found = await inbound.resolveTwilioInboundTenant(shim as never, to, {}, undefined, mg);
+        assert.equal(found?.tenantId, owner, to);
+        const lookups = seen.filter((s) => /channel_accounts/.test(s.sql));
+        assert.equal(lookups.length, 1, `${to}: one read`);
+        assert.equal(seen.filter((s) => /tenant_integration_credentials/.test(s.sql)).length, 0, `${to}: no credential read or decrypted`);
+        const plan = (await after.execute({ sql: `EXPLAIN QUERY PLAN ${lookups[0].sql}`, args: lookups[0].args as never })).rows.map((r) => String(r.detail));
+        assert.ok(plan.some((step) => /USING (COVERING )?INDEX/.test(step) && index.test(step)), `${to}: ${plan.join(" | ")}`);
+        assert.ok(!plan.some((step) => /^SCAN channel_accounts\b/.test(step)), `${to}: ${plan.join(" | ")}`);
+        // Without the migration: the same read, unindexed, the same owner.
+        assert.equal((await inbound.resolveTwilioInboundTenant(createTursoPostgrest(before) as never, to, {}, undefined, mg))?.tenantId, owner, `${to} before bravo__201`);
+      }
+    } finally {
+      after.close();
+      before.close();
+    }
+  });
+
+  await check("a number saved by two workspaces is routed to neither; removing it unroutes that workspace and the owner's texts arrive again", async () => {
+    await login(USERS.ownerB);
+    assert.equal((await saveKey("from_number", "+14165550101")).body.routing, "synced");
+    const amb = inboundParams("+14165550101", "in-ambiguous");
+    assert.equal((await inboundRoute.POST(twilioPost(INBOUND_URL, amb, twilioSign(ACCT_A.token, INBOUND_URL, amb)))).status, 403);
+    assert.deepEqual(await jobsFor(amb.MessageSid), [], "never handed to one of two claimants");
+    const removed = await removeKey("from_number");
+    assert.equal(removed.status, 200, removed.text);
+    assert.equal(removed.body.routing, "synced");
+    assert.deepEqual(await routeOf(BRAVO_CO), [[null, null, 0]], "inactive and emptied");
+    const back = inboundParams("+14165550101", "in-after-remove");
+    assert.equal((await inboundRoute.POST(twilioPost(INBOUND_URL, back, twilioSign(ACCT_A.token, INBOUND_URL, back)))).status, 200);
+    assert.deepEqual(await jobsFor(back.MessageSid), [ALPHA]);
+  });
+
+  await check("OASIS's own workspace: Test routes its deployment number (never stored), and its texts arrive; no client can claim that number's route", async () => {
+    process.env.TWILIO_ACCOUNT_SID = ACCT_OASIS.sid;
+    process.env.TWILIO_AUTH_TOKEN = ACCT_OASIS.token;
+    process.env.TWILIO_FROM_NUMBER = "+14165550170";
+    try {
+      await login(USERS.oasisOwner);
+      assert.equal((await runTest()).body.routing, "synced");
+      assert.deepEqual(await routeOf(OASIS), [["+14165550170", null, 1]]);
+      const o = { ...inboundParams("+14165550170", "in-oasis"), AccountSid: ACCT_OASIS.sid };
+      const res = await toRes(await inboundRoute.POST(twilioPost(INBOUND_URL, o, twilioSign(ACCT_OASIS.token, INBOUND_URL, o))));
+      assert.equal(res.status, 200, res.text);
+      assert.deepEqual(await jobsFor(o.MessageSid), [OASIS]);
+      // A client's Test never reads the deployment number.
+      await login(USERS.ownerE);
+      await runTest();
+      assert.deepEqual(await routeOf(ECHO), []);
+    } finally {
+      delete process.env.TWILIO_ACCOUNT_SID;
+      delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_FROM_NUMBER;
     }
   });
 
