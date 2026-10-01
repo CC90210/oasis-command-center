@@ -578,6 +578,17 @@ async function main() {
       await raw.execute("DELETE FROM support_tickets WHERE id = 't-breach'");
     }
   });
+  // W2a verifier: with nothing counted and no approvals, the panel said
+  // "Nothing is waiting on you" while three of the sources behind it had not
+  // been read. Unknown is not zero.
+  await check("/feed: an empty list with sources nobody could read never says 'Nothing is waiting on you'", async () => {
+    const { NeedsYouEmpty } = await import("../components/os/landings/FeedView");
+    const run = await feedFor("cc", "needs");
+    assert.ok(!(run.result instanceof Error), String(run.result));
+    const found = walk(run.result);
+    assert.ok(!found.elements.some((e) => e.type === NeedsYouEmpty), "'Nothing is waiting on you' over sources nobody read");
+    assert.match(found.strings.join(" "), /Couldn.t check .*inbound replies/, "the unread sources are named instead");
+  });
   // W2a review (W2A-R3): with Today's reads behind the tab, one hung read sent
   // the whole Feed, tape included, to the error page.
   await check("/feed: a Needs-you read that never answers leaves the Feed up; the tab counts no number it cannot finish and says why", async () => {

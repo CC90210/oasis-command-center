@@ -174,7 +174,7 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
                   </p>
                 </div>
               </Card>
-            ) : pending.value.items.length === 0 && !rowsWaiting && !needsUnread ? (
+            ) : pending.value.items.length === 0 && !rowsWaiting && !needsUnread && unchecked.length === 0 ? (
               <NeedsYouEmpty department={deptLabel ?? null} />
             ) : pending.value.items.length > 0 ? (
               <section aria-label="Waiting on you" className="space-y-3">
