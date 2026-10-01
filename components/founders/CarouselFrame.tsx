@@ -25,11 +25,16 @@ export function CarouselFrame({
   title,
   className,
   style,
+  width,
+  height,
 }: {
   slides: string[];
   title: string;
   className?: string;
   style?: React.CSSProperties;
+  /** The slides' measured pixels, so the browser can size the image before it loads. */
+  width?: number | null;
+  height?: number | null;
 }) {
   const [i, setI] = useState(0);
   const count = slides.length;
@@ -54,10 +59,18 @@ export function CarouselFrame({
         if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
       }}
     >
+      {/* ONE <img>, for the slide on screen. The first slide loads lazily, when
+          the tile nears the viewport; every other slide loads only when the
+          viewer moves to it. A Library page of carousels used to pull every
+          cover at full size on arrival. */}
       {/* eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, deliberately short-lived; see the note in marketing-shared */}
       <img
         src={slides[at]}
         alt={`${title}, slide ${at + 1} of ${count}`}
+        loading="lazy"
+        decoding="async"
+        width={width ?? undefined}
+        height={height ?? undefined}
         className="h-full w-full object-contain"
       />
 
