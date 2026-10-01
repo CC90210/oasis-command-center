@@ -49,6 +49,11 @@
  *      checks) instead of only "email us".
  *   9. Goal pace's "Set one in Settings" lands on Settings > Team, whose
  *      Revenue goal section carries the id the link's fragment opens.
+ *  12. Today for a client workspace's marketing hire (team_role marketing) is
+ *      the neutral Today: no link into OASIS's Content hub (/founders/marketing,
+ *      a 404 for them), no "OASIS", no persona name. app/page.tsx dispatched
+ *      MarketingToday on the persona alone, which is tenant-blind. OASIS's own
+ *      marketing hire keeps MarketingToday.
  *
  * Client components render in a child process (tests/client-route-gating.render.ts)
  * because react-dom/server does not load under react-server.
@@ -145,6 +150,8 @@ const USERS = {
   member: u(4, "riley@client.test"), // plain member of that client workspace
   newbie: u(5, "owner@new-co.test"), // owner of a workspace OASIS has not set up
   unlinked: u(6, "lost@nowhere.test"), // signed in, profile has no workspace
+  marketer: u(7, "mika@client.test"), // the client workspace's marketing hire (team_role marketing)
+  oasisMarketer: u(8, "marketing@oasisai.work"), // OASIS's own marketing hire
 } as const;
 type Who = keyof typeof USERS;
 
@@ -337,6 +344,8 @@ async function main() {
       profile("member", CLIENT, "member", 0, "Riley"),
       profile("newbie", NEWCO, "owner", 1, "Nia New"),
       profile("unlinked", null, "member", 0, "Lost User"),
+      profile("marketer", CLIENT, "marketing", 0, "Mika Marketer"),
+      profile("oasisMarketer", OASIS, "marketing", 0, "Morgan Marketer"),
     ],
     "write",
   );
@@ -696,6 +705,32 @@ async function main() {
     assert.ok(text.includes(SUPPORT_FORM_PATH), "the support form link is missing");
     assert.ok(text.includes(CONTACT_EMAIL), "the verified inbox is missing");
     assert.doesNotMatch(text, /\bCC\b|\bhe can\b/, "the page names CC to someone who may be a client");
+  });
+
+  // ── 12. Today, a client workspace's marketing hire ───────────────────────
+  // app/page.tsx dispatched MarketingToday on the persona alone. The persona is
+  // tenant-blind, so a client's marketing hire got OASIS's own card whose three
+  // links (/founders/marketing, its Library and Performance) all 404 outside
+  // OASIS's workspaces. The branch now asks the tenant-narrowed capability
+  // (capabilitiesFor narrows canSeeMarketing to OASIS's slugs) and renders the
+  // neutral Today for everyone else.
+  const { MarketingToday } = await import("../components/today/MarketingToday");
+  const { LiveClock } = await import("../components/LiveClock");
+  await check("Today, a client workspace's marketing hire: the neutral Today, no Content-hub link, no 'OASIS', no persona name", async () => {
+    await login("marketer");
+    const tree = await today();
+    assert.ok(!walk(tree).elements.some((e) => e.type === MarketingToday), "OASIS's marketing dashboard rendered for a client's hire");
+    // Hook-free components are rendered so a Link's href is read; LiveClock has hooks.
+    const text = deepText(tree, new Set<unknown>([PageFrame, LiveClock])).join(" ") + " " + walk(tree).strings.join(" ");
+    assert.ok(!text.includes("/founders/marketing"), `a link into OASIS's Content hub, a 404 for a client: ${text}`);
+    assert.doesNotMatch(text, /OASIS|Marketing studio|\bCC\b/, `OASIS-internal copy on a client's Today: ${text.match(/OASIS|Marketing studio|\bCC\b/)?.[0]}`);
+    assert.doesNotMatch(text, PERSONA_NAMES, text.match(PERSONA_NAMES)?.[0]);
+    assert.match(text, /Mika Marketer/, "the page greets the viewer by name");
+    assert.match(text, /No marketing dashboard in this workspace yet/, "the honest Missing state, not a dashboard invented for them");
+    // OASIS's own marketing hire keeps the Content hub.
+    await login("oasisMarketer");
+    const own = await today();
+    assert.ok(walk(own).elements.some((e) => e.type === MarketingToday), "OASIS's own marketing hire lost MarketingToday");
   });
 
   // ── 8. error boundaries and the AI notice ───────────────────────────────

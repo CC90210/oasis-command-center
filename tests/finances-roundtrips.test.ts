@@ -19,9 +19,11 @@
  *  - financeBook() is the business book for both owners; no page reads
  *    ?entity=, builds an ?entity= link or lists books, and the "CC personal /
  *    private" book switcher component is deleted.
- *  - The "OASIS · Founders Portal" banner (tagline and Marketing/Finances
- *    chips included) does not render on /founders/finances/** and still does
- *    on Marketing; the founders layout keeps its gate and audience filter.
+ *  - The "OASIS · Founders Portal" banner (tagline and Content/Finances chips
+ *    included) does not render on /founders/finances/** or, since 2026-10-01,
+ *    on /founders/marketing/** (Content has its own ContentTabs), and still
+ *    does on the Growth preview shell; the founders layout keeps its gate and
+ *    audience filter.
  *  - Every tab has its own loading.tsx skeleton.
  *
  * BEFORE (HEAD finance code as of 17114f3f, measured once on an earlier draft
@@ -352,14 +354,17 @@ async function main() {
   });
 
   // ── founders portal banner ──────────────────────────────────────────────
-  await check("the founders portal banner is gone on /founders/finances/** and still on Marketing", async () => {
+  await check("the founders portal banner is gone on /founders/finances/** and /founders/marketing/**, and still on the Growth shell", async () => {
     const { FoundersPortalBanner, foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
     const { FoundersSectionNav } = await import("../components/founders/FoundersSectionNav");
     const { FOUNDERS_PORTAL } = await import("../lib/portals/registry");
     const financePaths = ["/founders/finances", "/founders/finances/", "/founders/finances/bills", "/founders/finances/taxes", "/founders/finances/invoices/inv_1"];
-    const otherPaths = ["/founders/marketing", "/founders/marketing/library", "/founders"];
-    for (const p of financePaths) assert.equal(foundersBannerHidden(p), true, p);
-    for (const p of [...otherPaths, "/founders/financesx"]) assert.equal(foundersBannerHidden(p), false, p);
+    // Content (2026-10-01): the same decision as Finances, for the same reason — it
+    // starts with its own tab bar (components/founders/ContentTabs.tsx).
+    const contentPaths = ["/founders/marketing", "/founders/marketing/", "/founders/marketing/library", "/founders/marketing/train", "/founders/marketing/performance", "/founders/marketing/asset/a_1"];
+    const otherPaths = ["/founders", "/founders/growth", "/founders/growth/organic"];
+    for (const p of [...financePaths, ...contentPaths]) assert.equal(foundersBannerHidden(p), true, p);
+    for (const p of [...otherPaths, "/founders/financesx", "/founders/marketingx"]) assert.equal(foundersBannerHidden(p), false, p);
 
     // Render it (a plain function call with the pathname stubbed at the top).
     type El = { type: unknown; props: { children?: unknown; sections?: unknown } };
@@ -370,7 +375,7 @@ async function main() {
     const nodes = (n: unknown): El[] => (Array.isArray(n) ? n.flatMap(nodes) : n && typeof n === "object" && "props" in n ? [n as El, ...nodes((n as El).props.children)] : []);
     const text = (n: unknown): string =>
       typeof n === "string" || typeof n === "number" ? String(n) : Array.isArray(n) ? n.map(text).join(" ") : n && typeof n === "object" && "props" in n ? text((n as El).props.children) : "";
-    for (const p of financePaths) assert.equal(render(p), null, `${p}: no banner, no chips`);
+    for (const p of [...financePaths, ...contentPaths]) assert.equal(render(p), null, `${p}: no banner, no chips`);
     for (const p of otherPaths) {
       const el = render(p);
       assert.ok(el, `${p}: the banner renders`);

@@ -1,5 +1,5 @@
 /**
- * /founders/marketing — Founders Portal, Studio landing.
+ * /founders/marketing — Founders Portal, the Content hub's Overview tab.
  *
  * FOUNDERS ONLY. SunBiz and every other tenant get a 404, not a 403, so they
  * never learn this route exists. The gate keys on TENANT IDENTITY via the
@@ -48,7 +48,7 @@ import { MarketingEmpty } from "@/components/founders/marketing-shared";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Marketing · OASIS",
+  title: "Content · OASIS",
 };
 
 export default async function MarketingPage() {
@@ -159,7 +159,7 @@ export default async function MarketingPage() {
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title="Marketing"
+        title="Content"
         subtitle={
           summary.degraded
             ? `OASIS's own work · at least ${summary.total} ${summary.total === 1 ? "asset" : "assets"} — counts incomplete`

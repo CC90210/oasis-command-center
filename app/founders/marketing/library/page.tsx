@@ -90,7 +90,7 @@ import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-share
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Library · Marketing · OASIS",
+  title: "Library · Content · OASIS",
 };
 
 function isTrack(v: string | undefined): v is Track {
@@ -309,7 +309,7 @@ export default async function MarketingLibraryPage({
         subtitle="A record of what has already been produced — the daily poster writes here, it never reads from here."
         action={
           <Link href="/founders/marketing" className="text-xs font-semibold text-accent hover:underline">
-            Back to Studio
+            Back to Content
           </Link>
         }
       />

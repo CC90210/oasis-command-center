@@ -111,8 +111,13 @@ export type Portal = {
  *
  * So the naming is a FUNCTION of this flag, not a hardcoded pair:
  *
- *   false (today) → ONE entry: /founders/marketing, labelled "Marketing".
- *                   Route, nav label, <h1> and <title> finally agree.
+ *   false (today) → ONE entry: /founders/marketing, labelled "Content" — the
+ *                   name the OS rail gives the same route (lib/os/nav.ts) and
+ *                   the one CC settled on for the hub on 2026-10-01, after the
+ *                   rail said Content while the page, its <title> and its chips
+ *                   said Marketing. Nav label, <h1>, <title>, ContentTabs and
+ *                   the breadcrumb alias (lib/os/match.ts) agree, and nothing
+ *                   in the founders nav is labelled "Marketing".
  *   true          → #175's split returns: "Content" + "Marketing".
  *
  * Flipping this one boolean is the entirety of shipping Feature 1's navigation.
@@ -150,7 +155,7 @@ export const FOUNDERS_NAV: ReadonlyArray<FoundersNavItem> = MARKETING_SHELL_ACTI
       { href: "/founders/growth", label: "Marketing", icon: "BarChart3" },
       FINANCES_NAV_ITEM,
     ]
-  : [{ href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }, FINANCES_NAV_ITEM];
+  : [{ href: "/founders/marketing", label: "Content", icon: "Megaphone" }, FINANCES_NAV_ITEM];
 
 export const FOUNDERS_PORTAL: Portal = {
   id: "founders",

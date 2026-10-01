@@ -73,7 +73,7 @@ export default async function PerformancePage() {
             href="/founders/marketing"
             className="text-xs font-semibold text-accent hover:underline"
           >
-            Back to Studio
+            Back to Content
           </Link>
         }
       />
