@@ -384,6 +384,18 @@ async function main() {
     for (const id of scheduled) assert.ok(inAll.has(id), `${id} is in the All view`);
     const stage = await getMarketingAssets(T, { status: "scheduled", pageSize: 200 }, db);
     for (const id of scheduled) assert.ok(stage.assets.some((a) => a.id === id), `${id} is on the Scheduled stage`);
+    // "All N" is every asset in the tab - the tab's own COUNT - not the sum of
+    // the four pills, which leaves the scheduled assets out.
+    const lc = await getLifecycleCounts(T, "oasis-ai", db);
+    const tabs = await getBrandTabCounts(T, db);
+    const pills = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
+    assert.equal(tabs.counts["oasis-ai"], pills + scheduled.length, "the tab holds the bucketed assets and the scheduled ones");
+    const library = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
+    assert.match(
+      library,
+      /const lifecycleTotal = tabCounts\.degraded \? 0 : tabCounts\.counts\[group\];/,
+      "the All pill reads the tab's COUNT",
+    );
   });
 
   await check("the SQL lifecycle predicate matches the buckets for every status x published_at pair", async () => {
