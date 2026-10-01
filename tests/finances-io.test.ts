@@ -32,6 +32,26 @@ delete process.env.INVOICE_FROM_APP_PASSWORD;
 delete process.env.OASIS_MAIL_FROM;
 delete process.env.OASIS_MAIL_APP_PASSWORD;
 
+// The fixtures below are dated 2026-09-19 .. 2026-09-25, and the rules under
+// test (collection windows, books coverage, stale-event handling) compare
+// them with the current date. Freeze the clock at the moment the fixtures were
+// written, so the suite cannot expire at a day boundary: on 2026-10-01 it did
+// (AR no longer cleared, coverage "unconfirmed") and turned every PR red while
+// the code under test was unchanged. Everything that reads Date.now() or
+// `new Date()` sees 2026-09-24T12:00:00Z; explicit dates still parse normally.
+const FROZEN_NOW = Date.UTC(2026, 8, 24, 12, 0, 0);
+const RealDate = Date;
+class FrozenDate extends RealDate {
+  constructor(...args: unknown[]) {
+    // @ts-expect-error Date's constructor overloads cannot be expressed as a spread.
+    super(...(args.length ? args : [FROZEN_NOW]));
+  }
+  static override now(): number {
+    return FROZEN_NOW;
+  }
+}
+globalThis.Date = FrozenDate as unknown as DateConstructor;
+
 /** The pinned account's key, held only while `deliver` posts an event. */
 const STRIPE_KEY = "rk_live_finances_io_test_only";
 /** Every network call but a Stripe read made with that key. */
