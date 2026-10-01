@@ -65,7 +65,8 @@ async function seedIfMissing(): Promise<void> {
  * a waiter as hung, and an aborted check left the promise pending for the
  * isolate's lifetime (2026-10-01 pipeline incident; lib/runtime/settled-once.ts).
  * cache() still shares one check within a request. A failure is not
- * remembered: the next call checks again.
+ * remembered across requests: the next request checks again (within the same
+ * request, cache() hands later callers the same rejection).
  */
 const seedCheck = settledOnce(cache(seedIfMissing));
 

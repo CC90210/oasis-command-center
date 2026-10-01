@@ -38,6 +38,8 @@ const TESTS = [
   "tests/web-leads-filters.test.ts",
   "tests/web-leads-filter-memory.test.ts",
   "tests/web-leads-data.test.ts",
+  // The read cache shares one load without sharing its promise (2026-10-01).
+  "tests/web-leads-cache-single-flight.test.ts",
   "tests/web-leads-queries.test.ts",
   "tests/web-leads-list-read.test.ts",
   "tests/web-leads-counters.test.ts",

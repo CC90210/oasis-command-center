@@ -43,7 +43,12 @@
 
 type Entry<T> = { value: T; expires: number };
 
+/** A load in flight in SOME request on this isolate. A marker only: never its promise. */
+type Flight = { startedAt: number };
+
+/** Settled values only. Never a pending promise (see memo()). */
 const store = new Map<string, Entry<unknown>>();
+const flights = new Map<string, Flight>();
 
 /**
  * Cache TTLs, in milliseconds.
@@ -123,30 +128,72 @@ const store = new Map<string, Entry<unknown>>();
 export const TTL = { LEADS: 90_000, SCORES: 300_000, CORPUS: 300_000, PARKED: 1_800_000 } as const;
 
 /**
- * Run `load` and memoise it for `ttlMs`, keyed by `key`.
- *
- * IN-FLIGHT REQUESTS SHARE ONE LOAD. The promise goes into the map before it
- * resolves, so five reps opening the page in the same second trigger ONE
- * 31,000-row read rather than five. Without that, a cold instance under load
- * multiplies exactly the cost this module exists to remove.
- *
- * A REJECTED LOAD IS NEVER CACHED. The entry is dropped on failure, so a
- * transient bridge error cannot pin a broken read for the whole TTL -- which
- * would turn one bad second into ten of a feature that appears empty. Failing
- * loudly on the next request is correct; failing quietly for ten seconds is
- * not.
+ * How long a caller waits for ANOTHER request's load of the same key before it
+ * loads the key itself. Above the normal cold reads (the leads read measured
+ * 2.7 s, the parked scan 2.1 s), so a live load is almost always waited for;
+ * bounded, so a load whose request died costs this much once, never a hang.
  */
-export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
-  const now = Date.now();
-  const hit = store.get(key);
-  if (hit && hit.expires > now) return hit.value as Promise<T>;
+export const FLIGHT_WAIT_MS = 10_000;
+const POLL_MS = 50;
 
-  const promise = load().catch((err) => {
-    store.delete(key);
-    throw err;
-  });
-  store.set(key, { value: promise, expires: now + ttlMs });
-  return promise;
+type MemoOptions = { flightWaitMs?: number; pollMs?: number };
+
+function fresh<T>(key: string): Entry<T> | null {
+  const e = store.get(key);
+  return e && e.expires > Date.now() ? (e as Entry<T>) : null;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `load` and memoise its RESULT for `ttlMs`, keyed by `key`.
+ *
+ * CONCURRENT CALLERS STILL SHARE ONE LOAD, WITHOUT SHARING ITS PROMISE.
+ * Five reps opening the page in the same second must trigger ONE 31,000-row
+ * (15 MB) read, not five: five at once would also crowd a Worker isolate's
+ * memory. This used to work by putting the load's promise in the map. On
+ * Cloudflare Workers that is only safe while the request that started the load
+ * stays alive: the load's I/O belongs to that request, and if it is canceled
+ * mid-load the promise never settles, so every caller until the TTL expires
+ * waits on it (up to 30 minutes for the parked read). Reviewed after the
+ * 2026-10-01 pipeline incident (PR #509; lib/runtime/settled-once.ts); a local
+ * workerd run did not cancel a loader whose client disconnected, so this is a
+ * latent risk rather than a demonstrated cause, removed on principle. The map
+ * now holds only a marker that a load is in flight. A second caller polls for
+ * the SETTLED value on its own timers, and after FLIGHT_WAIT_MS stops waiting
+ * and loads the key itself.
+ *
+ * A REJECTED LOAD IS NEVER CACHED. A transient bridge error cannot pin a broken
+ * read for the whole TTL; a caller that was waiting on the failed load runs its
+ * own. Failing loudly on the next request is correct; failing quietly for ten
+ * seconds is not.
+ *
+ * A WRITE DURING A LOAD WINS. invalidate() clears in-flight markers too, and a
+ * load whose marker is gone returns its rows to its own caller but does not
+ * cache them, because they may predate the write.
+ */
+export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>, opts: MemoOptions = {}): Promise<T> {
+  const waitMs = opts.flightWaitMs ?? FLIGHT_WAIT_MS;
+  const pollMs = opts.pollMs ?? POLL_MS;
+  const waitUntil = Date.now() + waitMs;
+  for (;;) {
+    const hit = fresh<T>(key);
+    if (hit) return hit.value;
+    const other = flights.get(key);
+    const live = other !== undefined && Date.now() - other.startedAt < waitMs;
+    if (!live || Date.now() >= waitUntil) break;
+    await sleep(pollMs);
+  }
+
+  const mine: Flight = { startedAt: Date.now() };
+  flights.set(key, mine);
+  try {
+    const value = await load();
+    if (flights.get(key) === mine) store.set(key, { value, expires: mine.startedAt + ttlMs });
+    return value;
+  } finally {
+    if (flights.get(key) === mine) flights.delete(key);
+  }
 }
 
 /**
@@ -161,5 +208,9 @@ export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>
 export function invalidate(prefix: string): void {
   for (const key of store.keys()) {
     if (key.startsWith(prefix)) store.delete(key);
+  }
+  // A load already in flight may have read the table before this write.
+  for (const key of flights.keys()) {
+    if (key.startsWith(prefix)) flights.delete(key);
   }
 }
