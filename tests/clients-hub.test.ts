@@ -284,7 +284,8 @@ async function main() {
     assert.match(t, /X-DEAL-EMAIL/);
     assert.match(t, /X-SLACK/);
     assert.doesNotMatch(t, /Y-EMAIL|Y-SLACK|A-TENANT-EMAIL|A-SLACK|X-INTERNAL-NOTE/);
-    assert.match(t, /Sends from the OASIS mailbox/);
+    assert.match(t, /Sends as OASIS support mail \(from support@oasisai\.work once it is configured, else the OASIS mailbox\)/);
+    assert.match(t, /the client's reply goes to support@oasisai\.work/);
     assert.doesNotMatch(t, /mailto:/, "the record writes from the app, not a mailto link");
   });
   await login(USERS.clientA);

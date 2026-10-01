@@ -244,7 +244,7 @@ function ConversationsTab({ data, viewer }: { data: ClientRecordData; viewer: Cl
       recipients={state.value.addresses.recipients}
       mailboxNote={
         oasis
-          ? `Sends from the OASIS mailbox as support mail, with you in copy; the client's reply goes to ${OASIS_SUPPORT_EMAIL}. It is recorded in this conversation.`
+          ? `Sends as OASIS support mail (from ${OASIS_SUPPORT_EMAIL} once it is configured, else the OASIS mailbox), with you in copy; the client's reply goes to ${OASIS_SUPPORT_EMAIL}. It is recorded in this conversation.`
           : "Sends from your own mailbox connected in this workspace (never from OASIS's). It is recorded in this conversation."
       }
       sendBlocked={
