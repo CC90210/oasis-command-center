@@ -10,6 +10,7 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
+import { builderPaths, type BuilderHome } from "./builder-paths";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 
 type EditingAgent = {
@@ -27,6 +28,12 @@ type EditingAgent = {
 type Props = {
   tenantSlug: string;
   editing: EditingAgent | null;
+  /**
+   * The page the builder is on, which decides where a save and a delete land
+   * (./builder-paths.ts). The marketplace pages leave it out; the AI team's
+   * /agents/new passes "ai-team".
+   */
+  home?: BuilderHome;
 };
 
 function slugifyClient(name: string): string {
@@ -38,7 +45,8 @@ function slugifyClient(name: string): string {
     .slice(0, 62) || "agent";
 }
 
-export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
+export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
+  const paths = builderPaths(tenantSlug, home);
   const router = useRouter();
   const isEdit = !!editing;
 
@@ -145,8 +153,8 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
         setError(detail);
         return;
       }
-      setFlash(isEdit ? "Saved." : "Created. Redirecting to the marketplace...");
-      router.push(`/t/${tenantSlug}/marketplace/${data.agent.slug}`);
+      setFlash(isEdit ? "Saved." : paths.createdNote);
+      router.push(paths.saved(data.agent.slug));
     } catch (err) {
       setError(err instanceof Error ? err.message : "network_error");
     } finally {
@@ -169,7 +177,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
       // Invalidate the marketplace page's RSC cache; without this the
       // just-deleted agent reappears in the cached list.
       router.refresh();
-      router.push(`/t/${tenantSlug}/marketplace`);
+      router.push(paths.afterDelete);
     } catch (err) {
       setError(err instanceof Error ? err.message : "network_error");
     } finally {
@@ -194,7 +202,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
 
         <Field
           label="URL slug"
-          hint={`Marketplace URL: /t/${tenantSlug}/marketplace/${slug || "<slug>"}`}
+          hint={paths.slugHint(slug || "<slug>")}
         >
           <input
             type="text"

@@ -5,6 +5,7 @@ import { PageHeader, Tag } from "@/components/Card";
 import { ManifestEditorChat } from "@/components/manifest/ManifestEditorChat";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getManifestRow } from "@/lib/manifest/persistence";
+import { requireOwnedTenantSlug } from "@/lib/tenant-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -25,6 +26,9 @@ export default async function ManifestEditorPage({
   const { slug } = await params;
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
+  // The whole manifest goes to the browser below, so only this workspace's
+  // own members or a verified operator may open it; anyone else 404s.
+  await requireOwnedTenantSlug(normalised);
 
   const manifest = await getManifest(normalised);
   const row = await getManifestRow(normalised).catch(() => null);
