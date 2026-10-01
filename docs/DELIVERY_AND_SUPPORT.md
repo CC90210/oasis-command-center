@@ -72,7 +72,7 @@ The third row is a deliberate default, not an oversight: project and ticket data
 
 The client confirmation repeats only the ticket number, category, priority and a sanitised first name. The form does not verify email addresses, so anything else echoed back could be a stranger's text sent under the OASIS name.
 
-**Team replies.** On a ticket, "Send reply to client" emails the client from the OASIS mailbox and, if it is the first public reply, stops the first-response clock. "Add internal note" does neither. The email outcome is shown on the reply.
+**Team replies.** On a ticket, "Send reply to client" emails the client as support mail (from `support@oasisai.work` once its credential is set, else the OASIS mailbox; replies to `support@oasisai.work` either way) and, if it is the first public reply, stops the first-response clock. "Add internal note" does neither. The email outcome is shown on the reply.
 
 **Client replies** reopen a ticket that was waiting on them or resolved, and ping the founders' Telegram. A closed ticket takes no more client replies.
 
@@ -83,7 +83,8 @@ The client confirmation repeats only the ticket number, category, priority and a
 | Variable | Used for |
 |---|---|
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | All delivery reads and writes. |
-| `OASIS_MAIL_FROM`, `OASIS_MAIL_APP_PASSWORD` | The OASIS mailbox for client confirmations, replies and founder emails (or the `oasis_gmail` tenant credential). Without them every email is recorded as FAILED on the ticket. |
+| `SUPPORT_GMAIL_USER`, `SUPPORT_GMAIL_APP_PASSWORD` | The support mailbox, `support@oasisai.work`: client confirmations, replies and founder emails leave from it (`lib/email/support-mailbox.ts`). Every one of them answers to `support@oasisai.work` (Reply-To) whichever mailbox sends it. |
+| `OASIS_MAIL_FROM`, `OASIS_MAIL_APP_PASSWORD` | The OASIS mailbox those emails use until the support mailbox is configured (or the `oasis_gmail` tenant credential), with one `[support-mail]` log line per email saying so. Without either, every email is recorded as FAILED on the ticket. |
 | `OASIS_TELEGRAM_BOT_TOKEN`, `OASIS_TELEGRAM_CHAT_ID` | Founder alerts (operator lane; falls back to `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). |
 | `R2_ACCOUNT_ID` (or `CLOUDFLARE_ACCOUNT_ID`) and the other `R2_*` storage variables | Support attachments. Without them an attachment is refused and the ticket says so. |
 | `CRON_SECRET`, plus `CRON_ATTEST_SECRET` on Cloudflare | The SLA cron's auth. |
@@ -93,7 +94,7 @@ The client confirmation repeats only the ticket number, category, priority and a
 
 1. **Apply migration 183** to live Turso. It was dry-run against live and applied to a throwaway database only.
 2. **Schedule the SLA cron.** Add `/api/cron/sla-check` to `workers/oasis-cc-cron/src/index.ts` (every 15 minutes). Until then breaches are shown on the pages but nobody is alerted, and a support submission that dies half-way is not re-driven.
-3. **Confirm the OASIS mailbox is configured** in production, or client confirmations and replies will not send (each failure is visible on the ticket).
+3. **Confirm the support mailbox is configured** in production (`SUPPORT_GMAIL_USER` + `SUPPORT_GMAIL_APP_PASSWORD`, or at least the OASIS mailbox), or client confirmations and replies will not send (each failure is visible on the ticket).
 4. **Link clients to projects.** A support request is matched to a project only when the project's client email matches the email the client types, or when the client has portal users in exactly one workspace.
 5. **Decide whether non-founders get access.** Today builders and reps cannot open Projects or Tickets, even when work is assigned to them.
 6. **Nav.** `/projects` and `/tickets` are in the OASIS nav. A client workspace whose manifest falls back to the OASIS nav will see them too, which is intended: those pages show a client only their own rows.
@@ -101,6 +102,6 @@ The client confirmation repeats only the ticket number, category, priority and a
 ## Known limits
 
 - The anonymous form page does not prefill from the URL, so "Report an issue" cannot fill in the client's email.
-- A reply emailed by a client lands in the OASIS mailbox, not on the ticket thread. There is no inbound email to ticket link.
+- A reply emailed by a client lands in the `support@oasisai.work` inbox, not on the ticket thread. There is no inbound email to ticket link yet.
 - A form link minted with a lead token (the Forms "mint link" action) would bypass the support branch and behave like a normal form. Share the plain `/f/oasis-ai-cc/support` link only.
 - The form must stay one step.

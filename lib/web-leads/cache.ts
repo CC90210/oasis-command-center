@@ -128,22 +128,47 @@ const flights = new Map<string, Flight>();
 export const TTL = { LEADS: 90_000, SCORES: 300_000, CORPUS: 300_000, PARKED: 1_800_000 } as const;
 
 /**
- * How long a caller waits for ANOTHER request's load of the same key before it
- * loads the key itself. Above the normal cold reads (the leads read measured
- * 2.7 s, the parked scan 2.1 s), so a live load is almost always waited for;
- * bounded, so a load whose request died costs this much once, never a hang.
+ * How old a load in flight may get before it is presumed dead and ONE waiter
+ * takes it over. Above the normal cold reads (the leads read measured 2.7 s,
+ * the parked scan 2.1 s), so a live load is almost always waited for; bounded,
+ * so a load whose request died costs this much once, never a hang.
  */
 export const FLIGHT_WAIT_MS = 10_000;
 const POLL_MS = 50;
 
-type MemoOptions = { flightWaitMs?: number; pollMs?: number };
+/**
+ * How many flight budgets any one caller waits for someone else's load before
+ * giving up with CacheWaitTimeout (30 s in production): room for a dead load
+ * and one recovery, never an open-ended wait while the database is down.
+ */
+const WAIT_BUDGETS = 3;
 
-function fresh<T>(key: string): Entry<T> | null {
-  const e = store.get(key);
-  return e && e.expires > Date.now() ? (e as Entry<T>) : null;
+/** Thrown to a caller that waited WAIT_BUDGETS flight budgets for another request's load. Retryable. */
+export class CacheWaitTimeout extends Error {
+  constructor(readonly key: string) {
+    super("These leads are still loading for another request. Try again in a few seconds.");
+    this.name = "CacheWaitTimeout";
+  }
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/**
+ * The time source memo() waits on. Production uses the real clock; tests pass a
+ * virtual one so the takeover race is exercised deterministically instead of
+ * depending on how busy the machine running them is.
+ */
+export type MemoClock = { now: () => number; sleep: (ms: number) => Promise<void> };
+
+const REAL_CLOCK: MemoClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
+type MemoOptions = { flightWaitMs?: number; pollMs?: number; maxWaitMs?: number; clock?: MemoClock };
+
+function fresh<T>(key: string, now: number): Entry<T> | null {
+  const e = store.get(key);
+  return e && e.expires > now ? (e as Entry<T>) : null;
+}
 
 /**
  * Run `load` and memoise its RESULT for `ttlMs`, keyed by `key`.
@@ -160,8 +185,18 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * workerd run did not cancel a loader whose client disconnected, so this is a
  * latent risk rather than a demonstrated cause, removed on principle. The map
  * now holds only a marker that a load is in flight. A second caller polls for
- * the SETTLED value on its own timers, and after FLIGHT_WAIT_MS stops waiting
- * and loads the key itself.
+ * the SETTLED value on its own timers.
+ *
+ * A DEAD LOAD GETS EXACTLY ONE RECOVERY. A flight older than FLIGHT_WAIT_MS is
+ * presumed dead, and the first waiter to see that takes it over: the check and
+ * the new marker happen with no await between them, so no second waiter can
+ * take over the same dead flight. Every other waiter sees the new, live marker
+ * and keeps waiting for it. (Before this, every waiter whose own budget ran out
+ * started a load, and a hung database turned one 15 MB read into one per
+ * waiter: Codex review of #511, 2026-10-01.) A caller that has waited
+ * WAIT_BUDGETS flight budgets gives up with CacheWaitTimeout instead of adding load, even if
+ * the flight it waited on is dead by then: the next caller recovers it, so the
+ * number of loads per key stays bounded however late the waiters wake up.
  *
  * A REJECTED LOAD IS NEVER CACHED. A transient bridge error cannot pin a broken
  * read for the whole TTL; a caller that was waiting on the failed load runs its
@@ -175,17 +210,23 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>, opts: MemoOptions = {}): Promise<T> {
   const waitMs = opts.flightWaitMs ?? FLIGHT_WAIT_MS;
   const pollMs = opts.pollMs ?? POLL_MS;
-  const waitUntil = Date.now() + waitMs;
+  const clock = opts.clock ?? REAL_CLOCK;
+  const giveUpAt = clock.now() + (opts.maxWaitMs ?? WAIT_BUDGETS * waitMs);
   for (;;) {
-    const hit = fresh<T>(key);
+    const hit = fresh<T>(key, clock.now());
     if (hit) return hit.value;
     const other = flights.get(key);
-    const live = other !== undefined && Date.now() - other.startedAt < waitMs;
-    if (!live || Date.now() >= waitUntil) break;
-    await sleep(pollMs);
+    // Nobody is loading this key: load it.
+    if (other === undefined) break;
+    // Waited long enough: give up rather than add load.
+    if (clock.now() >= giveUpAt) throw new CacheWaitTimeout(key);
+    // The load in flight is presumed dead: take it over. Nothing awaits
+    // between this check and flights.set below, so only one waiter can.
+    if (clock.now() - other.startedAt >= waitMs) break;
+    await clock.sleep(pollMs);
   }
 
-  const mine: Flight = { startedAt: Date.now() };
+  const mine: Flight = { startedAt: clock.now() };
   flights.set(key, mine);
   try {
     const value = await load();

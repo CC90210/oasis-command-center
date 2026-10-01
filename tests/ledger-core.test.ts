@@ -116,7 +116,10 @@ async function main() {
       display_name TEXT, full_name TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT, updated_at TEXT NOT NULL);
-    CREATE TABLE customers (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, display_name TEXT);
+    -- primary_email and archived_at: the approved-email executor reads them to
+    -- tell a client from a lead (matchCustomerByEmail), as on the live table.
+    CREATE TABLE customers (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, display_name TEXT,
+      primary_email TEXT, archived_at TEXT);
     CREATE TABLE cas_probe (id TEXT PRIMARY KEY, status TEXT NOT NULL);
   `);
   for (const s of splitStatements(APPROVALS_SQL)) await db.execute(s);

@@ -35,7 +35,7 @@ const root = join(__dirname, "..");
 const dbFile = join(mkdtempSync(join(tmpdir(), "finances-wise-matching-")), "test.db");
 process.env.TURSO_DB_PATH = dbFile;
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
-for (const k of ["STRIPE_SECRET_KEY", "FOUNDERS_TENANT_IDS", "WISE_API_TOKEN", "WISE_PROFILE_ID", "INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD"]) {
+for (const k of ["STRIPE_SECRET_KEY", "FOUNDERS_TENANT_IDS", "WISE_API_TOKEN", "WISE_PROFILE_ID", "INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "SUPPORT_GMAIL_USER", "SUPPORT_GMAIL_APP_PASSWORD"]) {
   delete process.env[k];
 }
 process.env.WISE_API_TOKEN = "wise-test-token";

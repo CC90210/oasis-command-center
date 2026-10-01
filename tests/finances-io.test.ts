@@ -31,6 +31,8 @@ delete process.env.INVOICE_FROM_EMAIL;
 delete process.env.INVOICE_FROM_APP_PASSWORD;
 delete process.env.OASIS_MAIL_FROM;
 delete process.env.OASIS_MAIL_APP_PASSWORD;
+delete process.env.SUPPORT_GMAIL_USER;
+delete process.env.SUPPORT_GMAIL_APP_PASSWORD;
 
 // The fixtures below are dated 2026-09-19 .. 2026-09-25, and the rules under
 // test (collection windows, books coverage, stale-event handling) compare

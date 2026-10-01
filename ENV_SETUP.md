@@ -20,9 +20,12 @@ fully standalone.
 
 Password resets use a dedicated company-domain transactional identity. They do
 not fall back to e-sign, outreach, tenant SMTP, or personal Gmail credentials.
-When the dedicated `AUTH_*` set is absent, the existing company-domain
-`GMAIL_USER` + `GMAIL_APP_PASSWORD` Google Workspace identity is accepted as a
-strict compatibility path; consumer domains such as gmail.com are rejected.
+When the dedicated `AUTH_*` set is absent, the support mailbox
+(`SUPPORT_GMAIL_USER` + `SUPPORT_GMAIL_APP_PASSWORD`, below) is used; without
+it, the existing company-domain `GMAIL_USER` + `GMAIL_APP_PASSWORD` Google
+Workspace identity is accepted as a strict compatibility path (logged as a
+fallback); consumer domains such as gmail.com are rejected. Replies always go
+to `support@oasisai.work`.
 
 | Variable | Notes |
 |---|---|
@@ -34,6 +37,23 @@ strict compatibility path; consumer domains such as gmail.com are rejected.
 | `AUTH_FROM_EMAIL` | Approved company-domain From address, normally `security@oasisai.work` |
 | `AUTH_FROM_NAME` | Optional; defaults to `OASIS AI Account Security` |
 | `AUTH_ALLOWED_FROM_DOMAINS` | Optional comma-separated sender-domain allowlist for dedicated `AUTH_*` providers; defaults to `oasisai.work`. The `GMAIL_*` compatibility path remains pinned to `oasisai.work`. |
+
+### Support mailbox (`support@oasisai.work`)
+
+`support@oasisai.work` is OASIS's one published contact
+(`lib/legal/constants.ts` `OASIS_SUPPORT_EMAIL`). With these two Worker secrets
+set, OASIS's client-facing system mail leaves from it: the support desk's
+acknowledgements, replies and alerts, Clients-hub emails to a client, approved
+emails to a client, invoices (after an explicit `INVOICE_FROM_*`), and
+account-security mail (after a dedicated `AUTH_*`). Without them each of those
+keeps its previous mailbox and logs one `[support-mail]` line saying so. Every
+client-facing email answers to `support@oasisai.work` (Reply-To) either way.
+Sales email to leads is unaffected (`OASIS_MAIL_FROM`).
+
+| Variable | Notes |
+|---|---|
+| `SUPPORT_GMAIL_USER` | Must be exactly `support@oasisai.work`; any other mailbox is refused and logged as an error (`lib/email/support-mailbox.ts`) |
+| `SUPPORT_GMAIL_APP_PASSWORD` | Google app password for that account (spaces are stripped). SMTP only: no OAuth client or redirect URI is involved |
 
 `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are auto-derived
 from the `BRAVO_*` variants in [next.config.js](next.config.js); set them
