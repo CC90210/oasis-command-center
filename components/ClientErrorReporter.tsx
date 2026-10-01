@@ -29,6 +29,9 @@ export function ClientErrorReporter() {
       reportClientError("window", event.error ?? event.message);
     };
     const onRejection = (event: PromiseRejectionEvent) => {
+      // A fetch aborted by a navigation or an unmount is not a crash.
+      const reason = event.reason as { name?: unknown } | null | undefined;
+      if (reason && reason.name === "AbortError") return;
       reportClientError("rejection", event.reason);
     };
     window.addEventListener("error", onError);

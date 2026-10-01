@@ -6,40 +6,51 @@
  * in the visitor's browser. On 2026-10-01 the pipeline failed for a user on
  * every other click while the server logged nothing. The page now sends a
  * report here (lib/client-errors/report.ts); this route logs one
- * `[client.error]` line, which `wrangler tail` shows, and keeps the report in
- * client_error_reports (migration bravo__198) for the times nobody is tailing.
+ * `[client.error]` line, which `wrangler tail` shows, and keeps a SIGNED-IN
+ * report in client_error_reports (migration bravo__198) for the times nobody
+ * is tailing. An anonymous report is logged only (lib/client-errors/ingest.ts).
  *
  * Untrusted input, the same rules as /api/perf/vitals:
  *   - same-origin gate FIRST, fail-closed (403) before the body is read;
  *   - a hard byte cap enforced while reading, a strict schema, unknown keys
  *     refused, control characters stripped, pathname only (no query string);
- *   - a per-instance rate cap so a misbehaving page cannot flood logs or rows.
+ *   - a per-instance rate cap and a per-address cap so a misbehaving page or a
+ *     script forging Origin cannot flood the logs; only signed-in reports are
+ *     stored, so an unauthenticated caller cannot fill the table at all.
  * The tenant and the user come from the session, never from the payload; a
  * signed-out page (login, a public form) reports anonymously.
  */
 
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { storeClientErrorReport } from "@/lib/client-errors/ingest";
 import { CLIENT_ERROR_MAX_BODY_BYTES, parseClientErrorReport } from "@/lib/client-errors/shape";
 
 export const dynamic = "force-dynamic";
 
 const RATE_CAP_PER_MIN = 120;
+/** One address may send at most this many reports a minute (per instance). */
+const PER_ADDRESS_CAP_PER_MIN = 20;
 // Retention (30 days) runs on a schedule: lib/client-errors/retention.ts via
 // /api/cron/connection-health, so old rows go even when no new report arrives.
 
 let windowStart = 0;
 let windowCount = 0;
+const perAddress = new Map<string, number>();
 
-function overRateCap(): boolean {
+function overRateCap(address: string | null): boolean {
   const now = Date.now();
   if (now - windowStart > 60_000) {
     windowStart = now;
     windowCount = 0;
+    perAddress.clear();
   }
   windowCount++;
-  return windowCount > RATE_CAP_PER_MIN;
+  if (windowCount > RATE_CAP_PER_MIN) return true;
+  if (!address) return false;
+  const seen = (perAddress.get(address) ?? 0) + 1;
+  perAddress.set(address, seen);
+  return seen > PER_ADDRESS_CAP_PER_MIN;
 }
 
 function sameOrigin(req: Request): boolean {
@@ -77,13 +88,10 @@ async function readCapped(req: Request): Promise<string | null> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function isMissingTable(message: string): boolean {
-  return /no such table/i.test(message);
-}
-
 export async function POST(req: Request): Promise<NextResponse> {
   if (!sameOrigin(req)) return NextResponse.json({ ok: false }, { status: 403 });
-  if (overRateCap()) return new NextResponse(null, { status: 204 });
+  // Cloudflare sets cf-connecting-ip to the caller's address on every request.
+  if (overRateCap(req.headers.get("cf-connecting-ip"))) return new NextResponse(null, { status: 204 });
 
   let raw: string | null;
   try {
@@ -121,23 +129,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     `[client.error] ${JSON.stringify({ ...report, tenant_id: tenantId, user_id: userId, user_agent: userAgent })}`,
   );
 
+  // A signed-in report becomes a row; an anonymous one stays a log line only
+  // (lib/client-errors/ingest.ts). Before migration bravo__198 the log line is
+  // the whole record, by design.
   try {
-    const db = getServiceSupabase();
-    const { error } = await db.from("client_error_reports").insert({
-      id: crypto.randomUUID(),
-      tenant_id: tenantId,
-      user_id: userId,
-      kind: report.kind,
-      name: report.name,
-      message: report.message,
-      stack: report.stack,
-      digest: report.digest,
-      path: report.path,
-      user_agent: userAgent,
-    });
-    // Before migration bravo__198 is applied the table does not exist: the log
-    // line above is then the whole record, by design.
-    if (error && !isMissingTable(error.message)) console.error("[client.error.store]", error.message);
+    await storeClientErrorReport(report, { tenantId, userId, userAgent });
   } catch (err) {
     console.error("[client.error.store]", err instanceof Error ? err.message : String(err));
   }

@@ -215,14 +215,39 @@ async function main() {
     const { getTursoClient } = await import("../lib/turso");
     await getTursoClient().executeMultiple(read("database/turso/bravo__198_client_error_reports.sql"));
 
-    await check("after the migration the report is stored, pathname only", async () => {
+    await check("after the migration an ANONYMOUS report is logged but never stored", async () => {
+      const before = logged.length;
       const res = await post(valid);
       assert.equal(res.status, 204);
-      const rows = (await getTursoClient().execute("SELECT kind, name, message, path, tenant_id FROM client_error_reports")).rows;
+      assert.ok(logged.slice(before).some((l) => l.startsWith("[client.error] ")), "still logged");
+      const rows = (await getTursoClient().execute("SELECT COUNT(*) AS n FROM client_error_reports")).rows;
+      assert.equal(Number(rows[0].n), 0, "a public write route must not let an unauthenticated caller fill the table");
+    });
+
+    await check("a signed-in report is stored with its tenant and user, pathname only", async () => {
+      const { storeClientErrorReport } = await import("../lib/client-errors/ingest");
+      const parsed = shape.parseClientErrorReport(JSON.parse(valid));
+      assert.ok(parsed.ok);
+      if (!parsed.ok) return;
+      const result = await storeClientErrorReport(parsed.report, { tenantId: "t-1", userId: "u-1", userAgent: "UA" });
+      assert.deepEqual(result, { stored: true, reason: "stored" });
+      const rows = (await getTursoClient().execute("SELECT tenant_id, user_id, path, message FROM client_error_reports")).rows;
       assert.equal(rows.length, 1);
+      assert.equal(String(rows[0].tenant_id), "t-1");
+      assert.equal(String(rows[0].user_id), "u-1");
       assert.equal(String(rows[0].path), "/pipeline");
-      assert.equal(String(rows[0].message), "boom on the board");
-      assert.equal(rows[0].tenant_id, null);
+      assert.deepEqual(await storeClientErrorReport(parsed.report, { tenantId: null, userId: null, userAgent: null }), { stored: false, reason: "anonymous" });
+    });
+
+    await check("one address is capped per minute even with a valid Origin", async () => {
+      const statuses: number[] = [];
+      const before = logged.filter((l) => l.startsWith("[client.error] ")).length;
+      for (let i = 0; i < 25; i++) {
+        statuses.push((await post(JSON.stringify({ kind: "window", message: `flood ${i}`, path: "/x" }), { "cf-connecting-ip": "203.0.113.7" })).status);
+      }
+      assert.ok(statuses.every((s) => s === 204), "a capped caller learns nothing");
+      const logged20 = logged.filter((l) => l.startsWith("[client.error] ")).length - before;
+      assert.equal(logged20, 20, "only the first 20 from one address are logged");
     });
 
     await check("another origin is refused before the body is read", async () => {
@@ -276,6 +301,7 @@ async function main() {
     const listener = read("components/ClientErrorReporter.tsx");
     assert.match(listener, /addEventListener\("error", onError\)/);
     assert.match(listener, /addEventListener\("unhandledrejection", onRejection\)/);
+    assert.match(listener, /reason\.name === "AbortError"\) return;/, "an aborted fetch is not reported as a crash");
   });
 
   await check("the roster route turns a failed session read into a 503, not an uncaught 500", () => {

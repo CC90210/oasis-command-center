@@ -13,7 +13,8 @@
 -- (never a query string), masks credentials in paths, messages and stacks
 -- (/sign/, /invite/ and personalised form tokens, long opaque segments),
 -- strips control characters, and takes tenant_id and user_id from the session,
--- never from the payload (both NULL on a signed-out page). Rows older than 30
+-- never from the payload. Only reports from a signed-in session are stored; an
+-- anonymous report is logged only (lib/client-errors/ingest.ts). Rows older than 30
 -- days are pruned every 15 minutes by /api/cron/connection-health
 -- (lib/client-errors/retention.ts).
 --
