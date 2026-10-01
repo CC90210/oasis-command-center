@@ -48,6 +48,37 @@ function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * A virtual clock for memo(): time moves only when the test advances it, and
+ * every sleeper due at the same instant wakes in the same step, so a takeover
+ * race plays out the same way on any machine, however busy.
+ */
+function virtualClock() {
+  let t = 0;
+  let timers: Array<{ at: number; resolve: () => void }> = [];
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return {
+    now: () => t,
+    sleep: (ms: number) => new Promise<void>((resolve) => { timers.push({ at: t + ms, resolve }); }),
+    async advance(ms: number) {
+      const end = t + ms;
+      await settle();
+      for (;;) {
+        const due = timers.filter((x) => x.at <= end);
+        if (!due.length) break;
+        const at = Math.min(...due.map((x) => x.at));
+        const batch = timers.filter((x) => x.at === at);
+        timers = timers.filter((x) => x.at !== at);
+        t = at;
+        for (const x of batch) x.resolve();
+        await settle();
+      }
+      t = end;
+      await settle();
+    },
+  };
+}
+
 async function main() {
   console.log("web leads cache: single flight without a shared promise");
 
@@ -133,45 +164,43 @@ async function main() {
   // Codex review of #511: every waiter whose own budget ran out used to start
   // a load, so one hung read plus five waiters became six 15 MB reads.
   await check("a dead load gets exactly ONE recovery, however many callers wait on it", async () => {
-    const opts = { flightWaitMs: 150, pollMs: 10, maxWaitMs: 3_000 };
+    const clock = virtualClock();
+    const opts = { flightWaitMs: 150, pollMs: 10, maxWaitMs: 3_000, clock };
     let loads = 0;
     const load = async () => {
       loads += 1;
       if (loads === 1) return new Promise<string>(() => {});
-      await sleep(60);
+      await clock.sleep(60);
       return "recovered";
     };
     void memo("t6:leads", 60_000, load, opts);
-    await sleep(5);
     const waiters = Array.from({ length: 5 }, () => memo("t6:leads", 60_000, load, opts));
-    const values = await within(3_000, Promise.all(waiters), "the five waiters");
+    await clock.advance(1_000);
+    const values = await within(1_000, Promise.all(waiters), "the five waiters");
     assert.deepEqual(values, Array(5).fill("recovered"));
     assert.equal(loads, 2, "the original load and one recovery, never one per waiter");
   });
 
-  await check("when every load hangs, takeovers are spaced out and the remaining waiters give up", async () => {
-    const opts = { flightWaitMs: 200, pollMs: 10, maxWaitMs: 600 };
+  await check("when every load hangs, takeovers are spaced one budget apart and the rest give up", async () => {
+    const clock = virtualClock();
+    const opts = { flightWaitMs: 200, pollMs: 10, maxWaitMs: 600, clock };
     const starts: number[] = [];
     const load = () => {
-      starts.push(Date.now());
+      starts.push(clock.now());
       return new Promise<string>(() => {});
     };
     void memo("t7:leads", 60_000, load, opts);
-    await sleep(5);
     const outcomes = Array.from({ length: 5 }, () =>
       memo("t7:leads", 60_000, load, opts).then(
         () => "value",
         (e: unknown) => (e instanceof CacheWaitTimeout ? "gave up" : `other: ${String(e)}`),
       ),
     );
-    await sleep(1_200);
-    const settled = await Promise.all(outcomes.map((o) => Promise.race([o, sleep(0).then(() => "still loading")])));
-    assert.ok(starts.length <= 4, `loads started: ${starts.length} (at most the original and one per flight budget)`);
-    for (let i = 1; i < starts.length; i += 1) {
-      assert.ok(starts[i] - starts[i - 1] >= 150, `two loads started ${starts[i] - starts[i - 1]} ms apart`);
-    }
-    assert.ok(settled.filter((s) => s === "gave up").length >= 1, `outcomes: ${settled.join(", ")}`);
-    assert.ok(!settled.some((s) => s.startsWith("other")), `outcomes: ${settled.join(", ")}`);
+    await clock.advance(2_000);
+    const settled = await Promise.all(outcomes.map((o) => Promise.race([o, Promise.resolve("still loading")])));
+    assert.deepEqual(starts, [0, 200, 400], "the original load, then one takeover per dead flight, none after the wait cap");
+    assert.equal(settled.filter((s) => s === "gave up").length, 3, `outcomes: ${settled.join(", ")}`);
+    assert.equal(settled.filter((s) => s === "still loading").length, 2, `outcomes: ${settled.join(", ")}`);
   });
 
   await check("/api/web-leads answers a caller that gave up with a retryable 503, not a 500", () => {

@@ -151,14 +151,24 @@ export class CacheWaitTimeout extends Error {
   }
 }
 
-type MemoOptions = { flightWaitMs?: number; pollMs?: number; maxWaitMs?: number };
+/**
+ * The time source memo() waits on. Production uses the real clock; tests pass a
+ * virtual one so the takeover race is exercised deterministically instead of
+ * depending on how busy the machine running them is.
+ */
+export type MemoClock = { now: () => number; sleep: (ms: number) => Promise<void> };
 
-function fresh<T>(key: string): Entry<T> | null {
+const REAL_CLOCK: MemoClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
+type MemoOptions = { flightWaitMs?: number; pollMs?: number; maxWaitMs?: number; clock?: MemoClock };
+
+function fresh<T>(key: string, now: number): Entry<T> | null {
   const e = store.get(key);
-  return e && e.expires > Date.now() ? (e as Entry<T>) : null;
+  return e && e.expires > now ? (e as Entry<T>) : null;
 }
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Run `load` and memoise its RESULT for `ttlMs`, keyed by `key`.
@@ -184,7 +194,9 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * and keeps waiting for it. (Before this, every waiter whose own budget ran out
  * started a load, and a hung database turned one 15 MB read into one per
  * waiter: Codex review of #511, 2026-10-01.) A caller that has waited
- * MAX_WAIT_MS gives up with CacheWaitTimeout instead of adding load.
+ * MAX_WAIT_MS gives up with CacheWaitTimeout instead of adding load, even if
+ * the flight it waited on is dead by then: the next caller recovers it, so the
+ * number of loads per key stays bounded however late the waiters wake up.
  *
  * A REJECTED LOAD IS NEVER CACHED. A transient bridge error cannot pin a broken
  * read for the whole TTL; a caller that was waiting on the failed load runs its
@@ -198,19 +210,23 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>, opts: MemoOptions = {}): Promise<T> {
   const waitMs = opts.flightWaitMs ?? FLIGHT_WAIT_MS;
   const pollMs = opts.pollMs ?? POLL_MS;
-  const giveUpAt = Date.now() + (opts.maxWaitMs ?? 3 * waitMs);
+  const clock = opts.clock ?? REAL_CLOCK;
+  const giveUpAt = clock.now() + (opts.maxWaitMs ?? 3 * waitMs);
   for (;;) {
-    const hit = fresh<T>(key);
+    const hit = fresh<T>(key, clock.now());
     if (hit) return hit.value;
     const other = flights.get(key);
-    // Nobody is loading this key, or the load in flight is presumed dead: take
-    // it over. Nothing awaits between this check and flights.set below.
-    if (other === undefined || Date.now() - other.startedAt >= waitMs) break;
-    if (Date.now() >= giveUpAt) throw new CacheWaitTimeout(key);
-    await sleep(pollMs);
+    // Nobody is loading this key: load it.
+    if (other === undefined) break;
+    // Waited long enough: give up rather than add load.
+    if (clock.now() >= giveUpAt) throw new CacheWaitTimeout(key);
+    // The load in flight is presumed dead: take it over. Nothing awaits
+    // between this check and flights.set below, so only one waiter can.
+    if (clock.now() - other.startedAt >= waitMs) break;
+    await clock.sleep(pollMs);
   }
 
-  const mine: Flight = { startedAt: Date.now() };
+  const mine: Flight = { startedAt: clock.now() };
   flights.set(key, mine);
   try {
     const value = await load();
