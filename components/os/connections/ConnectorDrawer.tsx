@@ -25,6 +25,7 @@ import { X } from "lucide-react";
 import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/ConnectorIcon";
 import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
+import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
@@ -232,6 +233,8 @@ export function ConnectorDrawer({
             <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onChanged} />
           )}
 
+          {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={status?.label} />}
+
           {def.yourAccount === "google" && personalGoogle && (
             <section>
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Your own Google account</h3>
@@ -249,6 +252,15 @@ export function ConnectorDrawer({
                 {def.seeAlso.label}
               </a>
               .
+            </p>
+          )}
+
+          {def.docs && (
+            <p className="text-[13px] leading-5 text-fg-muted">
+              <a href={def.docs.href} target="_blank" rel="noopener noreferrer" className="text-accent underline-offset-2 hover:underline">
+                {def.docs.label}
+              </a>{" "}
+              explains where each value comes from.
             </p>
           )}
 

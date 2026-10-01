@@ -17,9 +17,14 @@ import {
 } from "@/lib/tenant-integration-store";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { publicAppBaseUrl } from "@/lib/api-helpers";
+import { probeTwilioConnection } from "@/lib/twilio/connection";
+import { twilioWebhookUrls } from "@/lib/twilio/shared";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type ProbeResult = { ok: boolean; error?: string; detail?: string; state?: string; message?: string };
 
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
@@ -46,7 +51,7 @@ export async function POST(req: NextRequest) {
   }
 
   const bundle = await getTenantIntegrationBundle(sess.tenantId, service);
-  let result: { ok: boolean; error?: string; detail?: string };
+  let result: ProbeResult;
   try {
     result = await runProbe(service, bundle);
   } catch (err) {
@@ -72,13 +77,17 @@ export async function POST(req: NextRequest) {
     service,
     error: result.ok ? null : result.error || "unknown_error",
     detail: result.detail || null,
+    // Twilio: one plain state ("needs_number", ...) and the sentence the owner
+    // reads; the card turns the stored state back into the same words.
+    state: result.state ?? null,
+    message: result.message ?? null,
   });
 }
 
 async function runProbe(
   service: string,
   bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
+): Promise<ProbeResult> {
   switch (service) {
     case "twilio":
       return probeTwilio(bundle);
@@ -179,76 +188,33 @@ async function probePresence(
   return { ok: true, detail: "all required fields present (no live probe available)" };
 }
 
-async function probeTwilio(
-  bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  const sid = bundle.account_sid;
-  const token = bundle.auth_token;
-  if (!sid || !token) {
-    return { ok: false, error: "missing_sid_or_token" };
-  }
-  const messagingServiceSid = bundle.messaging_service_sid;
-  const fromNumber = bundle.from_number;
-  if (!messagingServiceSid && !fromNumber) {
-    return { ok: false, error: "missing_sender" };
-  }
-  // Account-info GET — costs nothing, no side effect, returns 401 on
-  // bad creds and 200 on good. Auth = Basic(sid:token).
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`;
-  try {
-    const authorization = "Basic " + Buffer.from(`${sid}:${token}`).toString("base64");
-    const r = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: authorization,
-        Accept: "application/json",
-      },
-    });
-    if (r.status === 200) {
-      const j = (await r.json().catch(() => ({}))) as { friendly_name?: string; status?: string };
-      if (j.status && j.status !== "active") {
-        return { ok: false, error: `account_${j.status}` };
-      }
-      if (messagingServiceSid) {
-        const sender = await fetch(
-          `https://messaging.twilio.com/v1/Services/${encodeURIComponent(messagingServiceSid)}`,
-          { method: "GET", headers: { Authorization: authorization, Accept: "application/json" } },
-        );
-        if (sender.status === 401) return { ok: false, error: "invalid_credentials" };
-        if (sender.status !== 200) {
-          return { ok: false, error: `messaging_service_http_${sender.status}` };
-        }
-      } else {
-        const senderUrl = new URL(
-          `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/IncomingPhoneNumbers.json`,
-        );
-        senderUrl.searchParams.set("PhoneNumber", fromNumber);
-        senderUrl.searchParams.set("PageSize", "1");
-        const sender = await fetch(senderUrl, {
-          method: "GET",
-          headers: { Authorization: authorization, Accept: "application/json" },
-        });
-        if (sender.status === 401) return { ok: false, error: "invalid_credentials" };
-        if (sender.status !== 200) {
-          return { ok: false, error: `from_number_http_${sender.status}` };
-        }
-        const senderBody = (await sender.json().catch(() => ({}))) as {
-          incoming_phone_numbers?: unknown[];
-        };
-        if (!senderBody.incoming_phone_numbers?.length) {
-          return { ok: false, error: "from_number_not_owned" };
-        }
-      }
-      return {
-        ok: true,
-        detail: `Twilio account "${j.friendly_name || sid}" — ${j.status || "active"}; sender verified`,
-      };
-    }
-    if (r.status === 401) return { ok: false, error: "invalid_credentials" };
-    return { ok: false, error: `twilio_http_${r.status}` };
-  } catch (err) {
-    return { ok: false, error: `network_error: ${(err as Error).message}` };
-  }
+/**
+ * Twilio: read-only calls to the workspace's own account (lib/twilio/connection.ts
+ * probeTwilioConnection): the account's status, the saved number (on the
+ * account, able to text) or messaging service (exists, has a sender), and
+ * whether either already points at OASIS. A sender is not needed to run it:
+ * "needs a number" is an answer, not a refusal. The stored error is the state
+ * code, which the Connections card turns back into the same plain words.
+ */
+async function probeTwilio(bundle: Record<string, string>): Promise<ProbeResult> {
+  const probe = await probeTwilioConnection(bundle, { webhookUrls: twilioWebhookUrls(publicAppBaseUrl()) });
+  return {
+    ok: probe.ok,
+    error: probe.ok ? undefined : probe.state,
+    state: probe.state,
+    message: probe.message,
+    detail: twilioWebhookSentence(probe),
+  };
+}
+
+function twilioWebhookSentence(probe: Awaited<ReturnType<typeof probeTwilioConnection>>): string | undefined {
+  const sender = probe.sender;
+  if (!sender) return undefined;
+  const where = sender.incoming === "oasis" ? "reach OASIS" : sender.incoming === "elsewhere" ? "go to another address set in Twilio" : "are not sent anywhere yet";
+  const inbound = `Incoming texts ${where}.`;
+  return probe.inboundVerifiable
+    ? inbound
+    : `${inbound} OASIS cannot verify incoming texts without the Auth Token, so it refuses them.`;
 }
 
 async function probeStripe(

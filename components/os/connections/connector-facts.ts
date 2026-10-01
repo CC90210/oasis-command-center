@@ -43,6 +43,10 @@ async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
       has_value: r.has_value,
       last_tested_at: r.last_tested_at,
       last_test_ok: r.last_test_ok,
+      // A test's code (Twilio's plain states) and whether the value is OASIS's
+      // own deployment value; still never the value itself.
+      last_test_error: r.last_test_error,
+      source: r.source,
     }));
   } catch (error) {
     console.error("[connections.facts.key_rows]", error);

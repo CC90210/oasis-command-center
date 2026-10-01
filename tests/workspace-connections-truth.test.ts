@@ -95,6 +95,9 @@ const testRoute = readFileSync(
   join(root, "app", "api", "integrations", "keys", "test", "route.ts"),
   "utf8",
 );
+// Twilio's read-only test moved out of the route (2026-10-01, W10a), so every
+// state it reports is one function tests/twilio-connection.test.ts drives.
+const twilioProbe = readFileSync(join(root, "lib", "twilio", "connection.ts"), "utf8");
 
 assert.ok(
   summary.includes('["app_password", "from_address"]') &&
@@ -222,9 +225,10 @@ assert.equal(
 assert.ok(
     /Email-only: the keys are saved, but texting stays off until Twilio passes Test\./.test(keysPanel) &&
     keysPanel.includes("twilioVerified") &&
-    testRoute.includes("missing_sender") &&
-    testRoute.includes('j.status !== "active"') &&
-    testRoute.includes("sender verified"),
+    testRoute.includes("probeTwilioConnection(") &&
+    twilioProbe.includes('status !== "active"') &&
+    twilioProbe.includes('"needs_number"') &&
+    twilioProbe.includes('"number_lacks_sms"'),
   "Twilio must remain visibly email-only until its account and sender pass Test",
 );
 assert.ok(
