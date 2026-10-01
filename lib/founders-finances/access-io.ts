@@ -21,6 +21,7 @@ import {
   type FinanceViewer,
   type OwnerKey,
 } from "./access";
+import { settledOnce } from "@/lib/runtime/settled-once";
 import { BUSINESS_ENTITY_ID } from "./chart";
 import { query, queryOne } from "./db";
 import { ensureFinanceSeed } from "./seed-io";
@@ -89,24 +90,27 @@ const ENTITY_COLS = "id, slug, name, kind, owner_key, base_currency";
  * change under a running process. Before this, every requireEntity() was its
  * own round trip, i.e. one per list function on every page. The ACCESS
  * decision is not cached: canAccessEntity() still runs on every call.
+ *
+ * Only the READ ROWS are shared across requests, never a read in flight: a
+ * request that awaited another request's pending read was canceled by the
+ * Workers runtime as hung (2026-10-01 pipeline incident; see
+ * lib/runtime/settled-once.ts). cache() shares one read within a request, and
+ * a failed read is not remembered.
  */
-let entityTable: Promise<EntityRow[]> | null = null;
+const entityTable = settledOnce(
+  cache(async (): Promise<EntityRow[]> => {
+    await ensureFinanceSeed();
+    return query<EntityRow>(`SELECT ${ENTITY_COLS} FROM fin_entities ORDER BY kind, name`);
+  }),
+);
 
 function loadEntityTable(): Promise<EntityRow[]> {
-  if (!entityTable) {
-    entityTable = ensureFinanceSeed()
-      .then(() => query<EntityRow>(`SELECT ${ENTITY_COLS} FROM fin_entities ORDER BY kind, name`))
-      .catch((e) => {
-        entityTable = null; // retry next call rather than caching a failure
-        throw e;
-      });
-  }
-  return entityTable;
+  return entityTable.get();
 }
 
 /** Tests only: forget the per-process entity table. */
 export function resetEntityTableMemo(): void {
-  entityTable = null;
+  entityTable.reset();
 }
 
 export async function visibleEntities(viewer: FinanceViewer): Promise<EntityRow[]> {
