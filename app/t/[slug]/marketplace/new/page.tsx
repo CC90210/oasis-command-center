@@ -1,11 +1,15 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { PageHeader, Tag } from "@/components/Card";
 import { CustomAgentBuilder } from "@/components/marketplace/CustomAgentBuilder";
+import { aiTeamServes } from "@/components/os/aiteam/access";
+import { resolveOsViewer } from "@/components/os/department/viewer";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { manifestExists } from "@/lib/manifest/loader";
+import { withQuery } from "@/lib/os/redirects";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { requireOwnedTenantSlug } from "@/lib/tenant-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -18,9 +22,17 @@ export default async function MarketplaceBuildPage({
   searchParams: Promise<{ edit?: string }>;
 }) {
   const { slug } = await params;
-  const { edit } = await searchParams;
+  const query = await searchParams;
+  const { edit } = query;
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
+  // This workspace's own members, or a verified operator; anyone else 404s.
+  const access = await requireOwnedTenantSlug(normalised);
+  // The AI team's builder (/agents/new) builds for the session's workspace: a
+  // viewer on their own slug whom the AI team serves moves there, query kept.
+  // A client owner the AI team does not serve yet, and an operator previewing
+  // another workspace, keep this page (lib/os/redirects.ts OS_VIEWER_MOVES).
+  if (access === "own" && aiTeamServes(await resolveOsViewer())) redirect(withQuery("/agents/new", query));
 
   const user = await getSessionUser();
   const service = getServiceSupabase();

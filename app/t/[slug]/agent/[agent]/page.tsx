@@ -1,14 +1,16 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, Settings } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { AgentChat } from "@/components/agents/AgentChat";
+import { aiTeamServes } from "@/components/os/aiteam/access";
+import { resolveOsViewer } from "@/components/os/department/viewer";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
-import { ownsSlug } from "@/lib/manifest/tenant-scope";
 import { resolveSessionContext, type SessionContext } from "@/lib/api-auth";
 import { resolvePersona } from "@/lib/role-surfaces";
+import { requireOwnedTenantSlug } from "@/lib/tenant-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -40,6 +42,10 @@ export default async function TenantAgentChatPage({
       </div>
     );
   }
+  // This workspace's own members, or a verified operator; anyone else 404s
+  // before this workspace's name for the agent, or whether it is on, is read
+  // (W1a review R2; the marketplace pages carry the same gate).
+  const access = await requireOwnedTenantSlug(normalised);
   const tenantId = session.ok ? session.tenantId : null;
   // Owners and admins may open AI settings, so a failure carries the fix link
   // (the same persona rule a department channel uses).
@@ -53,11 +59,19 @@ export default async function TenantAgentChatPage({
   // /api/agents/chat answers only in a workspace the caller owns (403
   // otherwise), so a chat box over someone else's workspace would fail on
   // its first message. Say so instead of rendering it.
-  const owned = await ownsSlug(normalised, tenantId);
+  const owned = access === "own";
 
   const agentDef = await getAgentBySlug(agent, tenantId);
   if (!agentDef) notFound();
   if (!agentDef.is_public && agentDef.tenant_id !== tenantId) notFound();
+
+  // A custom teammate this workspace built has an OS page, /agents/<agent>: a
+  // viewer on their own slug whom the AI team serves moves there. A platform
+  // agent's chat stays here, as /agents/<agent> serves only the workspace's
+  // own (W1a review R5; lib/os/redirects.ts OS_VIEWER_MOVES).
+  if (owned && !agentDef.is_oasis_managed && agentDef.tenant_id === tenantId && aiTeamServes(await resolveOsViewer())) {
+    redirect(`/agents/${encodeURIComponent(agentDef.slug)}`);
+  }
 
   const manifest = await getManifest(normalised);
   const binding = manifest.agents.find((a) => a.slug === agentDef.slug);

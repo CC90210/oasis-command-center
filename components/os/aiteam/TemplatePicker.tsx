@@ -2,11 +2,13 @@
  * TemplatePicker — "New teammate" starting points for owners and admins.
  *
  * Each template opens the existing builder (components/marketplace/
- * CustomAgentBuilder.tsx at /t/<slug>/marketplace/new). The builder does not
- * read a template from the URL yet, so the card shows the description to paste
- * into its "Describe what this agent should do" field, and the link carries
- * `?template=<key>` for the builder to pick up when it learns to. Nothing here
- * claims the builder is prefilled.
+ * CustomAgentBuilder.tsx), mounted at /agents/new inside the OS shell
+ * (`builderHref` from components/os/aiteam/roster.ts; it was
+ * /t/<slug>/marketplace/new, under the legacy manifest sidebar). The builder
+ * does not read a template from the URL yet, so the card shows the description
+ * to paste into its "Describe what this agent should do" field, and the link
+ * carries `?template=<key>` for the builder to pick up when it learns to.
+ * Nothing here claims the builder is prefilled.
  *
  * Server component. A plain list, not an icon grid.
  */
