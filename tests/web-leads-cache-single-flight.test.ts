@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { invalidate, memo } from "../lib/web-leads/cache";
+import { CacheWaitTimeout, invalidate, memo } from "../lib/web-leads/cache";
 
 const ROOT = join(__dirname, "..");
 
@@ -46,6 +46,37 @@ function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
     timer = setTimeout(() => reject(new Error(`${what}: still waiting after ${ms} ms`)), ms);
   });
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * A virtual clock for memo(): time moves only when the test advances it, and
+ * every sleeper due at the same instant wakes in the same step, so a takeover
+ * race plays out the same way on any machine, however busy.
+ */
+function virtualClock() {
+  let t = 0;
+  let timers: Array<{ at: number; resolve: () => void }> = [];
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return {
+    now: () => t,
+    sleep: (ms: number) => new Promise<void>((resolve) => { timers.push({ at: t + ms, resolve }); }),
+    async advance(ms: number) {
+      const end = t + ms;
+      await settle();
+      for (;;) {
+        const due = timers.filter((x) => x.at <= end);
+        if (!due.length) break;
+        const at = Math.min(...due.map((x) => x.at));
+        const batch = timers.filter((x) => x.at === at);
+        timers = timers.filter((x) => x.at !== at);
+        t = at;
+        for (const x of batch) x.resolve();
+        await settle();
+      }
+      t = end;
+      await settle();
+    },
+  };
 }
 
 async function main() {
@@ -128,6 +159,53 @@ async function main() {
     assert.equal(await inFlight, "before the claim", "the caller that started it still gets its rows");
     assert.equal(await memo("t5:leads:pool", 60_000, load, FAST), "after the claim", "the next caller reads again");
     assert.equal(loads, 2);
+  });
+
+  // Codex review of #511: every waiter whose own budget ran out used to start
+  // a load, so one hung read plus five waiters became six 15 MB reads.
+  await check("a dead load gets exactly ONE recovery, however many callers wait on it", async () => {
+    const clock = virtualClock();
+    const opts = { flightWaitMs: 150, pollMs: 10, maxWaitMs: 3_000, clock };
+    let loads = 0;
+    const load = async () => {
+      loads += 1;
+      if (loads === 1) return new Promise<string>(() => {});
+      await clock.sleep(60);
+      return "recovered";
+    };
+    void memo("t6:leads", 60_000, load, opts);
+    const waiters = Array.from({ length: 5 }, () => memo("t6:leads", 60_000, load, opts));
+    await clock.advance(1_000);
+    const values = await within(1_000, Promise.all(waiters), "the five waiters");
+    assert.deepEqual(values, Array(5).fill("recovered"));
+    assert.equal(loads, 2, "the original load and one recovery, never one per waiter");
+  });
+
+  await check("when every load hangs, takeovers are spaced one budget apart and the rest give up", async () => {
+    const clock = virtualClock();
+    const opts = { flightWaitMs: 200, pollMs: 10, maxWaitMs: 600, clock };
+    const starts: number[] = [];
+    const load = () => {
+      starts.push(clock.now());
+      return new Promise<string>(() => {});
+    };
+    void memo("t7:leads", 60_000, load, opts);
+    const outcomes = Array.from({ length: 5 }, () =>
+      memo("t7:leads", 60_000, load, opts).then(
+        () => "value",
+        (e: unknown) => (e instanceof CacheWaitTimeout ? "gave up" : `other: ${String(e)}`),
+      ),
+    );
+    await clock.advance(2_000);
+    const settled = await Promise.all(outcomes.map((o) => Promise.race([o, Promise.resolve("still loading")])));
+    assert.deepEqual(starts, [0, 200, 400], "the original load, then one takeover per dead flight, none after the wait cap");
+    assert.equal(settled.filter((s) => s === "gave up").length, 3, `outcomes: ${settled.join(", ")}`);
+    assert.equal(settled.filter((s) => s === "still loading").length, 2, `outcomes: ${settled.join(", ")}`);
+  });
+
+  await check("/api/web-leads answers a caller that gave up with a retryable 503, not a 500", () => {
+    const route = readFileSync(join(ROOT, "app/api/web-leads/route.ts"), "utf8");
+    assert.match(route, /err instanceof CacheWaitTimeout[\s\S]{0,300}status: 503[\s\S]{0,80}"Retry-After"/);
   });
 
   await check("the module never stores a promise in its maps", () => {
