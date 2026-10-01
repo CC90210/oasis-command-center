@@ -390,6 +390,20 @@ async function main() {
       "a teammate the client built, never bound, is listed Off (not hidden)",
     );
   });
+  // Verifier E4: SUGA's saved prompts still named Maven after its roster went neutral.
+  await check("a client seed's saved prompts name its own teammates, never a house agent", async () => {
+    const { SEED_MANIFESTS } = await import("../lib/manifest/seeds");
+    const { isHouseAgentSlug } = await import("../lib/agents");
+    const clientSeeds = Object.entries(SEED_MANIFESTS).filter(([, m]) => m !== OASIS_SEED && m !== OASIS_AI_CC_SEED);
+    assert.ok(clientSeeds.length > 0, "no client seed to check");
+    for (const [key, seed] of clientSeeds) {
+      const bound = new Set(seed.agents.map((a) => a.slug));
+      for (const p of seed.default_prompts ?? []) {
+        assert.ok(!isHouseAgentSlug(p.agent_slug), `${key}: the prompt "${p.label}" names the house agent "${p.agent_slug}"`);
+        assert.ok(bound.has(p.agent_slug), `${key}: the prompt "${p.label}" names "${p.agent_slug}", which the seed does not bind`);
+      }
+    }
+  });
 
   // ── 4. The toggle API ─────────────────────────────────────────────────────
   await check("toggle: a client owner cannot add an OASIS house agent (the rule used to live only in the card)", async () => {

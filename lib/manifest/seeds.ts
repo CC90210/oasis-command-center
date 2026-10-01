@@ -359,10 +359,13 @@ export const SUGA_SEED: TenantManifest = {
     { path: "sponsorship", label: "Sponsorships", kind: "kanban", entity: "sponsorship", config: { group_by: "stage" } },
   ],
   default_prompts: [
-    { agent_slug: "maven", label: "Fan check-in", prompt: "Pull the most engaged 10 subscribers this week. Suggest a personalised DM I can send." },
-    { agent_slug: "maven", label: "Post idea", prompt: "What's a high-engagement post angle I haven't run this month?" },
-    { agent_slug: "maven", label: "Merch drop sweep", prompt: "Which merch drops are due to go live this month? Anything understocked?" },
-    { agent_slug: "maven", label: "Weekly brand pulse", prompt: "Summarise this week's posts, subscriber growth, and any sponsorship movement in 5 bullets." },
+    // The seed's primary teammate, the role Maven held when these were
+    // written. A client seed names its own bindings only (W4a), and there
+    // is no neutral Marketing lead yet.
+    { agent_slug: "sdr", label: "Fan check-in", prompt: "Pull the most engaged 10 subscribers this week. Suggest a personalised DM I can send." },
+    { agent_slug: "sdr", label: "Post idea", prompt: "What's a high-engagement post angle I haven't run this month?" },
+    { agent_slug: "sdr", label: "Merch drop sweep", prompt: "Which merch drops are due to go live this month? Anything understocked?" },
+    { agent_slug: "sdr", label: "Weekly brand pulse", prompt: "Summarise this week's posts, subscriber growth, and any sponsorship movement in 5 bullets." },
   ],
   // Universal default 2026-05-15 — all tenant data lives in CC's Supabase
   // project, scoped by tenant_id + RLS. Lower onboarding friction (no
