@@ -24,7 +24,10 @@ import { instrumentTursoClient } from "@/lib/perf/server-timing";
  * request's continuation, and kills it as hung. Any page that keeps 20 reads in
  * flight fills the queue, and a request landing in the same isolate meanwhile
  * dies: "Something went wrong" on every other click (2026-10-01 pipeline
- * incident; see lib/runtime/settled-once.ts for the runtime messages).
+ * incident; see lib/runtime/settled-once.ts for the runtime messages). Worse,
+ * if the request holding those slots is canceled, its statements never settle,
+ * the slots are never released, and every later statement in that isolate
+ * waits forever.
  *
  * A limit no isolate can reach means no statement waits on another request.
  * Each request's own fetches stay bounded by the runtime's per-request
