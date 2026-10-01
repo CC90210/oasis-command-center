@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
-import { PROVIDER_MODELS } from "@/lib/providers";
+import { PROVIDER_LABEL, PROVIDER_MODELS, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 
@@ -139,7 +139,7 @@ export async function POST(req: NextRequest) {
   // Upsert
   let existingQ = service
     .from("agent_model_config")
-    .select("id, encrypted_api_key")
+    .select("id, encrypted_api_key, provider")
     .eq("tenant_id", tenantId)
     .eq("agent_key", agentKey);
   existingQ = effectiveUserId
@@ -154,6 +154,23 @@ export async function POST(req: NextRequest) {
         message: "Personal agent overrides need an API key. Clear the override to use the team fallback.",
       },
       { status: 400 },
+    );
+  }
+  // A saved key belongs to its provider. Moving the row to another provider
+  // without a new key would leave that key behind for the new provider to
+  // refuse, on every channel that reads the row: `/model gpt-5.4` with an
+  // Anthropic key on file took every department down with provider_401
+  // (S4-09). Switching providers means pasting that provider's key.
+  const existingProvider = typeof existing?.provider === "string" ? existing.provider : "";
+  if (existing?.encrypted_api_key && !encryptedKey && existingProvider && existingProvider !== provider) {
+    const label = PROVIDER_LABEL[provider as Provider] ?? provider;
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "provider_mismatch",
+        message: `Paste ${/^[aeiou]/i.test(label) ? "an" : "a"} ${label} key to switch providers.`,
+      },
+      { status: 409 },
     );
   }
 

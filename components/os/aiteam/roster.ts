@@ -27,7 +27,7 @@ import { lastTurnOn, readWorkspaceTurns, workspaceChatReadiness } from "@/compon
 import { departmentGate } from "@/components/os/department/gate";
 import type { Read } from "@/components/os/department/routines";
 import type { OsViewer } from "@/components/os/department/viewer";
-import { agentChannelKey, departmentChannelKey } from "@/lib/os/channel/outcome";
+import { agentChannelKey, departmentChannelKey, failureCopy } from "@/lib/os/channel/outcome";
 import type { WebState } from "./TeammateRow";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
@@ -47,6 +47,8 @@ export type LeadTeammate = {
    * and a read that failed is `unknown`, never a green check.
    */
   web: WebState;
+  /** Why it is `not_working`, in the department header's own short words; null otherwise. */
+  webReason: string | null;
   /**
    * Where it lives in Slack: its mapped channels, or why it does not
    * (lib/slack/status.ts). Absent for a department with no teammate: nothing
@@ -72,6 +74,8 @@ export type CustomTeammate = {
    * key the provider is refusing.
    */
   web: Exclude<WebState, "not_set_up">;
+  /** Why it is `not_working`, in the department header's own short words; null otherwise. */
+  webReason: string | null;
 };
 
 export type AiTeam = {
@@ -81,7 +85,7 @@ export type AiTeam = {
   builderHref: string | null;
 };
 
-async function loadCustom(tenantId: string): Promise<Read<Array<Omit<CustomTeammate, "enabled" | "webHref" | "web">>>> {
+async function loadCustom(tenantId: string): Promise<Read<Array<Omit<CustomTeammate, "enabled" | "webHref" | "web" | "webReason">>>> {
   try {
     const res = await getServiceSupabase()
       .from("agents")
@@ -144,12 +148,17 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
   // department header's rule, lastTurnOn): one that failed is Not working, and
   // a record that could not be read is unknown. Leads and custom teammates are
   // judged the same way, each on the channel keys the route records them under.
-  const webOn = (channelKeys: readonly string[]): Exclude<WebState, "not_set_up"> => {
-    if (web !== "ready") return web;
+  // The reason travels with the state: the roster chip says why, in the same
+  // short words the header uses (StatusPill withLastTurn), so "not working"
+  // is never read as a missing web capability (S4-01).
+  type WebOn = { web: Exclude<WebState, "not_set_up">; webReason: string | null };
+  const webOn = (channelKeys: readonly string[]): WebOn => {
+    if (web !== "ready") return { web, webReason: null };
     const last = channelKeys.map((k) => lastTurnOn(turns, k));
-    if (last.some((t) => t.kind === "failed")) return "not_working";
-    if (last.some((t) => t.kind === "unknown")) return "unknown";
-    return "ready";
+    const failed = last.find((t): t is Extract<typeof t, { kind: "failed" }> => t.kind === "failed");
+    if (failed) return { web: "not_working", webReason: failureCopy(failed.code, { canManageAi: false }).short };
+    if (last.some((t) => t.kind === "unknown")) return { web: "unknown", webReason: null };
+    return { web: "ready", webReason: null };
   };
 
   const leads: LeadTeammate[] = [];
@@ -167,7 +176,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
       name: departments.map((d) => d.label).join(" · "),
       summary: led[0] ? departmentProfile(led[0].dept.key).purpose : "",
       departments,
-      web: agent ? webOn(led.map((b) => departmentChannelKey(b.dept.key))) : "not_connected",
+      ...(agent ? webOn(led.map((b) => departmentChannelKey(b.dept.key))) : { web: "not_connected", webReason: null }),
       slack: slackHomeFor(slackPresence, led.map((b) => b.dept.key)),
     });
   }
@@ -179,6 +188,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
       summary: binding.reason,
       departments: [{ label: dept.label, href: dept.href }],
       web: "not_set_up",
+      webReason: null,
     });
   }
 
@@ -193,7 +203,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
             ...c,
             enabled: enabled.has(c.slug.toLowerCase()),
             webHref: readiness.slug ? `/t/${readiness.slug}/agent/${encodeURIComponent(c.slug)}` : null,
-            web: webOn([agentChannelKey(c.slug)]),
+            ...webOn([agentChannelKey(c.slug)]),
           })),
         }
       : custom,

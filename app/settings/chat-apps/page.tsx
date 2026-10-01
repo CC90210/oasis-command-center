@@ -12,8 +12,9 @@
  *   - Telegram: each person's own alert bot works now (TelegramConnectCard,
  *     rendered by SettingsContent's chat-apps section), and owners see the
  *     shared team-alerts bot's measured status. Two-way AI teammates in
- *     Telegram chats are Phase 2 and say so.
- *   - Discord, Microsoft Teams, WhatsApp: planned, nothing more.
+ *     Telegram chats are not built, and the card says exactly that: a state,
+ *     never a release promise.
+ *   - Discord, Microsoft Teams, WhatsApp: not built, nothing more.
  *
  * OASIS's own Telegram bridges on CC's machine are not this and never appear
  * here; they are CC's personal channel (plan decision 3).
@@ -45,12 +46,8 @@ import { SLACK_RETENTION_DAYS } from "@/lib/slack/retention";
 
 export const dynamic = "force-dynamic";
 
-function plannedStatus(def: ConnectorDef): ConnectorStatus {
-  return {
-    kind: "coming_soon",
-    label: def.plannedFor === "Phase 2" ? "Coming in Phase 2" : "Planned",
-  };
-}
+/** An app nothing is built for yet: the state, with no date or phase attached. */
+const NOT_BUILT: ConnectorStatus = { kind: "coming_soon", label: "Not built yet" };
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -201,11 +198,11 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
             <div className="text-[13px]">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-medium text-fg">AI teammates in Telegram</span>
-                <StatusLine status={{ kind: "coming_soon", label: "Coming in Phase 2" }} />
+                <StatusLine status={{ kind: "coming_soon", label: "Telegram teammates are not built yet" }} />
               </div>
               <p className="mt-0.5 leading-5 text-fg-muted">
-                Message the OASIS bot to reach your Chief of Staff, or add it to a group chat and link the group to a
-                department. Approvals will arrive as buttons.
+                Today Telegram carries alerts only. A teammate you could message directly, or add to a group chat and
+                link to a department, is not built.
               </p>
             </div>
           </ChatAppCard>
@@ -217,9 +214,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
 
         {later.length > 0 && (
           <section className="rounded-xl border border-hairline bg-bg-panel px-4 py-4">
-            <h2 className="text-sm font-semibold text-fg">Later</h2>
+            <h2 className="text-sm font-semibold text-fg">Not built</h2>
             <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-              Planned after Slack and Telegram. Nothing to set up yet.
+              Nothing exists for these yet, so there is nothing to set up.
             </p>
             <ul className="mt-3 grid gap-2 sm:grid-cols-3">
               {later.map((d) => (
@@ -227,7 +224,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   <ConnectorIcon def={d} size="sm" />
                   <div className="min-w-0">
                     <div className="truncate text-[13px] font-medium text-fg">{d.name}</div>
-                    <StatusLine status={plannedStatus(d)} />
+                    <StatusLine status={NOT_BUILT} />
                   </div>
                 </li>
               ))}

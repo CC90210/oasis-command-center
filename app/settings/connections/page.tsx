@@ -6,7 +6,7 @@
  * (CC, 2026-09-29: the page used to list the same apps a second time under
  * "Keys and accounts"). Statuses are computed HERE, on the server, from real
  * sources only (lib/os/connectors.ts resolveConnectorStatus): an app with no
- * status source says "Coming soon", a failed lookup says "Status
+ * status source says "Not built yet", a failed lookup says "Status
  * unavailable", and nothing is ever "Connected" without a passing check.
  *
  * `?app=<slug>` opens that app's drawer (connectorHref), and Google's sign-in
