@@ -17,7 +17,13 @@
  *      neither reported as alerted when nothing was sent nor lost: it waits,
  *      flagged and visible on that desk, until the workspace has lanes.
  *   4. Reconcile the support intake on every desk: tickets for submissions
- *      whose request died half-way, and notifications whose after() never ran.
+ *      whose request died half-way, and notifications whose after() never ran
+ *      (email tickets included: their acknowledgement re-reads the decision
+ *      the support inbox made at ingest, so a retry sends only what was meant).
+ *   5. The support inbox (support@): alert ONCE when it has not been read for
+ *      20 minutes (lib/delivery/support-inbox-health.ts), and forget non-ticket
+ *      mail after 30 days (lib/delivery/email-intake.ts). Both are no-ops on a
+ *      database without migration bravo__200.
  *
  * Returned counts are what the cron route reports. A failed alert is counted
  * and its reason recorded on the ticket; it is never silently dropped, and it is
@@ -29,6 +35,8 @@ import { claimBreachAlerts, flagSlaBreaches, reclaimFailedBreachAlerts } from "@
 import { alertSlaBreach, deskUsesOasisLanes, type NotifyDeps } from "@/lib/delivery/notify";
 import { reconcileSupportIntake } from "@/lib/delivery/support-intake";
 import { OASIS_DESK, listRegisteredDesks } from "@/lib/delivery/desks";
+import { alertStaleSupportInboxes, type StaleAlertResult } from "@/lib/delivery/support-inbox-health";
+import { purgeOldNonTicketMessages } from "@/lib/delivery/email-intake";
 
 export type SlaCheckResult = {
   /** Desks checked this pass (OASIS's + registered workspace desks). */
@@ -40,6 +48,8 @@ export type SlaCheckResult = {
   flagged_without_lane: number;
   alert_failures: Array<{ ticket_id: string; status: string | null; error?: string }>;
   reconcile: Awaited<ReturnType<typeof reconcileSupportIntake>>;
+  /** support@: stale-read alerts this pass, and non-ticket mail forgotten. */
+  support_inbox: StaleAlertResult & { purged: number };
 };
 
 export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Promise<SlaCheckResult> {
@@ -76,6 +86,8 @@ export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Prom
     }
   }
   const reconcile = await reconcileSupportIntake(db, deps, now);
+  const stale = await alertStaleSupportInboxes(db, deps, now);
+  const purged = await purgeOldNonTicketMessages(db, now);
   return {
     desks: desks.length,
     flagged,
@@ -84,5 +96,6 @@ export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Prom
     flagged_without_lane: flaggedWithoutLane,
     alert_failures,
     reconcile,
+    support_inbox: { ...stale, purged },
   };
 }

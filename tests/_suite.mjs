@@ -450,6 +450,13 @@ const TESTS = [
   "tests/background-workers-contract.test.ts",
   // The /schedule week model: protected time and the editable blocks.
   "tests/schedule-model.test.ts",
+  // The support inbox (support@ -> the Command Center): the four HMAC routes
+  // the reader on CC's PC calls, email intake and threading, the instant
+  // acknowledgement, reply drafts and their approval, and the reader's
+  // heartbeat. Registered here, not in package.json's test:delivery, because
+  // package.json was held by three other build tracks when this landed.
+  "tests/support-inbox-wire.test.ts",
+  "tests/support-inbox-ingest.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

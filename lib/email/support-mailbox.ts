@@ -88,6 +88,48 @@ export function pinnedSuppressionTenant(brand: string): string | null {
   return brand.trim().toLowerCase() === OASIS_SUPPRESSION_BRAND.toLowerCase() ? OASIS_SUPPRESSION_TENANT_ID : null;
 }
 
+/**
+ * THE SUPPORT INBOXES THE COMMAND CENTER TAKES MAIL FOR, and the desk each one
+ * files into (2026-10-01). The reader on CC's PC posts each message with the
+ * mailbox it read it from (/api/internal/support/ingest); the desk, and so the
+ * tenant every write is pinned to, comes from THIS map, never from the request
+ * body. A mailbox that is not listed is refused (422). One entry today:
+ * support@ files into OASIS's own desk.
+ */
+export const SUPPORT_INBOX_DESKS: Readonly<Record<string, string>> = {
+  [OASIS_SUPPORT_EMAIL]: DELIVERY_TENANT_ID,
+};
+
+/** The desk tenant a support inbox files into, or null for a mailbox that is not one. */
+export function supportInboxDeskTenant(mailbox: unknown): string | null {
+  if (typeof mailbox !== "string") return null;
+  const key = mailbox.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SUPPORT_INBOX_DESKS, key) ? SUPPORT_INBOX_DESKS[key] : null;
+}
+
+/** The support inbox a desk tenant reads, or null (the inverse of supportInboxDeskTenant). */
+export function supportInboxForDesk(tenantId: string): string | null {
+  for (const [mailbox, tenant] of Object.entries(SUPPORT_INBOX_DESKS)) if (tenant === tenantId) return mailbox;
+  return null;
+}
+
+/**
+ * Is `address` the mailbox itself or one of its plus-addresses
+ * (support+anything@oasisai.work)? Mail to a plus-address lands in the same
+ * inbox; the reader keeps the one it was delivered to.
+ */
+export function isAddressOfMailbox(address: unknown, mailbox: string): boolean {
+  if (typeof address !== "string") return false;
+  const a = address.trim().toLowerCase();
+  const m = mailbox.trim().toLowerCase();
+  const at = m.lastIndexOf("@");
+  if (at <= 0 || a.indexOf("@") !== a.lastIndexOf("@")) return false;
+  if (a === m) return true;
+  const local = m.slice(0, at);
+  const domain = m.slice(at);
+  return a.endsWith(domain) && a.startsWith(`${local}+`) && a.length > local.length + 1 + domain.length;
+}
+
 type Env = Record<string, string | undefined>;
 
 export type SupportMailboxResolution =
