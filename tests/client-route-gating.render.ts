@@ -104,6 +104,14 @@ async function main() {
     render(`globalError:${id}`, React.createElement(GlobalError, { error: crash, reset: noop }));
   }
   render("error:prospectNoDigest", React.createElement(ErrorBoundary, { error: new Error("boom"), reset: noop }));
+  // A read deadline (lib/os/deadline.ts): in production Next forwards only the
+  // digest the thrower set, so this is exactly what the boundary receives.
+  const timedOut = Object.assign(new Error("Read did not answer in time: money"), { digest: "READ_DEADLINE" });
+  currentPath = "/settings/ai";
+  render("error:timedOut", React.createElement(ErrorBoundary, { error: timedOut, reset: noop }));
+  render("globalError:timedOut", React.createElement(GlobalError, { error: timedOut, reset: noop }));
+  currentPath = BOUNDARY_PATHS.form;
+  render("error:timedOutProspect", React.createElement(ErrorBoundary, { error: timedOut, reset: noop }));
   currentPath = "/settings/ai";
   // /unsubscribe: from a link (address shown) and with no address in the link
   // (the recipient types it).

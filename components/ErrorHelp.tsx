@@ -23,7 +23,10 @@
  * W0): a workspace read that did not answer inside its budget
  * (lib/os/deadline.ts). The copy says so plainly and asks for a reload; it
  * never names a table, a query or a tenant - the label stays in the Worker's
- * logs. Every other error keeps the generic copy.
+ * logs. The digest is not shown either: it is READ_DEADLINE, an internal
+ * identifier that tells a client nothing and that the logs already carry, so
+ * a timeout takes the no-code branch of the sentence. Every other error keeps
+ * the generic copy and its code.
  *
  * No hooks, so it renders on the server and under the react-server test
  * condition. The boundaries read the path (usePathname) and pass it in.
@@ -84,16 +87,18 @@ export function ErrorHelp({
   // "Reload the page" for a timeout (the read is retried from scratch); "Try
   // again" for everything else, which is what the boundary's button does.
   const lead = timedOut ? `${TIMED_OUT_COPY} Reload the page.` : "Try again.";
+  // A timeout's digest is an internal label, not a code anyone can act on.
+  const code = timedOut ? undefined : digest;
   return (
     <>
       {prospectFacing ? (
         <p className={textClass} style={textStyle}>
           {lead} If it keeps happening, contact the business that sent you here
-          {digest ? " and give them the code below" : " and tell them what you were doing"}.
+          {code ? " and give them the code below" : " and tell them what you were doing"}.
         </p>
       ) : (
         <p className={textClass} style={textStyle}>
-          {lead} If it keeps happening, {digest ? "send us the code below" : "tell us what you were doing"}{" "}
+          {lead} If it keeps happening, {code ? "send us the code below" : "tell us what you were doing"}{" "}
           through the{" "}
           <a href={SUPPORT_FORM_PATH} target="_blank" rel="noopener noreferrer" className={linkClass} style={linkStyle}>
             support form
@@ -105,7 +110,7 @@ export function ErrorHelp({
           .
         </p>
       )}
-      {digest ? (
+      {code ? (
         <div
           className={
             inline
@@ -114,7 +119,7 @@ export function ErrorHelp({
           }
           style={inline ? INLINE.code : undefined}
         >
-          Error code: {digest}
+          Error code: {code}
         </div>
       ) : null}
     </>

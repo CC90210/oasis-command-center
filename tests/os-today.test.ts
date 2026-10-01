@@ -217,7 +217,7 @@ async function main() {
   const founder = code("components/today/FounderToday.tsx");
   const brief = code("components/os/today/brief-load.ts");
   assert.match(founder, /const showFinancials = financialsAllowed && plan\.money;/, "the dispatcher's flag is narrowed by the plan");
-  assert.match(founder, /showFinancials \? await loadOasisMoney\(tenantId, "today"\) : null/, "money read only behind showFinancials");
+  assert.match(founder, /showFinancials\s*\?\s*withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)\s*:\s*Promise\.resolve\(null\)/, "money read only behind showFinancials (and under the Today read deadline, tests/os-read-deadline)");
   assert.match(founder, /loadNeedsYouReads\(\{\s*viewer,\s*navInput,\s*plan,\s*showFinancials,/, "the shared reads get the narrowed flag, never the raw capability");
   assert.match(brief, /input\.showFinancials && plan\.cash \? loadCash\(\) : Promise\.resolve\(null\)/, "cash read only behind the money gate");
   assert.equal((founder.match(/loadOasisMoney\(/g) || []).length, 1, "one money read");

@@ -204,11 +204,65 @@ async function main() {
   await check("loaders.ts runs every read under the deadline and rethrows only a deadline", () => {
     const src = read("components/os/today/loaders.ts");
     assert.match(src, /value: await withDeadline\(fn\(\), TODAY_READ_DEADLINE_MS, label\)/, "read() must wrap fn() in the deadline");
-    assert.match(src, /if \(isReadDeadlineError\(err\)\) throw err;\s*return \{ ok: false \};/, "a deadline is rethrown; any other error is still a marker");
+    // Anchored to read()'s own catch (its log line is the template with the
+    // label); loadCash's catch below has the same two lines and must not be
+    // what satisfies this.
+    assert.match(
+      src,
+      /console\.error\(`\[today\.\$\{label\}\]`, err\);\s*if \(isReadDeadlineError\(err\)\) throw err;\s*return \{ ok: false \};/,
+      "read() must rethrow a deadline and keep any other error a marker",
+    );
     assert.match(src, /withDeadline\(resolveFinanceViewer\(\), TODAY_READ_DEADLINE_MS, "cash\.viewer"\)/, "the cash viewer resolution is under the deadline too");
+    assert.match(
+      src,
+      /console\.error\("\[today\.cash\.viewer\]", err\);\s*if \(isReadDeadlineError\(err\)\) throw err;\s*return \{ ok: false \};/,
+      "the cash viewer catch must rethrow a deadline and keep any other error a marker",
+    );
     const briefSrc = read("components/os/today/brief-load.ts");
     assert.match(briefSrc, /withDeadline\(\s*loadPendingApprovals\(\{[\s\S]*?\}\),\s*TODAY_READ_DEADLINE_MS,\s*"approvals",\s*\)/, "the approvals read is under the deadline");
     assert.match(briefSrc, /withDeadline\(isOperator\(\), TODAY_READ_DEADLINE_MS, "routines\.operator"\)/, "the operator check is under the deadline");
+  });
+
+  // The founder's Today issues one read of its own, the money block
+  // (lib/goals/oasis-money: eight Turso reads, each failing soft). It used to
+  // be awaited SERIALLY, outside the deadline, before the Promise.all: a hung
+  // books read kept the skeleton up for every founder - the exact failure
+  // item 5 ends. Now it is under the deadline and awaited in the same
+  // Promise.all as the other blocks, so a deadline rejection never leaves
+  // the other reads rejecting with no handler. A reader this file imports
+  // that is not one of the deadline-guarded modules below has to be added
+  // here, which is the point.
+  await check("FounderToday.tsx: the money read is under the deadline, awaited with the other blocks, and every reader it imports is accounted for", () => {
+    const src = read("components/today/FounderToday.tsx");
+    assert.match(
+      src,
+      /const moneyP = showFinancials\s*\?\s*withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)\s*:\s*Promise\.resolve\(null\);/,
+      "the founder money read must run under TODAY_READ_DEADLINE_MS",
+    );
+    assert.match(
+      src,
+      /const \[money, reads, content, calendar, blocks\] = await Promise\.all\(\[moneyP, needsP, contentP, calendarP, blocksP\]\);/,
+      "the money read must be awaited with the other blocks, not on its own first",
+    );
+    assert.doesNotMatch(src, /await\s+(?:withDeadline\(\s*)?loadOasisMoney\(/, "the money read is awaited on its own again (serially, before the other blocks)");
+    assert.equal((src.match(/loadOasisMoney\(/g) ?? []).length, 1, "loadOasisMoney is called more than once; is the second call under the deadline?");
+    assert.match(src, /import \{ withDeadline \} from "@\/lib\/os\/deadline"/);
+    assert.match(src, /import \{ TODAY_READ_DEADLINE_MS, [^}]*\} from "@\/components\/os\/today\/loaders"/);
+    assert.doesNotMatch(src, /None of these promises rejects/, "the comment is false now: a read that never answers rejects to app/error.tsx");
+    // Every @/lib module this file imports, and why each needs no deadline here.
+    const KNOWN_LIB_IMPORTS = new Set([
+      "@/lib/dates",                 // pure
+      "@/lib/goals/oasis-money",     // the money read, pinned above
+      "@/lib/os/deadline",           // the helper
+      "@/lib/os/modules",            // pure
+      "@/lib/os/nav",                // pure
+      "@/lib/role-surfaces",         // pure
+      "@/lib/role-surfaces-session", // the operator check, passed into brief-load's deadline-guarded routines.operator
+      "@/lib/supabase",              // type only
+    ]);
+    const libImports = [...src.matchAll(/from "(@\/lib\/[^"]+)"/g)].map((m) => m[1]);
+    const unknown = libImports.filter((m) => !KNOWN_LIB_IMPORTS.has(m));
+    assert.deepEqual(unknown, [], "FounderToday.tsx imports a reader this test has not seen: put its read under withDeadline (or through loaders.ts) and list it here");
   });
 
   // ── 4. The error page names the timeout, offers a reload, names no table ──
@@ -227,22 +281,40 @@ async function main() {
   // critic, "surfaces outside the census"): the 404 speaks of their workspace,
   // not the pre-OS product name, and the root error page's button is the OS
   // button, not a second hard-coded blue.
-  await check("the 404 and the root error page speak the OS's language", () => {
+  await check("the 404s and the root error page speak the OS's language", () => {
     const notFound = read("app/not-found.tsx");
     assert.match(notFound, /That page doesn&apos;t exist in your workspace\./, "the 404 copy");
     assert.doesNotMatch(notFound, /Command Center/, "the 404 names the pre-OS product");
+    // The 404 every retired SunBiz route actually serves (/applications,
+    // /lenders, /offers, /t/sun/*...) is a Response that cannot load the
+    // stylesheet, so it carries the .btn-primary values written out.
+    const retired = read("lib/os/retired-routes.ts");
+    assert.match(retired, /<p>That page is no longer part of your workspace\.<\/p>/, "the retired-route 404 copy");
+    assert.doesNotMatch(retired, /Command Center/, "the retired-route 404 names the pre-OS product");
+    assert.doesNotMatch(retired, /#3b82f6|rgba\(59,130,246/i, "the retired-route 404 hard-codes the raw accent again");
+    assert.match(retired, /a \{[^}]*background: #2563eb; color: #ffffff;/, "the retired-route button must be the muted accent with white text (.btn-primary's values)");
     const globalError = read("app/global-error.tsx");
     assert.doesNotMatch(globalError, /#3b82f6|rgba\(59,130,246/i, "global-error.tsx hard-codes the accent again");
     assert.match(globalError, /className="btn-primary"/, "global-error.tsx must use the OS button class");
+    // ...and, because the root layout (the only importer of globals.css) has
+    // failed on the one path this file exists for, the token inline with its
+    // own value as the fallback. tests/client-route-gating renders it.
+    assert.match(globalError, /background: "rgb\(var\(--c-accent-muted, 37 99 235\)\)"/, "global-error.tsx's button has no colour when the stylesheet never loaded");
+    assert.match(globalError, /color: "#ffffff"/);
   });
 
-  await check("the timed-out copy is plain English with no internal names", async () => {
+  await check("the timed-out copy is plain English with no internal names, and no code to forward", async () => {
     const { TIMED_OUT_COPY } = await import("../components/ErrorHelp");
     assert.match(TIMED_OUT_COPY, /workspace read timed out/i);
     assert.doesNotMatch(TIMED_OUT_COPY, /[a-z]+_[a-z]+/, "an identifier with an underscore is an internal table or column name");
     assert.doesNotMatch(TIMED_OUT_COPY, /turso|libsql|sqlite|supabase|postgrest|tenant_|cron|bravo|atlas|maven|aura/i, "names an internal system");
     const help = read("components/ErrorHelp.tsx");
     assert.match(help, /timedOut \? `\$\{TIMED_OUT_COPY\} Reload the page\.` : "Try again\."/, "the timeout lead asks for a reload; every other error keeps 'Try again'");
+    // READ_DEADLINE is an internal label; a timeout takes the no-code branch
+    // and draws no "Error code" box (rendered proof: tests/client-route-gating).
+    assert.match(help, /const code = timedOut \? undefined : digest;/, "a timeout must not present its digest as a code to send");
+    assert.doesNotMatch(help, /\{digest \? /, "a branch still keys on the raw digest instead of `code`");
+    assert.match(help, /Error code: \{code\}/);
   });
 
   if (failures > 0) throw new Error(`${failures} check(s) failed`);

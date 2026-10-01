@@ -10,11 +10,14 @@
  * shared with app/error.tsx: try again, then send us the code; on a page a
  * client's prospect opens (/f/, /sign/, /unsubscribe), no OASIS contact.
  *
- * The button is the OS button class (.btn-primary, app/globals.css: accent
- * tokens, no hard-coded blue) with only layout inline (2026-10-01, OS plan
- * W0). When the stylesheet did load it matches every other button; when the
- * layout failed before the stylesheet, it is a plain, readable browser button
- * rather than a second palette.
+ * The button is the OS button class (.btn-primary, app/globals.css) AND an
+ * inline style that references the same tokens with their values as fallbacks
+ * (2026-10-01, OS plan W0). The only path this file exists for is the one
+ * where the root layout, the sole importer of globals.css, has failed: without
+ * the inline fallbacks the class names nothing and the button is the browser
+ * default (light grey, black text) on this dark body. With the stylesheet the
+ * token wins; without it the fallback is the token's own value
+ * (--c-accent-muted: 37 99 235, globals.css). No second palette either way.
  */
 
 import { useEffect } from "react";
@@ -67,7 +70,17 @@ export default function GlobalError({
           <button
             onClick={() => (timedOut ? window.location.reload() : reset())}
             className="btn-primary"
-            style={{ marginTop: "1rem", cursor: "pointer" }}
+            style={{
+              marginTop: "1rem",
+              cursor: "pointer",
+              background: "rgb(var(--c-accent-muted, 37 99 235))",
+              color: "#ffffff",
+              fontWeight: 600,
+              padding: "0.5rem 0.95rem",
+              borderRadius: "0.5rem",
+              border: 0,
+              fontSize: "0.875rem",
+            }}
           >
             {timedOut ? "Reload" : "Try again"}
           </button>
