@@ -44,7 +44,7 @@ import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
-import { getManifest } from "@/lib/manifest/loader";
+import { getWorkspaceManifest } from "@/lib/manifest/loader";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
 import { departmentChannelFor } from "@/components/os/department/config";
@@ -218,9 +218,12 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   const oasis = isOasisSurfaceTenant(tenant.slug);
   // Who leads each department: the workspace's manifest, read the way the web
   // channel reads it (config.ts departmentChannelFor). No manifest slug means
-  // no roster, so nothing answers here (and OASIS keeps its static leads).
+  // no roster, so nothing answers here (and OASIS keeps its static leads). A
+  // read that fails THROWS, so the job is retried: a database that did not
+  // answer is never posted into the client's Slack as "<Department> is not
+  // set up" (W4a review R3).
   const tenantSlug = ((await resolveOwnedSlug(job.tenantId)) || "").toLowerCase();
-  const scope = { oasis, manifest: tenantSlug ? await getManifest(tenantSlug, job.tenantId) : null };
+  const scope = { oasis, manifest: tenantSlug ? await getWorkspaceManifest(job.tenantId, tenantSlug) : null };
 
   const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment, defaultDepartment: defaultMentionDepartment(scope) });
   const dept = OS_DEPARTMENTS.find((d) => d.key === picked.department);

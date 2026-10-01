@@ -16,29 +16,36 @@
  *   3. A client's roster is its manifest: neutral leads, its own teammates,
  *      never a house agent, whatever its manifest says.
  *   4. POST /api/tenant/agents/toggle: a client owner cannot add an OASIS house
- *      agent (the OASIS-only rule used to live only in the Settings card); can
- *      turn on a teammate it built that its manifest never bound; cannot add
- *      another workspace's; a member changes nothing; a core lead never goes
- *      off; a lead switched off takes its department channel (and the chat
- *      route) down with it; every message names the teammate the roster's way.
+ *      agent (the OASIS-only rule used to live only in the Settings card), nor
+ *      switch on one a self-signup's manifest still binds; can turn on a
+ *      teammate it built that its manifest never bound; cannot add another
+ *      workspace's; a member changes nothing; a core lead never goes off; a
+ *      lead switched off takes its department channel (and the chat route)
+ *      down with it; every message names the teammate the roster's way. A
+ *      workspace OASIS has not set up has no lineup to change.
  *   5. POST /api/agents binds the new teammate the moment it exists: it is On
- *      on the AI Team, never "Off with no control".
+ *      on the AI Team, never "Off with no control". In a workspace that runs
+ *      on an in-code seed (OASIS's own), the row holds only its own bindings
+ *      (a seed overlay), so later code edits to the seed still reach it.
  *   6. The builder opens prefilled from ?template=, and the AI Team's On/Off
  *      switch says what it is (client components rendered in
  *      tests/one-agent-roster.render.ts, where React is whole).
  *   7. Provisioning writes each neutral lead's departments, and "Set up again"
  *      gives a kept lead (renamed by its owner) the departments chosen now.
+ *   8. OASIS's operator surfaces (a tenant cron's agent, /operations, /health)
+ *      list the house agents its bridge runs, not its business roster.
  *
  * Run: node --conditions=react-server --import tsx tests/one-agent-roster.test.ts
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createClient } from "@libsql/client";
 
+const ROOT = join(__dirname, "..");
 const dbFile = join(mkdtempSync(join(tmpdir(), "one-agent-roster-")), "test.db");
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
@@ -94,6 +101,13 @@ stub("next/link", {
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
 const OTHER = "7d7d7d7d-0000-4000-8000-00000000007d";
+// A self-signup whose wizard manifest binds house agents (the two live junk
+// rows bind bravo + atlas and bravo + atlas + maven), and a workspace OASIS
+// has not set up at all (no row, no seed).
+const SELFSIGNUP = "5e5e5e5e-0000-4000-8000-00000000005e";
+const FRESH = "4f4f4f4f-0000-4000-8000-00000000004f";
+// A workspace on the in-code SUGA_SEED (no row), whose leads are not core.
+const SUGA = "3c3c3c3c-0000-4000-8000-00000000003c";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -102,6 +116,9 @@ const USERS = {
   owner: u(2, "owner@client.test"), // a client workspace's owner
   member: u(3, "riley@client.test"), // a plain member there
   other: u(4, "owner@other.test"), // another client's owner
+  signup: u(5, "owner@selfsignup.test"), // the self-signup's owner
+  fresh: u(6, "owner@fresh.test"), // the owner of a workspace nobody has set up
+  suga: u(7, "owner@suga.test"), // the owner of the seed-backed SUGA workspace
 } as const;
 
 async function login(user: U | null): Promise<void> {
@@ -141,6 +158,9 @@ async function main() {
       is_oasis_managed INTEGER, created_by TEXT, tenant_id TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, updated_at TEXT);
+    CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
+      agent_key TEXT, name TEXT, description TEXT, schedule TEXT, action_type TEXT, action_payload TEXT,
+      enabled INTEGER, created_by TEXT, created_at TEXT, updated_at TEXT);
   `);
 
   const { buildProvisionedManifest, mergeProvisionedManifest } = await import("../lib/provisioning/manifest");
@@ -164,6 +184,9 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'other-co', 'Other Co')", args: [OTHER] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'selfsignup', 'Self Signup')", args: [SELFSIGNUP] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'fresh-co', 'Fresh Co')", args: [FRESH] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'suga', 'Suga')", args: [SUGA] },
       {
         sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version) VALUES ('m-client', ?, 'client-co', ?, 1, 1)",
         args: [CLIENT, JSON.stringify(provisioned("client-co", "Client Co"))],
@@ -172,14 +195,33 @@ async function main() {
         sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version) VALUES ('m-other', ?, 'other-co', ?, 1, 1)",
         args: [OTHER, JSON.stringify(provisioned("other-co", "Other Co"))],
       },
+      {
+        sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version) VALUES ('m-signup', ?, 'fun', ?, 1, 1)",
+        args: [
+          SELFSIGNUP,
+          JSON.stringify({
+            ...provisioned("fun", "Self Signup"),
+            agents: [
+              { slug: "bravo", display_name: "Bravo", enabled: true },
+              { slug: "atlas", display_name: "Atlas", enabled: true },
+              { slug: "maven", display_name: "Maven", enabled: false },
+            ],
+          }),
+        ],
+      },
       profile("cc", OASIS, "owner", 1),
       profile("owner", CLIENT, "owner", 1),
       profile("member", CLIENT, "member", 0),
       profile("other", OTHER, "owner", 1),
+      profile("signup", SELFSIGNUP, "owner", 1),
+      profile("fresh", FRESH, "owner", 1),
+      profile("suga", SUGA, "owner", 1),
       // Built by the client before new teammates were bound on creation.
       agentRow("intake-helper", "Intake Helper", CLIENT),
       // Another workspace's teammate.
       agentRow("renewals-desk", "Renewals Desk", OTHER),
+      // Built in a workspace OASIS has not set up.
+      agentRow("fresh-helper", "Fresh Helper", FRESH),
     ],
     "write",
   );
@@ -210,10 +252,14 @@ async function main() {
     const res = await post(toggleRoute, "/api/tenant/agents/toggle", body);
     return { status: res.status, body: (await res.json()) as { ok: boolean; error?: string; message?: string } };
   };
-  const stored = async (tenant: string) => {
+  const rawStored = async (tenant: string) => {
     const rs = await db.execute({ sql: "SELECT manifest FROM tenant_manifests WHERE tenant_id = ?", args: [tenant] });
     const raw = rs.rows[0]?.manifest;
-    return raw ? parseManifest(JSON.parse(String(raw))) : null;
+    return raw ? (JSON.parse(String(raw)) as Record<string, unknown>) : null;
+  };
+  const stored = async (tenant: string) => {
+    const raw = await rawStored(tenant);
+    return raw ? parseManifest(raw) : null;
   };
   const clientScope = async () => ({ oasis: false, manifest: await stored(CLIENT) });
 
@@ -240,18 +286,33 @@ async function main() {
     assert.deepEqual(m.agents.map(agentBindingKind), ["lead", "custom", "custom"]);
     assert.equal(agentBindingKind({ departments: [] }), "custom");
   });
-  await check("schema: a stored copy of every in-code seed parses (an owner's write to a seed-backed workspace takes effect)", async () => {
-    const seeds = await import("../lib/manifest/seeds");
-    for (const [name, seed] of Object.entries({
-      OASIS_SEED: seeds.OASIS_SEED,
-      OASIS_AI_CC_SEED: seeds.OASIS_AI_CC_SEED,
-      SUGA_SEED: seeds.SUGA_SEED,
-      UNPROVISIONED_SEED: seeds.UNPROVISIONED_SEED,
-    })) {
-      const copy = parseManifest(JSON.parse(JSON.stringify(seed)));
-      assert.deepEqual(copy.agents.map((a) => [a.slug, a.departments]), seed.agents.map((a) => [a.slug, a.departments]), name);
-      assert.equal(copy.pages?.[0]?.path, "", `${name}: the root page keeps its empty path`);
-    }
+  await check("a seed overlay stores only the workspace's own bindings and serves the CURRENT seed with them (review R2)", async () => {
+    const overlay = await import("../lib/manifest/seed-overlay");
+    const { SUGA_SEED } = await import("../lib/manifest/seeds");
+    const custom = { slug: "renewal-chaser", display_name: "Renewal chaser", enabled: true, core: false };
+    // The writer keeps what the seed does not say: an appended teammate, and
+    // the switch on a seed binding that is not core. A core lead's switch is
+    // not the workspace's to store (it is always on).
+    const lineup = [
+      ...OASIS_AI_CC_SEED.agents.map((a) => (a.slug === "maven" ? { ...a, enabled: false } : a)),
+      custom,
+    ];
+    assert.deepEqual(overlay.seedOverlayAgents(OASIS_AI_CC_SEED, lineup), [custom]);
+    assert.deepEqual(Object.keys(overlay.seedOverlayBody(OASIS_AI_CC_SEED, lineup)).sort(), ["agents", "seed_overlay"], "no copy of the seed");
+    // A reader serves the seed as it is in code now, plus those bindings.
+    const served = overlay.resolveStoredManifest({ seed_overlay: true, agents: [custom] }, "oasis-ai-cc", OASIS);
+    assert.ok(served.ok);
+    assert.equal(served.ok && served.manifest.nav, OASIS_AI_CC_SEED.nav, "nav comes from the seed itself");
+    assert.deepEqual(served.ok ? served.manifest.agents.map((a) => a.slug) : [], [...OASIS_AI_CC_SEED.agents.map((a) => a.slug), "renewal-chaser"]);
+    // A switch on a non-core seed binding (SUGA's leads are not core) is applied; its name stays the seed's.
+    const suga = overlay.applySeedOverlay(SUGA_SEED, [{ slug: "sdr", display_name: "Renamed", enabled: false }]);
+    const sdr = suga.agents.find((a) => a.slug === "sdr");
+    assert.deepEqual(sdr && [sdr.display_name, sdr.enabled], ["Sales lead", false]);
+    // An overlay is applied to a real seed only: none for a slug that has none.
+    assert.equal(overlay.resolveStoredManifest({ seed_overlay: true, agents: [custom] }, "client-co", CLIENT).ok, false);
+    assert.equal(overlay.overlaySeedFor("oasis", CLIENT), null, "the 'oasis' alias is OASIS's own tenants' only");
+    // A stored body that is a workspace's own manifest parses as it always did.
+    assert.ok(overlay.resolveStoredManifest(provisioned("client-co", "Client Co"), "client-co", CLIENT).ok);
   });
 
   // ── 2. OASIS's roster ─────────────────────────────────────────────────────
@@ -397,19 +458,82 @@ async function main() {
     assert.equal(on.body.message, "Enabled Sales lead");
     assert.equal(departmentChannelFor("sales", await clientScope()).kind, "agent");
   });
+  await check("an agent turn whose manifest read fails is 'could not confirm your workspace' (503), never a department mismatch (review R3)", async () => {
+    await db.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    let turn: Awaited<ReturnType<typeof prepareAgentTurn>>;
+    try {
+      turn = await prepareAgentTurn({
+        tenantId: CLIENT,
+        tenantSlug: "client-co",
+        agentSlug: "sdr",
+        department: departmentBySlug("sales"),
+        operator: { name: "Alex", email: "owner@client.test" },
+        platformFallback: null,
+        revealModel: false,
+        userId: USERS.owner.id,
+      });
+    } finally {
+      await db.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    assert.deepEqual(turn.ok ? null : { status: turn.status, error: turn.error }, { status: 503, error: "workspace_unavailable" });
+  });
   await check("toggle: OASIS's core leads never go off, and OASIS may still add a house agent it never shows", async () => {
     await login(USERS.cc);
     const r = await toggle({ action: "disable", slug: "bravo" });
     assert.equal(r.status, 409);
     assert.equal(r.body.error, "core_locked");
-    assert.equal(await stored(OASIS), null, "a refused change wrote OASIS a manifest row");
+    assert.equal(await rawStored(OASIS), null, "a refused change wrote OASIS a manifest row");
     const add = await toggle({ action: "add", slug: "aura" });
     assert.equal(add.status, 200, JSON.stringify(add.body));
     assert.ok(!identity.namesPersona(add.body.message ?? ""), `the API named a persona: ${add.body.message}`);
-    // The row now exists (seed + aura), and its roster still holds only the leads.
-    const oasis = await stored(OASIS);
-    assert.ok(oasis, "the first OASIS write copies its seed into a row");
+    // The row now exists and holds ONLY OASIS's own binding (a seed overlay,
+    // never a copy of its seed); its roster still holds only the leads.
+    assert.deepEqual(await rawStored(OASIS), { seed_overlay: true, agents: [{ slug: "aura", display_name: "Aura", enabled: true, core: false }] });
+    const { getManifest } = await import("../lib/manifest/loader");
+    const oasis = await getManifest("oasis-ai-cc", OASIS);
+    assert.deepEqual(oasis.agents.map((a) => a.slug), ["bravo", "sdr", "maven", "customer-support", "atlas", "aura"]);
     assert.deepEqual(workspaceTeammates({ oasis: true, manifest: oasis }).map((t) => t.slug), ["bravo", "sdr", "maven", "customer-support", "atlas"]);
+    // Its own binding can be removed again: the overlay is left empty, never a seed copy.
+    const remove = await toggle({ action: "remove", slug: "aura" });
+    assert.equal(remove.status, 200, JSON.stringify(remove.body));
+    assert.deepEqual(await rawStored(OASIS), { seed_overlay: true, agents: [] });
+  });
+  await check("toggle in a seed-backed workspace whose leads are not core: the switch is stored in the overlay; a seed lead cannot be removed", async () => {
+    await login(USERS.suga);
+    const { getManifest } = await import("../lib/manifest/loader");
+    const remove = await toggle({ action: "remove", slug: "sdr" });
+    assert.equal(remove.status, 409, JSON.stringify(remove.body));
+    assert.equal(remove.body.error, "comes_with_setup");
+    assert.equal(await rawStored(SUGA), null, "a refused removal wrote a row");
+    const off = await toggle({ action: "disable", slug: "sdr" });
+    assert.equal(off.status, 200, JSON.stringify(off.body));
+    const raw = await rawStored(SUGA);
+    assert.deepEqual(Object.keys(raw ?? {}).sort(), ["agents", "seed_overlay"]);
+    assert.deepEqual((raw?.agents as Array<{ slug: string; enabled: boolean }>).map((a) => [a.slug, a.enabled]), [["sdr", false]]);
+    const served = await getManifest("suga", SUGA);
+    assert.equal(departmentChannelFor("sales", { oasis: false, manifest: served }).kind, "unavailable", "the switch reaches the channel");
+    const on = await toggle({ action: "enable", slug: "sdr" });
+    assert.equal(on.status, 200, JSON.stringify(on.body));
+    assert.deepEqual(await rawStored(SUGA), { seed_overlay: true, agents: [] }, "back on: nothing of its own left to store");
+  });
+  await check("toggle: a house agent a self-signup's manifest still binds cannot be switched on (CodeRabbit #517); switching one off is allowed", async () => {
+    await login(USERS.signup);
+    const before = JSON.stringify(await rawStored(SELFSIGNUP));
+    const on = await toggle({ action: "enable", slug: "maven" });
+    assert.equal(on.status, 403, JSON.stringify(on.body));
+    assert.equal(on.body.error, "house_agent_not_offered");
+    assert.equal(JSON.stringify(await rawStored(SELFSIGNUP)), before, "a refused enable wrote the manifest");
+    const off = await toggle({ action: "disable", slug: "bravo" });
+    assert.equal(off.status, 200, JSON.stringify(off.body));
+    assert.ok(!identity.namesPersona(off.body.message ?? ""), `the API named a persona: ${off.body.message}`);
+    assert.equal((await stored(SELFSIGNUP))?.agents.find((a) => a.slug === "bravo")?.enabled, false);
+  });
+  await check("toggle: a workspace OASIS has not set up has no lineup to change; nothing is written", async () => {
+    await login(USERS.fresh);
+    const r = await toggle({ action: "add", slug: "fresh-helper" });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "not_set_up");
+    assert.equal(await rawStored(FRESH), null, "an unprovisioned workspace was given a manifest row");
   });
 
   // ── 5. A new teammate is bound when it is created ─────────────────────────
@@ -445,10 +569,12 @@ async function main() {
     });
     const body = (await res.json()) as { ok: boolean; bound?: boolean };
     assert.equal(body.bound, true, JSON.stringify(body));
-    // The first write copies OASIS's seed into a row; the loader must read it
-    // back (a seed copy used to fail to parse, so the seed was served and the
-    // binding vanished).
-    const { getManifest } = await import("../lib/manifest/loader");
+    // The first write stores OASIS's own binding only (a seed overlay), never
+    // a copy of its seed, and every reader serves the seed plus that binding.
+    const raw = await rawStored(OASIS);
+    assert.deepEqual(Object.keys(raw ?? {}).sort(), ["agents", "seed_overlay"], `OASIS's row holds a copy of its seed: ${Object.keys(raw ?? {}).join(", ")}`);
+    assert.deepEqual((raw?.agents as Array<{ slug: string }>).map((a) => a.slug), ["renewal-chaser"]);
+    const { getManifest, getManifestByTenantId } = await import("../lib/manifest/loader");
     const served = await getManifest("oasis-ai-cc", OASIS);
     assert.ok(served.agents.some((a) => a.slug === "renewal-chaser" && a.enabled), "OASIS is served a manifest without its new teammate");
     const viewer = await resolveOsViewer();
@@ -456,6 +582,23 @@ async function main() {
     const row = team.custom.ok ? team.custom.value.find((c) => c.slug === "renewal-chaser") : undefined;
     assert.equal(row?.enabled, true, "the new OASIS teammate shows Off");
     assert.deepEqual(team.leads.map((l) => l.name), ["Chief of Staff · Operations", "Sales", "Marketing", "Client Success", "Finance"]);
+    // A code change to the seed still reaches OASIS after that write: a nav
+    // label and a lead's name edited in code are served with the new binding.
+    const nav0 = OASIS_AI_CC_SEED.nav[0].label;
+    const sales = OASIS_AI_CC_SEED.agents.find((a) => a.slug === "sdr")!;
+    const salesName = sales.display_name;
+    try {
+      OASIS_AI_CC_SEED.nav[0].label = "Edited in code";
+      sales.display_name = "Sales (edited in code)";
+      for (const after of [await getManifest("oasis-ai-cc", OASIS), await getManifestByTenantId(OASIS)]) {
+        assert.equal(after?.nav[0].label, "Edited in code", "a seed edit stopped reaching OASIS after its first owner write");
+        assert.equal(after?.agents.find((a) => a.slug === "sdr")?.display_name, "Sales (edited in code)");
+        assert.ok(after?.agents.some((a) => a.slug === "renewal-chaser" && a.enabled), "and its own teammate is still there");
+      }
+    } finally {
+      OASIS_AI_CC_SEED.nav[0].label = nav0;
+      sales.display_name = salesName;
+    }
   });
 
   // ── 6. Client components ──────────────────────────────────────────────────
@@ -514,6 +657,43 @@ async function main() {
       ],
     );
     assert.equal(departmentChannelFor("sales", { oasis: false, manifest: merged }).kind, "agent", "the re-set-up lead answers again");
+  });
+
+  // ── 8. OASIS's operator surfaces keep the agents its bridge runs ──────────
+  // Review R4: OASIS's business roster is its department leads now, but a
+  // tenant cron's agent key maps to the repo the bridge runs it in
+  // (bravo_cli/cron_runner.py SIBLING_ROOT_BY_AGENT_KEY), and CC's own agents
+  // still run there. /operations and /health read the same list.
+  await check("a tenant cron in OASIS may name any agent its bridge runs (Aura too), never a lead's library template; a client keeps its roster", async () => {
+    const cronRoute = await import("../app/api/cron-jobs/route");
+    const { oasisOperatorAgents } = await import("../lib/manifest/tenant-scope");
+    const { OASIS_RUNTIME_AGENT_KEYS, isHouseAgentSlug } = await import("../lib/agents");
+    assert.deepEqual(oasisOperatorAgents(OASIS), ["bravo", "atlas", "maven", "aura"]);
+    assert.equal(oasisOperatorAgents(CLIENT), null, "a client workspace keeps its own roster");
+    for (const k of OASIS_RUNTIME_AGENT_KEYS) assert.ok(isHouseAgentSlug(k), `${k} is not a house agent`);
+    const create = async (agentKey: string) => {
+      const res = await post(cronRoute, "/api/cron-jobs", {
+        name: `Daily ${agentKey}`,
+        schedule: "0 9 * * *",
+        action_type: "snapshot_run",
+        action_payload: { snapshot: "daily" },
+        agent_key: agentKey,
+      });
+      return { status: res.status, body: (await res.json()) as { ok: boolean; error?: string } };
+    };
+    await login(USERS.cc);
+    const aura = await create("aura");
+    assert.equal(aura.status, 200, `OASIS cannot schedule Aura: ${JSON.stringify(aura.body)}`);
+    const sdr = await create("sdr");
+    assert.equal(sdr.status, 403, JSON.stringify(sdr.body));
+    assert.equal(sdr.body.error, "agent_key_not_allowed_for_tenant:sdr", "no bridge root maps a lead's library template");
+    await login(USERS.owner);
+    assert.equal((await create("sdr")).status, 200, "a client schedules its own teammate");
+    assert.equal((await create("aura")).status, 403, "a client schedules an OASIS house agent");
+    // Reassigning a job (PATCH), /operations and /health read the same list.
+    for (const page of ["app/api/cron-jobs/[id]/route.ts", "app/operations/page.tsx", "app/health/page.tsx"]) {
+      assert.match(readFileSync(join(ROOT, page), "utf8"), /oasisOperatorAgents\(/, `${page} lists OASIS's business roster`);
+    }
   });
 
   if (failures > 0) {

@@ -465,6 +465,25 @@ async function main() {
     assert.equal(await routesOf(ALPHA), 2);
   });
 
+  // W4a review R3: the departments that may be mapped are the workspace
+  // manifest's leads. A read that fails is a 5xx, never "Client Success has no
+  // AI teammate" for a department that has one.
+  await check("a manifest read that fails answers 500, never 'no AI teammate'; nothing is written", async () => {
+    await login(USERS.ownerA);
+    const before = await routesOf(ALPHA);
+    await db.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    let res: Response;
+    try {
+      res = await putChannel({ channel_id: "C0MARKETING", department: "sales" });
+    } finally {
+      await db.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    const body = (await res.json()) as { error?: string };
+    assert.equal(res.status, 500, JSON.stringify(body));
+    assert.notEqual(body.error, "department_not_set_up");
+    assert.equal(await routesOf(ALPHA), before, "a mapping was written on a roster nobody could read");
+  });
+
   await check("disconnecting Slack deletes its channel map and the people it looked up; the next workspace to install that team can map its channels", async () => {
     const at = new Date().toISOString();
     await db.execute({

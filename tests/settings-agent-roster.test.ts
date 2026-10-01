@@ -76,8 +76,10 @@ const settings = readFileSync(
   join(ROOT, "components", "settings", "SettingsContent.tsx"),
   "utf8",
 );
+// The picker lists the workspace's roster teammates (W4a review R1), and a
+// workspace mutation must remount it with the new roster.
 assert.ok(
-  settings.includes('key={manifestAgentKeys.join(":")}'),
+  settings.includes('key={rosterAgentKeys.join(":")}') && settings.includes("tenantAgents={rosterAgentKeys}"),
   "a workspace mutation must remount the profile picker with the new roster",
 );
 

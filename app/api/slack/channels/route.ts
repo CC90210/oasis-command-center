@@ -26,7 +26,7 @@ import { findActiveConnection } from "@/lib/connections/store";
 import { readBotToken } from "@/lib/connections/token-store";
 import { channelInfo, listPublicChannels } from "@/lib/slack/client";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
-import { getManifest } from "@/lib/manifest/loader";
+import { getWorkspaceManifest } from "@/lib/manifest/loader";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import type { DepartmentKey } from "@/lib/os/types";
 import {
@@ -55,7 +55,9 @@ async function slackContext(tenantId: string, db: Parameters<typeof findActiveCo
 /**
  * The departments with an AI teammate in the session's workspace
  * (lib/slack/routing.ts answeringDepartments): the leads its manifest binds,
- * the same roster the web channels read.
+ * the same roster the web channels read. A manifest read that fails throws
+ * (routeFailure answers it), never "<Department> has no AI teammate" for a
+ * department that has one (W4a review R3).
  */
 async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection>[0], tenantId: string): Promise<DepartmentKey[]> {
   const rs = await db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
@@ -63,7 +65,7 @@ async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection
   const slug = row?.slug ? String(row.slug) : "";
   if (!slug) throw new Error("api.slack.channels: the workspace's slug could not be read");
   const manifestSlug = await resolveOwnedSlug(tenantId);
-  const manifest = manifestSlug ? await getManifest(manifestSlug, tenantId) : null;
+  const manifest = manifestSlug ? await getWorkspaceManifest(tenantId, manifestSlug) : null;
   return answeringDepartments({ oasis: isOasisSurfaceTenant(slug), manifest });
 }
 

@@ -62,13 +62,13 @@ import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { getManifest } from "@/lib/manifest/loader";
+import { getManifestRead } from "@/lib/manifest/loader";
 import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
 import { teammateNamesFor, workspaceAgentsSubtitle } from "@/lib/os/teammate-names";
-import { departmentLabelsFor } from "@/lib/os/teammates";
+import { departmentLabelsFor, teammateFor } from "@/lib/os/teammates";
 import { loadWorkspaceRoster } from "@/components/os/aiteam/roster";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
@@ -156,9 +156,10 @@ export async function SettingsContent({
   ]);
 
   const manifestSlug = tenant ? resolveClientProfileSlug(tenant) : null;
-  const manifest = manifestSlug
-    ? await safe("settings.manifest", getManifest(manifestSlug), null)
+  const manifestRead = manifestSlug
+    ? await safe("settings.manifest", getManifestRead(manifestSlug), null)
     : null;
+  const manifest = manifestRead?.manifest ?? null;
 
   const manifestAgentKeys = resolveEnabledAgentSlugs({
     manifestAgents: manifest ? manifest.agents || [] : null,
@@ -191,6 +192,14 @@ export async function SettingsContent({
     [...new Set([...manifestAgentKeys, ...enabledAgents, ...(manifest?.agents || []).map((a) => a.slug)])],
     teammateScope,
   );
+  // The profile picker and the provider overrides offer only this workspace's
+  // teammates. A house agent a client's manifest still binds (the self-signup
+  // wizard wrote bravo, atlas and maven) or the legacy profile list names is
+  // not one of them, and would otherwise be offered by its persona's name
+  // (W4a review R1).
+  const onRoster = (slug: string) => teammateFor(slug, teammateScope) !== null;
+  const rosterAgentKeys = manifestAgentKeys.filter(onRoster);
+  const rosterChatAgentKeys = enabledChatAgentKeys.filter(onRoster);
 
   // Every authenticated persona owns their profile, password and personal
   // connections. Non-admins stop here: no credential vault, AI/provider
@@ -235,6 +244,10 @@ export async function SettingsContent({
       ? safe("settings.roster", loadWorkspaceRoster({ tenantId: profile.tenant_id, scope: teammateScope }), null)
       : Promise.resolve(null),
   ]);
+  // The Workspace agents card cannot state the roster when the workspace's
+  // manifest read failed (the in-code seed answered in its place, which for a
+  // client is the empty unprovisioned one) or the roster load threw.
+  const rosterUnread = manifestRead?.storedReadFailed === true || (needsRoster && roster === null);
   // The AI Team page, for a viewer its rail row opens for (owners and admins,
   // lib/os/nav.ts "ai-team") in a workspace OASIS has set up.
   const aiTeamHref =
@@ -286,9 +299,9 @@ export async function SettingsContent({
             >
               <SafeBoundary label="Profile editor">
                 <ProfileEditor
-                  key={manifestAgentKeys.join(":")}
+                  key={rosterAgentKeys.join(":")}
                   profile={profile}
-                  tenantAgents={manifestAgentKeys}
+                  tenantAgents={rosterAgentKeys}
                   agentNames={teammateNames}
                 />
               </SafeBoundary>
@@ -446,7 +459,7 @@ export async function SettingsContent({
               {canManageTenant ? (
                 <SafeBoundary label="Override an agent's provider">
                   <AgentConfigEditor
-                    agentKeys={enabledChatAgentKeys}
+                    agentKeys={rosterChatAgentKeys}
                     agentLabels={teammateNames}
                     bridgeOnline={bridgeOnline}
                     canInstallBridge={isOperator}
@@ -481,11 +494,13 @@ export async function SettingsContent({
           {/* Workspace agents: the AI Team's own roster (one list, W4a), with
               owner toggles and a link to the AI Team page. Every teammate is
               named by its manifest binding, never by persona. No add-ons:
-              OASIS's house agents live in Admin > Fleet. */}
-          {show("ai") && !previewMode && manifest?.agents && roster && (
+              OASIS's house agents live in Admin > Fleet. When the workspace's
+              manifest or the roster could not be read, the card says so
+              instead of vanishing or listing the seed's guess (W4a review R3). */}
+          {show("ai") && !previewMode && manifest?.agents && needsRoster && (
             <Card
               title="Workspace agents"
-              subtitle={workspaceAgentsSubtitle(teammateScope)}
+              subtitle={rosterUnread ? "The AI teammates this workspace runs." : workspaceAgentsSubtitle(teammateScope)}
               action={
                 aiTeamHref ? (
                   <Link
@@ -498,34 +513,38 @@ export async function SettingsContent({
                 ) : undefined
               }
             >
-              <SafeBoundary label="Workspace agents">
-                <AgentMarketplaceCard
-                  leads={roster.leads.map((l) => ({
-                    slug: l.slug,
-                    name: l.name,
-                    summary: l.summary,
-                    departments: departmentLabelsFor(l.departments),
-                    enabled: l.enabled,
-                    core: l.core,
-                    bound: l.bound,
-                  }))}
-                  custom={
-                    roster.custom.ok
-                      ? roster.custom.value.map((c) => ({
-                          slug: c.slug,
-                          name: c.name,
-                          summary: c.summary,
-                          departments: [],
-                          enabled: c.enabled,
-                          core: c.core,
-                          bound: c.bound,
-                        }))
-                      : null
-                  }
-                  isOwner={canManageTenant}
-                  aiTeamHref={aiTeamHref}
-                />
-              </SafeBoundary>
+              {rosterUnread || !roster ? (
+                <EmptyState message="Couldn't check this workspace's AI teammates just now. Refresh to try again; nothing was changed." />
+              ) : (
+                <SafeBoundary label="Workspace agents">
+                  <AgentMarketplaceCard
+                    leads={roster.leads.map((l) => ({
+                      slug: l.slug,
+                      name: l.name,
+                      summary: l.summary,
+                      departments: departmentLabelsFor(l.departments),
+                      enabled: l.enabled,
+                      core: l.core,
+                      bound: l.bound,
+                    }))}
+                    custom={
+                      roster.custom.ok
+                        ? roster.custom.value.map((c) => ({
+                            slug: c.slug,
+                            name: c.name,
+                            summary: c.summary,
+                            departments: [],
+                            enabled: c.enabled,
+                            core: c.core,
+                            bound: c.bound,
+                          }))
+                        : null
+                    }
+                    isOwner={canManageTenant}
+                    aiTeamHref={aiTeamHref}
+                  />
+                </SafeBoundary>
+              )}
             </Card>
           )}
 

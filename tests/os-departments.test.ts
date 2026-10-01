@@ -46,6 +46,8 @@ import { OS_NAV_CATALOG, mayOpenOsHref, type BuildOsNavInput } from "../lib/os/n
 import { DEFAULT_DEPARTMENTS, neutralTeamFor } from "../lib/provisioning/team";
 import { OASIS_SEED } from "../lib/manifest/seeds";
 import type { ManifestAgentBinding } from "../lib/manifest/schema";
+import type { DepartmentKey } from "../lib/os/types";
+import { workspaceTeammates } from "../lib/os/teammates";
 import { CATEGORY_LABELS, getSeedAgent } from "../lib/agents/library";
 import { QUICK_ACTIONS } from "../lib/quick-actions";
 import { SURFACE_CAPABILITIES, capabilitiesFor, type Persona } from "../lib/role-surfaces";
@@ -214,6 +216,39 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   const own = { oasis: false, manifest: { agents: [{ slug: "renewals-desk", display_name: "Renewals", enabled: true, departments: ["sales"] }] as ManifestAgentBinding[] } };
   const ownSales = departmentChannelFor("sales", own);
   assert.equal(ownSales.kind === "agent" ? ownSales.agentSlug : null, "renewals-desk", "a client's own lead answers its department");
+  // A neutral lead stored before `departments` existed (provisioning and the
+  // setup wizard wrote none until W4a) still leads the department the stored
+  // setup chose; not one the setup left out, not without a stored setup, and
+  // not when its `departments` is an explicit [] (CodeRabbit on #517).
+  const undeclared = neutralTeamFor(DEFAULT_DEPARTMENTS).map((a) => {
+    const { departments: _drop, ...rest } = a;
+    void _drop;
+    return rest;
+  });
+  const setup = (departments: DepartmentKey[]) => ({ departments, modules: [] });
+  const legacyClient = { oasis: false, manifest: { agents: undeclared, os: setup([...DEFAULT_DEPARTMENTS]) } };
+  for (const k of ["sales", "client_success"] as const) {
+    assert.equal(departmentChannelFor(k, legacyClient).kind, "agent", `${k}: a client provisioned before departments lost its lead`);
+  }
+  assert.deepEqual(
+    workspaceTeammates(legacyClient).map((t) => [t.slug, t.kind, t.departments]),
+    [
+      ["sdr", "lead", ["sales"]],
+      ["customer-support", "lead", ["client_success"]],
+    ],
+    "the roster agrees with the channels",
+  );
+  assert.equal(
+    departmentChannelFor("client_success", { oasis: false, manifest: { agents: undeclared, os: setup(["chief_of_staff", "sales"]) } }).kind,
+    "unavailable",
+    "a department the stored setup did not choose",
+  );
+  assert.equal(departmentChannelFor("sales", { oasis: false, manifest: { agents: undeclared } }).kind, "unavailable", "no stored setup, nothing inferred");
+  assert.equal(
+    departmentChannelFor("sales", { oasis: false, manifest: { agents: undeclared.map((a) => ({ ...a, departments: [] })), os: setup([...DEFAULT_DEPARTMENTS]) } }).kind,
+    "unavailable",
+    "an explicit [] is a custom teammate",
+  );
 }
 
 // ── 6. OASIS binds its own agents, and every one resolves ─────────────────
@@ -252,6 +287,26 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   assert.equal(bound("chief_of_staff"), "bravo");
   assert.equal(bound("marketing"), "maven");
   assert.equal(bound("finance"), "atlas");
+  // A stored OASIS manifest from before `departments`: bravo bound with no
+  // department, not core, and switched off. Its departments answer on the
+  // static fallback, and the binding's switch is that lead's switch: the AI
+  // Team row reads Off, so its channels are turned off too (W4a review R5).
+  const legacyOff = {
+    oasis: true,
+    manifest: { agents: [{ slug: "bravo", display_name: "Bravo", enabled: false, core: false }] as ManifestAgentBinding[] },
+  };
+  for (const k of ["chief_of_staff", "operations"] as const) {
+    const c = departmentChannelFor(k, legacyOff);
+    assert.equal(c.kind, "unavailable", `${k}: a lead the AI Team shows Off still answers in its channel`);
+    assert.match(c.kind === "unavailable" ? c.reason : "", /turned off/, k);
+  }
+  const offLead = workspaceTeammates(legacyOff).find((t) => t.slug === "bravo");
+  assert.deepEqual(
+    offLead && [offLead.enabled, offLead.core, offLead.bound],
+    [false, false, true],
+    "the roster shows the same lead Off, with a switch",
+  );
+  assert.equal(departmentChannelFor("sales", legacyOff).kind, "agent", "a lead with no binding of its own still answers");
   for (const slug of OASIS_BOUND_SLUGS) {
     assert.ok(getSeedAgent(slug)?.is_public, `OASIS agent "${slug}" must be a public library seed or its channel 404s`);
   }

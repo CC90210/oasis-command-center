@@ -351,6 +351,20 @@ export const FAMILY_AGENT_KEYS = ALL_AGENT_KEYS.filter(
 );
 
 /**
+ * The house agents OASIS's own bridge runs: the ones the bridge's cron runner
+ * maps to a repo (bravo_cli/cron_runner.py SIBLING_ROOT_BY_AGENT_KEY: bravo,
+ * atlas, maven, aura; its solara and helios rows are the retired SunBiz pair).
+ * OASIS's operator surfaces (a tenant cron's agent, /operations, /health) list
+ * these for OASIS's own workspace (lib/manifest/tenant-scope.ts
+ * oasisOperatorAgents). Its business roster is its department leads now, and
+ * sdr and customer-support are library templates no bridge root maps; CC's own
+ * agents left that roster for Admin > Fleet (decision 21) without leaving his
+ * machine (W4a review R4). The whole family is not the answer: /operations
+ * lists only what is wired up (CC, 2026-05-14), and Hermes, Lex and Lumen are not.
+ */
+export const OASIS_RUNTIME_AGENT_KEYS: readonly string[] = ["bravo", "atlas", "maven", "aura"];
+
+/**
  * Backward-compatibility aliases. Legacy DB rows + integration registries
  * may still carry slugs like "sunbiz" (the old key for Solara) or "suga_sean"
  * (the old Suga client agent). Resolve them transparently so chat + UI keep

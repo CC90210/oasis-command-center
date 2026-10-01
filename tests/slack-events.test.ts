@@ -759,6 +759,33 @@ async function main() {
     assert.match(String(posts[posts.length - 1].body.text), /^Finance is not set up in this workspace yet/);
   });
 
+  // W4a review R3: who leads a department is the workspace manifest now. A
+  // read that fails must be retried, not answered from the empty seed a client
+  // would get, which posts "<Department> is not set up" into its own Slack.
+  await check("a manifest read that fails is retried (the job throws): no 'not set up' notice, no model call", async () => {
+    let prepared = 0;
+    const postsBefore = posts.length;
+    const job = { ...dispatched[0], eventId: "EvMENTIONDB1", text: `<@${BOT_A}> Client Success, draft a reply to Acme`, channelDepartment: null };
+    await db.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    try {
+      await assert.rejects(
+        jobs.runSlackMentionJob(job, {
+          db,
+          now,
+          prepare: (async () => {
+            prepared += 1;
+            return { ok: false, status: 500, error: "should_not_run" };
+          }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+        }),
+        /manifest_by_tenant_lookup_failed/,
+      );
+    } finally {
+      await db.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    assert.equal(prepared, 0, "a turn was prepared on a roster nobody could read");
+    assert.equal(posts.length, postsBefore, `a notice reached the client's Slack: ${String(posts[posts.length - 1]?.body.text ?? "")}`);
+  });
+
   await check("a hand-off that fails removes the receipt and answers 500, so Slack's retry runs it", async () => {
     dispatchThrows = true;
     const body = eventBody(mention("UMEMBER1", "C0CLIENTS", "retry me"), { eventId: "EvDISPATCH1" });

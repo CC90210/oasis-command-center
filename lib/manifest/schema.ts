@@ -797,20 +797,24 @@ function parseAgent(v: Json, path: string): ManifestAgentBinding {
   };
 }
 
+/**
+ * A stored list of agent bindings on its own, parsed by the manifest's own
+ * rules: a seed overlay's (lib/manifest/seed-overlay.ts). Throws
+ * ManifestParseError.
+ */
+export function parseAgentBindings(input: Json, path = "$.agents"): ManifestAgentBinding[] {
+  if (!isArray(input)) throw new ManifestParseError(path, "expected array");
+  return input.map((a, idx) => parseAgent(a, `${path}[${idx}]`));
+}
+
 function parsePage(v: Json, path: string): ManifestPageDef {
   if (!isObject(v)) throw new ManifestParseError(path, "expected object");
   const kind = requireString(v, "kind", path);
   if (!PAGE_KINDS.has(kind as ManifestPageKind)) {
     throw new ManifestParseError(`${path}.kind`, `unknown page kind "${kind}"`);
   }
-  // "" is the workspace's root page (every in-code seed's Today). Requiring a
-  // non-empty path made a stored copy of ANY seed fail to parse, so the loader
-  // fell back to the seed and an owner's change to the agent lineup in a
-  // seed-backed workspace (OASIS's own, which has no row) silently never took
-  // effect (W4a: a new teammate's binding is one such change).
-  if (!isString(v.path)) throw new ManifestParseError(`${path}.path`, "expected string");
   return {
-    path: v.path,
+    path: requireString(v, "path", path),
     label: requireString(v, "label", path),
     kind: kind as ManifestPageKind,
     entity: optionalString(v, "entity"),

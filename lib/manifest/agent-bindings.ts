@@ -18,27 +18,31 @@
  *            agent is refused anywhere else: the OASIS-only add-on rule used to
  *            live only in the Settings card (S2 verifier). Added on, not core,
  *            with no departments (a custom teammate), named by its agents row.
- *   enable   switches it on.
+ *   enable   switches it on; a house agent is refused outside OASIS here too
+ *            (a self-signup's wizard manifest can still bind one).
  *   disable  switches it off; refused for a core binding.
- *   remove   drops it; refused for a core binding.
+ *   remove   drops it; refused for a core binding, and for a binding that
+ *            comes with the workspace's in-code seed.
  * Every message names the teammate the way the workspace's roster does
  * (lib/os/teammates.ts), never by a persona (S2-14).
  *
- * The write is the one the toggle route has always made: the workspace's
- * tenant_manifests row (found by tenant id) is updated in place, or, for a
- * workspace still on its in-code seed (OASIS has no row), the seed plus the
- * change is inserted under the workspace's slug.
+ * The write: a workspace with its own manifest (a tenant_manifests row, found
+ * by tenant id) has it updated in place. A workspace that runs on an in-code
+ * seed (OASIS has no row) stores only its own bindings, as a seed overlay
+ * (lib/manifest/seed-overlay.ts): never a copy of the seed, which would stop
+ * every later code change to the seed from reaching it (W4a review R2). A
+ * workspace with neither has no lineup to change and is refused.
  *
  * The CALLER has already checked that the session may manage this workspace.
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getAgentInfo, isHouseAgentSlug } from "@/lib/agents";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { teammateFor } from "@/lib/os/teammates";
 import type { ManifestAgentBinding } from "./schema";
+import { applySeedOverlay, isSeedOverlay, overlaySeedFor, seedOverlayBody, seedOverlayOwnAgents } from "./seed-overlay";
 
 export type AgentLineupAction = "add" | "enable" | "disable" | "remove";
 
@@ -85,17 +89,29 @@ export async function changeAgentLineup(input: {
   if (!tenantSlug) return refuse(400, "no_tenant_slug", "This workspace's settings could not be found.");
   const oasis = isOasisSurfaceTenant(rawSlug);
 
-  // The stored row, by tenant id; a workspace still on its in-code seed gets
-  // the seed copied into a row so there is something to change.
+  // The stored row, by tenant id.
   const existingRow = await db.from("tenant_manifests").select("id, manifest").eq("tenant_id", tenantId).maybeSingle();
-  // A failed read is not "no row": inserting the seed over it would fork the lineup.
+  // A failed read is not "no row": writing over it would fork the lineup.
   if (existingRow.error) return refuse(503, "manifest_unavailable", "This workspace's teammates could not be read just now. Try again.");
   const existingManifestId = (existingRow.data as { id?: string } | null)?.id || null;
-  let manifest = (existingRow.data as { manifest?: Record<string, unknown> } | null)?.manifest;
-  if (!manifest) {
-    const seed = await getTenantManifestForUser(tenantId);
-    if (!seed) return refuse(400, "no_manifest", "No manifest found for this workspace.");
-    manifest = seed as unknown as Record<string, unknown>;
+  const stored = (existingRow.data as { manifest?: unknown } | null)?.manifest || null;
+
+  // A workspace with its own manifest changes it in place. One that runs on
+  // an in-code seed (no row yet, or a seed overlay row) changes the seed's
+  // lineup plus its own bindings, and stores only those bindings.
+  const ownManifest = stored && !isSeedOverlay(stored) ? (stored as Record<string, unknown>) : null;
+  const seed = ownManifest ? null : overlaySeedFor(tenantSlug, tenantId);
+  if (!ownManifest && !seed) return refuse(409, "not_set_up", "This workspace has not been set up yet, so it has no teammates to change.");
+  let manifest: Record<string, unknown>;
+  if (ownManifest) {
+    manifest = ownManifest;
+  } else {
+    try {
+      manifest = applySeedOverlay(seed!, seedOverlayOwnAgents(stored)) as unknown as Record<string, unknown>;
+    } catch (err) {
+      console.error("[agent_bindings.overlay]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+      return refuse(500, "manifest_unreadable", "This workspace's teammates could not be read, so nothing was changed.");
+    }
   }
 
   const before: ManifestAgentBinding[] = Array.isArray((manifest as { agents?: unknown }).agents)
@@ -125,21 +141,28 @@ export async function changeAgentLineup(input: {
     if (idx < 0) return refuse(404, "not_in_workspace", "That teammate is not in this workspace.");
     const current = agents[idx];
     if (action === "enable") {
+      // Switching one on is joining the workspace: the same rule as add.
+      if (!oasis && isHouseAgentSlug(slug)) return refuse(403, "house_agent_not_offered", "That agent is not available in this workspace.");
       current.enabled = true;
     } else if (action === "disable") {
       if (current.core === true) return refuse(409, "core_locked", "Core teammates cannot be switched off.");
       current.enabled = false;
     } else {
       if (current.core === true) return refuse(409, "core_locked", "Core teammates cannot be removed.");
+      // An overlay cannot take a seed binding away (it would come back on the
+      // next read); switching it off is the reversible way.
+      if (seed?.agents.some((a) => a.slug.toLowerCase() === slug)) {
+        return refuse(409, "comes_with_setup", "This teammate comes with this workspace's setup. Switch it off instead.");
+      }
       agents.splice(idx, 1);
     }
   }
 
-  const newManifest = { ...(manifest as Record<string, unknown>), agents };
+  const newManifest = seed ? seedOverlayBody(seed, agents) : { ...(manifest as Record<string, unknown>), agents };
 
   // Existing row: UPDATE the manifest column only (slug + id stay put).
   // Missing row: INSERT a new row with the resolved tenant slug + the
-  // seed-derived manifest. UPSERT-via-on_conflict was the original approach,
+  // overlay. UPSERT-via-on_conflict was the original approach,
   // but tenant_manifests.slug is NOT NULL and PostgREST's upsert path does
   // INSERT-first (would fail on slug NULL) even when the unique tenant_id
   // constraint would have matched. The two-path pattern is explicit and safe.

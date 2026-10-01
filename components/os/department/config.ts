@@ -161,13 +161,34 @@ const TURNED_OFF = "This department's AI teammate is turned off for your workspa
  */
 export type DepartmentScope = {
   oasis: boolean;
-  manifest?: Pick<TenantManifest, "agents"> | null;
+  manifest?: Pick<TenantManifest, "agents" | "os"> | null;
 };
+
+/** The department each neutral template leads (the inverse of NEUTRAL_TEMPLATES). */
+const NEUTRAL_TEMPLATE_DEPARTMENT: Readonly<Record<string, DepartmentKey>> = Object.fromEntries(
+  (Object.entries(NEUTRAL_TEMPLATES) as Array<[DepartmentKey, string]>).map(([dept, slug]) => [slug, dept]),
+);
+
+/**
+ * A neutral lead written before `departments` existed: provisioning and the
+ * setup wizard bound `sdr` and `customer-support` with none until W4a. It
+ * leads the department its template is for, but only when the workspace's
+ * stored setup (manifest.os.departments) chose that department. An explicit
+ * [] stays a custom teammate (CodeRabbit on #517). Read-time only: nothing is
+ * written, and "Set up again" stores the departments for good.
+ */
+function withSetupDepartments(binding: ManifestAgentBinding, chosen: readonly DepartmentKey[] | undefined): ManifestAgentBinding {
+  if (binding.departments !== undefined || !chosen) return binding;
+  const dept = NEUTRAL_TEMPLATE_DEPARTMENT[binding.slug.toLowerCase()];
+  return dept && chosen.includes(dept) ? { ...binding, departments: [dept] } : binding;
+}
 
 /** The workspace's bindings, minus any house agent outside OASIS's own workspace. */
 export function workspaceBindings(scope: DepartmentScope): ManifestAgentBinding[] {
   const agents = scope.manifest?.agents ?? [];
-  return scope.oasis ? [...agents] : agents.filter((a) => !isHouseAgentSlug(a.slug));
+  if (scope.oasis) return [...agents];
+  const chosen = scope.manifest?.os?.departments;
+  return agents.filter((a) => !isHouseAgentSlug(a.slug)).map((a) => withSetupDepartments(a, chosen));
 }
 
 /** lib/manifest/agent-roster.ts's rule: a core binding is always on. */
@@ -182,20 +203,29 @@ export function manifestLeadFor(key: DepartmentKey, scope: DepartmentScope): Man
  * Who leads `key` in this workspace: its manifest's binding, or, in OASIS's
  * own workspace only, OASIS's static lead when the manifest names none
  * (`binding` is then null). Null: nobody leads it here.
+ *
+ * `control` is the binding whose switch turns this lead on and off: the lead's
+ * own binding, or, for OASIS's static lead, a binding of the same agent that
+ * names no department (a stored OASIS manifest from before `departments`).
+ * The channel and the roster (lib/os/teammates.ts) both read it, so a lead the
+ * AI Team shows Off never answers in its channel (W4a review R5).
  */
 export function departmentLead(
   key: DepartmentKey,
   scope: DepartmentScope,
-): { slug: string; binding: ManifestAgentBinding | null } | null {
+): { slug: string; binding: ManifestAgentBinding | null; control: ManifestAgentBinding | null } | null {
   const binding = manifestLeadFor(key, scope);
-  if (binding) return { slug: binding.slug, binding };
-  return scope.oasis ? { slug: OASIS_LEADS[key], binding: null } : null;
+  if (binding) return { slug: binding.slug, binding, control: binding };
+  if (!scope.oasis) return null;
+  const slug = OASIS_LEADS[key];
+  const control = workspaceBindings(scope).find((a) => a.slug.toLowerCase() === slug) ?? null;
+  return { slug, binding: null, control };
 }
 
 export function departmentChannelFor(key: DepartmentKey, scope: DepartmentScope): DepartmentChannelBinding {
   const lead = departmentLead(key, scope);
   if (!lead) return { kind: "unavailable", reason: NOT_SET_UP };
-  if (lead.binding && !bindingIsOn(lead.binding)) return { kind: "unavailable", reason: TURNED_OFF };
+  if (lead.control && !bindingIsOn(lead.control)) return { kind: "unavailable", reason: TURNED_OFF };
   return { kind: "agent", agentSlug: lead.slug, greeting: GREETINGS[key] };
 }
 

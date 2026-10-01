@@ -143,6 +143,12 @@ stubFile("components/SafeBoundary.tsx", {
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
 const NEWCO = "7d7d7d7d-0000-4000-8000-00000000007d";
+// A self-signup whose manifest binds OASIS house agents, as the setup wizard
+// once wrote them (W4a review R1): bravo, atlas and maven, persona names and all.
+const SIGNUP = "5e5e5e5e-0000-4000-8000-00000000005e";
+// A workspace whose slug is unreadable: Settings falls back to the legacy
+// profile list (every live self-signup owner's is ["bravo"]).
+const NOSLUG = "4e4e4e4e-0000-4000-8000-00000000004e";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -155,6 +161,8 @@ const USERS = {
   unlinked: u(6, "lost@nowhere.test"), // signed in, profile has no workspace
   marketer: u(7, "mika@client.test"), // the client workspace's marketing hire (team_role marketing)
   oasisMarketer: u(8, "marketing@oasisai.work"), // OASIS's own marketing hire
+  signup: u(9, "owner@selfsignup.test"), // owner of the self-signup whose manifest binds house agents
+  noslug: u(10, "owner@noslug.test"), // owner of a workspace whose slug cannot be read
 } as const;
 type Who = keyof typeof USERS;
 
@@ -341,9 +349,26 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'new-co', 'New Co')", args: [NEWCO] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'selfsignup', 'Self Signup')", args: [SIGNUP] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, NULL, 'No Slug Co')", args: [NOSLUG] },
       {
         sql: "INSERT INTO tenant_manifests VALUES ('m-client', ?, 'client-co', ?, 1, 1, '2026-01-01', '2026-01-01')",
         args: [CLIENT, JSON.stringify(clientManifest)],
+      },
+      {
+        sql: "INSERT INTO tenant_manifests VALUES ('m-signup', ?, 'selfsignup', ?, 1, 1, '2026-01-01', '2026-01-01')",
+        args: [
+          SIGNUP,
+          JSON.stringify({
+            ...clientManifest,
+            tenant_slug: "selfsignup",
+            agents: [
+              { slug: "bravo", display_name: "Bravo", enabled: true },
+              { slug: "atlas", display_name: "Atlas", enabled: true },
+              { slug: "maven", display_name: "Maven", enabled: true },
+            ],
+          }),
+        ],
       },
       profile("cc", OASIS, "owner", 1, "Conaugh McKenna"),
       profile("closer", OASIS, "closer", 0, "Casey Closer"),
@@ -353,6 +378,8 @@ async function main() {
       profile("unlinked", null, "member", 0, "Lost User"),
       profile("marketer", CLIENT, "marketing", 0, "Mika Marketer"),
       profile("oasisMarketer", OASIS, "marketing", 0, "Morgan Marketer"),
+      profile("signup", SIGNUP, "owner", 1, "Sam Signup"),
+      profile("noslug", NOSLUG, "owner", 1, "Nora Noslug"),
       // The client built a teammate before new teammates were bound on
       // creation (its manifest does not bind it), and a row squatting an
       // OASIS persona's slug; OASIS built one of its own.
@@ -520,7 +547,7 @@ async function main() {
     return el ? (JSON.parse(JSON.stringify(el.props)) as Record<string, unknown>) : null;
   };
   const captured: Record<string, { marketplace: Record<string, unknown> | null; agentConfig: Record<string, unknown> | null; profileEditor: Record<string, unknown> | null; serverText: string }> = {};
-  for (const who of ["client", "cc"] as const) {
+  for (const who of ["client", "cc", "signup"] as const) {
     await check(`Settings > AI brain and Profile render for ${who} (props captured for the client render)`, async () => {
       await login(who);
       const ai = await withContent(await settingsAi());
@@ -544,27 +571,27 @@ async function main() {
     ...((captured[who]?.marketplace?.custom as CardAgent[] | null | undefined) ?? []),
   ];
   const html: Record<string, Record<string, string>> = {};
-  for (const who of ["client", "cc"] as const) {
+  /** The client cards, rendered where React is whole (tests/client-route-gating.render.ts). */
+  const renderClient = (input: { marketplace: unknown; agentConfig: unknown; profileEditor: unknown }) => {
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/client-route-gating.render.ts"], {
+      encoding: "utf8",
+      env,
+      input: JSON.stringify(input),
+    });
+    assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
+    return JSON.parse(r.stdout) as Record<string, string>;
+  };
+  for (const who of ["client", "cc", "signup"] as const) {
     await check(`client components render for ${who} (tests/client-route-gating.render.ts)`, () => {
-      const nodeOptions = (process.env.NODE_OPTIONS || "")
-        .split(/\s+/)
-        .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
-        .join(" ");
-      const env = { ...process.env, NODE_OPTIONS: nodeOptions };
-      if (!nodeOptions) delete env.NODE_OPTIONS;
       const c = captured[who];
       assert.ok(c, "no props were captured");
-      const r = spawnSync(process.execPath, ["--import", "tsx", "tests/client-route-gating.render.ts"], {
-        encoding: "utf8",
-        env,
-        input: JSON.stringify({
-          marketplace: c.marketplace,
-          agentConfig: c.agentConfig,
-          profileEditor: c.profileEditor,
-        }),
-      });
-      assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
-      html[who] = JSON.parse(r.stdout) as Record<string, string>;
+      html[who] = renderClient({ marketplace: c.marketplace, agentConfig: c.agentConfig, profileEditor: c.profileEditor });
     });
   }
 
@@ -667,6 +694,68 @@ async function main() {
     const text = readable(html.client.profileEditor);
     assert.doesNotMatch(text, PERSONA_NAMES, text.match(PERSONA_NAMES)?.[0]);
     assert.match(text, /Sales|Client Success/, "the picker offers the client's own teammates by department");
+  });
+  // W4a review R1. A manifest that binds OASIS house agents (the setup wizard
+  // once wrote bravo, atlas and maven with their persona names) gets no
+  // teammate from them: the roster drops a house agent outside OASIS, so the
+  // Profile picker and the provider overrides must not offer one either, by
+  // any name. The two live self-signup rows bind exactly these, under a slug
+  // their shell does not read today; this pins the case where it does.
+  await check("Settings, a self-signup whose manifest binds bravo, atlas and maven: no house agent is offered, no persona is named", () => {
+    const c = captured.signup;
+    assert.deepEqual(c.profileEditor?.tenantAgents, [], "the Profile picker offered a house agent");
+    assert.deepEqual(c.agentConfig?.agentKeys, [], "the provider overrides offered a house agent");
+    const texts: Record<string, string> = {
+      profile: readable(html.signup.profileEditor),
+      overrides: readable(html.signup.agentConfig),
+      card: readable(html.signup.marketplace),
+      server: c.serverText,
+    };
+    for (const [where, text] of Object.entries(texts)) {
+      assert.doesNotMatch(text, PERSONA_NAMES, `${where}: ${text.match(PERSONA_NAMES)?.[0]}`);
+      assert.ok(!identity.namesPersona(text), `${where}: a persona on a self-signup's Settings: ${text.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
+    }
+    assert.doesNotMatch(html.signup.profileEditor, /value="(bravo|atlas|maven)"/, "a house slug is a picker option");
+    assert.match(texts.profile, /No workspace agents enabled/);
+  });
+  await check("Settings, a workspace whose slug cannot be read: the legacy profile list ([\"bravo\"]) is not offered either", async () => {
+    await login("noslug");
+    const viewerAccess = { persona: "founder", canSeePersonalSettings: true, canSeeTeamPerformance: false, canSeeSystemSurfaces: true, degraded: false };
+    const props = (section: string) => ({ section, viewerAccess }) as unknown as Parameters<typeof SettingsContent>[0];
+    assert.deepEqual(propsOf(await SettingsContent(props("profile")), ProfileEditor)?.tenantAgents, [], "the Profile picker offered the legacy list's house agent");
+    assert.deepEqual(propsOf(await SettingsContent(props("ai")), AgentConfigEditor)?.agentKeys, [], "the provider overrides offered it");
+  });
+  // W4a review R3 (and the hidden-card gap): when the workspace's manifest
+  // cannot be read, the seed answers for the shell, which for a client is the
+  // empty unprovisioned one. The card must say it couldn't check, not list
+  // that guess ("No department has a lead yet") or vanish.
+  await check("Settings > AI brain when the manifest read fails: Workspace agents says it couldn't check and lists no guess", async () => {
+    await login("client");
+    await raw.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    let page: unknown;
+    try {
+      page = await withContent(await settingsAi());
+    } finally {
+      await raw.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    const text = visibleText(page, new Set([AgentMarketplaceCard, AgentConfigEditor, ProfileEditor])).join("\n");
+    assert.match(text, /Workspace agents/, "the card vanished");
+    assert.match(text, /Couldn't check this workspace's AI teammates just now/);
+    assert.doesNotMatch(text, /No department has a lead yet/);
+    assert.equal(propsOf(page, AgentMarketplaceCard), null, "the card listed a roster read from the seed");
+  });
+  await check("an agent with no roster name reads 'AI teammate' in the Profile picker and the overrides, never its slug, persona or role", () => {
+    const out = renderClient({
+      marketplace: null,
+      agentConfig: { ...captured.client.agentConfig, agentKeys: ["bravo", "atlas"], agentLabels: {} },
+      profileEditor: { ...captured.client.profileEditor, tenantAgents: ["bravo", "atlas"], agentNames: {} },
+    });
+    for (const id of ["profileEditor", "agentConfig"]) {
+      const text = readable(out[id]);
+      assert.match(text, /AI teammate/, id);
+      assert.doesNotMatch(text, PERSONA_NAMES, `${id}: ${text.match(PERSONA_NAMES)?.[0]}`);
+      assert.doesNotMatch(text, /CEO|CFO|CMO|strategy, operations/, `${id} prints a persona's role line`);
+    }
   });
   await check("Settings > AI brain, OASIS owner: its five department leads by department name, no add-ons, never a persona", () => {
     const text = readable(html.cc.marketplace);

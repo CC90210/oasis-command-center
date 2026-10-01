@@ -29,9 +29,11 @@
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
+import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { getManifest } from "./loader";
 import { getManifestRow, getManifestSlugForTenant } from "./persistence";
 import { resolveEnabledAgentSlugs } from "./agent-roster";
+import { OASIS_SEED_TENANT_IDS } from "./seeds";
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -133,6 +135,18 @@ export async function getTenantEnabledAgents(
   const manifest = await getTenantManifestForUser(userTenantId);
   if (!manifest) return [];
   return resolveEnabledAgentSlugs({ manifestAgents: manifest.agents || [] });
+}
+
+/**
+ * The agents an OPERATOR surface lists for OASIS's own workspaces (by tenant
+ * id): a tenant cron's agent key (POST and PATCH /api/cron-jobs), /operations'
+ * workers and tapes, /health's integrations. That is the house agents OASIS's
+ * bridge runs (lib/agents.ts OASIS_RUNTIME_AGENT_KEYS), not its business
+ * roster, which is its department leads since W4a (decision 21; review R4).
+ * Null for every other workspace: the caller keeps its enabled roster.
+ */
+export function oasisOperatorAgents(tenantId: string | null | undefined): string[] | null {
+  return tenantId && OASIS_SEED_TENANT_IDS.has(tenantId) ? [...OASIS_RUNTIME_AGENT_KEYS] : null;
 }
 
 /**

@@ -34,7 +34,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { safe } from "@/lib/api-helpers";
 import { requireOperator } from "@/lib/role-surfaces-session";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { aiKeyOnFile, aiServicesWithKey, getTenant, integrationsHealth } from "@/lib/queries";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
@@ -79,7 +79,8 @@ export default async function HealthPage() {
 
   const [system, enabledAgents, tenant] = await Promise.all([
     loadSystemHealth(tenantId, { now }),
-    safe("health.enabled_agents", getTenantEnabledAgents(tenantId), [] as string[]),
+    // OASIS's own workspace: the agents its bridge runs (W4a review R4).
+    oasisOperatorAgents(tenantId) ?? safe("health.enabled_agents", getTenantEnabledAgents(tenantId), [] as string[]),
     safe("health.tenant", getTenant(tenantId), null),
   ]);
   const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;

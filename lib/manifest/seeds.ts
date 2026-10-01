@@ -54,7 +54,9 @@ export const OASIS_SEED: TenantManifest = {
   // components/os/department/config.ts reads for every channel, the AI Team
   // page and Settings. Each is named for the departments it leads; the persona
   // behind it never reaches a screen. OASIS has no tenant_manifests row, so
-  // this seed IS OASIS's roster. CC's own agents (aura, lex, hermes,
+  // this seed IS OASIS's roster; a teammate its owner builds is stored as a
+  // seed overlay on top of it (lib/manifest/seed-overlay.ts), so an edit here
+  // still reaches OASIS after that. CC's own agents (aura, lex, hermes,
   // life-preservation) lead no department and are not business teammates:
   // they live in Admin > Fleet (components/os/landings/fleet-data.ts).
   agents: [

@@ -75,8 +75,6 @@ export function departmentNames(keys: readonly DepartmentKey[]): string {
 
 export function workspaceTeammates(scope: DepartmentScope): WorkspaceTeammate[] {
   const bindings = workspaceBindings(scope);
-  const bySlug = new Map<string, ManifestAgentBinding>();
-  for (const b of bindings) if (!bySlug.has(b.slug.toLowerCase())) bySlug.set(b.slug.toLowerCase(), b);
 
   const leads = new Map<string, { slug: string; binding: ManifestAgentBinding | null; departments: DepartmentKey[]; declared: boolean }>();
   for (const dept of OS_DEPARTMENTS) {
@@ -90,7 +88,9 @@ export function workspaceTeammates(scope: DepartmentScope): WorkspaceTeammate[] 
     } else {
       leads.set(key, {
         slug: lead.slug,
-        binding: lead.binding ?? bySlug.get(key) ?? null,
+        // The binding that switches it: the one its department channel obeys
+        // (config.ts departmentLead `control`), so the two always agree.
+        binding: lead.control,
         departments: [dept.key],
         declared: lead.binding !== null,
       });
