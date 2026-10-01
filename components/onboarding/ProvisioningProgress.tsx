@@ -12,8 +12,8 @@
  *
  * Server component. The workspace comes from the SESSION (lib/team.ts
  * getSessionContext), never from a prop or the URL, so it can only ever show
- * the viewer's own workspace. The contact line imports CONTACT_EMAIL, the one
- * verified OASIS mailbox; no other address is written here.
+ * the viewer's own workspace. The contact line imports CONTACT_EMAIL, OASIS's
+ * support inbox; no other address is written here.
  */
 
 import { getSessionContext } from "@/lib/team";

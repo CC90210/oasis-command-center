@@ -5,13 +5,20 @@
  *   1. INVOICE_FROM_EMAIL + INVOICE_FROM_APP_PASSWORD (+ INVOICE_FROM_NAME) —
  *      an explicit override, for when invoices should leave from a billing
  *      address rather than the shared team mailbox;
- *   2. OASIS_MAIL_FROM + OASIS_MAIL_APP_PASSWORD — the existing OASIS shared
+ *   2. SUPPORT_GMAIL_USER + SUPPORT_GMAIL_APP_PASSWORD — support@oasisai.work,
+ *      the mailbox OASIS's client-facing system mail leaves from
+ *      (lib/email/support-mailbox.ts);
+ *   3. OASIS_MAIL_FROM + OASIS_MAIL_APP_PASSWORD — the existing OASIS shared
  *      mailbox (lib/integrations/oasis-shared-gmail-send.ts reads the same);
- *   3. the founders' tenant 'oasis_gmail' integration row {from_address,
+ *   4. the founders' tenant 'oasis_gmail' integration row {from_address,
  *      app_password} — the same row that sender falls back to.
+ * Sending from 3 or 4 because support@ is not configured logs one line.
  * None configured -> InvoiceMailerNotConfigured, thrown. There is no fallback
  * to a path that cannot carry the attachment (the e-sign sender degrades to
  * a notice without its PDF; an invoice must not).
+ *
+ * Replies go to support@oasisai.work whichever mailbox sent it: a client's
+ * question about an invoice belongs with OASIS's support inbox.
  *
  * The mailbox must be on oasisai.work (mailboxBrandConflict): an invoice for
  * OASIS AI Solutions authenticated as another company's mailbox is refused.
@@ -24,6 +31,8 @@ import "server-only";
 
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
+import { logSupportSenderFallback, resolveSupportMailbox } from "@/lib/email/support-mailbox";
 import { formatCents } from "./money";
 import { oneTimePayVerb } from "./invoice";
 
@@ -34,22 +43,21 @@ export class InvoiceMailerNotConfigured extends Error {
   }
 }
 
-export type InvoiceMailbox = { from: string; password: string; name: string; source: "invoice_env" | "oasis_env" | "tenant_row" };
+export type InvoiceMailbox = { from: string; password: string; name: string; source: "invoice_env" | "support_env" | "oasis_env" | "tenant_row" };
 
 export async function resolveInvoiceMailbox(tenantId: string | null): Promise<InvoiceMailbox> {
-  const envPairs: Array<[string, string, string, InvoiceMailbox["source"]]> = [
-    ["INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "INVOICE_FROM_NAME", "invoice_env"],
-    ["OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "OASIS_FROM_NAME", "oasis_env"],
-  ];
-  let found: InvoiceMailbox | null = null;
-  for (const [fromVar, passVar, nameVar, source] of envPairs) {
+  const envPair = (fromVar: string, passVar: string, nameVar: string, source: InvoiceMailbox["source"]): InvoiceMailbox | null => {
     const from = (process.env[fromVar] || "").trim();
     const password = (process.env[passVar] || "").replace(/\s+/g, "");
-    if (from && password) {
-      found = { from, password, name: (process.env[nameVar] || "").trim() || "OASIS AI Solutions", source };
-      break;
-    }
-  }
+    return from && password ? { from, password, name: (process.env[nameVar] || "").trim() || "OASIS AI Solutions", source } : null;
+  };
+  const support = resolveSupportMailbox();
+  let found: InvoiceMailbox | null =
+    envPair("INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "INVOICE_FROM_NAME", "invoice_env") ??
+    // The seller's name on the From line, not "OASIS AI Support": an invoice is
+    // from the company.
+    (support.ok ? { from: support.address, password: support.password, name: "OASIS AI Solutions", source: "support_env" } : null) ??
+    envPair("OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "OASIS_FROM_NAME", "oasis_env");
   if (!found && tenantId) {
     const b = await getTenantIntegrationBundle(tenantId, "oasis_gmail").catch(() => ({}) as Record<string, string>);
     const from = (b.from_address || "").trim();
@@ -58,8 +66,9 @@ export async function resolveInvoiceMailbox(tenantId: string | null): Promise<In
   }
   if (!found) {
     throw new InvoiceMailerNotConfigured(
-      "No OASIS mailbox is configured for invoices. Set INVOICE_FROM_EMAIL + INVOICE_FROM_APP_PASSWORD " +
-        "(or the existing OASIS_MAIL_FROM + OASIS_MAIL_APP_PASSWORD). The invoice was NOT emailed.",
+      "No OASIS mailbox is configured for invoices. Set SUPPORT_GMAIL_USER + SUPPORT_GMAIL_APP_PASSWORD " +
+        `(${OASIS_SUPPORT_EMAIL}), or INVOICE_FROM_EMAIL + INVOICE_FROM_APP_PASSWORD, or the existing ` +
+        "OASIS_MAIL_FROM + OASIS_MAIL_APP_PASSWORD. The invoice was NOT emailed.",
     );
   }
   const conflict = mailboxBrandConflict("oasis", found.from);
@@ -239,6 +248,10 @@ export async function sendInvoiceEmail(args: {
   filename: string;
 }): Promise<{ messageId: string; from: string }> {
   const mailbox = await resolveInvoiceMailbox(args.tenantId);
+  if (mailbox.source === "oasis_env" || mailbox.source === "tenant_row") {
+    const support = resolveSupportMailbox();
+    if (!support.ok) logSupportSenderFallback("invoice", support, mailbox.from);
+  }
   const nodemailer = await import("nodemailer");
   const transport = nodemailer.createTransport({
     host: "smtp.gmail.com",
@@ -254,7 +267,7 @@ export async function sendInvoiceEmail(args: {
   const info = await transport.sendMail({
     from: `"${safeName}" <${mailbox.from}>`,
     to: args.to,
-    replyTo: mailbox.from,
+    replyTo: OASIS_SUPPORT_EMAIL,
     subject: args.subject.replace(/[\r\n]+/g, " "),
     text: args.text,
     html: args.html,

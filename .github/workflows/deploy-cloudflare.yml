@@ -106,6 +106,8 @@
 #   OPERATOR_EMAIL
 #   PUBLIC_APP_URL
 #   TT_PG_BRIDGE_TOKEN
+#   SUPPORT_GMAIL_USER
+#   SUPPORT_GMAIL_APP_PASSWORD
 #
 # Until CLOUDFLARE_API_TOKEN exists the job still BUILDS (real signal on build
 # breakage) and SKIPS the deploy with a warning — no red CI while the migration
@@ -256,6 +258,8 @@ jobs:
           OPERATOR_EMAIL: ${{ secrets.OPERATOR_EMAIL }}
           PUBLIC_APP_URL: ${{ secrets.PUBLIC_APP_URL }}
           TT_PG_BRIDGE_TOKEN: ${{ secrets.TT_PG_BRIDGE_TOKEN }}
+          SUPPORT_GMAIL_USER: ${{ secrets.SUPPORT_GMAIL_USER }}
+          SUPPORT_GMAIL_APP_PASSWORD: ${{ secrets.SUPPORT_GMAIL_APP_PASSWORD }}
 
       - name: Deploy to Cloudflare Workers
         if: steps.preflight.outputs.ready == 'true'
