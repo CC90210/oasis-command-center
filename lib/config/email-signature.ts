@@ -122,9 +122,12 @@ const BRAND_FOOTERS: Record<BrandKey, string> = {
  * CASL s.6(2)) and gives the opt-out, and claims nothing about why the reader
  * is getting it, so it is true for every support mail.
  *
- * THE OPT-OUT IS THE RECIPIENT'S OWN SIGNED LINK to /unsubscribe, which records
- * it in email_suppressions, the list every sender checks. It used to say "reply
- * UNSUBSCRIBE", and a reply reaches support@, where nothing records it.
+ * THE OPT-OUT IS THE RECIPIENT'S OWN LINK to /unsubscribe, which records it in
+ * email_suppressions, the list every sender checks. It used to say "reply
+ * UNSUBSCRIBE", and a reply reaches support@, where nothing records it. The link
+ * carries a signature only when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; without
+ * it the link has no token and /api/unsubscribe accepts the address alone, as
+ * it does from the form on /unsubscribe.
  */
 export function oasisSupportFooter(unsubscribeUrl: string): string {
   return (
@@ -151,7 +154,7 @@ export function appendSignatureAndFooter(
    * the mailbox, which for support@ reads "Support"; the desk's own messages
    * already end "The OASIS team" or "<name>, OASIS".
    *
-   * `unsubscribeUrl` is the recipient's signed /unsubscribe link
+   * `unsubscribeUrl` is the recipient's /unsubscribe link
    * (lib/email/tracked-html.ts unsubscribeUrl), REQUIRED with purpose
    * "support": support mail without an opt-out that is recorded throws here
    * rather than goes out.

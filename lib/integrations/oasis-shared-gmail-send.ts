@@ -35,7 +35,7 @@
  * SUPPORT_GMAIL_APP_PASSWORD are on the Worker, and from the shared mailbox
  * below until then (one log line says so). Either way its Reply-To is
  * support@, so a client's answer lands where the desk works, and it carries
- * the support footer. Its opt-out is the recipient's signed link to
+ * the support footer. Its opt-out is the recipient's own link to
  * /unsubscribe (the one-click List-Unsubscribe header and the footer), never a
  * reply: support@ is read by a person and nothing there records an opt-out.
  * Sales mail (the default) never reads the support credential and is
@@ -145,7 +145,7 @@ export function composeOasisMessage(args: {
   signer?: EmailSigner | null;
   fromAddress: string;
   idempotencyKey?: string;
-  /** "support": Reply-To support@, support footer with a signed opt-out link, one-click List-Unsubscribe, no address-derived sign-off. */
+  /** "support": Reply-To support@, support footer with the recipient's opt-out link, one-click List-Unsubscribe, no address-derived sign-off. */
   purpose?: OasisMailPurpose;
 }): {
   from: string;
