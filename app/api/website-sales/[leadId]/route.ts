@@ -72,6 +72,10 @@ import {
   type MemberStanding,
 } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import {
+  isCompleteQualificationPayload,
+  normalizeQualificationForStorage,
+} from "@/lib/sales-qualification";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -573,16 +577,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     catch (error) { return NextResponse.json({ok:false,error:error instanceof Error ? error.message : "invalid_disposition"},{status:400}); }
   } else if (body.action === "qualify") {
     if (!mayAgentQualify(currentStage)) return NextResponse.json({ok:false,error:"connect_before_qualifying"},{status:409});
-    const q = body.qualification as Record<string,unknown>|undefined;
-    if (!q || !["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"].every(k => q[k] === true)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
-    patch = { qualification:q, stage:"qualified", qualified_at:occurredAt };
+    if (!isCompleteQualificationPayload(body.qualification)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
+    patch = { qualification:normalizeQualificationForStorage(body.qualification), stage:"qualified", qualified_at:occurredAt };
   } else if (body.action === "book_founder") {
-    const qualification = body.qualification as Record<string,unknown>|undefined;
-    const qualificationIncluded = Boolean(
-      qualification &&
-      ["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"]
-        .every((key) => qualification[key] === true),
-    );
+    const qualificationIncluded = isCompleteQualificationPayload(body.qualification);
     if (!mayAgentBookFounder(currentStage, qualificationIncluded)) {
       return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
     }
@@ -692,7 +690,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       stage:"founder_meeting_booked",
       ...(qualifiedDuringHandoff
         ? {
-            qualification,
+            qualification:normalizeQualificationForStorage(body.qualification),
             qualified_at:occurredAt,
             qualification_completed_by:session.userId,
             qualification_source:"confirmed_calendar_handoff",

@@ -23,6 +23,7 @@ import {
   SMS_CONSENT_DISCLOSURE,
   SMS_CONSENT_DISCLOSURE_VERSION,
 } from "@/lib/sms/auto-responses";
+import { QUALIFICATION_GATES } from "@/lib/sales-qualification";
 import {
   PIPELINE_MILESTONES,
   coachingNextStep,
@@ -1125,15 +1126,10 @@ export function LeadLifecycleActions({
               Qualification gates
             </legend>
             <div className="grid gap-2 sm:grid-cols-2">
-              {[
-                "Decision-maker confirmed",
-                "Website problem confirmed",
-                "Timing confirmed",
-                "Open to $500 setup + $150/month",
-              ].map((label, index) => (
+              {QUALIFICATION_GATES.map((gate, index) => (
                 <QualificationGateCard
-                  key={label}
-                  label={label}
+                  key={gate.key}
+                  label={gate.label}
                   checked={checks[index]}
                   disabled={disabled}
                   onChange={(checked) => setQualificationCheck(index, checked)}
