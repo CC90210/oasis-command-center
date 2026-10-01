@@ -48,7 +48,7 @@ export const SUNBIZ_LEGAL_FOOTER =
 // street), an incomplete CASL s.6(2) identification on every commercial email
 // OASIS sent. Laid out name / street / city-postal to match the SunBiz footer
 // above. One copy, shared by the outreach footer (BRAND_FOOTERS.oasis) and the
-// support footer (OASIS_SUPPORT_FOOTER).
+// support footer (oasisSupportFooter).
 const OASIS_IDENTITY = "OASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada";
 
 /**
@@ -121,10 +121,17 @@ const BRAND_FOOTERS: Record<BrandKey, string> = {
  * ticket. This one identifies the sender (name, street, the support address:
  * CASL s.6(2)) and gives the opt-out, and claims nothing about why the reader
  * is getting it, so it is true for every support mail.
+ *
+ * THE OPT-OUT IS THE RECIPIENT'S OWN SIGNED LINK to /unsubscribe, which records
+ * it in email_suppressions, the list every sender checks. It used to say "reply
+ * UNSUBSCRIBE", and a reply reaches support@, where nothing records it.
  */
-export const OASIS_SUPPORT_FOOTER =
-  `\n\n---\n${OASIS_IDENTITY}\n${OASIS_SUPPORT_EMAIL}\n\n` +
-  "A service message from OASIS support. To stop receiving these emails, reply UNSUBSCRIBE.";
+export function oasisSupportFooter(unsubscribeUrl: string): string {
+  return (
+    `\n\n---\n${OASIS_IDENTITY}\n${OASIS_SUPPORT_EMAIL}\n\n` +
+    `A service message from OASIS support. To stop receiving these emails, unsubscribe here: ${unsubscribeUrl}`
+  );
+}
 
 export function appendSignatureAndFooter(
   body: string,
@@ -140,11 +147,16 @@ export function appendSignatureAndFooter(
    *
    * `purpose: "support"` (OASIS only; another brand throws) is OASIS support
    * mail: signed by `signer` or by nobody, and closed with
-   * OASIS_SUPPORT_FOOTER. Never signed with a name derived from the mailbox,
-   * which for support@ reads "Support"; the desk's own messages already end
-   * "The OASIS team" or "<name>, OASIS".
+   * oasisSupportFooter(unsubscribeUrl). Never signed with a name derived from
+   * the mailbox, which for support@ reads "Support"; the desk's own messages
+   * already end "The OASIS team" or "<name>, OASIS".
+   *
+   * `unsubscribeUrl` is the recipient's signed /unsubscribe link
+   * (lib/email/tracked-html.ts unsubscribeUrl), REQUIRED with purpose
+   * "support": support mail without an opt-out that is recorded throws here
+   * rather than goes out.
    */
-  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey; purpose?: OasisMailPurpose },
+  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey; purpose?: OasisMailPurpose; unsubscribeUrl?: string },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
   const support = opts.purpose === "support";
@@ -152,6 +164,13 @@ export function appendSignatureAndFooter(
     throw new Error(
       `appendSignatureAndFooter: support mail is OASIS's, not ${JSON.stringify(opts.brand)}'s. ` +
         "Refusing to put OASIS's support footer on another company's email.",
+    );
+  }
+  const optOutUrl = (opts.unsubscribeUrl || "").trim();
+  if (support && !/^https?:\/\/\S+$/.test(optOutUrl)) {
+    throw new Error(
+      "appendSignatureAndFooter: support mail needs the recipient's unsubscribe link (unsubscribeUrl). " +
+        "Refusing to send it with an opt-out that nothing records.",
     );
   }
   // THE BRAND HAS TO REACH THE FALLBACK TOO.
@@ -193,7 +212,7 @@ export function appendSignatureAndFooter(
   // legal identity. An invalid value at runtime (untyped JS caller, bad JSON)
   // throws rather than defaulting — a commercial email must not go out
   // attributed to whoever happens to be first in the table.
-  const footer = support ? OASIS_SUPPORT_FOOTER : BRAND_FOOTERS[opts.brand];
+  const footer = support ? oasisSupportFooter(optOutUrl) : BRAND_FOOTERS[opts.brand];
   if (!footer) {
     throw new Error(
       `appendSignatureAndFooter: no footer for brand ${JSON.stringify(opts.brand)}. ` +

@@ -33,10 +33,13 @@
  * clients and its desk (lib/email/support-mailbox.ts lists the callers). It
  * leaves from support@oasisai.work once SUPPORT_GMAIL_USER +
  * SUPPORT_GMAIL_APP_PASSWORD are on the Worker, and from the shared mailbox
- * below until then (one log line says so). Either way its Reply-To and
- * List-Unsubscribe are support@ and it carries the support footer, so a
- * client's answer lands where the desk works. Sales mail (the default) never
- * reads the support credential and is unchanged.
+ * below until then (one log line says so). Either way its Reply-To is
+ * support@, so a client's answer lands where the desk works, and it carries
+ * the support footer. Its opt-out is the recipient's signed link to
+ * /unsubscribe (the one-click List-Unsubscribe header and the footer), never a
+ * reply: support@ is read by a person and nothing there records an opt-out.
+ * Sales mail (the default) never reads the support credential and is
+ * unchanged.
  */
 
 import "server-only";
@@ -48,10 +51,13 @@ import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 import {
   OASIS_SUPPORT_FROM_NAME,
+  OASIS_SUPPRESSION_BRAND,
+  OASIS_SUPPRESSION_TENANT_ID,
   logSupportSenderFallback,
   resolveSupportMailbox,
   type OasisMailPurpose,
 } from "@/lib/email/support-mailbox";
+import { unsubscribeApiUrl, unsubscribeUrl } from "@/lib/email/tracked-html";
 import {
   gmailMessageIdForIdempotencyKey,
   smtpFailureReason,
@@ -125,7 +131,9 @@ export async function resolveOasisSupportMailboxFrom(tenantId: string): Promise<
  * a credential, so nothing downstream of it could ever be exercised in a unit
  * test; this can, with no stubbing at all.
  *
- * PURE. Same inputs, same message, no I/O.
+ * PURE. Same inputs, same message, no I/O. (Support mail's opt-out links also
+ * read the deployment's link origin and signing secret, as every tracked link
+ * does: lib/email/tracked-html.ts.)
  */
 export function composeOasisMessage(args: {
   to: string;
@@ -137,7 +145,7 @@ export function composeOasisMessage(args: {
   signer?: EmailSigner | null;
   fromAddress: string;
   idempotencyKey?: string;
-  /** "support": Reply-To and List-Unsubscribe are support@, support footer, no address-derived sign-off. */
+  /** "support": Reply-To support@, support footer with a signed opt-out link, one-click List-Unsubscribe, no address-derived sign-off. */
   purpose?: OasisMailPurpose;
 }): {
   from: string;
@@ -185,12 +193,22 @@ export function composeOasisMessage(args: {
     ...(args.idempotencyKey
       ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
       : {}),
-    // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it as
-    // a header too lets a mail client offer its own one-click control and keeps
-    // filters from treating a branded HTML message as unattributed bulk. It
-    // points at the mailbox that is actually read, and matches the instruction
-    // in the footer rather than inventing a second mechanism.
-    headers: { "List-Unsubscribe": `<mailto:${support ? OASIS_SUPPORT_EMAIL : fromAddress}?subject=UNSUBSCRIBE>` },
+    // SALES: the opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring
+    // it as a header too lets a mail client offer its own one-click control and
+    // keeps filters from treating a branded HTML message as unattributed bulk.
+    // It points at the mailbox that is actually read, and matches the
+    // instruction in the footer rather than inventing a second mechanism.
+    //
+    // SUPPORT: the RFC 8058 one-click URL, so a mail client's "Unsubscribe"
+    // records the opt-out at once (/api/unsubscribe writes email_suppressions,
+    // the list every sender checks). No mailto: a reply would reach support@,
+    // where a person reads it and nothing records it.
+    headers: support
+      ? {
+          "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, OASIS_SUPPRESSION_BRAND)}>`,
+          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        }
+      : { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` },
     // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
     // plain-text helper — it joins with "\n\n---\n" and detects an existing
     // signature by comparing the last LINE — so it is applied here and never to
@@ -201,6 +219,8 @@ export function composeOasisMessage(args: {
       fromAddress,
       brand: "oasis",
       purpose: args.purpose,
+      // Support mail's footer links the recipient's own /unsubscribe page.
+      ...(support ? { unsubscribeUrl: unsubscribeUrl(args.to, OASIS_SUPPRESSION_BRAND) } : {}),
     }),
     ...(args.html ? { html: args.html } : {}),
   };
@@ -246,9 +266,20 @@ export async function sendOasisSharedGmail(args: {
   // dead code, and reading only `.suppressed` treats a FAILED LOOKUP as
   // "not suppressed" and emails someone who may have opted out. `checkFailed`
   // is the whole point of the return shape and has to be read.
-  let supp: { suppressed: boolean; checkFailed: boolean };
+  //
+  // SUPPORT MAIL ALSO READS OASIS'S OWN LIST. Its opt-out link files under
+  // OASIS's own workspace (OASIS_SUPPRESSION_TENANT_ID), so support mail sent
+  // from another of OASIS's workspaces checks that list as well as its own.
+  const optOutLists =
+    args.purpose === "support" && args.tenantId !== OASIS_SUPPRESSION_TENANT_ID
+      ? [args.tenantId, OASIS_SUPPRESSION_TENANT_ID]
+      : [args.tenantId];
+  let supp: { suppressed: boolean; checkFailed: boolean } = { suppressed: false, checkFailed: false };
   try {
-    supp = await checkEmailSuppressed(args.tenantId, args.to);
+    for (const listTenant of optOutLists) {
+      supp = await checkEmailSuppressed(listTenant, args.to);
+      if (supp.checkFailed || supp.suppressed) break;
+    }
   } catch (e) {
     // Belt and braces: it does not throw today, but a future rewrite that does
     // must not silently become a fail-open.

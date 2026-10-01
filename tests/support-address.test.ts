@@ -73,10 +73,10 @@ const CLIENT_FACING: Record<string, RegExp | null> = {
   "lib/delivery/messages.ts": null,
   "lib/delivery/notify.ts": /purpose: "support"/,
   "app/api/clients/[id]/reply/route.ts": /purpose: "support"/,
-  "lib/os/approvals/executors.ts": /purpose: emailPurposeFor\(/,
+  "lib/os/approvals/executors.ts": /purpose = await emailPurposeFor\(ctx\.db, ctx\.tenant\.id, ctx\.approval, to\)/,
   "lib/founders-finances/invoice-email.ts": /replyTo: OASIS_SUPPORT_EMAIL/,
   "lib/auth-email.ts": /replyTo: OASIS_SUPPORT_EMAIL/,
-  "lib/config/email-signature.ts": /OASIS_SUPPORT_FOOTER/,
+  "lib/config/email-signature.ts": /function oasisSupportFooter\(/,
   "docs/compliance/PRIVACY_NUTRITION_LABEL.json": null,
 };
 

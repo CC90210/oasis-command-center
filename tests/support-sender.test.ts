@@ -5,6 +5,12 @@
  * and answers to support@ (Reply-To) either way. Sales mail never reads the
  * support credential.
  *
+ * Support mail's opt-out is the recipient's signed link (one-click
+ * List-Unsubscribe to /api/unsubscribe, and the /unsubscribe page in the
+ * footer), never "reply UNSUBSCRIBE": a reply reaches support@, where nothing
+ * records it. Whether an approved email is support mail is decided when it is
+ * carried out, from the workspace's client records (a local libSQL file here).
+ *
  * Driven for real: the shared OASIS sender, the support desk's mail deps, the
  * approvals executor, the Clients-hub mailbox resolver, the invoice mailer and
  * the account-security mailer. The stand-ins are nodemailer (records the SMTP
@@ -14,8 +20,11 @@
  * Run: node --conditions=react-server --import tsx tests/support-sender.test.ts
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHmac } from "node:crypto";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createClient, type Client } from "@libsql/client";
 
 const ROOT = join(__dirname, "..");
 // Never let a test reach a real mailbox, whatever the developer's shell holds.
@@ -40,9 +49,15 @@ for (const k of [
   "AUTH_ALLOWED_FROM_DOMAINS",
   "OASIS_TELEGRAM_BOT_TOKEN",
   "TELEGRAM_BOT_TOKEN",
+  "PUBLIC_APP_URL",
+  "OASIS_UNSUBSCRIBE_HMAC_SECRET",
 ]) {
   delete process.env[k];
 }
+// Opt-out links are signed with this; the expected token is computed below,
+// independently of the code under test.
+const UNSUB_SECRET = "support-sender-unsubscribe-secret";
+process.env.OASIS_UNSUBSCRIBE_HMAC_SECRET = UNSUB_SECRET;
 
 function stubModule(path: string, exports: Record<string, unknown>) {
   require.cache[path] = { id: path, filename: path, path: dirname(path), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
@@ -115,6 +130,48 @@ async function logsOf<T>(fn: () => Promise<T>): Promise<{ result: T; warn: strin
 const supportLines = (lines: string[]) => lines.filter((l) => l.startsWith("[support-mail]"));
 const last = () => sent[sent.length - 1];
 
+/** The signed opt-out query for an OASIS support email: HMAC(email|brand), as /api/unsubscribe verifies it. */
+function optOutQuery(email: string): string {
+  const lower = email.toLowerCase();
+  const token = createHmac("sha256", UNSUB_SECRET).update(`${lower}|OASIS AI`).digest("hex").slice(0, 16);
+  return `email=${encodeURIComponent(lower)}&brand=OASIS+AI&token=${token}`;
+}
+/** Support mail's headers: the one-click URL, and no mailto at all. */
+const supportHeaders = (email: string) => ({
+  "List-Unsubscribe": `<https://oasisai.work/api/unsubscribe?${optOutQuery(email)}>`,
+  "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+});
+/** The support footer's last line: the recipient's own /unsubscribe page. */
+const supportOptOutLine = (email: string) =>
+  `A service message from OASIS support. To stop receiving these emails, unsubscribe here: https://oasisai.work/unsubscribe?${optOutQuery(email)}`;
+
+/** Split a migration the way scripts/apply_turso_migration.py does (no triggers here). */
+function splitSql(sql: string): string[] {
+  const out: string[] = [];
+  let buf: string[] = [];
+  for (const line of sql.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("--")) continue;
+    buf.push(line);
+    if (t.endsWith(";")) {
+      out.push(buf.join("\n").trim().replace(/;$/, ""));
+      buf = [];
+    }
+  }
+  return out;
+}
+
+/** A local libSQL file holding the REAL customers + customer_contacts tables (migration bravo__188). */
+async function customersDb(): Promise<Client> {
+  const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "support-sender-")), "test.db")}` });
+  const ddl = splitSql(readFileSync(join(ROOT, "database", "turso", "bravo__188_os_customers.sql"), "utf8")).filter(
+    (s) => /^CREATE (UNIQUE )?(TABLE|INDEX) /.test(s) && /\b(EXISTS|ON) customer(s|_contacts)\b/.test(s),
+  );
+  assert.equal(ddl.length, 8, "the customers and customer_contacts tables and their six indexes");
+  for (const s of ddl) await db.execute(s);
+  return db;
+}
+
 let failures = 0;
 async function check(name: string, fn: () => Promise<void> | void) {
   try {
@@ -128,8 +185,10 @@ async function check(name: string, fn: () => Promise<void> | void) {
 
 async function main() {
   console.log("support-sender:");
-  const { resolveSupportMailbox } = await import("../lib/email/support-mailbox");
-  const { OASIS_SUPPORT_FOOTER, appendSignatureAndFooter } = await import("../lib/config/email-signature");
+  const { resolveSupportMailbox, pinnedSuppressionTenant } = await import("../lib/email/support-mailbox");
+  const { oasisSupportFooter, appendSignatureAndFooter } = await import("../lib/config/email-signature");
+  /** The whole support footer for a recipient: identity, support@, and their own opt-out link. */
+  const supportFooterFor = (email: string) => oasisSupportFooter(`https://oasisai.work/unsubscribe?${optOutQuery(email)}`);
   const { sendOasisSharedGmail, composeOasisMessage, resolveOasisSupportMailboxFrom } = await import(
     "../lib/integrations/oasis-shared-gmail-send"
   );
@@ -163,18 +222,35 @@ async function main() {
     assert.deepEqual(last().auth, { user: SUPPORT, pass: "abcdefghijklmnop" }, "the SMTP login is the support mailbox");
     assert.equal(last().mail.from, `"OASIS AI Support" <${SUPPORT}>`);
     assert.equal(last().mail.replyTo, SUPPORT);
-    assert.deepEqual(last().mail.headers, { "List-Unsubscribe": `<mailto:${SUPPORT}?subject=UNSUBSCRIBE>` });
+    assert.deepEqual(last().mail.headers, supportHeaders(CLIENT), "one-click opt-out; no mailto to an inbox nothing reads for it");
     if (result.ok) assert.equal(result.from_address, SUPPORT);
     assert.deepEqual(supportLines([...warn, ...error]), [], "nothing to report when support@ sends");
   });
 
   await check("support mail is signed by its own body, never 'Support', and closes with the support footer", () => {
     const text = String(last().mail.text);
-    assert.ok(text.endsWith(OASIS_SUPPORT_FOOTER), text);
+    assert.ok(text.endsWith(supportFooterFor(CLIENT)), text);
     assert.ok(text.startsWith(`${ack.body}\n\n---\n`), "no sign-off derived from the mailbox address");
     assert.doesNotMatch(text, /\n\nSupport\n/);
     assert.doesNotMatch(text, /reached out about your business/, "the outreach consent sentence is false on a support reply");
     assert.ok(!JSON.stringify(last().mail).toLowerCase().includes("conaugh@oasisai.work"), "no client-facing email names CC");
+  });
+
+  await check("support mail's opt-out is the recipient's signed link, never a reply to support@ (header and footer)", () => {
+    const mail = last().mail;
+    const text = String(mail.text);
+    assert.ok(text.endsWith(`\n${SUPPORT}\n\n${supportOptOutLine(CLIENT)}`), text);
+    assert.doesNotMatch(text, /reply\s+UNSUBSCRIBE/i, "a reply to support@ is recorded nowhere");
+    const headers = mail.headers as Record<string, string>;
+    assert.doesNotMatch(headers["List-Unsubscribe"], /mailto:/i, "no mailto: support@ has no automation recording opt-outs");
+    assert.equal(headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click", "RFC 8058 one-click");
+    // The header is the machine target (the POST endpoint); the footer is the page a person reads.
+    assert.match(headers["List-Unsubscribe"], /^<https:\/\/oasisai\.work\/api\/unsubscribe\?/);
+    assert.match(text, /unsubscribe here: https:\/\/oasisai\.work\/unsubscribe\?email=client%40example\.test&brand=OASIS\+AI&token=[0-9a-f]{16}$/);
+    // The opt-out files under OASIS's own workspace, never by the name shared with strangers' workspaces.
+    assert.equal(pinnedSuppressionTenant("OASIS AI"), OASIS_TENANT);
+    assert.equal(pinnedSuppressionTenant(" oasis ai "), OASIS_TENANT, "matched as /api/unsubscribe reads it: trimmed, any case");
+    assert.equal(pinnedSuppressionTenant("SunBiz"), null, "every other brand keeps its own lookup");
   });
 
   await check("until SUPPORT_* is set, support mail keeps the shared mailbox, says so in ONE line, and still answers to support@", async () => {
@@ -185,8 +261,8 @@ async function main() {
     assert.equal(last().auth.user, SHARED);
     assert.equal(last().mail.from, SHARED, "no 'OASIS AI Support' display name on another mailbox");
     assert.equal(last().mail.replyTo, SUPPORT, "Reply-To is support@ immediately");
-    assert.deepEqual(last().mail.headers, { "List-Unsubscribe": `<mailto:${SUPPORT}?subject=UNSUBSCRIBE>` });
-    assert.ok(String(last().mail.text).endsWith(OASIS_SUPPORT_FOOTER));
+    assert.deepEqual(last().mail.headers, supportHeaders(CLIENT), "the same signed opt-out, whichever mailbox sends");
+    assert.ok(String(last().mail.text).endsWith(supportFooterFor(CLIENT)));
     const lines = supportLines([...warn, ...error]);
     assert.equal(lines.length, 1, lines.join("\n"));
     assert.equal(supportLines(warn).length, 1, "a missing credential is a warning");
@@ -262,7 +338,8 @@ async function main() {
     assert.equal(last().auth.user, SUPPORT);
     assert.equal(last().mail.to, CLIENT);
     assert.equal(last().mail.replyTo, SUPPORT);
-    assert.ok(String(last().mail.text).endsWith(OASIS_SUPPORT_FOOTER));
+    assert.ok(String(last().mail.text).endsWith(supportFooterFor(CLIENT)));
+    assert.deepEqual(last().mail.headers, supportHeaders(CLIENT));
   });
 
   await check("the Clients hub resolves support@ first, then the shared mailbox, then nothing; its route sends as support", async () => {
@@ -311,41 +388,100 @@ async function main() {
     }
   });
 
-  await check("the support footer is OASIS's only: another brand's email refuses it, OASIS mail closes with it", () => {
+  await check("the support footer is OASIS's only, and never goes out without the recipient's opt-out link", () => {
     assert.throws(
-      () => appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "sunbiz", purpose: "support" }),
+      () => appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "sunbiz", purpose: "support", unsubscribeUrl: "https://oasisai.work/unsubscribe" }),
       /support mail is OASIS's/,
     );
-    const oasis = appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "oasis", purpose: "support" });
-    assert.ok(oasis.endsWith(OASIS_SUPPORT_FOOTER), oasis);
+    for (const missing of [undefined, "", "   ", "mailto:support@oasisai.work?subject=unsubscribe"]) {
+      assert.throws(
+        () => appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "oasis", purpose: "support", unsubscribeUrl: missing }),
+        /support mail needs the recipient's unsubscribe link/,
+        `unsubscribeUrl ${JSON.stringify(missing)} is not an opt-out anything records`,
+      );
+    }
+    const link = `https://oasisai.work/unsubscribe?${optOutQuery(CLIENT)}`;
+    const oasis = appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "oasis", purpose: "support", unsubscribeUrl: link });
+    assert.ok(oasis.endsWith(oasisSupportFooter(link)), oasis);
+    assert.ok(oasis.endsWith(supportOptOutLine(CLIENT)), oasis);
+    const sales = appendSignatureAndFooter("Hi Simon,\n\nShort note.", { brand: "oasis", signer: { name: "Rep" } });
+    assert.match(sales, /reached out about your business\. To stop receiving emails, reply UNSUBSCRIBE\.$/, "sales mail is unchanged");
   });
 
-  await check("an approved email to a CLIENT goes as support mail; one to a lead stays sales mail", async () => {
+  await check("an approved email to a CLIENT goes as support mail, decided from the client records; one to a lead stays sales mail", async () => {
     const { EXECUTORS, defaultExecutorDeps, emailPurposeFor } = await import("../lib/os/approvals/executors");
-    assert.equal(emailPurposeFor({ target_ref: "customer:c1" }), "support");
-    assert.equal(emailPurposeFor({ target_ref: "lead:l1" }), "sales");
-    assert.equal(emailPurposeFor({ target_ref: null }), "sales");
+    const db = await customersDb();
+    const at = "2026-10-01T00:00:00.000Z";
+    const OTHER_TENANT = "6b6b6b6b-0000-4000-8000-00000000006b";
+    await db.batch(
+      [
+        {
+          sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, created_at, updated_at)
+                VALUES ('c1', ?, 'Ana Co', ?, 'active', ?, ?)`,
+          args: [OASIS_TENANT, CLIENT, at, at],
+        },
+        {
+          sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, email, created_at, updated_at)
+                VALUES ('cc1', ?, 'c1', 'Bo', 'bo@example.test', ?, ?)`,
+          args: [OASIS_TENANT, at, at],
+        },
+        {
+          sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, archived_at, created_at, updated_at)
+                VALUES ('c2', ?, 'Gone Co', 'gone@example.test', 'churned', ?, ?, ?)`,
+          args: [OASIS_TENANT, at, at, at],
+        },
+        // Another workspace's client: never a client of OASIS's.
+        {
+          sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, created_at, updated_at)
+                VALUES ('c3', ?, 'Their Co', 'theirs@example.test', 'active', ?, ?)`,
+          args: [OTHER_TENANT, at, at],
+        },
+      ],
+      "write",
+    );
+    const purpose = (to: string, targetRef: string | null) => emailPurposeFor(db, OASIS_TENANT, { target_ref: targetRef }, to);
+    // The agent tool files a client's draft against a lead or nothing: the recipient decides.
+    assert.equal(await purpose(CLIENT, "lead:l1"), "support", "a client's main address, filed against a lead");
+    assert.equal(await purpose("Client@Example.TEST", null), "support", "a client's main address, any case, filed against nothing");
+    assert.equal(await purpose("bo@example.test", null), "support", "a contact at a client");
+    assert.equal(await purpose("lead@example.test", "lead:l1"), "sales", "a lead");
+    assert.equal(await purpose("gone@example.test", null), "sales", "an archived client record is not a current client");
+    assert.equal(await purpose("theirs@example.test", null), "sales", "another workspace's client is not this workspace's");
+    assert.equal(await purpose("lead@example.test", "customer:c1"), "support", "a draft filed against a client record");
+    const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "support-sender-bare-")), "test.db")}` });
+    assert.equal(await emailPurposeFor(bare, OASIS_TENANT, { target_ref: null }, CLIENT), "sales", "no customers table yet: no clients");
+    const broken = { execute: async () => { throw new Error("SQLITE_BUSY: database is locked"); } } as unknown as Client;
+    await assert.rejects(emailPurposeFor(broken, OASIS_TENANT, { target_ref: null }, CLIENT), /database is locked/, "a failed lookup is never read as 'not a client'");
+
     setSupport(SUPPORT);
     oasisRow = { from_address: SHARED, app_password: "row-password" };
     const deps = { ...defaultExecutorDeps(), isDryRun: () => false };
-    const run = (targetRef: string, key: string) =>
+    const run = (on: Client, to: string, targetRef: string | null, key: string) =>
       EXECUTORS.send_email!.run({
-        db: {} as never,
+        db: on,
         approval: { target_ref: targetRef, idempotency_key: key } as never,
-        payload: { to: CLIENT, subject: "Your launch", body: "Hello." },
+        payload: { to, subject: "Your launch", body: "Hello." },
         tenant: { id: OASIS_TENANT, slug: "oasis-ai-cc" },
         approver: { userId: "u1", email: REP },
         deps,
       });
-    const client = await run("customer:c1", "client-email:c1:d1");
+    const client = await run(db, CLIENT, "lead:l1", "agent:x:2026-10-01:new:h0");
     assert.equal(client.ok, true, JSON.stringify(client.result));
-    assert.equal(last().auth.user, SUPPORT);
+    assert.equal(last().auth.user, SUPPORT, "a client's email filed against a lead still leaves from support@");
     assert.equal(last().mail.replyTo, SUPPORT);
-    assert.ok(String(last().mail.text).endsWith(OASIS_SUPPORT_FOOTER));
-    const lead = await run("lead:l1", "agent:x:2026-10-01:new:h1");
+    assert.ok(String(last().mail.text).endsWith(supportFooterFor(CLIENT)));
+    const lead = await run(db, "lead@example.test", "lead:l1", "agent:x:2026-10-01:new:h1");
     assert.equal(lead.ok, true, JSON.stringify(lead.result));
     assert.equal(last().auth.user, SHARED);
     assert.equal(last().mail.replyTo, REP);
+    const before = sent.length;
+    const unsure = await run(broken, CLIENT, null, "agent:x:2026-10-01:new:h2");
+    assert.equal(unsure.ok, false);
+    if (!unsure.ok) {
+      assert.equal(unsure.result.reason, "recipient_check_failed");
+      assert.match(unsure.result.message, /Could not check whether client@example\.test is one of this workspace's clients, so nothing was sent/);
+    }
+    assert.equal(sent.length, before, "nothing is sent on a guess");
   });
 
   await check("invoices: an explicit INVOICE_FROM wins, then support@, then the shared mailbox (logged); replies go to support@", async () => {

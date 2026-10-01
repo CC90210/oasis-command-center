@@ -17,7 +17,10 @@
  *      tokens become enforced once email_template.py starts signing them).
  *   3. Brand → tenant resolution: we lookup the tenant by brand string
  *      from `tenants.custom_fields.brand` so suppressions are properly
- *      tenant-scoped per CASL s. 6 (per-sender rule).
+ *      tenant-scoped per CASL s. 6 (per-sender rule). OASIS's support-mail
+ *      brand is pinned to OASIS's own workspace first (pinnedSuppressionTenant,
+ *      lib/email/support-mailbox.ts): its name is shared by dozens of other
+ *      workspaces, so a name lookup would file the opt-out under a stranger's.
  *   4. Rate limit by IP — anti-enumeration. Reuses the pair-code limiter.
  *
  * Returns 200 on success (or already-suppressed). Never reveals whether
@@ -31,6 +34,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp } from "@/lib/api-helpers";
 import { isRateLimited, recordPairAttempt } from "@/lib/pair-rate-limit";
+import { pinnedSuppressionTenant } from "@/lib/email/support-mailbox";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,6 +73,8 @@ function verifyToken(email: string, brand: string, token: string): boolean {
  */
 async function resolveTenantId(brand: string): Promise<string | null> {
   if (!brand) return null;
+  const pinned = pinnedSuppressionTenant(brand);
+  if (pinned) return pinned;
   const db = getServiceSupabase();
   // Use Supabase's PostgREST ilike for case-insensitive matching.
   const { data, error } = await db

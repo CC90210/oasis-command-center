@@ -35,8 +35,16 @@
  * out. The brand guard (mailboxBrandConflict) still runs on every send after
  * this.
  *
+ * THE OPT-OUT IS A LINK, NEVER A REPLY. Support mail's List-Unsubscribe header
+ * is the RFC 8058 one-click URL (/api/unsubscribe) and its footer links the
+ * /unsubscribe page (composeOasisMessage, oasis-shared-gmail-send.ts). Both
+ * write email_suppressions, the list every sender checks. A reply would reach
+ * support@, where a person reads it and nothing records it, so "reply
+ * UNSUBSCRIBE" would leave the senders mailing someone who asked them to stop.
+ *
  * Pure over its env argument; no I/O beyond the one log line.
  */
+import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 
 /** Worker secret holding the support mailbox's login. Must equal OASIS_SUPPORT_EMAIL. */
@@ -54,6 +62,31 @@ export const OASIS_SUPPORT_FROM_NAME = "OASIS AI Support";
  * desk (the list in this file's header).
  */
 export type OasisMailPurpose = "sales" | "support";
+
+/**
+ * The suppression brand on support mail's opt-out links (the `brand` that
+ * /api/unsubscribe files an opt-out under).
+ *
+ * PINNED, NOT LOOKED UP. /api/unsubscribe resolves an ordinary brand to a
+ * workspace by NAME, and "OASIS AI" is also the default name of dozens of
+ * self-signup workspaces (lib/provisioning/workspace-name.ts), so a name lookup
+ * would file OASIS's opt-out under a stranger's workspace, where no OASIS
+ * sender ever looks. pinnedSuppressionTenant sends it to OASIS's own workspace
+ * instead, whose list every support send checks (sendOasisSharedGmail).
+ */
+export const OASIS_SUPPRESSION_BRAND = "OASIS AI";
+
+/** OASIS's own workspace: where an opt-out from support mail is filed. */
+export const OASIS_SUPPRESSION_TENANT_ID = DELIVERY_TENANT_ID;
+
+/**
+ * The workspace an opt-out with this brand is filed under, for a brand that
+ * must never be resolved by name; null for every other brand, which keeps the
+ * name lookup.
+ */
+export function pinnedSuppressionTenant(brand: string): string | null {
+  return brand.trim().toLowerCase() === OASIS_SUPPRESSION_BRAND.toLowerCase() ? OASIS_SUPPRESSION_TENANT_ID : null;
+}
 
 type Env = Record<string, string | undefined>;
 
