@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { evaluate } from "../lib/health/checks-core";
 import { DRIP_CHECKS } from "../lib/health/drip-checks";
 import {
@@ -148,23 +148,12 @@ async function main() {
   assert.equal(observed, 2);
   assert.equal(evaluate(check.id, check.rule, observed, []).verdict, "failing");
 
-  const route = readFileSync("app/api/cron/tps-enroll/route.ts", "utf8");
-  const repair = route.slice(
-    route.indexOf("async function repairOrphanVerificationHolds"),
-    route.indexOf("export async function GET"),
-  );
-  assert.ok(repair.length > 500, "the repair implementation disappeared");
-  assert.match(route, /searchParams\.get\("repair-orphan-holds"\) === "1"/);
-  assert.match(route, /searchParams\.get\("write"\) === "1"/);
-  assert.match(route, /const MAX_REPAIR_BATCH = 25/);
-  assert.match(repair, /db\.from\(JOBS_TABLE\)\.insert\(job\)/);
-  assert.doesNotMatch(repair, /\.update\s*\(/, "repair must not mutate leads or drip rows");
-  assert.doesNotMatch(repair, /sendDripSms|sendMessage|lead_interactions/,
-    "repair must not contact a lead");
-
-  // Repair requires an explicit authenticated invocation. Since 2026-09-28 the
-  // Live-Sub enrollment itself is unscheduled too: it served SunBiz only, and
-  // SunBiz was retired (runbook C-6a), so no tps-enroll URL may be scheduled.
+  // The repair ran inside /api/cron/tps-enroll (?repair-orphan-holds=1&write=1).
+  // That route served SunBiz only: unscheduled when SunBiz was retired
+  // (2026-09-28, runbook C-6a) and deleted 2026-10-01 with the other
+  // SunBiz-only cron routes (OS plan W0). The pure helpers above stay pinned;
+  // the route and its schedule must not come back.
+  assert.equal(existsSync("app/api/cron/tps-enroll"), false, "the retired SunBiz Live-Sub enrollment route is back");
   const worker = readFileSync("workers/oasis-cc-cron/src/index.ts", "utf8");
   assert.ok(!worker.includes('path: "/api/cron/tps-enroll'), "the retired SunBiz Live-Sub enrollment is scheduled again");
   assert.ok(!worker.includes("repair-orphan-holds"), "repair was accidentally auto-scheduled");

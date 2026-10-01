@@ -55,6 +55,21 @@ function stubModule(path: string, exports: Record<string, unknown>) {
   } as unknown as NodeModule;
 }
 
+// The bundled roster (agents.config.json) is EMPTY since 2026-10-01: the
+// retired SunBiz reps' addresses and phone left every client's bundle (OS plan
+// W0). The paths under test still read the roster through lib/config/agents.ts,
+// and the rule they prove (a deactivated rep is dropped, an active one kept) is
+// about standing, not about who is on the roster, so the roster is test data
+// here: the same three keys the fixtures below name, with a phone on the
+// retired rep so the "no phone may appear" assertion still has something to catch.
+stubModule(require.resolve("../agents.config.json"), {
+  agents: [
+    { key: "jordan", name: "Jordan", email: "jordan@sunbizfunding.com", phone: "555-010-0001" },
+    { key: "alex", name: "Alex", email: "alex@sunbizfunding.com", phone: "" },
+    { key: "matt", name: "Matt", email: "Submissions@sunbizfunding.com", phone: "" },
+  ],
+});
+
 const SESSION_COOKIE_NAME = "oasis_session";
 let sessionCookie: string | undefined;
 stubModule(require.resolve("next/headers"), {

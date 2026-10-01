@@ -68,7 +68,6 @@ async function main() {
     getSeedManifest,
     OASIS_SEED,
     OASIS_AI_CC_SEED,
-    SUN_SEED,
     SUGA_SEED,
     UNPROVISIONED_SEED,
     UNPROVISIONED_SLUG,
@@ -175,9 +174,17 @@ async function main() {
     for (const viewer of [undefined, OASIS, SUNBIZ, SIGNUP]) {
       assert.equal(getSeedManifest("oasis-ai-cc", viewer), OASIS_AI_CC_SEED);
       assert.equal(getSeedManifest(" OASIS-AI-CC ", viewer), OASIS_AI_CC_SEED);
-      assert.equal(getSeedManifest("sun", viewer), SUN_SEED);
       assert.equal(getSeedManifest("suga", viewer), SUGA_SEED);
     }
+  });
+
+  // ── The retired SunBiz shell has no seed any more (2026-10-01, OS plan W0) ──
+  await check("the retired 'sun' slug has no seed: it is an unknown workspace, whoever asks", () => {
+    assert.equal("SUN_SEED" in seeds, false, "SUN_SEED is exported again");
+    for (const viewer of [undefined, OASIS, SUNBIZ, SIGNUP]) {
+      assert.equal(getSeedManifest("sun", viewer), UNPROVISIONED_SEED, `viewer ${String(viewer)}`);
+    }
+    assert.equal("sun" in seeds.SEED_MANIFESTS, false, "SEED_MANIFESTS lists sun again");
   });
 
   await check("oasis-webdev keeps OASIS_SEED (no row, no seed, OASIS's own tenant)", async () => {
@@ -203,17 +210,6 @@ async function main() {
       hrefs(OASIS_AI_CC_SEED),
       [...CC, "/web-leads", "/commissions", "/training", "/objections"],
       "OASIS_AI_CC_SEED",
-    );
-    assert.deepEqual(
-      hrefs(SUN_SEED),
-      [
-        "/t/sun", "/agent", "/t/sun/reasoning", "/playbook", "/templates", "/t/sun/leads",
-        "/t/sun/shopping-out", "/t/sun/applications", "/t/sun/conversations", "/t/sun/calls",
-        "/t/sun/campaigns", "/t/sun/offers", "/t/sun/renewals", "/t/sun/commissions",
-        "/t/sun/lenders", "/t/sun/import", "/forms", "/sequences", "/team", "/t/sun/automations",
-        "/metrics", "/t/sun/settings",
-      ],
-      "SUN_SEED",
     );
     assert.deepEqual(
       hrefs(SUGA_SEED),
@@ -268,6 +264,9 @@ async function main() {
     assert.equal(await manifestExists("fun"), true);
     assert.equal(await manifestExists("oasis-ai-cc"), true);
     assert.equal(await manifestExists("oasis"), true);
+    // The retired SunBiz shell: no seed, no row, so /t/sun/* calls notFound()
+    // like any unknown slug (every app/t/[slug] page gates on this).
+    assert.equal(await manifestExists("sun"), false, "manifestExists('sun') answers true from the in-code seed again");
   });
 
   // A DB outage used to hand a workspace with a real row CC's nav for the

@@ -7,6 +7,13 @@
  * read into a zero — that decision belongs to the builders, which render it as
  * "Couldn't load".
  *
+ * A read that does not ANSWER is different from one that fails. Every read
+ * here runs under TODAY_READ_DEADLINE_MS (lib/os/deadline.ts): past it, the
+ * loader rejects with a ReadDeadlineError instead of answering, so the page
+ * fails closed to app/error.tsx ("a workspace read timed out", reload) rather
+ * than leaving the root skeleton up forever. A failed read is still a failed
+ * block; a hung read is a hung page, and the page says so inside the budget.
+ *
  * Reuse, not re-implementation: the pipeline counts are the /pipeline board's
  * own query (lib/oasis-pipeline-query + the board's stage list and cycle, the
  * same inputs lib/oasis-board-summary.ts passes), the SLA clock is
@@ -43,6 +50,7 @@ import { isTimeZone } from "@/lib/calendar/zone";
 import { OPERATOR_TIME_ZONE, operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import type { CalendarDay } from "@/components/os/today/ScheduleGlance";
 import type { Persona } from "@/lib/role-surfaces";
+import { isReadDeadlineError, withDeadline } from "@/lib/os/deadline";
 import {
   pickHotReplies,
   summarizeBoard,
@@ -58,12 +66,26 @@ import {
   type SalesSnapshot,
 } from "@/components/os/today/model";
 
-/** Run `fn`; log and answer `{ ok: false }` if it throws. Never a fallback value. */
+/**
+ * How long one Today read may take before the page gives up on it. Long
+ * enough for a cold Turso read; short enough that the founder sees an answer,
+ * not a skeleton, when something hangs.
+ */
+export const TODAY_READ_DEADLINE_MS = 12_000;
+
+/**
+ * Run `fn` under the deadline; log and answer `{ ok: false }` if it throws.
+ * Never a fallback value. A deadline is the one error that is NOT swallowed:
+ * it is rethrown (logged first) so the page fails closed to the error boundary
+ * instead of rendering a block as "Couldn't load" twelve seconds late while a
+ * sibling read may still hang.
+ */
 async function read<T>(label: string, fn: () => Promise<T>): Promise<Read<T>> {
   try {
-    return { ok: true, value: await fn() };
+    return { ok: true, value: await withDeadline(fn(), TODAY_READ_DEADLINE_MS, label) };
   } catch (err) {
     console.error(`[today.${label}]`, err);
+    if (isReadDeadlineError(err)) throw err;
     return { ok: false };
   }
 }
@@ -356,9 +378,10 @@ export function loadTodayCalendar(owner: { tenantId: string; userId: string }, d
 export async function loadCash(): Promise<Read<CashSnapshot> | null> {
   let viewer: Awaited<ReturnType<typeof resolveFinanceViewer>>;
   try {
-    viewer = await resolveFinanceViewer();
+    viewer = await withDeadline(resolveFinanceViewer(), TODAY_READ_DEADLINE_MS, "cash.viewer");
   } catch (err) {
     console.error("[today.cash.viewer]", err);
+    if (isReadDeadlineError(err)) throw err;
     return { ok: false };
   }
   if (!viewer) return null;

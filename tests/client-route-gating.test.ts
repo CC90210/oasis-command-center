@@ -356,9 +356,14 @@ async function main() {
   console.log("client-route-gating:");
 
   // ── 1. retired pages ───────────────────────────────────────────────────
+  // The retired SunBiz shell /t/sun/* (OS plan W0) is a static segment under
+  // the tenant catch-all: the folder is app/t/sun/[[...path]] so one handler
+  // answers /t/sun and everything below it, and the static "sun" wins over
+  // app/t/[slug]. The second line of defence, manifestExists("sun") === false,
+  // is pinned by tests/manifest-unknown-slug-fail-closed.test.ts.
   const RETIRED = [
     "contacts", "embed", "offers", "lenders", "funded-deals", "applications",
-    "sms", "email-blast", "metrics", "templates", "renewals",
+    "sms", "email-blast", "metrics", "templates", "renewals", "t/sun/[[...path]]",
   ];
   // A page calling notFound() drew the not-found screen with HTTP 200 (the root
   // loading.tsx streams the shell first). Each retired folder is now only a
@@ -367,6 +372,10 @@ async function main() {
   for (const route of RETIRED) {
     await check(`/${route} is retired: its GET answers HTTP 404 with the not-found page, and no page renders`, async () => {
       assert.equal(existsSync(join(ROOT, `app/${route}/page.tsx`)), false, `app/${route}/page.tsx would render with a 200`);
+      if (route.startsWith("t/sun")) {
+        assert.equal(existsSync(join(ROOT, "app/t/sun/page.tsx")), false, "app/t/sun/page.tsx would render with a 200");
+        assert.equal(existsSync(join(ROOT, "app/t/sun/route.ts")), false, "a second handler beside the optional catch-all is a Next build error");
+      }
       const src = readFileSync(join(ROOT, `app/${route}/route.ts`), "utf8");
       assert.deepEqual(
         [...src.matchAll(/^import .*$/gm)].map((m) => m[0]),
@@ -749,6 +758,30 @@ async function main() {
     for (const f of ["app/error.tsx", "app/global-error.tsx"]) {
       assert.doesNotMatch(readFileSync(join(ROOT, f), "utf8"), /vercel/i, `${f} mentions Vercel`);
     }
+  });
+  // A workspace read that did not answer in time (lib/os/deadline.ts, OS plan
+  // W0): the page says so in plain words and offers a reload. The digest is
+  // READ_DEADLINE, an internal identifier; the person is not asked to forward
+  // it (it is already in the Worker's logs), so no "Error code" box is drawn.
+  await check("a timed-out read: plain words, a reload, and no internal code to forward; the global button is styled without the stylesheet", () => {
+    for (const id of ["error:timedOut", "globalError:timedOut", "error:timedOutProspect"]) {
+      const markup = html.client[id];
+      assert.ok(markup, `${id} did not render`);
+      const text = readable(markup);
+      assert.match(text, /This page timed out/, id);
+      assert.match(text, /A workspace read timed out before the page could finish loading\. Reload the page\./, id);
+      assert.match(text, /tell (us|them) what you were doing/, `${id}: a timeout has no code to send`);
+      assert.doesNotMatch(text, /Error code|READ_DEADLINE|send us the code|give them the code/, `${id}: shows an internal identifier as something to forward`);
+      assert.match(text, /\bReload\b/, `${id}: no reload offered`);
+      assert.doesNotMatch(text, /Try again/, `${id}: a timeout is retried by a reload, not a reset`);
+    }
+    // app/global-error.tsx exists for the one path where globals.css never
+    // loaded: its button must carry the token colours inline, with the token's
+    // own value as the fallback, or it is the browser's grey default.
+    const button = html.client["globalError:timedOut"].match(/<button[^>]*>/)?.[0] ?? "";
+    assert.match(button, /class="btn-primary"/, "the global boundary's button is not the OS button class");
+    assert.match(button, /background:rgb\(var\(--c-accent-muted, ?37 99 235\)\)/, "the button has no colour when the stylesheet is gone");
+    assert.match(button, /color:#ffffff/, "white text on the filled button");
   });
   const { PROSPECT_FACING_PREFIXES, isProspectFacingPath } = await import("../components/ErrorHelp");
   await check("the error boundaries on a page a client's prospect opens: try again and the code, no OASIS contact, no link into the OS", () => {

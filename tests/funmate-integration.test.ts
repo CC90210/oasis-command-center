@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { transformSunbizApplicationForFunmate, renderFunmateSubmission } from "../lib/lenders/funmate-transform";
 
 const transformed = transformSunbizApplicationForFunmate("app-123", {
@@ -44,8 +44,8 @@ const retryRoute = readFileSync(
 );
 assert.match(retryRoute, /sendFunmateMail/);
 assert.match(retryRoute, /funmate_retry_missing_recipient/);
-const replyScanner = readFileSync("app/api/cron/scan-funmate-replies/route.ts", "utf8");
-assert.match(replyScanner, /process\.env\.CRON_SECRET/);
-assert.match(replyScanner, /addressesByLender/);
+// The FundMate reply scanner (/api/cron/scan-funmate-replies) was unscheduled
+// since SunBiz retired and deleted 2026-10-01 (OS plan W0).
+assert.equal(existsSync("app/api/cron/scan-funmate-replies"), false, "the retired FundMate reply scanner is back");
 
 console.log("funmate-integration: all assertions passed");

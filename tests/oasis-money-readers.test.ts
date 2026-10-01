@@ -26,7 +26,7 @@ assert.match(loader, /revenueCollected\(range\)/, "goal progress must be money c
 assert.match(loader, /mrr: pinned === true \? mrr : null,/, "an unconnected Stripe account must not render as $0 MRR");
 
 const founderToday = read("components/today/FounderToday.tsx");
-assert.match(founderToday, /showFinancials \? await loadOasisMoney\(tenantId, "today"\) : null/);
+assert.match(founderToday, /showFinancials\s*\?\s*withDeadline\(loadOasisMoney\(tenantId, "today"\), TODAY_READ_DEADLINE_MS, "money"\)\s*:\s*Promise\.resolve\(null\)/);
 assert.doesNotMatch(founderToday, /mrr_current_usd|mrrSnapshot|mrrHistory/);
 
 const analytics = read("app/analytics/page.tsx");

@@ -11,7 +11,7 @@ export default function NotFound() {
         <div>
           <h1 className="text-lg font-bold text-fg">Page not found</h1>
           <p className="text-sm text-fg-muted mt-1">
-            That route doesn&apos;t exist in your Command Center.
+            That page doesn&apos;t exist in your workspace.
           </p>
         </div>
         <div className="flex justify-center pt-1">

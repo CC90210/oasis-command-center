@@ -1,13 +1,19 @@
 /**
- * SunBiz agent roster (Jordan / Alex / Matt) — BUNDLED from
- * agents.config.json at the repo root via a static import.
+ * Agent roster — BUNDLED from agents.config.json at the repo root via a
+ * static import.
  *
- * This is the source of truth for the shop-out derived-CC list (Adon's
- * 2026-06-10 spec, section 2). When the operator fires a shop-out, the
- * application row's rep fields are intersected against these agents to
- * produce the auto-checked CC list. Anyone whose email isn't in this
- * file is excluded — processors, admins, ops, etc. don't get CC'd on
- * lender outreach.
+ * EMPTY SINCE 2026-10-01 (OS plan W0). It held SunBiz's three reps with their
+ * work emails and a phone number, shipped in every client's bundle; SunBiz was
+ * retired 2026-09-28, so the entries were removed with the shop-out panel. The
+ * file and this module stay because every send path still resolves its signer
+ * through resolveSignerForOperator below: with no roster the OASIS and
+ * Bluerise branches answer exactly as before, and a "sunbiz" send falls to the
+ * shared Submissions identity. tests/agents-config-runtime-portable.test.ts
+ * pins that the roster carries no personal data.
+ *
+ * It was the source of truth for the shop-out derived-CC list (Adon's
+ * 2026-06-10 spec, section 2): the application row's rep fields were
+ * intersected against these agents to produce the auto-checked CC list.
  *
  * 🚨 STATIC IMPORT, NOT readFileSync — DO NOT "restore" the fs read.
  *

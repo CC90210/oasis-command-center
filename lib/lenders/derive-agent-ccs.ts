@@ -18,7 +18,20 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getAgents } from "@/lib/config/agents";
 import { isActiveMember } from "@/lib/team";
-import type { DerivedAgentEntry } from "@/components/shop-out/derived-cc-list";
+
+/**
+ * One derived CC entry: a roster agent found on the application's rep fields.
+ * Lived in components/shop-out/derived-cc-list.tsx until the shop-out panel
+ * was deleted (2026-10-01, OS plan W0); the run route still reads the list.
+ */
+export type DerivedAgentEntry = {
+  /** Stable key from agents.config.json. */
+  key: string;
+  /** Display name. */
+  name: string;
+  /** Email — the value persisted in cc_emails. */
+  email: string;
+};
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

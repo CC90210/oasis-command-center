@@ -182,6 +182,40 @@ async function main() {
     "write",
   );
 
+  // The records route gates on manifestExists(slug) and reads the entity list
+  // from the manifest. Until 2026-10-01 the in-code SUN_SEED answered for
+  // "sun"; that retired shell is deleted (OS plan W0), so this stand-in
+  // workspace owns a stored manifest row declaring the two entities, like any
+  // real client workspace does.
+  const { parseManifest } = await import("../lib/manifest/schema");
+  const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
+  const sunManifest = parseManifest({
+    ...finalizeManifestFromWizard({ template: "custom", slug: "sun", answers: {} }),
+    data_model: [
+      {
+        name: "lead",
+        label: "Lead",
+        fields: [
+          { name: "name", type: "string" },
+          { name: "assigned_to", type: "string" },
+          { name: "notes", type: "string" },
+        ],
+      },
+      {
+        name: "application",
+        label: "Application",
+        fields: [
+          { name: "business_name", type: "string" },
+          { name: "assigned_to", type: "string" },
+        ],
+      },
+    ],
+  });
+  await seed.execute({
+    sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version, created_at, updated_at) VALUES ('m-sun', ?, 'sun', ?, 1, 1, '2026-01-01', '2026-01-01')",
+    args: [TENANT, JSON.stringify(sunManifest)],
+  });
+
   const { signSession, SESSION_COOKIE } = await import("../lib/turso-auth");
   assert.equal(SESSION_COOKIE, SESSION_COOKIE_NAME, "the cookie-jar stand-in reads the wrong cookie name");
   const { NextRequest } = await import("next/server");

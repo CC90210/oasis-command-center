@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { Activity, Building2, ExternalLink, Loader2, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import { LeadFileBody, type DetailPayload } from "@/components/leads/LeadFileBody";
 import { LenderPickerField, type LenderOption } from "@/components/renewals/RecordFundedDeal";
@@ -191,7 +190,6 @@ function LenderPanel({ lender, onSaved }: { lender: Detail["lender"]; onSaved: (
   return <div className="space-y-4 p-6"><h3 className="font-semibold text-fg">{String(initial.name || "Lender")}</h3>
     {Object.entries(form).map(([key, value]) => <label key={key} className="block text-xs text-fg-muted">{key.replaceAll("_", " ")}<input className="input mt-1" value={value} onChange={(e) => setForm({ ...form, [key]: e.target.value })} /></label>)}
     <button type="button" onClick={save} className="btn-primary">Save lender contact</button>
-    <Link href="/t/sun/lenders" className="inline-flex items-center gap-1 text-xs text-accent">Open full lender editor <ExternalLink size={12} /></Link>
   </div>;
 }
 

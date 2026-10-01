@@ -46,10 +46,11 @@ import {
   greetingFor,
   usd,
 } from "@/components/os/today/model";
-import { loadCalendarStatus, loadContentWeek, loadTodayCalendar } from "@/components/os/today/loaders";
+import { TODAY_READ_DEADLINE_MS, loadCalendarStatus, loadContentWeek, loadTodayCalendar } from "@/components/os/today/loaders";
 import { briefPlanFor, empireLaneFromCheck, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
 import { operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
+import { withDeadline } from "@/lib/os/deadline";
 import { resolveOsModules } from "@/lib/os/modules";
 import { ASK_HREF, mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
 import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
@@ -103,8 +104,14 @@ export async function FounderToday({
   const now = new Date();
   const day = operatorDayAt(now);
 
-  // Every block starts at once. None of these promises rejects: each loader
+  // Every block starts at once, the money read below included, and all of
+  // them are awaited together. A read that FAILS never rejects: each loader
   // resolves to a value, a failure marker, or null when its block is refused.
+  // A read that does not ANSWER inside TODAY_READ_DEADLINE_MS does reject
+  // (lib/os/deadline.ts), so the page fails closed to app/error.tsx instead of
+  // leaving the root skeleton up. Awaiting them in one Promise.all makes the
+  // first rejection the page's error and leaves no other read rejecting with
+  // nothing listening (an unhandled rejection in the Worker's logs).
   // The Needs-you reads (pipeline, support, inbound, cash, approvals,
   // connections, routines) are the SAME call the Chief of Staff tab makes
   // (components/os/today/brief-load.ts), so the two cannot count differently.
@@ -126,9 +133,14 @@ export async function FounderToday({
   // The money block. Entered only when the capability says so — the point of
   // the branch is that these reads never happen otherwise, not that their
   // results get dropped afterwards. lib/goals/oasis-money is the same loader
-  // /analytics uses; its figures are the Finances ledger and live Stripe.
-  const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
-  const [reads, content, calendar, blocks] = await Promise.all([needsP, contentP, calendarP, blocksP]);
+  // /analytics uses; its figures are the Finances ledger and live Stripe. It is
+  // the one read this file issues itself, and it runs under the same budget as
+  // the loaders: its eight reads each fail soft (safe()), so only a hang can
+  // escape, and the deadline turns that hang into the error page too.
+  const moneyP = showFinancials
+    ? withDeadline(loadOasisMoney(tenantId, "today"), TODAY_READ_DEADLINE_MS, "money")
+    : Promise.resolve(null);
+  const [money, reads, content, calendar, blocks] = await Promise.all([moneyP, needsP, contentP, calendarP, blocksP]);
   const { sales, delivery, cash, routines } = reads;
 
   const paceSeries: GoalPacePoint[] = money?.paceSeries ?? [];
