@@ -457,6 +457,7 @@ const TESTS = [
   // package.json was held by three other build tracks when this landed.
   "tests/support-inbox-wire.test.ts",
   "tests/support-inbox-ingest.test.ts",
+  "tests/support-inbox-drafts.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
