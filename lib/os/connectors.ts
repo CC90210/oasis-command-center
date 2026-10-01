@@ -392,7 +392,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     does: [
       "Sends texts from your own Twilio number or messaging service, once the connection test passes",
-      "Sends nothing for real until live texting is switched on for OASIS: until then each send is recorded as a test",
+      "Sends only while live texting is switched on. While it is off, OASIS asks Twilio to send nothing, so no text leaves your number",
       "Checks Twilio's signature on every incoming text with your Auth Token and refuses any it cannot verify",
     ],
     keywords: ["sms", "text", "phone"],

@@ -23,6 +23,7 @@ import {
   findTenantManuallyEditableIntegrationSchema,
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
+import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,7 +100,10 @@ export async function POST(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, id: result.id });
+  // Twilio: the webhooks find this workspace by its saved sender's routing row
+  // (lib/twilio/sender-route.ts), so the row follows every save.
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_saved") : undefined;
+  return NextResponse.json({ ok: true, id: result.id, ...(routing ? { routing } : {}) });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -140,5 +144,7 @@ export async function DELETE(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
-  return NextResponse.json({ ok: true });
+  // A removed Twilio sender stops routing incoming texts to this workspace.
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_removed") : undefined;
+  return NextResponse.json({ ok: true, ...(routing ? { routing } : {}) });
 }
