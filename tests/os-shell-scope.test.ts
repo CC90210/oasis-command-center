@@ -117,6 +117,7 @@ const SidebarShell = Mounted("SidebarShell");
 const MainShell = Mounted("MainShell");
 const CustomAgentBuilder = Mounted("CustomAgentBuilder");
 const AgentChat = Mounted("AgentChat");
+const AgentSubscriptionPanel = Mounted("AgentSubscriptionPanel");
 stubFile("app/globals.css", {});
 stubFile("components/SidebarShell.tsx", { SidebarShell });
 stubFile("components/MainShell.tsx", { MainShell });
@@ -124,7 +125,7 @@ stubFile("components/PerfVitals.tsx", { PerfVitals: Mounted("PerfVitals") });
 stubFile("components/ClientErrorReporter.tsx", { ClientErrorReporter: Mounted("ClientErrorReporter") });
 stubFile("components/brand/OasisLogo.tsx", { OasisLogo: Mounted("OasisLogo") });
 stubFile("components/marketplace/CustomAgentBuilder.tsx", { CustomAgentBuilder });
-stubFile("components/marketplace/AgentSubscriptionPanel.tsx", { AgentSubscriptionPanel: Mounted("AgentSubscriptionPanel") });
+stubFile("components/marketplace/AgentSubscriptionPanel.tsx", { AgentSubscriptionPanel });
 stubFile("components/agents/AgentChat.tsx", { AgentChat });
 stubFile("components/manifest/ManifestEditorChat.tsx", { ManifestEditorChat: Mounted("ManifestEditorChat") });
 
@@ -378,7 +379,8 @@ async function main() {
         assert.equal(await outcome(run), "rendered", `other-co's owner lost ${name} (${agent})`);
       }
     }
-    const { AgentSubscriptionPanel } = await import("../components/marketplace/AgentSubscriptionPanel");
+    // The stand-in itself, not a re-import of its path: the element type the
+    // page mounted is this function.
     const detail = findEl(await marketplaceAgent({ params: Promise.resolve({ slug: "other-co", agent: "sdr" }) }), AgentSubscriptionPanel);
     const binding = detail?.props.binding as { display_name?: string; prompt_overlay?: string } | null | undefined;
     assert.equal(binding?.display_name, "Other Co Sales");
