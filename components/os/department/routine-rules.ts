@@ -73,6 +73,20 @@ export function routinesForDepartment(
   return rows.filter((r) => owners.has(r.agentKey));
 }
 
+/**
+ * The Empire lane's rows that belong to an OASIS department (CC decision 17,
+ * 2026-10-01). Every `cron_jobs` row carries the OASIS workspace id whatever
+ * business it serves, so a failing job on the operator's machine read as an
+ * OASIS routine failure on Today. A row counts only when the agent that owns it
+ * (owner_agent_key, else the owner inferred from its name) is bound to an
+ * OASIS department (`boundAgents`, config.ts OASIS_BOUND_SLUGS); any other row
+ * stays listed in Automations and never reaches Today or the Operations tab.
+ */
+export function departmentBoundRows(rows: readonly RoutineRow[], boundAgents: readonly string[]): RoutineRow[] {
+  const bound = new Set(boundAgents.map((s) => s.trim().toLowerCase()).filter(Boolean));
+  return rows.filter((r) => bound.has(r.agentKey));
+}
+
 /** Failed on its last run inside the window. An old failure is history, not news. */
 export function failedWithin(rows: readonly RoutineRow[], hours: number, now: number): RoutineRow[] {
   const since = now - hours * 3_600_000;

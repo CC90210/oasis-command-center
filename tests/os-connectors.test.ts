@@ -25,6 +25,8 @@ import { join } from "node:path";
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
+  connectionsDot,
+  connectionsHealth,
   connectorBySlug,
   connectorHref,
   connectorMatches,
@@ -254,6 +256,57 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   keyRow("twilio", "auth_token", over),
   keyRow("twilio", "from_number", over),
 ];
+
+// ─── The workspace at a glance (W2a, S5-F03) ────────────────────────────────
+// The rail's Connections dot and the Operations tile count the SAME statuses
+// the cards show. Green only when every app set up is proven; nothing set up,
+// an unverified app or a failed read is no dot; any app needing the owner is
+// amber whatever else is true.
+{
+  assert.deepEqual(connectionsHealth(EMPTY, NOW), { setUp: 0, attention: 0, connected: 0, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(EMPTY, NOW)), null, "nothing set up is not 'all healthy'");
+  const failedHealth = connectionsHealth(FAILED, NOW);
+  assert.deepEqual([failedHealth.setUp, failedHealth.unknown], [0, LIVE.length], "every built card unknown when every read failed");
+  assert.equal(connectionsDot(failedHealth), null, "a failed read draws no dot");
+  const gwsOnly: ConnectorFacts = { ...EMPTY, heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }] };
+  assert.deepEqual(connectionsHealth(gwsOnly, NOW), { setUp: 1, attention: 0, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(gwsOnly, NOW)), "ok", "one proven app and nothing else set up: green");
+  const unverified: ConnectorFacts = { ...gwsOnly, keyRows: twilioKeys() };
+  assert.deepEqual(connectionsHealth(unverified, NOW), { setUp: 2, attention: 0, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(unverified, NOW)), null, "a saved key nobody tested is not proven, so no green");
+  const expired: ConnectorFacts = {
+    ...gwsOnly,
+    connections: [{
+      provider: "stripe", status: "expired", account_id: null, account_label: null, environment: "live",
+      last_health_at: iso(MIN), last_health_verdict: "down", last_health_code: "key_rejected", last_health_detail: null,
+    }],
+  };
+  assert.deepEqual(connectionsHealth(expired, NOW), { setUp: 2, attention: 1, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(expired, NOW)), "attention", "a key Stripe stopped accepting is amber");
+  assert.equal(connectionsDot({ setUp: 1, attention: 1, connected: 0, unknown: 4 }), "attention", "a known problem outranks an unread one");
+  // Hostile facts cannot light an app that has no status source.
+  assert.equal(connectionsHealth(GREEN, NOW).setUp, LIVE.length, "only built apps are counted");
+  // The rail reads it (app/layout.tsx), nothing hard-codes a status.
+  const layout = read("app/layout.tsx");
+  assert.match(layout, /connectionsDot\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
+  assert.match(layout, /connectionsStatus=\{showConnections \? connectionsMeasured : null\}/);
+  // Chrome never holds a page: the facts read answers inside its own budget
+  // or the rail draws no dot (lib/os/deadline.ts, W0).
+  assert.match(layout, /withDeadline\(\s*loadConnectorFacts\(\{[^}]*\}\)\.then\([\s\S]*?\),\s*RAIL_CONNECTIONS_DEADLINE_MS,\s*"layout\.connections",\s*\)/);
+  assert.match(layout, /const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;/);
+  // The Operations tile counts the same statuses, as the WORKSPACE's number:
+  // the viewer's own Google link is left out (W2A-R5), and the tile links an
+  // owner or admin to the hub.
+  assert.match(
+    read("components/os/department/numbers.ts"),
+    /connectionTile\(connectionsHealth\(\{ \.\.\.facts, personalGoogleLinked: null \}, Date\.now\(\)\), viewer\.surface\.persona === "founder"\)/,
+  );
+  // Why it is left out: the same workspace, one person with their own Google
+  // linked, would count an app set up that the workspace has not set up.
+  const linked: ConnectorFacts = { ...EMPTY, personalGoogleLinked: true };
+  assert.equal(connectionsHealth(linked, NOW).setUp, 1, "precondition: a personal link counts as set up on the hub");
+  assert.equal(connectionsHealth({ ...linked, personalGoogleLinked: null }, NOW).setUp, 0);
+}
 
 // A saved key nobody tested is set up, not connected.
 assert.equal(resolveConnectorStatus(twilio, { ...EMPTY, keyRows: twilioKeys() }, NOW).kind, "configured");

@@ -5,10 +5,11 @@
  * Connections (plug), a notifications slot, and — for platform operators only —
  * the Admin shield, which switches the rail to Admin rows without navigating.
  *
- * The Connections dot is drawn ONLY from a real status. There is no
- * connection-health source yet (tenant_connections lands in Phase 2), so the
- * layout passes none and the plug renders plain. A green dot nobody measured
- * is the "unknown is not zero" failure in chrome form.
+ * The Connections dot is drawn ONLY from a real status: app/layout.tsx sums
+ * the statuses Settings > Connections shows (lib/os/connectors.ts
+ * connectionsDot). Amber when any app needs the owner, green only when every
+ * app set up is proven connected, and no dot at all otherwise. A green dot
+ * nobody measured is the "unknown is not zero" failure in chrome form.
  */
 
 import Link from "next/link";

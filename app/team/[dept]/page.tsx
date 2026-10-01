@@ -41,6 +41,8 @@ import { mayOpenOsHref } from "@/lib/os/nav";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor } from "@/lib/slack/status";
+import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
+import { connectorBySlug, connectorHref, resolveConnectorStatus } from "@/lib/os/connectors";
 
 export const dynamic = "force-dynamic";
 
@@ -85,10 +87,14 @@ export default async function DepartmentPage({
 
   const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis });
   const tenantId = viewer.surface.tenantId;
+  const profile = departmentProfile(dept.key);
+  // Connections are workspace configuration: owners and admins, the same rule
+  // as the rail footer's Connections door. Only they get each app's status.
+  const canManageConnections = viewer.surface.persona === "founder";
   // Routines feed both the panel and the Operations / Chief of Staff numbers:
   // read once, shared, while the channel check runs beside them.
   const routinesRead = loadTenantRoutines(tenantId);
-  const [channel, routines, numbers, approvals, slackPresence] = await Promise.all([
+  const [channel, routines, numbers, approvals, slackPresence, connectorFacts] = await Promise.all([
     resolveChannelState(dept, viewer),
     routinesRead,
     routinesRead.then((r) => loadDepartmentNumbers(dept, viewer, r)),
@@ -105,7 +111,20 @@ export default async function DepartmentPage({
     }),
     // Where this department lives in Slack (lib/slack/status.ts).
     loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
+    // Each app's status, from the facts Settings > Connections reads.
+    canManageConnections && profile.connections.length > 0
+      ? loadConnectorFacts({ tenantId, userId: viewer.surface.userId })
+      : Promise.resolve(null),
   ]);
+  const nowMs = Date.now();
+  const apps = profile.connections.map((app) => {
+    const def = connectorBySlug(app.connector);
+    return {
+      label: app.label,
+      href: connectorHref(app.connector),
+      status: connectorFacts && def ? resolveConnectorStatus(def, connectorFacts, nowMs) : null,
+    };
+  });
 
   const deptRoutines = routines.ok
     ? {
@@ -127,13 +146,16 @@ export default async function DepartmentPage({
   const needsYouCapped = numbers.needsYou
     ? numbers.needsYou.capped
     : numbers.attention.some((item) => item.capped === true) || !approvals.ok;
-  const profile = departmentProfile(dept.key);
 
   return (
     <DepartmentTab
       dept={dept}
       purpose={profile.purpose}
-      status={statusFor(channel.kind === "ready", needsYou, needsYouCapped)}
+      // Only a channel KNOWN to be unconnected drops the counts: an AI account
+      // that could not be checked says nothing about what is waiting, so the
+      // counts still decide and the header keeps a real "Needs you"
+      // (StatusPill.tsx headerStatus).
+      status={statusFor(channel.kind !== "not_connected", needsYou, needsYouCapped)}
       channel={channel}
       prefill={prefill}
       overview={{
@@ -142,12 +164,10 @@ export default async function DepartmentPage({
         feedHref: mayOpenOsHref(viewer.navInput, FEED_HREF) ? `${FEED_HREF}?tab=needs&dept=${dept.slug}` : null,
         tiles: numbers.tiles,
         routines: deptRoutines,
-        connections: profile.connections,
+        connections: apps,
         // Only a department with a teammate answers in Slack.
         slack: binding.kind === "agent" ? slackHomeFor(slackPresence, [dept.key]) : null,
-        // Connections are workspace configuration: owners and admins, the
-        // same rule as the rail footer's Connections door.
-        canManageConnections: viewer.surface.persona === "founder",
+        canManageConnections,
         asks: suggestedAsksFor(dept.key, { oasis: viewer.oasis }),
       }}
     />

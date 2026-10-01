@@ -21,6 +21,8 @@ import { describeSchedule, lastRunLabel, routineTitle, type RoutineRow } from ".
 import type { Read } from "./routines";
 import { SuggestedAsks } from "./SuggestedAsks";
 import type { SlackHome } from "@/lib/slack/status";
+import { StatusLine } from "@/components/os/connections/StatusLine";
+import type { ConnectorStatus } from "@/lib/os/connectors";
 
 const CONNECTIONS_HREF = "/settings/connections";
 const CHAT_APPS_HREF = "/settings/chat-apps";
@@ -163,32 +165,35 @@ function Routines({ routines }: { routines: Read<RoutineRow[]> }) {
   );
 }
 
+/**
+ * One app the department works through. `status` is its Connections hub card's
+ * own status (lib/os/connectors.ts resolveConnectorStatus), read for the
+ * owners and admins who manage connections; null for everyone else, whose
+ * chips name the app and claim nothing about it.
+ */
+export type DepartmentAppChip = { label: string; href: string; status: ConnectorStatus | null };
+
 function Connections({
   apps,
   canManage,
 }: {
-  apps: readonly string[];
+  apps: readonly DepartmentAppChip[];
   canManage: boolean;
 }) {
   return (
     <div className="space-y-2.5">
       {apps.length > 0 ? (
-        <ul className="flex flex-wrap gap-1.5">
+        <ul className="space-y-1.5">
           {apps.map((app) => (
-            <li key={app}>
+            <li key={app.label} className="flex min-w-0 items-center justify-between gap-3 text-[13px] leading-5">
               {canManage ? (
-                <Link
-                  href={CONNECTIONS_HREF}
-                  prefetch={false}
-                  className="inline-flex h-7 items-center rounded-md border border-hairline px-2 text-xs font-medium text-fg-muted transition-colors duration-150 hover:bg-active-hover hover:text-fg"
-                >
-                  {app}
+                <Link href={app.href} prefetch={false} className="shrink-0 font-medium text-fg hover:underline">
+                  {app.label}
                 </Link>
               ) : (
-                <span className="inline-flex h-7 items-center rounded-md border border-hairline px-2 text-xs font-medium text-fg-muted">
-                  {app}
-                </span>
+                <span className="shrink-0 font-medium text-fg">{app.label}</span>
               )}
+              {app.status && <StatusLine status={app.status} />}
             </li>
           ))}
         </ul>
@@ -197,14 +202,11 @@ function Connections({
       )}
       <p className="text-xs leading-4 text-fg-dim">
         {canManage ? (
-          <>
-            Live status checks are not measured yet.{" "}
-            <Link href={CONNECTIONS_HREF} prefetch={false} className="text-accent hover:underline">
-              Manage connections
-            </Link>
-          </>
+          <Link href={CONNECTIONS_HREF} prefetch={false} className="text-accent hover:underline">
+            Manage connections
+          </Link>
         ) : (
-          "Live status checks are not measured yet. An owner or admin manages connections."
+          "An owner or admin manages connections."
         )}
       </p>
     </div>
@@ -219,7 +221,7 @@ export type OverviewPanelProps = {
   feedHref: string | null;
   tiles: readonly KpiTileProps[];
   routines: Read<RoutineRow[]>;
-  connections: readonly string[];
+  connections: readonly DepartmentAppChip[];
   /** Where this department lives in Slack; null when it has no teammate to answer there. */
   slack?: SlackHome | null;
   canManageConnections: boolean;
