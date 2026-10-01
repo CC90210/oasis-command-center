@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   CheckCircle2,
@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
+import { templateDraft } from "@/components/os/aiteam/templates";
 
 type EditingAgent = {
   slug: string;
@@ -41,11 +42,16 @@ function slugifyClient(name: string): string {
 export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
   const router = useRouter();
   const isEdit = !!editing;
+  // "New teammate" templates on the AI Team link here with ?template=<key>
+  // (components/os/aiteam/templates.ts): a new agent starts from that
+  // template's name, category, one-line summary and brief. Editing ignores it.
+  const searchParams = useSearchParams();
+  const draft = isEdit ? null : templateDraft(searchParams?.get("template"));
 
-  const [name, setName] = useState(editing?.name || "");
-  const [category, setCategory] = useState<AgentCategory>(editing?.category || "custom");
-  const [intent, setIntent] = useState("");
-  const [shortDesc, setShortDesc] = useState(editing?.short_description || "");
+  const [name, setName] = useState(editing?.name || draft?.name || "");
+  const [category, setCategory] = useState<AgentCategory>(editing?.category || draft?.category || "custom");
+  const [intent, setIntent] = useState(draft?.brief || "");
+  const [shortDesc, setShortDesc] = useState(editing?.short_description || draft?.summary || "");
   const [description, setDescription] = useState(editing?.description || "");
   const [basePrompt, setBasePrompt] = useState(editing?.base_prompt || "");
   const [toolsText, setToolsText] = useState((editing?.required_tools || []).join(", "));
@@ -135,7 +141,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
         body: JSON.stringify(payload),
       });
       const data = (await res.json()) as
-        | { ok: true; agent: { slug: string } }
+        | { ok: true; agent: { slug: string }; bound?: boolean; message?: string }
         | { ok: false; error: string; message?: string; field?: string; reason?: string };
       if (!data.ok) {
         const detail =
@@ -143,6 +149,11 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
             ? `${data.field || "field"}: ${data.reason || data.message}`
             : data.message || data.error;
         setError(detail);
+        return;
+      }
+      // Created, but its switch did not take: say where to finish, and stay.
+      if (!isEdit && data.bound === false) {
+        setError(data.message || "Created, but it could not be switched on. Turn it on from the AI Team page.");
         return;
       }
       setFlash(isEdit ? "Saved." : "Created. Redirecting to the marketplace...");

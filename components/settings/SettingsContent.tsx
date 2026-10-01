@@ -63,10 +63,13 @@ import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest } from "@/lib/manifest/loader";
+import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
-import { FAMILY_AGENT_KEYS, resolveAgentKey } from "@/lib/agents";
+import { resolveAgentKey } from "@/lib/agents";
 import { teammateNamesFor, workspaceAgentsSubtitle } from "@/lib/os/teammate-names";
+import { departmentLabelsFor } from "@/lib/os/teammates";
+import { loadWorkspaceRoster } from "@/components/os/aiteam/roster";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
@@ -177,21 +180,15 @@ export async function SettingsContent({
   const canManageTenant = canManageWorkspaceSettings(teamProfile, viewerAccess?.canSeeSystemSurfaces);
   const canSeeTeamPerformance = viewerAccess?.canSeeTeamPerformance === true;
   const oasisSalesWorkspace = isOasisSurfaceTenant(tenant?.slug ?? null);
-  // What each agent is called on screen: the department it leads IN THIS
-  // WORKSPACE, never the persona behind it (lib/os/teammate-names.ts). Computed
-  // here, once, with the same OASIS flag the AI Team roster and the department
-  // tabs use, so the profile picker, the provider overrides, the workspace card
-  // and a client's own /team tabs all agree.
-  const teammateScope = { oasis: oasisSalesWorkspace };
+  // What each agent is called on screen: its name on THIS workspace's roster
+  // (lib/os/teammate-names.ts over lib/os/teammates.ts: the manifest binding's
+  // display_name), never the persona behind it. Computed here, once, with the
+  // same OASIS flag and manifest the AI Team roster and the department tabs
+  // read, so the profile picker, the provider overrides, the workspace card and
+  // a client's own /team tabs all agree.
+  const teammateScope = { oasis: oasisSalesWorkspace, manifest };
   const teammateNames = teammateNamesFor(
-    [
-      ...new Set([
-        ...manifestAgentKeys,
-        ...enabledAgents,
-        ...(manifest?.agents || []).map((a) => a.slug),
-        ...FAMILY_AGENT_KEYS,
-      ]),
-    ],
+    [...new Set([...manifestAgentKeys, ...enabledAgents, ...(manifest?.agents || []).map((a) => a.slug)])],
     teammateScope,
   );
 
@@ -224,14 +221,24 @@ export async function SettingsContent({
   // never "Not connected" / "offline" for a key or a machine that may be fine.
   const needsAiKeys = show("ai");
   const needsBridge = show("ai");
-  const [connectedAiSet, bridgeOnline] = await Promise.all([
+  // Workspace agents read the AI Team's own roster (components/os/aiteam/
+  // roster.ts loadWorkspaceRoster), so the two pages list the same teammates.
+  const needsRoster = show("ai") && !!manifest && !!profile?.tenant_id;
+  const [connectedAiSet, bridgeOnline, roster] = await Promise.all([
     needsAiKeys
       ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
     needsBridge
       ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), null)
       : Promise.resolve(false),
+    needsRoster && profile?.tenant_id
+      ? safe("settings.roster", loadWorkspaceRoster({ tenantId: profile.tenant_id, scope: teammateScope }), null)
+      : Promise.resolve(null),
   ]);
+  // The AI Team page, for a viewer its rail row opens for (owners and admins,
+  // lib/os/nav.ts "ai-team") in a workspace OASIS has set up.
+  const aiTeamHref =
+    viewerAccess?.persona === "founder" && manifest && !isUnprovisionedManifest(manifest) ? "/agents" : null;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -471,28 +478,52 @@ export async function SettingsContent({
               to be wrong. Provider selection lives in AI Setup and, per agent,
               in the override table above. */}
 
-          {/* Workspace agents. Owner-only toggles; non-owners see a read-only
-              list. Every agent is named for the department it leads
-              (lib/os/teammate-names.ts), never by persona. Add-ons are OASIS
-              house agents, so only OASIS's own workspace is offered them: a
-              client's department teammates are set up with OASIS. */}
-          {show("ai") && !previewMode && manifest?.agents && (
+          {/* Workspace agents: the AI Team's own roster (one list, W4a), with
+              owner toggles and a link to the AI Team page. Every teammate is
+              named by its manifest binding, never by persona. No add-ons:
+              OASIS's house agents live in Admin > Fleet. */}
+          {show("ai") && !previewMode && manifest?.agents && roster && (
             <Card
               title="Workspace agents"
               subtitle={workspaceAgentsSubtitle(teammateScope)}
+              action={
+                aiTeamHref ? (
+                  <Link
+                    href={aiTeamHref}
+                    prefetch={false}
+                    className="shrink-0 text-xs text-accent hover:text-accent/80 underline underline-offset-2"
+                  >
+                    Open AI Team →
+                  </Link>
+                ) : undefined
+              }
             >
               <SafeBoundary label="Workspace agents">
                 <AgentMarketplaceCard
-                  initialAgents={(manifest.agents || []).map((a) => ({
-                    slug: a.slug,
-                    display_name: a.display_name || a.slug,
-                    enabled: a.enabled,
-                    primary: a.primary,
-                    core: a.core,
+                  leads={roster.leads.map((l) => ({
+                    slug: l.slug,
+                    name: l.name,
+                    summary: l.summary,
+                    departments: departmentLabelsFor(l.departments),
+                    enabled: l.enabled,
+                    core: l.core,
+                    bound: l.bound,
                   }))}
+                  custom={
+                    roster.custom.ok
+                      ? roster.custom.value.map((c) => ({
+                          slug: c.slug,
+                          name: c.name,
+                          summary: c.summary,
+                          departments: [],
+                          enabled: c.enabled,
+                          core: c.core,
+                          bound: c.bound,
+                        }))
+                      : null
+                  }
                   isOwner={canManageTenant}
-                  teammateNames={teammateNames}
-                  offerAddOns={oasisSalesWorkspace}
+                  aiTeamHref={aiTeamHref}
                 />
               </SafeBoundary>
             </Card>

@@ -156,7 +156,24 @@ export type ManifestAgentBinding = {
     fields: string[];
     mode: "read" | "write";
   }>;
+  /**
+   * The departments this teammate leads in this workspace (W4a, 2026-10-01).
+   * The manifest is the one roster: a department channel, the AI Team page,
+   * Settings > AI brain, Slack and the welcome wizard all read who leads a
+   * department from here (components/os/department/config.ts
+   * departmentChannelFor). Non-empty makes the binding a department LEAD;
+   * absent or empty, a CUSTOM teammate the workspace built (agentBindingKind).
+   */
+  departments?: DepartmentKey[];
 };
+
+/** A department lead (it leads at least one department) or a custom teammate. */
+export type ManifestAgentKind = "lead" | "custom";
+
+/** The binding's kind, implicit in its `departments`. */
+export function agentBindingKind(binding: Pick<ManifestAgentBinding, "departments">): ManifestAgentKind {
+  return binding.departments && binding.departments.length > 0 ? "lead" : "custom";
+}
 
 /**
  * The tool names an agent may be OFFERED, given its manifest palette and the
@@ -735,8 +752,25 @@ function parseFieldPermissions(v: Json): ManifestAgentBinding["field_permissions
   return out;
 }
 
+/**
+ * Lenient parse of an agent's `departments`: known department keys only, no
+ * repeats. Undefined when absent or not an array. Never throws: a stray value
+ * must not fail the whole manifest and fall the workspace back to a seed.
+ */
+function parseAgentDepartments(v: Json): DepartmentKey[] | undefined {
+  if (!isArray(v)) return undefined;
+  const out: DepartmentKey[] = [];
+  for (const item of v) {
+    if (isString(item) && OS_DEPARTMENT_KEYS.has(item) && !out.includes(item as DepartmentKey)) {
+      out.push(item as DepartmentKey);
+    }
+  }
+  return out;
+}
+
 function parseAgent(v: Json, path: string): ManifestAgentBinding {
   if (!isObject(v)) throw new ManifestParseError(path, "expected object");
+  const departments = parseAgentDepartments(v.departments);
   // Carry through tool_palette / setup_answers / field_permissions. These
   // are declared on ManifestAgentBinding and consumed downstream (the chat
   // route reads tool_palette, agent-personas folds setup_answers, role-gates
@@ -759,6 +793,7 @@ function parseAgent(v: Json, path: string): ManifestAgentBinding {
     tool_palette: toolPalette,
     setup_answers: parseSetupAnswers(v.setup_answers),
     field_permissions: parseFieldPermissions(v.field_permissions),
+    ...(departments !== undefined ? { departments } : {}),
   };
 }
 
@@ -768,8 +803,14 @@ function parsePage(v: Json, path: string): ManifestPageDef {
   if (!PAGE_KINDS.has(kind as ManifestPageKind)) {
     throw new ManifestParseError(`${path}.kind`, `unknown page kind "${kind}"`);
   }
+  // "" is the workspace's root page (every in-code seed's Today). Requiring a
+  // non-empty path made a stored copy of ANY seed fail to parse, so the loader
+  // fell back to the seed and an owner's change to the agent lineup in a
+  // seed-backed workspace (OASIS's own, which has no row) silently never took
+  // effect (W4a: a new teammate's binding is one such change).
+  if (!isString(v.path)) throw new ManifestParseError(`${path}.path`, "expected string");
   return {
-    path: requireString(v, "path", path),
+    path: v.path,
     label: requireString(v, "label", path),
     kind: kind as ManifestPageKind,
     entity: optionalString(v, "entity"),

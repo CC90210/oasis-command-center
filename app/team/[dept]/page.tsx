@@ -83,7 +83,7 @@ export default async function DepartmentPage({
   const rawQ = typeof q === "string" ? q.trim() : "";
   const prefill = rawQ ? rawQ.slice(0, MAX_PREFILL_CHARS) : null;
 
-  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis });
+  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis, manifest: viewer.manifest });
   const tenantId = viewer.surface.tenantId;
   // Routines feed both the panel and the Operations / Chief of Staff numbers:
   // read once, shared, while the channel check runs beside them.

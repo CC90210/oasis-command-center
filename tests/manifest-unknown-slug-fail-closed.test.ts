@@ -193,7 +193,8 @@ async function main() {
     assert.equal(getSeedManifest(OASIS_WEBSITE_TENANT_SLUG), OASIS_SEED);
     assert.deepEqual(
       OASIS_SEED.agents.filter((a) => a.enabled).map((a) => a.slug),
-      ["bravo", "atlas", "maven", "aura"],
+      // OASIS's five department leads (W4a); CC's own agents are not on it.
+      ["bravo", "sdr", "maven", "customer-support", "atlas"],
       "invite redemption into oasis-webdev reads this roster; an empty one throws",
     );
   });

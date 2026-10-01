@@ -14,19 +14,40 @@
  *   - the identity lock below replaces the generic one and names only the
  *     department, so "who are you?" is answered "Sales".
  *
- * PURE: imports only the department list, safe in client code and in
- * bare-node tests.
+ * PURE: imports only the department list and the agent registry (plain data),
+ * safe in client code and in bare-node tests.
  */
 
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { AGENT_REGISTRY } from "@/lib/agents";
 
 /**
- * The names no client-rendered string may carry. Three house agents and CC's
- * own first name (the operator persona). tests/os-channels-honest.test.ts scans
- * the department, roster and channel output, and the stream's `agent` events,
- * with this pattern.
+ * Every persona's name and slug in lib/agents.ts AGENT_REGISTRY (Bravo, Atlas,
+ * Maven, Aura, Hermes, Solara, Helios, Lumen and life-preservation, Lex), and
+ * CC's own first name. Built from the registry so a persona added there is
+ * covered here (W4a, audit S2-14: this used to be bravo|maven|atlas|conaugh,
+ * so Hermes, Lex or Aura could reach a client unflagged). Codex is left out:
+ * it is the backend executor behind custom agents, not a persona, and the
+ * identity lock below names it as a model a channel is NOT.
  */
-export const PERSONA_NAME_PATTERN = /\b(bravo|maven|atlas|conaugh)\b/i;
+const PERSONA_WORDS: readonly string[] = [
+  ...new Set(
+    [
+      ...Object.values(AGENT_REGISTRY)
+        .filter((a) => a.key !== "codex")
+        .flatMap((a) => [a.label, a.key]),
+      "conaugh",
+    ].map((w) => w.toLowerCase()),
+  ),
+];
+
+/**
+ * The names no client-rendered string may carry. tests/os-channels-honest.test.ts
+ * scans the department, roster, Settings and channel output, and the stream's
+ * `agent` events, with this pattern.
+ */
+const PERSONA_ALTERNATION = PERSONA_WORDS.map((w) => w.replace(/[^a-z0-9]/g, (c) => `\\${c}`)).join("|");
+export const PERSONA_NAME_PATTERN = new RegExp(`\\b(${PERSONA_ALTERNATION})\\b`, "i");
 
 /** Whether a client-rendered string names a house agent or CC. */
 export function namesPersona(text: string): boolean {

@@ -137,15 +137,20 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const agentSlug = (req.agentSlug || "").trim().toLowerCase();
   const dept = req.department;
 
-  // A department channel: the agent must be the one this workspace binds to
-  // that department, so a department label is never pinned on another agent.
+  // The workspace's manifest: its roster says who leads each department.
+  const manifest = await getManifest(tenantSlug, tenantId);
+
+  // A department channel: the agent must be the one this workspace's manifest
+  // binds to that department (config.ts departmentChannelFor), so a department
+  // label is never pinned on another agent, and a lead switched off answers
+  // nothing.
   if (dept) {
     // getTenant answers null when the tenants read fails. That is not "not
     // OASIS": judging the binding on it would refuse OASIS's own departments.
     const tenant = await getTenant(tenantId);
     if (!tenant?.slug) return { ok: false, status: 503, error: "workspace_unavailable" };
-    const binding = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug) });
-    if (binding.kind !== "agent" || binding.agentSlug !== agentSlug) {
+    const lead = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug), manifest });
+    if (lead.kind !== "agent" || lead.agentSlug !== agentSlug) {
       return { ok: false, status: 400, error: "department_agent_mismatch" };
     }
   }
@@ -156,7 +161,6 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   if (!agent.is_public && agent.tenant_id !== tenantId) return { ok: false, status: 403, error: "agent_not_visible" };
 
   const channelKey = dept ? departmentChannelKey(dept.key) : agentChannelKey(agent.slug);
-  const manifest = await getManifest(tenantSlug, tenantId);
   const binding = manifest.agents.find((a) => a.slug === agent.slug);
 
   // The WORKSPACE row (user_id IS NULL) of the `bravo` config: a teammate's

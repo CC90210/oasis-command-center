@@ -373,6 +373,17 @@ export function resolveAgentKey(key: string): string {
   return AGENT_KEY_ALIASES[key] || key;
 }
 
+/**
+ * True for an OASIS house agent: any AGENT_REGISTRY slug, or a legacy alias of
+ * one. These are the personas that run OASIS and CC's own agents. They live in
+ * OASIS's workspace and in Admin > Fleet; a client workspace never binds one
+ * (lib/os/teammates.ts, POST /api/tenant/agents/toggle).
+ */
+export function isHouseAgentSlug(slug: string | null | undefined): boolean {
+  const key = resolveAgentKey(String(slug ?? "").trim().toLowerCase());
+  return key !== "" && Object.prototype.hasOwnProperty.call(AGENT_REGISTRY, key);
+}
+
 export function getAgentInfo(key: string): AgentInfo {
   const resolved = resolveAgentKey(key);
   return (

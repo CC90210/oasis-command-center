@@ -23,17 +23,20 @@
  *      is_owner / admin_access flags back as 0/1, and `{m.is_owner && ...}`
  *      printed the 0.
  *   6. Settings > AI brain for a client owner, and Profile's agent picker, name
- *      no OASIS persona (Bravo, Atlas, Maven, Aura, Hermes, Solara, Helios) and
- *      say neither "empire" nor "C-suite"; teammates are named by the
- *      department they lead IN THAT WORKSPACE (departmentChannelFor with the
- *      viewer's flag, as the client's own /team tabs read it), so a client
- *      never sees "Chief of Staff", "Marketing" or "Finance" on an agent its
- *      own tabs call not set up. OASIS's own owner is not offered add-ons by
- *      persona name either. Remove is offered only where Add brings the agent
- *      back: never in a client workspace, and in OASIS's only for a house agent,
- *      which then reappears under Available add-ons. The copy behind a toggle
- *      (a row's Tool palette) is read from source, since it never paints on
- *      first render.
+ *      no OASIS persona (every AGENT_REGISTRY name, lib/os/channel/identity.ts)
+ *      and say neither "empire" nor "C-suite". Workspace agents lists the AI
+ *      Team's own roster (W4a): each teammate named by its manifest binding,
+ *      and a department name only where the client's own manifest binds that
+ *      department (departmentChannelFor, as its /team tabs read it). No add-ons
+ *      (OASIS's house agents live in Admin > Fleet), no Remove anywhere (it had
+ *      no inverse), a reversible Disable / Enable on every non-core teammate,
+ *      and a link to the AI Team. The copy behind a toggle (a row's Tool
+ *      palette) is read from source, since it never paints on first render.
+ *  13. /agents (the AI Team) opens for a client owner (decision 22) and lists
+ *      only the client's neutral leads and the teammates it built: never an
+ *      OASIS persona, another workspace's teammate, or a row squatting a
+ *      persona's slug. A member, a marketing hire and an unprovisioned owner
+ *      get a 404.
  *  11. Drips' New sequence starter is created off and signs as nobody (it went
  *      live signed "Solara, SunBiz Funding" in every workspace).
  *   7. Today's "we could not confirm your workspace" screen sends the person to
@@ -315,6 +318,10 @@ async function main() {
       tool_capabilities TEXT, revoked_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, agent_name TEXT, provider TEXT,
       encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
+    -- Teammates built in the builder (the AI Team's custom read, W4a).
+    CREATE TABLE agents (slug TEXT PRIMARY KEY, name TEXT, category TEXT, short_description TEXT, description TEXT,
+      base_prompt TEXT, required_tools TEXT, suggested_model TEXT, pricing TEXT, is_public INTEGER,
+      is_oasis_managed INTEGER, created_by TEXT, tenant_id TEXT, created_at TEXT, updated_at TEXT);
   `);
 
   const { parseManifest } = await import("../lib/manifest/schema");
@@ -346,6 +353,18 @@ async function main() {
       profile("unlinked", null, "member", 0, "Lost User"),
       profile("marketer", CLIENT, "marketing", 0, "Mika Marketer"),
       profile("oasisMarketer", OASIS, "marketing", 0, "Morgan Marketer"),
+      // The client built a teammate before new teammates were bound on
+      // creation (its manifest does not bind it), and a row squatting an
+      // OASIS persona's slug; OASIS built one of its own.
+      ...[
+        ["intake-helper", "Intake Helper", CLIENT],
+        ["maven", "Maven", CLIENT],
+        ["renewals-desk", "Renewals Desk", OASIS],
+      ].map(([slug, name, tenant]) => ({
+        sql: `INSERT INTO agents (slug, name, category, short_description, base_prompt, is_public, is_oasis_managed, tenant_id, created_at, updated_at)
+              VALUES (?, ?, 'support', 'Built by this workspace.', 'You help {{tenant.brand.name}} with intake questions.', 0, 0, ?, ?, ?)`,
+        args: [slug, name, tenant, stamp, stamp],
+      })),
     ],
     "write",
   );
@@ -519,13 +538,11 @@ async function main() {
   }
 
   // ── client components, rendered where React is whole ─────────────────────
-  const { FAMILY_AGENT_KEYS } = await import("../lib/agents");
-  const isHouse = (slug: string) => FAMILY_AGENT_KEYS.some((k) => k.toLowerCase() === slug.toLowerCase());
-  type CardAgent = { slug: string; display_name: string; enabled: boolean; core?: boolean };
-  const cardAgents = (who: "client" | "cc") =>
-    ((captured[who]?.marketplace?.initialAgents as CardAgent[] | undefined) ?? []);
-  /** OASIS's card with one removable house agent taken out, as a Remove leaves it. */
-  const removedFromCc = cardAgents("cc").find((a) => a.core !== true && isHouse(a.slug)) ?? null;
+  type CardAgent = { slug: string; name: string; departments: string[]; enabled: boolean; core: boolean; bound: boolean };
+  const cardAgents = (who: "client" | "cc") => [
+    ...((captured[who]?.marketplace?.leads as CardAgent[] | undefined) ?? []),
+    ...((captured[who]?.marketplace?.custom as CardAgent[] | null | undefined) ?? []),
+  ];
   const html: Record<string, Record<string, string>> = {};
   for (const who of ["client", "cc"] as const) {
     await check(`client components render for ${who} (tests/client-route-gating.render.ts)`, () => {
@@ -544,10 +561,6 @@ async function main() {
           marketplace: c.marketplace,
           agentConfig: c.agentConfig,
           profileEditor: c.profileEditor,
-          marketplaceAfterRemove:
-            who === "cc" && removedFromCc && c.marketplace
-              ? { ...c.marketplace, initialAgents: cardAgents("cc").filter((a) => a.slug !== removedFromCc.slug) }
-              : null,
         }),
       });
       assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
@@ -555,12 +568,16 @@ async function main() {
     });
   }
 
+  const identity = await import("../lib/os/channel/identity");
   await check("Settings > AI brain, client owner: no persona name, no 'empire', no 'C-suite'", () => {
     const c = captured.client;
     const pageText = [c.serverText, readable(html.client.marketplace), readable(html.client.agentConfig)].join("\n");
     assert.doesNotMatch(pageText, PERSONA_NAMES, `persona or OASIS-internal wording on a client's Settings > AI brain:\n${pageText.match(PERSONA_NAMES)?.[0]}`);
-    assert.equal(c.marketplace?.offerAddOns, false, "a client is not offered OASIS's house agents");
+    // The runtime guard knows every persona in the registry (W4a, S2-14).
+    assert.ok(!identity.namesPersona(pageText), `a persona on a client's Settings > AI brain: ${pageText.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
     assert.doesNotMatch(readable(html.client.marketplace), /Available add-ons/);
+    // A row squatting a persona's slug in the client's own agents table never reaches its card.
+    assert.ok(!cardAgents("client").some((a) => a.slug === "maven"), "a client's 'maven' row reached its Workspace agents");
   });
   // The render above shows each card as it first paints. Copy behind a toggle
   // (a row's Tool palette, the system prompt override) never paints there, so
@@ -596,25 +613,37 @@ async function main() {
     assert.deepEqual(hits, [], "a persona or OASIS-internal word in Settings > AI brain copy");
   });
 
-  // The names must agree with the client's own department tabs, which read
-  // departmentChannelFor(key, { oasis: false }): only departments bound there
-  // may name an agent, and only the agent bound to them.
+  // The leads must agree with the client's own department tabs, which read
+  // departmentChannelFor(key, { oasis: false, manifest }): only departments its
+  // manifest binds may name an agent, and only the agent bound to them.
   const { OS_DEPARTMENTS } = await import("../lib/os/departments");
   const { departmentChannelFor } = await import("../components/os/department/config");
   const { workspaceAgentsSubtitle } = await import("../lib/os/teammate-names");
+  const { OASIS_AI_CC_SEED } = await import("../lib/manifest/seeds");
+  const clientScope = { oasis: false, manifest: clientManifest };
   await check("Settings > AI brain, client owner: a teammate carries a department name only where the client's own tab binds it", () => {
-    const names = (captured.client.marketplace?.teammateNames ?? {}) as Record<string, { name: string }>;
-    assert.ok(Object.keys(names).length > 0, "no teammate names were handed to the card");
-    for (const [slug, { name }] of Object.entries(names)) {
+    const leads = (captured.client.marketplace?.leads ?? []) as CardAgent[];
+    assert.ok(leads.length > 0, "no department leads were handed to the card");
+    for (const lead of leads) {
       for (const dept of OS_DEPARTMENTS) {
-        if (!name.split(" · ").includes(dept.label)) continue;
-        const bound = departmentChannelFor(dept.key, { oasis: false });
+        if (!lead.departments.includes(dept.label) && !lead.name.split(" · ").includes(dept.label)) continue;
+        const bound = departmentChannelFor(dept.key, clientScope);
         assert.ok(
-          bound.kind === "agent" && bound.agentSlug.toLowerCase() === slug.toLowerCase(),
-          `${slug} is called "${name}" on a client's Settings, but that client's ${dept.label} tab says ${bound.kind === "agent" ? `it is ${bound.agentSlug}` : "not set up"}`,
+          bound.kind === "agent" && bound.agentSlug.toLowerCase() === lead.slug.toLowerCase(),
+          `${lead.slug} is called "${lead.name}" on a client's Settings, but that client's ${dept.label} tab says ${bound.kind === "agent" ? `it is ${bound.agentSlug}` : "not set up"}`,
         );
       }
     }
+    // The card's teammates are the AI Team's: the two neutral leads, then the
+    // teammate the client built (not bound yet, so Off with an Enable).
+    assert.deepEqual(
+      cardAgents("client").map((a) => [a.slug, a.name, a.enabled, a.bound]),
+      [
+        ["sdr", "Sales lead", true, true],
+        ["customer-support", "Client Success lead", true, true],
+        ["intake-helper", "Intake Helper", false, false],
+      ],
+    );
     // The client manifest comes from the setup wizard with its default departments
     // (#497): its neutral teammates lead Sales and Client Success, the only
     // departments a client's tabs bind. No house agent (bravo, atlas, maven) runs there.
@@ -626,54 +655,116 @@ async function main() {
     assert.match(card, /Sales/, "the Sales teammate is named for its department");
     assert.match(card, /Client Success/, "the Client Success teammate is named for its department");
     // The card's subtitle lists only the departments bound for a client.
-    const subtitle = workspaceAgentsSubtitle({ oasis: false });
+    const subtitle = workspaceAgentsSubtitle(clientScope);
     assert.ok(captured.client.serverText.includes(subtitle), "the client's card does not carry the client subtitle");
     assert.match(subtitle, /\(Sales and Client Success\)/);
     assert.doesNotMatch(subtitle, /Chief of Staff|Marketing|Finance|Operations/);
+    // Settings > AI brain links to the AI Team, which a client owner now opens (decision 22).
+    assert.equal(captured.client.marketplace?.aiTeamHref, "/agents");
+    assert.match(captured.client.serverText, /Open AI Team/);
   });
   await check("Profile's primary-agent picker, client owner: job names, no persona", () => {
     const text = readable(html.client.profileEditor);
     assert.doesNotMatch(text, PERSONA_NAMES, text.match(PERSONA_NAMES)?.[0]);
     assert.match(text, /Sales|Client Success/, "the picker offers the client's own teammates by department");
   });
-  await check("Settings > AI brain, OASIS owner: add-ons offered, by department or job, never by persona", () => {
+  await check("Settings > AI brain, OASIS owner: its five department leads by department name, no add-ons, never a persona", () => {
     const text = readable(html.cc.marketplace);
-    assert.equal(captured.cc.marketplace?.offerAddOns, true);
-    assert.doesNotMatch([captured.cc.serverText, text, readable(html.cc.agentConfig)].join("\n"), PERSONA_NAMES);
-    assert.match(text, /Chief of Staff/, "in OASIS's workspace the Chief of Staff teammate is named for its department");
-    const subtitle = workspaceAgentsSubtitle({ oasis: true });
+    const all = [captured.cc.serverText, text, readable(html.cc.agentConfig)].join("\n");
+    assert.doesNotMatch(all, PERSONA_NAMES);
+    assert.ok(!identity.namesPersona(all), `a persona on OASIS's Settings > AI brain: ${all.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
+    // Decision 21: CC's own agents (Personal assistant, Contracts, Commerce,
+    // Memory keeper) are not OASIS business teammates, and nothing offers them.
+    assert.doesNotMatch(text, /Available add-ons|Personal assistant|Contracts|Commerce|Memory keeper|Add to workspace/);
+    assert.deepEqual(
+      ((captured.cc.marketplace?.leads ?? []) as CardAgent[]).map((a) => a.name),
+      ["Chief of Staff · Operations", "Sales", "Marketing", "Client Success", "Finance"],
+    );
+    // No name takes a persona's colour (the card used AGENT_REGISTRY textClass).
+    assert.doesNotMatch(html.cc.marketplace, /text-(pink|emerald|purple|amber|indigo)-[234]00[^"]*">(Chief of Staff|Sales|Marketing|Client Success|Finance)/);
+    const subtitle = workspaceAgentsSubtitle({ oasis: true, manifest: OASIS_AI_CC_SEED });
     assert.ok(captured.cc.serverText.includes(subtitle));
     assert.match(subtitle, /\(Chief of Staff, Sales, Marketing, Client Success, Finance and Operations\)/);
+    assert.equal(captured.cc.marketplace?.aiTeamHref, "/agents");
   });
 
-  // ── Remove only where Add brings it back ────────────────────────────────
+  // ── No Remove anywhere: it had no inverse ───────────────────────────────
   const REMOVE = 'title="Remove from workspace"';
   const count = (s: string, needle: string) => s.split(needle).length - 1;
-  await check("Workspace agents, client owner: no Remove (there is no Add list to bring it back); Disable / Enable instead", () => {
-    const markup = html.client.marketplace;
-    const nonCore = cardAgents("client").filter((a) => a.core !== true);
-    assert.ok(nonCore.length > 0, "the client fixture has no removable teammate; this check would be vacuous");
-    assert.equal(count(markup, REMOVE), 0, "a client owner can remove a teammate with no way to add it back");
-    assert.equal(
-      count(markup, ">Disable</button>") + count(markup, ">Enable</button>"),
-      nonCore.length,
-      "every non-core teammate keeps a reversible Disable / Enable",
-    );
+  await check("Workspace agents: no Remove in any workspace; every non-core teammate has a reversible Disable / Enable", () => {
+    for (const who of ["client", "cc"] as const) {
+      const markup = html[who].marketplace;
+      const nonCore = cardAgents(who).filter((a) => a.core !== true);
+      assert.equal(count(markup, REMOVE), 0, `${who}: a Remove with no way to add the teammate back`);
+      assert.equal(
+        count(markup, ">Disable</button>") + count(markup, ">Enable</button>"),
+        nonCore.length,
+        `${who}: every non-core teammate keeps a reversible Disable / Enable`,
+      );
+    }
+    assert.ok(cardAgents("client").some((a) => a.core !== true), "the client fixture has no switchable teammate; the check above would be vacuous");
     const src = readFileSync(join(ROOT, "components/settings/AgentMarketplaceCard.tsx"), "utf8");
-    assert.doesNotMatch(src, /add it back any time/, "the confirmation promises a way back the card may not have");
+    assert.doesNotMatch(src, /add it back any time|FAMILY_AGENT_KEYS|textClass/, "the card offers house agents or paints a persona's colour");
   });
-  await check("Workspace agents, OASIS owner: Remove only on house agents, and a removed one is back under Available add-ons", () => {
-    const markup = html.cc.marketplace;
-    const removable = cardAgents("cc").filter((a) => a.core !== true && isHouse(a.slug));
-    assert.equal(count(markup, REMOVE), removable.length, "Remove shows on an agent that Add cannot bring back");
-    assert.ok(removedFromCc, "OASIS's card has no removable house agent; the round trip below would be vacuous");
-    const names = (captured.cc.marketplace?.teammateNames ?? {}) as Record<string, { name: string }>;
-    const name = names[removedFromCc.slug]?.name ?? removedFromCc.display_name;
-    const after = html.cc.marketplaceAfterRemove;
-    assert.ok(after, "the after-remove card did not render");
-    const addOns = readable(after.slice(after.indexOf("Available add-ons")));
-    assert.ok(after.includes("Available add-ons"), "after a Remove, OASIS's card has no Available add-ons section");
-    assert.ok(addOns.includes(name) && addOns.includes("Add to workspace"), `${name} did not come back as an add-on after Remove`);
+
+  // ── /agents: the AI Team, for a client owner too (decision 22, W4a) ─────
+  const aiTeamPage = (await import("../app/agents/page")).default;
+  const { TeammateRow } = await import("../components/os/aiteam/TeammateRow");
+  const { TeammateToggle } = await import("../components/os/aiteam/TeammateToggle");
+  type RowProps = { name: string; summary: string; meta?: string; control?: unknown; departments?: Array<{ label: string }> };
+  type ToggleEl = { type?: unknown; props?: { slug: string; enabled: boolean; bound: boolean } };
+  const teamRows = (tree: unknown) =>
+    walk(tree)
+      .elements.filter((e) => e.type === TeammateRow)
+      .map((e) => {
+        const props = e.props as unknown as RowProps;
+        const control = props.control as ToggleEl | undefined;
+        assert.ok(!control || control.type === TeammateToggle, "a row's control is the On/Off switch");
+        const toggle = control?.props ? { slug: control.props.slug, enabled: control.props.enabled, bound: control.props.bound } : null;
+        return { ...props, toggle };
+      });
+  await check("/agents, client owner: the AI Team opens, with only the client's neutral leads and its own teammates", async () => {
+    await login("client");
+    const tree = await aiTeamPage();
+    const rows = teamRows(tree);
+    assert.deepEqual(
+      rows.map((r) => r.name),
+      ["Sales lead", "Client Success lead", "Chief of Staff lead", "Marketing lead", "Operations lead", "Intake Helper"],
+      "a client owner's AI Team: its two neutral leads, a placeholder per other open department, and its own teammate",
+    );
+    const text = [
+      ...walk(tree).strings,
+      ...rows.flatMap((r) => [r.name, r.summary, r.meta ?? "", ...(r.departments ?? []).map((d) => d.label)]),
+    ].join("\n");
+    assert.doesNotMatch(text, PERSONA_NAMES, `a persona on a client's AI Team: ${text.match(PERSONA_NAMES)?.[0]}`);
+    assert.ok(!identity.namesPersona(text), `a persona on a client's AI Team: ${text.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
+    assert.doesNotMatch(text, /Renewals Desk|Finance/, "another workspace's teammate, or a department the client does not have");
+    // The owner switches its leads and its teammate; the one built before it
+    // was bound gets an On that binds it.
+    assert.deepEqual(
+      rows.map((r) => r.toggle),
+      [
+        { slug: "sdr", enabled: true, bound: true },
+        { slug: "customer-support", enabled: true, bound: true },
+        null,
+        null,
+        null,
+        { slug: "intake-helper", enabled: false, bound: false },
+      ],
+    );
+  });
+  await check("/agents: a client member and an unprovisioned owner get a 404; OASIS's owner sees its five leads", async () => {
+    for (const who of ["member", "marketer", "newbie"] as const) {
+      await login(who);
+      assert.equal(await outcome(() => aiTeamPage()), "404", `${who} opened the AI Team`);
+    }
+    await login("cc");
+    const rows = teamRows(await aiTeamPage());
+    assert.deepEqual(
+      rows.map((r) => r.name),
+      ["Chief of Staff · Operations", "Sales", "Marketing", "Client Success", "Finance", "Renewals Desk"],
+    );
+    assert.deepEqual(rows.slice(0, 5).map((r) => r.toggle), [null, null, null, null, null], "OASIS's leads are core");
   });
 
   await check("/forms and /sequences, client workspace: no SunBiz agent in the copy, no link to the retired Metrics", () => {

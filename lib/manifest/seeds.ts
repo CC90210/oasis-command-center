@@ -50,18 +50,19 @@ export const OASIS_SEED: TenantManifest = {
     footer_label: "OASIS AI · Agent Command Center · v1.0",
     footer_tagline: '"Only good things from now on."',
   },
+  // OASIS's AI team (W4a, 2026-10-01): one lead per department, the bindings
+  // components/os/department/config.ts reads for every channel, the AI Team
+  // page and Settings. Each is named for the departments it leads; the persona
+  // behind it never reaches a screen. OASIS has no tenant_manifests row, so
+  // this seed IS OASIS's roster. CC's own agents (aura, lex, hermes,
+  // life-preservation) lead no department and are not business teammates:
+  // they live in Admin > Fleet (components/os/landings/fleet-data.ts).
   agents: [
-    { slug: "bravo", display_name: "Bravo", enabled: true, primary: true, core: true },
-    { slug: "atlas", display_name: "Atlas", enabled: true, core: true },
-    { slug: "maven", display_name: "Maven", enabled: true, core: true },
-    // Aura — voice / sensory persona. Owns scripts/aura/ (morning pow
-    // wow + future voice automations). Enabled 2026-05-17 when Aura got
-    // her own home directory and first cron. See agents/aura.md.
-    { slug: "aura", display_name: "Aura", enabled: true, core: true },
-    // Lex — in-house counsel (legal/contracts). Available as a non-core
-    // add-on, but disabled by default so OASIS's enabled roster is exactly
-    // Bravo + Atlas + Maven + Aura until the workspace owner opts in.
-    { slug: "lex", display_name: "Lex", enabled: false, core: false },
+    { slug: "bravo", display_name: "Chief of Staff · Operations", enabled: true, primary: true, core: true, departments: ["chief_of_staff", "operations"] },
+    { slug: "sdr", display_name: "Sales", enabled: true, core: true, departments: ["sales"] },
+    { slug: "maven", display_name: "Marketing", enabled: true, core: true, departments: ["marketing"] },
+    { slug: "customer-support", display_name: "Client Success", enabled: true, core: true, departments: ["client_success"] },
+    { slug: "atlas", display_name: "Finance", enabled: true, core: true, departments: ["finance"] },
   ],
   // OASIS Setup Readiness opinion — CC's empire stack. Distinct from
   // SunBiz: includes Stripe (CC bills through OASIS), n8n for inbound
@@ -281,11 +282,13 @@ export const SUGA_SEED: TenantManifest = {
     footer_tagline: "Fans first. Always.",
   },
   agents: [
-    // Maven (CMO) owns brand work — content, fans, sponsorships, drops.
-    // Previously this seed had a 4-agent Lyra package; collapsed 2026-05-14
-    // because the brand-command capabilities fold cleanly into Maven, and
-    // a tenant-specific agent fork is over-engineering for one client.
-    { slug: "maven", display_name: "Maven", enabled: true, primary: true },
+    // A client workspace runs neutral teammates only (W4a, 2026-10-01): the
+    // library templates OASIS provisions for Sales and Client Success
+    // (lib/provisioning/team.ts neutralTeamFor). It used to bind Maven, an
+    // OASIS house agent, which no client binding may name. There is no neutral
+    // marketing lead yet, so Marketing says "not set up".
+    { slug: "sdr", display_name: "Sales lead", enabled: true, primary: true, departments: ["sales"] },
+    { slug: "customer-support", display_name: "Client Success lead", enabled: true, departments: ["client_success"] },
   ],
   nav: [
     { href: "/t/suga", label: "Dashboard", icon: "LayoutDashboard", group: "Operations" },

@@ -3,11 +3,15 @@
  * the old /agents page (git show 5c374a19:app/agents/page.tsx) when /agents
  * became the AI Team.
  *
- * Same roster rule as before and as the shell (tests/settings-agent-roster):
- * manifest-first through resolveEnabledAgentSlugs, the legacy
- * profile.agents_enabled column only for a workspace with no manifest, and
- * NEVER a fallback to the whole family — that once listed Bravo, Atlas, Maven,
- * Aura and Hermes to every fresh tenant.
+ * THE FLEET IS OASIS'S HOUSE AGENTS (W4a, decision 21, 2026-10-01): the
+ * family in lib/agents.ts (FAMILY_AGENT_KEYS), CC's own agents included
+ * (Aura, Lex, Hermes, Lumen). It used to list the business workspace's
+ * manifest roster, but that roster is now the department leads and the
+ * teammates the workspace built (lib/os/teammates.ts), and CC's own agents
+ * live HERE, not in OASIS's business workspace. The page is operator-only
+ * (requireOperator in app/admin/agents/page.tsx), so listing the whole family
+ * shows it to nobody but the operator; it was a fallback for EVERY fresh tenant
+ * that leaked these names before.
  *
  * Liveness reads are done here rather than through lib/queries agentStates /
  * integrationsHealth because both dropped `r.error` when this was written (both
@@ -33,8 +37,6 @@ import "server-only";
 
 import { getActiveProfile } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { FAMILY_AGENT_KEYS } from "@/lib/agents";
 import { SUPERVISOR_DISABLED } from "@/lib/automations/worker-status";
 
@@ -126,17 +128,8 @@ function processIsUp(status: string | null | undefined, metadata: unknown): bool
 export async function loadFleet(): Promise<Fleet> {
   const profile = await getActiveProfile();
   const tenantId = profile?.tenant_id ?? null;
-  const manifest = await getTenantManifestForUser(tenantId);
-  const enabledSlugs = resolveEnabledAgentSlugs({
-    manifestAgents: manifest ? manifest.agents || [] : null,
-    legacyProfileAgents: profile?.agents_enabled,
-  });
-  const family = new Set<string>(FAMILY_AGENT_KEYS);
-  // As the old page: roster slugs pass through verbatim so a tenant-only custom
-  // agent still shows; only the bare legacy column is intersected with the
-  // family registry.
-  const agents = enabledSlugs.length > 0 ? enabledSlugs : (profile?.agents_enabled || []).filter((k) => family.has(k));
-  if (agents.length === 0) return { agents, signals: new Map(), signalsKnown: true };
+  // The house agents, whatever the business workspace's roster holds.
+  const agents = [...FAMILY_AGENT_KEYS];
 
   const db = getServiceSupabase();
   const [states, pings] = await Promise.all([

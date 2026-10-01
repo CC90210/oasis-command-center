@@ -2,11 +2,10 @@
  * TemplatePicker — "New teammate" starting points for owners and admins.
  *
  * Each template opens the existing builder (components/marketplace/
- * CustomAgentBuilder.tsx at /t/<slug>/marketplace/new). The builder does not
- * read a template from the URL yet, so the card shows the description to paste
- * into its "Describe what this agent should do" field, and the link carries
- * `?template=<key>` for the builder to pick up when it learns to. Nothing here
- * claims the builder is prefilled.
+ * CustomAgentBuilder.tsx at /t/<slug>/marketplace/new) with `?template=<key>`,
+ * and the builder opens prefilled from it (templates.ts templateDraft): the
+ * name, category, summary, and this brief in its "Describe what this agent
+ * should do" field. The card shows the brief so the owner can read it first.
  *
  * Server component. A plain list, not an icon grid.
  */
@@ -33,7 +32,7 @@ export function TemplatePicker({ builderHref }: { builderHref: string }) {
               <span className="hidden shrink-0 pt-0.5 text-xs text-fg-dim group-open:inline">Hide brief</span>
             </summary>
             <div className="mt-3 space-y-2.5">
-              <p className="text-xs leading-4 text-fg-dim">Paste this into the builder&apos;s description:</p>
+              <p className="text-xs leading-4 text-fg-dim">The builder opens with this description filled in:</p>
               <p className="rounded-lg border border-hairline bg-bg-deep px-3 py-2 text-[13px] leading-5 text-fg-muted">
                 {t.brief}
               </p>

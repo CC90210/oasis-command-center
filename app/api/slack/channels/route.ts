@@ -26,6 +26,8 @@ import { findActiveConnection } from "@/lib/connections/store";
 import { readBotToken } from "@/lib/connections/token-store";
 import { channelInfo, listPublicChannels } from "@/lib/slack/client";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { getManifest } from "@/lib/manifest/loader";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import type { DepartmentKey } from "@/lib/os/types";
 import {
   answeringDepartments,
@@ -50,13 +52,19 @@ async function slackContext(tenantId: string, db: Parameters<typeof findActiveCo
   return conn;
 }
 
-/** The departments with an AI teammate in the session's workspace (lib/slack/routing.ts answeringDepartments). */
+/**
+ * The departments with an AI teammate in the session's workspace
+ * (lib/slack/routing.ts answeringDepartments): the leads its manifest binds,
+ * the same roster the web channels read.
+ */
 async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection>[0], tenantId: string): Promise<DepartmentKey[]> {
   const rs = await db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   const row = rs.rows[0] as unknown as Record<string, unknown> | undefined;
   const slug = row?.slug ? String(row.slug) : "";
   if (!slug) throw new Error("api.slack.channels: the workspace's slug could not be read");
-  return answeringDepartments({ oasis: isOasisSurfaceTenant(slug) });
+  const manifestSlug = await resolveOwnedSlug(tenantId);
+  const manifest = manifestSlug ? await getManifest(manifestSlug, tenantId) : null;
+  return answeringDepartments({ oasis: isOasisSurfaceTenant(slug), manifest });
 }
 
 export async function GET() {
