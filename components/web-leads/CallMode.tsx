@@ -237,7 +237,7 @@ export function CallMode({
   } | null>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const exitRef = useRef<HTMLButtonElement>(null);
-  const submissionRef = useRef<{ signature: string; requestId: string } | null>(null);
+  const submissionRef = useRef<{ signature: string; requestId: string; nextActionAt: string | null } | null>(null);
 
   // A NEW queue starts at the top. Without this, "load the next 50" leaves the
   // cursor at 50 -- past the end of the fresh array -- so the rep lands on the
@@ -294,16 +294,21 @@ export function CallMode({
       const business = lead.name;
       const label = OUTCOMES.find((o) => o.key === outcome)?.label || outcome;
       // The outcome route REQUIRES a future date for every outcome that keeps
-      // the lead open (#488). Computed at click time, so a retry recomputes it;
-      // the signature keys on the preset, not the instant, so that retry still
-      // reuses the requestId and cannot log the call twice.
-      const nextActionAt = nextActionForOutcome(outcome, callbackPreset);
+      // the lead open (#488). The signature keys on the preset, not the
+      // instant, so a retry reuses the requestId and cannot log the call twice.
+      // A retry also reuses the FIRST attempt's date: the call-history row keeps
+      // the date it was first saved with while the lead takes whatever the
+      // latest request sends, so a fresh date would split the two. The one
+      // exception is a date that has since passed, which the route would
+      // reject and leave the rep unable to finish the retry.
       const signature = JSON.stringify([lead.id, outcome, trimmedNote, callbackPreset]);
-      const requestId =
-        submissionRef.current?.signature === signature
-          ? submissionRef.current.requestId
-          : crypto.randomUUID();
-      submissionRef.current = { signature, requestId };
+      const prior = submissionRef.current?.signature === signature ? submissionRef.current : null;
+      const requestId = prior ? prior.requestId : crypto.randomUUID();
+      const nextActionAt =
+        prior?.nextActionAt && Date.parse(prior.nextActionAt) > Date.now()
+          ? prior.nextActionAt
+          : nextActionForOutcome(outcome, callbackPreset);
+      submissionRef.current = { signature, requestId, nextActionAt };
       try {
         const r = await fetch(`/api/web-leads/${encodeURIComponent(lead.id)}/outcome`, {
           method: "POST",

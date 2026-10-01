@@ -41,6 +41,19 @@ assert.match(
   /JSON\.stringify\(\{[^}]*\bnextActionAt\b[^}]*\}\)/,
   "Call Mode's outcome POST body must carry nextActionAt",
 );
+// A retry must resend the first attempt's date. The call-history row keeps the
+// first date while the lead takes the latest request's, so a recomputed date on
+// retry splits the two (review finding on #518, Claude + CodeRabbit).
+assert.match(
+  callMode,
+  /submissionRef\.current = \{ signature, requestId, nextActionAt \}/,
+  "Call Mode must remember the date it sent alongside the requestId",
+);
+assert.match(
+  callMode,
+  /\? prior\.nextActionAt\s*:/,
+  "a retry under the same requestId must reuse the first attempt's date while it is still in the future",
+);
 assert.match(
   callMode,
   /t\.tagName === "SELECT"/,
