@@ -6,8 +6,11 @@
  *
  * NOT on Finances. CC, 2026-09-24: "remove the Oasis founder portal section at
  * the very top, where I can switch between marketing and finances... this is
- * unnecessary." Finances pages start with their own tab bar; Marketing is one
- * click away in the left sidebar. Every other founders page keeps the banner.
+ * unnecessary." Finances pages start with their own tab bar; Content is one
+ * click away in the rail. NOT on Content either (2026-10-01): it starts with
+ * its own ContentTabs (components/founders/ContentTabs.tsx), the same decision
+ * CC made for Finances. Every other founders page keeps the banner - today
+ * that is the inactive Growth preview shell, reachable by direct URL.
  *
  * A client component only because the founders layout is a server component
  * and cannot see the pathname. It decides nothing about access: the layout
@@ -19,11 +22,12 @@ import { usePathname } from "next/navigation";
 import type { PortalSection } from "@/lib/portals/registry";
 import { FoundersSectionNav } from "./FoundersSectionNav";
 
-const FINANCES_PREFIX = "/founders/finances";
+/** The founders sections that start with their own tab bar instead. */
+const HIDDEN_PREFIXES = ["/founders/finances", "/founders/marketing"] as const;
 
 /** True where the portal banner does not render. PURE, for the test. */
 export function foundersBannerHidden(pathname: string): boolean {
-  return pathname === FINANCES_PREFIX || pathname.startsWith(`${FINANCES_PREFIX}/`);
+  return HIDDEN_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 export function FoundersPortalBanner({ label, tagline, sections }: { label: string; tagline: string; sections: PortalSection[] }) {
