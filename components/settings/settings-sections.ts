@@ -52,7 +52,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDef[] = [
   { key: "billing", href: "/settings/billing", label: "Billing & add-ons", audience: "manage" },
   { key: "notifications", href: "/settings/notifications", label: "Notifications", audience: "everyone" },
   { key: "privacy", href: "/settings/privacy", label: "Data & privacy", audience: "everyone" },
-  { key: "audit-log", href: "/settings/audit-log", label: "Audit log", audience: "team_performance" },
+  { key: "audit-log", href: "/settings/audit-log", label: "Activity log", audience: "team_performance" },
   { key: "devices", href: "/settings/devices", label: "Devices", audience: "operator" },
 ];
 

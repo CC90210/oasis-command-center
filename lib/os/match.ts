@@ -19,6 +19,12 @@
  *
  * `tabs` repeat FinanceTabs' labels (this file may import nothing); the drift
  * test tests/founders-finances-books-coverage.test.ts fails when they differ.
+ *
+ * Content (2026-10-01) is the second entry. Its hub root IS its rail row, so
+ * `as` is the prefix itself and the row lit nothing new; the alias exists for
+ * the breadcrumb, which read "Content" on the Library page with no "Library"
+ * crumb. `tabs` repeat ContentTabs' labels plus Asset, a crumb for the asset
+ * page but not a tab; tests/content-hub.test.ts fails when they differ.
  */
 export const PATH_ALIASES: ReadonlyArray<{
   prefix: string;
@@ -40,6 +46,18 @@ export const PATH_ALIASES: ReadonlyArray<{
       reports: "Reports",
       taxes: "Taxes",
       settings: "Settings",
+    },
+  },
+  {
+    prefix: "/founders/marketing",
+    as: "/founders/marketing",
+    section: "Content",
+    tabs: {
+      "": "Overview",
+      library: "Library",
+      train: "Train",
+      performance: "Performance",
+      asset: "Asset",
     },
   },
 ];

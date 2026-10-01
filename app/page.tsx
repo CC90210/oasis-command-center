@@ -33,7 +33,9 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { PageFrame } from "@/components/os/PageFrame";
+import { LiveClock } from "@/components/LiveClock";
 import { WorkspaceSetupPending } from "@/components/os/today/WorkspaceSetupPending";
+import { operatorDateKey } from "@/lib/dates";
 import { getActiveProfile, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import {
@@ -198,8 +200,35 @@ export default async function TodayPage() {
   // Same reasoning as the manager branch above: without one, marketing falls
   // through to FounderToday, which would render the whole pipeline and the
   // company inbound tape.
+  //
+  // Gated on the CAPABILITY, not the persona alone (2026-10-01). The persona
+  // is tenant-blind, and MarketingToday's links are OASIS's own Content hub,
+  // which 404s outside OASIS's workspaces: a client's marketing hire got an
+  // OASIS-named card whose every button was a dead door. canSeeMarketing is
+  // already narrowed to OASIS's slugs (lib/role-surfaces.ts capabilitiesFor),
+  // so everyone else gets the neutral Today: their name, the clock, and no
+  // claim about data this dispatcher has not read.
   if (surface.persona === "marketing") {
-    return <MarketingToday viewerName={viewerName} />;
+    if (surface.capabilities.canSeeMarketing) {
+      return <MarketingToday viewerName={viewerName} />;
+    }
+    return (
+      <PageFrame
+        title="Today"
+        subtitle={
+          <span>
+            {viewerName} · <LiveClock initialDateKey={operatorDateKey()} /> · marketing
+          </span>
+        }
+      >
+        <section className="max-w-2xl rounded-xl border border-hairline bg-bg-panel p-4">
+          <h2 className="text-sm font-semibold text-fg">No marketing dashboard in this workspace yet</h2>
+          <p className="mt-2 text-sm leading-[22px] text-fg-muted">
+            Your workspace&apos;s pages are in the rail. Nothing on this screen needs your attention.
+          </p>
+        </section>
+      </PageFrame>
+    );
   }
 
   // builder has its own persona now but the DELIVERY surface is still the

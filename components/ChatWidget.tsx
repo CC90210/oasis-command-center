@@ -484,6 +484,17 @@ type AgentConfig = {
   has_key: boolean;
 };
 
+/**
+ * The provider /model is pinned to for an agent: the one whose key is saved on
+ * its row. A key belongs to its provider, so a row with a key only takes that
+ * provider's models; /api/agent-config answers 409 provider_mismatch to any
+ * other provider without a new key (S4-09). No row, or no key: null, not pinned.
+ */
+function modelPickerProvider(configs: AgentConfig[], agentKey: string): string | null {
+  const row = configs.find((c) => c.agent_key === agentKey);
+  return row?.has_key ? row.provider : null;
+}
+
 type Props = {
   agentKeys: string[];
   defaultAgent?: string;
@@ -599,6 +610,26 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, [urlAgent, agentKeys]);
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [configsLoaded, setConfigsLoaded] = useState(false);
+  // The rows /model will WRITE: the workspace rows for an admin (tenant
+  // scope), the operator's own overrides otherwise (the user-scope fallback
+  // the switch takes on admin_required). The provider pin, the autocomplete
+  // and the examples read these same rows, or an employee's personal OpenAI
+  // key is refused by the workspace's Anthropic one before the request is
+  // ever made (CodeRabbit on #504).
+  const [userConfigs, setUserConfigs] = useState<AgentConfig[]>([]);
+  const refetchUserConfigs = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agent-config?scope=user");
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; configs?: AgentConfig[] };
+      if (r.ok && j?.ok && Array.isArray(j.configs)) setUserConfigs(j.configs);
+    } catch (err) {
+      console.error("[chat_widget.agent_config.user]", err);
+    }
+  }, []);
+  useEffect(() => {
+    if (!isAdmin) void refetchUserConfigs();
+  }, [isAdmin, refetchUserConfigs]);
+  const pinConfigs = isAdmin ? configs : userConfigs;
   // Per-user display names (Solara → "Ada" etc). The hook fetches
   // /api/agent-config?scope=user once at mount and returns labelFor()
   // which falls back to the canonical agent label when the operator
@@ -675,15 +706,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }));
     }
     if (slashArgCommand === "model") {
-      // Surface models the operator actually has providers configured
-      // for first — those are the only ones /model can successfully
-      // switch to. If no configs are loaded yet, show the full registry
-      // as a fallback (better than an empty menu mid-onboarding).
-      const configuredProviders = new Set(configs.map((c) => c.provider));
+      // A row with a saved key is pinned to that key's provider: only its
+      // models are offered (modelPickerProvider). Otherwise, surface models
+      // the operator actually has providers configured for — those are the
+      // only ones /model can successfully switch to. If no configs are
+      // loaded yet, show the full registry as a fallback (better than an
+      // empty menu mid-onboarding).
+      const pinned = modelPickerProvider(pinConfigs, agent);
+      const configuredProviders = new Set(pinConfigs.map((c) => c.provider));
       const flat: ArgCandidate[] = [];
       for (const [provider, models] of Object.entries(PROVIDER_MODELS)) {
-        const isConfigured = configuredProviders.has(provider) || configs.length === 0;
-        if (!isConfigured) continue;
+        const offered = pinned ? provider === pinned : configuredProviders.has(provider) || pinConfigs.length === 0;
+        if (!offered) continue;
         for (const m of models) {
           flat.push({ value: m, label: m, hint: provider });
         }
@@ -691,7 +725,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, configs, agentDisplayName, targetLabels]);
+  }, [slashArgCommand, agentKeys, agent, pinConfigs, agentDisplayName, targetLabels]);
+  // The candidate list can shrink without the query changing (switching to a
+  // keyed agent narrows /model to that provider): a retained index past the
+  // new length would dereference nothing on Enter. Start over on every change.
+  useEffect(() => {
+    setSlashArgSelectedIdx(0);
+  }, [argCandidates]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
@@ -1686,19 +1726,27 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
       case "model": {
         const requested = args.trim();
+        // A saved key pins this agent to its provider (modelPickerProvider):
+        // the listing and the switch stay inside it, and switching providers
+        // means pasting that provider's key in Settings.
+        const pinned = modelPickerProvider(pinConfigs, agent);
         if (!requested) {
-          // No args — list the models available across the operator's
-          // configured providers so they don't have to guess. Falls back
-          // to the full registry when no configs are loaded.
-          const known = configs.length
-            ? Array.from(
-                new Set(
-                  configs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
-                ),
-              )
-            : Object.values(PROVIDER_MODELS).flat();
+          // No args — list the models available across the providers on the
+          // rows /model will write, so they don't have to guess. Falls back
+          // to the full registry when no such rows are loaded.
+          const known = pinned
+            ? PROVIDER_MODELS[pinned as keyof typeof PROVIDER_MODELS] || []
+            : pinConfigs.length
+              ? Array.from(
+                  new Set(
+                    pinConfigs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
+                  ),
+                )
+              : Object.values(PROVIDER_MODELS).flat();
           appendSystem(
-            `Usage: /model <id>. Examples: ${known.slice(0, 6).join(", ")}${known.length > 6 ? ", ..." : ""}.`,
+            `Usage: /model <id>. Examples: ${known.slice(0, 6).join(", ")}${known.length > 6 ? ", ..." : ""}.${
+              pinned ? ` This agent's saved key is for ${pinned}, so only ${pinned} models apply here.` : ""
+            }`,
           );
           return;
         }
@@ -1706,6 +1754,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         if (!provider) {
           appendSystem(
             `Unknown model "${requested}". Use a model id from one of: ${Object.keys(PROVIDER_MODELS).join(", ")}. Tip: /model with no arg lists examples.`,
+          );
+          return;
+        }
+        if (pinned && provider !== pinned) {
+          appendSystem(
+            `${requested} is a ${provider} model, and this agent's saved key is for ${pinned}. To switch providers, paste a ${provider} key in Settings (AI provider accounts). The current model stays active.`,
           );
           return;
         }
@@ -1748,6 +1802,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           } catch {
             // non-fatal — header may stay stale until next reload.
           }
+          if (!isAdmin) await refetchUserConfigs();
           appendSystem(
             `Model switched to ${requested} (${provider}). Next turn uses the new model.`,
           );
@@ -2683,10 +2738,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
-        // Same accept-or-fall-through semantics as the command menu.
-        if (argMatches.length > 0) {
+        // Same accept-or-fall-through semantics as the command menu. The
+        // index is reset whenever the list changes, and the first match
+        // covers the render in between.
+        const pick = argMatches[slashArgSelectedIdx] ?? argMatches[0];
+        if (pick) {
           e.preventDefault();
-          insertSlashArg(argMatches[slashArgSelectedIdx].value);
+          insertSlashArg(pick.value);
           return;
         }
       }

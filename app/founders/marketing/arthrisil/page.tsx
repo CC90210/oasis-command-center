@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 export const metadata = {
-  title: "Arthrisil · Marketing · OASIS",
+  title: "Arthrisil · Content · OASIS",
 };
 
 export default function ArthrisilMarketingPage() {

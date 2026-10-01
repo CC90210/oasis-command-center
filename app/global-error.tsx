@@ -23,6 +23,8 @@
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
+import { recoverFromStaleBuild, reportClientError } from "@/lib/client-errors/report";
+import { isStaleBuildError } from "@/lib/client-errors/shape";
 import { isReadDeadlineDigest } from "@/lib/os/deadline";
 
 export default function GlobalError({
@@ -36,6 +38,9 @@ export default function GlobalError({
   const timedOut = isReadDeadlineDigest(error.digest);
   useEffect(() => {
     console.error("[global-error.tsx]", error);
+    // Runs in the browser; the report is the server's only record of it.
+    reportClientError("global", error);
+    if (isStaleBuildError(error)) recoverFromStaleBuild();
   }, [error]);
 
   return (

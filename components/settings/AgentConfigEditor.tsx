@@ -295,7 +295,9 @@ export function AgentConfigEditor({
       });
       const j = await res.json();
       if (!j.ok) {
-        patchRow(agentKey, { saving: false, error: j.error || `http_${res.status}` });
+        // The route's `message` says what to do ("Paste an OpenAI Direct key
+        // to switch providers."); `error` is the slug for callers.
+        patchRow(agentKey, { saving: false, error: j.message || j.error || `http_${res.status}` });
         return;
       }
       patchRow(agentKey, {

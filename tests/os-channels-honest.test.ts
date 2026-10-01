@@ -580,16 +580,24 @@ async function main() {
     assert.ok(row, `no ${CUSTOM_SLUG} on the roster`);
     return { team, web: row!.web };
   };
-  await check("the AI Team roster says 'Web · not working' where the header says Not working, custom teammates included", async () => {
+  await check("the AI Team roster says 'App channel · not working: <reason>' where the header says Not working, custom teammates included", async () => {
     const viewer = await viewerFor(USERS.partner);
     const team = await loadAiTeam(viewer, []);
     const agentLeads = team.leads.filter((l) => !l.id.startsWith("dept:"));
     assert.ok(agentLeads.length >= 2, JSON.stringify(team.leads.map((l) => l.id)));
     for (const lead of agentLeads) assert.equal(lead.web, "not_working", lead.name);
+    // The chip carries the header's own reason (S4-01): the owner reads why,
+    // not a label that looks like a missing web capability.
+    for (const lead of agentLeads) assert.equal(lead.webReason, "AI account refused the request (check billing)", lead.name);
     // A custom teammate's chat runs on the same refused workspace key.
-    assert.equal((await customWeb(USERS.partner)).web, "not_working", "a green Web check on a custom teammate over a refused key");
-    const label = textOf(Homes({ web: "not_working" }));
-    assert.match(label, /Web · not working/);
+    const custom = await customWeb(USERS.partner);
+    assert.equal(custom.web, "not_working", "a green App channel check on a custom teammate over a refused key");
+    const customRow = custom.team.custom.ok ? custom.team.custom.value.find((c) => c.slug === CUSTOM_SLUG) : undefined;
+    assert.equal(customRow?.webReason, "AI account refused the request (check billing)");
+    const label = textOf(Homes({ web: "not_working", webReason: agentLeads[0].webReason }));
+    assert.match(label, /App channel · not working: AI account refused the request \(check billing\)/);
+    assert.doesNotMatch(label, /\bWeb\b/, "the chip is the app channel, not web access");
+    assert.match(textOf(Homes({ web: "ready" })), /App channel/);
     rendered.push(label);
   });
   await check("a member's 412 while the key is off does not wipe the key's refusal from the channel", async () => {
@@ -616,7 +624,7 @@ async function main() {
     assert.ok(state.kind === "ready" && state.lastTurn.kind === "ok", JSON.stringify(state));
     assert.deepEqual(withLastTurn(statusFor(true, 0), state.kind === "ready" ? state.lastTurn : null), { kind: "working" });
   });
-  await check("a custom teammate's own refused turn is its own: Web · not working until its chat answers", async () => {
+  await check("a custom teammate's own refused turn is its own: App channel · not working until its chat answers", async () => {
     await login(USERS.partner);
     // Its direct chat (no department) asks for a model the provider does not
     // know: a failure of that chat, not of the account.

@@ -34,14 +34,17 @@ async function main() {
   assert.equal(fin!.label, "Finances");
   assert.equal(fin!.icon, "Landmark");
   assert.equal(fin!.audience, "finance_owners", "hidden from the marketing hire the portal admits");
-  assert.ok(FOUNDERS_NAV.some((n) => n.href === "/founders/marketing"), "Marketing is still there");
+  assert.ok(FOUNDERS_NAV.some((n) => n.href === "/founders/marketing"), "the Content hub is still there");
   assert.equal(portalForPath("lib/founders-finances/metrics.ts"), "founders");
   assert.equal(portalForPath("app/founders/finances/page.tsx"), "founders");
 
+  // The hub is "Content" (CC, 2026-10-01; tests/marketing-shell.test.ts). The
+  // chips below render only on the Growth preview shell now — the banner is
+  // hidden on Finances and on Content — but the rule stays pure and testable.
   const labelsOn = (p: string) => visibleFoundersSections(p, FOUNDERS_PORTAL.sections).chips.map((s) => s.label);
-  assert.deepEqual(labelsOn("/founders/finances"), ["Marketing", "Finances"], "no Marketing sub-chips on Finances");
-  assert.deepEqual(labelsOn("/founders/finances/reports"), ["Marketing", "Finances"]);
-  assert.deepEqual(labelsOn("/founders/marketing/library"), ["Marketing", "Finances", "Library", "Train", "Performance"]);
+  assert.deepEqual(labelsOn("/founders/finances"), ["Content", "Finances"], "no Content sub-chips on Finances");
+  assert.deepEqual(labelsOn("/founders/finances/reports"), ["Content", "Finances"]);
+  assert.deepEqual(labelsOn("/founders/marketing/library"), ["Content", "Finances", "Library", "Train", "Performance"]);
   assert.equal(visibleFoundersSections("/founders/marketing/performance", FOUNDERS_PORTAL.sections).active, "/founders/marketing/performance");
   assert.equal(visibleFoundersSections("/founders/finances/taxes", FOUNDERS_PORTAL.sections).active, "/founders/finances");
   assert.equal(labelsOn("/founders/marketingx").includes("Library"), false, "prefix match needs a path boundary");

@@ -114,6 +114,7 @@ export default async function AiTeamPage() {
                 summary={lead.summary}
                 departments={lead.departments}
                 web={lead.web}
+                webReason={lead.webReason}
                 slack={lead.slack}
                 href={lead.departments[0]?.href ?? null}
               />
@@ -150,6 +151,7 @@ export default async function AiTeamPage() {
                 meta={c.category}
                 summary={c.summary}
                 web={c.web}
+                webReason={c.webReason}
                 href={c.webHref}
                 badge={c.enabled ? "On" : "Off"}
               />

@@ -19,7 +19,7 @@ import { TrainDropzone } from "@/components/founders/TrainDropzone";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Train · Marketing · OASIS" };
+export const metadata = { title: "Train · Content · OASIS" };
 
 const TONE: Record<string, string> = {
   pending: "#A8B5C2",

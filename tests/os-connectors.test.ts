@@ -49,6 +49,7 @@ import {
   type SettingsSectionKey,
 } from "../components/settings/settings-sections";
 import { OASIS_ADDONS } from "../components/settings/addons";
+import { PROVIDER_REGISTRY } from "../lib/providers";
 import { watchPopup } from "../components/os/connections/popup-watch";
 import { FOCUSABLE_SELECTOR, trapTab } from "../components/os/connections/focus-trap";
 
@@ -206,7 +207,17 @@ for (const def of CONNECTOR_CATALOG) {
   if (!def.live) {
     assert.equal(s.kind, "coming_soon", `${def.slug} has no status source but resolved to "${s.kind}"`);
     assert.doesNotMatch(s.label, /connected/i);
+    // The state, in the same words Chat apps uses for the same apps; "Coming
+    // soon" / "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
+    assert.equal(s.label, "Not built yet", `${def.slug} (${def.plannedFor}): a card with nothing behind it says so`);
   }
+}
+assert.match(read("app/settings/chat-apps/page.tsx"), /label: "Not built yet"/, "Chat apps and Connections say it the same way");
+// No card's copy promises a release: the Stripe card said the Finance sync
+// "ships (next release)".
+for (const def of CONNECTOR_CATALOG) {
+  const copy = [def.summary, ...def.reads, ...def.does, def.pendingNote ?? ""].join(" ");
+  assert.doesNotMatch(copy, /next release|later release|coming soon|Phase 2|ships? (in|next)/i, `${def.slug}: a release promise on the card`);
 }
 assert.equal(resolveConnectorStatus(connectorBySlug("stripe")!, GREEN, NOW).kind, "connected");
 assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN, NOW).kind, "connected");
@@ -381,7 +392,24 @@ assert.equal(
   "Slack app not configured yet",
 );
 assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
-assert.match(read("app/settings/chat-apps/page.tsx"), /Coming in Phase 2/);
+// Telegram teammates are a state ("not built yet"), never an era word or a
+// release promise (S2-11, S4-12, S5-F07's register).
+assert.match(read("app/settings/chat-apps/page.tsx"), /Telegram teammates are not built yet/);
+assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /Phase 2|Coming soon/);
+assert.match(read("app/settings/notifications/page.tsx"), /Choosing what notifies you is not built yet/);
+assert.doesNotMatch(read("app/settings/notifications/page.tsx"), /Phase 2|arrives with/);
+assert.match(read("components/os/aiteam/TeammateRow.tsx"), /Telegram · alerts only/);
+assert.doesNotMatch(read("components/os/aiteam/TeammateRow.tsx"), /Phase 2/);
+// The connector drawer's coming-soon note is the state too, not a date:
+// "scheduled for the next release" promised a release nobody had scheduled.
+assert.match(read("components/os/connections/ConnectorDrawer.tsx"), /Nothing is built for it yet, so it cannot be connected\./);
+assert.doesNotMatch(read("components/os/connections/ConnectorDrawer.tsx"), /next release|later release|=== "Phase 2"/);
+// The Google Gemini card never nudges an owner toward the free AI Studio tier,
+// which may train on a client's data (S2-09): paid tier only, and it says why.
+const gemini = PROVIDER_REGISTRY.find((p) => p.value === "google")!;
+assert.equal(gemini.tagline, "Paid tier only. The free AI Studio tier may train on your data.");
+assert.match(gemini.hint, /Paid tier only/);
+assert.doesNotMatch(`${gemini.tagline} ${gemini.hint}`, /free tier available/i);
 
 // Search: by name, keyword and category label; nonsense matches nothing.
 assert.ok(connectorMatches(connectorBySlug("gohighlevel")!, "ghl"));
@@ -403,11 +431,19 @@ for (const a of OASIS_ADDONS) {
     /\$|price|download|buy|free trial/i,
     `${a.name}: nothing sells or ships an add-on in Phase 1`,
   );
+  // OASIS's own workspace links the app's install guide in OASIS's own repo.
+  assert.match(a.installGuide.href, /^https:\/\/github\.com\/CC90210\//, `${a.name}: install guide is OASIS's own repo`);
+  assert.ok(a.installGuide.label.trim(), `${a.name}: install guide needs a label`);
 }
-assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.platforms, /^Windows$/);
+// Whispr's macOS port merged on 2026-09-26 and its README now carries a macOS
+// section, so the card says both (S1-A1; decision 24).
+assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.platforms, /^macOS and Windows$/);
+assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.summary, /Mac and Windows/);
 const billing = read("app/settings/billing/page.tsx");
 assert.match(billing, /SUPPORT_FORM_PATH/, "the add-on request must go through the existing support form");
+assert.match(billing, /viewer\.access\.oasisWorkspace/, "the page must branch on whose workspace it is (S1-A2)");
 assert.match(read("components/settings/AddonCard.tsx"), /Ask OASIS to add this/);
+assert.match(read("components/settings/AddonCard.tsx"), /Built by OASIS/);
 assert.doesNotMatch(billing + read("components/settings/AddonCard.tsx"), /\$\s?\d|mailto:/);
 
 // ─── 5. Settings sections: operator-only stays operator-only ────────────────

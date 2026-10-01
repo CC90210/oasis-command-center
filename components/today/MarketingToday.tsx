@@ -17,6 +17,12 @@
  * real tool. No stat tiles invented to fill space, and above all no numbers —
  * a fabricated metric on a dashboard is worse than an empty one, because a
  * plausible number gets believed and acted on.
+ *
+ * OASIS'S OWN MARKETING HIRE ONLY. app/page.tsx renders this when the viewer's
+ * tenant-narrowed capability record says canSeeMarketing, not on the persona
+ * alone (2026-10-01): every link here is OASIS's own Content hub, which 404s
+ * outside OASIS's workspaces, so a client's marketing hire gets the neutral
+ * Today instead of an OASIS-named card whose every button is a dead door.
  */
 
 import Link from "next/link";
@@ -38,12 +44,12 @@ export function MarketingToday({ viewerName }: { viewerName: string }) {
     >
       <div className="space-y-6">
         <Card
-          title="Marketing studio"
+          title="Content"
           subtitle="Where the work happens — library, training, and published performance."
         >
           <div className="flex flex-wrap gap-2">
             <Link href="/founders/marketing" className="btn-primary inline-flex items-center gap-2">
-              Open Marketing
+              Open Content
             </Link>
             <Link href="/founders/marketing/library" className="btn-secondary inline-flex items-center gap-2">
               Library

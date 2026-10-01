@@ -28,11 +28,13 @@
  * the viewer; it is in the Worker's logs.
  */
 
-import { useEffect } from "react";
+import { useEffect, useTransition } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
 import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
+import { recoverFromStaleBuild, reportClientError } from "@/lib/client-errors/report";
+import { isStaleBuildError } from "@/lib/client-errors/shape";
 import { isReadDeadlineDigest } from "@/lib/os/deadline";
 
 export default function ErrorBoundary({
@@ -44,10 +46,27 @@ export default function ErrorBoundary({
 }) {
   const prospectFacing = isProspectFacingPath(usePathname());
   const timedOut = isReadDeadlineDigest(error.digest);
+  const router = useRouter();
+  const [retrying, startRetry] = useTransition();
   useEffect(() => {
-    // The Worker's logs capture console output; this is the diagnostic record.
     console.error("[error.tsx]", error);
+    // This boundary runs in the browser: the console line above never reaches
+    // the Worker, and a crash in a client component carries no digest. The
+    // report is the server's only record of it (POST /api/client-errors).
+    reportClientError("boundary", error);
+    // A page left open across a deploy asks for code that no longer exists;
+    // only a full reload fixes that, so do it once instead of showing this card.
+    if (isStaleBuildError(error)) recoverFromStaleBuild();
   }, [error]);
+
+  // Next's documented retry for a failed render: refetch the server's data for
+  // this route, then re-render the segment. reset() alone re-renders with the
+  // same data and fails the same way.
+  const retry = () =>
+    startRetry(() => {
+      router.refresh();
+      reset();
+    });
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center px-6 py-16">
@@ -61,7 +80,7 @@ export default function ErrorBoundary({
         <ErrorHelp digest={error.digest} prospectFacing={prospectFacing} timedOut={timedOut} />
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {timedOut ? (
-            // A full reload, not reset(): the read is started over from the
+            // A full reload, not retry(): the read is started over from the
             // server rather than re-rendering the segment that just hung.
             <button
               onClick={() => window.location.reload()}
@@ -71,10 +90,11 @@ export default function ErrorBoundary({
             </button>
           ) : (
             <button
-              onClick={() => reset()}
+              onClick={retry}
+              disabled={retrying}
               className="btn-primary inline-flex items-center gap-1.5 text-sm"
             >
-              <RefreshCw className="w-4 h-4" /> Try again
+              <RefreshCw className="w-4 h-4" /> {retrying ? "Trying again..." : "Try again"}
             </button>
           )}
           {prospectFacing ? null : (

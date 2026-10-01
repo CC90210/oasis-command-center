@@ -271,7 +271,7 @@ export async function SettingsContent({
                       href="/settings/audit-log"
                       className="text-xs text-accent hover:text-accent/80 underline underline-offset-2"
                     >
-                      Audit log →
+                      Activity log →
                     </a>
                   )}
                 </div>
