@@ -18,11 +18,18 @@
  *  2. Pages are stable: every asset appears on exactly one page, even when
  *     created_at ties across a page boundary, and a page past the end lands on
  *     the last page instead of an empty grid.
- *  3. The pager keeps the filters: a page link carries the tab, channel, brand,
- *     lifecycle and view it was drawn under; a filter change goes back to page 1.
- *  4. Counts come from COUNT queries, and the lifecycle pills and the grid use
- *     ONE predicate that agrees with lifecycleOf() for every status x
- *     published_at pair (they had drifted: "Needs review 50" over a grid of 21).
+ *  3. The pager keeps the filters: a page link carries the tab, track, channel,
+ *     brand, lifecycle and view it was drawn under; a filter change goes back to
+ *     page 1. Every filter narrows the grid AND its total (?track=paid once lit
+ *     the Paid pill over every track's assets). The asset page links back to
+ *     the exact view it was opened from, through a validated ?from=.
+ *  4. Counts come from COUNT queries - proved from the SQL that ran, not from
+ *     matching numbers - and the lifecycle pills and the grid use ONE predicate
+ *     that agrees with lifecycleOf() for every status x published_at pair (they
+ *     had drifted: "Needs review 50" over a grid of 21). Needs review is draft or
+ *     in review, not yet posted: a scheduled asset is in no lifecycle bucket.
+ *  5. Studio's "awaiting your verdict" line is the Needs review pill's own COUNT,
+ *     so it agrees with the grid it links to.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -37,16 +44,21 @@ import {
   loadLibraryPage,
 } from "../lib/founders/marketing-queries";
 import {
+  BRAND_GROUPS,
+  DEFAULT_BRAND_GROUP,
   LIBRARY_PAGE_SIZE,
   LIFECYCLE,
   STATUSES,
+  assetHref,
   libraryHref,
+  libraryReturnPath,
   libraryPageCount,
   libraryPagerItems,
   lifecycleOf,
   parseLibraryPage,
   parseLibraryView,
   type LibraryState,
+  type Lifecycle,
 } from "../lib/founders-marketing-core";
 
 const ROOT = join(__dirname, "..");
@@ -150,6 +162,43 @@ function countingSigner() {
   /** Distinct assets whose media was signed: the path is <tenant>/<asset>/<file>. */
   const assets = () => new Set(refs.map((r) => r.path.split("/")[1]));
   return { sign, refs, assets };
+}
+
+/**
+ * The same database, with every statement the query builder sends recorded.
+ * Matching numbers do not prove a COUNT ran - reading every row and counting in
+ * JS gives the same numbers - so the count checks assert on the SQL itself.
+ */
+function recorded(raw: ReturnType<typeof createClient>) {
+  const statements: string[] = [];
+  const client = new Proxy(raw, {
+    get(target, prop) {
+      if (prop === "execute") {
+        return (stmt: string | { sql: string }) => {
+          statements.push(typeof stmt === "string" ? stmt : stmt.sql);
+          return target.execute(stmt as never);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { db: createTursoPostgrest(client) as never, statements };
+}
+
+/** A COUNT statement on the asset table, as lib/turso-postgrest.ts compiles one. */
+const COUNT_SQL = /^SELECT count\(\*\) AS n FROM "marketing_asset"(?: WHERE |$)/;
+
+/**
+ * The bucket an asset belongs in: lifecycleOf(), except that only a draft or
+ * in-review asset is waiting on a verdict. A scheduled asset (or a status
+ * 'published' row with no published_at) is in NO bucket - it keeps its own place
+ * on Studio's stage tiles and in the All view.
+ */
+function bucketOf(status: string, published: boolean): Lifecycle | null {
+  const l = lifecycleOf({ status, published_at: published ? "x" : null });
+  if (l === "needs_review" && status !== "draft" && status !== "in_review") return null;
+  return l;
 }
 
 const pad = (n: number) => String(n).padStart(3, "0");
@@ -262,6 +311,28 @@ async function main() {
     assert.deepEqual(other.assets.map((a) => a.id), ["o001"], "tenant scoping survives paging");
   });
 
+  await check("a track filter narrows the grid AND its total (?track=paid shows only paid assets)", async () => {
+    const { raw: r3, db: d3 } = await makeDb();
+    await seed(r3, [
+      { id: "paid1", kind: "video", channel: "paid-meta", created: "2026-09-06T00:00:00.000Z" },
+      { id: "org2", kind: "image", channel: "organic-tiktok", created: "2026-09-06T00:00:01.000Z" },
+      { id: "paid2", kind: "carousel", channel: "paid-meta", created: "2026-09-06T00:00:02.000Z" },
+      { id: "org1", kind: "video", channel: "organic-instagram", created: "2026-09-06T00:00:03.000Z" },
+    ]);
+    const paid = await getMarketingAssets(T, { track: "paid" }, d3);
+    assert.deepEqual(paid.assets.map((a) => a.id), ["paid2", "paid1"], "only the paid rows, newest first");
+    assert.equal(paid.total, 2, "the total behind the pager counts paid rows only");
+    const organic = await getMarketingAssets(T, { track: "organic" }, d3);
+    assert.deepEqual(organic.assets.map((a) => a.id), ["org1", "org2"]);
+    assert.equal(organic.total, 2);
+    // Through the page's own data path too, signing included.
+    const s = countingSigner();
+    const page = await loadLibraryPage(T, { track: "paid" }, { db: d3, sign: s.sign });
+    assert.deepEqual(page.tiles.map((t) => t.asset.id), ["paid2", "paid1"]);
+    assert.equal(page.total, 2);
+    assert.deepEqual([...s.assets()].sort(), ["paid1", "paid2"], "nothing from another track is signed");
+  });
+
   await check("chat- and agent-made rows are on the page like any other (author_agent is not a filter)", async () => {
     const s = countingSigner();
     const got = await loadLibraryPage(T, { group: "clients" }, { db, sign: s.sign });
@@ -272,25 +343,50 @@ async function main() {
     assert.equal(copy!.posterUrl, null, "no media, nothing signed - the tile draws its copy instead");
   });
 
-  await check("tab counts are COUNT queries over every status, one per tab", async () => {
-    const tabs = await getBrandTabCounts(T, db);
+  await check("tab counts are COUNT queries over every status, one per tab (the SQL that ran)", async () => {
+    const rec = recorded(raw);
+    const tabs = await getBrandTabCounts(T, rec.db);
     assert.equal(tabs.degraded, false);
     assert.deepEqual(tabs.counts, { "oasis-ai": 103, conaugh: 1, music: 0, clients: 4 });
+    assert.equal(rec.statements.length, BRAND_GROUPS.length, `one statement per tab, ran:\n${rec.statements.join("\n")}`);
+    for (const sql of rec.statements) assert.match(sql, COUNT_SQL, `a row read where a COUNT belongs: ${sql}`);
   });
 
-  await check("lifecycle pills and the grid agree, and both agree with lifecycleOf()", async () => {
-    const lc = await getLifecycleCounts(T, "oasis-ai", db);
+  await check("lifecycle pills are COUNT queries and agree with the grid and with the buckets", async () => {
+    const rec = recorded(raw);
+    const lc = await getLifecycleCounts(T, "oasis-ai", rec.db);
     assert.equal(lc.degraded, false);
+    assert.equal(rec.statements.length, LIFECYCLE.length, `one statement per pill, ran:\n${rec.statements.join("\n")}`);
+    for (const sql of rec.statements) assert.match(sql, COUNT_SQL, `a row read where a COUNT belongs: ${sql}`);
     const oasisRows = rows.filter((r) => (r.tenant ?? T) === T && (r.brand ?? "oasis-ai") === "oasis-ai");
     for (const l of LIFECYCLE) {
-      const truth = oasisRows.filter((r) => lifecycleOf({ status: r.status ?? "in_review", published_at: r.published ? "x" : null }) === l).length;
+      const truth = oasisRows.filter((r) => bucketOf(r.status ?? "in_review", !!r.published) === l).length;
       const grid = await getMarketingAssets(T, { lifecycle: l }, db);
       assert.equal(lc.counts[l], truth, `pill ${l}`);
       assert.equal(grid.total, truth, `grid ${l}`);
     }
   });
 
-  await check("the SQL lifecycle predicate matches lifecycleOf() for every status x published_at pair", async () => {
+  await check("Needs review is draft or in review, not yet posted: scheduled assets keep their own place", async () => {
+    const oasisRows = rows.filter((r) => (r.tenant ?? T) === T && (r.brand ?? "oasis-ai") === "oasis-ai");
+    const scheduled = oasisRows.filter((r) => r.status === "scheduled" && !r.published).map((r) => r.id);
+    assert.ok(scheduled.length >= 5, `the seed holds scheduled, unposted assets (${scheduled.length})`);
+    const needs = await getMarketingAssets(T, { lifecycle: "needs_review", pageSize: 200 }, db);
+    const inNeeds = new Set(needs.assets.map((a) => a.id));
+    for (const id of scheduled) assert.ok(!inNeeds.has(id), `${id} is scheduled, not waiting on a verdict`);
+    for (const a of needs.assets) {
+      assert.ok(a.status === "draft" || a.status === "in_review", `${a.id} is ${a.status}`);
+      assert.equal(a.published_at, null, `${a.id} has been posted`);
+    }
+    // ...and they are not lost: the All view and Studio's ?status=scheduled tile show them.
+    const all = await getMarketingAssets(T, { pageSize: 200 }, db);
+    const inAll = new Set(all.assets.map((a) => a.id));
+    for (const id of scheduled) assert.ok(inAll.has(id), `${id} is in the All view`);
+    const stage = await getMarketingAssets(T, { status: "scheduled", pageSize: 200 }, db);
+    for (const id of scheduled) assert.ok(stage.assets.some((a) => a.id === id), `${id} is on the Scheduled stage`);
+  });
+
+  await check("the SQL lifecycle predicate matches the buckets for every status x published_at pair", async () => {
     const { raw: r2, db: d2 } = await makeDb();
     const pairs: Seed[] = [];
     for (const st of STATUSES) {
@@ -299,26 +395,62 @@ async function main() {
       }
     }
     await seed(r2, pairs);
+    const placed = new Map<string, Lifecycle>();
     for (const l of LIFECYCLE) {
       const want = pairs
-        .filter((p) => lifecycleOf({ status: p.status!, published_at: p.published ? "x" : null }) === l)
+        .filter((p) => bucketOf(p.status!, !!p.published) === l)
         .map((p) => p.id)
         .sort();
       const got = await getMarketingAssets(T, { lifecycle: l, pageSize: 100 }, d2);
       assert.deepEqual(got.assets.map((a) => a.id).sort(), want, `bucket ${l}`);
+      for (const a of got.assets) {
+        assert.ok(!placed.has(a.id), `${a.id} is in both ${placed.get(a.id)} and ${l}`);
+        placed.set(a.id, l);
+      }
     }
+    // Exactly the undated scheduled / published rows sit outside every bucket.
+    const unplaced = pairs.filter((p) => !placed.has(p.id)).map((p) => p.id).sort();
+    assert.deepEqual(unplaced, ["published-n", "scheduled-n"]);
     const lc = await getLifecycleCounts(T, "oasis-ai", d2);
     const sum = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
-    assert.equal(sum, pairs.length, "every row lands in exactly one bucket");
+    assert.equal(sum, pairs.length - unplaced.length, "the pills count exactly the bucketed rows, once each");
+  });
+
+  await check("Studio's \"awaiting your verdict\" is the Needs review pill's own COUNT, and its link opens that grid", async () => {
+    const studio = readFileSync(join(ROOT, "app/founders/marketing/page.tsx"), "utf8");
+    assert.match(
+      studio,
+      /getLifecycleCounts\(founder\.tenantId, DEFAULT_BRAND_GROUP\)/,
+      "Studio reads the Library's own pill counts for the OASIS tab",
+    );
+    assert.match(
+      studio,
+      /const awaitingVerdict = lifecycle\.degraded \? 0 : lifecycle\.counts\.needs_review;/,
+      "the line is the Needs review count (and no number at all when that read failed)",
+    );
+    const studioCode = studio.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(studioCode, /by_status\.in_review/, "not a second count over a different set of assets");
+    assert.match(studio, /href="\/founders\/marketing\/library\?lifecycle=needs_review"/, "the line opens that grid");
+    assert.ok(
+      studio.indexOf("lifecycle.degraded || summary.degraded ?") >= 0 &&
+        studio.indexOf("lifecycle.degraded || summary.degraded ?") < studio.indexOf('headline="Nothing waiting on you"'),
+      "a failed verdict count renders the degraded panel before any 'Nothing waiting on you'",
+    );
+    // On the data: the default tab IS where the link lands.
+    assert.equal(DEFAULT_BRAND_GROUP, "oasis-ai");
+    const lc = await getLifecycleCounts(T, DEFAULT_BRAND_GROUP, db);
+    const grid = await getMarketingAssets(T, { lifecycle: "needs_review" }, db);
+    assert.equal(lc.counts.needs_review, grid.total);
   });
 
   await check("page links keep every filter; a filter change goes back to page 1", () => {
     const here: LibraryState = {
-      group: "clients", channel: "organic-tiktok", brand: "warner", lifecycle: "needs_review", view: "grid",
+      group: "clients", track: "organic", channel: "organic-tiktok", brand: "warner", lifecycle: "needs_review", view: "grid",
     };
     const p3 = new URL(libraryHref(here, { page: 3 }), "https://x").searchParams;
     assert.equal(p3.get("page"), "3");
     assert.equal(p3.get("group"), "clients");
+    assert.equal(p3.get("track"), "organic", "the track survives a page turn");
     assert.equal(p3.get("channel"), "organic-tiktok");
     assert.equal(p3.get("brand"), "warner");
     assert.equal(p3.get("lifecycle"), "needs_review");
@@ -327,6 +459,12 @@ async function main() {
     assert.equal(back.get("page"), null, "a new filter starts at page 1");
     assert.equal(back.get("group"), "clients");
     assert.equal(back.get("view"), "grid", "the view survives a filter change");
+    assert.equal(back.get("track"), "organic", "and so does the track");
+    assert.equal(
+      libraryHref({ group: "oasis-ai", track: "paid", view: "phone" }, { page: 2 }),
+      "/founders/marketing/library?track=paid&page=2",
+      "page 2 of the Paid filter is page 2 of the Paid filter",
+    );
     assert.equal(libraryHref({ group: "oasis-ai", view: "phone" }, { page: 1 }), "/founders/marketing/library");
     assert.equal(parseLibraryPage("3"), 3);
     assert.equal(parseLibraryPage("0"), 1);
@@ -339,12 +477,61 @@ async function main() {
     assert.deepEqual(libraryPagerItems(10, 40), [1, "gap", 8, 9, 10, 11, 12, "gap", 40]);
   });
 
+  await check("the asset page's Library link goes back to the view the asset was opened from (validated ?from=)", () => {
+    const view = "/founders/marketing/library?group=clients&track=paid&lifecycle=needs_review&view=grid&page=3";
+    assert.equal(libraryReturnPath(view), view, "tab, filters, view and page all survive");
+    assert.equal(
+      assetHref("a1", view),
+      `/founders/marketing/asset/a1?from=${encodeURIComponent(view)}`,
+      "the tile's link carries the view",
+    );
+    assert.equal(assetHref("a1", "/founders/marketing/library"), "/founders/marketing/asset/a1", "no view, no from");
+    assert.equal(assetHref("a1"), "/founders/marketing/asset/a1");
+    // A browser hands `from` back, so it is validated, never trusted.
+    for (const hostile of [
+      "https://evil.example/founders/marketing/library?page=2",
+      "//evil.example/founders/marketing/library",
+      "\\\\evil.example/founders/marketing/library",
+      "javascript:alert(1)",
+      "/founders/marketing/library/../../settings",
+      "/founders/marketing/libraryX",
+      "/founders/finances",
+      "",
+      undefined,
+      42,
+      "x".repeat(5000),
+    ]) {
+      assert.equal(libraryReturnPath(hostile), "/founders/marketing/library", `accepted ${String(hostile).slice(0, 60)}`);
+    }
+    assert.equal(
+      libraryReturnPath("/founders/marketing/library?page=2&next=https://evil.example#frag"),
+      "/founders/marketing/library?page=2",
+      "only the Library's own parameters are kept",
+    );
+    // The wiring: the Library hands each tile its own view; the asset page
+    // validates `from`, links back with it, and keeps it across preview toggles.
+    const library = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
+    assert.match(library, /const thisView = pageHref\(currentPage\);/);
+    assert.match(library, /returnTo=\{thisView\}/);
+    const detail = readFileSync(join(ROOT, "app/founders/marketing/asset/[id]/page.tsx"), "utf8");
+    assert.match(detail, /const libraryBack = libraryReturnPath\(sp\.from\);/);
+    assert.match(detail, /<Link\s+href=\{libraryBack\}/, "the Library link uses the validated view");
+    assert.match(detail, /q\.set\("from", libraryBack\)/, "a preview toggle keeps the way back");
+  });
+
   await check("the page reaches media ONLY through loadLibraryPage (no second signing path)", () => {
     const page = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
     assert.match(page, /loadLibraryPage\(founder\.tenantId,/);
     assert.doesNotMatch(page, /signMediaUrls|createSignedUrl/, "the page must not sign anything itself");
     assert.doesNotMatch(page, /getMarketingAssets\(/, "rows come through the paged loader only");
     assert.match(page, /pageHref\(currentPage \+ 1\)/, "the pager links through libraryHref");
+    // The page signs at most LIBRARY_PAGE_SIZE because it asks for the default
+    // page: an override in the call would quietly undo the cap the checks above
+    // measure through the loader.
+    const call = /loadLibraryPage\(founder\.tenantId,\s*(\{[\s\S]*?\})\s*\)/.exec(page);
+    assert.ok(call, "the page's loadLibraryPage call");
+    assert.doesNotMatch(call![1], /pageSize/, `the page overrides the page size: ${call![1]}`);
+    assert.match(call![1], /\btrack\b/, "and it passes the track filter on");
   });
 
   console.log(`\nlibrary-paging: ${passed} passed, ${failed} failed`);

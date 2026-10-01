@@ -14,6 +14,7 @@ import { CarouselFrame } from "@/components/founders/CarouselFrame";
 import { PhoneFrame, PhoneTextCard } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
 import {
+  assetHref,
   channelLabel,
   isRenderableCarousel,
   lifecycleLabel,
@@ -272,6 +273,7 @@ export function AssetTile({
   slideUrls,
   openReviews = 0,
   presentation = "grid",
+  returnTo,
 }: {
   id: string;
   title: string;
@@ -293,6 +295,8 @@ export function AssetTile({
   slideUrls?: string[];
   openReviews?: number;
   presentation?: LibraryView;
+  /** The Library view this tile is drawn in, so the asset page can link back to it. */
+  returnTo?: string;
 }) {
   const duration = fmtDuration(durationS);
   const platforms = parsePlatforms(platformsRaw);
@@ -331,7 +335,7 @@ export function AssetTile({
           mediaFrame() from this file rather than restating it, which was the
           condition attached to restoring this. */}
       <Link
-        href={`/founders/marketing/asset/${id}`}
+        href={assetHref(id, returnTo)}
         className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
       >
         {title}

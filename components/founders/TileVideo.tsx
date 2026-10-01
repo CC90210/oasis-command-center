@@ -18,7 +18,15 @@
  * view) keeps the browser's controls. `phone` (inside a PhoneFrame) plays the
  * way a Reel does: no control bar over the caption, tap to pause or play, a
  * mute toggle and a thin progress line - so the app's overlay is judged as the
- * audience will see it rather than under a desktop scrubber.
+ * audience will see it rather than under a desktop scrubber. The tap target is
+ * a real button named for what it will do ("Play ..." / "Pause ..."), so the
+ * keyboard and a screen reader can pause it too: a <video> with no controls
+ * takes no focus and has no name.
+ *
+ * `initialOpen` is for the asset page, where the asset IS what the viewer
+ * opened: the player is there from the start (most videos have no poster on
+ * file, so a cover would be a black box) and loads its first frame, but nothing
+ * plays until the viewer presses play. Library tiles never pass it.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -31,6 +39,7 @@ export function TileVideo({
   height,
   title,
   variant = "native",
+  initialOpen = false,
 }: {
   src: string;
   posterUrl?: string | null;
@@ -38,8 +47,10 @@ export function TileVideo({
   height?: number | null;
   title: string;
   variant?: "native" | "phone";
+  /** The asset page only: the player is open from the start and waits for play. */
+  initialOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [paused, setPaused] = useState(true);
   const [muted, setMuted] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -48,7 +59,9 @@ export function TileVideo({
 
   useEffect(() => {
     const v = ref.current;
-    if (!open || !v) return;
+    // Plays only when the viewer opened it from the cover. A player that starts
+    // open (the asset page) waits for its play button: nothing autoplays.
+    if (!open || initialOpen || !v) return;
     // Sound on first, since the viewer just asked for it. A browser that refuses
     // unmuted playback (Safari outside the click's own task) gets muted
     // playback instead; if even that is refused, the play button stays on
@@ -57,7 +70,14 @@ export function TileVideo({
       v.muted = true;
       v.play().catch(() => setPaused(true));
     });
-  }, [open]);
+  }, [open, initialOpen]);
+
+  const togglePlay = () => {
+    const v = ref.current;
+    if (!v) return;
+    if (v.paused) v.play().catch(() => setPaused(true));
+    else v.pause();
+  };
 
   if (open) {
     return (
@@ -67,7 +87,9 @@ export function TileVideo({
           ref={ref}
           src={src}
           poster={posterUrl || undefined}
-          preload="none"
+          // A tile's player loads nothing until play. The asset page's loads its
+          // first frame, which stands in for the poster most videos lack.
+          preload={initialOpen ? "metadata" : "none"}
           controls={!phone}
           loop={phone}
           playsInline
@@ -78,20 +100,27 @@ export function TileVideo({
             const v = e.currentTarget;
             if (phone && v.duration) setProgress(v.currentTime / v.duration);
           }}
-          onClick={(e) => {
-            if (!phone) return;
-            const v = e.currentTarget;
-            if (v.paused) v.play().catch(() => setPaused(true));
-            else v.pause();
-          }}
         />
         {phone && (
           <>
-            {paused && (
-              <span className="pointer-events-none absolute left-1/2 top-1/2 flex h-[14cqw] w-[14cqw] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/55">
-                <Play className="ml-[0.6cqw] h-[6cqw] w-[6cqw] fill-white text-white" />
-              </span>
-            )}
+            {/* Tap anywhere to play or pause, as in the apps - through a real
+                button, so it also takes focus and says what it will do. The
+                mute button is drawn after it and sits on top. */}
+            <button
+              type="button"
+              onClick={togglePlay}
+              aria-label={paused ? `Play ${title}` : `Pause ${title}`}
+              className="absolute inset-0 flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/80"
+            >
+              {paused && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none flex h-[14cqw] w-[14cqw] items-center justify-center rounded-full bg-black/55"
+                >
+                  <Play aria-hidden className="ml-[0.6cqw] h-[6cqw] w-[6cqw] fill-white text-white" />
+                </span>
+              )}
+            </button>
             <button
               type="button"
               onClick={() => {

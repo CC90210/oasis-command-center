@@ -597,7 +597,8 @@ export type Distribution = "live" | "never_posted";
  *
  *  2. IT WOULD HAVE DESYNCED THE PAGE. The Library's pills and grid both filter
  *     in SQL (scopeToLifecycle in lib/founders/marketing-queries.ts, which
- *     mirrors this function and is tested against it), on `published_at` alone.
+ *     mirrors this function and is tested against it; a scheduled asset is in no
+ *     SQL bucket and keeps its own place), on `published_at` alone.
  *     A second signal here that SQL cannot see makes the pills and the
  *     grid disagree — "Posted 3" over an empty grid — and they agreed only
  *     because the field was always undefined. Two code paths deciding one
@@ -986,6 +987,55 @@ export function libraryHref(state: LibraryState, next: LibraryHrefChange): strin
   if (next.page && next.page > 1) params.set("page", String(Math.floor(next.page)));
   const query = params.toString();
   return `/founders/marketing/library${query ? `?${query}` : ""}`;
+}
+
+const LIBRARY_PATH = "/founders/marketing/library";
+/**
+ * Every query parameter the Library page reads, in the order libraryHref writes
+ * them (so a Library URL comes back unchanged); nothing else survives.
+ */
+const LIBRARY_PARAMS = ["group", "track", "channel", "brand", "author", "status", "lifecycle", "view", "page"] as const;
+
+/**
+ * Where the asset page's "Library" link goes: the Library view the asset was
+ * opened from, carried as ?from=, or the Library's front page.
+ *
+ * The link used to be the bare Library URL, so opening an asset from page 3 of
+ * the Clients tab in Grid view and pressing "Library" landed on page 1 of the
+ * OASIS tab in Phone view. `from` is a URL the browser hands back, so it is
+ * validated rather than trusted: it must resolve to this origin's Library page
+ * itself - another host, another path or a protocol trick falls back to the
+ * front page - and only the Library's own parameters are kept. The result is
+ * always a relative path, so the link cannot become an open redirect.
+ */
+export function libraryReturnPath(raw: unknown): string {
+  if (typeof raw !== "string" || !raw || raw.length > 2048) return LIBRARY_PATH;
+  const base = "https://library.invalid";
+  let url: URL;
+  try {
+    url = new URL(raw, base);
+  } catch {
+    return LIBRARY_PATH;
+  }
+  if (url.origin !== base || url.pathname !== LIBRARY_PATH) return LIBRARY_PATH;
+  const params = new URLSearchParams();
+  for (const key of LIBRARY_PARAMS) {
+    const value = url.searchParams.get(key);
+    if (value) params.set(key, value);
+  }
+  const query = params.toString();
+  return query ? `${LIBRARY_PATH}?${query}` : LIBRARY_PATH;
+}
+
+/**
+ * A tile's link to its asset page, carrying the Library view it sits in so the
+ * asset page can link straight back to it. The front page needs no `from`.
+ */
+export function assetHref(id: string, from?: string | null): string {
+  const back = libraryReturnPath(from);
+  return back === LIBRARY_PATH
+    ? `/founders/marketing/asset/${id}`
+    : `/founders/marketing/asset/${id}?from=${encodeURIComponent(back)}`;
 }
 
 /** Which app the phone preview imitates. */

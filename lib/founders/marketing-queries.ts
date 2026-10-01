@@ -65,7 +65,9 @@ function scopeToBrandGroup<T extends {
 }
 
 /**
- * lifecycleOf() as a filter the database runs - for the grid AND the pill counts.
+ * The lifecycle buckets as a filter the database runs - for the grid AND the
+ * pill counts, and for Studio's "awaiting your verdict" line, which links to
+ * the Needs review grid and counts it through getLifecycleCounts().
  *
  * The grid used to filter with its own SQL while the pills bucketed rows in JS
  * through lifecycleOf(), and the two disagreed: "Needs review" counted the
@@ -73,11 +75,16 @@ function scopeToBrandGroup<T extends {
  * the grid behind it did not show them, and "Posted" showed archived rows that
  * the pill filed under Archived. One definition, used by both, ends that.
  *
- * Same precedence as lifecycleOf(): shelved first, then published_at (the world
- * outranks our bookkeeping), then the approved verdict, and everything else is
- * waiting on a verdict. tests/library-paging.test.ts runs every status x
- * published_at pair through this against real SQLite and compares it with
- * lifecycleOf().
+ * NEEDS REVIEW IS DRAFT OR IN REVIEW, NOT YET POSTED - the grid's meaning since
+ * the pills shipped. A scheduled asset is not waiting on a verdict: it has its
+ * own place (Studio's Scheduled stage, ?status=scheduled, and the All view), so
+ * it is in no lifecycle bucket, and neither is a status 'published' row with no
+ * published_at. The pill now counts what the grid shows instead of folding them in.
+ *
+ * Otherwise the precedence of lifecycleOf(): shelved first, then published_at
+ * (the world outranks our bookkeeping), then the approved verdict.
+ * tests/library-paging.test.ts runs every status x published_at pair through
+ * this against real SQLite and compares it with lifecycleOf().
  */
 type LifecycleFilterable = {
   eq: (column: string, value: string) => LifecycleFilterable;
@@ -96,7 +103,7 @@ function scopeToLifecycle<T>(q: T, lifecycle: Lifecycle): T {
     case "approved":
       return f.eq("status", "approved").is("published_at", null) as unknown as T;
     case "needs_review":
-      return f.not("status", "in", "(archived,rejected,approved)").is("published_at", null) as unknown as T;
+      return f.in("status", ["draft", "in_review"]).is("published_at", null) as unknown as T;
   }
 }
 
@@ -558,6 +565,10 @@ export async function getMarketingAssets(
         .from("marketing_asset")
         .select("*", { count: "exact" })
         .eq("tenant_id", tenantId);
+      // Every facet the page offers narrows the grid AND the total behind it. The
+      // track line was dropped once when this builder was written: ?track=paid lit
+      // the Paid pill and printed "N assets - Paid" over every track's assets.
+      if (opts.track) q = q.eq("track", opts.track);
       if (opts.channel) q = q.eq("channel", opts.channel);
       if (opts.author) q = q.eq("author_email", opts.author);
 
@@ -1019,6 +1030,9 @@ async function headCounts<K extends string>(
  * filters with, so a pill and the grid behind it cannot disagree. It used to
  * read every row of the tab and bucket them in JS, which was both a full read
  * per page view and a second definition of the buckets that had drifted.
+ *
+ * Studio's "N awaiting your verdict" is this call's needs_review on the OASIS
+ * tab, the grid its link opens, so the number and the grid it promises agree.
  */
 export async function getLifecycleCounts(
   tenantId: string,

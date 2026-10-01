@@ -21,6 +21,14 @@
  *     preload="none"); every <img> is lazy, async and carries its width and
  *     height; a carousel draws its first slide only; an asset with no media
  *     still shows its copy on the phone instead of a blank tile.
+ *  4. TileVideo, driven frame by frame: the <video> mounts on the cover's click
+ *     and on nothing else (not on mount, not when hydration runs the effects);
+ *     the phone player pauses and plays from a real button whose name says
+ *     which, with the decorative icon hidden from assistive tech; the asset
+ *     page's player (initialOpen) is open from the start with its first frame
+ *     and plays nothing on its own; Library tiles never pass initialOpen.
+ *  5. The slide-order strip's thumbnails are lazy and async, and a tile's link
+ *     carries the Library view it sits in (?from=) for the asset page's way back.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -97,7 +105,25 @@ if (r.status !== 0) {
   console.error(r.stderr || r.stdout);
   throw new Error(`tests/library-phone-preview.render.ts exited ${r.status}`);
 }
-const drawn = JSON.parse(r.stdout) as { frames: Record<string, string>; tiles: Record<string, string> };
+const drawn = JSON.parse(r.stdout) as {
+  frames: Record<string, string>;
+  tiles: Record<string, string>;
+  player: {
+    mount: string;
+    afterHydration: string;
+    afterClick: string;
+    callsAfterClick: string[];
+    playing: string;
+    callsAfterPause: string[];
+    paused: string;
+    callsAfterPlay: string[];
+    openMount: string;
+    openAfterHydration: string;
+    openCalls: string[];
+    nativeAfterClick: string;
+  };
+  slideReorder: string;
+};
 
 check("PhoneFrame draws a 9:19.5 screen with the asset's media inside it", () => {
   for (const [name, html] of Object.entries(drawn.frames)) {
@@ -149,10 +175,9 @@ check("no grid tile renders a <video> on arrival; any tile <video> is preload=\"
   for (const name of ["videoPoster:grid", "videoPoster:phone", "videoBare:grid", "videoBare:phone"]) {
     assert.match(drawn.tiles[name], /aria-label="Play Asset title"/, `${name}: the video waits behind a play button`);
   }
-  // The element that mounts on play, and every other <video> a tile file can
-  // render, is preload="none" in source. A grid tile reaches only these files.
+  // Every other <video> a tile file can render is preload="none" in source. A
+  // grid tile reaches only these files.
   for (const file of [
-    "components/founders/TileVideo.tsx",
     "components/founders/marketing-shared.tsx",
     "components/founders/CarouselFrame.tsx",
     "components/founders/PhoneFrame.tsx",
@@ -164,8 +189,85 @@ check("no grid tile renders a <video> on arrival; any tile <video> is preload=\"
     }
     assert.ok(!/preload="(metadata|auto)"/.test(src), `${file}: no tile media may preload`);
   }
+  // TileVideo's one <video> is the opened one. It preloads only on the asset
+  // page (initialOpen), which no tile passes - checked, drawn, further down.
   const tileVideo = code("components/founders/TileVideo.tsx");
   assert.equal((tileVideo.match(/<video\b/g) ?? []).length, 1, "TileVideo has exactly one <video>, the opened one");
+  assert.deepEqual(
+    tileVideo.match(/preload=\{?[^\s>]*/g),
+    ['preload={initialOpen'],
+    "TileVideo's preload is decided by initialOpen and nothing else",
+  );
+  assert.ok(!/preload="(metadata|auto)"/.test(tileVideo), "TileVideo hardcodes no preloading");
+});
+
+check("a tile's <video> mounts on the cover's click and on nothing else - not on mount, not on hydration", () => {
+  const p = drawn.player;
+  assert.equal(tags(p.mount, "video").length, 0, "a <video> on mount");
+  assert.match(p.mount, /aria-label="Play Asset title"/, "the cover is a named play button");
+  assert.equal(tags(p.afterHydration, "video").length, 0, "the hydration commit (effects) opened the player");
+  const opened = tags(p.afterClick, "video");
+  assert.equal(opened.length, 1, "the click mounts the <video>");
+  assert.equal(attr(opened[0], "preload"), "none", "and it loads nothing before play() asks for it");
+  assert.deepEqual(p.callsAfterClick, ["play"], "the click is what plays it");
+  const native = tags(p.nativeAfterClick, "video");
+  assert.equal(native.length, 1);
+  assert.equal(attr(native[0], "preload"), "none", "the plain grid's player too");
+  assert.ok(/\scontrols=""/.test(native[0]), "with the browser's controls");
+});
+
+check("the phone player pauses and plays from a real button named for what it will do", () => {
+  const p = drawn.player;
+  const named = (html: string, label: string) =>
+    tags(html, "button").filter((b) => attr(b, "aria-label") === label);
+  assert.equal(named(p.afterClick, "Play Asset title").length, 1, "paused: the button says Play");
+  assert.equal(named(p.playing, "Pause Asset title").length, 1, "playing: the button says Pause");
+  assert.equal(named(p.playing, "Play Asset title").length, 0, "and not Play");
+  assert.deepEqual(p.callsAfterPause, ["play", "pause"], "the button pauses the playing video");
+  assert.equal(named(p.paused, "Play Asset title").length, 1, "paused again: it says Play");
+  assert.deepEqual(p.callsAfterPlay, ["play", "pause", "play"], "and plays it again");
+  // The big play glyph is decoration on a named button: hidden from assistive tech.
+  assert.match(
+    p.afterClick,
+    /<button[^>]*aria-label="Play Asset title"[^>]*><span aria-hidden="true"[^>]*><svg\b[^>]*aria-hidden="true"/,
+    "the play glyph inside the button is aria-hidden",
+  );
+  const video = tags(p.afterClick, "video")[0];
+  assert.ok(!/\scontrols=/.test(video), "no desktop control bar over the caption in the phone");
+});
+
+check("the asset page's player is open from the start, shows its first frame, and plays nothing on its own", () => {
+  const p = drawn.player;
+  const v = tags(p.openMount, "video");
+  assert.equal(v.length, 1, "no cover in front of the asset the viewer opened");
+  assert.equal(attr(v[0], "preload"), "metadata", "its first frame stands in for the missing poster");
+  assert.ok(!p.openMount.includes("No cover image on file"), "never the black 'No cover image' box");
+  assert.deepEqual(p.openCalls, [], "nothing autoplays");
+  assert.match(p.openAfterHydration, /aria-label="Play Asset title"/, "it waits for its play button");
+  const detail = code("app/founders/marketing/asset/[id]/page.tsx");
+  assert.match(detail, /<TileVideo\b[^>]*\bvariant="phone"[^>]*\binitialOpen\b/, "the asset page opens its phone player");
+  for (const file of ["components/founders/marketing-shared.tsx", "app/founders/marketing/library/page.tsx"]) {
+    assert.ok(!/initialOpen/.test(code(file)), `${file}: a Library tile stays a cover until play`);
+  }
+});
+
+check("the slide-order thumbnails are lazy and async", () => {
+  const imgs = tags(drawn.slideReorder, "img");
+  assert.equal(imgs.length, 3);
+  for (const img of imgs) {
+    assert.equal(attr(img, "loading"), "lazy", img);
+    assert.equal(attr(img, "decoding"), "async", img);
+  }
+});
+
+check("a tile links to its asset page with the Library view it sits in", () => {
+  const withView = tags(drawn.tiles["returnTo:phone"], "a").map((a) => attr(a, "href"));
+  assert.ok(
+    withView.includes("/founders/marketing/asset/a1?from=%2Ffounders%2Fmarketing%2Flibrary%3Fgroup%3Dclients%26page%3D2%26view%3Dgrid"),
+    `tile links: ${withView.join(", ")}`,
+  );
+  const plain = tags(drawn.tiles["videoPoster:phone"], "a").map((a) => attr(a, "href"));
+  assert.ok(plain.includes("/founders/marketing/asset/a1"), "no view to carry: the bare asset link");
 });
 
 check("every tile <img> is lazy, async and sized; a carousel draws its first slide only", () => {

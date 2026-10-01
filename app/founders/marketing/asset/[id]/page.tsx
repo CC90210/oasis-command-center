@@ -34,6 +34,7 @@ import {
   channelLabel,
   isOwnBrand,
   isRenderableCarousel,
+  libraryReturnPath,
   parsePlatforms,
   parseSlideUrls,
   authorName,
@@ -90,7 +91,7 @@ export default async function AssetDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ frame?: string; chrome?: string; guides?: string }>;
+  searchParams: Promise<{ frame?: string; chrome?: string; guides?: string; from?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
@@ -100,6 +101,9 @@ export default async function AssetDetailPage({
   // the media alone at its own shape, as this page always has.
   const original = sp.frame === "original";
   const guides = sp.guides === "1";
+  // The Library view this asset was opened from (tab, filters, view, page),
+  // validated to the Library's own path; anything else is its front page.
+  const libraryBack = libraryReturnPath(sp.from);
 
   // Null covers both "no such asset" and "not yours" — the caller cannot tell
   // them apart, which is the point. 404, never 403.
@@ -159,12 +163,14 @@ export default async function AssetDetailPage({
 
   // ONE media decision for both views, so the phone and the original can never
   // show different things. In the phone the video plays the way a Reel does
-  // (TileVideo, no control bar over the caption, mounted on play); the
-  // Original view keeps the browser's player for scrubbing.
+  // (TileVideo, no control bar over the caption); the Original view keeps the
+  // browser's player for scrubbing. initialOpen: this page IS the opened asset,
+  // so the player is there from the start with its first frame - not a cover,
+  // which for most videos (no poster on file) was a black "No cover image".
   const mediaEl = isRenderableCarousel(asset.asset_type, slideUrls) ? (
     <CarouselFrame slides={slideUrls} title={asset.title} width={w} height={h} className="h-full w-full" />
   ) : videoUrl && !original ? (
-    <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" />
+    <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
   ) : videoUrl ? (
     <video
       src={videoUrl}
@@ -188,6 +194,8 @@ export default async function AssetDetailPage({
     const nextChrome = next.chrome ?? (sp.chrome === "instagram" || sp.chrome === "tiktok" ? sp.chrome : null);
     if (!nextOriginal && nextChrome) q.set("chrome", nextChrome);
     if (!nextOriginal && (next.guides ?? guides)) q.set("guides", "1");
+    // A preview toggle keeps the way back to the Library view.
+    if (libraryBack !== "/founders/marketing/library") q.set("from", libraryBack);
     const s = q.toString();
     return `/founders/marketing/asset/${asset.id}${s ? `?${s}` : ""}`;
   };
@@ -222,8 +230,10 @@ export default async function AssetDetailPage({
         title={asset.title}
         subtitle={asset.hook || "No hook recorded"}
         action={
+          // Back to the Library view this asset was opened from, not page 1 of
+          // the default tab.
           <Link
-            href="/founders/marketing/library"
+            href={libraryBack}
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
           >
             <ArrowLeft className="h-3.5 w-3.5" />

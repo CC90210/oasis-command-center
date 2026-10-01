@@ -20,8 +20,9 @@
  * writing it. A roadmap note describes the day it was written; the code moves
  * and the note does not, and then it actively misinforms whoever reads it next.
  *
- * What is true is checkable from here: "needs you" counts assets at `in_review`,
- * the tiles and cards all render an em dash rather than a zero when the read is
+ * What is true is checkable from here: "needs you" counts the Library's Needs
+ * review bucket on the OASIS tab (draft or in review, not yet posted) with the
+ * same COUNT as that pill, the tiles and cards all render an em dash rather than a zero when the read is
  * degraded (tests/marketing-degraded-render.test.ts enforces that), and the
  * Performance card links to a tab that is live.
  */
@@ -35,11 +36,13 @@ import { resolveFounder } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_FACETS,
   DEGRADED_MARKETING_SUMMARY,
+  getLifecycleCounts,
   getMarketingFacets,
   getMarketingSummary,
 } from "@/lib/founders/marketing-queries";
 import {
   BRAND_GROUPS,
+  DEFAULT_BRAND_GROUP,
   brandGroupFor,
   type BrandGroupKey,
 } from "@/lib/founders-marketing-core";
@@ -62,9 +65,15 @@ export default async function MarketingPage() {
   // Two reads, one round trip. `summary` is CC's own queue and stays scoped to
   // OASIS's own work; `facets` deliberately spans every brand, because the whole
   // point of the tab counts is to show what is behind the tabs he is NOT on.
-  const [summary, facets] = await Promise.all([
+  const [summary, facets, lifecycle] = await Promise.all([
     safe("marketing.summary", getMarketingSummary(founder.tenantId), DEGRADED_MARKETING_SUMMARY),
     safe("marketing.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    // The Library's lifecycle pills for the OASIS tab: the SAME call, the same
+    // COUNT, that draws "Needs review N" on the page the line below links to.
+    safe("marketing.lifecycle", getLifecycleCounts(founder.tenantId, DEFAULT_BRAND_GROUP), {
+      counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
+      degraded: true,
+    }),
   ]);
 
   // `"—"` on a failed read, never 0. A brand tile reading 0 says "this brand has
@@ -83,7 +92,13 @@ export default async function MarketingPage() {
   // you" while the Library badged all thirteen assets IN REVIEW. Both were
   // reading truthfully from different sources, and the screen whose entire job
   // is "what needs you" was the one that was wrong.
-  const awaitingVerdict = summary.by_status.in_review || 0;
+  //
+  // ONE COUNT FOR THE LINE AND THE GRID IT OPENS. This was by_status.in_review,
+  // while the link lands on the Library's Needs review grid, which also holds
+  // drafts, so the number and the grid it opened differed by every draft. It is
+  // now that grid's own pill count, so the two cannot disagree. A failed count
+  // is not a zero: the degraded branch below renders instead.
+  const awaitingVerdict = lifecycle.degraded ? 0 : lifecycle.counts.needs_review;
 
   // A failed read has no number to show. Returning 0 here would put a measured
   // zero on screen next to a panel that just said the query failed.
@@ -188,13 +203,14 @@ export default async function MarketingPage() {
             </span>
           )}
         </div>
-        {summary.degraded ? (
+        {lifecycle.degraded || summary.degraded ? (
           // NOT "nothing waiting on you". A query failed, so every number on this
           // page is a floor rather than a fact, and saying "nothing" would be a
           // confident lie about CC's own workload. See MarketingSummary.degraded.
+          // The verdict count is its own read now, so its failure lands here too.
           <MarketingEmpty
             headline="Couldn't load your queue"
-            detail="A query failed, so these counts are incomplete — treat them as a floor, not a total. Nothing has been lost; this is a read-side failure. Refresh, and if it persists the server log carries the reason under [marketing:summary]."
+            detail="A query failed, so these counts are incomplete — treat them as a floor, not a total. Nothing has been lost; this is a read-side failure. Refresh, and if it persists the server log carries the reason under [marketing:summary] or [marketing:lifecycle]."
             hint="Showing whatever did load, rather than a zero that would look like good news."
           />
         ) : needsYou === 0 ? (

@@ -91,6 +91,7 @@ import {
   type Track,
 } from "@/lib/founders-marketing-core";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
+import { TileVideo } from "@/components/founders/TileVideo";
 
 export const dynamic = "force-dynamic";
 
@@ -168,9 +169,10 @@ export default async function MarketingLibraryPage({
       degraded: true,
     }),
   ]);
-  const lifecycleTotal = lc.degraded
-    ? 0
-    : LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
+  // EVERY asset in the tab, from the tab's own COUNT. Not the sum of the four
+  // pills: a scheduled asset sits in none of them (it is not waiting on a
+  // verdict), and summing would quietly drop it from "All".
+  const lifecycleTotal = tabCounts.degraded ? 0 : tabCounts.counts[group];
   const assetsOrNull = pageOrNull ? pageOrNull.tiles : null;
   const libraryDegraded = assetsOrNull === null;
   const signed = assetsOrNull ?? [];
@@ -211,6 +213,9 @@ export default async function MarketingLibraryPage({
   const here = { group, track, channel, brand, author, status, lifecycle, view };
   const filterHref = (next: LibraryHrefChange) => libraryHref(here, next);
   const pageHref = (n: number) => filterHref({ page: n });
+  // This exact view - tab, filters, view and page - for the asset page's
+  // "Library" link to come back to.
+  const thisView = pageHref(currentPage);
 
   const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
   const filtered = !!(track || channel || brand || author || status || lifecycle);
@@ -331,18 +336,17 @@ export default async function MarketingLibraryPage({
       {group === "clients" && (!brand || brand === "arthrisil") && (
         <Card title="Arthrisil · Social-proof edit V6" subtitle="Client creative · Internal review · 48s · 9:16">
           <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
-            <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
-              {/* preload="none": no video loads on arrival anywhere in the Library. */}
-              <video
-                className="mx-auto block max-h-[70vh] w-full bg-black object-contain"
-                controls
-                playsInline
-                preload="none"
-                poster="/media/arthrisil-marketing/end-card-preview.png"
-              >
-                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v6.mp4" type="video/mp4" />
-                Your browser does not support HTML video.
-              </video>
+            {/* The same lazy player as every Library tile: a cover until someone
+                presses play, then a <video>. It used to mount a <video> on
+                arrival, poster and all, whenever the Clients tab opened. */}
+            <div className="mx-auto aspect-[9/16] max-h-[70vh] w-full overflow-hidden rounded-2xl border border-bg-border bg-black">
+              <TileVideo
+                src="/media/arthrisil-marketing/arthrisil-social-proof-v6.mp4"
+                posterUrl="/media/arthrisil-marketing/end-card-preview.png"
+                width={1080}
+                height={1920}
+                title="Arthrisil social-proof edit V6"
+              />
             </div>
             <div className="space-y-4">
               <div>
@@ -563,6 +567,7 @@ export default async function MarketingLibraryPage({
                 mediaH={mediaH}
                 openReviews={asset.open_reviews}
                 presentation={view}
+                returnTo={thisView}
               />
             ))}
           </div>
