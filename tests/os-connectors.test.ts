@@ -403,11 +403,19 @@ for (const a of OASIS_ADDONS) {
     /\$|price|download|buy|free trial/i,
     `${a.name}: nothing sells or ships an add-on in Phase 1`,
   );
+  // OASIS's own workspace links the app's install guide in OASIS's own repo.
+  assert.match(a.installGuide.href, /^https:\/\/github\.com\/CC90210\//, `${a.name}: install guide is OASIS's own repo`);
+  assert.ok(a.installGuide.label.trim(), `${a.name}: install guide needs a label`);
 }
-assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.platforms, /^Windows$/);
+// Whispr's macOS port merged on 2026-09-26 and its README now carries a macOS
+// section, so the card says both (S1-A1; decision 24).
+assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.platforms, /^macOS and Windows$/);
+assert.match(OASIS_ADDONS.find((a) => a.slug === "oasis-whispr")!.summary, /Mac and Windows/);
 const billing = read("app/settings/billing/page.tsx");
 assert.match(billing, /SUPPORT_FORM_PATH/, "the add-on request must go through the existing support form");
+assert.match(billing, /viewer\.access\.oasisWorkspace/, "the page must branch on whose workspace it is (S1-A2)");
 assert.match(read("components/settings/AddonCard.tsx"), /Ask OASIS to add this/);
+assert.match(read("components/settings/AddonCard.tsx"), /Built by OASIS/);
 assert.doesNotMatch(billing + read("components/settings/AddonCard.tsx"), /\$\s?\d|mailto:/);
 
 // ─── 5. Settings sections: operator-only stays operator-only ────────────────

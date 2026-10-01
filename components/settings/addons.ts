@@ -31,22 +31,29 @@ export type AddonDef = {
   facts: readonly string[];
   /** What leaves the machine, stated plainly. */
   privacy: string;
+  /**
+   * The app's own install guide, shown only on OASIS's workspace (the one
+   * that built it): a client's card routes a request to OASIS instead.
+   */
+  installGuide: { href: string; label: string };
 };
 
 export const OASIS_ADDONS: readonly AddonDef[] = [
   {
     slug: "oasis-whispr",
     name: "OASIS Whispr",
-    summary: "Local, private dictation for Windows",
+    summary: "Local, private dictation for Mac and Windows",
     icon: "/connectors/addons/oasis-whispr.png",
-    platforms: "Windows",
+    platforms: "macOS and Windows",
     facts: [
       "Hold Ctrl and talk, or tap it twice to talk hands-free. The words are typed into whatever window you are already in.",
+      "Ctrl is only the default: any key or combination can be the shortcut, Fn on a Mac included, chosen in Settings.",
       "About 1 to 1.5 seconds from letting go to edited text.",
-      "Starts with Windows and sits in the background; any key or combination can be the shortcut.",
+      "Starts at login (a Startup shortcut on Windows, a LaunchAgent on a Mac) and sits in the background.",
     ],
     privacy:
-      "The speech model runs on your PC, with no OASIS account, key or server. The one step that leaves the machine is the AI edit that turns speech into written text, which runs through the Claude Code or OpenCode you are already logged into. Switch it off and nothing leaves at all.",
+      "The speech model runs on your computer, with no OASIS account, key or server. The one step that leaves the machine is the AI edit that turns speech into written text, which runs through the Claude Code or OpenCode you are already logged into. Switch it off and nothing leaves at all.",
+    installGuide: { href: "https://github.com/CC90210/Oasis-Wispr#readme", label: "Install guide" },
   },
   {
     slug: "oasis-vision",
@@ -61,5 +68,6 @@ export const OASIS_ADDONS: readonly AddonDef[] = [
     ],
     privacy:
       "Runs on your machine, with no account, no telemetry and no API key required to start. The data stays on the computer that fetched it.",
+    installGuide: { href: "https://github.com/CC90210/oasis-vision#install", label: "Install guide" },
   },
 ];
