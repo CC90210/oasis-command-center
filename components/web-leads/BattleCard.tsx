@@ -1,176 +1,62 @@
 "use client";
 
 /**
- * BattleCard — the whole case against one prospect's website, on one screen,
- * for a rep who is already on the phone.
+ * BattleCard — what a rep needs on screen while they are on the phone with one
+ * prospect, and nothing they do not.
  *
- * ═══ WHY A PAGE AND NOT A DRAWER ════════════════════════════════════════════
+ * ═══ THE COMPACT CARD (Adon, 2026-10-01) ════════════════════════════════════
  *
- * WebLeadDetail is a 28rem drawer over the leads table, and that is the right
- * shape for triage: glance, decide, close. It is the wrong shape for a call.
- * Adon: *"I want this page to be something that they can literally look at
- * while they're on the phone with the client, based off of our entire analysis
- * of their website and their current online footprint."* A rep mid-sentence
- * cannot scroll a narrow column looking for the thing they were about to say.
- * So: full width, with the call-critical blocks open in front of them.
+ * "Compact the battle card to make only the useful information that's going
+ * to actually help us on sale... there's a lot of redundancy here... it's
+ * just way too much for me to be actually going through each one."
  *
- * ═══ PROGRESSIVE DISCLOSURE (Adon, 2026-08-31) ══════════════════════════════
+ * The card had grown to fifteen blocks, nine of them open by default, and a
+ * third of them said the same thing twice: two openers built from the same
+ * worst gap, an objection and a build line inside the opener that the
+ * objection console and the build list below already carried, two separate
+ * sell-lists, three depths of the same audit (the shape chart, the fault
+ * list, the raw crawl) plus a WebGL radar and a 3D arena. It is now seven,
+ * read top to bottom in the order a call happens:
  *
- * The card originally rendered everything open, on the theory that any click
- * is a click a rep will not make while a stranger is waiting. Adon reviewed it
- * in use and reversed that: "it's just so much information that's in front of
- * your face." The resolution keeps both truths (see BattleSection.tsx):
+ *   1. Header          who to ask for, the number, their site, the score and
+ *                      the one sentence that makes the score mean something.
+ *   2. Before you dial what we have already sent them, the directory's facts,
+ *                      and how far to trust this card (closed).
+ *   3. The script      say this, ask this and stop talking, then why it costs
+ *                      them. The reserve statistic sits under it.
+ *   4. Objections      ranked for this business, one-tap log.
+ *   5. What we would build for them
+ *                      the lead's own ranked catalogue, with the wider
+ *                      industry list folded underneath it.
+ *   6. Proof           rivals, every failing check, online presence and the
+ *                      raw crawl, for when a prospect pushes back (closed).
+ *   7. Log this call   the one write surface, never collapsible.
  *
- *   - Every section is collapsible, and the ones a rep reads WHILE dialing
- *     default OPEN: the lead line, the opening script, the two graphs, the
- *     named competitors, the call log. Nothing mid-call costs a click.
- *   - The reference sections default CLOSED behind a one-line teaser naming
- *     what is inside: the directory facts, the brush-offs, the full fault
- *     list, the raw crawl. tests/web-leads-battlecard.test.ts pins the map so
- *     a later edit cannot silently collapse the opening script.
- *   - State persists per rep in localStorage; "Expand all" restores the
- *     original everything-open page in one click.
- *   - The two graphs gained SELECTION instead of more panels: tapping a radar
- *     axis or a fix-first row opens the detail for that one dimension in
- *     place, which is what lets the full fault list live behind a disclosure
- *     without hiding anything a rep needs mid-sentence.
- *
- * ═══ THE FUTURIST CHROME (Adon, 2026-08-31 round 2; 2026-09-01 round 3) ═════
- *
- * Round 2 ("even nicer and 3D, a futuristic look"): glass panels with a lit
- * top edge (BattleSection + Panel share it), blueprint grid + HUD corner
- * brackets on the hero, the score counting up inside a ring that draws once,
- * a perspective-tilted radar, competitor cards that tilt in 3D under the
- * cursor, glow hovers on the controls.
- *
- * Round 3 ("Iron Man" -- the full HUD): the radar became a HOLOGRAM STACK
- * (four SVG layers lifted to different Z depths inside one preserve-3d tilt,
- * so they parallax against each other -- see the Radar docblock), every
- * dimension gained a fixed identity hue worn on its vertex, label, list dot
- * and meter, the benchmark competitor wears GOLD everywhere it appears, the
- * score ring became an arc reactor (gradient stroke, pulsing halo), numerals
- * and headings moved to a display face (Chakra Petch, self-hosted at build --
- * zero runtime requests), and the radar carries one piece of AMBIENT
- * decorative motion, a slowly rotating tick ring.
- *
- * Round 4 (2026-09-01, "take a big leap... I'm saying 3D imaging"): the radar
- * became a REAL WebGL hologram -- see Radar3D.tsx -- with the 2D SVG stack
- * kept intact as the automatic fallback (phones, reduced motion, no WebGL,
- * failed import: the card degrades to round 3, never to blank). A plexus
- * particle canvas breathes behind the hero (the video-background ask, with
- * no video asset), meters became segmented HUD readouts, the distribution
- * strip went neon, and telemetry values moved to JetBrains Mono
- * (--battle-data) beside Space Grotesk display (--battle-display), both from
- * the already-vendored woff2.
- *
- * Round 5 (2026-09-01, "even cooler... really outlining the graph of what
- * type of bad it is"): the display face became Chakra Petch with Orbitron on
- * the hero numeral alone (both vendored, see OFL.md), the WebGL radar gained
- * real bloom, beam sheaths, a radar sweep and PROJECTED LABELS so the chart
- * names its own axes (Radar3D.tsx), every Panel wears the hero's corner
- * marks, and the shape section opens with the DESIGNATION PLATE: the
- * hand-written name for the shape of this lead's problem (lead-profile.ts --
- * "Invisible storefront", "Full rebuild"), chosen by arithmetic over the
- * same scores the radar draws, so a rep says what the graph shows.
- *
- * Round 7 (2026-09-01, "more interactive... truly next generation"): the
- * stage became something a rep OPERATES, not just watches. Grounded in the
- * FUI research (Jayse Hansen's Iron Man HUD rules: amplify the operator,
- * never distract; ground the fantasy in real instrumentation) and the
- * standard three.js interaction vocabulary (damped inertia, eased camera
- * flights). The hologram BOOTS -- assembles itself once on mount; tapping a
- * beam, a label, a list row or a designation-plate chip FLIES the stage to
- * that dimension behind one shared selection owned by ScoredBody; a
- * targeting reticle in the dimension's identity hue assembles at the
- * selected beam's foot; a released drag carries inertia and decays;
- * double-click resets the camera. Hover only brightens -- selection is a
- * deliberate tap, so casual pointer travel never yanks the camera. The
- * sheaths and score surface moved to hand-rolled fresnel shaders
- * (Radar3D.tsx header explains which of them may animate and why).
- *
- * Round 8 (2026-09-01, "maximize it without any expenses... open sourced
- * repos if you need"): everything zero-asset, zero-dependency. SOUND,
- * synthesized from oscillators at play time (battle-sfx.ts -- no audio
- * files exist and none may be added), attached to the operator's own
- * actions only, OFF BY DEFAULT because this card sits next to a live phone
- * call, opt-in per rep via the SFX toggle on the stage. The designation
- * name resolves through a glyph DECODE on mount (a string permutation, not
- * a library; aria-label carries the real name). The targeting reticle
- * gained a lock-on burst. Patterns mined from the open-source FUI space
- * (Arwes's sound-per-interaction grammar) without taking the dependency.
- *
- * Round 9 (2026-09-02, the audit round: "a full audit... the final
- * iteration that will be a 10/10"): physics and wayfinding. No visual
- * state may SNAP -- the stage's selection and hover emphasis blend through
- * frame-rate-normalized damped mixes (Radar3D), meters draw with transform
- * instead of width (compositor, not layout), sections animate open/close
- * PHYSICALLY via grid-rows with closed content inert, every eyebrow label
- * speaks the display face, and the SectionToolbar became the card's
- * COMMAND STRIP: a sticky HUD tab per section, registry-driven, each
- * showing its drawer's state and jumping a rep anywhere in one tap.
- * All pinned by §8j.
- *
- * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
- * identical treatment -- rule 1 survives the decoration); ambient motion is
- * confined to decorative layers that carry no data (the rotating tick ring,
- * the particle drifts, the idle orbit of the 3D stage -- the pillars and
- * surfaces on that stage encode scores and rotate rigidly with it, never by
- * themselves); pointer-driven motion is the rep's own hand echoed back; and
- * `prefers-reduced-motion` flattens ALL of it -- tilts render flat, fades
- * render settled, the ring, count and rotation render finished and still,
- * and the WebGL scene is simply never mounted (rule 4). The old "CSS 3D,
- * deliberately not three.js" weight rule was overridden by the operator for
- * this one chart; what survives is its cost discipline -- three.js is
- * code-split and loaded only where the scene actually runs (Radar3D.tsx).
- *
- * ═══ THE COMPETITOR SECTION IS THE POINT ════════════════════════════════════
- *
- * Every number this feature produced until now was absolute, and an absolute
- * number is unsellable -- a prospect has no idea whether 34 is normal for a
- * hair salon. We own the only honest comparison available: 23,195 Canadian
- * sites scored by the same model on the same 49 checks. Every business in the
- * same industry and city is a competitor and is already measured, by name, with
- * a URL the prospect can open while the rep is still talking. See
- * lib/web-leads/competitors.ts.
+ * The HUD rounds of 2026-08-31 to 2026-09-02 (particle field, scanlines, the
+ * WebGL radar, the 3D arena, the designation plate, sound, the glyph decode,
+ * the count-up ring) are removed, not hidden. They are in git history if they
+ * are ever wanted back; none of them told a rep what to say.
  *
  * ═══ THE RULES THIS FILE DOES NOT GET TO BREAK ══════════════════════════════
  *
- * 1. NO COLOUR IS KEYED TO A SCORE. Colour on this card answers exactly two
- *    questions and neither is "how good is it": WHICH area (each dimension
- *    wears one fixed hue from DIM_HUES -- trust is that blue at 4 and at 94)
- *    and WHOSE mark (the prospect is always cyan, the benchmark competitor is
- *    always gold). The palette is deliberately cool-spectrum with no
- *    traffic-light red or green, because a red 22 renders a judgement the
- *    measurement does not support, and a rep who sees red says something they
- *    cannot back up. tests/web-leads-guards.test.ts still bans the verdict
- *    colour classes outright in this file, and selection only BRIGHTENS a
- *    dimension's own hue -- it follows the rep's tap, never the value.
+ * 1. NO COLOUR IS KEYED TO A SCORE. A red 22 renders a judgement the
+ *    measurement does not support, and a rep who sees red says something
+ *    they cannot back up. tests/web-leads-guards.test.ts bans the verdict
+ *    colour classes in this file outright.
  *
- * 2. THE THREE NON-SCORED STATES RENDER AS SENTENCES. Never a zero, never a
- *    blank, and above all never an empty chart -- a radar with all seven axes
- *    at the origin for a site our crawler was blocked from is a fabricated
- *    accusation with a nice gradient on it.
+ * 2. THE NON-SCORED STATES RENDER AS SENTENCES. Never a zero, never a blank,
+ *    never an empty chart for a site our crawler could not read.
  *
  * 3. EVERY WORD IS HAND-WRITTEN. remedies.ts, angles.ts and evidence.ts are
  *    fixed tables rendered verbatim. Nothing on this page is generated per
  *    lead, because a model writing sales copy will eventually assert a
  *    measurement we never took and a rep will say it aloud to a stranger.
  *
- * 4. `prefers-reduced-motion` DISABLES ALL OF IT. Charts animate once on mount
- *    and never again; under reduced motion they simply appear. A rep on a call
- *    does not need things moving.
- *
- * ═══ WHY THE CHARTS ARE HAND-ROLLED SVG ═════════════════════════════════════
- *
- * recharts is in package.json, and it is deliberately not used here. Three
- * reasons: it ships its own colour defaults into a surface whose central rule
- * is that no colour may be keyed to a score, it renders a client-side
- * responsive container that reflows after paint (a chart that resizes under a
- * rep mid-sentence), and none of these four charts is complex enough to earn
- * ~90KB of it. A radar is seven points on a circle.
+ * 4. `prefers-reduced-motion` DISABLES ALL OF IT. What little still moves
+ *    (the catalogue's meters drawing once) simply appears.
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import localFont from "next/font/local";
 import { ArrowLeft, ChevronDown, ExternalLink, Phone } from "lucide-react";
@@ -179,37 +65,26 @@ import { assessTrust, type TrustAssessment } from "@/lib/web-leads/trust";
 import type { CompetitorContext } from "@/lib/web-leads/competitors";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
-import { remedyFor } from "@/lib/web-leads/remedies";
 import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { ObjectionConsole } from "./ObjectionConsole";
-import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
-import { hueFor, GOLD, CYAN } from "./battle-hud";
-import { Meter, MeasuredLine, RemedyLines } from "./audit-parts";
+import { BattleSection, BattleSections, SectionToolbar } from "./BattleSection";
+import { MeasuredLine, RemedyLines } from "./audit-parts";
 import { CapabilityCatalogue } from "./CapabilityCatalogue";
 import { hasLiveWebsite } from "@/lib/web-leads/automations-match";
-import { Radar3D } from "./Radar3D";
-import { CompetitorArena3D } from "./CompetitorArena3D";
-import { sfx } from "./battle-sfx";
-import { designateLead } from "@/lib/web-leads/lead-profile";
 import { PresenceBlock } from "./PresenceBlock";
 import type { OnlinePresence } from "@/lib/web-leads/presence";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
 /**
- * The display face for the HUD (round 3: "a nicer font"; round 5, Adon: "a
- * nicer, cooler looking font"). Round 4 borrowed the marketing site's Space
- * Grotesk; round 5 gives the card its OWN voice: Chakra Petch, a squared
- * mechanical face drawn for instrument panels -- it reads as HUD chrome in a
- * section title and stays legible in a 10px tracking-wide label. Vendored
- * latin woff2 in app/fonts/ (from @fontsource, see OFL.md), loaded with
- * next/font/local, never next/font/google: tests/font-selfhost.test.ts bans
- * the build-time Google fetch that failed two deploys in August. Scoped to
- * this card through a CSS variable on its root; nothing outside the battle
- * card inherits it.
+ * The display face for section labels: Chakra Petch, vendored latin woff2 in
+ * app/fonts/ (from @fontsource, see OFL.md), loaded with next/font/local,
+ * never next/font/google: tests/font-selfhost.test.ts bans the build-time
+ * Google fetch that failed two deploys in August. Scoped to this card through
+ * a CSS variable on its root.
  */
 const displayFont = localFont({
   src: [
@@ -221,20 +96,9 @@ const displayFont = localFont({
 });
 
 /**
- * The instrument numeral: Orbitron, for the hero score ONLY. One weight, one
- * place -- the arc reactor gets a dial face and nothing else does, which is
- * what keeps it special. Same vendored-woff2 discipline as the other faces.
- */
-const numeralFont = localFont({
-  src: [{ path: "../../app/fonts/Orbitron-700.woff2", weight: "700", style: "normal" }],
-  variable: "--battle-numeral",
-});
-
-/**
- * The telemetry face: JetBrains Mono (also already vendored, also loaded
- * locally) for every measured value -- scores, points, crawl readouts. A
- * monospaced figure reads as an instrument, and two different values can
- * never render at two different widths mid-call.
+ * The telemetry face: JetBrains Mono (already vendored, loaded locally) for
+ * measured values. Two different values never render at two different widths
+ * mid-call.
  */
 const dataFont = localFont({
   src: [
@@ -243,12 +107,6 @@ const dataFont = localFont({
   ],
   variable: "--battle-data",
 });
-
-// The identity palette (one fixed hue per dimension, cyan = prospect,
-// GOLD = benchmark) moved to ./battle-hud.ts so the WebGL radar shares the
-// exact same colours -- two charts disagreeing about which blue is "trust"
-// is the palette version of two copies of an address. Full rationale and the
-// identity-never-verdict rule live in that module's header.
 
 type Payload = {
   lead: WebLead;
@@ -270,9 +128,7 @@ type Fetched =
  *
  * Read through an effect rather than at render so the server and the first
  * client paint agree -- reading matchMedia during render is a hydration
- * mismatch. It starts `false` and corrects on mount, which means at worst one
- * frame of intent before everything stops; starting `true` instead would cost
- * every other user their mount animation on the first frame.
+ * mismatch.
  */
 function useReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
@@ -287,12 +143,8 @@ function useReducedMotion(): boolean {
 }
 
 /**
- * Flips true one frame after mount, so every chart can transition from its
- * empty state to its real one exactly once.
- *
- * ONCE is the whole point: a chart that redraws every time a rep scrolls or a
- * sibling re-renders is a distraction during a call, not a feature. `drawn`
- * never goes back to false, so re-renders keep the final geometry.
+ * Flips true one frame after mount, so the catalogue's meters can draw from
+ * empty to their real value exactly once, and never again on a re-render.
  */
 function useDrawOnce(reduced: boolean): boolean {
   const [drawn, setDrawn] = useState(false);
@@ -302,60 +154,6 @@ function useDrawOnce(reduced: boolean): boolean {
     return () => cancelAnimationFrame(raf);
   }, [reduced]);
   return drawn;
-}
-
-/**
- * Counts the hero score up from zero, once, on mount. Pure theatre, so it obeys
- * rule 4 twice over: reduced motion renders the final number immediately, and
- * the animation never replays. The real value is mirrored in an sr-only span at
- * the call site so assistive tech never hears an intermediate frame.
- */
-function useCountUp(target: number, reduced: boolean): number {
-  const [value, setValue] = useState(0);
-  useEffect(() => {
-    if (reduced) { setValue(target); return; }
-    let raf = 0;
-    const started = performance.now();
-    const duration = 700;
-    const tick = (now: number) => {
-      const p = Math.min(1, (now - started) / duration);
-      const eased = 1 - Math.pow(1 - p, 3);
-      setValue(Math.round(eased * target));
-      if (p < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, reduced]);
-  return value;
-}
-
-/**
- * Resolves `text` through a brief glyph scramble, once, on mount -- the
- * decode-in every FUI plate uses (round 8, zero-asset: it is a string
- * permutation, not an animation library). Reduced motion renders the final
- * text immediately, and the caller carries the real text in an aria-label
- * so assistive tech never hears an intermediate frame.
- */
-function useDecode(text: string, reduced: boolean): string {
-  const [display, setDisplay] = useState(reduced ? text : "");
-  useEffect(() => {
-    if (reduced) { setDisplay(text); return; }
-    const GLYPHS = "<>/|=+*#%";
-    const TOTAL = 22;
-    let frame = 0;
-    let raf = 0;
-    const step = () => {
-      frame++;
-      const solved = Math.floor((frame / TOTAL) * text.length);
-      let out = text.slice(0, solved);
-      for (let i = solved; i < text.length; i++) out += text[i] === " " ? " " : GLYPHS[(i * 7 + frame) % GLYPHS.length];
-      setDisplay(frame >= TOTAL ? text : out);
-      if (frame < TOTAL) raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [text, reduced]);
-  return display;
 }
 
 const fmt = (n: number) => n.toLocaleString("en-US");
@@ -370,46 +168,33 @@ function formatDate(iso: string): string {
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <h2 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.18em] text-fg-muted [font-family:var(--battle-display)]">
-      {/* The HUD tab: a small lit dash before every section name, the same
-          accent at every score. Purely typographic chrome. */}
-      <span aria-hidden className="h-px w-3 shrink-0 bg-accent/60" />
+    <h2 className="text-[10px] font-bold uppercase tracking-[0.18em] text-fg-muted [font-family:var(--battle-display)]">
       {children}
     </h2>
   );
 }
 
+/** A small uppercase label inside a section. */
+function Label({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
+      {children}
+    </p>
+  );
+}
+
 function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <section className={`relative overflow-hidden rounded-xl border border-bg-border bg-bg-panel/75 p-5 shadow-card backdrop-blur-sm lg:p-6 ${className}`}>
-      {/* Same lit top edge as BattleSection, so the two shells read as one
-          system whether a block collapses or not. Keyed to nothing. */}
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent"
-      />
-      {/* HUD corner marks, echoing the hero's: every instrument panel on the
-          card wears the same frame. Constant chrome, keyed to nothing. */}
-      <span aria-hidden className="pointer-events-none absolute right-2 top-2 h-3 w-3 border-r border-t border-accent/25" />
-      <span aria-hidden className="pointer-events-none absolute bottom-2 left-2 h-3 w-3 border-b border-l border-accent/25" />
+    <section className={`rounded-xl border border-bg-border bg-bg-panel p-5 lg:p-6 ${className}`}>
       {children}
     </section>
   );
 }
 
-/* `RemedyLines`, `UNMEASURABLE_CHECKS` and `MeasuredLine` used to live here,
-   module-private. Task 5 (2026-09-14) moved the two renderers to
-   `./audit-parts` and the table to `lib/web-leads/check-evidence.ts`, because
-   the capability catalogue needed all three and, unable to import them,
-   reimplemented them: three unintended differences appeared between the two
-   copies inside one task. Both surfaces now render the same markup from the
-   same source. Nothing about what this card draws changed. */
-
 /**
- * The honest-sentence panel that replaces the entire scored body when trust
- * says the stored score cannot be stood behind (lib/web-leads/trust.ts).
- * A sentence, never a chart -- the same discipline as NotScored (rule 2).
- * The re-check control lives on the MeasurementHonesty panel directly above.
+ * The honest-sentence panel that replaces the scored body when trust says the
+ * stored score cannot be stood behind (lib/web-leads/trust.ts). A sentence,
+ * never a chart -- the same discipline as NotScored (rule 2).
  */
 function UntrustedPanel({ hide }: { hide: NonNullable<TrustAssessment["hide"]> }) {
   return (
@@ -417,26 +202,40 @@ function UntrustedPanel({ hide }: { hide: NonNullable<TrustAssessment["hide"]> }
       <SectionTitle>Why there is no score</SectionTitle>
       <p className="mt-3 max-w-3xl text-xl font-semibold leading-snug text-fg">{hide.headline}</p>
       <p className="mt-3 max-w-3xl text-sm leading-relaxed text-fg-muted">{hide.detail}</p>
+      <p className="mt-3 text-xs text-fg-dim">To re-measure the site, open &ldquo;Before you dial&rdquo; above.</p>
     </Panel>
   );
 }
 
 /**
- * MeasurementHonesty — what this card knows about its OWN reliability, in one
- * always-visible strip: URL-ownership state, trust warnings, what "measured"
- * means, and the one-lead re-check control (Adon, 2026-09-01: fix bad cards
- * one at a time instead of re-crawling 30,000).
- *
- * Copy rules as everywhere: hand-written, no verdict colours (the verified
- * line uses the constant cyan every telemetry accent uses, worn identically
- * whatever the verdict), no em dashes, nothing generated.
+ * Trust warnings, shown OUTSIDE every drawer and only when there are any. A
+ * clean card shows nothing here; a card a rep should be careful with says so
+ * before they read a single line of the script.
+ */
+function TrustWarnings({ warnings }: { warnings: TrustAssessment["warnings"] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Panel className="space-y-1.5">
+      <SectionTitle>Read this before you trust the numbers</SectionTitle>
+      {warnings.map((w) => (
+        <p key={w.code} className="text-sm text-fg-muted">{w.line}</p>
+      ))}
+    </Panel>
+  );
+}
+
+/**
+ * What this card knows about its OWN reliability: URL-ownership state, what
+ * "measured" means, and the one-lead re-check control (Adon, 2026-09-01: fix
+ * bad cards one at a time instead of re-crawling 30,000). Content only; it
+ * lives inside the "Before you dial" drawer. The warnings themselves render
+ * outside every drawer, in TrustWarnings.
  */
 function MeasurementHonesty({
-  audit, verification, warnings, hidden, recheck, canMutate, busy, postError, onRecheck,
+  audit, verification, hidden, recheck, canMutate, busy, postError, onRecheck,
 }: {
   audit: AuditResult;
   verification: UrlVerification;
-  warnings: TrustAssessment["warnings"];
   hidden: boolean;
   recheck: RecheckStatus | null;
   canMutate: boolean;
@@ -449,21 +248,17 @@ function MeasurementHonesty({
   const open = recheck !== null && (recheck.status === "pending" || recheck.status === "running");
 
   return (
-    <Panel>
-      <SectionTitle>How much to trust this card</SectionTitle>
-      <div className="mt-3 space-y-2 text-xs leading-relaxed">
+    <div>
+      <Label>How much to trust this card</Label>
+      <div className="mt-2 space-y-2 text-xs leading-relaxed">
         {verification.verdict === "verified" && (
           <p className="text-fg-muted">
-            <span className="font-medium" style={{ color: "#7dd3fc" }}>Ownership confirmed.</span> This website was
-            verified as this business&apos;s own site
-            {verification.verifiedAt ? ` on ${formatDate(verification.verifiedAt)}` : ""}.
+            <span className="font-medium text-fg">Ownership confirmed.</span> This website was verified as this
+            business&apos;s own site{verification.verifiedAt ? ` on ${formatDate(verification.verifiedAt)}` : ""}.
           </p>
         )}
-        {warnings.map((w) => (
-          <p key={w.code} className="text-fg-muted">{w.line}</p>
-        ))}
         {audit.state === "scored" && !hidden && (
-          <p className="text-fg-dim [font-family:var(--battle-data)]">
+          <p className="text-fg-dim">
             Every number on this card was measured by our crawler on {formatDate(audit.measuredAt)}. Nothing is
             estimated; where we could not measure something, the card says so in words instead of showing a number.
           </p>
@@ -474,12 +269,12 @@ function MeasurementHonesty({
         type="button"
         onClick={() => setShowHow((v) => !v)}
         aria-expanded={showHow}
-        className="mt-3 rounded text-[11px] font-semibold text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+        className="mt-2 rounded text-[11px] font-semibold text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
       >
         {showHow ? "Hide how we measure" : "How we measure, and what we cannot see"}
       </button>
       {showHow && (
-        <p className="mt-2 max-w-3xl text-xs leading-relaxed text-fg-dim motion-safe:animate-fade-in">
+        <p className="mt-2 max-w-3xl text-xs leading-relaxed text-fg-dim">
           Our crawler reads the homepage&apos;s raw source and up to three of its stylesheets, once. It does not run
           the site&apos;s code the way a browser does, so sites that build their page in the browser can look empty to
           it, and it does not visit other pages, so a contact form living on a contact page is invisible to the
@@ -488,9 +283,9 @@ function MeasurementHonesty({
         </p>
       )}
 
-      <div className="mt-4 border-t border-bg-border pt-3">
+      <div className="mt-3 border-t border-bg-border pt-3">
         {open ? (
-          <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
+          <p className="text-xs text-fg-muted">
             Re-check {recheck.status === "running" ? "in progress" : "queued"}, requested{" "}
             {formatDate(recheck.requestedAt)}. This card refreshes itself when the new measurement lands, usually
             within a minute or two.
@@ -507,13 +302,14 @@ function MeasurementHonesty({
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="Correct website link (optional)"
-                className="min-w-0 flex-1 rounded-lg border border-bg-border bg-bg-raised/50 px-3 py-2 text-xs text-fg placeholder:text-fg-faint focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 [font-family:var(--battle-data)]"
+                aria-label="Correct website link (optional)"
+                className="min-w-0 flex-1 rounded-lg border border-bg-border bg-bg-raised/50 px-3 py-2 text-xs text-fg placeholder:text-fg-faint focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
               />
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => onRecheck(url.trim() || undefined)}
-                className="shrink-0 rounded-lg border border-accent/40 px-4 py-2 text-xs font-semibold text-fg transition-[color,border-color,box-shadow] hover:border-accent/70 hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:opacity-50 motion-reduce:transition-none"
+                className="shrink-0 rounded-lg border border-bg-border px-4 py-2 text-xs font-semibold text-fg transition-colors hover:border-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:opacity-50 motion-reduce:transition-none"
               >
                 {busy ? "Queuing…" : "Re-check this site now"}
               </button>
@@ -538,7 +334,7 @@ function MeasurementHonesty({
           </p>
         )}
       </div>
-    </Panel>
+    </div>
   );
 }
 
@@ -546,434 +342,6 @@ function MeasurementHonesty({
  *  points earned by passing checks, out of the area's 100. */
 function earnedPoints(d: DimensionProfile): number {
   return d.checks.reduce((n, c) => n + (c.has ? c.points : 0), 0);
-}
-
-/* `Meter` moved to `./audit-parts` with the same two callers it always had
-   plus the capability row, which had grown a near-copy of it without the tick
-   overlay. See that file. */
-
-/**
- * ParticleField — the drifting plexus behind the hero (Adon, 2026-09-01:
- * "have a video background, whatever it is"). A 2D canvas, ~70 points and
- * the lines between near neighbours: the living-backdrop effect a looping
- * video would give, with no licensed asset, no network fetch, and a couple
- * of kilobytes of code. Chrome, keyed to nothing. Under reduced motion it
- * draws exactly ONE still frame -- texture without motion -- and the loop
- * never starts; a hidden tab pauses it.
- */
-function ParticleField({ reduced }: { reduced: boolean }) {
-  const ref = useRef<HTMLCanvasElement | null>(null);
-  useEffect(() => {
-    const canvas = ref.current;
-    const parent = canvas?.parentElement;
-    if (!canvas || !parent) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    let raf = 0;
-    let running = true;
-    const size = { w: 0, h: 0 };
-    const pts = Array.from({ length: 70 }, () => ({
-      x: Math.random(), y: Math.random(),
-      vx: (Math.random() - 0.5) * 0.0005, vy: (Math.random() - 0.5) * 0.0005,
-    }));
-    const frame = (still: boolean) => {
-      const { w, h } = size;
-      ctx.clearRect(0, 0, w, h);
-      if (!still) {
-        for (const p of pts) {
-          p.x += p.vx; p.y += p.vy;
-          if (p.x < 0 || p.x > 1) p.vx *= -1;
-          if (p.y < 0 || p.y > 1) p.vy *= -1;
-        }
-      }
-      ctx.fillStyle = "rgba(103,232,249,0.55)";
-      for (const p of pts) {
-        ctx.beginPath();
-        ctx.arc(p.x * w, p.y * h, 1.1, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      const maxD = 120;
-      ctx.lineWidth = 0.6;
-      for (let i = 0; i < pts.length; i++) {
-        for (let j = i + 1; j < pts.length; j++) {
-          const dx = (pts[i].x - pts[j].x) * w;
-          const dy = (pts[i].y - pts[j].y) * h;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < maxD * maxD) {
-            ctx.strokeStyle = `rgba(59,130,246,${(0.26 * (1 - Math.sqrt(d2) / maxD)).toFixed(3)})`;
-            ctx.beginPath();
-            ctx.moveTo(pts[i].x * w, pts[i].y * h);
-            ctx.lineTo(pts[j].x * w, pts[j].y * h);
-            ctx.stroke();
-          }
-        }
-      }
-      if (!still && running) raf = requestAnimationFrame(() => frame(false));
-    };
-    const resize = () => {
-      size.w = canvas.width = parent.clientWidth || 1;
-      size.h = canvas.height = parent.clientHeight || 1;
-      if (reduced) frame(true);
-    };
-    resize();
-    const ro = new ResizeObserver(resize);
-    ro.observe(parent);
-    if (reduced) frame(true);
-    else raf = requestAnimationFrame(() => frame(false));
-    const onVis = () => {
-      running = document.visibilityState === "visible";
-      cancelAnimationFrame(raf);
-      if (running && !reduced) raf = requestAnimationFrame(() => frame(false));
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      running = false;
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [reduced]);
-  return <canvas ref={ref} aria-hidden className="pointer-events-none absolute inset-0 opacity-50" />;
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// §3.2 — the seven-dimension radar
-// ───────────────────────────────────────────────────────────────────────────
-
-/** How many times a card re-polls for a queued presence measurement before
- *  giving up. Six 8-second polls ≈ 48s, which covers the worker's ~30s poll
- *  plus one lookup; past that a card left open all shift must stop asking. */
-const PRESENCE_POLL_LIMIT = 6;
-
-const RADAR = { w: 420, h: 340, cx: 210, cy: 168, r: 108, labelR: 130 };
-
-function radarPoint(index: number, total: number, value: number) {
-  const angle = -Math.PI / 2 + (index * 2 * Math.PI) / total;
-  const radius = (Math.min(100, Math.max(0, value)) / 100) * RADAR.r;
-  return { x: RADAR.cx + radius * Math.cos(angle), y: RADAR.cy + radius * Math.sin(angle), angle };
-}
-
-/** Hand-rolled two-line wrap. The model's dimension names are rep-facing
- *  sentences ("Turning visitors into calls"), and shortening them here would
- *  invent a second vocabulary for the same seven things. */
-function wrapLabel(text: string, max = 16): string[] {
-  const words = text.split(" ");
-  const lines: string[] = [];
-  let line = "";
-  for (const w of words) {
-    if (!line) { line = w; continue; }
-    if ((line + " " + w).length <= max) line += " " + w;
-    else { lines.push(line); line = w; }
-  }
-  if (line) lines.push(line);
-  return lines.slice(0, 3);
-}
-
-/**
- * The radar, as a HOLOGRAM STACK (Adon, 2026-09-01: "3D-shaped... Iron Man").
- *
- * One component, four layers, each its own SVG so the caller can lift them to
- * different Z depths inside a CSS `preserve-3d` tilt:
- *
- *   base   — grid rings, spokes, labels, the rotating tick ring, the legend.
- *            The only layer with a role: it carries the aria-label naming all
- *            seven scores, so assistive tech reads ONE chart, not four.
- *   shadow — a dark blurred copy of the data polygon, low over the grid. This
- *            is what makes the lifted layer read as floating.
- *   data   — the holographic polygon (cool-spectrum gradient fill, cyan glow
- *            edge), per-dimension hue vertices, and the GOLD dashed benchmark.
- *   hits   — the transparent pointer targets, topmost.
- *
- * When the table tilts, the layers parallax against each other -- real depth,
- * from CSS transforms and ~zero bytes of library. The rotating tick ring is
- * the one AMBIENT motion on the card (Adon: it should feel alive); it is
- * decoration on chrome, carries no data, and is `motion-safe:` gated so
- * reduced-motion users never see it move.
- *
- * Colour on this chart is identity, never verdict: each vertex/label wears its
- * dimension's fixed hue at every score; the prospect's outline is always cyan
- * and the benchmark always gold (rule 1, as restated in the module header).
- */
-type RadarLayer = "base" | "shadow" | "data" | "hits";
-
-function Radar({
-  dimensions, leader, leaderName, drawn, reduced, selected, onSelect, layer,
-}: {
-  dimensions: DimensionProfile[];
-  leader: { key: string; leader: number }[] | null;
-  leaderName: string | null;
-  drawn: boolean;
-  reduced: boolean;
-  /** The dimension the rep is inspecting. Selection brightens its axis; the
-   *  hue itself never changes with the value on it (rule 1). */
-  selected?: string | null;
-  onSelect?: (key: string) => void;
-  layer: RadarLayer;
-}) {
-  const uid = useId();
-  const n = dimensions.length;
-  if (n < 3) return null;
-
-  const theirs = dimensions.map((d, i) => radarPoint(i, n, d.score));
-  const leaderByKey = new Map((leader || []).map((l) => [l.key, l.leader]));
-  const leaderPts = leader ? dimensions.map((d, i) => radarPoint(i, n, leaderByKey.get(d.key) ?? 0)) : null;
-  const toPath = (pts: { x: number; y: number }[]) => pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-
-  // Draws once on mount, from the centre outward, on every geometry layer at
-  // once. transformOrigin is given in user units because SVG has no
-  // percentage transform box here.
-  const drawnGroupStyle = {
-    transformOrigin: `${RADAR.cx}px ${RADAR.cy}px`,
-    transform: drawn ? "scale(1)" : "scale(0)",
-    transition: reduced ? "none" : "transform 480ms cubic-bezier(0.22, 1, 0.36, 1)",
-  } as const;
-
-  if (layer === "shadow") {
-    return (
-      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full" aria-hidden>
-        <g style={drawnGroupStyle}>
-          <polygon points={toPath(theirs)} fill="#020617" fillOpacity={0.55} style={{ filter: "blur(6px)" }} />
-        </g>
-      </svg>
-    );
-  }
-
-  if (layer === "data") {
-    return (
-      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full" aria-hidden>
-        <defs>
-          <radialGradient id={`holo-${uid}`} cx="50%" cy="50%" r="65%">
-            <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.45" />
-            <stop offset="60%" stopColor="#3b82f6" stopOpacity="0.22" />
-            <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.10" />
-          </radialGradient>
-        </defs>
-        <g style={drawnGroupStyle}>
-          {/* The benchmark competitor: gold, dashed, softly lit. Gold is WHOSE
-              mark this is, worn identically whether it beats the prospect on
-              an axis or loses to them. */}
-          {leaderPts && (
-            <polygon
-              points={toPath(leaderPts)}
-              fill="none"
-              stroke={GOLD}
-              strokeOpacity={0.85}
-              strokeWidth={1.5}
-              strokeDasharray="5 4"
-              style={{ filter: `drop-shadow(0 0 4px ${GOLD}66)` }}
-            />
-          )}
-          <polygon
-            points={toPath(theirs)}
-            fill={`url(#holo-${uid})`}
-            stroke="#67e8f9"
-            strokeOpacity={0.95}
-            strokeWidth={2}
-            style={{ filter: "drop-shadow(0 0 6px rgba(34,211,238,0.5))" }}
-          />
-          {theirs.map((p, i) => {
-            const d = dimensions[i];
-            const hue = hueFor(d.key);
-            const active = selected === d.key;
-            return (
-              <g key={d.key}>
-                {active && <circle cx={p.x} cy={p.y} r={7} fill="none" stroke="#e2e8f0" strokeOpacity={0.9} strokeWidth={1} />}
-                <circle
-                  cx={p.x} cy={p.y}
-                  r={active ? 4 : 3}
-                  fill={hue.to}
-                  style={{ filter: `drop-shadow(0 0 4px ${hue.to})` }}
-                />
-              </g>
-            );
-          })}
-        </g>
-      </svg>
-    );
-  }
-
-  if (layer === "hits") {
-    return (
-      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full">
-        {/* Invisible hit targets, one per axis, covering the vertex and the
-            label. aria-hidden on purpose: the dimension list next to this
-            chart is the accessible, keyboard-reachable way to make the same
-            selection, and it is ALWAYS rendered (the radar itself is
-            display:none below `sm`). These exist so a mouse or a thumb can
-            use the chart itself. */}
-        {onSelect &&
-          dimensions.map((d, i) => {
-            const tip = radarPoint(i, n, 100);
-            const lx = RADAR.cx + ((tip.x - RADAR.cx) / RADAR.r) * RADAR.labelR;
-            const ly = RADAR.cy + ((tip.y - RADAR.cy) / RADAR.r) * RADAR.labelR;
-            return (
-              <g key={d.key} aria-hidden className="cursor-pointer">
-                <circle cx={tip.x} cy={tip.y} r={20} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
-                <circle cx={lx} cy={ly} r={18} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
-              </g>
-            );
-          })}
-      </svg>
-    );
-  }
-
-  // base
-  return (
-    <svg
-      viewBox={`0 0 ${RADAR.w} ${RADAR.h}`}
-      className="h-auto w-full"
-      role="img"
-      aria-label={`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}
-    >
-      {/* The rotating tick rings -- ambient decoration, motion-safe gated. */}
-      <g className="motion-safe:animate-[spin_75s_linear_infinite]" style={{ transformOrigin: `${RADAR.cx}px ${RADAR.cy}px` }}>
-        <circle cx={RADAR.cx} cy={RADAR.cy} r={150} fill="none" stroke="#22d3ee" strokeOpacity={0.18} strokeWidth={1} strokeDasharray="2 9" />
-        <circle cx={RADAR.cx} cy={RADAR.cy} r={144} fill="none" stroke="#3b82f6" strokeOpacity={0.12} strokeWidth={0.75} strokeDasharray="18 26" />
-      </g>
-      {/* Rings. Four, unlabelled: this chart answers "what SHAPE of bad is
-          this", and gridline numbers invite reading exact values off it, which
-          is what the list beside it is for. */}
-      {[25, 50, 75, 100].map((ring) => (
-        <polygon
-          key={ring}
-          points={toPath(dimensions.map((_, i) => radarPoint(i, n, ring)))}
-          fill="none"
-          stroke="#38bdf8"
-          strokeOpacity={ring === 100 ? 0.35 : 0.12}
-          strokeWidth={1}
-        />
-      ))}
-      {/* Spokes. The selected axis brightens in its own hue -- keyed to the
-          tap, not to the value on it. */}
-      {dimensions.map((d, i) => {
-        const p = radarPoint(i, n, 100);
-        const active = selected === d.key;
-        return (
-          <line
-            key={d.key}
-            x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y}
-            stroke={active ? hueFor(d.key).to : "#38bdf8"}
-            strokeOpacity={active ? 0.7 : 0.14}
-            strokeWidth={active ? 1.5 : 1}
-          />
-        );
-      })}
-      {/* Axis labels, using the model's own rep-facing names, each in its
-          dimension's fixed hue. */}
-      {dimensions.map((d, i) => {
-        const p = radarPoint(i, n, 100);
-        const dx = p.x - RADAR.cx;
-        const lx = RADAR.cx + (dx / RADAR.r) * RADAR.labelR;
-        const ly = RADAR.cy + ((p.y - RADAR.cy) / RADAR.r) * RADAR.labelR;
-        const anchor = Math.abs(dx) < 12 ? "middle" : dx > 0 ? "start" : "end";
-        const lines = wrapLabel(d.label);
-        const active = selected === d.key;
-        return (
-          <text
-            key={d.key}
-            x={lx}
-            y={ly - (lines.length - 1) * 5}
-            textAnchor={anchor}
-            fill={active ? "#f1f5f9" : hueFor(d.key).to}
-            fillOpacity={active ? 1 : 0.85}
-            style={{ fontSize: 10, fontWeight: active ? 700 : 500, fontFamily: "var(--battle-display)" }}
-          >
-            {lines.map((line, li) => (
-              <tspan key={line} x={lx} dy={li === 0 ? 0 : 11}>{line}</tspan>
-            ))}
-          </text>
-        );
-      })}
-      {leaderName && (
-        <text x={RADAR.cx} y={RADAR.h - 6} textAnchor="middle" fill={GOLD} fillOpacity={0.8} style={{ fontSize: 10, fontFamily: "var(--battle-display)" }}>
-          Dashed outline: {leaderName}
-        </text>
-      )}
-    </svg>
-  );
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// §3.1 — the percentile strip
-// ───────────────────────────────────────────────────────────────────────────
-
-const STRIP = { w: 400, h: 96, top: 10, plot: 62, left: 2, right: 2 };
-
-function DistributionStrip({
-  buckets, leadBucket, leadScore, drawn, reduced,
-}: {
-  buckets: number[];
-  leadBucket: number;
-  leadScore: number;
-  drawn: boolean;
-  reduced: boolean;
-}) {
-  const gradId = useId();
-  const max = Math.max(1, ...buckets);
-  const usable = STRIP.w - STRIP.left - STRIP.right;
-  const slot = usable / buckets.length;
-  const barW = slot - 4;
-  const markerX = STRIP.left + leadBucket * slot + slot / 2;
-
-  return (
-    <svg
-      viewBox={`0 0 ${STRIP.w} ${STRIP.h}`}
-      className="h-auto w-full text-fg-dim"
-      role="img"
-      aria-label={`Score distribution in ten bands; this business falls in the ${leadBucket * 10} to ${leadBucket * 10 + 9} band`}
-    >
-      <defs>
-        {/* ONE gradient for every bar. The corpus wears one colour; only the
-            marker says "you are here". */}
-        <linearGradient id={gradId} x1="0%" y1="100%" x2="0%" y2="0%">
-          <stop offset="0%" stopColor="#1d4ed8" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.75" />
-        </linearGradient>
-      </defs>
-      {buckets.map((count, i) => {
-        const h = (count / max) * STRIP.plot;
-        const x = STRIP.left + i * slot + 2;
-        return (
-          // ONE fill for every bar, including the band this lead falls in. The
-          // "you are here" signal is the marker below, not a tinted bar: a bar
-          // that changes appearance based on where the score landed is a colour
-          // keyed to a score wearing a different hat.
-          <rect
-            key={i}
-            x={x}
-            width={barW}
-            y={STRIP.top + STRIP.plot - (drawn ? h : 0)}
-            height={drawn ? h : 0}
-            rx={2}
-            fill={`url(#${gradId})`}
-            style={{ transition: reduced ? "none" : `y 420ms ease-out ${i * 22}ms, height 420ms ease-out ${i * 22}ms` }}
-          />
-        );
-      })}
-      {/* The marker. A line and a label, no fill change anywhere. */}
-      <line
-        x1={markerX} x2={markerX}
-        y1={STRIP.top - 4} y2={STRIP.top + STRIP.plot + 4}
-        stroke={CYAN} strokeOpacity={0.95} strokeWidth={1.5}
-        style={{ filter: `drop-shadow(0 0 4px ${CYAN})` }}
-      />
-      <polygon
-        points={`${markerX - 4},${STRIP.top + STRIP.plot + 5} ${markerX + 4},${STRIP.top + STRIP.plot + 5} ${markerX},${STRIP.top + STRIP.plot + 11}`}
-        fill={CYAN}
-      />
-      <text
-        x={Math.min(STRIP.w - 30, Math.max(30, markerX))}
-        y={STRIP.h - 6}
-        textAnchor="middle"
-        fill="#e0f2fe"
-        style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--battle-display)" }}
-      >
-        {leadScore}
-      </text>
-      <text x={STRIP.left} y={STRIP.h - 6} textAnchor="start" className="fill-fg-dim" style={{ fontSize: 9 }}>0</text>
-      <text x={STRIP.w - STRIP.right} y={STRIP.h - 6} textAnchor="end" className="fill-fg-dim" style={{ fontSize: 9 }}>100</text>
-    </svg>
-  );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1000,16 +368,9 @@ function NotScored({ audit }: { audit: AuditResult }) {
         // and stays hedged. A site we were blocked from may be excellent.
         <p className="mt-2 text-xs text-fg-faint">{audit.reason}</p>
       )}
-      <p className="mt-4 max-w-2xl text-sm leading-relaxed text-fg-muted">
-        There is nothing measured to compare against competitors yet, so this page shows no score, no ranking and no
-        chart. Everything the directory recorded is in the business details above, and it has not been verified by
-        anyone.
+      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-fg-muted">
+        Nothing measured yet, so there is no score, ranking or chart. Sell from what we would build, below.
       </p>
-      {/* The two verbatim directory strings USED to be repeated here. They now
-          render once, at the top of the page, in BusinessFacts -- which every
-          state of this card shows, scored or not. Printing the same unverified
-          sentence twice on one screen invites a rep to wonder which of the two
-          is the current one. */}
     </Panel>
   );
 }
@@ -1017,75 +378,72 @@ function NotScored({ audit }: { audit: AuditResult }) {
 /**
  * THE BUILD SECTION, WHICH THIS CARD MOUNTS TWICE (fix round 1, 2026-09-14).
  *
- * WHY TWICE. The catalogue's whole reason for existing is the lead with no
- * website: that rep has nothing to pick apart and everything to sell. But the
- * `fixes` section lives inside `ScoredBody`, which renders ONLY for
- * `audit.state === "scored"` -- so the one mount the spec asked for could
- * never show the no-website case. It was not one dead branch either: with no
- * dimensions there is no audit, so the no-website intro, the no-audit intro
- * and the whole `unscored` row state were unreachable from this card as
- * shipped. The compiler says the same thing out loud: writing
- * `audit.state !== "no_website"` inside `ScoredBody` is TS2367, because the
- * types have no overlap. A lead with no site now gets the catalogue at
- * container level, which is exactly what `PresenceBlock` already does and for
- * exactly the same reason -- the lead with no website is the lead that block
- * exists for too.
- *
- * HOW THE TWO MOUNTS ARE KEPT IN STEP. They share everything except the
- * section id and the props that genuinely differ per lead. The title and the
- * sub are the two constants below, so neither call site can carry its own
- * wording; the catalogue itself is invoked in exactly ONE place in this file,
- * `BuildCatalogue`, so neither call site can pass its own prop set. What is
- * left at each call site is `id`, `dimensions`, `hasWebsite` and
- * `selectedAngleKey`, and each of those is different on purpose. Pinned in
- * tests/web-leads-battlecard.test.ts counts them: the catalogue element is
- * written once, the wrapper element twice, and both sections read the same
- * two constants.
- *
- * THE TWO MOUNTS ARE MUTUALLY EXCLUSIVE. One is inside the `scored` arm of
- * the body ternary and the other inside the `not scored` arm, so a rep never
- * sees two catalogues, and the ids stay distinct so the tab strip and the
- * per-section collapse memory never have to disambiguate them.
+ * The catalogue's whole reason for existing is the lead with no website, and
+ * the scored body renders only for `audit.state === "scored"`, so a lead with
+ * no site gets the catalogue at container level instead. The two mounts are
+ * mutually exclusive (one per arm of the body ternary), share the two
+ * constants below for their wording, and both render `BuildCatalogue`, which
+ * is the ONE place `CapabilityCatalogue` is invoked, so neither call site can
+ * carry its own prop set. Pinned in tests/web-leads-battlecard.test.ts.
  */
 const BUILD_TITLE = "What we would build for them";
 
-/** True on EVERY lead, which is the constraint that shaped it. A scored lead
- *  ranks; a lead with no site has nothing to rank and the catalogue's own
- *  intro paragraph says so directly underneath. So this promises no audit,
- *  claims no ranking unconditionally, and does not say "everything" -- the
- *  clean and verified-clean capabilities sit behind the catalogue's own "show
- *  all" control and are genuinely not on screen. */
+/** True on EVERY lead: it promises no audit, claims no ranking
+ *  unconditionally, and does not say "everything" -- the clean capabilities
+ *  sit behind the catalogue's own "show all" control. */
 const BUILD_SUB =
   "What Oasis would build, own and run for this business. Where their own audit found something, the heaviest items come first. Tap a row for what it is, what it is costing them, and the line to say.";
 
-/** An empty audit, as a module constant so both the identity and the value are
- *  stable: `CapabilityCatalogue` memoises on `dimensions`, and a fresh `[]`
- *  per render would invalidate that memo on every render of a card that has
- *  nothing to memoise in the first place. */
+/** An empty audit, as a module constant so `CapabilityCatalogue`'s memo on
+ *  `dimensions` is not invalidated by a fresh `[]` every render. */
 const NO_DIMENSIONS: DimensionProfile[] = [];
+
+/**
+ * The industry-wide opportunity list, folded UNDER the lead's own catalogue
+ * (compact card, 2026-10-01). It was its own open section, which put two
+ * sell-lists one block apart; the lead's ranked catalogue is what a rep
+ * reads on the call, and this is a browsing tool for when that runs out.
+ */
+function IndustryIdeas({ industry }: { industry: string | null | undefined }) {
+  return (
+    <details className="group mt-5 border-t border-bg-border pt-4">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded text-xs font-semibold text-fg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 [&::-webkit-details-marker]:hidden">
+        <ChevronDown aria-hidden className="h-3.5 w-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />
+        More to offer this industry
+      </summary>
+      <div className="mt-4">
+        <IndustryAutomationGuide initialIndustry={industry} />
+      </div>
+    </details>
+  );
+}
 
 /** The single invocation of `CapabilityCatalogue` in this file. Both mounts
  *  render this rather than the catalogue directly, so the prop set cannot
  *  drift between them. */
 function BuildCatalogue({
-  dimensions, hasWebsite, signals, selectedAngleKey, drawn, reduced,
+  dimensions, hasWebsite, signals, selectedAngleKey, industry, drawn, reduced,
 }: {
   dimensions: DimensionProfile[];
   hasWebsite: boolean;
   signals: Record<string, unknown> | null;
   selectedAngleKey: string | null;
+  industry: string | null | undefined;
   drawn: boolean;
   reduced: boolean;
 }) {
   return (
-    <CapabilityCatalogue
-      dimensions={dimensions}
-      hasWebsite={hasWebsite}
-      signals={signals}
-      drawn={drawn}
-      reduced={reduced}
-      selectedAngleKey={selectedAngleKey}
-    />
+    <>
+      <CapabilityCatalogue
+        dimensions={dimensions}
+        hasWebsite={hasWebsite}
+        signals={signals}
+        drawn={drawn}
+        reduced={reduced}
+        selectedAngleKey={selectedAngleKey}
+      />
+      <IndustryIdeas industry={industry} />
+    </>
   );
 }
 
@@ -1096,27 +454,13 @@ function BuildCatalogue({
 /**
  * `embedded` renders the SAME card inside another page, for /pipeline/[id].
  *
- * WHY THE SAME COMPONENT RATHER THAN A PIPELINE-SHAPED COPY (Adon, 2026-08-25):
- * "we have to ensure that the leads tab and the pipeline are completely
- * synonymous... as soon as you claim a lead, you're losing a lot of the
- * information that we have on the leads tab. We need to ensure that this is not
- * done because that's just completely dysfunctional."
- *
- * A second rendering of one business's failings is two things that can disagree
- * mid-call -- the same argument BusinessFacts already settles between the drawer
- * and this card. So the pipeline gets this component, reading the same
- * /api/web-leads/[id]/battlecard payload through the same authorization
- * boundary. There is no pipeline variant of the score, the competitors, the
- * angles or the objections, because there is no second implementation of them.
- *
- * Embedded only changes CHROME, never content: it drops the full-viewport
- * background (it sits inside a page that already has one) and the "Back to
- * leads" link (that page has its own "Back to pipeline", and sending a rep from
- * the pipeline to the leads pool is the wrong door). Collapse state is chrome
- * by the same rule -- both surfaces share the SAME localStorage keys, so the
- * card a rep shaped on the leads tab is the card they get on the pipeline.
- * `canMutate` is orthogonal and stays required -- whether a viewer may WRITE
- * is not a layout question.
+ * WHY THE SAME COMPONENT (Adon, 2026-08-25): "we have to ensure that the leads
+ * tab and the pipeline are completely synonymous." A second rendering of one
+ * business's failings is two things that can disagree mid-call, so the
+ * pipeline gets this component, reading the same payload through the same
+ * authorization boundary. Embedded only changes CHROME, never content: no
+ * full-viewport background and no "Back to leads" link. Collapse state is
+ * shared through the same localStorage keys on both surfaces.
  */
 export function BattleCard({
   leadId,
@@ -1320,97 +664,83 @@ export function BattleCard({
   const trust = assessTrust({ audit, signals, urlVerification });
   const onlinePresence = state.payload.onlinePresence ?? null;
   // DOES THIS BUSINESS HAVE A LIVE WEBSITE, from the AUDIT rather than from
-  // the directory's `websiteUrl` field. The two states that mean "no" and why
-  // both of them count are documented on `hasLiveWebsite` in
-  // lib/web-leads/automations-match.ts, which is the one place this is
-  // decided and which is unit-tested against every state of the union.
-  //
-  // It is computed HERE, before the ternary below, because this is the last
-  // scope in which `audit` is still the whole `AuditResult` union. Inside the
-  // scored branch the type has narrowed and the same comparison does not
-  // compile at all (TS2367: '"scored"' and '"no_website"' have no overlap),
-  // which is the type system stating the defect this fix round repaired: down
-  // there the answer is structurally `true`, so the no-website case could
-  // never render. Both mounts below read this one value.
+  // the directory's `websiteUrl` field (`hasLiveWebsite` in
+  // lib/web-leads/automations-match.ts, unit-tested against every state).
+  // Computed HERE because this is the last scope in which `audit` is still
+  // the whole union; inside the scored branch the type has narrowed and the
+  // no-website comparison does not compile at all.
   const hasWebsite = hasLiveWebsite(audit);
+  const scored = audit.state === "scored" && !trust.hide ? audit : null;
 
   return (
-    <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
-      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} scoreHidden={Boolean(trust.hide)} />
+    <div className={`${displayFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
+      <Hero lead={lead} audit={audit} competitors={competitors} canMutate={canMutate} embedded={embedded} scoreHidden={Boolean(trust.hide)} />
       <BattleSections>
-        <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
+        <div className={embedded ? "space-y-4 pt-4" : "mx-auto max-w-6xl space-y-4 px-4 pb-16 pt-4 lg:px-8"}>
           <SectionToolbar />
-          <MeasurementHonesty
-            audit={audit}
-            verification={urlVerification}
-            warnings={trust.warnings}
-            hidden={trust.hide !== null}
-            recheck={recheck}
-            canMutate={canMutate}
-            busy={recheckPost.busy}
-            postError={recheckPost.error}
-            onRecheck={requestRecheck}
-          />
-          {/* FIRST SECTION ON THE PAGE, ABOVE EVERY CHART. A rep confirms who
-              they are calling before they pitch, and the card shipped on
-              2026-08-24 without this block at all -- address, postal code,
-              directory category and territory appeared nowhere on it. It
-              defaults CLOSED (Adon, 2026-08-31): the hero already carries the
-              name, the full address and the phone, so this block is the
-              long-form reference, one labelled click away. One shared
-              component with the drawer (components/web-leads/BusinessFacts.tsx)
-              rather than a second copy of the same fields, because two
-              renderings of one lead's address are two things that can disagree
-              mid-call. */}
+          <TrustWarnings warnings={trust.warnings} />
+          {/* BEFORE YOU DIAL: the three reference blocks a rep wants once,
+              before the phone rings, and never during the call. History comes
+              first because being the second person from the same company to
+              phone someone this week is the fastest way to sound like the
+              cold-call operation we are telling them we are not. Closed by
+              default; the header already carries the name, address and phone. */}
           <BattleSection
-            id="facts"
+            id="before-dial"
             defaultOpen={false}
-            title="Who you are calling"
-            sub="Everything the directory recorded about this business. None of it has been verified by anyone here."
-            teaser="Address, phone, category and territory as the directory recorded them, unverified"
+            title="Before you dial"
+            sub="What we have already sent them, what the directory recorded (unverified), and how far to trust this card."
+            teaser="Past emails and calls, business details, and how far to trust this card"
           >
-            <BusinessFacts lead={lead} layout="grid" />
-          </BattleSection>
-
-          {/* BEYOND THE WEBSITE (phase 2): the presence evaluation lives at
-              the CONTAINER level, not inside ScoredBody, because a lead with
-              no website / an unreachable site / a hidden score is exactly
-              the lead whose presence IS the pitch -- and ScoredBody never
-              renders for those states. Auto-refresh: the card asks the
-              worker for a measurement when none exists or it has gone stale
-              (the effect below); the section renders the honest waiting
-              sentence in the meantime. */}
-          <BattleSection
-            id="presence"
-            defaultOpen={true}
-            title="Beyond the website"
-            sub="The business's presence where customers actually look first: Google, one consistent identity, email that lands. Measured, separate from the website score."
-          >
-            <PresenceBlock presence={onlinePresence} ask={presenceAsk.status} />
+            <div className="space-y-6">
+              <div>
+                <Label>What we have already sent them</Label>
+                <div className="mt-2">
+                  <LeadTimelinePanel leadId={leadId} />
+                </div>
+              </div>
+              <div>
+                <Label>Who you are calling</Label>
+                <div className="mt-2">
+                  <BusinessFacts lead={lead} layout="grid" />
+                </div>
+              </div>
+              <MeasurementHonesty
+                audit={audit}
+                verification={urlVerification}
+                hidden={trust.hide !== null}
+                recheck={recheck}
+                canMutate={canMutate}
+                busy={recheckPost.busy}
+                postError={recheckPost.error}
+                onRecheck={requestRecheck}
+              />
+            </div>
           </BattleSection>
 
           {trust.hide ? (
             // The score exists in the database but cannot be stood behind
             // (browser-built shell, or a website flagged as not theirs).
             // Adon's rule: hide it and say why -- never a number wearing a
-            // warning. The re-check control is on the honesty panel above.
-            <UntrustedPanel hide={trust.hide} />
+            // warning. The industry list still renders: the rep still has a
+            // business on the phone and something to offer it.
+            <>
+              <UntrustedPanel hide={trust.hide} />
+              <Panel>
+                <SectionTitle>What we could offer them</SectionTitle>
+                <div className="mt-3">
+                  <IndustryAutomationGuide initialIndustry={lead.industry} />
+                </div>
+              </Panel>
+            </>
           ) : audit.state !== "scored" ? (
             // THE SECOND MOUNT. `NotScored` is the honest sentence about what
             // we do and do not know; the catalogue underneath it is the
             // entire pitch for this lead. A business with no website at all
-            // is the best lead this feature produces, and until this mount
-            // existed that rep got one line saying "No website found yet,
-            // needs checking" and nothing to sell.
-            //
-            // `NO_DIMENSIONS` is not a stand-in for an audit: no non-scored
-            // state carries dimensions at all, so this IS the lead's audit
-            // data. With it, `hasWebsite` alone picks the intro, and it is
-            // derived from the audit's own state by `hasLiveWebsite`, so a
-            // no-website or parked lead gets "there is no website for this
-            // business" and an unreachable or unchecked one gets "this site
-            // has not been checked yet". Neither sentence claims a
-            // measurement we did not take.
+            // is the best lead this feature produces. `NO_DIMENSIONS` is not
+            // a stand-in for an audit: no non-scored state carries dimensions,
+            // so this IS the lead's audit data, and `hasWebsite` alone picks
+            // the catalogue's intro.
             <>
               <NotScored audit={audit} />
               <BattleSection id="build" defaultOpen={true} title={BUILD_TITLE} sub={BUILD_SUB}>
@@ -1419,9 +749,9 @@ export function BattleCard({
                   hasWebsite={hasWebsite}
                   signals={signals}
                   // No dimensions means `selectAngle` has nothing to choose
-                  // from, so no angle renders higher up this card and there
-                  // is nothing for the overlap note to warn about.
+                  // from, so no angle renders on this card.
                   selectedAngleKey={null}
+                  industry={lead.industry}
                   drawn={drawn}
                   reduced={reduced}
                 />
@@ -1431,59 +761,52 @@ export function BattleCard({
             <ScoredBody
               lead={lead}
               audit={audit}
-              competitors={competitors}
               signals={signals}
               hasWebsite={hasWebsite}
               drawn={drawn}
               reduced={reduced}
             />
           )}
-          <BattleSection
-            id="industry-automations"
-            defaultOpen={true}
-            title="What else you can automate for them"
-            sub="Matched to this business type. Ask the question first; treat every build and integration as founder-scoped."
-            teaser="Industry-specific website features, connected workflows, and custom automation opportunities"
-          >
-            <IndustryAutomationGuide initialIndustry={lead.industry} />
-          </BattleSection>
-          {/* HISTORY SITS ABOVE THE WRITE SURFACE, deliberately.
-              A rep about to dial needs to know what this business has already
-              received from us, and needs it BEFORE the call rather than after
-              logging one. Being the second person from the same company to
-              phone someone this week is the fastest way to sound like the
-              cold-call operation we are telling them we are not.
 
-              REUSED, NOT REBUILT. LeadTimelinePanel already unifies email,
-              calls, voicemail, documents and open events for one lead, and its
-              own header cites the 2026-05-16 ask: "we need to see text + email
-              conversations". It was wired to the pipeline lead file and never to
-              this card, so the capability existed and the rep working the cold
-              board could not see it. It fetches by leadId and scopes by session
-              tenant, which is the same tenant these leads live in
-              (oasis-ai-cc), so it needs nothing from this component but the id.
-
-              COLLAPSIBLE, unlike the outcome log below it. This is a read
-              surface: useful before the call, noise during it. */}
+          {/* PROOF: everything a rep reaches for only when a prospect pushes
+              back. One drawer instead of four sections. The presence block
+              renders for every lead (it is the pitch for a lead with no
+              website); the audit-derived parts render only for a score we
+              can stand behind. */}
           <BattleSection
-            id="history"
+            id="proof"
             defaultOpen={false}
-            title="What we have already sent them"
-            sub="Every email, call and document recorded against this business, newest first. Worth ten seconds before you dial."
-            teaser="Email history, call dispositions, documents"
+            title="Proof, if they push back"
+            teaser={
+              scored
+                ? "Who they are up against, every failing check, their online presence, and the raw crawl"
+                : "Their online presence: Google, one consistent identity, email that lands"
+            }
           >
-            <LeadTimelinePanel leadId={leadId} />
+            <div className="space-y-8">
+              {scored && (
+                <ScoredProof lead={lead} audit={scored} competitors={competitors} signals={signals} />
+              )}
+              <div>
+                <Label>Their online presence</Label>
+                <p className="mt-1 text-xs text-fg-dim">
+                  Where customers look first: Google, one consistent identity, email that lands. Measured separately
+                  from the website score.
+                </p>
+                <div className="mt-3">
+                  <PresenceBlock presence={onlinePresence} ask={presenceAsk.status} />
+                </div>
+              </div>
+            </div>
           </BattleSection>
+
           <Panel>
             {/* Reused wholesale rather than restyled: one component owns the
                 outcomes, and logging an outcome IS the transfer to the pipeline
-                (lib/web-leads/outcome.ts) -- there is no separate "move to
-                pipeline" button anywhere in this feature. A second copy here
-                would be a second place for that rule to drift. It brings its own
-                "Log this call" heading, so this panel deliberately does not add
-                a second one above it. Deliberately NOT collapsible either: this
-                is the card's one write surface, and the transfer to the pipeline
-                must never be sitting behind a closed drawer when the call ends. */}
+                (lib/web-leads/outcome.ts). It brings its own "Log this call"
+                heading. Deliberately NOT collapsible: this is the card's one
+                write surface, and the transfer to the pipeline must never be
+                sitting behind a closed drawer when the call ends. */}
             <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
           </Panel>
         </div>
@@ -1491,6 +814,11 @@ export function BattleCard({
     </div>
   );
 }
+
+/** How many times a card re-polls for a queued presence measurement before
+ *  giving up. Six 8-second polls ≈ 48s, which covers the worker's ~30s poll
+ *  plus one lookup; past that a card left open all shift must stop asking. */
+const PRESENCE_POLL_LIMIT = 6;
 
 function BackLink() {
   return (
@@ -1513,13 +841,9 @@ function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
           <div className="h-3 w-52 rounded bg-bg-elev/60 animate-pulse-slow" />
         </div>
       </div>
-      <div className="mx-auto max-w-6xl space-y-5 px-4 py-6 lg:px-8">
+      <div className="mx-auto max-w-6xl space-y-4 px-4 py-6 lg:px-8">
         {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="h-44 rounded-xl border border-bg-border bg-bg-panel animate-pulse-slow"
-            style={{ animationDelay: `${i * 80}ms` }}
-          />
+          <div key={i} className="h-44 rounded-xl border border-bg-border bg-bg-panel animate-pulse-slow" />
         ))}
       </div>
     </div>
@@ -1527,17 +851,16 @@ function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
 }
 
 /**
- * The hero: who they are, the number to dial, their site, the score, and the
- * one sentence that makes the score mean something.
+ * The header: who to ask for, the number to dial, their site, the score, and
+ * the one sentence that makes the score mean something. No backdrop layers:
+ * everything here is information.
  */
 function Hero({
-  lead, audit, competitors, drawn, reduced, canMutate, embedded = false, scoreHidden = false,
+  lead, audit, competitors, canMutate, embedded = false, scoreHidden = false,
 }: {
   lead: WebLead;
   audit: AuditResult;
   competitors: CompetitorContext | null;
-  drawn: boolean;
-  reduced: boolean;
   canMutate: boolean;
   embedded?: boolean;
   /** Trust said the stored score cannot be stood behind: render no number
@@ -1545,96 +868,40 @@ function Hero({
   scoreHidden?: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
-  const ringId = useId();
-  // Hooks before any branch: the count-up runs for every state and simply
-  // counts to 0 when there is no score to show.
-  const shownScore = useCountUp(audit.state === "scored" && !scoreHidden ? audit.composite : 0, reduced);
   return (
-    <header className="relative overflow-hidden border-b border-bg-border bg-bg-panel/60">
-      {/* Ambient depth, keyed off NOTHING -- not the score, not the state. It
-          renders identically for a 4 and a 94. Depth without meaning is the
-          whole brief (design spec §6). */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-70"
-        style={{ background: "radial-gradient(60% 120% at 15% -10%, rgba(59,130,246,0.10), transparent 70%)" }}
-      />
-      {/* The blueprint grid and the counter-glow. Chrome, keyed to nothing:
-          a 4 and a 94 get the same room. The grid fades out radially so it
-          reads as depth behind the header, not as a chart axis. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-40"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(59,130,246,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.07) 1px, transparent 1px)",
-          backgroundSize: "36px 36px",
-          maskImage: "radial-gradient(85% 120% at 30% 0%, black, transparent 85%)",
-          WebkitMaskImage: "radial-gradient(85% 120% at 30% 0%, black, transparent 85%)",
-        }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-60"
-        style={{ background: "radial-gradient(50% 90% at 95% 115%, rgba(59,130,246,0.08), transparent 70%)" }}
-      />
-      {/* The living backdrop: drifting plexus + a static CRT scanline
-          texture. Both chrome, both keyed to nothing. */}
-      <ParticleField reduced={reduced} />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-40"
-        style={{ background: "repeating-linear-gradient(0deg, rgba(59,130,246,0.04) 0px, rgba(59,130,246,0.04) 1px, transparent 1px, transparent 3px)" }}
-      />
-      {/* HUD corner marks. Decoration with a job: they frame the header as the
-          instrument panel the rest of the card hangs off. */}
-      <span aria-hidden className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l-2 border-t-2 border-accent/30" />
-      <span aria-hidden className="pointer-events-none absolute right-3 top-3 h-4 w-4 border-r-2 border-t-2 border-accent/30" />
-      <div className={embedded ? "relative px-4 py-6 lg:px-6" : "relative mx-auto max-w-6xl px-4 py-7 lg:px-8 lg:py-9"}>
+    <header className="border-b border-bg-border bg-bg-panel/60">
+      <div className={embedded ? "px-4 py-5 lg:px-6" : "mx-auto max-w-6xl px-4 py-6 lg:px-8"}>
         {!embedded && <BackLink />}
-        <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between`}>
+        <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between`}>
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg [font-family:var(--battle-display)] lg:text-4xl">{lead.name}</h1>
-            {/* WHO TO ASK FOR — the first thing a rep needs when the call
-                connects, and it was fetched, carried onto this card, and then
-                never rendered. The owner name reached `lead.ownerName` and
-                stopped there, so the one screen a rep reads WHILE the phone is
-                ringing showed only the business.
-
-                Placed directly under the business name because that is the
-                order the sentence comes out: "Hi, is Marc in?" — and the title
-                follows so a rep knows whether they are asking for the owner or
-                a named practitioner. Rendered only when somebody is actually
-                identified; there is deliberately no fallback to the business
-                name, which would put "Ask for HVAC Mechanical Systems Inc" in
-                the rep's mouth. */}
+            <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg">{lead.name}</h1>
+            {/* WHO TO ASK FOR, directly under the business name because that
+                is the order the sentence comes out: "Hi, is Marc in?" Rendered
+                only when somebody is actually identified; there is no fallback
+                to the business name, which would put "Ask for HVAC Mechanical
+                Systems Inc" in the rep's mouth. */}
             {lead.ownerName && (
               <p className="mt-1.5 text-base font-semibold text-accent">
                 Ask for {lead.ownerName}
                 {lead.ownerTitle ? <span className="font-normal text-fg-muted"> · {lead.ownerTitle}</span> : null}
               </p>
             )}
-            {/* The FULL address, street and postal code included -- not just
-                the city. A rep confirming a business by name needs the street
-                to be sure they have the right branch, and this line is the
-                first thing under the name. The complete block (category,
-                territory, the unverified directory sentences) is the first
-                panel below. */}
+            {/* The FULL address, street and postal code included: a rep
+                confirming a business by name needs the street to be sure they
+                have the right branch. */}
             <p className="mt-2 text-sm text-fg-muted">
               {[lead.industry, fullAddress(lead)].filter(Boolean).join(" · ") || "No location on file"}
             </p>
-            {/* Full width and 56px tall below `sm`, one line of pills above it.
-                A rep reading this page on a phone is usually reading it BECAUSE
-                they are about to dial, and `tel:` is the one control on this
-                whole surface that does something better on a phone than on a
-                desktop. `whitespace-nowrap` on the number for the same reason
-                the table has it: a browser will break after a hyphen, and
-                `+1-416-` / `259-` / `9326` is not a number a rep can read out. */}
-            <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:flex-wrap">
+            {/* Full width and 56px tall below `sm`: a rep reading this on a
+                phone is usually about to dial, and `tel:` is the one control
+                here that does something better on a phone. `whitespace-nowrap`
+                because `+1-416-` / `259-` / `9326` is not a number a rep can
+                read out. */}
+            <div className="mt-4 flex flex-col gap-2.5 sm:flex-row sm:flex-wrap">
               {lead.phone && canMutate ? (
                 <a
                   href={`tel:${lead.phone}`}
-                  className="inline-flex min-h-14 w-full items-center justify-center gap-2.5 whitespace-nowrap rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 text-lg font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter,transform] hover:brightness-110 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:min-h-0 sm:w-auto sm:py-3 sm:text-base"
+                  className="inline-flex min-h-14 w-full items-center justify-center gap-2.5 whitespace-nowrap rounded-lg bg-accent px-5 text-lg font-bold tabular-nums text-white transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:min-h-0 sm:w-auto sm:py-3 sm:text-base"
                 >
                   <Phone className="h-5 w-5 shrink-0" />{lead.phone}
                 </a>
@@ -1643,22 +910,18 @@ function Hero({
               ) : (
                 <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">No phone number on file</p>
               )}
-              {/* preferredSiteUrl adds a scheme to bare domains (217 stored
-                  websites have none, and a bare string in an href navigates
-                  inside our own dashboard), allowlists http/https (these come
-                  from OpenStreetMap, which anyone can edit), and prefers the
-                  origin over a stale deep path. Render NOTHING when it returns
-                  null -- a missing button is honest, a dead one is not. */}
+              {/* preferredSiteUrl adds a scheme to bare domains, allowlists
+                  http/https (these come from OpenStreetMap, which anyone can
+                  edit), and prefers the origin over a stale deep path. Render
+                  NOTHING when it returns null -- a missing button is honest, a
+                  dead one is not. */}
               {websiteHref && (
                 <a
                   href={websiteHref}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 text-sm font-semibold text-fg transition-[color,border-color,transform] hover:border-accent/40 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:py-3"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 text-sm font-semibold text-fg transition-colors hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:py-3"
                 >
-                  {/* Same words as the drawer's button and as the operator's
-                      own request. Two surfaces that send a rep to the same
-                      place should not call it two different things. */}
                   <ExternalLink className="h-4 w-4" />View website
                 </a>
               )}
@@ -1667,60 +930,20 @@ function Hero({
 
           <div className="shrink-0 lg:text-right">
             {audit.state === "scored" && scoreHidden ? (
-              <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
-                No score is shown for this site. The measurement panel below says exactly why.
+              <p className="max-w-xs text-sm font-semibold leading-snug text-fg-muted">
+                No score is shown for this site. The panel below says exactly why.
               </p>
             ) : audit.state === "scored" ? (
               <>
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">Website score</p>
-                {/* The number counts up inside a ring that draws once around
-                    it. The ring's LENGTH is the score out of 100 -- the same
-                    encoding every Meter on this card already uses -- and its
-                    colour is one neutral stroke with a constant glow whether
-                    the score is 4 or 94 (rule 1). The animated figure is
-                    theatre and is hidden from assistive tech; the sr-only span
-                    carries the real number so a screen reader never announces
-                    an intermediate frame. */}
-                <div className="relative mt-2 inline-flex h-36 w-36 items-center justify-center">
-                  {/* The "arc-reactor halo" is gone: a blurred orb pulsing
-                      forever behind the ring, and by its own comment identical
-                      at every score, so it encoded nothing. Perpetual motion
-                      next to a number competes with the number, and it held a
-                      compositor layer for the whole session. The ring itself
-                      carries the score. */}
-                  <svg viewBox="0 0 120 120" className="absolute inset-0 h-full w-full -rotate-90" aria-hidden>
-                    <defs>
-                      <linearGradient id={ringId} x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#22d3ee" />
-                        <stop offset="100%" stopColor="#3b82f6" />
-                      </linearGradient>
-                    </defs>
-                    <circle cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" className="stroke-bg-border" />
-                    <circle cx="60" cy="60" r="47" fill="none" strokeWidth="1" stroke="#22d3ee" strokeOpacity="0.18" strokeDasharray="1 6" />
-                    <circle
-                      cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" strokeLinecap="round"
-                      stroke={`url(#${ringId})`}
-                      strokeDasharray={`${(2 * Math.PI * 54).toFixed(2)}`}
-                      strokeDashoffset={
-                        drawn
-                          ? ((1 - Math.min(100, Math.max(0, audit.composite)) / 100) * 2 * Math.PI * 54).toFixed(2)
-                          : (2 * Math.PI * 54).toFixed(2)
-                      }
-                      style={{
-                        transition: reduced ? "none" : "stroke-dashoffset 900ms cubic-bezier(0.22, 1, 0.36, 1)",
-                        filter: "drop-shadow(0 0 6px rgba(34,211,238,0.5))",
-                      }}
-                    />
-                  </svg>
-                  <p className="text-[2.6rem] font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)] [font-family:var(--battle-numeral)]">
-                    <span aria-hidden>{shownScore}</span>
-                    <span className="sr-only">{audit.composite}</span>
-                  </p>
-                </div>
-                <p className="mt-1 text-xs text-fg-dim [font-family:var(--battle-data)]">Measured {formatDate(audit.measuredAt)}</p>
+                <p className="mt-1 text-4xl font-bold leading-none tabular-nums text-fg">
+                  {audit.composite}
+                  <span className="text-base font-medium text-fg-dim">/100</span>
+                </p>
+                <p className="mt-1 text-xs text-fg-dim">Measured {formatDate(audit.measuredAt)}</p>
               </>
             ) : (
-              <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
+              <p className="max-w-xs text-sm font-semibold leading-snug text-fg-muted">
                 {audit.state === "no_website"
                   ? "No website found yet, needs checking"
                   : audit.state === "parked"
@@ -1734,7 +957,7 @@ function Hero({
         </div>
 
         {audit.state === "scored" && !scoreHidden && competitors && (
-          <PercentileSentence competitors={competitors} score={audit.composite} drawn={drawn} reduced={reduced} />
+          <PercentileSentence competitors={competitors} />
         )}
       </div>
     </header>
@@ -1743,320 +966,85 @@ function Hero({
 
 /**
  * The strongest honest sentence this system can produce, and the reason the
- * competitor work exists at all.
- *
- * Two things it must never do: quote a percentile without naming the group it
- * is against, and quote one against a group small enough for a prospect to
- * count. lib/web-leads/competitors.ts guarantees the second (MIN_SLICE) and
- * hands back every rejected slice so this can say the first out loud.
+ * competitor work exists at all. It never quotes a percentile without naming
+ * the group, and never against a group small enough for a prospect to count
+ * (lib/web-leads/competitors.ts guarantees that, and hands back every
+ * rejected slice so this can say so out loud).
  */
-function PercentileSentence({
-  competitors, score, drawn, reduced,
-}: {
-  competitors: CompetitorContext;
-  score: number;
-  drawn: boolean;
-  reduced: boolean;
-}) {
-  const { slice, percentile, national, rejected, distribution } = competitors;
+function PercentileSentence({ competitors }: { competitors: CompetitorContext }) {
+  const { slice, percentile, rejected } = competitors;
   const pctText = percentile.lowerThanPct === 0 ? "under 1%" : `${percentile.lowerThanPct}%`;
   return (
-    <div
-      className="mt-7 grid gap-6 border-t border-bg-border pt-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)] lg:items-center"
-      style={{
-        opacity: drawn ? 1 : 0,
-        transform: drawn ? "none" : "translateY(8px)",
-        transition: reduced ? "none" : "opacity 380ms ease-out 60ms, transform 380ms ease-out 60ms",
-      }}
-    >
-      <div>
-        <p className="text-xl font-semibold leading-snug text-fg lg:text-2xl">
-          {percentile.rank === 1
-            ? `Nothing we have measured among ${fmt(slice.peerCount)} ${slice.label} scores higher.`
-            : `Scores lower than ${pctText} of the ${fmt(slice.peerCount)} ${slice.label} we have measured.`}
+    <div className="mt-5 border-t border-bg-border pt-4">
+      <p className="text-lg font-semibold leading-snug text-fg">
+        {percentile.rank === 1
+          ? `Nothing we have measured among ${fmt(slice.peerCount)} ${slice.label} scores higher.`
+          : `Scores lower than ${pctText} of the ${fmt(slice.peerCount)} ${slice.label} we have measured.`}
+      </p>
+      {/* NEVER a silent fallback. If the local slice was too thin to be
+          honest, the wider one that replaced it is named here. */}
+      {rejected.length > 0 && (
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          Only {fmt(rejected[0].peerCount)} {rejected[0].label} have been scored, too few to compare against, so this
+          is measured against {slice.label} instead.
         </p>
-        <p className="mt-2 text-sm text-fg-muted">
-          Rank {fmt(percentile.rank)} of {fmt(percentile.outOf)}. Best in that group scores {slice.best}, the middle of
-          it scores {slice.median}, the lowest scores {slice.worst}.
-        </p>
-        {slice.kind !== "national" && (
-          <p className="mt-1 text-sm text-fg-dim">
-            Against every one of the {fmt(national.peerCount)} Canadian sites we have measured: lower than{" "}
-            {national.lowerThanPct === 0 ? "under 1%" : `${national.lowerThanPct}%`}.
-          </p>
-        )}
-        {/* NEVER a silent fallback. If the local slice was too thin to be
-            honest, the wider one that replaced it is named here. */}
-        {rejected.length > 0 && (
-          <p className="mt-2 text-xs leading-relaxed text-fg-faint">
-            Only {fmt(rejected[0].peerCount)} {rejected[0].label} have been scored, too few to compare against, so this
-            is measured against {slice.label} instead.
-          </p>
-        )}
-      </div>
-      <div className="w-full">
-        <DistributionStrip
-          buckets={distribution.buckets}
-          leadBucket={distribution.leadBucket}
-          leadScore={score}
-          drawn={drawn}
-          reduced={reduced}
-        />
-        {/* No count in this caption on purpose: the histogram counts the lead
-            itself as one of the measured sites, so any number here would be
-            peerCount + 1 and would sit one off the sentence beside it. Two
-            numbers that describe the same group and disagree by one is the kind
-            of thing a prospect notices and a rep cannot explain. */}
-        <p className="mt-1 text-center text-[10px] text-fg-faint">
-          Score bands across the {slice.label} we have measured
-        </p>
-      </div>
+      )}
     </div>
   );
 }
 
 /**
- * The DESIGNATION PLATE (round 5): the name of the shape, stamped above the
- * chart that draws it.
- *
- * Every word comes verbatim from the hand-written tables in
- * lib/web-leads/lead-profile.ts (battle-card rule 3); the classifier that
- * picks WHICH entry applies is ordered arithmetic over the same dimension
- * scores the radar renders, so the plate and the chart can never disagree.
- * The plate wears the neutral accent at every designation -- "Full rebuild"
- * and "Strong contender" get identical chrome (rule 1); the only hue on it
- * is the identity dot of each defining dimension, the same dot those areas
- * wear on the radar, the list and the fix ranking. The readouts on the right
- * are the shape's own numbers: the floor (worst area), the ceiling (best),
- * and the spread between them, in the telemetry face.
+ * The call itself, for a scored lead: the script, the objections, and what we
+ * would build. Everything else is reference and lives in the two drawers.
  */
-function DesignationPlate({
-  audit, selected, onSelect, reduced,
-}: {
-  audit: Extract<AuditResult, { state: "scored" }>;
-  /** The shape section's shared selection (round 7): the plate's chips are
-   *  the same control as the list rows and the beams -- tapping a defining
-   *  area here selects it there and flies the 3D stage to it. */
-  selected: string | null;
-  onSelect: (key: string) => void;
-  reduced: boolean;
-}) {
-  const designation = useMemo(
-    () => designateLead(audit.dimensions, audit.composite),
-    [audit.dimensions, audit.composite],
-  );
-  const decodedName = useDecode(designation.name, reduced);
-  const byKey = useMemo(() => new Map(audit.dimensions.map((d) => [d.key, d])), [audit.dimensions]);
-  const scores = audit.dimensions.map((d) => d.score);
-  const floor = Math.min(...scores);
-  const ceiling = Math.max(...scores);
-
-  return (
-    <div className="relative mb-4 overflow-hidden rounded-lg border border-accent/25 bg-bg-raised/60 p-4 backdrop-blur-sm [clip-path:polygon(0_0,calc(100%-16px)_0,100%_16px,100%_100%,0_100%)]">
-      {/* The lit diagonal along the clipped corner, and a faint scan texture.
-          Constant chrome, identical for every designation. */}
-      <span aria-hidden className="pointer-events-none absolute -right-[7px] top-[4px] h-px w-6 rotate-45 bg-accent/60" />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-30"
-        style={{ background: "repeating-linear-gradient(0deg, rgba(59,130,246,0.05) 0px, rgba(59,130,246,0.05) 1px, transparent 1px, transparent 4px)" }}
-      />
-      <div className="relative flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
-        <div className="min-w-0 max-w-2xl">
-          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-fg-muted [font-family:var(--battle-display)]">
-            Designation
-          </p>
-          {/* The name resolves through a brief glyph decode (round 8); the
-              aria-label carries the real designation so assistive tech never
-              hears a scramble frame. */}
-          <p
-            aria-label={designation.name}
-            className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl"
-          >
-            <span aria-hidden>{decodedName || " "}</span>
-          </p>
-          <p className="mt-2 text-sm leading-relaxed text-fg-dim">{designation.meaning}</p>
-          <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">
-            <span className="font-medium text-fg-muted">The play:</span> {designation.play}
-          </p>
-          {/* The defining areas, wearing the same identity dots they wear on
-              every other surface of this card. Identity, never verdict --
-              and since round 7 they are BUTTONS on the section's shared
-              selection: tapping one selects it in the list, opens its
-              detail, and flies the 3D stage to its beam. */}
-          <div className="mt-3 flex flex-wrap gap-2">
-            {designation.primary.map((key) => {
-              const d = byKey.get(key);
-              if (!d) return null;
-              const hue = hueFor(key);
-              const active = selected === key;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => onSelect(key)}
-                  aria-pressed={active}
-                  className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none ${active ? "border-accent/50 bg-bg-raised/80 text-fg" : "border-bg-border bg-bg-panel/70 text-fg-muted hover:border-accent/30 hover:text-fg"}`}
-                >
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
-                  {d.label}
-                  <span className="tabular-nums text-fg [font-family:var(--battle-data)]">{d.score}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        <dl className="flex shrink-0 gap-4 text-right">
-          {(
-            [
-              ["Floor", floor],
-              ["Ceiling", ceiling],
-              ["Spread", ceiling - floor],
-            ] as const
-          ).map(([label, value]) => (
-            <div key={label}>
-              <dt className="text-[9px] font-bold uppercase tracking-[0.18em] text-fg-muted [font-family:var(--battle-display)]">{label}</dt>
-              <dd className="mt-0.5 text-lg font-medium tabular-nums leading-none text-fg [font-family:var(--battle-data)]">{value}</dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-    </div>
-  );
-}
-
 function ScoredBody({
-  lead, audit, competitors, signals, hasWebsite, drawn, reduced,
+  lead, audit, signals, hasWebsite, drawn, reduced,
 }: {
   lead: WebLead;
   audit: Extract<AuditResult, { state: "scored" }>;
-  competitors: CompetitorContext | null;
   signals: Record<string, unknown> | null;
-  /** Whether this lead has a website at all, read off the audit's own state
-   *  by the card container (the one scope where `AuditResult` is still the
-   *  whole union) and handed down. `CapabilityCatalogue` branches on it, and
-   *  a wrong `true` sends a lead with no site down the defect path, so the
-   *  MEASUREMENT decides it and never the directory's `websiteUrl` field.
-   *
-   *  WHAT THIS IS NOT, stated rather than implied: it is not a guard for
-   *  this component. `ScoredBody` renders only for `state === "scored"`, so
-   *  every value reaching this prop today is `true`. It is a prop rather
-   *  than a literal `true` at the call site because a literal would be this
-   *  file asserting a fact about the audit instead of reading one, and
-   *  because the derivation then sits at the one place that can still see a
-   *  `no_website` audit. */
+  /** Read off the audit's own state by the container (the one scope where
+   *  `AuditResult` is still the whole union) and handed down, so the
+   *  MEASUREMENT decides it and never the directory's `websiteUrl` field. */
   hasWebsite: boolean;
   drawn: boolean;
   reduced: boolean;
 }) {
-  const worstFirst = useMemo(
-    () => [...audit.dimensions].sort((a, b) => recoverablePoints(b) - recoverablePoints(a)),
-    [audit.dimensions],
-  );
-  const failed = useMemo(
-    () => audit.dimensions.flatMap((d) => d.checks.filter((c) => !c.has)).sort((a, b) => b.points - a.points),
-    [audit.dimensions],
-  );
-  const headline = failed[0] || null;
   const angle = useMemo(() => selectAngle(audit.dimensions), [audit.dimensions]);
-  const evidence = useMemo(() => evidenceFrom(signals), [signals]);
-  const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
-  const failingAreas = worstFirst.filter((d) => d.checks.some((c) => !c.has)).length;
-  // ONE selection for the whole shape section (round 7): the designation
-  // plate's chips, the dimension list, the SVG radar and the WebGL stage all
-  // share it, so tapping an area anywhere focuses it everywhere -- including
-  // the camera flight on the 3D stage. Null means "the worst area", resolved
-  // inside DimensionShape where worstFirst is already the ordering truth.
-  const [dimSel, setDimSel] = useState<string | null>(null);
 
   return (
     <>
-      {/* ── §4, depth one: THE ONE LINE ─────────────────────────────────── */}
-      {headline && (
-        <BattleSection id="lead-with" defaultOpen={true} title="The one thing to lead with">
-          {/* Stated as its CONSEQUENCE, not its cause. remedies.ts's `costs`
-              line is hand-written to be read aloud; the check's own label
-              ("Tappable phone number") is a defect name and nobody sells one. */}
-          <p className="max-w-4xl text-xl font-semibold leading-snug text-fg lg:text-2xl">
-            {remedyFor(headline.code)?.costs || headline.label}
-          </p>
-          <p className="mt-2 text-xs text-fg-dim">
-            Biggest single gap on the site, out of {failed.length} failed {failed.length === 1 ? "check" : "checks"}.
-          </p>
-        </BattleSection>
-      )}
-
-      {/* ── §5, THE ANGLE ───────────────────────────────────────────────────
-          Rendered in the order the three beats are actually spoken, because a
-          rep mid-call reads down the page and says what is in front of them.
-          Beat one is stated (Gong's 300M-call data: name the reason outright).
-          Beat two is asked and then followed by silence (Sandler: the prospect
-          cannot argue with a gap he found himself). Beat three is the teach,
-          and it only earns its place AFTER an answer -- delivering it early is
-          precisely what manufactures the objection to it. The rationale and
-          sources are in lib/web-leads/angles.ts. */}
+      {/* ── THE SCRIPT ─────────────────────────────────────────────────────
+          One opener, not two: the old "one thing to lead with" line and this
+          script were both built from the same worst gap. Rendered in the order
+          the beats are spoken, because a rep mid-call reads down the page and
+          says what is in front of them. Beat one is stated; beat two is asked
+          and followed by silence; beat three only earns its place AFTER an
+          answer -- delivering it early manufactures the objection to it.
+          Rationale and sources in lib/web-leads/angles.ts. */}
       {angle && (
         <BattleSection
           id="opening"
           defaultOpen={true}
-          title="How to open"
-          sub={
-            <>
-              Chosen because {angle.label.toLowerCase()} is losing them more of the score than anything else. Say your
-              own name and company first, then these three in order.
-            </>
-          }
+          title="The script"
+          sub={<>Chosen because {angle.label.toLowerCase()} is costing them the most. Give your name and company first, then these in order.</>}
         >
-          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
-            1. Say this
-          </p>
-          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
-            &ldquo;{angle.angle.opener}&rdquo;
-          </p>
-
-          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
-            2. Then ask this, and stop talking
-          </p>
-          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
-            &ldquo;{angle.angle.diagnostic}&rdquo;
-          </p>
-          {/* Rendered with the question, never below the fold of it. A rep who
-              reads straight down this card after a clean answer describes a
-              problem the prospect has just demonstrated they do not have, which
-              is a false claim on a live call. A dimension is several checks and
-              this is one of them. (Codex review, 2026-08-24.) */}
+          <Label>1. Say this</Label>
+          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">&ldquo;{angle.angle.opener}&rdquo;</p>
+          <div className="mt-5"><Label>2. Ask this, then stop talking</Label></div>
+          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">&ldquo;{angle.angle.diagnostic}&rdquo;</p>
+          {/* With the question, never below the fold of it: after a clean
+              answer, the cost line below describes a problem the prospect has
+              just shown they do not have. */}
           <p className="mt-2 max-w-4xl text-xs leading-relaxed text-fg-muted">{IF_THE_ANSWER_IS_CLEAN}</p>
-
-          <div className="mt-6 grid gap-5 border-t border-bg-border pt-5 md:grid-cols-3">
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
-                3. Once they answer, this is why it costs them
-              </p>
-              <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.cost}</p>
-            </div>
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
-                If they say &ldquo;{angle.angle.objection.says}&rdquo;
-              </p>
-              <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.objection.response}</p>
-            </div>
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">What we&apos;d build</p>
-              <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.build}</p>
-            </div>
-          </div>
-
-          {/* Held in reserve, and labelled as such. This is the ONLY copy on
-              the card carrying a research figure, and it is not part of the
-              pitch: it is what a rep reaches for when the prospect disputes the
-              general claim. The source line is rendered beside it on purpose,
-              so a rep who is challenged twice can name where it came from
-              instead of guessing. */}
+          <div className="mt-5"><Label>3. Once they answer, why it costs them</Label></div>
+          <p className="mt-1.5 max-w-4xl text-sm leading-relaxed text-fg-dim">{angle.angle.cost}</p>
+          {/* Held in reserve, and labelled as such: what a rep reaches for when
+              the prospect disputes the general claim, with the source beside it
+              so a rep challenged twice can name where it came from. */}
           {angle.angle.proof && (
             <div className="mt-5 rounded-lg border border-bg-border bg-bg-raised/60 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
-                Only if they push back on that
-              </p>
+              <Label>Only if they push back on that</Label>
               <p className="mt-1.5 max-w-4xl text-sm leading-relaxed text-fg-dim">{angle.angle.proof.stat}</p>
               <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">Source: {angle.angle.proof.source}</p>
             </div>
@@ -2064,182 +1052,141 @@ function ScoredBody({
         </BattleSection>
       )}
 
-      {/*
-        DEFAULT OPEN, reversing the 2026-08-31 progressive-disclosure decision for
-        this one section. That decision was right for a static poster: the eight
-        cards were identical on every lead, so a rep who had read them once carried
-        them and the teaser named what was behind the click.
-
-        That argument does not survive the console. The cards are ranked for the
-        business on the phone, so they are no longer carried, and the tap that fills
-        the entire objection database lives inside the section. A section a rep has
-        to open first is a section a rep does not open mid-sentence. Approved by
-        Adon, 2026-09-10. Every other section keeps its current default, and
-        "Expand all" plus the per-rep localStorage persistence are untouched.
-      */}
+      {/* DEFAULT OPEN (Adon, 2026-09-10): the cards are ranked for the business
+          on the phone, and a section a rep has to open first is a section a rep
+          does not open mid-sentence. */}
       <BattleSection
         id="brushoffs"
         defaultOpen={true}
-        title="What they will push back with, and what to say"
+        title="Objections and what to say"
         teaser="The objections this business is most likely to raise, ranked, with the counter for each and a one-tap log"
       >
         <ObjectionConsole leadId={lead.id} bare />
       </BattleSection>
 
-      {/* ── §3.2 the shape + §3.3 points on the table ────────────────────── */}
-      <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
-        <BattleSection
-          id="shape"
-          defaultOpen={true}
-          title="What kind of bad is it"
-          sub="The shape of the problem across seven areas. Tap one, on the chart or in the list, to see what is failing inside it."
-        >
-          <DesignationPlate audit={audit} selected={dimSel} onSelect={setDimSel} reduced={reduced} />
-          <DimensionShape
-            dimensions={audit.dimensions}
-            worstFirst={worstFirst}
-            competitors={competitors}
-            signals={signals}
-            drawn={drawn}
-            reduced={reduced}
-            selected={dimSel}
-            onSelect={setDimSel}
-          />
-        </BattleSection>
+      {/* The capability catalogue (Task 5, 2026-09-14): the fifteen reviewed
+          capabilities, ranked for this lead, in words an owner recognises as
+          something they would buy. Read mid-call, so it may not cost a click. */}
+      <BattleSection
+        id="fixes"
+        defaultOpen={true}
+        title={BUILD_TITLE}
+        sub={BUILD_SUB}
+      >
+        <BuildCatalogue
+          dimensions={audit.dimensions}
+          hasWebsite={hasWebsite}
+          signals={signals}
+          selectedAngleKey={angle?.key ?? null}
+          industry={lead.industry}
+          drawn={drawn}
+          reduced={reduced}
+        />
+      </BattleSection>
+    </>
+  );
+}
 
-        {/*
-          THE SECTION IS NOW THE CATALOGUE, NOT THE RANKED DIMENSIONS (Task 5,
-          2026-09-14). `FixFirst` ranked the seven scored DIMENSIONS, which is
-          the scoring model's own vocabulary: nobody buys "discoverability".
-          `CapabilityCatalogue` ranks the fifteen reviewed CAPABILITIES in
-          `lib/web-leads/automations.ts`, which are the same measurements
-          regrouped into things an owner recognises as something they would
-          buy, and it carries the stage ladder the dimension list had nowhere
-          to put. The figure on a row is still weighted composite points, the
-          same unit this card prints everywhere else.
+/**
+ * The audit-derived half of the proof drawer, for a score we can stand
+ * behind: rivals, every failing check, and the raw crawl.
+ */
+function ScoredProof({
+  lead, audit, competitors, signals,
+}: {
+  lead: WebLead;
+  audit: Extract<AuditResult, { state: "scored" }>;
+  competitors: CompetitorContext | null;
+  signals: Record<string, unknown> | null;
+}) {
+  const worstFirst = useMemo(
+    () => [...audit.dimensions].sort((a, b) => recoverablePoints(b) - recoverablePoints(a)),
+    [audit.dimensions],
+  );
+  const evidence = useMemo(() => evidenceFrom(signals), [signals]);
+  const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
+  const failing = worstFirst.filter((d) => d.checks.some((c) => !c.has));
 
-          `id` and `defaultOpen` are unchanged and pinned by
-          tests/web-leads-battlecard.test.ts: this is read mid-call and may
-          not cost a click.
-        */}
-        <BattleSection
-          id="fixes"
-          defaultOpen={true}
-          title={BUILD_TITLE}
-          sub={BUILD_SUB}
-        >
-          <BuildCatalogue
-            dimensions={audit.dimensions}
-            hasWebsite={hasWebsite}
-            signals={signals}
-            selectedAngleKey={angle?.key ?? null}
-            drawn={drawn}
-            reduced={reduced}
-          />
-        </BattleSection>
+  return (
+    <>
+      <div>
+        <Label>Who they are up against</Label>
+        {competitors && (
+          <p className="mt-1 text-xs text-fg-dim">
+            The best-scoring {competitors.slice.label} we have measured, on the same {totalChecks} checks. Real
+            businesses, open any of them while you are on the call.
+          </p>
+        )}
+        <div className="mt-3">
+          <Competitors competitors={competitors} audit={audit} lead={lead} />
+        </div>
       </div>
 
-      {/* ── The competitors ─────────────────────────────────────────────── */}
-      <BattleSection
-        id="competitors"
-        defaultOpen={true}
-        title="Who they are up against"
-        sub={
-          competitors ? (
-            <>
-              The best-scoring {competitors.slice.label} we have measured, on the same {totalChecks} checks. Real
-              businesses, open any of them while you are on the call.
-            </>
-          ) : undefined
-        }
-      >
-        <Competitors competitors={competitors} audit={audit} lead={lead} drawn={drawn} reduced={reduced} />
-      </BattleSection>
-
-      {/* ── §4, depth two: THE CASE, BY DIMENSION ───────────────────────── */}
-      <BattleSection
-        id="faults"
-        defaultOpen={false}
-        title="Everything wrong with this site"
-        sub="Grouped by what it affects, worst first. An area's score is plain arithmetic: the points its passing checks earn, out of 100. Every failing check below names what the crawler actually measured on this site, so no number here has to be taken on faith."
-        teaser={`${failed.length} ${failed.length === 1 ? "check" : "checks"} failing across ${failingAreas} ${failingAreas === 1 ? "area" : "areas"}, worst first, with what each one costs them`}
-      >
-        <div className="space-y-6">
-          {worstFirst.map((d) => {
-            const misses = d.checks.filter((c) => !c.has);
-            return (
-              <div key={d.key} id={`battle-dim-${d.key}`} className="scroll-mt-24 border-t border-bg-border pt-4 first:border-t-0 first:pt-0">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h3 className="text-base font-semibold text-fg">{d.label}</h3>
-                  <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
-                    Scores <span className="tabular-nums text-fg">{d.score}</span> ·{" "}
-                    {earnedPoints(d)} of 100 points earned ·{" "}
-                    {misses.length === 0
-                      ? "nothing failing here"
-                      : `${misses.length} of ${d.checks.length} ${misses.length === 1 ? "check" : "checks"} failing`}
-                  </p>
-                </div>
-                {misses.length === 0 ? (
-                  <p className="mt-2 text-sm text-fg-dim">Everything we check in this area passed.</p>
-                ) : (
-                  <ul className="mt-3 grid gap-2.5 md:grid-cols-2">
-                    {misses
-                      .slice()
-                      .sort((a, b) => b.points - a.points)
-                      .map((check: CheckResult) => (
-                        <li key={check.code} className="rounded-lg border border-bg-border bg-bg-raised/60 p-3.5">
-                          <div className="flex items-baseline justify-between gap-3">
-                            <p className="text-sm font-semibold text-fg">{check.label}</p>
-                            {/* The check's exact worth in this area's 100 --
-                                the score is these numbers added up, and a rep
-                                should be able to do the addition out loud. */}
-                            <span className="shrink-0 text-[11px] tabular-nums text-fg-dim [font-family:var(--battle-data)]">
-                              {check.points} of this area&apos;s 100 pts
-                            </span>
-                          </div>
-                          <MeasuredLine code={check.code} signals={signals} />
-                          <RemedyLines code={check.code} />
-                        </li>
-                      ))}
+      <div>
+        <Label>Everything failing on their site</Label>
+        <p className="mt-1 text-xs text-fg-dim">
+          Grouped by what it affects, worst first. Each line names what the crawler actually measured, so no number
+          has to be taken on faith.
+        </p>
+        {failing.length === 0 ? (
+          <p className="mt-3 text-sm text-fg-dim">Every check we run passed on this site.</p>
+        ) : (
+          <div className="mt-3 space-y-5">
+            {failing.map((d) => {
+              const misses = d.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points);
+              return (
+                <div key={d.key} id={`battle-dim-${d.key}`} className="scroll-mt-24">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-fg">{d.label}</h3>
+                    <p className="text-xs tabular-nums text-fg-muted">
+                      Scores <span className="text-fg">{d.score}</span> · {earnedPoints(d)} of 100 points earned ·{" "}
+                      {misses.length} of {d.checks.length} {misses.length === 1 ? "check" : "checks"} failing
+                    </p>
+                  </div>
+                  <ul className="mt-2 grid gap-2 md:grid-cols-2">
+                    {misses.map((check: CheckResult) => (
+                      <li key={check.code} className="rounded-lg border border-bg-border bg-bg-raised/60 p-3">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <p className="text-sm font-semibold text-fg">{check.label}</p>
+                          {/* The check's exact worth in this area's 100: the
+                              score is these numbers added up, and a rep
+                              should be able to do the addition out loud. */}
+                          <span className="shrink-0 text-[11px] tabular-nums text-fg-dim">
+                            {check.points} of this area&apos;s 100 pts
+                          </span>
+                        </div>
+                        <MeasuredLine code={check.code} signals={signals} />
+                        <RemedyLines code={check.code} />
+                      </li>
+                    ))}
                   </ul>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </BattleSection>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
-      {/* ── §4, depth three: THE EVIDENCE ───────────────────────────────── */}
-      <BattleSection
-        id="evidence"
-        defaultOpen={false}
-        title="What we actually measured"
-        sub={
-          <>
-            The raw crawl, for when a prospect says they redid the site last year. Every line is something the crawler
-            saw on {formatDate(audit.measuredAt)}; anything it did not record is not listed rather than shown as a
-            zero.
-          </>
-        }
-        teaser={`The raw crawl from ${formatDate(audit.measuredAt)}, line by line`}
-      >
+      <div>
+        <Label>The raw crawl</Label>
+        <p className="mt-1 text-xs text-fg-dim">
+          For when a prospect says they redid the site last year. Every line is something the crawler saw on{" "}
+          {formatDate(audit.measuredAt)}; anything it did not record is left out rather than shown as a zero.
+        </p>
         {evidence.length === 0 ? (
-          <p className="text-sm text-fg-muted">
+          <p className="mt-3 text-sm text-fg-muted">
             No raw measurements were stored alongside this score, so there is nothing to quote here.
           </p>
         ) : (
-          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+          <div className="mt-3 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {evidence.map((group) => (
               <div key={group.title}>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">{group.title}</p>
-                <dl className="mt-2 divide-y divide-bg-border/60">
+                <p className="text-xs font-semibold text-fg-muted">{group.title}</p>
+                <dl className="mt-1.5 divide-y divide-bg-border/60">
                   {group.rows.map((row) => (
-                    <div
-                      key={row.label}
-                      className="-mx-1.5 flex items-baseline justify-between gap-3 rounded px-1.5 py-1.5 transition-colors hover:bg-accent/5 motion-reduce:transition-none"
-                    >
+                    <div key={row.label} className="flex items-baseline justify-between gap-3 py-1.5">
                       <dt className="text-xs text-fg-dim">{row.label}</dt>
-                      <dd className="shrink-0 text-xs font-medium tabular-nums text-fg-muted [font-family:var(--battle-data)]">{row.value}</dd>
+                      <dd className="shrink-0 text-right text-xs font-medium tabular-nums text-fg-muted">{row.value}</dd>
                     </div>
                   ))}
                 </dl>
@@ -2247,367 +1194,21 @@ function ScoredBody({
             ))}
           </div>
         )}
-        {/* The unverified directory status used to be repeated here too. It
-            renders once now, in the BusinessFacts block at the top of the
-            page, labelled for what it is. */}
-      </BattleSection>
+      </div>
     </>
   );
 }
 
 /**
- * The radar and the dimension list, sharing one selection, with the detail for
- * the selected dimension rendered beneath them.
- *
- * The selection model is why the full fault list can default closed: a rep who
- * taps "Looking credible" sees, in place, what is failing there, what the
- * biggest gap costs, and how it sits against the best local competitor --
- * without scrolling away from the chart they were narrating. The accessible
- * path is the list (real buttons, aria-pressed); the radar's hit areas are a
- * pointer convenience over the same state, which matters because the radar
- * itself is display:none below `sm`.
- *
- * Defaults to the WORST dimension rather than to nothing: the empty state of a
- * detail panel is a question ("tap something?"), and the worst area is the one
- * the rep was going to tap anyway -- it is the same ordering logic the angle
- * selection already uses.
- */
-function DimensionShape({
-  dimensions, worstFirst, competitors, signals, drawn, reduced, selected, onSelect,
-}: {
-  dimensions: DimensionProfile[];
-  worstFirst: DimensionProfile[];
-  competitors: CompetitorContext | null;
-  signals: Record<string, unknown> | null;
-  drawn: boolean;
-  reduced: boolean;
-  /** Selection is OWNED BY ScoredBody (round 7): the designation plate's
-   *  chips, this list, the SVG radar and the WebGL stage all read and write
-   *  the same state, so a tap anywhere focuses everywhere. */
-  selected: string | null;
-  onSelect: (key: string) => void;
-}) {
-  const bus = useBattleSections();
-  const setSelected = onSelect;
-  // The SFX preference, mirrored into state so the toggle re-renders. Read
-  // in an effect for the same SSR-hydration reason as useReducedMotion.
-  const [sfxOn, setSfxOn] = useState(false);
-  useEffect(() => setSfxOn(sfx.enabled), []);
-  // The holo-table tilt for the 2D FALLBACK stack: the radar sits on a
-  // gentle base pitch and leans toward the pointer. USER-DRIVEN motion only.
-  const [tilt, setTilt] = useState({ x: 0, y: 0 });
-  // The WebGL radar's lifecycle: pending (initializing invisibly behind the
-  // SVG), on (3D live, SVG unmounted), off (probe/import/init failed -- the
-  // SVG stays, permanently, and nothing is retried or blank).
-  const [gl, setGl] = useState<"pending" | "on" | "off">("pending");
-  // Desktop check as STATE, not CSS: `hidden` would only hide the canvas --
-  // the effect behind it would still download three.js onto every phone.
-  // Read in an effect for the same hydration reason as useReducedMotion.
-  const [desktop, setDesktop] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(min-width: 640px)");
-    setDesktop(mq.matches);
-    const onChange = (e: MediaQueryListEvent) => setDesktop(e.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  const sel = selected ?? worstFirst[0]?.key ?? null;
-  const dim = dimensions.find((d) => d.key === sel) || null;
-  const headToHead = competitors?.headToHead || null;
-  // Memoised: Radar3D rebuilds its whole GL scene when this identity
-  // changes, and a fresh array per render would rebuild it per click.
-  const leaderArr = useMemo(
-    () => headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null,
-    [headToHead],
-  );
-  const leaderFor = dim ? headToHead?.dimensions.find((l) => l.key === dim.key) || null : null;
-  const misses = dim ? dim.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points) : [];
-  // The ONE truth for "is the 3D radar actually on screen". The SVG hides on
-  // exactly this, not on `gl` alone: a rep who enables reduced motion after
-  // the scene initialized unmounts Radar3D while `gl` still says "on", and a
-  // fallback keyed to `gl` alone would leave a blank hole where a chart was.
-  // (Codex review, 2026-09-01.)
-  const glLive = drawn && !reduced && desktop && gl === "on";
-
-  function jumpToFaults() {
-    if (!bus || !dim) return;
-    bus.openOne("faults");
-    const anchor = `battle-dim-${dim.key}`;
-    // The section's content mounts on open, so the anchor does not exist until
-    // the next paint. One short timeout, then scroll; instant under reduced
-    // motion, because a page that lurches is motion too.
-    window.setTimeout(() => {
-      document.getElementById(anchor)?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
-    }, 90);
-  }
-
-  return (
-    <>
-      {/* THE RADAR IS HIDDEN BELOW `sm`, AND NOTHING REPLACES IT, because
-          nothing has to. The seven dimension buttons below already carry
-          every number the radar encodes, labelled, in one column, and they
-          were always there. So the phone gets the buttons and the desktop
-          gets the chart.
-
-          On desktop the chart is the WebGL hologram (Radar3D) when it can
-          be: `drawn` gates the mount one frame so a reduced-motion
-          preference has already been read (a reduced-motion user never even
-          downloads three.js), and while the GL scene initializes -- or if it
-          fails -- the 2D SVG hologram stack below renders instead, so the
-          card is never blank and never waits. The SVG stack is also the
-          aria carrier; when the canvas takes over, an sr-only summary keeps
-          the same sentence available to assistive tech. */}
-      {drawn && !reduced && desktop && gl !== "off" && (
-        <div className={gl === "on" ? "relative" : "pointer-events-none absolute h-px w-px overflow-hidden opacity-0"}>
-          <Radar3D
-            dimensions={dimensions}
-            leader={leaderArr}
-            selected={sel}
-            onSelect={setSelected}
-            onStatus={(ok) => setGl(ok ? "on" : "off")}
-            className="h-[380px] w-full"
-          />
-          {gl === "on" && (
-            <>
-              <p className="sr-only">{`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}</p>
-              <div className="flex items-center justify-center gap-3">
-                {headToHead && (
-                  <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
-                    Gold outline: {headToHead.competitor.name} · tap a beam to focus · drag to orbit · double-click to reset
-                  </p>
-                )}
-                {/* Sound is OPT-IN, per rep: this card sits next to a live
-                    phone call, so the HUD ships silent and stays silent
-                    until the rep flips this. battle-sfx.ts synthesizes the
-                    palette from oscillators -- zero audio files. */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !sfxOn;
-                    sfx.setEnabled(next);
-                    setSfxOn(next);
-                  }}
-                  aria-pressed={sfxOn}
-                  className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none [font-family:var(--battle-display)] ${sfxOn ? "border-accent/50 text-fg" : "border-bg-border text-fg-dim hover:text-fg-muted"}`}
-                >
-                  SFX {sfxOn ? "on" : "off"}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-      <div className={glLive ? "hidden" : "relative hidden justify-center sm:flex"} style={{ perspective: "1100px" }}>
-        {(() => {
-          const radarProps = {
-            dimensions,
-            leader: headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null,
-            leaderName: headToHead?.competitor.name || null,
-            drawn,
-            reduced,
-            selected: sel,
-            onSelect: setSelected,
-          };
-          return (
-            <div
-              className="relative w-full max-w-[420px]"
-              style={{
-                transform: reduced ? "none" : `rotateX(${(18 + tilt.x).toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
-                // Conditional like every other transition in this file:
-                // `reduced` starts false and corrects on mount, so an
-                // unconditional 180ms here animated the base pitch flat for
-                // exactly the users who asked for no motion. With it
-                // conditional, the correction is a one-frame snap. (Codex
-                // review, 2026-08-31.)
-                transition: reduced ? "none" : "transform 180ms ease-out",
-                transformStyle: "preserve-3d",
-              }}
-              onPointerMove={
-                reduced
-                  ? undefined
-                  : (e) => {
-                      const r = e.currentTarget.getBoundingClientRect();
-                      const px = (e.clientX - r.left) / r.width - 0.5;
-                      const py = (e.clientY - r.top) / r.height - 0.5;
-                      setTilt({ x: -py * 9, y: px * 12 });
-                    }
-              }
-              onPointerLeave={() => setTilt({ x: 0, y: 0 })}
-            >
-              {/* The hologram stack: grid on the table, shadow just above it,
-                  the data polygon floating over both, hit targets on top.
-                  Under tilt the layers parallax -- that gap IS the 3D. Flat
-                  (reduced motion) the layers align exactly and nothing is
-                  lost but the theatre. */}
-              <Radar {...radarProps} layer="base" />
-              <div aria-hidden className="pointer-events-none absolute inset-0" style={{ transform: "translateZ(10px)" }}>
-                <Radar {...radarProps} layer="shadow" />
-              </div>
-              <div aria-hidden className="pointer-events-none absolute inset-0" style={{ transform: "translateZ(28px)" }}>
-                <Radar {...radarProps} layer="data" />
-              </div>
-              <div className="absolute inset-0" style={{ transform: "translateZ(34px)" }}>
-                <Radar {...radarProps} layer="hits" />
-              </div>
-            </div>
-          );
-        })()}
-        {/* The holo base: a soft light pool under the table. Constant. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -bottom-1 left-1/2 h-8 w-3/5 -translate-x-1/2 rounded-[100%] bg-accent/10 blur-xl"
-        />
-      </div>
-      <div className="mt-4 space-y-1 sm:border-t sm:border-bg-border sm:pt-4">
-        {dimensions.map((d) => {
-          const active = d.key === sel;
-          const hue = hueFor(d.key);
-          return (
-            <button
-              key={d.key}
-              type="button"
-              onClick={() => setSelected(d.key)}
-              aria-pressed={active}
-              className={`block w-full rounded-md px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none ${active ? "bg-bg-raised/70" : "hover:bg-bg-raised/40"}`}
-            >
-              <span className="flex items-center justify-between gap-3 text-xs">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  {/* The dimension's identity hue -- the same dot at every
-                      score, matching its vertex on the radar above. */}
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
-                  <span className={active ? "truncate font-semibold text-fg" : "truncate text-fg-muted"}>{d.label}</span>
-                </span>
-                <span className={`tabular-nums [font-family:var(--battle-data)] ${active ? "text-fg" : "text-fg-dim"}`}>{d.score}</span>
-              </span>
-              <span className="mt-1 block"><Meter value={d.score} drawn={drawn} reduced={reduced} hue={hue} /></span>
-            </button>
-          );
-        })}
-      </div>
-
-      {dim && (
-        <div
-          className="relative mt-4 rounded-lg border bg-bg-raised/50 p-4 backdrop-blur-sm"
-          // The selected dimension's identity hue frames its own detail --
-          // the same hue this area wears everywhere, at every score.
-          style={{ borderColor: `${hueFor(dim.key).to}40` }}
-        >
-          {/* The targeting brackets: this is the one inset on the card that
-              answers a selection, so it gets the HUD marks. Constant chrome. */}
-          <span aria-hidden className="pointer-events-none absolute left-1 top-1 h-2.5 w-2.5 border-l border-t border-accent/40" />
-          <span aria-hidden className="pointer-events-none absolute bottom-1 right-1 h-2.5 w-2.5 border-b border-r border-accent/40" />
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <p className="flex items-center gap-1.5 text-sm font-semibold text-fg [font-family:var(--battle-display)]">
-              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(dim.key).to, boxShadow: `0 0 6px ${hueFor(dim.key).to}` }} />
-              {dim.label}
-            </p>
-            <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
-              Scores <span className="tabular-nums text-fg">{dim.score}</span> ·{" "}
-              {earnedPoints(dim)} of 100 points earned ·{" "}
-              {misses.length === 0
-                ? "nothing failing here"
-                : `${misses.length} of ${dim.checks.length} ${misses.length === 1 ? "check" : "checks"} failing`}
-            </p>
-          </div>
-          {misses.length === 0 ? (
-            <p className="mt-2 text-sm text-fg-dim">Everything we check in this area passed.</p>
-          ) : (
-            <div className="mt-2.5">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">Biggest gap in this area</p>
-              <p className="mt-1 text-sm font-semibold text-fg">{misses[0].label}</p>
-              <MeasuredLine code={misses[0].code} signals={signals} />
-              <RemedyLines code={misses[0].code} />
-            </div>
-          )}
-          {leaderFor && headToHead && (
-            <div className="mt-3 border-t border-bg-border pt-3">
-              <p className="text-xs tabular-nums text-fg-dim">
-                <span className="font-semibold text-fg">{leaderFor.theirs}</span> vs {headToHead.competitor.name} at{" "}
-                {leaderFor.leader}
-                {/* A signed number, not a colour and not an arrow. The sign is
-                    a fact about two measurements; a red arrow is a verdict. */}
-                <span className="ml-2 text-fg-muted">({leaderFor.diff > 0 ? "+" : ""}{leaderFor.diff})</span>
-              </p>
-              <div className="mt-1.5"><TwoUpTrack theirs={leaderFor.theirs} leader={leaderFor.leader} drawn={drawn} reduced={reduced} /></div>
-            </div>
-          )}
-          {misses.length > 0 && bus && (
-            <button
-              type="button"
-              onClick={jumpToFaults}
-              className="mt-3 inline-flex items-center gap-1 rounded text-[11px] font-semibold text-fg-muted transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-            >
-              See {misses.length === 1 ? "the failing check" : `all ${misses.length} failing checks`} in this area
-              <ChevronDown aria-hidden className="h-3 w-3 -rotate-90" />
-            </button>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-/**
- * A card that leans toward the pointer, in CSS 3D.
- *
- * The same contract as the holo-table tilt above: user-driven only (the card
- * echoes the rep's own hand, nothing moves on its own), one neutral chrome
- * whatever the numbers on the card say, and reduced motion renders it flat --
- * the handlers are not even attached. Hover border/glow classes stay on the
- * caller; the inline transition names border-color and box-shadow so those
- * class transitions survive the inline `transition` property.
- */
-function TiltCard({ reduced, className = "", children }: { reduced: boolean; className?: string; children: React.ReactNode }) {
-  const [t, setT] = useState({ x: 0, y: 0 });
-  return (
-    <div
-      className={className}
-      style={{
-        transform:
-          reduced || (t.x === 0 && t.y === 0)
-            ? undefined
-            : `perspective(700px) rotateX(${t.x.toFixed(2)}deg) rotateY(${t.y.toFixed(2)}deg)`,
-        transition: reduced ? undefined : "transform 160ms ease-out, border-color 160ms ease-out, box-shadow 160ms ease-out",
-        willChange: reduced ? undefined : "transform",
-      }}
-      onPointerMove={
-        reduced
-          ? undefined
-          : (e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              const px = (e.clientX - r.left) / r.width - 0.5;
-              const py = (e.clientY - r.top) / r.height - 0.5;
-              setT({ x: -py * 6, y: px * 8 });
-            }
-      }
-      onPointerLeave={() => setT({ x: 0, y: 0 })}
-    >
-      {children}
-    </div>
-  );
-}
-
-/**
- * Head to head against real, named, locally-measured competitors.
- *
- * This is the section the operator asked for and the reason the rest of it is
- * worth reading: "produce competitors that do use AI, that do have an online
- * footprint, and then compare that to what they currently have." We do not have
- * to guess who those are. They are in the corpus, in the same industry and the
- * same city, already scored on the same 49 checks.
- *
- * Renders CONTENT ONLY: the section shell, the heading and the explanatory
- * line live in the BattleSection that wraps it in ScoredBody, so the heading
- * doubles as the disclosure control like every other section on the card.
+ * Real, named, locally-measured competitors: the top few, each openable, and
+ * the area-by-area numbers against the one we hold a full breakdown for.
  */
 function Competitors({
-  competitors, audit, lead, drawn, reduced,
+  competitors, audit, lead,
 }: {
   competitors: CompetitorContext | null;
   audit: Extract<AuditResult, { state: "scored" }>;
   lead: WebLead;
-  drawn: boolean;
-  reduced: boolean;
 }) {
   if (!competitors) {
     return (
@@ -2625,134 +1226,63 @@ function Competitors({
         {top.map((c, i) => {
           const href = preferredSiteUrl(c.websiteUrl);
           return (
-            <li
-              key={`${c.name}-${i}`}
-              style={{
-                opacity: drawn ? 1 : 0,
-                transform: drawn ? "none" : "translateY(6px)",
-                transition: reduced ? "none" : `opacity 320ms ease-out ${i * 60}ms, transform 320ms ease-out ${i * 60}ms`,
-              }}
-            >
-              {/* Entry stagger on the <li>, 3D tilt on the inner card: two
-                  transforms, two elements, no fighting over one style. */}
-              <TiltCard
-                reduced={reduced}
-                className="h-full rounded-lg border border-bg-border bg-bg-raised/60 p-4 hover:border-accent/40 hover:shadow-glow"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-fg">{c.name}</p>
-                    <p className="mt-0.5 truncate text-xs text-fg-dim">
-                      {[c.city, c.province].filter(Boolean).join(", ") || "Location not recorded"}
-                    </p>
-                  </div>
-                  <span className="shrink-0 text-2xl font-bold leading-none tabular-nums text-fg [font-family:var(--battle-display)]" style={{ textShadow: "0 0 14px rgba(34,211,238,0.35)" }}>{c.score}</span>
+            <li key={`${c.name}-${i}`} className="rounded-lg border border-bg-border bg-bg-raised/60 p-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-fg">{c.name}</p>
+                  <p className="mt-0.5 truncate text-xs text-fg-dim">
+                    {[c.city, c.province].filter(Boolean).join(", ") || "Location not recorded"}
+                  </p>
                 </div>
-                {href && (
-                  <a
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-[color,border-color,transform] hover:border-accent/40 hover:text-fg active:translate-y-px focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-                  >
-                    <ExternalLink className="h-3 w-3" />Open their site
-                  </a>
-                )}
-              </TiltCard>
+                <span className="shrink-0 text-xl font-bold leading-none tabular-nums text-fg">{c.score}</span>
+              </div>
+              {href && (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2.5 inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+                >
+                  <ExternalLink className="h-3 w-3" />Open their site
+                </a>
+              )}
             </li>
           );
         })}
       </ul>
 
       {headToHead && (
-        <div className="mt-6 border-t border-bg-border pt-5">
+        <div className="mt-5 border-t border-bg-border pt-4">
           <p className="text-sm font-semibold text-fg">
             {lead.name} against {headToHead.competitor.name}, area by area
           </p>
           {/* "The best-scoring" is only said when it IS the best-scoring.
               buildHeadToHead falls through to the next candidate when the top
               one has no readable profile, and calling that one the best is a
-              false claim about a named business made on a live call -- in
-              exactly the case the fallback exists to handle. (Codex review,
-              2026-08-24.) */}
+              false claim about a named business made on a live call. (Codex
+              review, 2026-08-24.) */}
           <p className="mt-1 text-xs text-fg-dim">
             {headToHead.rankInSlice === 1
               ? `The best-scoring of the ${fmt(slice.peerCount)} ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}.`
               : `Among the top-scoring ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}. We do not hold an area-by-area breakdown for the highest-scoring one, so this is the closest that we do.`}{" "}
             It scores {headToHead.composite} where this one scores {audit.composite}.
           </p>
-          <div className="mt-5">
-            <CompetitorArena3D
-              dimensions={headToHead.dimensions}
-              prospectName={lead.name}
-              competitorName={headToHead.competitor.name}
-              reduced={reduced}
-            />
-          </div>
-          <ul className="mt-4 space-y-3">
+          <dl className="mt-3 divide-y divide-bg-border/60">
             {headToHead.dimensions.map((d) => (
-              <li key={d.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(d.key).to, boxShadow: `0 0 6px ${hueFor(d.key).to}` }} />
-                  <span className="truncate">{d.label}</span>
-                </span>
-                <span className="text-xs tabular-nums text-fg-dim [font-family:var(--battle-data)]">
+              <div key={d.key} className="flex items-baseline justify-between gap-4 py-1.5">
+                <dt className="min-w-0 truncate text-xs text-fg-muted">{d.label}</dt>
+                {/* A signed number, not a colour and not an arrow. The sign is
+                    a fact about two measurements; a red arrow is a verdict. */}
+                <dd className="shrink-0 text-right text-xs tabular-nums text-fg-dim">
                   <span className="font-semibold text-fg">{d.theirs}</span> vs {d.leader}
-                  {/* A signed number, not a colour and not an arrow. The sign is
-                      a fact about two measurements; a red arrow is a verdict. */}
                   <span className="ml-2 text-fg-muted">({d.diff > 0 ? "+" : ""}{d.diff})</span>
-                </span>
-                <div className="col-span-2">
-                  <TwoUpTrack theirs={d.theirs} leader={d.leader} drawn={drawn} reduced={reduced} />
-                </div>
-              </li>
+                </dd>
+              </div>
             ))}
-          </ul>
+          </dl>
         </div>
       )}
     </>
-  );
-}
-
-/**
- * One 0-100 track carrying both scores: a filled bar for this lead and a tick
- * for the competitor.
- *
- * Deliberately not two stacked bars. Two bars invite a rep to read the LENGTHS
- * against each other, which is a comparison of two absolute scores; one track
- * with a tick puts the eye on the distance between them, which is the thing
- * being sold. The colours are WHOSE-marks, fixed identities worn at every
- * score: the prospect's fill is always cyan, the benchmark's tick is always
- * gold -- the same pair the radar overlay wears (rule 1).
- */
-function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader: number; drawn: boolean; reduced: boolean }) {
-  const t = Math.min(100, Math.max(0, theirs));
-  const l = Math.min(100, Math.max(0, leader));
-  return (
-    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
-      {/* Same compositor discipline as Meter: transform, never width. */}
-      <div
-        className="absolute inset-y-0 left-0 rounded-full"
-        style={{
-          width: `${t}%`,
-          transform: drawn ? "scaleX(1)" : "scaleX(0)",
-          transformOrigin: "left",
-          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
-          background: "linear-gradient(90deg, #22d3ee, #60a5fa)",
-          boxShadow: "0 0 8px rgba(34,211,238,0.35)",
-        }}
-      />
-      <div
-        className="absolute inset-y-0 w-0.5"
-        style={{
-          left: `calc(${l}% - 1px)`,
-          opacity: drawn ? 1 : 0,
-          transition: reduced ? "none" : "opacity 420ms ease-out 120ms",
-          background: GOLD,
-          boxShadow: `0 0 6px ${GOLD}`,
-        }}
-      />
-    </div>
   );
 }
 

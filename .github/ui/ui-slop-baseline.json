@@ -1,6 +1,6 @@
 {
   "_comment": "Known AI-tell visual patterns. Each entry is a reason a business owner reads our software as generated. Shrink, never grow.",
-  "root": "C:\\Users\\echel\\AppData\\Local\\Temp\\claude\\c--Users-echel-JARVIS\\eacee293-4a60-4b8a-af1b-ae56d1a89a60\\scratchpad\\occ-tells",
+  "root": "C:\\Users\\echel\\oasis-compact-card",
   "known": [
     {
       "file": "app/(marketing)/marketing.css",
@@ -24,12 +24,12 @@
     },
     {
       "file": "app/download/page.tsx",
-      "line": 69,
+      "line": 305,
       "rule": "radial-wash"
     },
     {
       "file": "app/playbook/drills/page.tsx",
-      "line": 263,
+      "line": 266,
       "rule": "ai-accent"
     },
     {
@@ -338,43 +338,13 @@
       "rule": "ai-accent"
     },
     {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 748,
-      "rule": "ai-accent"
-    },
-    {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 1560,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 1572,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 1573,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 1579,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "components/web-leads/CompetitorArena3D.tsx",
-      "line": 355,
-      "rule": "radial-wash"
-    },
-    {
       "file": "lib/agents.ts",
-      "line": 149,
+      "line": 145,
       "rule": "ai-accent"
     },
     {
       "file": "lib/agents.ts",
-      "line": 296,
+      "line": 292,
       "rule": "ai-accent"
     }
   ]
