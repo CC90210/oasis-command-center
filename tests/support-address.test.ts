@@ -229,6 +229,23 @@ async function main() {
     assert.ok(!prospect.includes(SUPPORT) && !prospect.includes(CC), "a client's prospect is sent back to that business");
   });
 
+  await check("5. client invoices name support@ as the seller contact; the business settings name CC nowhere", async () => {
+    const { seedStatements, BUSINESS_ENTITY_ID } = await import("../lib/founders-finances/chart");
+    const rows = seedStatements().filter((s) => /INSERT OR IGNORE INTO fin_settings/.test(s.sql) && s.args[0] === BUSINESS_ENTITY_ID);
+    assert.equal(rows.length, 1, "exactly one seeded settings row for the business entity");
+    // Pair each column with its value: a literal in the SQL, or the next bound arg for a "?".
+    const m = /\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/.exec(rows[0].sql);
+    assert.ok(m, "the settings seed keeps its column list");
+    const columns = m[1].split(",").map((c) => c.trim());
+    const values = m[2].split(",").map((v) => v.trim());
+    let next = 0;
+    const row = Object.fromEntries(columns.map((c, i) => [c, values[i] === "?" ? rows[0].args[next++] : values[i]]));
+    assert.equal(row.contact_email, SUPPORT, "invoices-io.ts prints contact_email as the seller's email on every client invoice");
+    for (const [column, value] of Object.entries(row)) {
+      assert.ok(String(value).toLowerCase() !== CC, `${column} names CC's address`);
+    }
+  });
+
   if (failures > 0) {
     console.error(`support-address: ${failures} check(s) failed`);
     process.exit(1);

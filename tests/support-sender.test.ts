@@ -129,7 +129,7 @@ async function check(name: string, fn: () => Promise<void> | void) {
 async function main() {
   console.log("support-sender:");
   const { resolveSupportMailbox } = await import("../lib/email/support-mailbox");
-  const { OASIS_SUPPORT_FOOTER } = await import("../lib/config/email-signature");
+  const { OASIS_SUPPORT_FOOTER, appendSignatureAndFooter } = await import("../lib/config/email-signature");
   const { sendOasisSharedGmail, composeOasisMessage, resolveOasisSupportMailboxFrom } = await import(
     "../lib/integrations/oasis-shared-gmail-send"
   );
@@ -276,6 +276,48 @@ async function main() {
     const route = readFileSync(join(ROOT, "app/api/clients/[id]/reply/route.ts"), "utf8");
     assert.match(route, /oasisMailboxFrom: resolveOasisSupportMailboxFrom,/);
     assert.match(route, /sendOasisSharedGmail\(\{[\s\S]*?purpose: "support",[\s\S]*?\}\)/);
+  });
+
+  // The deployed Worker configures the shared mailbox through OASIS_MAIL_FROM /
+  // OASIS_MAIL_APP_PASSWORD, not the tenant row, so this is the precedence that
+  // decides what clients see. Both copies of it are pinned: the sender's and
+  // the Clients hub's resolver.
+  await check("support@ outranks the OASIS_MAIL env pair in the sender and the Clients-hub resolver; sales keeps the pair", async () => {
+    const before = { from: process.env.OASIS_MAIL_FROM, pass: process.env.OASIS_MAIL_APP_PASSWORD };
+    try {
+      process.env.OASIS_MAIL_FROM = SHARED;
+      process.env.OASIS_MAIL_APP_PASSWORD = "env-pair-password";
+      setSupport(SUPPORT);
+      oasisRow = {};
+      const support = await sendOasisSharedGmail({ ...ack, idempotencyKey: "support-ack:env-pair" });
+      assert.equal(support.ok, true, JSON.stringify(support));
+      assert.equal(last().auth.user, SUPPORT, "support mail logs in as support@ although the env pair is set");
+      assert.equal(last().mail.from, `"OASIS AI Support" <${SUPPORT}>`);
+      assert.equal(await resolveOasisSupportMailboxFrom(OASIS_TENANT), SUPPORT, "the Clients hub names support@ too");
+      const sales = await sendOasisSharedGmail({
+        tenantId: OASIS_TENANT,
+        to: "lead@example.test",
+        subject: "Following up",
+        body: "Hi Simon,\n\nShort note.",
+        idempotencyKey: "lead:env-pair",
+      });
+      assert.equal(sales.ok, true, JSON.stringify(sales));
+      assert.equal(last().auth.user, SHARED, "sales mail keeps the OASIS_MAIL pair");
+    } finally {
+      if (before.from === undefined) delete process.env.OASIS_MAIL_FROM;
+      else process.env.OASIS_MAIL_FROM = before.from;
+      if (before.pass === undefined) delete process.env.OASIS_MAIL_APP_PASSWORD;
+      else process.env.OASIS_MAIL_APP_PASSWORD = before.pass;
+    }
+  });
+
+  await check("the support footer is OASIS's only: another brand's email refuses it, OASIS mail closes with it", () => {
+    assert.throws(
+      () => appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "sunbiz", purpose: "support" }),
+      /support mail is OASIS's/,
+    );
+    const oasis = appendSignatureAndFooter("Hi Ana,\n\nDone.", { brand: "oasis", purpose: "support" });
+    assert.ok(oasis.endsWith(OASIS_SUPPORT_FOOTER), oasis);
   });
 
   await check("an approved email to a CLIENT goes as support mail; one to a lead stays sales mail", async () => {
