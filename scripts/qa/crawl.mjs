@@ -649,6 +649,16 @@ async function main() {
   for (const [type, n] of Object.entries(counts.byType)) console.log(`  ${type.padEnd(18)} ${n}`);
 }
 
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    }),
+  ]);
+}
+
 async function visitRoute(ctx, viewer, vp, route, probeOnly) {
   const page = await ctx.newPage();
   const rec = {
@@ -729,7 +739,12 @@ async function visitRoute(ctx, viewer, vp, route, probeOnly) {
     await page.waitForFunction(() => window.__qaMainReadyAt != null, null, { timeout: opts.readyTimeoutMs, polling: 100 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(250);
-    const m = await page.evaluate(measurePage, { personaNames: [...PERSONA_NAMES], checkPersona: viewer.checkPersona === true });
+    // A page whose main thread is stuck would hold evaluate() forever; that page is the finding.
+    const m = await withTimeout(
+      page.evaluate(measurePage, { personaNames: [...PERSONA_NAMES], checkPersona: viewer.checkPersona === true }),
+      45000,
+      "the page did not answer the measurement within 45s (main thread busy)",
+    );
     Object.assign(rec, {
       title: m.title,
       h1: m.h1,
@@ -752,7 +767,7 @@ async function visitRoute(ctx, viewer, vp, route, probeOnly) {
     });
     if (scrolled) {
       await page.waitForTimeout(200);
-      rec.bars = [...rec.bars, ...(await page.evaluate(measureScrolledBars))];
+      rec.bars = [...rec.bars, ...(await withTimeout(page.evaluate(measureScrolledBars), 20000, "the page did not answer the scrolled measurement within 20s"))];
     }
     if (opts.screenshots) {
       const dir = path.join(opts.screenshots, viewer.key, vp.key);
