@@ -49,6 +49,7 @@ import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
 import { PerfVitals } from "@/components/PerfVitals";
+import { ClientErrorReporter } from "@/components/ClientErrorReporter";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -470,6 +471,7 @@ export default async function RootLayout({
             @vercel/speed-insights because the Cloudflare cutover is in
             flight — this survives the host move. */}
         <PerfVitals />
+        <ClientErrorReporter />
         {isFullBleed || !manifest ? (
           children
         ) : (

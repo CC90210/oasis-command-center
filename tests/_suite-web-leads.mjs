@@ -32,6 +32,7 @@ const TESTS = [
   "tests/web-leads-due.test.ts",
   "tests/web-leads-next-action.test.ts",
   "tests/web-leads-do-not-call.test.ts",
+  "tests/call-disposition.test.ts",
   "tests/web-leads-projection-covers-filters.test.ts",
   "tests/web-leads-enrichment.test.ts",
   "tests/web-leads-filters.test.ts",

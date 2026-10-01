@@ -196,7 +196,20 @@ assert.ok(updateCalls.some((call) => /patch:\s*contextPatch/.test(call)), `${LIB
 {
   assert.match(libCode, /const stagePatch: Record<string, unknown> = \{ stage: target \}/, `${LIB} must still advance the stage`);
   assert.match(libCode, /stagePatch\.lost_at = calledAt/, `${LIB} must stamp lost_at or the 90-day recycle can never fire`);
-  assert.match(libCode, /const contextPatch: Record<string, unknown> = \{[\s\S]*?last_disposition:\s*outcome/, `${LIB} must preserve the latest call result`);
+  // TIGHTENED 2026-09-30, NOT RELAXED. This previously required the literal
+  // `last_disposition: outcome`, which was the raw board vocabulary. Both this
+  // module and lib/website-sales-workflow.ts write that same field, so a lead
+  // carried whichever words the screen the rep happened to use produced, and
+  // components/today/RepToday.tsx rendered them to a rep: one lead read
+  // "attempted", another "no answer", for the same real event.
+  //
+  // It now pins the CANONICAL form. The protection is unchanged and the pattern
+  // is strictly narrower: before, any expression beginning with `outcome` would
+  // have satisfied it; now only the mapping through the vocabulary both paths
+  // share does. Note this module already wrote that canonical value to its
+  // ledger row and its interaction row -- last_disposition was the single place
+  // it disagreed with itself.
+  assert.match(libCode, /const contextPatch: Record<string, unknown> = \{[\s\S]*?last_disposition:\s*DB_OUTCOME\[outcome\]/, `${LIB} must preserve the latest call result, in the shared vocabulary`);
   assert.match(libCode, /ifMatchAll:[\s\S]*?assigned_to/, `${LIB} must bind stage/context writes to the frozen owner`);
   assert.match(libCode, /ifMatchAll:[\s\S]*?last_call_at/, `${LIB} must order mutable context by the canonical call timestamp`);
   assert.match(

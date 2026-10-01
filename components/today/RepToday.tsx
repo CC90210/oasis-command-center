@@ -53,6 +53,7 @@ import {
   type CommissionAmountStatus,
   type WebsiteSalesCommissionSummary,
 } from "@/lib/website-sales-commission-summary";
+import { dispositionLabel } from "@/lib/call-disposition";
 
 type LeadData = Record<string, unknown>;
 
@@ -314,7 +315,10 @@ export async function RepToday({
                     const who =
                       str(data, "company") || str(data, "name") || str(data, "email") || "unnamed lead";
                     const askFor = contactNameFor(data as Record<string, unknown>);
-                    const disposition = str(data, "last_disposition");
+                    // Legacy rows carry whichever raw vocabulary wrote them, so this
+                    // normalises on READ rather than requiring a backfill: an old
+                    // "attempted" and a new "no_answer" both read "No answer".
+                    const disposition = dispositionLabel(str(data, "last_disposition"));
                     return (
                       <li key={row.id} className="py-3">
                         <Link
@@ -351,7 +355,7 @@ export async function RepToday({
                                 which on this board is the company again, shown
                                 twice. */}
                             {askFor && <span className="text-fg">Ask for {truncate(askFor, 24)}</span>}
-                            {disposition && <span>last: {disposition.replace(/_/g, " ")}</span>}
+                            {disposition && <span>last: {disposition}</span>}
                           </div>
                         </Link>
                       </li>

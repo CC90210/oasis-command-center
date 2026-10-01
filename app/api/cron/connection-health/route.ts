@@ -33,6 +33,7 @@ import { checkCronAuth } from "@/lib/cron-auth";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { runConnectionHealthPass } from "@/lib/connections/health";
 import { purgeSlackRetention } from "@/lib/slack/retention";
+import { purgeClientErrorReports } from "@/lib/client-errors/retention";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,8 +59,20 @@ async function handle(req: NextRequest) {
       slackRetention = { error: "slack_retention_failed" };
       retentionFailed = true;
     }
+    // Browser crash reports keep 30 days (lib/client-errors/retention.ts).
+    let clientErrorRetention: Record<string, unknown>;
+    try {
+      clientErrorRetention = { ...(await purgeClientErrorReports(db, new Date())) };
+    } catch (err) {
+      console.error("[cron.connection-health.client-error-retention]", err instanceof Error ? err.stack : err);
+      clientErrorRetention = { error: "client_error_retention_failed" };
+      retentionFailed = true;
+    }
     const ok = result.errors.length === 0 && !retentionFailed;
-    return NextResponse.json({ ok, ...result, slack_retention: slackRetention }, { status: ok ? 200 : 500 });
+    return NextResponse.json(
+      { ok, ...result, slack_retention: slackRetention, client_error_retention: clientErrorRetention },
+      { status: ok ? 200 : 500 },
+    );
   } catch (err) {
     console.error("[cron.connection-health]", err instanceof Error ? err.stack : err);
     return NextResponse.json({ ok: false, error: "connection_health_failed" }, { status: 500 });
