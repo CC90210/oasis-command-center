@@ -36,6 +36,7 @@ import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 import type { EmpireLane, RoutineHealth } from "@/components/os/department/routine-rules";
 import type { PlatformOperatorCheck } from "@/lib/platform-operator";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import {
   buildNeedsYou,
   todayBriefPlan,
@@ -203,4 +204,32 @@ export async function loadNeedsYouReads(input: {
 /** The one Needs-you list, from the reads above. */
 export function needsYouFrom(reads: NeedsYouReads, nowMs: number): NeedsYou {
   return buildNeedsYou({ ...reads, nowMs });
+}
+
+/**
+ * The same list for a page that is not Today (the Feed's Needs-you tab):
+ * this viewer's own plan, the same reads, the same money gate and the same
+ * Empire-lane check FounderToday makes, so its count (model.ts needsYouTotal)
+ * is Today's. The Feed's tab used to count approvals alone while Today's pill
+ * counted every source: two "Needs you" labels, two numbers.
+ */
+export async function loadViewerNeedsYou(input: {
+  viewer: BriefViewer;
+  navInput: BuildOsNavInput;
+  /** Approval cards to fetch (the total is an exact count either way). */
+  approvalsLimit: number;
+}): Promise<NeedsYou> {
+  const day = operatorDayAt(new Date());
+  const { plan } = briefPlanFor(input.viewer, input.navInput);
+  const reads = await loadNeedsYouReads({
+    viewer: input.viewer,
+    navInput: input.navInput,
+    plan,
+    showFinancials: input.viewer.capabilities.canSeeCompanyFinancials && plan.money,
+    day,
+    approvalsLimit: input.approvalsLimit,
+    // A failed lookup is "unknown", not "no" (empireLaneFromCheck).
+    isPlatformOperator: async () => empireLaneFromCheck(await resolvePlatformOperator()),
+  });
+  return needsYouFrom(reads, day.nowMs);
 }

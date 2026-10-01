@@ -7,6 +7,12 @@
  * Comment, and under them the last week of decisions with their REAL outcomes
  * ("Sent ✓", "Failed: …"). It opens by default whenever something is waiting.
  *
+ * Unfiltered, the tab's count and its other rows are Today's own
+ * (components/os/today/brief-load.ts loadViewerNeedsYou, model.ts
+ * needsYouTotal): the tab used to count approvals alone while Today's pill
+ * counted every source, two "Needs you" labels with two numbers. Filtered by
+ * a department, it is that department's approvals, as before.
+ *
  * SCOPE, IN ORDER, ALL ON THE SERVER:
  *   1. requireOsRoute("/feed") — the rail's own gate, first, before any read.
  *   2. Approvals: the session's workspace, cut to the departments this viewer
@@ -43,7 +49,11 @@ import {
 } from "@/components/os/landings/FeedView";
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
 import { loadPendingApprovals, loadRecentDecisions } from "@/components/os/approvals/load";
+import { loadViewerNeedsYou } from "@/components/os/today/brief-load";
+import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
+import { NeedsYouRows } from "@/components/os/today/NeedsYouList";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
+import { floorCount } from "@/lib/os/count";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import type { DepartmentKey } from "@/lib/os/types";
@@ -80,13 +90,21 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
   const tabs: FeedTab[] = canSeeTape ? ["needs", "all", "shipped"] : ["needs"];
 
   // What is waiting on this viewer. Read first: it decides the default tab and
-  // the Needs-you count, and it is cheap (one indexed query per block).
+  // the Needs-you count. Unfiltered, the count is Today's (every source, one
+  // list); filtered by a department, its approvals (rows carry no department).
   const scope = approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput });
-  const pending = await loadPendingApprovals({ scope, tenantSlug, department: dept, limit: FEED_APPROVALS_SHOWN });
+  const [pending, needs] = await Promise.all([
+    loadPendingApprovals({ scope, tenantSlug, department: dept, limit: FEED_APPROVALS_SHOWN }),
+    dept ? Promise.resolve(null) : loadViewerNeedsYou({ viewer: viewer.surface, navInput: viewer.navInput, approvalsLimit: 1 }),
+  ]);
+  const waiting = needs ? needsYouTotal(needs) : pending.ok ? { total: pending.value.total, capped: false } : null;
+  // Rows other than approvals (which are drawn as full cards above them).
+  const needsRows = needs?.items ?? [];
+  const rowsWaiting = needsRows.some((item) => !isReviewItem(item));
 
   const rawTab = first(sp.tab);
   const tab: FeedTab =
-    rawTab === undefined && pending.ok && pending.value.total > 0 ? "needs" : parseFeedTab(rawTab, canSeeTape);
+    rawTab === undefined && waiting !== null && waiting.total > 0 ? "needs" : parseFeedTab(rawTab, canSeeTape);
 
   // The tape is read for its audience on every tab: the All / Shipped counts
   // on the tab bar come from it.
@@ -103,10 +121,13 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
         })
       : [];
   const inDept = dept ? rowsForTab(visible, "all", dept) : visible;
-  const counts: Partial<Record<FeedTab, number>> = {
-    ...(pending.ok ? { needs: pending.value.total } : {}),
+  // A count nobody could finish is a floor ("3+"); a floor of 0 is no number at all.
+  const needsCount = waiting && (waiting.total > 0 || !waiting.capped) ? floorCount(waiting.total, waiting.capped) : null;
+  const counts: Partial<Record<FeedTab, number | string>> = {
+    ...(needsCount !== null ? { needs: needsCount } : {}),
     ...(feed && feed.ok ? { all: inDept.length, shipped: inDept.filter(isShipped).length } : {}),
   };
+  const unchecked = (needs?.unavailable ?? []).filter((source) => source !== "approvals");
   const rows = rowsForTab(visible, tab, dept);
   const deptLabel = dept ? departmentLabels[dept] : null;
   const windowDays = feed && feed.ok ? feed.windowDays : 7;
@@ -136,9 +157,9 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
                   </p>
                 </div>
               </Card>
-            ) : pending.value.items.length === 0 ? (
+            ) : pending.value.items.length === 0 && !rowsWaiting ? (
               <NeedsYouEmpty department={deptLabel ?? null} />
-            ) : (
+            ) : pending.value.items.length > 0 ? (
               <section aria-label="Waiting on you" className="space-y-3">
                 <ul className="space-y-3">
                   {pending.value.items.map((a) => (
@@ -154,6 +175,19 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
                   </p>
                 )}
               </section>
+            ) : null}
+
+            {/* The rest of what Today lists: follow-ups, tickets past SLA,
+                failed routines, hot replies, connections, then Review. */}
+            {needsRows.length > 0 && (
+              <Card noPadding>
+                <NeedsYouRows items={needsRows} />
+              </Card>
+            )}
+            {unchecked.length > 0 && (
+              <p className="text-xs text-status-warm">
+                Couldn&rsquo;t check {unchecked.join(", ")} just now. This list may be incomplete; reload in a minute.
+              </p>
             )}
 
             {decisions && (
@@ -199,6 +233,7 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
             <FeedRows
               rows={rows}
               departmentLabels={departmentLabels}
+              oasisWorkspace={viewer.oasis}
               emptyMessage={
                 tab === "shipped"
                   ? `Nothing shipped${deptLabel ? ` from ${deptLabel}` : ""} in the last ${windowDays} days.`

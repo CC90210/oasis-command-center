@@ -7,11 +7,15 @@
  * Comment; the rest are one link away in the Feed.
  *
  * Then the rows that already exist somewhere else in the product: a past-due
- * follow-up on the board, a founder meeting with no outcome, follow-ups
- * carried over from before the cycle, open leads with no next step, a ticket
- * past its SLA, a failed routine, a hot reply, an overdue invoice, a
- * connection that needs the owner (until it recovers). Each row opens the page
- * where it is resolved. The header counts the things behind the rows.
+ * follow-up on the board, a founder meeting with no outcome, a ticket past its
+ * SLA, a failed routine, a hot reply, an overdue invoice, a connection that
+ * needs the owner (until it recovers). Each row opens the page where it is
+ * resolved. The header counts the things behind the rows.
+ *
+ * Under them, "Review": rows to look over that are not waiting on anyone, and
+ * are not in the count (model.ts isReviewItem): open leads with no next step,
+ * follow-ups promised before this cycle began, today's booked meetings, bank
+ * lines to categorise.
  *
  * An empty list says so, and a source that could not be read is named under
  * it — "nothing needs you" is only claimed when every source answered.
@@ -22,7 +26,14 @@
 import Link from "next/link";
 import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Plug, Receipt, Repeat, Reply } from "lucide-react";
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
-import { needsYouTotal, type NeedsYou, type NeedsYouIcon, type NeedsYouTone } from "@/components/os/today/model";
+import {
+  isReviewItem,
+  needsYouTotal,
+  type NeedsYou,
+  type NeedsYouIcon,
+  type NeedsYouItem,
+  type NeedsYouTone,
+} from "@/components/os/today/model";
 import { floorCount } from "@/lib/os/count";
 
 const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
@@ -57,6 +68,70 @@ function formatCount(n: number, capped = false): string {
   return n > 99 ? "99+" : floorCount(n, capped);
 }
 
+function NeedsYouRow({ item }: { item: NeedsYouItem }) {
+  const Icon = ICONS[item.icon];
+  return (
+    <li>
+      <Link
+        href={item.href}
+        prefetch={false}
+        className="group flex items-start gap-3 px-4 py-3 outline-none transition-colors duration-150 hover:bg-bg-hover focus-visible:bg-bg-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60"
+      >
+        <Icon size={16} strokeWidth={1.75} aria-hidden className={`mt-0.5 shrink-0 ${ICON_TONE[item.tone]}`} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-fg">{item.title}</span>
+          {item.detail && <span className="mt-0.5 block truncate text-[13px] text-fg-muted">{item.detail}</span>}
+        </span>
+        {item.count !== null && (
+          <span
+            className={`mt-0.5 inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${PILL_TONE[item.tone]}`}
+          >
+            {formatCount(item.count, item.capped === true)}
+          </span>
+        )}
+        <ChevronRight
+          size={16}
+          strokeWidth={1.75}
+          aria-hidden
+          className="mt-0.5 shrink-0 text-fg-dim transition-colors duration-150 group-hover:text-fg-muted"
+        />
+      </Link>
+    </li>
+  );
+}
+
+/**
+ * The rows: what needs the viewer first, then the Review rows under their own
+ * heading. Shared by Today and the Feed's Needs-you tab, which count the same
+ * rows (model.ts needsYouTotal).
+ */
+export function NeedsYouRows({ items }: { items: readonly NeedsYouItem[] }) {
+  const waiting = items.filter((item) => !isReviewItem(item));
+  const review = items.filter(isReviewItem);
+  return (
+    <>
+      {waiting.length > 0 && (
+        <ul className="divide-y divide-hairline">
+          {waiting.map((item) => (
+            <NeedsYouRow key={item.id} item={item} />
+          ))}
+        </ul>
+      )}
+      {review.length > 0 && (
+        <div className={waiting.length > 0 ? "border-t border-hairline" : undefined}>
+          <h3 className="px-4 pb-1 pt-3 text-xs font-semibold text-fg-muted">Review</h3>
+          <p className="px-4 text-xs text-fg-dim">Worth a look, not counted as waiting on you.</p>
+          <ul className="divide-y divide-hairline">
+            {review.map((item) => (
+              <NeedsYouRow key={item.id} item={item} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function NeedsYouList({
   needsYou,
   feedHref = null,
@@ -68,10 +143,12 @@ export function NeedsYouList({
   const { items, unavailable } = needsYou;
   const approvals = needsYou.approvals ?? null;
   // Things, not rows: 15 overdue follow-ups are 15 (model.ts needsYouTotal,
-  // the same count the Chief of Staff card and tab print).
+  // the same count the Chief of Staff card and tab print). Review rows are
+  // drawn but not counted.
   const { total, capped } = needsYouTotal(needsYou);
   const urgent = items.filter((i) => i.tone === "urgent").length + (approvals?.total ?? 0);
   const moreApprovals = approvals ? approvals.total - approvals.items.length : 0;
+  const waiting = items.filter((item) => !isReviewItem(item)).length;
   return (
     <section aria-labelledby="needs-you-heading" className="rounded-xl border border-hairline bg-bg-panel">
       <header className="flex items-center gap-2 border-b border-hairline px-4 py-3">
@@ -110,47 +187,14 @@ export function NeedsYouList({
         </div>
       )}
 
-      {items.length === 0 && (approvals?.items.length ?? 0) === 0 ? (
+      {waiting === 0 && (approvals?.items.length ?? 0) === 0 && (
         <p className="px-4 py-6 text-sm text-fg-muted">
           {unavailable.length === 0
             ? "Nothing needs you right now. Approvals, follow-ups, support SLAs and hot replies land here when they do."
             : "Nothing found in the sources that answered."}
         </p>
-      ) : items.length > 0 ? (
-        <ul className="divide-y divide-hairline">
-          {items.map((item) => {
-            const Icon = ICONS[item.icon];
-            return (
-              <li key={item.id}>
-                <Link
-                  href={item.href}
-                  prefetch={false}
-                  className="group flex items-start gap-3 px-4 py-3 outline-none transition-colors duration-150 hover:bg-bg-hover focus-visible:bg-bg-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60"
-                >
-                  <Icon size={16} strokeWidth={1.75} aria-hidden className={`mt-0.5 shrink-0 ${ICON_TONE[item.tone]}`} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-fg">{item.title}</span>
-                    {item.detail && <span className="mt-0.5 block truncate text-[13px] text-fg-muted">{item.detail}</span>}
-                  </span>
-                  {item.count !== null && (
-                    <span
-                      className={`mt-0.5 inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${PILL_TONE[item.tone]}`}
-                    >
-                      {formatCount(item.count, item.capped === true)}
-                    </span>
-                  )}
-                  <ChevronRight
-                    size={16}
-                    strokeWidth={1.75}
-                    aria-hidden
-                    className="mt-0.5 shrink-0 text-fg-dim transition-colors duration-150 group-hover:text-fg-muted"
-                  />
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      ) : null}
+      )}
+      <NeedsYouRows items={items} />
 
       {unavailable.length > 0 && (
         <p className="border-t border-hairline px-4 py-2.5 text-xs text-status-warm">

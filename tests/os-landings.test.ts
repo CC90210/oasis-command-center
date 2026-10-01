@@ -526,6 +526,37 @@ async function main() {
       | undefined;
     assert.deepEqual(rows?.map((r) => r.id), ["e-oasis-sent"]);
   });
+  // W2a (U2 verifier): the tab counted approvals alone while Today's pill
+  // counted every source; two "Needs you" labels printed two numbers.
+  await check("/feed: the Needs-you tab counts what Today counts, and lists the rows behind the number", async () => {
+    const { FeedTabs, NeedsYouEmpty } = await import("../components/os/landings/FeedView");
+    // A ticket past its first-response target on OASIS's desk: Today counts it.
+    await raw.execute({
+      sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, severity, client_email, sla_target, created_at)
+            VALUES ('t-breach', ?, 3, 'T-0003', 'Checkout broken', 'open', 'critical', 'buyer@shop.test', ?, ?)`,
+      args: [OASIS, iso(60 * MINUTE), iso(2 * 60 * MINUTE)],
+    });
+    try {
+      for (const tab of [undefined, "all"]) {
+        const run = await feedFor("cc", tab);
+        assert.ok(!(run.result instanceof Error), String(run.result));
+        const els = walk(run.result).elements;
+        const counts = els.find((e) => e.type === FeedTabs)?.props.counts as Record<string, unknown> | undefined;
+        // No approval is waiting, so the old count was 0. Three of CC's sources
+        // have no table in this fixture, so the count is a floor.
+        assert.equal(counts?.needs, "1+", `tab=${tab}: the tab prints Today's count: ${JSON.stringify(counts)}`);
+      }
+      const run = await feedFor("cc");
+      const found = walk(run.result);
+      assert.equal(found.elements.find((e) => e.type === FeedTabs)?.props.active, "needs", "something waits, so the Feed opens on it");
+      assert.ok(!found.elements.some((e) => e.type === NeedsYouEmpty), "'Nothing is waiting' over a breached ticket");
+      const t = found.strings.join(" ");
+      assert.ok(t.includes("1 ticket is past the first-response SLA") && t.includes("T-0003 Checkout broken"), "the row behind the number is listed");
+      assert.match(t, /Couldn.t check .*inbound replies/, "the unread sources are named");
+    } finally {
+      await raw.execute("DELETE FROM support_tickets WHERE id = 't-breach'");
+    }
+  });
   await check("/feed: loadTenantFeed pins correlation_id and refuses an empty workspace", async () => {
     const { loadTenantFeed } = await import("../components/os/landings/feed-data");
     const calls: Array<[string, ...unknown[]]> = [];
@@ -693,6 +724,47 @@ async function main() {
     assert.equal(fm.parseFeedTab("shipped", false), "needs", "no tape, no other tabs");
     assert.equal(fm.parseFeedTab(undefined, true), "all");
     assert.equal(fm.parseFeedDepartment("finance", [{ key: "sales", slug: "sales" }]), null, "a department the viewer cannot open is not a filter");
+  });
+  // W2a (U2-11, U7-19): the tape never prints a wire name, a house agent or
+  // the operator, and a client never reads OASIS's plumbing.
+  await check("feed-model: publisher and system names pass the persona rule; unmapped publishers are 'Workspace' for clients", async () => {
+    const { namesPersona } = await import("../lib/os/channel/identity");
+    assert.equal(fm.feedPublisherLabel("oasis_lead_stage_engine", false), "Workspace", "a client never reads an OASIS producer slug");
+    assert.equal(fm.feedPublisherLabel("manifest-data", false), "Workspace");
+    assert.equal(fm.feedPublisherLabel("oasis_lead_stage_engine", true), "Oasis lead stage engine", "OASIS reads its own producer");
+    assert.equal(fm.feedPublisherLabel("bravo_scheduler", true), "Chief of Staff scheduler", "a house agent is written as its department");
+    assert.equal(fm.feedPublisherLabel("email_brain", true), "Email brain");
+    assert.equal(fm.feedPublisherLabel("conaugh_cli", true), "Workspace", "the operator is never named");
+    assert.equal(fm.feedPublisherLabel(null, false), "Unattributed");
+    assert.equal(fm.feedSystemName("Maven post published"), "Marketing post published");
+    // The summary is built from a payload whose AGENT names are departments;
+    // the row's own data (a lead called Atlas Roofing) prints as written.
+    const { projectEvent } = await import("../lib/event-projection");
+    const summaryOf = (payload: object) =>
+      projectEvent({ id: "r", event_type: "BRAVO_PULSE_REFRESHED", payload: fm.displayPayload(payload) as object }).summary;
+    assert.equal(summaryOf({ agent: "bravo", kind: "tick" }), "Chief of Staff · tick");
+    assert.equal(summaryOf({ agent: "conaugh", kind: "tick" }), "Workspace · tick");
+    assert.equal(summaryOf({ note: "Atlas Roofing renewal" }), "Atlas Roofing renewal", "data is not an agent name");
+    for (const s of [summaryOf({ agent: "bravo", kind: "tick" }), summaryOf({ kind: "k", agent: "maven" }), fm.feedPublisherLabel("bravo_scheduler", true)]) {
+      assert.equal(namesPersona(s), false, `a persona name reached the Feed: ${s}`);
+    }
+    assert.equal(fm.displayPayload('{"note":"n"}'), '{"note":"n"}', "a payload with no agent name is passed through untouched");
+  });
+  await check("FeedRows: no wire-name tooltip, and a client's unmapped publisher reads 'Workspace'", async () => {
+    const { FeedRows } = await import("../components/os/landings/FeedView");
+    const rows = [
+      { id: "w1", event_type: "BRAVO_RECORD_STATUS_CHANGED", publisher_agent: "oasis_lead_stage_engine", target_agent: null, severity: null,
+        payload: { entity: "lead", from: "new", to: "won" }, published_at: null, created_at: new Date().toISOString(), status: null },
+    ];
+    for (const oasisWorkspace of [false, true]) {
+      const tree = walk(FeedRows({ rows, departmentLabels: {}, emptyMessage: "none", oasisWorkspace }));
+      assert.ok(!tree.elements.some((e) => e.props.title === "BRAVO_RECORD_STATUS_CHANGED"), "the raw event type is a tooltip again");
+      const t = tree.strings.join(" ");
+      assert.ok(!/BRAVO_|SUNBIZ_/.test(t), `a wire name reached the row: ${t}`);
+      assert.ok(t.includes("Record status changed"), t);
+      assert.ok(t.includes(oasisWorkspace ? "Oasis lead stage engine" : "Workspace"), `${oasisWorkspace ? "OASIS" : "client"}: ${t}`);
+      if (!oasisWorkspace) assert.ok(!t.includes("Oasis lead stage engine"), "a client read OASIS's producer name");
+    }
   });
 
   const cm = await import("../components/os/landings/clients-model");

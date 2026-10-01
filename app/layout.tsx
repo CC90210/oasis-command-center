@@ -48,6 +48,9 @@ import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
+import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
+import { connectionsDot, connectionsHealth } from "@/lib/os/connectors";
+import type { ConnectionsStatus } from "@/components/os/RailFooter";
 import { PerfVitals } from "@/components/PerfVitals";
 import { ClientErrorReporter } from "@/components/ClientErrorReporter";
 
@@ -323,12 +326,33 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
+  // The rail's Connections dot, for the owners and admins who get the door
+  // (showConnections below): one summary of the statuses Settings > Connections
+  // shows (lib/os/connectors.ts connectionsHealth), started here so it runs
+  // beside the manifest read instead of after it. Null is no dot: nothing set
+  // up, an unverified app or a failed read is never drawn green.
+  const surfaceForConnections = viewerSurface?.ok ? viewerSurface : null;
+  const connectionsStatusP: Promise<ConnectionsStatus | null> =
+    !isFullBleed && !demoMode && !pathOverrideSlug && navPersona === "founder" && surfaceForConnections
+      ? timed(
+          "connections",
+          safe(
+            "layout.connections_status",
+            loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId }).then(
+              (facts) => connectionsDot(connectionsHealth(facts, Date.now())),
+            ),
+            null,
+          ),
+          perfSpans,
+        )
+      : Promise.resolve(null);
   // The viewer's tenant id lets an OASIS operator whose tenant-slug read
   // degraded (manifestSlug null → "default") keep OASIS_SEED instead of the
   // unprovisioned placeholder; it changes nothing for any other tenant.
   const manifest = isFullBleed
     ? null
     : await timed("manifest", getManifest(manifestSlug, profile?.tenant_id ?? null), perfSpans);
+  const connectionsMeasured = await connectionsStatusP;
   // One `[perf]` line per shell render: the measured session tax. This is
   // the P1 before/after number; remove only when the instant-load work ends.
   logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);
@@ -405,6 +429,8 @@ export default async function RootLayout({
   const osShell = !isFullBleed && !!manifest && !demoMode && !pathOverrideSlug;
   const viewerTenantSlug = viewerSurface?.ok ? viewerSurface.tenantSlug : null;
   const provisioned = !!manifest && !isUnprovisionedManifest(manifest);
+  // Connections are workspace configuration: owners/admins only.
+  const showConnections = osShell && provisioned && navPersona === "founder";
   const osSections: OsNavSection[] | null = osShell
     ? buildOsNav({
         persona: navPersona,
@@ -515,11 +541,8 @@ export default async function RootLayout({
               // (the manifest nav above is then only the preview/demo shells').
               sections={osSections}
               isOperator={isOperator}
-              // Connections are workspace configuration: owners/admins only.
-              showConnections={osShell && provisioned && navPersona === "founder"}
-              // No connection-health source exists yet (Phase 2), so no dot:
-              // an unmeasured status is not a green one.
-              connectionsStatus={null}
+              showConnections={showConnections}
+              connectionsStatus={showConnections ? connectionsMeasured : null}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"

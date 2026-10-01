@@ -22,7 +22,8 @@
  *   CS         listTickets / listProjects + slaStatus (lib/delivery)
  *   Ops        tenant_cron_jobs (+ OASIS's Empire rows), via ./routines.ts,
  *              summarised by routine-rules.ts routineHealth — the same
- *              numbers Today's Operations card prints
+ *              numbers Today's Operations card prints; connections from the
+ *              hub's own statuses (lib/os/connectors.ts connectionsHealth)
  *   CoS        Needs you: components/os/today/brief-load.ts, the SAME reads
  *              and the same count (model.ts needsYouTotal) as Today
  */
@@ -56,7 +57,7 @@ import {
   needsYouFrom,
   operatorDayAt,
 } from "@/components/os/today/brief-load";
-import { needsYouTotal } from "@/components/os/today/model";
+import { isReviewItem, needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
 import { mrrTile } from "./money-rules";
 import {
@@ -71,6 +72,8 @@ import {
 } from "./routine-rules";
 import { loadEmpireRoutines, type Read } from "./routines";
 import type { OsViewer } from "./viewer";
+import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
+import { connectionsHealth, type ConnectionsHealth } from "@/lib/os/connectors";
 
 export type AttentionItem = {
   id: string;
@@ -530,9 +533,33 @@ async function clientSuccessNumbers(viewer: OsViewer): Promise<DepartmentNumbers
   };
 }
 
+/**
+ * Connections at a glance: how many of the apps this workspace has set up need
+ * the owner, counted from the statuses Settings > Connections shows
+ * (lib/os/connectors.ts connectionsHealth), so this tile, the rail's
+ * Connections dot and the hub's cards cannot disagree. The tile used to claim
+ * health checks were unmeasured while Today listed connections needing
+ * attention from those same checks. An app whose status could not be read
+ * makes the count a floor; nothing readable at all is "Couldn't load".
+ */
+function connectionTile(h: ConnectionsHealth): KpiTileProps {
+  const label = "Connections needing attention";
+  if (h.setUp === 0 && h.unknown > 0) return failed(label, "Connection status could not be read");
+  if (h.setUp === 0) return { label, value: null, status: "no_data", emptyText: "No apps connected yet" };
+  return {
+    label,
+    value: tileCount(h.attention, h.unknown > 0),
+    status: "live",
+    hint: `Of ${n(h.setUp)} app${h.setUp === 1 ? "" : "s"} set up${h.unknown > 0 ? `; ${n(h.unknown)} could not be checked` : ""}`,
+  };
+}
+
 async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>): Promise<DepartmentNumbers> {
-  const owner = viewer.surface.persona === "founder";
-  const health = await routineHealthFor(viewer, routines);
+  const [health, facts] = await Promise.all([
+    routineHealthFor(viewer, routines),
+    // The hub's own facts: each read fails on its own and reads as "could not be checked".
+    loadConnectorFacts({ tenantId: viewer.surface.tenantId, userId: viewer.surface.userId }),
+  ]);
   return {
     tiles: [
       ...routineTiles(health),
@@ -548,13 +575,7 @@ async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>)
                 ? `Last clean run ${formatOperatorDate({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }, new Date(health.value.lastSuccessAt))}`
                 : "No clean run recorded yet",
             },
-      {
-        label: "Connection health",
-        value: null,
-        status: "not_connected",
-        hint: "Health checks are not measured yet",
-        ...(owner ? { connectHref: CONNECTIONS_HREF } : {}),
-      },
+      connectionTile(connectionsHealth(facts, Date.now())),
     ],
     attention: health.ok ? failureAttention(health.value) : [],
   };
@@ -607,7 +628,10 @@ async function chiefOfStaffNumbers(viewer: OsViewer, routines: Read<RoutineRow[]
   tiles.push(...routineTiles(reads.routines ?? (await routineHealthFor(viewer, routines))));
   return {
     tiles,
-    attention: needs.items.map((item) => ({
+    // The rows the count is made of. Review rows (leads with no next step,
+    // follow-ups from before the cycle) are not waiting on anyone and are
+    // not counted (model.ts isReviewItem); they stay on Today under Review.
+    attention: needs.items.filter((item) => !isReviewItem(item)).map((item) => ({
       id: item.id,
       label: item.title,
       href: item.href,

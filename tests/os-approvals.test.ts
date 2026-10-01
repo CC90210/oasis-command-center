@@ -453,7 +453,9 @@ async function main() {
     const today = readFileSync(join(ROOT, "components/os/today/model.ts"), "utf8");
     assert.match(today, /if \(!input\.approvals\.ok\) unavailable\.push\("approvals"\);/);
     assert.match(today, /capped: n\.unavailable\.length > 0 \|\|/, "an unread source makes the shared total a floor");
-    assert.match(code, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
+    // Every channel not KNOWN to be unconnected keeps its count (W2a: an AI
+    // account that could not be read no longer hides a real Needs you).
+    assert.match(code, /statusFor\(channel\.kind !== "not_connected", needsYou, needsYouCapped\)/);
   });
 
   await check("card: a refreshed row replaces the shown one unless the shown one is newer, and the card follows its prop", () => {

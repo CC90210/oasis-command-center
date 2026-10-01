@@ -11,13 +11,15 @@
 
 import Link from "next/link";
 import { Card, Tag } from "@/components/Card";
-import { formatPublisher } from "@/lib/event-bus-display";
 import { projectEvent } from "@/lib/event-projection";
 import { timeAgo } from "@/lib/fmt";
 import type { DepartmentKey } from "@/lib/os/types";
 import {
   FEED_TABS,
   departmentForEvent,
+  displayPayload,
+  feedPublisherLabel,
+  feedSystemName,
   type FeedEventRow,
   type FeedTab,
 } from "@/components/os/landings/feed-model";
@@ -40,8 +42,11 @@ export function FeedTabs({
   active: FeedTab;
   tabs: readonly FeedTab[];
   deptSlug: string | null;
-  /** Shown only for tabs with a known count: a failed read shows no number, never 0. */
-  counts: Partial<Record<FeedTab, number>>;
+  /**
+   * Shown only for tabs with a known count: a failed read shows no number,
+   * never 0. A floor arrives already formatted ("3+", lib/os/count.ts).
+   */
+  counts: Partial<Record<FeedTab, number | string>>;
 }) {
   return (
     <nav aria-label="Feed" className="flex gap-1 border-b border-hairline">
@@ -59,7 +64,7 @@ export function FeedTabs({
             }`}
           >
             {t.label}
-            {typeof count === "number" && <span className="text-xs tabular-nums text-fg-dim">{count}</span>}
+            {count !== undefined && <span className="text-xs tabular-nums text-fg-dim">{count}</span>}
           </Link>
         );
       })}
@@ -125,10 +130,13 @@ export function FeedRows({
   rows,
   departmentLabels,
   emptyMessage,
+  oasisWorkspace,
 }: {
   rows: readonly FeedEventRow[];
   departmentLabels: Readonly<Partial<Record<DepartmentKey, string>>>;
   emptyMessage: string;
+  /** The viewer stands in OASIS's own workspace: only there does a producer's own name print. */
+  oasisWorkspace: boolean;
 }) {
   if (rows.length === 0) {
     return (
@@ -141,7 +149,11 @@ export function FeedRows({
     <Card noPadding>
       <ul className="divide-y divide-hairline">
         {rows.map((row) => {
-          const ev = projectEvent(row);
+          // The wire name (BRAVO_RECORD_STATUS_CHANGED) never reaches the
+          // screen, not even as a tooltip: the label is the projected one,
+          // and every system name passes feed-model's naming rule.
+          const ev = projectEvent({ ...row, payload: displayPayload(row.payload) });
+          const label = feedSystemName(ev.label) ?? "Activity";
           const dept = departmentForEvent(row);
           const who = dept ? departmentLabels[dept] ?? null : null;
           const when = ev.published_at || row.created_at;
@@ -157,12 +169,8 @@ export function FeedRows({
               </time>
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  <span className="text-sm font-medium text-fg" title={row.event_type}>
-                    {ev.label}
-                  </span>
-                  <span className="text-xs text-fg-dim">
-                    {who ?? (row.publisher_agent ? formatPublisher(row.publisher_agent) : "Unattributed")}
-                  </span>
+                  <span className="text-sm font-medium text-fg">{label}</span>
+                  <span className="text-xs text-fg-dim">{who ?? feedPublisherLabel(row.publisher_agent, oasisWorkspace)}</span>
                   {(sev === "error" || sev === "critical") && <Tag tone="hot">Failed</Tag>}
                   {(sev === "warn" || sev === "warning") && <Tag tone="warm">Warning</Tag>}
                 </div>

@@ -25,6 +25,8 @@ import { join } from "node:path";
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
+  connectionsDot,
+  connectionsHealth,
   connectorBySlug,
   connectorHref,
   connectorMatches,
@@ -254,6 +256,42 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   keyRow("twilio", "auth_token", over),
   keyRow("twilio", "from_number", over),
 ];
+
+// ─── The workspace at a glance (W2a, S5-F03) ────────────────────────────────
+// The rail's Connections dot and the Operations tile count the SAME statuses
+// the cards show. Green only when every app set up is proven; nothing set up,
+// an unverified app or a failed read is no dot; any app needing the owner is
+// amber whatever else is true.
+{
+  assert.deepEqual(connectionsHealth(EMPTY, NOW), { setUp: 0, attention: 0, connected: 0, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(EMPTY, NOW)), null, "nothing set up is not 'all healthy'");
+  const failedHealth = connectionsHealth(FAILED, NOW);
+  assert.deepEqual([failedHealth.setUp, failedHealth.unknown], [0, LIVE.length], "every built card unknown when every read failed");
+  assert.equal(connectionsDot(failedHealth), null, "a failed read draws no dot");
+  const gwsOnly: ConnectorFacts = { ...EMPTY, heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }] };
+  assert.deepEqual(connectionsHealth(gwsOnly, NOW), { setUp: 1, attention: 0, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(gwsOnly, NOW)), "ok", "one proven app and nothing else set up: green");
+  const unverified: ConnectorFacts = { ...gwsOnly, keyRows: twilioKeys() };
+  assert.deepEqual(connectionsHealth(unverified, NOW), { setUp: 2, attention: 0, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(unverified, NOW)), null, "a saved key nobody tested is not proven, so no green");
+  const expired: ConnectorFacts = {
+    ...gwsOnly,
+    connections: [{
+      provider: "stripe", status: "expired", account_id: null, account_label: null, environment: "live",
+      last_health_at: iso(MIN), last_health_verdict: "down", last_health_code: "key_rejected", last_health_detail: null,
+    }],
+  };
+  assert.deepEqual(connectionsHealth(expired, NOW), { setUp: 2, attention: 1, connected: 1, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(expired, NOW)), "attention", "a key Stripe stopped accepting is amber");
+  assert.equal(connectionsDot({ setUp: 1, attention: 1, connected: 0, unknown: 4 }), "attention", "a known problem outranks an unread one");
+  // Hostile facts cannot light an app that has no status source.
+  assert.equal(connectionsHealth(GREEN, NOW).setUp, LIVE.length, "only built apps are counted");
+  // The rail reads it (app/layout.tsx), nothing hard-codes a status.
+  const layout = read("app/layout.tsx");
+  assert.match(layout, /connectionsDot\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
+  assert.match(layout, /connectionsStatus=\{showConnections \? connectionsMeasured : null\}/);
+  assert.match(read("components/os/department/numbers.ts"), /connectionTile\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
+}
 
 // A saved key nobody tested is set up, not connected.
 assert.equal(resolveConnectorStatus(twilio, { ...EMPTY, keyRows: twilioKeys() }, NOW).kind, "configured");

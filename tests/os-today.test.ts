@@ -38,17 +38,22 @@ import { resolveOsModules } from "../lib/os/modules";
 import { mayOpenOsHref, type BuildOsNavInput } from "../lib/os/nav";
 import type { DepartmentKey } from "../lib/os/types";
 import {
+  CONNECTIONS_HREF,
   buildDepartmentCards,
   buildNeedsYou,
   cashView,
   goalPaceView,
+  isReviewItem,
   meetingsBetween,
+  needsYouTotal,
   pickHotReplies,
   salesBuckets,
   summarizeBoard,
   summarizeDelivery,
+  summarizeRecords,
   todayBriefPlan,
   type CashSnapshot,
+  type ContentWeek,
   type DeliverySnapshot,
   type GoalPaceView,
   type Read,
@@ -363,6 +368,33 @@ async function main() {
   );
   assert.deepEqual(replies.map((r) => r.id), ["r4", "r1"], "classified hot, last 24h, newest first — the unclassified fallback is not hot");
 
+  // A hot reply somebody already answered is not waiting (W2a, U2 verifier):
+  // it sat in Needs you, urgent, for its whole 24 hours after the owner wrote
+  // back. Only a SENT touch on the SAME lead AFTER the reply clears it.
+  const hot = (id: string, lead_id: string | null) => ({
+    id,
+    lead_id,
+    subject: `Reply ${id}`,
+    created_at: "2026-09-28T13:00:00Z",
+    metadata: { classification: { intent: "hot_lead" } },
+  });
+  const unanswered = pickHotReplies(
+    [hot("h1", "L1"), hot("h2", "L2"), hot("h3", "L3"), hot("h4", null), hot("h5", "L5")],
+    now,
+    [
+      { lead_id: "L1", type: "email_sent", created_at: "2026-09-28T13:30:00Z" }, // answered after it arrived
+      { lead_id: "L2", type: "email_sent", created_at: "2026-09-28T12:00:00Z" }, // sent BEFORE the reply: not an answer
+      { lead_id: "L3", type: "email_queued", created_at: "2026-09-28T14:00:00Z" }, // queued, not sent
+      { lead_id: "L9", type: "call_made", created_at: "2026-09-28T14:00:00Z" }, // another lead
+      { lead_id: "L5", type: "call_made", created_at: "2026-09-28T13:05:00Z" }, // a call back is an answer
+    ],
+  );
+  assert.deepEqual(
+    unanswered.map((r) => r.id).sort(),
+    ["h2", "h3", "h4"],
+    "answered replies drop out; a queued send, an earlier send, another lead's touch and an unmatched sender do not clear one",
+  );
+
   assert.equal(askPrefillHref("/team/chief-of-staff", "  "), "/team/chief-of-staff", "empty asks open the channel bare");
   assert.equal(
     askPrefillHref("/team/chief-of-staff", " Call Acme & send the proposal? "),
@@ -409,6 +441,56 @@ async function main() {
   }
   assert.equal(full.items.find((i) => i.id === "sla-breached")?.href, "/tickets?sla=breached");
   assert.equal(full.unavailable.length, 0);
+
+  // ── Review: drawn, never counted (W2a, CC decision 1, 2026-10-01) ─────────
+  // OASIS's count held 46 open leads with no next step and 20 follow-ups
+  // promised before the 2026-09-23 cycle, so it could never reach zero. A
+  // workspace whose leads are ONLY those shows 0, with the rows under Review.
+  const staleRows = [
+    { id: "c1", data: { company: "Carried One", stage: "connected", next_action_at: "2026-09-10T12:00:00Z" } },
+    { id: "c2", data: { company: "Carried Two", stage: "attempting_contact", next_action_at: "2026-09-12T12:00:00Z" } },
+    { id: "n1", data: { company: "No Step Co", stage: "assigned" } },
+  ];
+  const staleSummary = { onBoard: 3, qualified: 0, meetings: 0, won: 0, lost: 0, cycleStartedAt: "2026-09-24" };
+  const staleBoard = summarizeBoard({ rows: staleRows, summary: staleSummary, truncatedStages: [], nowMs: now, day });
+  const reviewOnly = buildNeedsYou({ sales: { ok: true, value: staleBoard }, delivery: null, inbound: null, cash: null, nowMs: now });
+  assert.deepEqual(
+    reviewOnly.items.map((i) => [i.id, i.tone, i.count]),
+    [["follow-ups-carried", "info", 2], ["no-next-step", "info", 1]],
+    "carried-over and no-next-step rows are Review rows",
+  );
+  assert.ok(reviewOnly.items.every(isReviewItem));
+  assert.deepEqual(needsYouTotal(reviewOnly), { total: 0, capped: false }, "only carried-over and no-next-step leads: the count is 0");
+  const [cosReview] = buildDepartmentCards({
+    departments: OS_DEPARTMENTS.filter((d) => d.key === "chief_of_staff").map((d) => ({ key: d.key, label: d.label, href: d.href })),
+    needsYou: reviewOnly,
+    sales: null,
+    delivery: null,
+    content: null,
+    goal: null,
+    stripeConnected: null,
+    routines: null,
+    nowMs: now,
+  });
+  assert.deepEqual([cosReview.status, cosReview.tone], ["Nothing waiting", "ok"], "Chief of Staff prints the same 0");
+  // A real miss beside them still counts, and only it.
+  const withMiss = buildNeedsYou({
+    sales: {
+      ok: true,
+      value: summarizeBoard({
+        rows: [...staleRows, { id: "o1", data: { company: "Fresh Miss", stage: "connected", next_action_at: "2026-09-27T12:00:00Z" } }],
+        summary: { ...staleSummary, onBoard: 4 },
+        truncatedStages: [],
+        nowMs: now,
+        day,
+      }),
+    },
+    delivery: null,
+    inbound: null,
+    cash: null,
+    nowMs: now,
+  });
+  assert.deepEqual(needsYouTotal(withMiss), { total: 1, capped: false }, "the in-cycle miss is the one thing waiting");
 
   // Goal pace: a failed collected read is an error, never an empty bar.
   const goalRow = { label: "October sprint", target_cents: 600_000, period_end: "2026-10-24" };
@@ -471,7 +553,7 @@ async function main() {
     needsYou: gaps,
     sales: failed,
     delivery: deliveryRead,
-    content: { ok: true, value: { published: 0, lastSyncedAt: "2026-09-28T14:00:00Z" } },
+    content: { ok: true, value: { published: 0, lastSyncedAt: "2026-09-28T14:00:00Z", zernioConnected: null } },
     goal: { kind: "error", label: "October sprint" },
     stripeConnected: false,
     routines: failed,
@@ -506,6 +588,74 @@ async function main() {
   assert.match(nc, /Not connected Connect/);
   assert.doesNotMatch(nc, /(^|\s)0(\s|$)/);
 
+  // Review, rendered: no pill over Review rows alone, and the rows that wait
+  // come before the heading.
+  const reviewText = render(createElement(NeedsYouList, { needsYou: reviewOnly }));
+  assert.match(reviewText, /Needs you Nothing needs you right now\./, `no pill, and the empty line, over Review rows: ${reviewText.slice(0, 120)}`);
+  assert.match(
+    reviewText,
+    /Review Worth a look, not counted as waiting on you\. 2 follow-ups were due before this cycle began Carried over · Carried One, Carried Two 2 1 open lead has no next step No Step Co 1/,
+    `the Review list draws the rows: ${reviewText}`,
+  );
+  const missText = render(createElement(NeedsYouList, { needsYou: withMiss }));
+  assert.match(missText, /Needs you 1 item 1 1 follow-up is past due Fresh Miss 1 Review /, `actionable rows first, then Review: ${missText.slice(0, 160)}`);
+
+  // ── Honest day-one cards (W2a: U2-12, U2-13, U7-13) ──────────────────────
+  const oneCard = (key: DepartmentKey, over: Partial<Parameters<typeof buildDepartmentCards>[0]>) =>
+    buildDepartmentCards({
+      departments: OS_DEPARTMENTS.filter((d) => d.key === key).map((d) => ({ key: d.key, label: d.label, href: d.href })),
+      needsYou: { items: [], unavailable: [] },
+      sales: null,
+      delivery: null,
+      content: null,
+      goal: null,
+      stripeConnected: null,
+      routines: null,
+      nowMs: now,
+      formatWhen: () => "Sep 28, 10:00 AM",
+      ...over,
+    })[0];
+  // A workspace that has never held a lead: no green "No follow-ups past due"
+  // over "0 open leads".
+  const noLeads = oneCard("sales", { sales: { ok: true, value: summarizeRecords([], 0, now, day) } });
+  assert.deepEqual(
+    [noLeads.tone, noLeads.status, noLeads.metric.kind, noLeads.metric.label],
+    ["quiet", "No leads yet", "no_data", "No leads have been added to this workspace yet"],
+  );
+  const noLeadsText = render(createElement(DepartmentCard, { card: noLeads }));
+  assert.doesNotMatch(noLeadsText, /No follow-ups past due|open leads|(^|\s)0(\s|$)/, `a pipeline nobody used claimed health: ${noLeadsText}`);
+  // Control: leads that are all closed are real history, and their 0 open is a real 0.
+  const allClosed = oneCard("sales", { sales: { ok: true, value: summarizeRecords([{ id: "w", data: { stage: "won" } }], 1, now, day) } });
+  assert.deepEqual(
+    [allClosed.status, allClosed.metric.kind === "live" && allClosed.metric.value],
+    ["No follow-ups past due", "0"],
+  );
+  // An empty board this cycle says so too.
+  const emptyBoard = summarizeBoard({ rows: [], summary: { ...staleSummary, onBoard: 0 }, truncatedStages: [], nowMs: now, day });
+  assert.equal(oneCard("sales", { sales: { ok: true, value: emptyBoard } }).status, "No leads yet");
+
+  // Marketing names Zernio only where the workspace connected it, or where its
+  // posts already sync from it; anywhere else it says how to start.
+  const content = (value: ContentWeek) => oneCard("marketing", { content: { ok: true, value } });
+  const neverConnected = content({ published: 0, lastSyncedAt: null, zernioConnected: false });
+  assert.deepEqual(
+    [neverConnected.status, neverConnected.tone, neverConnected.connection?.state, neverConnected.connection?.href],
+    ["Connect a social account", "quiet", "not_connected", CONNECTIONS_HREF],
+  );
+  const neverText = render(createElement(DepartmentCard, { card: neverConnected }));
+  assert.doesNotMatch(neverText, /Zernio|Nothing synced/, `a tool the owner never connected, shown as a sync: ${neverText}`);
+  assert.match(neverText, /Connect a social account/);
+  assert.match(neverText, /Social posting · Not connected Connect/);
+  const connectedNoPosts = content({ published: 0, lastSyncedAt: null, zernioConnected: true });
+  assert.deepEqual(
+    [connectedNoPosts.status, connectedNoPosts.connection?.label, connectedNoPosts.connection?.note],
+    ["No posts synced yet", "Zernio post analytics", "Nothing synced yet"],
+  );
+  const syncing = content({ published: 4, lastSyncedAt: "2026-09-28T14:00:00Z", zernioConnected: null });
+  assert.deepEqual([syncing.status, syncing.connection?.label], ["Publishing", "Zernio post analytics"], "posts that synced name their source");
+  const unread = oneCard("marketing", { content: { ok: false } });
+  assert.doesNotMatch(render(createElement(DepartmentCard, { card: unread })), /Zernio/, "a failed read names no vendor");
+
   // "Within SLA" is a claim about every open ticket. A capped read with nothing
   // breached in the rows it DID see cannot make it (CodeRabbit #469).
   const quietDelivery = { ...delivery, breached: [], atRisk: [] };
@@ -515,7 +665,7 @@ async function main() {
       needsYou: { items: [], unavailable: [] },
       sales: failed,
       delivery: { ok: true, value: { ...quietDelivery, ticketsTruncated, projectsTruncated } },
-      content: { ok: true, value: { published: 0, lastSyncedAt: null } },
+      content: { ok: true, value: { published: 0, lastSyncedAt: null, zernioConnected: false } },
       goal: null,
       stripeConnected: null,
       routines: null,
@@ -572,7 +722,7 @@ async function main() {
         needsYou: { items: [], unavailable: [] },
         sales: { ok: true, value: { ...board, source: "records", summary: null, openLeads: 0, overdue: [], meetingsToday: [], partial: false } },
         delivery: deliveryRead,
-        content: { ok: true, value: { published: 3, lastSyncedAt: "2026-09-28T14:00:00Z" } },
+        content: { ok: true, value: { published: 3, lastSyncedAt: "2026-09-28T14:00:00Z", zernioConnected: null } },
         goal: null,
         stripeConnected: null,
         routines: { ok: true, value: { total: 0, on: 0, failed24h: [], lastSuccessAt: null } },
