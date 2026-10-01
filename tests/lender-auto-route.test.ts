@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 import {
   planApplicationRoute,
@@ -256,47 +256,16 @@ assert.equal(
 }
 
 // ---------------------------------------------------------------------------
-// THE WRITE MUST GO THROUGH updateRecord. A raw
-// db.from("tenant_records").update() sits directly above the new call in the
-// same function (the offer write), so copying it is the easy mistake — and it
-// would move the deal on the board while leaving the drip engine, the timeline
-// and stage_entered_at blind to it. That is the two-fields-out-of-sync defect
-// this session just spent a day closing, re-entering from a new direction.
-// ---------------------------------------------------------------------------
-{
-  const route = readFileSync("app/api/cron/scan-lender-replies/route.ts", "utf8");
-  assert.ok(route.includes("planApplicationRoute("), "the scanner must consult the rule");
-  assert.ok(route.includes("updateRecord("), "and move the application through updateRecord");
-  const at = route.indexOf("planApplicationRoute(");
-  const after = route.slice(at, at + 2500);
-  assert.ok(
-    !/from\("tenant_records"\)[\s\S]{0,120}\.update\(/.test(after),
-    "the routing write must NOT be a raw tenant_records update",
-  );
-}
-
-// ---------------------------------------------------------------------------
-// IT MUST ACTUALLY RUN. The whole reason this build exists is that the scanner
-// was never registered anywhere, so it had not written since 2026-08-06 while
-// 898 lender threads sat unread. A rule nothing calls is worth nothing.
-//
-// Registration is TWO facts in this repo: vercel.json declares it, and
-// .github/workflows/cron-driver.yml is what actually fires it (Vercel's own
-// scheduler was found unreliable — see that file's header). Both are asserted;
-// cron-driver-coverage.test.ts enforces the pairing generally, this names the
-// route so its removal fails by name.
-// ---------------------------------------------------------------------------
-//
-// 2026-09-28: SunBiz, the only tenant with lenders, was RETIRED (runbook C-6a).
-// The scanner is deliberately no longer scheduled anywhere, so a rollback
-// cannot restart writes for a tenant whose data is being exported and deleted.
-// The registration assertions are inverted rather than dropped: re-adding the
-// schedule must fail here by name. The route's own shape is still pinned below
-// until C-6b deletes the funding code.
+// THE SCANNER IS GONE. /api/cron/scan-lender-replies served SunBiz only; it was
+// unscheduled when SunBiz retired (2026-09-28, runbook C-6a) and deleted on
+// 2026-10-01 with the other SunBiz-only cron routes (OS plan W0). The rule
+// above is pure and stays pinned; the registration assertions are kept
+// inverted so re-adding the route or a schedule for it fails here by name.
 // ---------------------------------------------------------------------------
 {
   const read = (p: string) => readFileSync(p, "utf8");
   const SCANNER = "/api/cron/scan-lender-replies";
+  assert.equal(existsSync("app/api/cron/scan-lender-replies"), false, "the retired lender scanner route is back");
   const registry = JSON.parse(read("config/cron-registry.json")) as { crons?: Array<{ path: string }> };
   assert.ok(
     !(registry.crons ?? []).some((c) => c.path.split("?")[0] === SCANNER),
@@ -311,105 +280,8 @@ assert.equal(
     "the GitHub cron driver must not drive the retired lender scanner",
   );
 
-  // THE AUTH SHAPE THAT MADE THE FIRST ATTEMPT A NO-OP (Codex review P1).
-  //
-  // The GitHub driver is what actually fires crons here; it sends the
-  // CRON_SECRET bearer and NO x-vercel-cron header. Gating checkCronAuth
-  // behind that header meant every scheduled call fell through to the
-  // manual-trigger secret, failed it, and 401'd — leaving the scanner exactly
-  // as dead as before, which is the one thing this change exists to fix.
-  const route = read("app/api/cron/scan-lender-replies/route.ts");
-  assert.ok(
-    /if \(checkCronAuth\(req\) === null\) return null;/.test(route),
-    "checkCronAuth must be TRIED first, unconditionally",
-  );
-
-  // COMPARE-AND-SET on the status. updateRecord has no conditional form — it
-  // re-reads and merges — so without a claim an operator advancing the deal
-  // between the status check and the write is silently overwritten, dragging a
-  // funded file back to `approved` on a race.
-  assert.ok(
-    /status_changed_under_us/.test(route),
-    "the routing write must defer when the status moved under it",
-  );
-  // ATOMIC, not merely narrowed. The guard must ride on the statement that
-  // WRITES (updateRecord's ifMatch). A separate claim-then-write leaves the
-  // race open, because updateRecord re-reads and merges.
-  // BOTH writes are guarded. updateRecord re-reads and merges the WHOLE data
-  // document, so even the small flag patch can rewrite an operator's newer
-  // status as a side effect.
-  assert.equal(
-    (route.match(/ifMatch:/g) || []).length,
-    2,
-    "the routing write AND the flag write must both compare-and-set on status",
-  );
-  // Provenance requires the thread to belong to the SENDING lender. Phase 1
-  // falls back to "the only thread on this deal", which would let lender B's
-  // approval move a deal shopped only to lender A.
-  // Ownership is computed ONCE and consulted everywhere. It was added to three
-  // places across three review rounds and then missed in a fourth (the
-  // unknown-cursor advance), which is the signature of a check that should not
-  // have been a repeated expression in the first place.
-  assert.ok(
-    /const senderOwnsThread = Boolean\(thread && lender && thread\.lender_id === lender\.id\)/.test(route),
-    "thread ownership must be computed once on the candidate",
-  );
-  assert.ok(
-    !/c\.thread\.lender_id === c\.lenderId/.test(route),
-    "and never re-derived at a call site, where it can be forgotten",
-  );
-  // ...and an unambiguous DEAL. Phase 1 matches business names by substring
-  // both ways, first-match-wins — "ABC" matches "ABC Holdings" and vice versa.
-  // Loose enough for a pill, not for moving someone's funding.
-  assert.ok(
-    /appMatchUnambiguous/.test(route),
-    "routing must require an exact or unique application match, not a substring hit",
-  );
-  // The THREAD-STATUS write is sender-gated too, not just routing. Scheduling
-  // this route with write=1 every ten minutes turns Phase 1's sole-thread
-  // fallback into a standing hazard: an unknown sender would overwrite lender
-  // A's status and cursor, and the autoroute switch does not gate that write.
-  // Every WRITE consults ownership: the thread-status write, routing
-  // provenance, the unknown-cursor advance, and the no-cursor bail-out.
-  // EVERY write consults ownership: thread status, the offer record, the
-  // outcome ledger, routing provenance, the unknown-cursor advance, the
-  // no-cursor bail-out, and both rewinds. Scheduling this route with write=1
-  // turns each ungated one into an automatic mis-attribution path.
-  assert.ok(
-    (route.match(/c\.senderOwnsThread/g) || []).length >= 7,
-    "every write path must be gated on the sender actually owning the thread",
-  );
-  // ONLY THE NEWEST reply per thread may decide the deal. Several unread
-  // messages on one thread all reach the routing block in fetch order, so an
-  // older decline could move the deal to `declined` and the newer approval
-  // behind it would be refused as not-routable.
-  assert.ok(
-    /newestPerThread/.test(route),
-    "an older reply must never decide the deal over a newer one in the same batch",
-  );
-  // ...and it is SKIPPED, not flagged. Folding staleness into the provenance
-  // check treats a merely superseded reply as an untrusted one, so an older
-  // decline behind a newer approval stamps needs_review — which the newer
-  // approval, reporting would_route while disarmed, never clears.
-  assert.ok(
-    /skipped: superseded_by_newer_reply/.test(route),
-    "a superseded reply must skip deal handling, not be flagged as untrusted",
-  );
-  assert.ok(
-    !/newestPerThread[\s\S]{0,200}hasMatchedThread/.test(route),
-    "staleness must not be conflated with provenance",
-  );
-  // A failed thread-status write must stop this candidate. Continuing would
-  // route the deal while the cursor stayed put, so the same approval is
-  // reprocessed next tick and lands as not_routable_from: approved.
-  assert.ok(
-    /thread_status_write_failed/.test(route),
-    "a failed thread-status write must defer the candidate, not fall through to the later writes",
-  );
-  assert.ok(
-    !/\.from\("tenant_records"\)[\s\S]{0,200}\.update\(\{ updated_at/.test(route),
-    "a separate claim-then-write does not close the race and must not come back",
-  );
+  // updateRecord's compare-and-set guard is app-wide (every manifest record
+  // write), not the scanner's; it stays pinned.
   {
     const data = read("lib/manifest/data.ts");
     assert.ok(data.includes("ifMatch"), "updateRecord must support the guard");
@@ -437,76 +309,6 @@ assert.equal(
     assert.ok(/writeQ\.eq\("updated_at", existing\.updated_at\)/.test(data),
       "a guarded update must pin the row version, not just the one field");
   }
-  // AN OUTAGE IS NOT AN ANSWER. classify-reply returns a real object with
-  // category "unknown" and unavailable:true when inference is down — the shape
-  // of a verdict without being one. Routing on it would flag the deal and
-  // advance the cursor, permanently consuming a reply nothing ever read, and
-  // the outage would present as a pile of "needs review" rather than as an
-  // outage.
-  assert.ok(
-    /if \(write && cls && !cls\.unavailable && !c\.already\)/.test(route),
-    "the routing block must skip replies the classifier never actually saw",
-  );
-  // `unknown` must advance the thread cursor, or the same reply is re-fetched
-  // and re-classified every ten minutes forever.
-  assert.ok(
-    /cls\.category === "unknown" && c\.senderOwnsThread && c\.thread && flagStamped/.test(route),
-    "an unknown reply must advance the cursor — but only its own sender's thread, and only once flagged",
-  );
-  // `unknown` is the category most in need of a human, so it must reach the
-  // flag path rather than being excluded with the write block.
-  assert.ok(
-    !/if \(write && cls && !c\.already && cls\.category !== "unknown"\) \{[\s\S]{0,4000}planApplicationRoute\(/.test(route),
-    "the routing block must NOT sit inside the write block that excludes unknown",
-  );
-  // A flag that fails to stamp is a review request nobody ever sees, because
-  // the IMAP cursor has already moved past the message.
-  assert.ok(/flag_failed:/.test(route), "a failed review flag must be reported, not swallowed");
-  // ...and must stay RETRYABLE. Step 1 already advanced the cursor, so a
-  // failed flag with no rewind is a reply needing a human that is invisible
-  // forever.
-  // BOTH write paths rewind — the flag path and the routing path. Step 1 has
-  // already advanced the cursor by the time either runs, so a transient error
-  // in either one permanently consumes the reply while the tick reports it as
-  // merely "deferred".
-  // THREE paths can fail after step 1 has already advanced the cursor: the
-  // pre-decision reads, the flag write, and the routing write. Every one must
-  // rewind, or that reply is consumed while the tick reports it as deferred.
-  assert.equal(
-    (route.match(/last_response_at: c\.thread\.last_response_at/g) || []).length,
-    3,
-    "the read, flag and routing paths must each rewind the cursor on failure",
-  );
-  // ...but a LOST RACE must not rewind. An operator moved the deal on purpose;
-  // retrying would lose the same race every tick, forever.
-  assert.ok(
-    /if \(!lostRace && c\.thread\)/.test(route),
-    "a lost compare-and-set must NOT be retried — that reply is genuinely done",
-  );
-  assert.ok(
-    /&& flagStamped\)/.test(route),
-    "and the unknown-cursor advance must be gated on the flag actually landing",
-  );
-  // An explicitly stored "" is a real value; `is null` does not match it, so
-  // collapsing it would report contention forever and never route the deal.
-  assert.ok(
-    /statusAtDecision === undefined \|\| statusAtDecision === null\n?\s*\? null/.test(route),
-    'only undefined/null may map to a null precondition — "" must be preserved',
-  );
-  assert.ok(
-    !/if \(req\.headers\.get\("x-vercel-cron"\)\)/.test(route),
-    "and must NOT be gated behind the x-vercel-cron header — the driver never sends it",
-  );
-}
-
-// The staged go-live must be OFF in the shipped config. Arming it is a
-// deliberate act after a day of `would_route` output has been read, not
-// something that rides along with the deploy.
-{
-  const route = readFileSync("app/api/cron/scan-lender-replies/route.ts", "utf8");
-  assert.ok(route.includes("autoRouteLive()"), "the route must consult the master switch");
-  assert.ok(route.includes("would_route"), "and report what it WOULD have done while disarmed");
-  assert.ok(route.includes("routing:"), "the response must carry the routing counters for health checks");
 }
 
 console.log("lender-auto-route.test.ts — one lender is not the deal ✓");

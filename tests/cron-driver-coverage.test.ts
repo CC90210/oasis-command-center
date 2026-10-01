@@ -22,7 +22,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 
 // 2026-08-30 (PR #347): the crons moved OUT of vercel.json into an inert
@@ -197,6 +197,41 @@ assert.ok(
   "health-check MUST be driven — without it no check in the fleet can alert",
 );
 
+// ── 7. Every cron route on disk is registered, or deliberately not ──────────
+//
+// The inverse of §1-§4. Those prove a REGISTERED cron has a driver and a
+// handler; nothing proved a HANDLER had a registration. When SunBiz was retired
+// (2026-09-28) its thirteen routes were unscheduled and left on disk, where
+// each stayed reachable by URL with the shared cron secrets: a retired tenant's
+// writers, stopped on paper, one call away from running. They were deleted
+// 2026-10-01 (OS plan W0). A route under app/api/cron that is not in the
+// registry fails here by name unless it is listed below with the reason it is
+// unscheduled.
+const UNSCHEDULED_BY_DESIGN: Record<string, string> = {
+  // OASIS client usage roll-up (lib/os/customers/usage.ts reads client_roi_snapshots).
+  // Not in the registry today; outside W0's scope, so it is named rather than deleted.
+  "roi-snapshot": "OASIS client ROI roll-up; no schedule registered yet",
+  // OASIS MRR snapshot (user_profiles.mrr_current_usd -> mrr_snapshots). Same.
+  "snapshot-mrr": "OASIS MRR snapshot; no schedule registered yet",
+};
+const registeredRoutes = new Set(crons.map((c) => basePathOf(c.path).replace(/^\/api\/cron\//, "")));
+const onDisk = readdirSync("app/api/cron", { withFileTypes: true })
+  .filter((d) => d.isDirectory())
+  .map((d) => d.name)
+  .sort();
+assert.ok(onDisk.length >= 10, `only ${onDisk.length} cron route folders found; the walk is broken`);
+const unregistered = onDisk.filter((name) => !registeredRoutes.has(name) && !(name in UNSCHEDULED_BY_DESIGN));
+assert.deepEqual(
+  unregistered,
+  [],
+  "cron routes on disk with no registration and no stated reason: register them in config/cron-registry.json + the Worker table, or delete them",
+);
+for (const name of Object.keys(UNSCHEDULED_BY_DESIGN)) {
+  assert.ok(onDisk.includes(name), `UNSCHEDULED_BY_DESIGN names ${name}, which no longer exists; delete the entry`);
+  assert.ok(!registeredRoutes.has(name), `${name} is registered now; delete it from UNSCHEDULED_BY_DESIGN`);
+}
+
 console.log(
-  `cron-driver-coverage.test.ts — ${crons.length} crons registered, Worker-driven, GitHub manual-only, all schedules valid ✓`,
+  `cron-driver-coverage.test.ts — ${crons.length} crons registered, Worker-driven, GitHub manual-only, all schedules valid, ` +
+    `${onDisk.length} route folders accounted for ✓`,
 );

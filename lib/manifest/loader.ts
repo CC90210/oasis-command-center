@@ -5,9 +5,11 @@
  * Lookup order:
  *   1. Supabase `tenant_manifests` row keyed by slug (Phase 1b on once
  *      migration 038 is applied; until then this call returns null fast).
- *   2. In-code seed manifests in ./seeds.ts (OASIS, SUN, SUGA). A slug with
- *      no row and no seed gets UNPROVISIONED_SEED, the empty "being set up"
- *      workspace, never OASIS's own (see getSeedManifest).
+ *   2. In-code seed manifests in ./seeds.ts (OASIS, SUGA). A slug with no row
+ *      and no seed gets UNPROVISIONED_SEED, the empty "being set up"
+ *      workspace, never OASIS's own (see getSeedManifest). The retired SunBiz
+ *      seed ("sun") is gone (2026-10-01, OS plan W0), so manifestExists("sun")
+ *      is false and /t/sun/* answers the not-found page like every unknown slug.
  *
  * The loader NEVER throws. Invalid stored manifests (malformed JSON, schema
  * drift) log via safe() and fall back to seeds, so a bad row in DB can't

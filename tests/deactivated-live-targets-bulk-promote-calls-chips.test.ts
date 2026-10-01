@@ -250,6 +250,14 @@ async function main() {
       profile("p-sun-retired", SUN_RETIRED, "retired@sun.test", SUN_TENANT, "agent", "Ethan Retired", RETIRED_AT),
       profile("p-stranger", STRANGER, "stranger@elsewhere.test", OTHER_TENANT, "agent", "Stella Stranger"),
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'sun', 'Sun Biz Funding')", args: [SUN_TENANT] },
+      // The promote route gates on manifestExists(slug). Until 2026-10-01 the
+      // in-code SUN_SEED answered for "sun"; that retired shell is deleted (OS
+      // plan W0), so this stand-in workspace owns a stored manifest row like
+      // any real client workspace does.
+      {
+        sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version, created_at, updated_at) VALUES ('m-sun', ?, 'sun', '{}', 1, 1, '2026-01-01', '2026-01-01')",
+        args: [SUN_TENANT],
+      },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'elsewhere', 'Elsewhere')", args: [OTHER_TENANT] },
       record(LIVE_LEAD, { business_name: "Live Merchant", stage: "contacted", assigned_to: SUN_AGENT }),
       // Deactivation cleared it: it must not flow back to them.

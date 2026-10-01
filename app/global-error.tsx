@@ -9,11 +9,18 @@
  * imports may not have loaded. The help copy is components/ErrorHelp.tsx,
  * shared with app/error.tsx: try again, then send us the code; on a page a
  * client's prospect opens (/f/, /sign/, /unsubscribe), no OASIS contact.
+ *
+ * The button is the OS button class (.btn-primary, app/globals.css: accent
+ * tokens, no hard-coded blue) with only layout inline (2026-10-01, OS plan
+ * W0). When the stylesheet did load it matches every other button; when the
+ * layout failed before the stylesheet, it is a plain, readable browser button
+ * rather than a second palette.
  */
 
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
+import { isReadDeadlineDigest } from "@/lib/os/deadline";
 
 export default function GlobalError({
   error,
@@ -23,6 +30,7 @@ export default function GlobalError({
   reset: () => void;
 }) {
   const prospectFacing = isProspectFacingPath(usePathname());
+  const timedOut = isReadDeadlineDigest(error.digest);
   useEffect(() => {
     console.error("[global-error.tsx]", error);
   }, [error]);
@@ -53,23 +61,15 @@ export default function GlobalError({
           }}
         >
           <h1 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
-            Something went wrong
+            {timedOut ? "This page timed out" : "Something went wrong"}
           </h1>
-          <ErrorHelp digest={error.digest} inline prospectFacing={prospectFacing} />
+          <ErrorHelp digest={error.digest} inline prospectFacing={prospectFacing} timedOut={timedOut} />
           <button
-            onClick={() => reset()}
-            style={{
-              marginTop: "1rem",
-              padding: "0.55rem 1rem",
-              borderRadius: 6,
-              border: "1px solid rgba(59,130,246,0.3)",
-              background: "#3b82f6",
-              color: "#020409",
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
+            onClick={() => (timedOut ? window.location.reload() : reset())}
+            className="btn-primary"
+            style={{ marginTop: "1rem", cursor: "pointer" }}
           >
-            Try again
+            {timedOut ? "Reload" : "Try again"}
           </button>
         </div>
       </body>

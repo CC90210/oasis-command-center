@@ -95,12 +95,12 @@ assert.ok(
   "comment stripping must not hide a real fs import",
 );
 
-// 4. The bundled config must actually satisfy the roster contract, so a
-//    malformed commit fails here and not at 3am in a shop-out.
+// 4. The bundled config must keep the roster SHAPE getAgents() validates, so a
+//    malformed commit fails here and not at 3am in a send.
 const config = JSON.parse(readFileSync(join(ROOT, "agents.config.json"), "utf8")) as {
   agents?: Array<Record<string, unknown>>;
 };
-assert.ok(Array.isArray(config.agents) && config.agents.length > 0, "agents.config.json needs agents");
+assert.ok(Array.isArray(config.agents), "agents.config.json needs an agents array");
 for (const entry of config.agents) {
   for (const field of ["key", "name", "email", "phone"]) {
     assert.equal(
@@ -111,4 +111,16 @@ for (const entry of config.agents) {
   }
 }
 
-console.log(`agents-config-runtime-portable: OK (${config.agents.length} agents, no runtime fs)`);
+// 5. ...and carries NO retired tenant's personal data. Until 2026-10-01 it
+//    held SunBiz's three reps (work emails, a phone number), statically
+//    imported into every client's bundle. SunBiz was retired 2026-09-28; the
+//    entries went with the shop-out panel (OS plan W0). The roster is empty
+//    today, and a SunBiz address or any phone number in it is a red build.
+assert.deepEqual(config.agents, [], "agents.config.json carries roster entries again; the retired SunBiz reps must not come back");
+assert.doesNotMatch(
+  readFileSync(join(ROOT, "agents.config.json"), "utf8"),
+  /sunbizfunding\.com|\d{3}-\d{3}-\d{4}/i,
+  "agents.config.json carries a retired tenant's email or phone number",
+);
+
+console.log(`agents-config-runtime-portable: OK (${config.agents.length} agents, no personal data, no runtime fs)`);

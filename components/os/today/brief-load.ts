@@ -19,7 +19,10 @@
  * finance-owner gate on top.
  *
  * Every loader resolves to a value, a failure marker or null (refused); none
- * rejects, so one failing source cannot take the rest down with it.
+ * rejects on a FAILED read, so one failing source cannot take the rest down
+ * with it. The one rejection is a read that does not answer at all: each runs
+ * under TODAY_READ_DEADLINE_MS (loaders.ts, lib/os/deadline.ts) and past it
+ * the page fails closed to app/error.tsx rather than keeping the skeleton up.
  */
 import "server-only";
 
@@ -52,8 +55,10 @@ import {
   loadHotReplies,
   loadRoutineHealth,
   loadSales,
+  TODAY_READ_DEADLINE_MS,
   type OperatorDay,
 } from "@/components/os/today/loaders";
+import { isReadDeadlineError, withDeadline } from "@/lib/os/deadline";
 
 export type BriefViewer = {
   persona: Persona;
@@ -97,7 +102,8 @@ export function briefPlanFor(viewer: BriefViewer, navInput: BuildOsNavInput): { 
  * A check that could not be made is "unknown", never "no" (routine-rules.ts
  * EmpireLane): the operator must not read "no failures" over the workspace
  * lane alone because their profile read blipped. A throw is logged and
- * answered "unknown", never rejected.
+ * answered "unknown", never rejected — except a read that never answers,
+ * which rejects past the deadline like every other Today read.
  */
 export async function empireRoutinesFor(
   viewer: Pick<BriefViewer, "persona" | "tenantSlug">,
@@ -105,9 +111,10 @@ export async function empireRoutinesFor(
 ): Promise<EmpireLane> {
   if (!isOasisSurfaceTenant(viewer.tenantSlug) || viewer.persona !== "founder") return false;
   try {
-    return await isOperator();
+    return await withDeadline(isOperator(), TODAY_READ_DEADLINE_MS, "routines.operator");
   } catch (err) {
     console.error("[today.routines.operator]", err);
+    if (isReadDeadlineError(err)) throw err;
     return "unknown";
   }
 }
@@ -146,7 +153,8 @@ export async function loadNeedsYouReads(input: {
 }): Promise<NeedsYouReads> {
   const { viewer, plan, day } = input;
   const tenantId = viewer.tenantId;
-  // Every block starts at once. None of these promises rejects.
+  // Every block starts at once. None of these promises rejects on a failed
+  // read; one that does not answer inside its deadline does (see the header).
   const salesP = plan.pipeline
     ? loadSales({ source: plan.pipeline, tenantId, tenantSlug: viewer.tenantSlug, day })
     : Promise.resolve(null);
@@ -162,12 +170,17 @@ export async function loadNeedsYouReads(input: {
   const inboundP = plan.inbound ? loadHotReplies(tenantId, day.nowMs) : Promise.resolve(null);
   const cashP = input.showFinancials && plan.cash ? loadCash() : Promise.resolve(null);
   // Approvals waiting on THIS viewer: the session's workspace, cut to the
-  // departments the rail opens for them (lib/os/approvals/scope.ts).
-  const approvalsP = loadPendingApprovals({
-    scope: approvalScopeFromViewer({ surface: viewer, navInput: input.navInput }),
-    tenantSlug: viewer.tenantSlug,
-    limit: input.approvalsLimit,
-  });
+  // departments the rail opens for them (lib/os/approvals/scope.ts). The
+  // reader answers a failure marker itself; the deadline covers a hang.
+  const approvalsP = withDeadline(
+    loadPendingApprovals({
+      scope: approvalScopeFromViewer({ surface: viewer, navInput: input.navInput }),
+      tenantSlug: viewer.tenantSlug,
+      limit: input.approvalsLimit,
+    }),
+    TODAY_READ_DEADLINE_MS,
+    "approvals",
+  );
   const connectionsP = plan.connections ? loadConnectionAlerts(tenantId) : Promise.resolve(null);
   // The Empire scheduler's OASIS rows are OASIS's own routines; only the
   // platform operator standing in OASIS counts them (empireRoutinesFor).

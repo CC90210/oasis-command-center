@@ -13,7 +13,7 @@
  * the load-bearing shapes so a refactor that silently drops one fails here.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -22,7 +22,6 @@ const read = (path: string) => readFileSync(join(root, path), "utf8");
 
 const dispatch = read("lib/bulk-email/dispatch.ts");
 const bulkRoute = read("app/api/leads/bulk/route.ts");
-const cronRoute = read("app/api/cron/dispatch-bulk-email/route.ts");
 // Schedule-of-record moved out of vercel.json 2026-08-30 (Vercel's scheduler
 // died 2026-08-06; the array there was read as if it were live).
 const cronRegistry = JSON.parse(read("config/cron-registry.json")) as {
@@ -163,12 +162,7 @@ assert.match(
 );
 
 // ---- cron wiring -------------------------------------------------------------
-
-assert.match(
-  cronRoute,
-  /checkCronAuth\(req\)[\s\S]*?runDispatchBulkEmail\(\)/,
-  "the drain endpoint must sit behind the shared cron auth gate",
-);
+//
 // Parsed, not regex-matched against raw text: the old pattern depended on key
 // order, the literal `",` separator and 2-space layout, none of which anything
 // enforces (no prettier/editorconfig in this repo). A reformat would have
@@ -180,9 +174,13 @@ assert.match(
 // rollback cannot restart sends or writes for that tenant. Inverted rather
 // than dropped, so re-adding the schedule fails here by name. The queue
 // writer's inline kick in app/api/leads/bulk is untouched.
+//
+// 2026-10-01 (OS plan W0): the unscheduled drain route itself was deleted with
+// the other SunBiz-only cron routes; a route folder that comes back fails here.
 assert.ok(
   !(cronRegistry.crons ?? []).some((c) => c.path.split("?")[0] === "/api/cron/dispatch-bulk-email"),
   "the retired SunBiz bulk-email drain must not be scheduled in config/cron-registry.json",
 );
+assert.equal(existsSync(join(root, "app/api/cron/dispatch-bulk-email")), false, "the retired SunBiz bulk-email drain route is back");
 
 console.log("bulk-email dispatch tests passed");

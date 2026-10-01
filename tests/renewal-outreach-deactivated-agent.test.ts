@@ -5,14 +5,18 @@
  *
  * Two paths queued that email with no standing check:
  *
- *   - GET/POST /api/cron/renewal-thresholds   raises the event and queues the send
+ *   - GET/POST /api/cron/renewal-thresholds   raised the event and queued the send
  *   - POST /api/renewals/[id]/outreach        approve / retry from the drawer
  *
- * Both now refuse a deactivated agent before resolving any mailbox, record the
- * event blocked with last_error `assigned_agent_deactivated`, and queue nothing.
+ * Both refused a deactivated agent before resolving any mailbox, recorded the
+ * event blocked with last_error `assigned_agent_deactivated`, and queued nothing.
  * A failed standing read queues nothing either (the send speaks as the person).
  * The approve/retry route sends as the lead's NEW owner once the deal has been
  * reassigned to an active teammate. Active agents behave exactly as before.
+ *
+ * The cron was deleted 2026-10-01 (OS plan W0: SunBiz-only, unscheduled since
+ * the retirement), so the events it raised are seeded directly below and only
+ * the drawer route is exercised.
  *
  * Everything runs for real against a local libSQL database. Stand-ins: the
  * session cookie jar, the per-user mailbox store, the SunBiz mailbox credential
@@ -222,7 +226,6 @@ async function main() {
   );
 
   const { NextRequest } = await import("next/server");
-  const cron = await import("../app/api/cron/renewal-thresholds/route");
   const outreach = await import("../app/api/renewals/[id]/outreach/route");
 
   type EventRow = { status: string; last_error: string | null; assigned_agent_id: string | null; scheduled_send_id: string | null };
@@ -249,86 +252,30 @@ async function main() {
     }
   };
 
-  const runCron = async () => {
-    mailboxAsks.length = 0;
-    mails.length = 0;
-    const req = new NextRequest("http://localhost/api/cron/renewal-thresholds", {
-      headers: { authorization: `Bearer ${process.env.CRON_SECRET}` },
-    });
-    const { result: res, warned } = await captureWarn(() => cron.GET(req));
-    const body = (await res.json()) as Record<string, unknown>;
-    assert.equal(res.status, 200, `cron status (${JSON.stringify(body)})`);
-    return { body, warned };
-  };
-
-  // ── Cron: first pass over the four seeded deals ──────────────────────────
-  const first = await runCron();
-
-  await check("cron: an active agent's lender email is still queued from their own mailbox", async () => {
-    const event = await eventFor(DEAL_ACTIVE);
-    assert.equal(event?.status, "queued");
-    assert.equal(event?.last_error, null);
-    assert.equal(event?.assigned_agent_id, ACTIVE_AGENT);
-    const sends = await sendsFor(DEAL_ACTIVE);
-    assert.equal(sends.length, 1);
-    assert.equal(sends[0].actor_user_id, ACTIVE_AGENT);
-    assert.equal(sends[0].from_identity, "alex@sunbizfunding.com");
-    assert.equal(sends[0].to_email, "deals@lender.test");
-    assert.ok(mailboxAsks.includes(ACTIVE_AGENT));
-  });
-
-  await check("cron: an active agent's long-past deal still waits for review, unchanged", async () => {
-    const event = await eventFor(DEAL_ACTIVE_OLD);
-    assert.equal(event?.status, "review_required");
-    assert.equal(event?.last_error, null);
-    assert.equal((await sendsFor(DEAL_ACTIVE_OLD)).length, 0);
-  });
-
-  await check("cron: a deactivated agent's lender email is not queued; the event is blocked with the reason", async () => {
-    const event = await eventFor(DEAL_RETIRED);
-    assert.equal(event?.status, "blocked");
-    assert.equal(event?.last_error, "assigned_agent_deactivated");
-    assert.equal(event?.assigned_agent_id, RETIRED_AGENT, "history keeps the funding agent on the event");
-    assert.equal(event?.scheduled_send_id, null);
-    assert.equal((await sendsFor(DEAL_RETIRED)).length, 0, "nothing may go out as the retired agent");
-  });
-
-  await check("cron: a deactivated agent's long-past deal is blocked too, not offered for approval", async () => {
-    const event = await eventFor(DEAL_RETIRED_OLD);
-    assert.equal(event?.status, "blocked");
-    assert.equal(event?.last_error, "assigned_agent_deactivated");
-    assert.equal((await sendsFor(DEAL_RETIRED_OLD)).length, 0);
-  });
-
-  await check("cron: a deactivated agent's mailbox is never resolved, and the block is logged", async () => {
-    assert.ok(!mailboxAsks.includes(RETIRED_AGENT), `mailbox asks: ${mailboxAsks.join(",")}`);
-    const tag = tagged(first.warned, "[renewal-thresholds] assigned agent deactivated");
-    assert.ok(tag, "withholding the send must be visible in the logs");
-    assert.equal((tag[1] as { agentId?: string }).agentId, RETIRED_AGENT);
-    assert.equal(first.body.queued, 1);
-    assert.equal(first.body.review_required, 1);
-    assert.equal(first.body.blocked, 2);
-  });
-
-  await check("cron: the deactivated agent's internal notice still reaches the submissions inbox", async () => {
-    const retiredNotices = mails.filter((mail) => /Retired/.test(mail.text));
-    assert.equal(retiredNotices.length, 2);
-    for (const mail of retiredNotices) assert.equal(mail.to, "submissions@sun.test");
-    assert.ok(retiredNotices.every((mail) => /Outreach: blocked/.test(mail.text)));
-  });
-
-  // ── Cron: a standing read that fails queues nothing ──────────────────────
+  // ── The 50% events, as the threshold cron used to raise them ─────────────
+  //
+  // /api/cron/renewal-thresholds served SunBiz only: unscheduled when SunBiz
+  // was retired (2026-09-28, runbook C-6a) and deleted 2026-10-01 with the
+  // other SunBiz-only cron routes (OS plan W0). Its first pass over these deals
+  // produced exactly these rows (an active agent's long-past deal waits for
+  // review; a deactivated agent's deals are blocked with the reason; a deal
+  // whose standing read failed is blocked with its own reason), so they are
+  // seeded directly and the drawer route below is exercised unchanged.
   await seed.execute(deal(DEAL_FLAKY, LEAD_FLAKY, "Flaky Co", today));
-  const flaky = await withBrokenStanding(runCron);
-
-  await check("cron: a failed standing read queues nothing and blocks the event with its own reason", async () => {
-    const event = await eventFor(DEAL_FLAKY);
-    assert.equal(event?.status, "blocked");
-    assert.equal(event?.last_error, "assigned_agent_check_failed");
-    assert.equal((await sendsFor(DEAL_FLAKY)).length, 0);
-    assert.ok(!mailboxAsks.includes(FLAKY_AGENT), "no mailbox is resolved on an unknown standing");
-    assert.ok(tagged(flaky.warned, "[renewal-thresholds] assigned agent check failed"), "the failed check is logged");
+  const event = (dealId: string, leadId: string, agentId: string, status: string, lastError: string | null) => ({
+    sql: `INSERT INTO renewal_outreach_events (tenant_id, funded_deal_id, lead_id, lender_id, assigned_agent_id, threshold_date, status, last_error)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [TENANT, dealId, leadId, LENDER, agentId, today, status, lastError],
   });
+  await seed.batch(
+    [
+      event(DEAL_ACTIVE_OLD, LEAD_ACTIVE_OLD, ACTIVE_AGENT, "review_required", null),
+      event(DEAL_RETIRED, LEAD_RETIRED, RETIRED_AGENT, "blocked", "assigned_agent_deactivated"),
+      event(DEAL_RETIRED_OLD, LEAD_RETIRED_OLD, RETIRED_AGENT, "blocked", "assigned_agent_deactivated"),
+      event(DEAL_FLAKY, LEAD_FLAKY, FLAKY_AGENT, "blocked", "assigned_agent_check_failed"),
+    ],
+    "write",
+  );
 
   // ── POST /api/renewals/[id]/outreach ─────────────────────────────────────
   const { signSession } = await import("../lib/turso-auth");

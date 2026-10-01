@@ -112,19 +112,12 @@ const SEEDED_JOB_NAMES = new Set<string>([
  *
  * Every entry is a deliberate exclusion with a reason, not a snooze button. A
  * new dead key must fail the test rather than be waved through by a wildcard.
+ *
+ * Empty since 2026-10-01: the seven "SunBiz ..." tenant_cron_jobs overrides
+ * left with the retired SunBiz runtime (OS plan W0). A "SunBiz ..." key that
+ * comes back is an orphan here, by name.
  */
-const KNOWN_ABSENT = new Set<string>([
-  // SunBiz portal jobs. Seeded from that portal's own registry
-  // (tenant_cron_jobs), not this one, and deliberately out of scope for
-  // SEED_JOBS.
-  "SunBiz Follow-up Generator",
-  "SunBiz Daily Plan Generator",
-  "SunBiz Renewal Reminder",
-  "SunBiz Underwriting Orchestrator",
-  "SunBiz Shop-Out Sender",
-  "SunBiz Cold Outreach Runner",
-  "SunBiz Health Check",
-]);
+const KNOWN_ABSENT = new Set<string>([]);
 
 run("every override key matches a real job name", () => {
   const orphaned = Object.keys(FRIENDLY_DESCRIPTIONS).filter(
@@ -137,6 +130,11 @@ run("every override key matches a real job name", () => {
       "Re-key them onto the current name, or delete the copy — do NOT leave it, " +
       "because the tab silently falls back to engineer text and looks fine.",
   );
+});
+
+run("no override is written for the retired SunBiz tenant's jobs", () => {
+  const sunbiz = Object.keys(FRIENDLY_DESCRIPTIONS).filter((k) => /sunbiz/i.test(k));
+  assert.deepEqual(sunbiz, [], "SunBiz was retired 2026-09-28; its job copy is residue nobody can read");
 });
 
 run("the renames that were found stay fixed", () => {
