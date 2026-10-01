@@ -67,12 +67,16 @@ function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 
-/** Server source files: app/, lib/ and middleware.ts, without tests. */
+/**
+ * Server source files, without tests: app/, lib/, middleware.ts, the Worker's
+ * own entry (worker-entry.ts) and every Worker under workers/ (the cron Worker
+ * runs on the same runtime, so the same rules apply to its module state).
+ */
 function serverSources(): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
-      if (name === "node_modules" || name === "__tests__" || name.startsWith(".")) continue;
+      if (name === "node_modules" || name === "__tests__" || name === "test" || name.startsWith(".")) continue;
       const abs = join(dir, name);
       if (statSync(abs).isDirectory()) walk(abs);
       else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name)) out.push(relative(ROOT, abs).split(sep).join("/"));
@@ -80,7 +84,8 @@ function serverSources(): string[] {
   };
   walk(join(ROOT, "app"));
   walk(join(ROOT, "lib"));
-  out.push("middleware.ts");
+  walk(join(ROOT, "workers"));
+  out.push("middleware.ts", "worker-entry.ts");
   return out;
 }
 
@@ -271,6 +276,14 @@ async function main() {
       }
     }
     assert.deepEqual(offenders, [], "closing the isolate's one client fails every request's in-flight statements");
+  });
+
+  await check("the scans reach every Worker's source, not only app/ and lib/", () => {
+    const scanned = serverSources();
+    for (const f of ["worker-entry.ts", "workers/oasis-cc-cron/src/index.ts", "middleware.ts"]) {
+      assert.ok(scanned.includes(f), `the scan no longer reads ${f}`);
+    }
+    assert.ok(!scanned.some((f) => /\/test\//.test(f)), "test folders stay out of the scan");
   });
 
   await check("no server module declares a promise, or a map typed to hold promises, at module scope", () => {
