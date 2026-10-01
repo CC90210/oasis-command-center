@@ -426,28 +426,15 @@ for (const view of [
   // teaser span once (2026-08-31): the assertion failed as intended, and the
   // class was reverted.
   "components/web-leads/BattleSection.tsx",
-  // Added 2026-09-01 with the WebGL radar. It renders MORE audit data than any
-  // other file here (seven scored pillars and two score wireframes), and its
-  // colours are hex strings fed to three.js rather than Tailwind classes -- so
-  // the class ban catches less of it than usual, and what it does catch (a
-  // helper span, a legend, a future overlay) matters more. Proved to fire
-  // against this file by planting `text-red-400` on the host div once
-  // (2026-09-01): the assertion failed as intended, and the class was
-  // reverted. The identity-hue discipline for the hex colours is pinned
-  // separately in web-leads-battlecard.test.ts §8c-8d.
-  "components/web-leads/Radar3D.tsx",
+  // components/web-leads/Radar3D.tsx (added 2026-09-01) and
+  // lib/web-leads/lead-profile.ts (added 2026-09-01, round 5) were listed here
+  // until the compact card (2026-10-01) DELETED both files. Their entries left
+  // with them because a guard cannot read a file that does not exist; that
+  // they stay deleted is pinned in web-leads-battlecard.test.ts §8d.
   // Added 2026-09-01 with the shared HUD palette. The one module every chart
   // reads its colours from -- which makes it the highest-leverage place to
   // sneak a verdict colour into the whole feature at once.
   "components/web-leads/battle-hud.ts",
-  // Added 2026-09-01 (round 5) with the designation plate. This module NAMES
-  // the shape of the problem ("Full rebuild", "Invisible storefront") -- the
-  // one place in the feature where the copy itself is a verdict, which makes
-  // a verdict COLOUR beside it feel natural and be doubly wrong: the plate
-  // must wear identical chrome for the best news and the worst. Proved to
-  // fire against this file by planting `text-red-400` in a designation entry
-  // once (2026-09-01): the assertion failed as intended and was reverted.
-  "lib/web-leads/lead-profile.ts",
   // Added 2026-09-03 with the presence layer. Three files, one temptation:
   // a presence score sitting beside a star rating is the most red/green-
   // hungry surface the feature has ever grown. Pass/fail renders as SHAPE

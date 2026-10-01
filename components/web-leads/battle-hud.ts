@@ -1,6 +1,7 @@
 /**
- * battle-hud.ts — the battle card's HUD palette, shared by the 2D SVG
- * hologram (BattleCard.tsx) and the WebGL radar (Radar3D.tsx).
+ * battle-hud.ts — the battle card's identity palette, read by the capability
+ * catalogue, its rows and the presence block. (The SVG and WebGL radars that
+ * first wore it were removed with the compact card, 2026-10-01.)
  *
  * ═══ COLOUR IS IDENTITY, NEVER VERDICT ══════════════════════════════════════
  *

@@ -36,11 +36,20 @@ assert.equal(
 assert.ok(read("app/playbook/automations/page.tsx").includes("<IndustryAutomationGuide"), "the playbook renders the shared guide");
 
 const battleCard = read("components/web-leads/BattleCard.tsx");
-assert.ok(battleCard.includes('id="industry-automations"'), "the battle card exposes industry opportunities during a call");
-assert.ok(battleCard.includes("initialIndustry={lead.industry}"), "the battle card preselects the lead's industry");
+// Re-aimed with the compact card (Adon, 2026-10-01). The guide was its own open
+// section, a second sell-list one block below the lead's ranked catalogue. It
+// now folds UNDER that catalogue, inside the open "What we would build for
+// them" section, on every lead that has one, and stands on its own for a lead
+// whose score is hidden. What is still required: a rep on a call can reach it
+// without leaving the card, preselected to the lead's industry, and the build
+// section it lives in is open by default.
+assert.ok(battleCard.includes("<IndustryIdeas industry={industry} />"), "the battle card exposes industry opportunities under the build list");
+assert.ok(battleCard.includes("industry={lead.industry}"), "both build mounts pass the lead's industry through");
+assert.ok(battleCard.includes("initialIndustry={industry}"), "the battle card preselects the lead's industry");
+assert.ok(battleCard.includes("initialIndustry={lead.industry}"), "a lead with a hidden score still gets the industry list");
 assert.ok(
-  battleCard.includes('defaultOpen={true}'),
-  "the automation guide is open by default so a rep does not hunt for it mid-call",
+  /<BattleSection\s+id="fixes"\s+defaultOpen=\{true\}/.test(battleCard) && battleCard.includes('<BattleSection id="build" defaultOpen={true}'),
+  "the build section the guide lives in is open by default so a rep does not hunt for it mid-call",
 );
 
 const guide = read("components/playbook/IndustryAutomationGuide.tsx");
