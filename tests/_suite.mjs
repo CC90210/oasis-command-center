@@ -253,6 +253,7 @@ const TESTS = [
   "tests/health-panel.test.ts",
   "tests/shopout-sender-locality.test.ts",
   "tests/sequence-volume.test.ts",
+  "tests/pg-bridge-operators.test.ts",
   "tests/or-filter-dotted-values.test.ts",
   "tests/form-submit-failure-capture.test.ts",
   "tests/deploy-serves-main.test.ts",
@@ -396,13 +397,14 @@ const TESTS = [
   // intended changes (document-rendering, guard-audit, shopout-high-risk-confirm,
   // sunbiz-runtime); the reasons are in each file.
   //
-  // The local bridge. (The PostgREST bridge and the TextTorrent RPC ports it
-  // served were deleted 2026-10-01 with the retired SunBiz runtime, W0.)
+  // The bridge, and the RPC shim the bridge and the TextTorrent runtime call.
   "tests/bridge-agent-validation.test.ts",
   "tests/bridge-dropdown-state.test.ts",
   "tests/bridge-effective-online.test.ts",
   "tests/bridge-health-reasons.test.ts",
   "tests/bridge-target-resolution.test.ts",
+  "tests/bridge-rpc-registry.test.ts",
+  "tests/turso-rpc-texttorrent.test.mjs",
   "tests/turso-contains.test.ts",
   // Drips and SMS sending: which line a text leaves from, whether the
   // destination can receive it, and what a delivery receipt means.

@@ -459,7 +459,7 @@ export async function readRecentReceipts(
      * first cut, and it is the worst possible direction for a breaker to fail.
      *
      * `in` is one of the operators the Turso adapter implements
-     * (lib/turso-postgrest.ts), and lib/__tests__/turso-postgrest.test.mjs pins it.
+     * (lib/turso-postgrest.ts), and pg-bridge-operators.test.ts pins it.
      */
     onlyLines?: string[];
   } = {},
