@@ -9,12 +9,12 @@
     "privacyPolicyUrl": "https://oasisai.work/privacy",
     "termsUrl": "https://oasisai.work/terms",
     "dmcaUrl": "https://oasisai.work/dmca",
-    "privacyContact": "conaugh@oasisai.work",
+    "privacyContact": "support@oasisai.work",
     "privacyOfficer": {
       "name": "Conaugh McKenna",
       "title": "Person in charge of the protection of personal information",
       "titleFr": "Responsable de la protection des renseignements personnels",
-      "email": "conaugh@oasisai.work"
+      "email": "support@oasisai.work"
     }
   },
   "lastVerified": "2026-09-28",
@@ -169,7 +169,7 @@
     "portability": true,
     "withdrawConsent": true,
     "optOutOfSale": "Not applicable — no sale or sharing as defined by the CPRA",
-    "requestChannel": "conaugh@oasisai.work",
+    "requestChannel": "support@oasisai.work",
     "responseTargetDays": 30
   },
 

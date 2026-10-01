@@ -281,7 +281,7 @@ async function main() {
     const el = await ProvisioningProgress();
     const text = JSON.stringify(el);
     assert.ok(text.includes("Workspace ready"), "reads the recorded steps");
-    assert.ok(text.includes("conaugh@oasisai.work"), "Questions? <CONTACT_EMAIL>");
+    assert.ok(text.includes("support@oasisai.work"), "Questions? <CONTACT_EMAIL>");
     const src = readFileSync("components/onboarding/ProvisioningProgress.tsx", "utf8");
     assert.ok(src.includes('import { CONTACT_EMAIL } from "@/lib/marketing/routes"'));
     const code = src.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -535,7 +535,7 @@ async function main() {
     assert.ok(text.includes("Setup stopped before it finished."), text);
     assert.doesNotMatch(text, /operator_exemption_unaudited|Could not record/, "the internal reason is not shown to the client");
     assert.doesNotMatch(text, /will pick it up|has the details/);
-    assert.ok(text.includes("conaugh@oasisai.work"), "the next step is the contact line");
+    assert.ok(text.includes("support@oasisai.work"), "the next step is the contact line");
     // Add-ons are shown by their labels, never their keys.
     const bay = await one(db, `SELECT steps_json FROM provisioning_runs WHERE tenant_id = ? AND status = 'complete' LIMIT 1`, [BAYSIDE]);
     assert.match(String(bay?.steps_json), /add-ons requested: Content"/);

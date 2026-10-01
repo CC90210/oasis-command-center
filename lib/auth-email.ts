@@ -1,4 +1,6 @@
 import "server-only";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
+import { logSupportSenderFallback, resolveSupportMailbox } from "@/lib/email/support-mailbox";
 
 /** Dedicated transactional sender for account-security mail. */
 export type AuthEmailConfig = {
@@ -9,6 +11,11 @@ export type AuthEmailConfig = {
   password: string;
   fromEmail: string;
   fromName: string;
+  /**
+   * Which credential this is: the dedicated AUTH_* set, the support mailbox
+   * (support@oasisai.work), or the GMAIL_USER compatibility path.
+   */
+  source: "dedicated" | "support" | "workspace_fallback";
 };
 
 type AuthEmailEnvironment = Record<string, string | undefined>;
@@ -44,9 +51,11 @@ function hasHeaderBreak(value: string): boolean {
 }
 
 /**
- * Resolve dedicated AUTH_* credentials first, then the existing company-domain
- * Google Workspace identity. E-sign, outreach, tenant SMTP, and consumer Gmail
- * identities are intentionally not password-reset fallbacks.
+ * Resolve dedicated AUTH_* credentials first, then the support mailbox
+ * (SUPPORT_GMAIL_USER + SUPPORT_GMAIL_APP_PASSWORD, support@oasisai.work: the
+ * address OASIS's client-facing system mail leaves from), then the existing
+ * company-domain Google Workspace identity. E-sign, outreach, tenant SMTP, and
+ * consumer Gmail identities are intentionally not password-reset fallbacks.
  */
 export function resolveAuthEmailConfig(
   env: AuthEmailEnvironment = process.env,
@@ -66,15 +75,30 @@ export function resolveAuthEmailConfig(
     env.AUTH_SMTP_SECURE,
   ].some((value) => !!value?.trim());
   let usingWorkspaceFallback = false;
+  let source: AuthEmailConfig["source"] = "dedicated";
+
+  // The support mailbox, when its credential is on the Worker: invites and
+  // password resets are OASIS system mail to its clients, and leave from the
+  // address the product publishes. Same Google Workspace transport as below.
+  const support = hasDedicatedConfiguration ? null : resolveSupportMailbox(env);
+  if (support?.ok) {
+    source = "support";
+    host = "smtp.gmail.com";
+    portText = "465";
+    user = support.address;
+    password = support.password;
+    fromEmail = support.address;
+  }
 
   // Existing production bridge: a Google Workspace mailbox on the company's
   // custom domain. This fallback is intentionally exact and cannot consume
   // GMAIL_FROM_ADDRESS, ESIGN_*, or any tenant/outreach sender identity.
-  if (!hasDedicatedConfiguration) {
+  if (!hasDedicatedConfiguration && !support?.ok) {
     const workspaceUser = (env.GMAIL_USER || "").trim().toLowerCase();
     const workspacePassword = (env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
     if (workspaceUser && workspacePassword) {
       usingWorkspaceFallback = true;
+      source = "workspace_fallback";
       host = "smtp.gmail.com";
       portText = "465";
       user = workspaceUser;
@@ -143,7 +167,7 @@ export function resolveAuthEmailConfig(
     : port === 465;
   return {
     ok: true,
-    config: { host, port, secure, user, password, fromEmail, fromName },
+    config: { host, port, secure, user, password, fromEmail, fromName, source },
   };
 }
 
@@ -159,10 +183,15 @@ export async function sendAuthEmail(
   input: { to: string; subject: string; text: string },
   deps: { env?: AuthEmailEnvironment; transport?: AuthEmailTransport } = {},
 ): Promise<AuthEmailResult> {
-  const resolved = resolveAuthEmailConfig(deps.env ?? process.env);
+  const env = deps.env ?? process.env;
+  const resolved = resolveAuthEmailConfig(env);
   if (!resolved.ok) {
     console.error(`[auth-email] ${resolved.code}: ${resolved.error}`);
     return resolved;
+  }
+  if (resolved.config.source === "workspace_fallback") {
+    const support = resolveSupportMailbox(env);
+    if (!support.ok) logSupportSenderFallback("auth-email", support, resolved.config.fromEmail);
   }
   const recipient = input.to.trim().toLowerCase();
   if (!emailDomain(recipient) || hasHeaderBreak(input.subject)) {
@@ -186,6 +215,9 @@ export async function sendAuthEmail(
     }
     const receipt = await transport.sendMail({
       from: { name: resolved.config.fromName, address: resolved.config.fromEmail },
+      // An invitee or a client who answers this mail is asking OASIS for help:
+      // the reply goes to the support inbox, whichever mailbox sent it.
+      replyTo: OASIS_SUPPORT_EMAIL,
       to: recipient,
       subject: input.subject,
       text: input.text,

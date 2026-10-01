@@ -137,13 +137,13 @@ export const FLIGHT_WAIT_MS = 10_000;
 const POLL_MS = 50;
 
 /**
- * The longest any one caller waits for someone else's load before giving up
- * with CacheWaitTimeout. Three flight budgets: room for a dead load and one
- * recovery, never an open-ended wait while the database is down.
+ * How many flight budgets any one caller waits for someone else's load before
+ * giving up with CacheWaitTimeout (30 s in production): room for a dead load
+ * and one recovery, never an open-ended wait while the database is down.
  */
-export const MAX_WAIT_MS = 3 * FLIGHT_WAIT_MS;
+const WAIT_BUDGETS = 3;
 
-/** Thrown to a caller that waited MAX_WAIT_MS for another request's load. Retryable. */
+/** Thrown to a caller that waited WAIT_BUDGETS flight budgets for another request's load. Retryable. */
 export class CacheWaitTimeout extends Error {
   constructor(readonly key: string) {
     super("These leads are still loading for another request. Try again in a few seconds.");
@@ -194,7 +194,7 @@ function fresh<T>(key: string, now: number): Entry<T> | null {
  * and keeps waiting for it. (Before this, every waiter whose own budget ran out
  * started a load, and a hung database turned one 15 MB read into one per
  * waiter: Codex review of #511, 2026-10-01.) A caller that has waited
- * MAX_WAIT_MS gives up with CacheWaitTimeout instead of adding load, even if
+ * WAIT_BUDGETS flight budgets gives up with CacheWaitTimeout instead of adding load, even if
  * the flight it waited on is dead by then: the next caller recovers it, so the
  * number of loads per key stays bounded however late the waiters wake up.
  *
@@ -211,7 +211,7 @@ export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>
   const waitMs = opts.flightWaitMs ?? FLIGHT_WAIT_MS;
   const pollMs = opts.pollMs ?? POLL_MS;
   const clock = opts.clock ?? REAL_CLOCK;
-  const giveUpAt = clock.now() + (opts.maxWaitMs ?? 3 * waitMs);
+  const giveUpAt = clock.now() + (opts.maxWaitMs ?? WAIT_BUDGETS * waitMs);
   for (;;) {
     const hit = fresh<T>(key, clock.now());
     if (hit) return hit.value;

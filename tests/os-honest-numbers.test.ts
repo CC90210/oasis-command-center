@@ -42,6 +42,8 @@ delete process.env.TURSO_DB_URL;
 delete process.env.TURSO_AUTH_TOKEN;
 delete process.env.STRIPE_SECRET_KEY;
 delete process.env.FOUNDERS_TENANT_IDS;
+// Test-only key for the key store's ciphertexts (the Zernio key check reads one).
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "os-honest-numbers-field-key-long-enough-0001";
 // The OASIS workspace calendar identity (fake values; nothing calls Google).
 process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID = "test-client-id";
 process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET = "test-client-secret";
@@ -229,8 +231,9 @@ async function main() {
     assert.equal(byId["meeting-outcomes"]?.count, 1);
     assert.deepEqual([byId["meetings-today"]?.count, byId["meetings-today"]?.title], [2, "2 meetings booked today"], "Morning Co is in the outcomes row, not here too");
     assert.equal(byId["meetings-today"]?.detail, "First at 2:46 PM with Just Ended Co");
-    // 1 missing outcome + 1 late prep follow-up + 2 meetings today, for 5 leads.
-    assert.deepEqual(model.needsYouTotal(list), { total: 4, capped: false });
+    // 1 missing outcome + 1 late prep follow-up. Today's booked meetings are a
+    // Review row (W2a: drawn, not counted as waiting on the viewer).
+    assert.deepEqual(model.needsYouTotal(list), { total: 2, capped: false });
     const probe = model.buildNeedsYou({
       sales: { ok: true, value: model.summarizeBoard({ rows: meetingLeads.slice(0, 1), summary, truncatedStages: [], nowMs: now, day }) },
       delivery: null,
@@ -239,7 +242,7 @@ async function main() {
       nowMs: now,
     });
     assert.deepEqual(probe.items.map((i) => i.id), ["meetings-today"], "a running meeting is on the schedule, not a missed close-out");
-    assert.deepEqual(model.needsYouTotal(probe), { total: 1, capped: false });
+    assert.deepEqual(model.needsYouTotal(probe), { total: 0, capped: false }, "a meeting on the schedule is not waiting on anyone");
   });
   // Verify-fix probes (2026-09-29): the rows are right to name these leads
   // twice, and the shared total counted each of them twice.
@@ -253,15 +256,17 @@ async function main() {
   await check("Needs you total: a lead in two rows is ONE thing waiting; the rows keep their own counts", () => {
     const listFor = (rows: typeof twoRowLeads) =>
       model.buildNeedsYou({ sales: { ok: true, value: model.summarizeRecords(rows, rows.length, now, day) }, delivery: null, inbound: null, cash: null, nowMs: now });
-    for (const [lead, rows] of [
-      [twoRowLeads[0], ["follow-ups", "meetings-today"]],
-      [twoRowLeads[1], ["no-next-step", "meetings-today"]],
+    for (const [lead, rows, total] of [
+      [twoRowLeads[0], ["follow-ups", "meetings-today"], 1],
+      // Both of its rows are Review rows (W2a): drawn, nothing counted.
+      [twoRowLeads[1], ["no-next-step", "meetings-today"], 0],
     ] as const) {
       const list = listFor([lead]);
       assert.deepEqual(list.items.map((i) => [i.id, i.count]), rows.map((id) => [id, 1]), `${lead.id}: each row still says what is true of the lead`);
-      assert.deepEqual(model.needsYouTotal(list), { total: 1, capped: false }, `${lead.id}: one lead, however many rows name it`);
+      assert.deepEqual(model.needsYouTotal(list), { total, capped: false }, `${lead.id}: one lead at most, however many rows name it`);
     }
-    // Both leads, and a row that is not about leads: 2 leads + 1 routine = 3, never 5.
+    // Both leads, and a row that is not about leads: the late follow-up's lead
+    // + 1 routine = 2. Held Co's rows are Review rows, and nothing is counted twice.
     const both = model.buildNeedsYou({
       sales: { ok: true, value: model.summarizeRecords(twoRowLeads, 2, now, day) },
       delivery: null,
@@ -270,7 +275,7 @@ async function main() {
       routines: { ok: true, value: { total: 1, on: 1, failed24h: [{ id: "w9", agentKey: "x", name: "x", description: "", schedule: "", enabled: true, lastRunAt: iso(now - hour), lastRunStatus: "error", lane: "workspace" }], lastSuccessAt: null } },
       nowMs: now,
     });
-    assert.deepEqual(model.needsYouTotal(both), { total: 3, capped: false });
+    assert.deepEqual(model.needsYouTotal(both), { total: 2, capped: false });
     // No row claims more leads than exist: each lead row's number is its own
     // leads, every one of them real, and none exceeds the leads there are.
     for (const item of both.items.filter((i) => i.subjects)) {
@@ -291,7 +296,7 @@ async function main() {
       routines: null,
       nowMs: now,
     })[0];
-    assert.equal(cos.status, "3 waiting on you");
+    assert.equal(cos.status, "2 waiting on you");
   });
 
   const needs = model.buildNeedsYou({
@@ -338,8 +343,9 @@ async function main() {
   // ── 3. Chief of Staff: ONE count, on Today and on its tab ─────────────────
   await check("Chief of Staff: Today's card, the Needs you header and the tab print the same THING count", () => {
     const { total, capped } = model.needsYouTotal(needs);
-    // 1 overdue + 2 no-outcome + 2 carried + 3 no next step + 1 routine + 2 approvals.
-    assert.deepEqual({ total, capped }, { total: 11, capped: false }, "things, not rows (6 rows here)");
+    // 1 overdue + 2 no-outcome + 1 routine + 2 approvals. The 2 carried over and
+    // the 3 with no next step are Review rows (W2a): drawn, never counted.
+    assert.deepEqual({ total, capped }, { total: 6, capped: false }, "things, not rows, and never the Review rows");
     const [cos] = model.buildDepartmentCards({
       departments: dept("chief_of_staff"),
       needsYou: needs,
@@ -350,15 +356,18 @@ async function main() {
       stripeConnected: null,
       routines: null,
     });
-    assert.deepEqual([cos.metric.kind === "live" && cos.metric.value, cos.status], ["11", "11 waiting on you"]);
+    assert.deepEqual([cos.metric.kind === "live" && cos.metric.value, cos.status], ["6", "6 waiting on you"]);
     const header = render(createElement(NeedsYouList, { needsYou: needs }));
-    assert.match(header, /Needs you 11 items 11 /, `the Needs you header must print the same total: ${header.slice(0, 80)}`);
+    assert.match(header, /Needs you 6 items 6 /, `the Needs you header must print the same total: ${header.slice(0, 80)}`);
     // The tab (components/os/department/numbers.ts) carries needsYouTotal over
     // the SAME reads, and the page prints it: the three cannot drift.
     const numbers = code("components/os/department/numbers.ts");
     assert.match(numbers, /loadNeedsYouReads\(\{\s*viewer: viewer\.surface,\s*navInput: viewer\.navInput,\s*plan,\s*showFinancials,\s*day,/);
     assert.match(numbers, /const needs = needsYouFrom\(reads, day\.nowMs\);/);
     assert.match(numbers, /needsYou: needsYouTotal\(needs\),/);
+    // Its lines are the rows the count is made of: no Review row is listed
+    // under a header that does not count it (W2a).
+    assert.match(numbers, /attention: needs\.items\.filter\(\(item\) => !isReviewItem\(item\)\)\.map\(/);
     assert.match(numbers, /const showFinancials = viewer\.surface\.capabilities\.canSeeCompanyFinancials && plan\.money;/, "the tab narrows money exactly as Today does");
     const page = code("app/team/[dept]/page.tsx");
     assert.match(page, /const needsYou = numbers\.needsYou\s*\?\s*numbers\.needsYou\.total/, "the tab header prints the shared total");
@@ -512,7 +521,7 @@ async function main() {
       formatWhen: when,
     })[0];
   await check("Marketing: 'Zernio post analytics · Last synced …', never a fixed 'Meta Ads · Not connected'", () => {
-    const live = marketing({ ok: true, value: { published: 12, lastSyncedAt: "2026-09-29T20:22:00Z" } });
+    const live = marketing({ ok: true, value: { published: 12, lastSyncedAt: "2026-09-29T20:22:00Z", zernioConnected: null } });
     assert.deepEqual(live.connection, { label: "Zernio post analytics", state: "live", note: "Last synced Sep 29, 4:16 PM", href: null });
     const text = render(createElement(DepartmentCard, { card: live }));
     assert.match(text, /12 pieces published in 7 days/);
@@ -527,7 +536,7 @@ async function main() {
         needsYou: { items: [], unavailable: [] },
         sales: null,
         delivery: null,
-        content: { ok: true, value: { published: 0, lastSyncedAt } },
+        content: { ok: true, value: { published: 0, lastSyncedAt, zernioConnected: null } },
         goal: null,
         stripeConnected: null,
         routines: null,
@@ -545,11 +554,20 @@ async function main() {
     assert.deepEqual([fresh.metric.kind, fresh.status], ["live", "Nothing published this week"], "a sync inside the week counts (control)");
   });
   await check("Marketing: nothing ever synced is 'no data', and a failed read is 'Couldn't check'", () => {
-    const none = marketing({ ok: true, value: { published: 0, lastSyncedAt: null } });
+    const none = marketing({ ok: true, value: { published: 0, lastSyncedAt: null, zernioConnected: true } });
     assert.deepEqual([none.metric.kind, none.connection?.state, none.connection?.note], ["no_data", "no_data", "Nothing synced yet"]);
     assert.doesNotMatch(render(createElement(DepartmentCard, { card: none })), /(^|\s)0(\s|$)/, "never '0 published' for a source that never reported");
     const failed = marketing({ ok: false });
     assert.deepEqual([failed.metric.kind, failed.connection?.note], ["error", "Couldn't check"]);
+  });
+  await check("Marketing (W2a, U2-13): a workspace that never connected Zernio is told to connect a social account", () => {
+    const fresh = marketing({ ok: true, value: { published: 0, lastSyncedAt: null, zernioConnected: false } });
+    assert.deepEqual(
+      [fresh.status, fresh.metric.kind, fresh.connection],
+      ["Connect a social account", "no_data", { label: "Social posting", state: "not_connected", note: "Not connected", href: "/settings/connections" }],
+    );
+    const text = render(createElement(DepartmentCard, { card: fresh }));
+    assert.doesNotMatch(text, /Zernio|Nothing synced|(^|\s)0(\s|$)/, `an unconnected tool read as a broken sync: ${text}`);
   });
 
   // ── 7. Operations: real routine health from both lanes ────────────────────
@@ -865,9 +883,34 @@ async function main() {
     { sql: "INSERT INTO cron_jobs VALUES ('e2', ?, 'Post Analytics Sync', '', '17 * * * *', 'script_run', '{}', 'maven', 1, ?, 'synced: 295 · failed: 0', NULL, 10, 0, '2026-09-01')", args: [TENANT_A, at(120_000)] },
     { sql: "INSERT INTO cron_jobs VALUES ('e3', ?, 'Parked', '', '0 * * * *', 'script_run', '{}', 'bravo', 0, NULL, NULL, NULL, 0, 0, '2026-09-01')", args: [TENANT_A] },
     { sql: "INSERT INTO cron_jobs VALUES ('e4', ?, 'B empire', '', '0 * * * *', 'script_run', '{}', 'bravo', 1, ?, 'ERROR boom', NULL, 1, 1, '2026-09-01')", args: [TENANT_B, at(60_000)] },
+    // Stamped with A's workspace id but owned by an agent no department is
+    // bound to (W2a, decision 17): it never counts on A's Today or tab.
+    { sql: "INSERT INTO cron_jobs VALUES ('e5', ?, 'House errand', '', '0 * * * *', 'script_run', '{}', 'aura', 1, ?, 'ERROR unrelated', NULL, 4, 2, '2026-09-01')", args: [TENANT_A, at(60_000)] },
     { sql: "INSERT INTO post_analytics VALUES ('p1', ?, 'Twelve pieces', ?, '2026-09-29T20:22:00Z')", args: [TENANT_A, at(86_400_000)] },
     { sql: "INSERT INTO post_analytics VALUES ('p2', ?, 'Twelve pieces', ?, '2026-09-29T20:20:00Z')", args: [TENANT_A, at(86_400_000)] },
   ]);
+
+  // The Connections tables in their real shape: the Marketing card asks
+  // whether Zernio is connected, and the Operations tile counts the hub's own
+  // statuses (bravo__187 + the live key-store DDL).
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__187_os_connections.sql"), "utf8"));
+  await raw.executeMultiple(`
+    CREATE TABLE "tenant_integration_credentials" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+      "tenant_id" TEXT NOT NULL, "service" TEXT NOT NULL, "field_key" TEXT NOT NULL,
+      "encrypted_value" TEXT NOT NULL, "last_tested_at" TEXT, "last_test_ok" INTEGER, "last_test_error" TEXT,
+      "created_by" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("id"));
+    CREATE TABLE integrations_health (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT, service TEXT,
+      status TEXT, last_ping_at TEXT, metadata TEXT NOT NULL DEFAULT '{}');
+  `);
+  const connectionRow = (id: string, tenant: string, provider: string, status: string, verdict: string) => ({
+    sql: `INSERT INTO tenant_connections (id, tenant_id, provider, auth_kind, status, last_health_at, last_health_verdict, created_at, updated_at)
+          VALUES (?, ?, ?, 'api_key', ?, ?, ?, ?, ?)`,
+    args: [id, tenant, provider, status, at(60_000), verdict, at(86_400_000), at(60_000)],
+  });
 
   const loaders = await import("../components/os/today/loaders");
   await check("routines I/O: the workspace lane plus OASIS's Empire rows, and never another workspace's", async () => {
@@ -888,9 +931,65 @@ async function main() {
   });
   await check("content I/O: freshness comes from this workspace's post analytics only", async () => {
     const a = await loaders.loadContentWeek(TENANT_A);
-    assert.deepEqual(a, { ok: true, value: { published: 1, lastSyncedAt: "2026-09-29T20:22:00Z" } });
+    assert.deepEqual(
+      a,
+      { ok: true, value: { published: 1, lastSyncedAt: "2026-09-29T20:22:00Z", zernioConnected: null } },
+      "posts that synced already name their source: nothing more is asked",
+    );
     const b = await loaders.loadContentWeek(TENANT_B);
-    assert.deepEqual(b, { ok: true, value: { published: 0, lastSyncedAt: null } }, "a workspace with nothing synced has no freshness");
+    assert.deepEqual(
+      b,
+      { ok: true, value: { published: 0, lastSyncedAt: null, zernioConnected: false } },
+      "a workspace with nothing synced has no freshness, and no Zernio of its own",
+    );
+  });
+  await check("content I/O (W2a, U2-13): Zernio is connected only by this workspace's own live zernio/late connection", async () => {
+    const zernioOf = async (tenant: string) => {
+      const r = await loaders.loadContentWeek(tenant);
+      return r.ok ? r.value.zernioConnected : "failed";
+    };
+    await raw.batch([connectionRow("zc-a", TENANT_A, "zernio", "connected", "healthy")], "write");
+    try {
+      assert.equal(await zernioOf(TENANT_B), false, "another workspace's connection is not this one's");
+      await raw.batch([connectionRow("zc-b", TENANT_B, "late", "pending", "unknown")], "write");
+      assert.equal(await zernioOf(TENANT_B), true, "a live Late connection is Zernio");
+      await raw.execute({ sql: "UPDATE tenant_connections SET revoked_at = ? WHERE id = 'zc-b'", args: [at(1_000)] });
+      assert.equal(await zernioOf(TENANT_B), false, "a revoked connection is not a connection");
+      // The check that could not run is not "not connected": the read fails.
+      await raw.execute("ALTER TABLE tenant_connections RENAME TO tenant_connections_offline");
+      try {
+        assert.equal(await zernioOf(TENANT_B), "failed", "a failed connection read is 'Couldn't load', never 'Connect a social account'");
+        assert.equal(await zernioOf(TENANT_A), null, "a workspace whose posts synced never asks");
+      } finally {
+        await raw.execute("ALTER TABLE tenant_connections_offline RENAME TO tenant_connections");
+      }
+    } finally {
+      await raw.execute("DELETE FROM tenant_connections WHERE id IN ('zc-a', 'zc-b')");
+    }
+  });
+  // W2a review (W2A-R4): the key check decrypted EVERY stored credential and
+  // threw on any unreadable one, so another app's key (Twilio, Stripe) turned
+  // the Marketing card into "Couldn't load".
+  await check("content I/O (W2A-R4): only a Zernio/Late key answers 'is Zernio connected'; another app's unreadable key does not", async () => {
+    const { encryptField } = await import("../lib/field-encryption");
+    const zernioOf = async (tenant: string) => {
+      const r = await loaders.loadContentWeek(tenant);
+      return r.ok ? r.value.zernioConnected : "failed";
+    };
+    const keyRow = (id: string, service: string, field: string, value: string) => ({
+      sql: "INSERT INTO tenant_integration_credentials (id, tenant_id, service, field_key, encrypted_value) VALUES (?, ?, ?, ?, ?)",
+      args: [id, TENANT_B, service, field, value],
+    });
+    await raw.batch([keyRow("k-twilio", "twilio", "auth_token", "not-a-ciphertext")], "write");
+    try {
+      assert.equal(await zernioOf(TENANT_B), false, "a Twilio key nobody can read says nothing about Zernio");
+      await raw.batch([keyRow("k-late", "late", "api_key", encryptField("late-test-key"))], "write");
+      assert.equal(await zernioOf(TENANT_B), true, "a saved Late key is Zernio");
+      await raw.execute("UPDATE tenant_integration_credentials SET encrypted_value = 'garbled' WHERE id = 'k-late'");
+      assert.equal(await zernioOf(TENANT_B), "failed", "a Late key that will not decrypt is 'Couldn't load', never a guess");
+    } finally {
+      await raw.execute("DELETE FROM tenant_integration_credentials WHERE id IN ('k-twilio', 'k-late')");
+    }
   });
 
   // Hot replies: lead_interactions does not exist yet, so the read FAILS.
@@ -904,14 +1003,31 @@ async function main() {
   });
   await check("inbound I/O: once readable, each workspace reads only its own inbound (control)", async () => {
     await raw.executeMultiple(`
-      CREATE TABLE lead_interactions (id TEXT PRIMARY KEY, tenant_id TEXT, type TEXT, subject TEXT, metadata TEXT, created_at TEXT);
+      CREATE TABLE lead_interactions (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, type TEXT, subject TEXT, metadata TEXT, created_at TEXT);
     `);
+    const hotMeta = JSON.stringify({ classification: { intent: "hot_lead" } });
     await raw.batch([
-      { sql: "INSERT INTO lead_interactions VALUES ('i1', ?, 'email_received', 'Ready to sign', ?, ?)", args: [TENANT_A, JSON.stringify({ classification: { intent: "hot_lead" } }), at(3_600_000)] },
-      { sql: "INSERT INTO lead_interactions VALUES ('i2', ?, 'email_received', 'B mail', ?, ?)", args: [TENANT_B, JSON.stringify({ classification: { intent: "hot_lead" } }), at(3_600_000)] },
+      { sql: "INSERT INTO lead_interactions VALUES ('i1', ?, NULL, 'email_received', 'Ready to sign', ?, ?)", args: [TENANT_A, hotMeta, at(3_600_000)] },
+      { sql: "INSERT INTO lead_interactions VALUES ('i2', ?, NULL, 'email_received', 'B mail', ?, ?)", args: [TENANT_B, hotMeta, at(3_600_000)] },
     ]);
     const hot = await loaders.loadHotReplies(TENANT_A, t);
     assert.deepEqual(hot.ok && hot.value.map((r) => r.id), ["i1"]);
+  });
+  await check("inbound I/O (W2a): a hot reply answered on its own lead drops out; another workspace's send answers nothing", async () => {
+    const hotMeta = JSON.stringify({ classification: { intent: "hot_lead" } });
+    await raw.batch([
+      // Answered: an email went out on its lead an hour after it arrived.
+      { sql: "INSERT INTO lead_interactions VALUES ('i3', ?, 'lead-a3', 'email_reply', 'Answered', ?, ?)", args: [TENANT_A, hotMeta, at(3 * 3_600_000)] },
+      { sql: "INSERT INTO lead_interactions VALUES ('o3', ?, 'lead-a3', 'email_sent', 'Re: Answered', NULL, ?)", args: [TENANT_A, at(2 * 3_600_000)] },
+      // The only send on its lead is in ANOTHER workspace: not an answer here.
+      { sql: "INSERT INTO lead_interactions VALUES ('i4', ?, 'lead-a4', 'email_reply', 'Still waiting', ?, ?)", args: [TENANT_A, hotMeta, at(2 * 3_600_000)] },
+      { sql: "INSERT INTO lead_interactions VALUES ('o4', ?, 'lead-a4', 'email_sent', 'Elsewhere', NULL, ?)", args: [TENANT_B, at(3_600_000)] },
+      // Queued is not sent.
+      { sql: "INSERT INTO lead_interactions VALUES ('i5', ?, 'lead-a5', 'email_reply', 'Queued reply', ?, ?)", args: [TENANT_A, hotMeta, at(2.5 * 3_600_000)] },
+      { sql: "INSERT INTO lead_interactions VALUES ('o5', ?, 'lead-a5', 'email_queued', 'Draft', NULL, ?)", args: [TENANT_A, at(3_600_000)] },
+    ]);
+    const hot = await loaders.loadHotReplies(TENANT_A, t);
+    assert.deepEqual(hot.ok && hot.value.map((r) => r.id), ["i1", "i4", "i5"], "the answered reply is the only one gone");
   });
 
   // Calendar: user_integration_credentials does not exist yet, so the status
@@ -1051,6 +1167,72 @@ async function main() {
     assert.deepEqual([tile(b.tiles, "Routines on")?.value, tile(b.tiles, "Failed in 24h")?.value], ["1 of 1", "1"], "a client workspace: its own lane only");
     const none = await numbersMod.loadDepartmentNumbers(deptOf("operations"), osViewer(TENANT_C, false), await loadTenantRoutines(TENANT_C));
     assert.deepEqual([tile(none.tiles, "Routines on")?.status, tile(none.tiles, "Failed in 24h")?.status], ["no_data", "no_data"], "no routine set up is not '0 failed'");
+  });
+  await check("Operations tab I/O (W2a): the connection tile counts the hub's own statuses, never 'not measured'", async () => {
+    // A's Google Workspace heartbeat passed a minute ago; Stripe refused A's key.
+    await raw.batch(
+      [
+        { sql: "INSERT INTO integrations_health (tenant_id, service, status, last_ping_at) VALUES (?, 'gws', 'healthy', ?)", args: [TENANT_A, at(60_000)] },
+        connectionRow("st-a", TENANT_A, "stripe", "expired", "down"),
+      ],
+      "write",
+    );
+    try {
+      const connTile = (tiles: Parameters<typeof tile>[0]) =>
+        tile(tiles, "Connections needing attention") as { status: string; value: unknown; hint?: string; emptyText?: string } | undefined;
+      const a = connTile((await numbersMod.loadDepartmentNumbers(deptOf("operations"), operatorViewer(), await loadTenantRoutines(TENANT_A))).tiles);
+      assert.deepEqual([a?.status, a?.value, a?.hint], ["live", "1", "Of 2 apps set up"], "Stripe needs the owner; Google is proven");
+      const b = connTile((await numbersMod.loadDepartmentNumbers(deptOf("operations"), osViewer(TENANT_B, false), await loadTenantRoutines(TENANT_B))).tiles);
+      assert.deepEqual([b?.status, b?.emptyText], ["no_data", "No apps connected yet"], "nothing set up is words, never 0");
+      assert.doesNotMatch(JSON.stringify([a, b]), /not measured/i);
+    } finally {
+      await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
+      await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
+    }
+  });
+  // W2a review (W2A-R5): the tile dropped the old tile's link to the hub, and
+  // it counted the viewer's own Google link, so two people in one workspace
+  // could read two different workspace numbers.
+  await check("Operations tab I/O (W2A-R5): an owner gets the link to fix a non-zero count; the count is the workspace's, whoever looks", async () => {
+    await raw.batch(
+      [
+        { sql: "INSERT INTO integrations_health (tenant_id, service, status, last_ping_at) VALUES (?, 'gws', 'healthy', ?)", args: [TENANT_A, at(60_000)] },
+        connectionRow("st-a", TENANT_A, "stripe", "expired", "down"),
+      ],
+      "write",
+    );
+    // The personal-link read needs the table's real columns; B's owner links their own Google.
+    await raw.executeMultiple(`
+      ALTER TABLE user_integration_credentials ADD COLUMN last_tested_at TEXT;
+      ALTER TABLE user_integration_credentials ADD COLUMN last_test_ok INTEGER;
+      ALTER TABLE user_integration_credentials ADD COLUMN last_test_error TEXT;
+      ALTER TABLE user_integration_credentials ADD COLUMN updated_at TEXT;
+    `);
+    await raw.execute({
+      sql: "INSERT INTO user_integration_credentials (id, tenant_id, user_id, service, field_key, encrypted_value) VALUES ('g-b', ?, ?, 'gmail_oauth', 'refresh_token', 'stored')",
+      args: [TENANT_B, osViewer(TENANT_B, false).surface.userId],
+    });
+    try {
+      type ConnTile = { status: string; value: unknown; hint?: string; emptyText?: string; action?: { label: string; href: string } };
+      const connTile = async (viewer: ReturnType<typeof osViewer>, tenant: string) =>
+        tile((await numbersMod.loadDepartmentNumbers(deptOf("operations"), viewer, await loadTenantRoutines(tenant))).tiles, "Connections needing attention") as
+          | ConnTile
+          | undefined;
+      const owner = await connTile(operatorViewer(), TENANT_A);
+      assert.deepEqual([owner?.value, owner?.action], ["1", { label: "Open Connections", href: "/settings/connections" }], "the owner can fix it from the tile");
+      const worker = await connTile(osViewer(TENANT_A, true, { persona: "worker" }), TENANT_A);
+      assert.deepEqual([worker?.value, worker?.action], ["1", undefined], "the same number; only an owner or admin manages connections");
+      const { KpiTile } = await import("../components/os/KpiTile");
+      assert.match(render(createElement(KpiTile, owner as never)), /Connections needing attention 1 Of 2 apps set up Open Connections/);
+      // B's owner has their own Google linked; B has set up nothing. The hub
+      // card says "Your account linked", but the workspace has no app set up.
+      const b = await connTile(osViewer(TENANT_B, false), TENANT_B);
+      assert.deepEqual([b?.status, b?.emptyText, b?.action], ["no_data", "No apps connected yet", undefined], "a personal link is not the workspace's app");
+    } finally {
+      await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
+      await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
+      await raw.execute("DELETE FROM user_integration_credentials WHERE id = 'g-b'");
+    }
   });
   // Verify-fix (2026-09-29): a failed operator lookup answered "not the
   // operator", so CC's Empire failures vanished behind a clean workspace lane.
