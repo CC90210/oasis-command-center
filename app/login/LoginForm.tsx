@@ -84,8 +84,11 @@ export function LoginForm() {
             setErr(b.message || b.error || "Invite redemption failed");
             return;
           }
-          const slug = b.tenant_slug?.trim();
-          window.location.assign(slug ? `/t/${slug}` : "/");
+          // The new teammate lands on Today, like every sign-in: "/" resolves
+          // the workspace from the session (lib/auth-routing.ts
+          // homePathForTenant stays the one post-login rule). /t/<slug> was
+          // the legacy manifest shell (W1a, U1-05).
+          window.location.assign("/");
           return;
         }
         window.location.assign(`/auth/land?next=${encodeURIComponent(next)}`);
@@ -124,15 +127,12 @@ export function LoginForm() {
         // path), so any !body.ok above is a real failure (expired, revoked,
         // email mismatch, etc.) and we surface it.
         //
-        // Post-redeem routing (2026-05-29 fix): invitees joining an
-        // existing tenant skip the new-tenant wizard and land directly
-        // in their workspace (/t/<slug>). Falls back to "/" when the
-        // server couldn't resolve a Command Center profile slug — the
-        // welcome page itself also auto-redirects, so the fallback path
-        // is safe.
-        const slug = body.tenant_slug?.trim();
-        router.push(slug ? `/t/${slug}` : "/");
-        router.refresh();
+        // Post-redeem routing: invitees joining an existing tenant skip the
+        // new-tenant wizard and land on Today ("/"), which resolves the
+        // workspace from the session (W1a, U1-05; it was /t/<slug>, the
+        // legacy manifest shell). A full page load, not router.push: this
+        // page is full-bleed and the root layout must render the OS shell.
+        window.location.assign("/");
         return;
       }
       router.push(`/auth/land?next=${encodeURIComponent(next)}`);

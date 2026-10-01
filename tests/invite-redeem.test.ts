@@ -47,6 +47,21 @@ import {
 } from "./_onboarding-fixture";
 
 const { dbFile } = setupOnboardingEnv("invite-redeem");
+// The welcome page's logo pulls next/image, whose client context cannot load
+// under the react-server condition (same stand-in as
+// tests/onboarding-wizard-authz.test.ts). The page under test only redirects.
+{
+  const logo = require.resolve("../components/brand/OasisLogo");
+  require.cache[logo] = {
+    id: logo,
+    filename: logo,
+    path: logo,
+    loaded: true,
+    children: [],
+    paths: [],
+    exports: { __esModule: true, OasisLogo: () => null },
+  } as unknown as NodeModule;
+}
 
 const BAYSIDE = "b0b0b000-0000-4000-8000-00000000b0b0"; // unprovisioned client workspace
 const NODEOPS = "c0c0c000-0000-4000-8000-00000000c0c0"; // wizard manifest under ANOTHER slug
@@ -367,6 +382,55 @@ async function main() {
     assert.ok(page.includes('setGoogleSignup(mode !== "turso")'));
     const invite = readFileSync("app/invite/[token]/page.tsx", "utf8").replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
     assert.doesNotMatch(invite, /leave\s+the workspace at any time/, "no promise of a leave control that does not exist");
+  });
+
+  // ── Where a new teammate lands (W1a, U1-05) ──────────────────────────────
+  // Every path that redeems an invite used to push /t/<slug>: the legacy
+  // manifest dashboard, outside the OS shell, as a new client teammate's very
+  // first screen. They all land on Today ("/") now, which resolves the
+  // workspace from the session; lib/auth-routing.ts homePathForTenant stays the
+  // one post-login rule, and for a workspace like Bayside its answer IS "/".
+  await check("the welcome page sends a joined invitee to Today through the claim refresh, never to /t/<slug>", async () => {
+    setSessionCookie(await signFor(STAFF));
+    const { default: Welcome } = await import("../app/onboarding/welcome/page");
+    await assert.rejects(
+      () => Welcome({ searchParams: Promise.resolve({}) }),
+      (err: Error) => {
+        assert.equal(err.message, `NEXT_REDIRECT;/api/auth/onboarding-refresh?next=${encodeURIComponent("/")}`);
+        return true;
+      },
+    );
+    const { homePathForTenant } = await import("../lib/auth-routing");
+    assert.equal(
+      homePathForTenant({ tenantSlug: "bayside-hvac", commandCenterProfileSlug: "bayside-hvac" }),
+      "/",
+      "the post-login rule's own answer for this workspace is the landing every invite path uses",
+    );
+  });
+
+  await check("every invite redemption in the browser lands on '/' with a full page load, never /t/<slug>", () => {
+    const sources = {
+      "app/login/LoginForm.tsx": readFileSync("app/login/LoginForm.tsx", "utf8"),
+      "app/signup/page.tsx": readFileSync("app/signup/page.tsx", "utf8"),
+      "app/invite/[token]/InviteRedeemForSignedInUser.tsx": readFileSync("app/invite/[token]/InviteRedeemForSignedInUser.tsx", "utf8"),
+      "app/auth/reset-password/page.tsx": readFileSync("app/auth/reset-password/page.tsx", "utf8"),
+    };
+    const assigns = (src: string) => (src.match(/window\.location\.assign\("\/"\)/g) || []).length;
+    for (const [file, src] of Object.entries(sources)) {
+      assert.doesNotMatch(src, /`\/t\/\$\{/, `${file} builds a /t/<slug> URL again: the legacy manifest shell`);
+    }
+    // LoginForm: the Turso path and the Supabase rollback path both redeem.
+    assert.equal(assigns(sources["app/login/LoginForm.tsx"]), 2, "both LoginForm redemption paths load '/'");
+    // signup: joinWorkspace (Turso) and the rollback path's redeem; its
+    // confirm-email path signs in at /login with next=/.
+    assert.equal(assigns(sources["app/signup/page.tsx"]), 2, "both signup redemption paths load '/'");
+    assert.ok(sources["app/signup/page.tsx"].includes('`&next=${encodeURIComponent("/")}`'), "the confirm-email path signs in to '/'");
+    // The signed-in CTA leaves the full-bleed /invite page with a full load, as
+    // signup does (U4-19): a soft push left the workspace with no rail.
+    const cta = sources["app/invite/[token]/InviteRedeemForSignedInUser.tsx"];
+    assert.equal(assigns(cta), 1);
+    assert.doesNotMatch(cta, /router\.(push|replace|refresh)\(|useRouter/, "no soft navigation out of the full-bleed /invite page");
+    assert.equal(assigns(sources["app/auth/reset-password/page.tsx"]), 1, "a reset that redeems an invite loads '/'");
   });
 
   db.close();

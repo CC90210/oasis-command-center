@@ -12,7 +12,6 @@
 
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import Link from "next/link";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { DesktopLinkClient } from "./client";
@@ -47,7 +46,7 @@ export default async function DesktopLinkPage({ searchParams }: { searchParams: 
         <p className="text-fg-muted text-sm leading-relaxed">
           Your account doesn&apos;t have a tenant yet. Open the dashboard at <code className="text-accent">/settings</code> and complete provisioning, then come back to this page.
         </p>
-        <Link href="/settings" className="mt-6 inline-block btn-secondary">Open Settings</Link>
+        <a href="/settings" className="mt-6 inline-block btn-secondary">Open Settings</a>
       </Shell>
     );
   }
@@ -102,18 +101,24 @@ export default async function DesktopLinkPage({ searchParams }: { searchParams: 
   );
 }
 
+// This page is full-bleed (lib/os/full-bleed.ts): it draws its own header, and
+// the root layout does not re-render on a client-side navigation. A <Link> out
+// of it would render the dashboard without its rail, so the links here are
+// plain <a> and load the next page in full (tests/shell-boundary.test.ts).
 function Shell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <main className="min-h-screen bg-bg-deep text-fg flex flex-col">
       <header className="px-6 sm:px-10 py-6 border-b border-bg-border flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2.5 group">
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- a full load is the POINT here; see the note above. */}
+        <a href="/" className="flex items-center gap-2.5 group">
           <OasisLogo size={32} priority />
           <div className="leading-none">
             <div className="font-black tracking-tight text-fg text-sm">OASIS AI</div>
             <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">Desktop Connect</div>
           </div>
-        </Link>
-        <Link href="/" className="text-xs text-fg-muted hover:text-fg">Skip to dashboard</Link>
+        </a>
+        {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- a full load is the POINT here; see the note above. */}
+        <a href="/" className="text-xs text-fg-muted hover:text-fg">Skip to dashboard</a>
       </header>
       <section className="flex-1 flex items-start justify-center px-6 sm:px-10 py-12">
         <div className="w-full max-w-xl bg-bg-elev/50 border border-bg-border rounded-2xl p-8 sm:p-10 backdrop-blur">

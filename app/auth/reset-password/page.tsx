@@ -105,11 +105,9 @@ export default function ResetPasswordPage() {
           );
           return;
         }
-        const slug = body.tenant_slug?.trim();
-        setTimeout(
-          () => window.location.assign(slug ? `/t/${slug}` : "/auth/land?next=%2F"),
-          900,
-        );
+        // Today ("/") resolves the workspace from the session, inside the OS
+        // shell (W1a, U1-05; it was /t/<slug>, the legacy manifest shell).
+        setTimeout(() => window.location.assign("/"), 900);
         return;
       }
 

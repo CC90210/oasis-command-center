@@ -6,6 +6,7 @@ import { CustomAgentBuilder } from "@/components/marketplace/CustomAgentBuilder"
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { manifestExists } from "@/lib/manifest/loader";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { requireOwnedTenantSlug } from "@/lib/tenant-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,6 +22,9 @@ export default async function MarketplaceBuildPage({
   const { edit } = await searchParams;
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
+  // Middleware 308s this URL to /agents/new; if that ever stops, this page
+  // still serves only its own workspace's members or a verified operator.
+  await requireOwnedTenantSlug(normalised);
 
   const user = await getSessionUser();
   const service = getServiceSupabase();

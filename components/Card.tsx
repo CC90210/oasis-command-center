@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { PageFrame } from "@/components/os/PageFrame";
 
 export function Card({
   title,
@@ -123,6 +124,19 @@ export function EmptyState({
   );
 }
 
+/**
+ * The pre-OS page header, kept for its callers: it IS the OS PageFrame header
+ * now (W1a, U1-01), so every page still on it gets the OS type scale and the
+ * OS actions row in one change (title 20/28, subtitle 13/20, actions beside the
+ * title from `lg` and stacked under it below that, MainShell's breakpoint).
+ *
+ * PageFrame wraps a page's body and a PageHeader sits above one, so this
+ * renders PageFrame with no children. Nothing here adds padding, width or
+ * motion: MainShell's canvas owns those, as it does for PageFrame.
+ *
+ * New pages use PageFrame directly. tests/ui-chrome.test.ts holds the list of
+ * files still importing PageHeader to a baseline that only shrinks.
+ */
 export function PageHeader({
   title,
   subtitle,
@@ -133,30 +147,9 @@ export function PageHeader({
   action?: ReactNode;
 }) {
   return (
-    // STACKS BELOW `lg`, and nothing at `lg` or above changes. The action slot
-    // (a segmented control on /web-leads) is ~200px wide, and the content box
-    // it shares is 358px on a 390px phone and only 464px at 768 -- MainShell's
-    // 240px sidebar margin starts at `md`, so a tablet is NARROWER for content
-    // than a phone is. Measured 2026-08-25: the subtitle wrapped into a
-    // nine-line sliver at 390 and a four-line one at 768. `lg` is the first
-    // width where both fit on one line (720px of content box).
-    // `lg:flex-row` restores the current layout exactly at every desktop width,
-    // so for the other pages using this header the change is stacking below
-    // 1024 and nothing else.
-    <header className="mb-6 flex flex-col items-start justify-between gap-3 lg:flex-row lg:gap-4">
-      <div className="min-w-0">
-        {/* Page title 20/28 semibold (OS type scale). The accent-to-transparent
-            gradient rule that trailed every title is gone: gradient decoration
-            is one of the generated-UI tells #464 removed elsewhere. */}
-        <h1 className="text-xl leading-7 font-semibold tracking-[-0.01em] text-fg">
-          {title}
-        </h1>
-        {subtitle && (
-          <div className="text-[13px] leading-5 text-fg-muted mt-1">{subtitle}</div>
-        )}
-      </div>
-      {action && <div className="shrink-0">{action}</div>}
-    </header>
+    <PageFrame title={title} subtitle={subtitle} actions={action}>
+      {null}
+    </PageFrame>
   );
 }
 

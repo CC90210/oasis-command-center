@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import ts from "typescript";
-import { OS_REDIRECTS } from "../lib/os/redirects";
+import { OS_PATTERN_REDIRECTS, OS_REDIRECTS, osPatternRedirect } from "../lib/os/redirects";
 import { MARKETING_HOME_PATH } from "../lib/marketing/routes";
 
 const APP = join(process.cwd(), "app");
@@ -79,6 +79,51 @@ assert.equal(OS_REDIRECTS["/integrations"], "/settings/connections", "Connection
 assert.ok(!("/feed" in OS_REDIRECTS), "/feed is a real Team page — it no longer redirects to /operations");
 assert.ok(!("/money" in OS_REDIRECTS), "/money is a real page, never a redirect");
 
+// ── the pattern moves: the AI team left /t/<slug> (W1a, U1-04) ────────────
+// "New teammate", the template tiles and a custom teammate's chat opened
+// /t/<slug>/marketplace/new and /t/<slug>/agent/<agent>, which switched the OS
+// rail off for the legacy manifest sidebar. Both moved to OS pages that read the
+// session's workspace; the old URLs are 308s (middleware.ts, pinned by
+// execution in tests/middleware-prefix.test.ts).
+{
+  assert.deepEqual(
+    OS_PATTERN_REDIRECTS.map((r) => r.route),
+    ["/t/[slug]/marketplace/new", "/t/[slug]/agent/[agent]"],
+    "the two AI team moves, and only those",
+  );
+  for (const r of OS_PATTERN_REDIRECTS) {
+    // The old route is a real page folder (it keeps its own owner-or-operator
+    // gate in case the redirect is ever removed), and a URL of its shape moves.
+    assert.ok(routeExists(r.route), `${r.route} is not a page under app/`);
+    const sample = r.route.replace(/\[[^\]]+\]/g, (seg) => (seg === "[slug]" ? "acme-roofing" : "outreach-sniper"));
+    const to = osPatternRedirect(sample);
+    assert.ok(to, `${sample} does not match its own move`);
+    assert.ok(to!.startsWith("/") && !to!.startsWith("//"), `${sample} must move same-origin`);
+    assert.ok(routeExists(to!), `${sample} -> ${to}, but ${to} is not a page under app/`);
+    assert.ok(!(to! in OS_REDIRECTS) && osPatternRedirect(to!) === null, `${sample} -> ${to} is a redirect chain`);
+  }
+  assert.equal(osPatternRedirect("/t/acme-roofing/marketplace/new"), "/agents/new");
+  assert.equal(osPatternRedirect("/t/acme-roofing/agent/outreach-sniper"), "/agents/outreach-sniper");
+  // The targets are the OS pages themselves, not the catch-all.
+  assert.ok(existsSync(join(APP, "agents", "new", "page.tsx")), "app/agents/new/page.tsx");
+  assert.ok(existsSync(join(APP, "agents", "[slug]", "page.tsx")), "app/agents/[slug]/page.tsx");
+  // Nothing else under /t/ moves: the marketplace list and an agent's detail
+  // page stay (inside the OS shell on the viewer's own slug), as does every
+  // manifest page.
+  for (const stays of [
+    "/t/acme-roofing",
+    "/t/acme-roofing/leads",
+    "/t/acme-roofing/marketplace",
+    "/t/acme-roofing/marketplace/outreach-sniper",
+    "/t/acme-roofing/marketplace/new/extra",
+    "/t/acme-roofing/agent",
+    "/t/acme-roofing/agent/outreach-sniper/history",
+    "/agents/new",
+  ]) {
+    assert.equal(osPatternRedirect(stays), null, `${stays} must not move`);
+  }
+}
+
 // ── middleware.ts uses them, and carries no stale literal of its own ──────
 const middleware = readFileSync(join(process.cwd(), "middleware.ts"), "utf8");
 const block = middleware.match(/const REDIRECT_MAP[^=]*=\s*\{([\s\S]*?)\n\s*\};/);
@@ -93,6 +138,10 @@ assert.ok(!literals.some(([from]) => from === "/money"), "/money must not redire
 // The one computed entry: the marketing home collapses onto "/".
 assert.match(block![1], /\[MARKETING_HOME_PATH\]:\s*"\/"/);
 assert.ok(routeExists(MARKETING_HOME_PATH), `${MARKETING_HOME_PATH} must exist for the "/" rewrite to land`);
+// The pattern moves run in middleware too, as permanent redirects that keep
+// the query (?template= from a tile, ?edit= from a teammate's configure panel).
+assert.match(middleware, /const movedTo = osPatternRedirect\(pathname\);/, "middleware must apply OS_PATTERN_REDIRECTS");
+assert.match(middleware, /target\.search = req\.nextUrl\.search;\s*return NextResponse\.redirect\(target, 308\);/);
 
 // ── every internal link in the app lands somewhere (2026-09-30) ───────────
 //

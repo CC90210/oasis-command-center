@@ -294,18 +294,14 @@ function InviteSignup({
         // Intentionally omit ?invite= from the /login URL — the
         // server-side finalize step above already redeemed the token,
         // so re-passing it would make LoginForm call redeem-invite a
-        // second time and fail with "invalid_or_expired". Pass next=
-        // pointing directly at the tenant workspace (e.g. /t/sun)
-        // when finalize gave us a tenant_slug, so the invitee skips
-        // the redundant new-tenant wizard entirely (2026-05-29 fix).
-        // Fall back to "/" when no slug — /auth/land + the welcome
-        // page's own redirect catch the legacy path.
-        const finalSlug = body.tenant_slug?.trim();
-        const nextPath = finalSlug ? `/t/${finalSlug}` : "/";
+        // second time and fail with "invalid_or_expired". next= is Today
+        // ("/"): sign-in resolves the workspace from the session, so the
+        // invitee skips the new-tenant wizard and lands in the OS shell
+        // (W1a, U1-05; it was /t/<slug>, the legacy manifest shell).
         const loginUrl =
           `/login?email=${encodeURIComponent(email)}` +
           `&fresh=1` +
-          `&next=${encodeURIComponent(nextPath)}`;
+          `&next=${encodeURIComponent("/")}`;
         router.push(loginUrl);
         router.refresh();
         return;
@@ -326,13 +322,12 @@ function InviteSignup({
         setErr(inviteRedeemMessage(body));
         return;
       }
-      // Invitees skip the new-tenant wizard and land directly in
-      // their tenant workspace (2026-05-29 fix). Falls back to "/"
-      // when no slug was resolvable — the welcome page's own
-      // redirect catches the legacy path.
-      const slug = body.tenant_slug?.trim();
-      router.push(slug ? `/t/${slug}` : "/");
-      router.refresh();
+      // Invitees skip the new-tenant wizard and land on Today ("/"),
+      // which resolves the workspace from the session (W1a, U1-05; it
+      // was /t/<slug>, the legacy manifest shell). A full page load, as
+      // joinWorkspace() above does: this page is full-bleed and the root
+      // layout must render the OS shell.
+      window.location.assign("/");
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : "Sign up failed");
     } finally {

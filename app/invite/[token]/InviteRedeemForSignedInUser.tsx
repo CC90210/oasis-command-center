@@ -11,7 +11,6 @@
  */
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { ArrowRight, Loader2, CheckCircle2, AlertCircle, Mail, Shield } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth-client";
 
@@ -23,7 +22,6 @@ type Props = {
 };
 
 export function InviteRedeemForSignedInUser({ token, tenantName, roleLabel, email }: Props) {
-  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,11 +52,12 @@ export function InviteRedeemForSignedInUser({ token, tenantName, roleLabel, emai
         setBusy(false);
         return;
       }
-      // Land the invitee directly in their tenant workspace when we
-      // resolved a slug (2026-05-29 fix — see redeem-invite route).
-      const slug = body.tenant_slug?.trim();
-      router.push(slug ? `/t/${slug}` : "/");
-      router.refresh();
+      // Land on Today ("/"), which resolves the workspace from the session
+      // (W1a, U1-05; it was /t/<slug>, the legacy manifest shell). A full
+      // page load, as /signup does (U4-19): /invite is full-bleed, and the
+      // root layout does not re-render on a client-side navigation, so
+      // router.push painted the workspace with no rail until a reload.
+      window.location.assign("/");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Redeem failed");
       setBusy(false);
