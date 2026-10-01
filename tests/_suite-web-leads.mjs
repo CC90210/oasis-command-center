@@ -124,6 +124,10 @@ const TESTS = [
   // modules, to the same convention as web-leads-outcome-guards above. Source
   // reads only; no credentials.
   "tests/objection-guards.test.ts",
+  // Call Mode sends a callback date the outcome route accepts. Keys 1-3 had
+  // returned 400 next_action_required since #488; this runs the client's date
+  // through the server's own validator.
+  "tests/web-leads-callmode-next-action.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

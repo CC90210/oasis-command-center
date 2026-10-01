@@ -54,6 +54,7 @@ import { clientsViewerFromSurface, type ClientsViewer } from "@/lib/os/customers
 import { CUSTOMER_LIFECYCLE_LABELS } from "@/lib/os/customers/rules";
 import { ACTIVE_PROJECT_STAGES, DELIVERY_TENANT_ID, OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
 import { loadAssignmentRoster } from "@/lib/delivery/session";
@@ -243,7 +244,7 @@ function ConversationsTab({ data, viewer }: { data: ClientRecordData; viewer: Cl
       recipients={state.value.addresses.recipients}
       mailboxNote={
         oasis
-          ? "Sends from the OASIS mailbox, with you in copy. It is recorded in this conversation."
+          ? `Sends as OASIS support mail (from ${OASIS_SUPPORT_EMAIL} once it is configured, else the OASIS mailbox), with you in copy; the client's reply goes to ${OASIS_SUPPORT_EMAIL}. It is recorded in this conversation.`
           : "Sends from your own mailbox connected in this workspace (never from OASIS's). It is recorded in this conversation."
       }
       sendBlocked={

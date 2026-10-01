@@ -190,8 +190,9 @@ function outcomeDueAt(meetingAt: number, data: Record<string, unknown>): number 
  *                   not) and nobody said.
  *   overdue         next step dated inside this cycle and already past.
  *   carriedOver     next step dated BEFORE the cycle began: a promise from the
- *                   last cycle, shown on its own, never counted as fresh.
- *   noNextStep      open, and no next step recorded at all.
+ *                   last cycle, shown on its own under Review, never counted
+ *                   as something waiting (isReviewItem).
+ *   noNextStep      open, and no next step recorded at all (also Review).
  *
  * A booked meeting that has not reached outcomeDueAt IS the lead's next step
  * (the booking writes next_action_at = the meeting time), so a meeting still
@@ -280,6 +281,13 @@ export type SalesSnapshot = {
    * rows are then a floor, and the brief says "at least".
    */
   partial: boolean;
+  /**
+   * The source holds a lead at all: any lead record, open or closed (records
+   * source), or one on this cycle's board (board source). Without one, "0 open
+   * leads" and a green "No follow-ups past due" describe a pipeline nobody has
+   * used yet, so the card says "No leads yet" instead of a health verdict.
+   */
+  hasLeads: boolean;
 };
 
 export function summarizeRecords(
@@ -296,6 +304,7 @@ export function summarizeRecords(
     ...salesBuckets(rows, nowMs, null),
     meetingsToday: meetingsBetween(rows, day.startMs, day.endMs),
     partial: total > rows.length,
+    hasLeads: total > 0 || rows.length > 0,
   };
 }
 
@@ -317,6 +326,7 @@ export function summarizeBoard(input: {
     // booked meeting (MEETING_STAGES are all open); a won column past its
     // overview limit cannot.
     partial: input.truncatedStages.some((stage) => !CLOSED_STAGES.has(stage)),
+    hasLeads: input.summary.onBoard > 0,
   };
 }
 
@@ -408,20 +418,47 @@ const HOT_INTENTS: ReadonlySet<string> = new Set(["hot_lead", "frustrated", "bil
 const HOT_PRIORITIES: ReadonlySet<string> = new Set(["critical", "urgent"]);
 
 /**
- * Inbound the classifier marked hot, received inside the window. The reader
- * behind this (priorityInbound) falls back to UNclassified rows when nothing is
- * flagged, so the classification is checked again here: an unread newsletter is
- * not something that needs the owner.
+ * The lead_interactions types that answer someone: a sent email, DM, LinkedIn
+ * message or text, or a call made. The outbound set the lead's next-action
+ * route reads (app/api/leads/[id]/next-action); a queued email has not gone out.
+ */
+export const REPLY_ANSWER_TYPES: readonly string[] = ["email_sent", "dm_sent", "linkedin_sent", "call_made", "sms_sent"];
+const REPLY_ANSWERS: ReadonlySet<string> = new Set(REPLY_ANSWER_TYPES);
+
+/** A touch on a lead, as the hot-reply check sees it. */
+export type LeadTouch = { lead_id?: string | null; type?: string | null; created_at: string };
+
+/**
+ * Inbound the classifier marked hot, received inside the window, that nobody
+ * has answered yet. The reader behind this (priorityInbound) falls back to
+ * UNclassified rows when nothing is flagged, so the classification is checked
+ * again here: an unread newsletter is not something that needs the owner.
+ *
+ * ANSWERED IS NOT WAITING. A hot reply stayed in Needs you, urgent, for its
+ * whole 24 hours even after the owner wrote back. `outbound` is the touches
+ * logged on the same leads (REPLY_ANSWER_TYPES): a reply with a later one on
+ * its lead has been answered and drops out. A reply matched to no lead cannot
+ * be checked, so it stays.
  */
 export function pickHotReplies(
-  rows: ReadonlyArray<{ id: string; subject?: string | null; created_at: string; metadata?: unknown }>,
+  rows: ReadonlyArray<{ id: string; lead_id?: string | null; subject?: string | null; created_at: string; metadata?: unknown }>,
   nowMs: number,
+  outbound: readonly LeadTouch[] = [],
   windowMs = 24 * 60 * 60 * 1000,
 ): HotReply[] {
+  const lastAnswer = new Map<string, number>();
+  for (const touch of outbound) {
+    const lead = (touch.lead_id || "").trim();
+    const at = Date.parse(touch.created_at);
+    if (!lead || !Number.isFinite(at) || !REPLY_ANSWERS.has(String(touch.type || ""))) continue;
+    if (at > (lastAnswer.get(lead) ?? -Infinity)) lastAnswer.set(lead, at);
+  }
   const out: HotReply[] = [];
   for (const row of rows) {
     const at = Date.parse(row.created_at);
     if (!Number.isFinite(at) || nowMs - at > windowMs) continue;
+    const lead = (row.lead_id || "").trim();
+    if (lead && (lastAnswer.get(lead) ?? -Infinity) > at) continue;
     const meta = (row.metadata && typeof row.metadata === "object" ? row.metadata : {}) as Record<string, unknown>;
     const cls = (meta.classification && typeof meta.classification === "object"
       ? meta.classification
@@ -767,9 +804,11 @@ export function buildNeedsYou(input: {
       }
       if (s.carriedOver.length > 0) {
         const n = s.carriedOver.length;
+        // A promise from before the cycle began: something to look over, not
+        // something waiting (isReviewItem), so it is "info" like no next step.
         items.push({
           id: "follow-ups-carried",
-          tone: "attention",
+          tone: "info",
           icon: "follow_up",
           title: `${floor}${plural(n, "follow-up was", "follow-ups were")} due before this cycle began`,
           detail: `Carried over · ${names(s.carriedOver)}`,
@@ -865,8 +904,28 @@ export function buildNeedsYou(input: {
 }
 
 /**
+ * The rows to look over, not things waiting on the viewer: open leads with no
+ * next step, follow-ups promised before this cycle began, and today's booked
+ * meetings (the schedule lists them; one that passes with no outcome comes
+ * back as "meeting-outcomes", which counts). Needs you draws them under a
+ * "Review" heading below the rows that need the viewer, and the count leaves
+ * them out: on 2026-09-30 OASIS's Today counted 66 of them (46 leads with no
+ * next step, 20 follow-ups carried over from before the 2026-09-23 cycle) as
+ * things waiting on CC, so the number could never reach zero.
+ *
+ * Named by row, not by tone: bank lines to categorise are "info" too, and they
+ * are owner work that stays in the count (the finance backlog).
+ */
+const REVIEW_ROW_IDS: ReadonlySet<string> = new Set(["follow-ups-carried", "no-next-step", "meetings-today"]);
+
+export function isReviewItem(item: Pick<NeedsYouItem, "id">): boolean {
+  return REVIEW_ROW_IDS.has(item.id);
+}
+
+/**
  * Everything waiting on the viewer, counted as THINGS, not rows: 15 overdue
  * follow-ups are 15, not "1 item". Approvals are added by their exact count.
+ * Review rows (isReviewItem) are shown but never counted.
  *
  * THE ONE COUNT. Today's Needs you header, Today's Chief of Staff card and the
  * /team/chief-of-staff header all print this, from one NeedsYou built by
@@ -888,12 +947,13 @@ export function buildNeedsYou(input: {
 export function needsYouTotal(n: NeedsYou): { total: number; capped: boolean } {
   const subjects = new Set<string>();
   let own = 0;
-  for (const item of n.items) {
+  const counted = n.items.filter((item) => !isReviewItem(item));
+  for (const item of counted) {
     if (item.subjects) for (const s of item.subjects) subjects.add(s);
     else own += item.count ?? 1;
   }
   const total = subjects.size + own + (n.approvals?.total ?? 0);
-  return { total, capped: n.unavailable.length > 0 || n.items.some((item) => item.capped === true) };
+  return { total, capped: n.unavailable.length > 0 || counted.some((item) => item.capped === true) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -990,6 +1050,13 @@ export type ContentWeek = {
   published: number | null;
   /** The newest post_analytics sync for this workspace. Null = nothing has ever synced. */
   lastSyncedAt: string | null;
+  /**
+   * Whether this workspace has its own Zernio (formerly Late) account
+   * connected: a live tenant_connections row for zernio/late, or a Late key in
+   * the workspace's key store. Asked only when nothing has ever synced (posts
+   * that synced already name their source); null when not asked.
+   */
+  zernioConnected: boolean | null;
 };
 
 /** The window the Marketing card counts published pieces over (momentumMetrics contentPublished7d). */
@@ -1000,6 +1067,13 @@ function marketingSourceLabel(): string {
   const zernio = CONNECTOR_CATALOG.find((c) => c.slug === "zernio");
   return zernio ? `${zernio.name} post analytics` : "Post analytics";
 }
+
+/**
+ * The Marketing line before any source is known to be this workspace's: no
+ * vendor is named, because a tool the owner never connected reads as a broken
+ * sync ("Zernio post analytics · Nothing synced yet" on every new workspace).
+ */
+const SOCIAL_SOURCE_LABEL = "Social posting";
 
 /** "Sep 29, 4:16 PM" in the operator's time zone. */
 export function operatorWhen(ms: number): string {
@@ -1072,6 +1146,20 @@ function departmentCard(
       if (!r) return { ...base, tone: "quiet", status: "Not in your view", metric: { kind: "unmeasured", label: "Pipeline is scoped to your own leads" } };
       if (!r.ok) return { ...base, tone: "attention", status: "Couldn't load", metric: { kind: "error", label: "Pipeline read failed" } };
       const s = r.value;
+      // A pipeline that has never held a lead has no follow-ups to be past
+      // due: "No follow-ups past due" over "0 open leads" was a green verdict
+      // with nothing behind it (the class #482/#496 fixed for tickets).
+      if (!s.hasLeads) {
+        return {
+          ...base,
+          tone: "quiet",
+          status: "No leads yet",
+          metric: {
+            kind: "no_data",
+            label: s.source === "board" ? "No leads are on the board this cycle yet" : "No leads have been added to this workspace yet",
+          },
+        };
+      }
       const floor = s.partial ? "At least " : "";
       const overdue = s.overdue.length;
       const missing = s.outcomeMissing.length;
@@ -1107,24 +1195,42 @@ function departmentCard(
       const label = marketingSourceLabel();
       if (!r) return { ...base, tone: "quiet", status: "Not in your view", metric: { kind: "unmeasured", label: "Content reporting is not on your plan" } };
       if (!r.ok || r.value.published === null) {
+        // Which source this workspace has is part of what could not be read,
+        // so no vendor is named.
         return {
           ...base,
           tone: "attention",
           status: "Couldn't load",
           metric: { kind: "error", label: "Published-content read failed" },
-          connection: { label, state: "error", note: "Couldn't check", href: null },
+          connection: { label: SOCIAL_SOURCE_LABEL, state: "error", note: "Couldn't check", href: null },
         };
       }
-      const { published, lastSyncedAt } = r.value;
+      const { published, lastSyncedAt, zernioConnected } = r.value;
       const syncedMs = lastSyncedAt ? Date.parse(lastSyncedAt) : NaN;
-      const connection: DeptConnection = Number.isFinite(syncedMs)
-        ? { label, state: "live", note: `Last synced ${when(syncedMs)}`, href: null }
-        : { label, state: "no_data", note: "Nothing synced yet", href: null };
-      // No post has ever synced: "0 published" would read as "we stopped
-      // posting" about a source that has never reported.
-      if (connection.state === "no_data") {
-        return { ...base, tone: "quiet", status: "No posts synced yet", metric: { kind: "no_data", label: "No published posts have synced yet" }, connection };
+      if (!Number.isFinite(syncedMs)) {
+        // Nothing has ever synced. Zernio is named only for a workspace that
+        // connected its own account; every other workspace is told how to
+        // start, never shown a tool it has never heard of as "not syncing".
+        if (zernioConnected !== true) {
+          return {
+            ...base,
+            tone: "quiet",
+            status: "Connect a social account",
+            metric: { kind: "no_data", label: "No social account is connected yet" },
+            connection: { label: SOCIAL_SOURCE_LABEL, state: "not_connected", note: "Not connected", href: CONNECTIONS_HREF },
+          };
+        }
+        // Connected, and no post has synced yet: "0 published" would read as
+        // "we stopped posting" about a source that has never reported.
+        return {
+          ...base,
+          tone: "quiet",
+          status: "No posts synced yet",
+          metric: { kind: "no_data", label: "No published posts have synced yet" },
+          connection: { label, state: "no_data", note: "Nothing synced yet", href: null },
+        };
       }
+      const connection: DeptConnection = { label, state: "live", note: `Last synced ${when(syncedMs)}`, href: null };
       // The last sync is older than the week being counted: every post of
       // that week could be missing, so the count is not a count. The sync runs
       // on the operator's machine, and a week with it off read as a real 0.

@@ -153,7 +153,7 @@ async function main() {
   assert.equal(winAnsiSafe("✓ ok 😀 é"), "? ok ? é", "characters the standard fonts cannot draw are replaced, not thrown on");
 
   // ── invoice email ───────────────────────────────────────────────────────
-  for (const k of ["INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD"]) delete process.env[k];
+  for (const k of ["INVOICE_FROM_EMAIL", "INVOICE_FROM_APP_PASSWORD", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "SUPPORT_GMAIL_USER", "SUPPORT_GMAIL_APP_PASSWORD"]) delete process.env[k];
   await assert.rejects(resolveInvoiceMailbox(null), InvoiceMailerNotConfigured, "no mailbox is a loud error");
   process.env.INVOICE_FROM_EMAIL = "billing@sunbizfunding.com";
   process.env.INVOICE_FROM_APP_PASSWORD = "abcd efgh ijkl mnop";

@@ -9,7 +9,8 @@
  *
  *   send_email    lib/integrations/oasis-shared-gmail-send.ts, the OASIS
  *                 mailbox: suppression check (fail-closed), brand-vs-mailbox
- *                 guard, OASIS footer, Message-Id from the idempotency key. It
+ *                 guard, OASIS footer, Message-Id from the idempotency key; an
+ *                 email to a client goes as support mail (emailPurposeFor). It
  *                 is OASIS's mailbox, so the brand must resolve to "oasis" for
  *                 THIS tenant (lib/email/brand-for-tenant.ts, fail-closed); a
  *                 client workspace has no in-app sender yet and is told so.
@@ -50,7 +51,9 @@ import type { EmailSigner } from "@/lib/config/email-signature";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendOasisSharedGmail, type OasisSharedSendResult } from "@/lib/integrations/oasis-shared-gmail-send";
+import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+import { isCustomerEmail, isMissingCustomersSchema } from "@/lib/os/customers/store";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
 // The pure half of lib/founders/gate.ts: the same allowlist, without the
@@ -158,6 +161,42 @@ function emailReadiness(tenant: ExecutorTenant): string | null {
   return null;
 }
 
+/**
+ * An approved email to one of OASIS's CLIENTS is support mail: from
+ * support@oasisai.work once its credential is set, replies to support@, the
+ * support footer. Anything else (a lead, a prospect) stays sales mail from the
+ * shared mailbox, exactly as before.
+ *
+ * DECIDED WHEN IT IS CARRIED OUT, FROM THE DATA, so it holds whichever path
+ * created the approval. It is support mail when either:
+ *   - target_ref is "customer:<id>": a draft filed against a client's record
+ *     (lib/os/customers/conversations.ts proposeClientEmail); or
+ *   - the recipient is one of THIS workspace's clients (isCustomerEmail: a
+ *     client's main address or a contact's, at one client or at several,
+ *     archived records not counted). The
+ *     agent tool propose_email (lib/cloud-tool-runner.ts) files every draft
+ *     against a lead or against nothing, whoever it is to, so its target_ref
+ *     says nothing about who the recipient is.
+ *
+ * A database with no client records yet (no customers table) has no clients.
+ * Any other failed lookup THROWS: guessing "sales" would send a client's email
+ * from the sales mailbox, which is the mistake this exists to rule out.
+ */
+export async function emailPurposeFor(
+  db: Client,
+  tenantId: string,
+  approval: Pick<ApprovalRow, "target_ref">,
+  to: string,
+): Promise<OasisMailPurpose> {
+  if ((approval.target_ref || "").startsWith("customer:")) return "support";
+  try {
+    return (await isCustomerEmail(db, tenantId, to)) ? "support" : "sales";
+  } catch (err) {
+    if (isMissingCustomersSchema(err)) return "sales";
+    throw err;
+  }
+}
+
 /** What each OasisSharedSendResult reason means to the person who pressed Approve. */
 export function emailFailureMessage(reason: string, error: string): string {
   switch (reason) {
@@ -214,6 +253,20 @@ const sendEmail: Executor = {
       }
     }
 
+    // Support mail or sales mail, from this workspace's client records. A
+    // lookup that could not run is a recorded failure, never a guess.
+    let purpose: OasisMailPurpose;
+    try {
+      purpose = await emailPurposeFor(ctx.db, ctx.tenant.id, ctx.approval, to);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      return failed(
+        "recipient_check_failed",
+        `Could not check whether ${to} is one of this workspace's clients, so nothing was sent (${why.slice(0, 200)}).`,
+        EMAIL_PROVIDER,
+      );
+    }
+
     const sent = await ctx.deps.sendEmail({
       tenantId: ctx.tenant.id,
       to,
@@ -222,6 +275,7 @@ const sendEmail: Executor = {
       body,
       signer: ctx.deps.signerFor(approverEmail, "oasis"),
       idempotencyKey: ctx.approval.idempotency_key,
+      purpose,
     });
     if (sent.ok) {
       return {

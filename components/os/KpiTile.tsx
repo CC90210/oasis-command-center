@@ -37,9 +37,11 @@ export type KpiTileProps = {
   connectHref?: string;
   /** What a "no_data" tile says in place of a number. Defaults to "No data yet". */
   emptyText?: string;
+  /** A live tile's link to where its number is acted on ("Open Connections"). Ignored unless status is "live". */
+  action?: { label: string; href: string };
 };
 
-export function KpiTile({ label, value, status, hint, connectHref, emptyText }: KpiTileProps) {
+export function KpiTile({ label, value, status, hint, connectHref, emptyText, action }: KpiTileProps) {
   const live = status === "live";
   const shown = live && value !== null && value !== "" ? value : null;
   return (
@@ -71,6 +73,11 @@ export function KpiTile({ label, value, status, hint, connectHref, emptyText }: 
         </div>
       )}
       {hint && <div className="mt-1 text-xs leading-4 text-fg-dim">{hint}</div>}
+      {live && action && (
+        <Link href={action.href} prefetch={false} className="mt-1 inline-block text-xs font-medium text-accent hover:underline">
+          {action.label}
+        </Link>
+      )}
     </div>
   );
 }

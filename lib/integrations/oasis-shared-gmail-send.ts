@@ -28,6 +28,18 @@
  * NEVER THROWS. Returns a typed result so the route can fall back to the bridge
  * exactly as it does today. Until the credential is stored this returns
  * `not_configured` on every call and the existing path carries on unchanged.
+ *
+ * SUPPORT MAIL (2026-10-01). `purpose: "support"` is OASIS's system mail to its
+ * clients and its desk (lib/email/support-mailbox.ts lists the callers). It
+ * leaves from support@oasisai.work once SUPPORT_GMAIL_USER +
+ * SUPPORT_GMAIL_APP_PASSWORD are on the Worker, and from the shared mailbox
+ * below until then (one log line says so). Either way its Reply-To is
+ * support@, so a client's answer lands where the desk works, and it carries
+ * the support footer. Its opt-out is the recipient's own link to
+ * /unsubscribe (the one-click List-Unsubscribe header and the footer), never a
+ * reply: support@ is read by a person and nothing there records an opt-out.
+ * Sales mail (the default) never reads the support credential and is
+ * unchanged.
  */
 
 import "server-only";
@@ -36,6 +48,16 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
+import {
+  OASIS_SUPPORT_FROM_NAME,
+  OASIS_SUPPRESSION_BRAND,
+  OASIS_SUPPRESSION_TENANT_ID,
+  logSupportSenderFallback,
+  resolveSupportMailbox,
+  type OasisMailPurpose,
+} from "@/lib/email/support-mailbox";
+import { unsubscribeApiUrl, unsubscribeUrl } from "@/lib/email/tracked-html";
 import {
   gmailMessageIdForIdempotencyKey,
   smtpFailureReason,
@@ -88,6 +110,18 @@ export async function resolveOasisMailboxFrom(tenantId: string): Promise<string 
 }
 
 /**
+ * The address OASIS SUPPORT mail leaves from: support@oasisai.work once its
+ * credential is on the Worker, else the shared mailbox above, else null. The
+ * Clients hub reads it to decide whether OASIS can write to a client at all
+ * and to name the mailbox on a dry run; sendOasisSharedGmail with
+ * `purpose: "support"` resolves the same way.
+ */
+export async function resolveOasisSupportMailboxFrom(tenantId: string): Promise<string | null> {
+  const support = resolveSupportMailbox();
+  return support.ok ? support.address : resolveOasisMailboxFrom(tenantId);
+}
+
+/**
  * The exact message object handed to nodemailer.
  *
  * SEPARATED SO IT CAN BE PROVEN. Everything CC reported was wrong lives in these
@@ -97,7 +131,9 @@ export async function resolveOasisMailboxFrom(tenantId: string): Promise<string 
  * a credential, so nothing downstream of it could ever be exercised in a unit
  * test; this can, with no stubbing at all.
  *
- * PURE. Same inputs, same message, no I/O.
+ * PURE. Same inputs, same message, no I/O. (Support mail's opt-out links also
+ * read the deployment's link origin and signing secret, as every tracked link
+ * does: lib/email/tracked-html.ts.)
  */
 export function composeOasisMessage(args: {
   to: string;
@@ -109,6 +145,8 @@ export function composeOasisMessage(args: {
   signer?: EmailSigner | null;
   fromAddress: string;
   idempotencyKey?: string;
+  /** "support": Reply-To support@, support footer with the recipient's opt-out link, one-click List-Unsubscribe, no address-derived sign-off. */
+  purpose?: OasisMailPurpose;
 }): {
   from: string;
   to: string;
@@ -121,6 +159,7 @@ export function composeOasisMessage(args: {
   html?: string;
 } {
   const { fromAddress } = args;
+  const support = args.purpose === "support";
 
   // Never copy the recipient, and never copy THIS MAILBOX. Sending from the
   // shared address and Cc'ing it puts a duplicate beside the copy already in its
@@ -132,14 +171,21 @@ export function composeOasisMessage(args: {
   // Replies go to the person who OWNS the lead, not to the shared mailbox —
   // otherwise the prospect answers into an inbox nobody watches, which is the
   // same invisibility the Cc exists to fix, one step later in the conversation.
+  //
+  // SUPPORT MAIL ANSWERS TO SUPPORT, whatever mailbox it left from: the inbox
+  // the desk works is the one a client's reply has to reach, and the one the
+  // published contact names. A caller's replyTo is not consulted.
   const replyToCandidate = (args.replyTo || "").trim();
-  const replyTo =
-    replyToCandidate && !excluded.has(replyToCandidate.toLowerCase())
+  const replyTo = support
+    ? OASIS_SUPPORT_EMAIL
+    : replyToCandidate && !excluded.has(replyToCandidate.toLowerCase())
       ? replyToCandidate
       : ccList[0];
 
   return {
-    from: fromAddress,
+    // The display name only on the real support mailbox: "OASIS AI Support"
+    // in front of another address would misname who sent it.
+    from: support && fromAddress.toLowerCase() === OASIS_SUPPORT_EMAIL ? `"${OASIS_SUPPORT_FROM_NAME}" <${fromAddress}>` : fromAddress,
     to: args.to,
     ...(ccList.length ? { cc: ccList.join(", ") } : {}),
     ...(replyTo ? { replyTo } : {}),
@@ -147,12 +193,22 @@ export function composeOasisMessage(args: {
     ...(args.idempotencyKey
       ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
       : {}),
-    // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it as
-    // a header too lets a mail client offer its own one-click control and keeps
-    // filters from treating a branded HTML message as unattributed bulk. It
-    // points at the mailbox that is actually read, and matches the instruction
-    // in the footer rather than inventing a second mechanism.
-    headers: { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` },
+    // SALES: the opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring
+    // it as a header too lets a mail client offer its own one-click control and
+    // keeps filters from treating a branded HTML message as unattributed bulk.
+    // It points at the mailbox that is actually read, and matches the
+    // instruction in the footer rather than inventing a second mechanism.
+    //
+    // SUPPORT: the RFC 8058 one-click URL, so a mail client's "Unsubscribe"
+    // records the opt-out at once (/api/unsubscribe writes email_suppressions,
+    // the list every sender checks). No mailto: a reply would reach support@,
+    // where a person reads it and nothing records it.
+    headers: support
+      ? {
+          "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, OASIS_SUPPRESSION_BRAND)}>`,
+          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        }
+      : { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` },
     // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
     // plain-text helper — it joins with "\n\n---\n" and detects an existing
     // signature by comparing the last LINE — so it is applied here and never to
@@ -162,6 +218,9 @@ export function composeOasisMessage(args: {
       signer: args.signer,
       fromAddress,
       brand: "oasis",
+      purpose: args.purpose,
+      // Support mail's footer links the recipient's own /unsubscribe page.
+      ...(support ? { unsubscribeUrl: unsubscribeUrl(args.to, OASIS_SUPPRESSION_BRAND) } : {}),
     }),
     ...(args.html ? { html: args.html } : {}),
   };
@@ -192,6 +251,12 @@ export async function sendOasisSharedGmail(args: {
   /** The acting rep, so the sign-off is theirs and not the mailbox owner's. */
   signer?: EmailSigner | null;
   idempotencyKey?: string;
+  /**
+   * "support" for OASIS's system mail to its clients and its desk: from
+   * support@ when its credential exists (else this mailbox, logged), replies
+   * to support@, support footer. Omitted = "sales", unchanged.
+   */
+  purpose?: OasisMailPurpose;
 }): Promise<OasisSharedSendResult> {
   // OPT-OUT GATE FIRST, before any credential work or send. Fail closed: a
   // suppression lookup that errors must not be read as "not suppressed".
@@ -201,9 +266,20 @@ export async function sendOasisSharedGmail(args: {
   // dead code, and reading only `.suppressed` treats a FAILED LOOKUP as
   // "not suppressed" and emails someone who may have opted out. `checkFailed`
   // is the whole point of the return shape and has to be read.
-  let supp: { suppressed: boolean; checkFailed: boolean };
+  //
+  // SUPPORT MAIL ALSO READS OASIS'S OWN LIST. Its opt-out link files under
+  // OASIS's own workspace (OASIS_SUPPRESSION_TENANT_ID), so support mail sent
+  // from another of OASIS's workspaces checks that list as well as its own.
+  const optOutLists =
+    args.purpose === "support" && args.tenantId !== OASIS_SUPPRESSION_TENANT_ID
+      ? [args.tenantId, OASIS_SUPPRESSION_TENANT_ID]
+      : [args.tenantId];
+  let supp: { suppressed: boolean; checkFailed: boolean } = { suppressed: false, checkFailed: false };
   try {
-    supp = await checkEmailSuppressed(args.tenantId, args.to);
+    for (const listTenant of optOutLists) {
+      supp = await checkEmailSuppressed(listTenant, args.to);
+      if (supp.checkFailed || supp.suppressed) break;
+    }
   } catch (e) {
     // Belt and braces: it does not throw today, but a future rewrite that does
     // must not silently become a fail-open.
@@ -245,10 +321,16 @@ export async function sendOasisSharedGmail(args: {
   // env is not. Today OASIS is one workspace with one sending mailbox; the day
   // a second one needs its own address, it sets a row and that row wins for it
   // without disturbing this one.
+  //
+  // SUPPORT MAIL FIRST tries support@oasisai.work (SUPPORT_GMAIL_USER +
+  // SUPPORT_GMAIL_APP_PASSWORD, lib/email/support-mailbox.ts). Sales mail never
+  // reads that credential.
+  const support = args.purpose === "support" ? resolveSupportMailbox() : null;
   const envFrom = (process.env.OASIS_MAIL_FROM || "").trim();
   const envPassword = (process.env.OASIS_MAIL_APP_PASSWORD || "").trim();
-  const bundle =
-    envFrom && envPassword
+  const bundle = support?.ok
+    ? ({ from_address: support.address, app_password: support.password } as Record<string, string>)
+    : envFrom && envPassword
       ? ({ from_address: envFrom, app_password: envPassword } as Record<string, string>)
       : await getTenantIntegrationBundle(args.tenantId, OASIS_MAIL_SERVICE).catch(
           () => ({}) as Record<string, string>,
@@ -261,12 +343,25 @@ export async function sendOasisSharedGmail(args: {
   // as a wrong password when it is really a formatting one. The SunBiz path
   // learned this on 2026-07-02; inherited here rather than re-learned.
   const appPassword = (bundle.app_password || "").replace(/\s+/g, "");
+  // Support mail that cannot leave from support@ says so, once, whether it
+  // goes out from the shared mailbox instead or not at all. The idempotency
+  // key's prefix names the surface (support-ack, support-reply, client-email).
+  if (support && !support.ok) {
+    logSupportSenderFallback(
+      (args.idempotencyKey || "").split(":")[0] || "oasis-mail",
+      support,
+      fromAddress && appPassword ? fromAddress : null,
+    );
+  }
   if (!fromAddress || !appPassword) {
     return {
       ok: false,
       provider: "oasis_shared_gmail",
       reason: "not_configured",
-      error: `no ${OASIS_MAIL_SERVICE} from_address/app_password for this tenant`,
+      error:
+        support && !support.ok
+          ? `${OASIS_SUPPORT_EMAIL} cannot send (${support.detail}) and no ${OASIS_MAIL_SERVICE} mailbox is configured`
+          : `no ${OASIS_MAIL_SERVICE} from_address/app_password for this tenant`,
     };
   }
 

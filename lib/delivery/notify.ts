@@ -4,10 +4,14 @@
  * Reuses the existing channels, no new providers:
  *   Telegram  lib/notify/telegram.ts, lane "operator" (CC's OASIS lane, the
  *             same one the OASIS funnels alert on).
- *   Email     lib/integrations/oasis-shared-gmail-send.ts — the OASIS mailbox
+ *   Email     lib/integrations/oasis-shared-gmail-send.ts as SUPPORT mail —
+ *             from support@oasisai.work once SUPPORT_GMAIL_USER +
+ *             SUPPORT_GMAIL_APP_PASSWORD are set, else the OASIS mailbox
  *             (OASIS_MAIL_FROM + OASIS_MAIL_APP_PASSWORD, or the oasis_gmail
- *             tenant credential). It carries the suppression check, the brand
- *             guard and the OASIS footer; this module adds none of its own.
+ *             tenant credential) with one log line saying so. Replies always
+ *             go to support@, which is where "reply to this email" in
+ *             messages.ts leads. It carries the suppression check, the brand
+ *             guard and the support footer; this module adds none of its own.
  *
  * EXACTLY ONCE. Each notification is claimed on the ticket row before it is
  * sent (store.claimNotification) and its outcome recorded after. A retry, a
@@ -75,6 +79,7 @@ export function defaultNotifyDeps(): NotifyDeps {
         subject: m.subject,
         body: m.body,
         idempotencyKey: m.idempotencyKey,
+        purpose: "support",
       });
       return r.ok ? { ok: true } : { ok: false, reason: `${r.reason}: ${r.error}` };
     },

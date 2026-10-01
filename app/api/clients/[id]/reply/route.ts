@@ -5,8 +5,10 @@
  *
  *   A person's message   sent only with confirmed: true (the composer asks
  *                        "Send this email to <address>?" first), through the
- *                        workspace's OWN mailbox: OASIS's workspace sends from
- *                        the OASIS mailbox; any other workspace only from the
+ *                        workspace's OWN mailbox: OASIS's workspace sends as
+ *                        SUPPORT mail (from support@oasisai.work once its
+ *                        credential is set, else the OASIS mailbox; replies to
+ *                        support@ either way); any other workspace only from the
  *                        teammate's own mailbox connected in it, never from
  *                        OASIS's (lib/os/customers/conversations.ts
  *                        resolveClientMailbox). A workspace with no registered
@@ -35,7 +37,7 @@ import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import type { EmailSigner } from "@/lib/config/email-signature";
 import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
-import { resolveOasisMailboxFrom, sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
+import { resolveOasisSupportMailboxFrom, sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { getTenant } from "@/lib/queries";
 import {
   clientAddresses,
@@ -63,7 +65,7 @@ function defaultMailboxDeps(): MailboxDeps {
   return {
     oasisTenantId: DELIVERY_TENANT_ID,
     killSwitch: () => (process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1",
-    oasisMailboxFrom: resolveOasisMailboxFrom,
+    oasisMailboxFrom: resolveOasisSupportMailboxFrom,
     sendOasis: (a) =>
       sendOasisSharedGmail({
         tenantId: a.tenantId,
@@ -73,6 +75,7 @@ function defaultMailboxDeps(): MailboxDeps {
         body: a.body,
         signer: (a.signer as EmailSigner | null) ?? null,
         idempotencyKey: a.idempotencyKey,
+        purpose: "support",
       }),
     operatorMailbox: async (tenantId, userId) =>
       (await operatorHasAppPassword(tenantId, userId)) ? "app_password" : (await operatorHasGmailOAuth(tenantId, userId)) ? "oauth" : null,

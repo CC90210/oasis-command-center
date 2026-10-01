@@ -34,12 +34,22 @@
 
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import type { BrandKey } from "@/lib/email/brands";
+import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 
 export type EmailSigner = { name: string; email?: string; phone?: string };
 
 export const SUNBIZ_LEGAL_FOOTER =
   "\n\n---\nSunBiz Funding LLC\n221 W Hallandale Beach Blvd, Suite 518\nHallandale, FL 33009\n\n" +
   "You received this email because you submitted a funding inquiry. To stop receiving emails, reply UNSUBSCRIBE.";
+
+// OASIS's identification block. Street address supplied by CC 2026-09-09;
+// until then it said only "OASIS AI Solutions, Montreal, QC, Canada" (no
+// street), an incomplete CASL s.6(2) identification on every commercial email
+// OASIS sent. Laid out name / street / city-postal to match the SunBiz footer
+// above. One copy, shared by the outreach footer (BRAND_FOOTERS.oasis) and the
+// support footer (oasisSupportFooter).
+const OASIS_IDENTITY = "OASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada";
 
 /**
  * Append the rep's sign-off + the legal footer to an outbound body.
@@ -90,13 +100,8 @@ export const SUNBIZ_LEGAL_FOOTER =
  */
 const BRAND_FOOTERS: Record<BrandKey, string> = {
   sunbiz: SUNBIZ_LEGAL_FOOTER,
-  // Street address supplied by CC 2026-09-09. Until then this said only
-  // "OASIS AI Solutions, Montreal, QC, Canada" — no street, which is an
-  // incomplete CASL s.6(2) identification on every commercial email OASIS
-  // sends. Laid out name / street / city-postal to match the SunBiz footer
-  // above, so the two read as the same kind of document.
   oasis:
-    "\n\n---\nOASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada\n\n" +
+    `\n\n---\n${OASIS_IDENTITY}\n\n` +
     "You received this email because we reached out about your business. " +
     "To stop receiving emails, reply UNSUBSCRIBE.",
   bluerise:
@@ -105,6 +110,31 @@ const BRAND_FOOTERS: Record<BrandKey, string> = {
     "You received this email because you submitted a funding inquiry. " +
     "To stop receiving emails, reply UNSUBSCRIBE.",
 };
+
+/**
+ * The footer on OASIS SUPPORT mail (lib/email/support-mailbox.ts lists who
+ * sends it): the desk's acknowledgements, replies and team alerts, a
+ * teammate's email to a client, an approved email to a client.
+ *
+ * Not BRAND_FOOTERS.oasis. That one tells the reader "we reached out about
+ * your business", true of a cold prospect and false of a client who opened a
+ * ticket. This one identifies the sender (name, street, the support address:
+ * CASL s.6(2)) and gives the opt-out, and claims nothing about why the reader
+ * is getting it, so it is true for every support mail.
+ *
+ * THE OPT-OUT IS THE RECIPIENT'S OWN LINK to /unsubscribe, which records it in
+ * email_suppressions, the list every sender checks. It used to say "reply
+ * UNSUBSCRIBE", and a reply reaches support@, where nothing records it. The link
+ * carries a signature only when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; without
+ * it the link has no token and /api/unsubscribe accepts the address alone, as
+ * it does from the form on /unsubscribe.
+ */
+export function oasisSupportFooter(unsubscribeUrl: string): string {
+  return (
+    `\n\n---\n${OASIS_IDENTITY}\n${OASIS_SUPPORT_EMAIL}\n\n` +
+    `A service message from OASIS support. To stop receiving these emails, unsubscribe here: ${unsubscribeUrl}`
+  );
+}
 
 export function appendSignatureAndFooter(
   body: string,
@@ -117,10 +147,35 @@ export function appendSignatureAndFooter(
    * callers were in exactly that state (gmail-apppassword-send, gmail-oauth-send).
    *
    * Making it required means the compiler, not a reviewer, finds the next one.
+   *
+   * `purpose: "support"` (OASIS only; another brand throws) is OASIS support
+   * mail: signed by `signer` or by nobody, and closed with
+   * oasisSupportFooter(unsubscribeUrl). Never signed with a name derived from
+   * the mailbox, which for support@ reads "Support"; the desk's own messages
+   * already end "The OASIS team" or "<name>, OASIS".
+   *
+   * `unsubscribeUrl` is the recipient's /unsubscribe link
+   * (lib/email/tracked-html.ts unsubscribeUrl), REQUIRED with purpose
+   * "support": support mail without an opt-out that is recorded throws here
+   * rather than goes out.
    */
-  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey },
+  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey; purpose?: OasisMailPurpose; unsubscribeUrl?: string },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
+  const support = opts.purpose === "support";
+  if (support && opts.brand !== "oasis") {
+    throw new Error(
+      `appendSignatureAndFooter: support mail is OASIS's, not ${JSON.stringify(opts.brand)}'s. ` +
+        "Refusing to put OASIS's support footer on another company's email.",
+    );
+  }
+  const optOutUrl = (opts.unsubscribeUrl || "").trim();
+  if (support && !/^https?:\/\/\S+$/.test(optOutUrl)) {
+    throw new Error(
+      "appendSignatureAndFooter: support mail needs the recipient's unsubscribe link (unsubscribeUrl). " +
+        "Refusing to send it with an opt-out that nothing records.",
+    );
+  }
   // THE BRAND HAS TO REACH THE FALLBACK TOO.
   //
   // This resolved the signer with no brand, so a caller that passed
@@ -129,7 +184,9 @@ export function appendSignatureAndFooter(
   // defect, arriving through the back door. Threading opts.brand closes it for
   // every present and future caller rather than for the one route that was
   // reported.
-  const signer = opts.signer ?? resolveSignerForOperator(opts.fromAddress, { brand: opts.brand });
+  const signer = support
+    ? opts.signer ?? null
+    : opts.signer ?? resolveSignerForOperator(opts.fromAddress, { brand: opts.brand });
   const name = (signer?.name || "").trim();
 
   // NO EM DASH. This sign-off is appended to EVERY outbound email, so the one
@@ -158,7 +215,7 @@ export function appendSignatureAndFooter(
   // legal identity. An invalid value at runtime (untyped JS caller, bad JSON)
   // throws rather than defaulting — a commercial email must not go out
   // attributed to whoever happens to be first in the table.
-  const footer = BRAND_FOOTERS[opts.brand];
+  const footer = support ? oasisSupportFooter(optOutUrl) : BRAND_FOOTERS[opts.brand];
   if (!footer) {
     throw new Error(
       `appendSignatureAndFooter: no footer for brand ${JSON.stringify(opts.brand)}. ` +
