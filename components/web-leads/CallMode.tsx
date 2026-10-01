@@ -371,7 +371,7 @@ export function CallMode({
       // any future input in this overlay is covered by the same guard.
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.tagName === "SELECT" || t.isContentEditable)) {
-        if (e.key === "Escape") (t as HTMLTextAreaElement).blur();
+        if (e.key === "Escape") t.blur();
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
