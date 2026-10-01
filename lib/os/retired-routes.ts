@@ -18,8 +18,13 @@
  * in app/, components/ or lib/ may link to one.
  *
  * The body is plain HTML with its own styles (the app's stylesheet is not
- * loaded for a route handler) in the OS's dark palette. ASCII only: the shipped
- * Worker may not carry a character above U+00FF (tests/worker-source-one-byte).
+ * loaded for a route handler) in the OS's dark palette: the button is the
+ * .btn-primary values from app/globals.css (--c-accent-muted #2563eb, white
+ * text) written out, since a Response cannot load the stylesheet. The copy
+ * speaks of "your workspace" like app/not-found.tsx, never of the pre-OS
+ * product name (tests/os-read-deadline.test.ts pins both). ASCII only: the
+ * shipped Worker may not carry a character above U+00FF
+ * (tests/worker-source-one-byte).
  */
 
 const HTML = `<!doctype html>
@@ -35,13 +40,13 @@ const HTML = `<!doctype html>
   main { max-width: 28rem; width: 100%; border: 1px solid #1e2532; border-radius: 16px; background: #0b0f17; padding: 1.75rem; text-align: center; }
   h1 { font-size: 1.125rem; margin: 0 0 0.375rem; }
   p { font-size: 0.875rem; color: #9ba3b1; line-height: 1.55; margin: 0 0 1.25rem; }
-  a { display: inline-block; padding: 0.5rem 1rem; border-radius: 6px; background: #3b82f6; color: #020409; font-weight: 700; font-size: 0.875rem; text-decoration: none; }
+  a { display: inline-block; padding: 0.5rem 0.95rem; border-radius: 0.5rem; background: #2563eb; color: #ffffff; font-weight: 600; font-size: 0.875rem; text-decoration: none; }
 </style>
 </head>
 <body>
 <main>
 <h1>Page not found</h1>
-<p>That page is no longer part of the Command Center.</p>
+<p>That page is no longer part of your workspace.</p>
 <a href="/">Back to Today</a>
 </main>
 </body>

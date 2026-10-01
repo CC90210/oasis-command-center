@@ -9,6 +9,15 @@
  * imports may not have loaded. The help copy is components/ErrorHelp.tsx,
  * shared with app/error.tsx: try again, then send us the code; on a page a
  * client's prospect opens (/f/, /sign/, /unsubscribe), no OASIS contact.
+ *
+ * The button is the OS button class (.btn-primary, app/globals.css) AND an
+ * inline style that references the same tokens with their values as fallbacks
+ * (2026-10-01, OS plan W0). The only path this file exists for is the one
+ * where the root layout, the sole importer of globals.css, has failed: without
+ * the inline fallbacks the class names nothing and the button is the browser
+ * default (light grey, black text) on this dark body. With the stylesheet the
+ * token wins; without it the fallback is the token's own value
+ * (--c-accent-muted: 37 99 235, globals.css). No second palette either way.
  */
 
 import { useEffect } from "react";
@@ -16,6 +25,7 @@ import { usePathname } from "next/navigation";
 import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
 import { recoverFromStaleBuild, reportClientError } from "@/lib/client-errors/report";
 import { isStaleBuildError } from "@/lib/client-errors/shape";
+import { isReadDeadlineDigest } from "@/lib/os/deadline";
 
 export default function GlobalError({
   error,
@@ -25,6 +35,7 @@ export default function GlobalError({
   reset: () => void;
 }) {
   const prospectFacing = isProspectFacingPath(usePathname());
+  const timedOut = isReadDeadlineDigest(error.digest);
   useEffect(() => {
     console.error("[global-error.tsx]", error);
     // Runs in the browser; the report is the server's only record of it.
@@ -58,23 +69,25 @@ export default function GlobalError({
           }}
         >
           <h1 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
-            Something went wrong
+            {timedOut ? "This page timed out" : "Something went wrong"}
           </h1>
-          <ErrorHelp digest={error.digest} inline prospectFacing={prospectFacing} />
+          <ErrorHelp digest={error.digest} inline prospectFacing={prospectFacing} timedOut={timedOut} />
           <button
-            onClick={() => reset()}
+            onClick={() => (timedOut ? window.location.reload() : reset())}
+            className="btn-primary"
             style={{
               marginTop: "1rem",
-              padding: "0.55rem 1rem",
-              borderRadius: 6,
-              border: "1px solid rgba(59,130,246,0.3)",
-              background: "#3b82f6",
-              color: "#020409",
-              fontWeight: 700,
               cursor: "pointer",
+              background: "rgb(var(--c-accent-muted, 37 99 235))",
+              color: "#ffffff",
+              fontWeight: 600,
+              padding: "0.5rem 0.95rem",
+              borderRadius: "0.5rem",
+              border: 0,
+              fontSize: "0.875rem",
             }}
           >
-            Try again
+            {timedOut ? "Reload" : "Try again"}
           </button>
         </div>
       </body>

@@ -98,19 +98,17 @@ export function MyActiveDealsCard({
           {visible.map((r) => {
             const stage = r.deal_stage || r.stage || "—";
             const tone = STAGE_TONE[stage] || "bg-zinc-500/15 text-zinc-300 border-zinc-500/30";
-            // Open the SAME right-side drawer the pipelines use (in-place on the
-            // dashboard — the overlay is mounted on every /t/sun page), instead
-            // of navigating to the full-page record editor. The full editor
-            // stays reachable via the drawer's "Edit full record →".
-            const href = r.entity_type === "application"
-              ? `/t/sun?application=${r.id}`
-              : `/t/sun?lead=${r.id}`;
+            // Each card used to open the record in the /t/sun drawer
+            // (`/t/sun?lead=<id>` / `?application=<id>`). That shell belongs to
+            // the retired SunBiz tenant and answers the not-found page since
+            // 2026-10-01 (OS plan W0, audit U1-22), so the card is no longer a
+            // link; the "Full pipeline" link above still opens the board.
             return (
               <li
                 key={r.id}
-                className="rounded-xl border border-bg-border bg-bg-elev/40 p-3 transition-colors hover:border-amber-300/35"
+                className="rounded-xl border border-bg-border bg-bg-elev/40 p-3"
               >
-                <Link href={href} className="block space-y-2">
+                <div className="space-y-2">
                   <div className="flex items-start justify-between gap-2">
                     <span className="line-clamp-2 text-[13px] font-semibold text-fg">
                       {r.business_name || "(unnamed)"}
@@ -127,7 +125,7 @@ export function MyActiveDealsCard({
                     </span>
                     <span>{ageDays(r.updated_at)}</span>
                   </div>
-                </Link>
+                </div>
               </li>
             );
           })}

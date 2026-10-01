@@ -64,6 +64,18 @@ stubModule(require.resolve("next/headers"), {
   draftMode: async () => ({ isEnabled: false }),
 });
 
+// The bundled roster (agents.config.json) is EMPTY since 2026-10-01: the
+// retired SunBiz reps' details left every client's bundle (OS plan W0). The
+// "roster agent" rules under test are about standing, not about who is on the
+// roster, so the roster is test data here: the three keys the fixtures name.
+stubModule(require.resolve("../agents.config.json"), {
+  agents: [
+    { key: "jordan", name: "Jordan", email: "jordan@sunbizfunding.com", phone: "" },
+    { key: "alex", name: "Alex", email: "alex@sunbizfunding.com", phone: "" },
+    { key: "matt", name: "Matt", email: "Submissions@sunbizfunding.com", phone: "" },
+  ],
+});
+
 // The reply route's SunBiz Gmail send: record the CC list it was handed.
 const gmailSends: Array<{ to: string; cc?: string[] }> = [];
 stubModule(require.resolve("../lib/integrations/submissions-gmail-send"), {

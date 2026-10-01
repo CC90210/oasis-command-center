@@ -19,11 +19,23 @@
  * `inline` is for global-error.tsx: when the root layout itself failed, the
  * stylesheet may not have loaded, so it carries its own styles.
  *
+ * `timedOut` is the one failure the boundary can name (2026-10-01, OS plan
+ * W0): a workspace read that did not answer inside its budget
+ * (lib/os/deadline.ts). The copy says so plainly and asks for a reload; it
+ * never names a table, a query or a tenant - the label stays in the Worker's
+ * logs. The digest is not shown either: it is READ_DEADLINE, an internal
+ * identifier that tells a client nothing and that the logs already carry, so
+ * a timeout takes the no-code branch of the sentence. Every other error keeps
+ * the generic copy and its code.
+ *
  * No hooks, so it renders on the server and under the react-server test
  * condition. The boundaries read the path (usePathname) and pass it in.
  */
 import { CONTACT_EMAIL } from "@/lib/marketing/routes";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
+
+/** What a timed-out read says, on every surface. Plain words, no internals. */
+export const TIMED_OUT_COPY = "A workspace read timed out before the page could finish loading.";
 
 /**
  * Public pages a client's prospects and customers land on. Each is also a
@@ -59,26 +71,34 @@ export function ErrorHelp({
   digest,
   inline = false,
   prospectFacing = false,
+  timedOut = false,
 }: {
   digest?: string;
   inline?: boolean;
   /** A client's prospect may be reading: name no OASIS contact (see above). */
   prospectFacing?: boolean;
+  /** The error is a read deadline (lib/os/deadline.ts): say so, ask for a reload. */
+  timedOut?: boolean;
 }) {
   const linkClass = inline ? undefined : "text-accent underline-offset-2 hover:underline";
   const linkStyle = inline ? INLINE.link : undefined;
   const textClass = inline ? undefined : "text-sm text-fg-muted leading-relaxed";
   const textStyle = inline ? INLINE.text : undefined;
+  // "Reload the page" for a timeout (the read is retried from scratch); "Try
+  // again" for everything else, which is what the boundary's button does.
+  const lead = timedOut ? `${TIMED_OUT_COPY} Reload the page.` : "Try again.";
+  // A timeout's digest is an internal label, not a code anyone can act on.
+  const code = timedOut ? undefined : digest;
   return (
     <>
       {prospectFacing ? (
         <p className={textClass} style={textStyle}>
-          Try again. If it keeps happening, contact the business that sent you here
-          {digest ? " and give them the code below" : " and tell them what you were doing"}.
+          {lead} If it keeps happening, contact the business that sent you here
+          {code ? " and give them the code below" : " and tell them what you were doing"}.
         </p>
       ) : (
         <p className={textClass} style={textStyle}>
-          Try again. If it keeps happening, {digest ? "send us the code below" : "tell us what you were doing"}{" "}
+          {lead} If it keeps happening, {code ? "send us the code below" : "tell us what you were doing"}{" "}
           through the{" "}
           <a href={SUPPORT_FORM_PATH} target="_blank" rel="noopener noreferrer" className={linkClass} style={linkStyle}>
             support form
@@ -90,7 +110,7 @@ export function ErrorHelp({
           .
         </p>
       )}
-      {digest ? (
+      {code ? (
         <div
           className={
             inline
@@ -99,7 +119,7 @@ export function ErrorHelp({
           }
           style={inline ? INLINE.code : undefined}
         >
-          Error code: {digest}
+          Error code: {code}
         </div>
       ) : null}
     </>

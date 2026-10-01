@@ -206,7 +206,8 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["app/api/applications/[id]/shop-out/run/route.ts", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
   ["app/api/applications/[id]/shop-out/health/route.ts", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
   ["app/api/applications/[id]/lender-threads/[threadId]/reply/route.ts", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
-  ["app/applications/[id]/shop-out/page.tsx", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
+  // app/applications/[id]/shop-out/page.tsx was deleted 2026-10-01 (OS plan W0,
+  // audit U1-19): the retired SunBiz panel; /applications answers 404.
   // OASIS OS shell: the agent fleet moved from /agents (now the AI Team) to
   // /admin/agents, gated by requireOperator() as its first statement. The Feed
   // no longer has an operator branch at all — every viewer, operators included,

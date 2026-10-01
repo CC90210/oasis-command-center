@@ -111,7 +111,9 @@ assert.ok(routeExists(MARKETING_HOME_PATH), `${MARKETING_HOME_PATH} must exist f
 // one. Paths under /t/ are the tenant
 // catch-all's (app/t/[slug]/[...path]) and are exempt, as are the template
 // navs in lib/manifest/templates.ts: finalizeManifestFromWizard rewrites every
-// one of them under /t/<slug>.
+// one of them under /t/<slug>. The exemption stops at the retired SunBiz slug:
+// /t/sun has no manifest since 2026-10-01 (OS plan W0, audit U1-22), so a
+// link under it is a dead link like any other.
 
 const ROOT = process.cwd();
 const ROUTE_FILES = ["route.ts", "route.tsx", "route.js"];
@@ -287,17 +289,38 @@ function linksIn(src: string, file: string): Found[] {
  */
 const KNOWN_DEAD: ReadonlyArray<{ file: string; path: string; why: string }> = [
   {
-    file: "lib/manifest/seeds.ts",
-    path: "/templates",
-    why: "SUN_SEED nav, the retired SunBiz workspace (retired 2026-09-28). seeds.ts belongs to OASIS OS track T7.",
-  },
-  {
-    file: "lib/manifest/seeds.ts",
-    path: "/metrics",
-    why: "SUN_SEED nav, the retired SunBiz workspace (retired 2026-09-28). seeds.ts belongs to OASIS OS track T7.",
+    file: "app/page.tsx",
+    path: "/t/sun",
+    why: "the Today dispatcher's SunBiz branch still redirects a session on the retired profile to its shell; app/page.tsx belongs to the OS shell track (W1a), not W0.",
   },
 ];
 const EXEMPT_FILES = new Set(["lib/manifest/templates.ts"]);
+
+/**
+ * Tenant slugs whose /t/<slug> shell is retired. app/t/[slug] matches any slug
+ * on disk, so the resolver alone would call /t/sun a page; the loader answers
+ * notFound() for it (no seed, no row), which makes every link under it dead.
+ */
+const RETIRED_TENANT_SLUGS = new Set(["sun"]);
+
+/** Dead: a retired tenant shell, or anything outside the live tenant catch-all that resolves nowhere. */
+function isDeadLink(path: string): boolean {
+  // literalPath() already drops ?query and #hash; strip here too so the slug
+  // check holds for any caller, not only the extractor.
+  const p = path.split(/[?#]/)[0];
+  if (p.startsWith("/t/") && RETIRED_TENANT_SLUGS.has(p.split("/")[2])) return true;
+  if (p === "/t" || p.startsWith("/t/")) return false;
+  return !resolves(p);
+}
+assert.equal(isDeadLink("/t/acme/leads"), false, "a live tenant's catch-all is exempt");
+assert.equal(isDeadLink("/t/__param__"), false, "a computed slug is some live tenant's");
+assert.equal(isDeadLink("/t/sun"), true, "the retired SunBiz shell");
+assert.equal(isDeadLink("/t/sun/lenders"), true);
+assert.equal(isDeadLink("/t/sun?tab=lenders"), true, "a query string does not hide the retired shell");
+assert.equal(isDeadLink("/t/sun#deals"), true, "nor does a hash");
+assert.equal(isDeadLink("/t/sunrise/leads"), false, "a slug that merely starts with sun");
+assert.equal(isDeadLink("/pipeline"), false);
+assert.equal(isDeadLink("/leads/abc"), true);
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -319,7 +342,7 @@ for (const base of ["app", "components", "lib"]) {
 }
 assert.ok(all.length > 300, `the link scan found only ${all.length} literals; the extractor is broken`);
 
-const dead = all.filter((f) => !f.path.startsWith("/t/") && f.path !== "/t" && !resolves(f.path));
+const dead = all.filter((f) => isDeadLink(f.path));
 const unexpected = dead.filter((d) => !KNOWN_DEAD.some((k) => k.file === d.file && k.path === d.path));
 assert.deepEqual(
   unexpected.map((d) => `${d.file}:${d.line}  ${d.source}  ->  ${d.path}`),
