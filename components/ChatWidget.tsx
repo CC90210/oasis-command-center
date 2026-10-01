@@ -610,6 +610,26 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, [urlAgent, agentKeys]);
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [configsLoaded, setConfigsLoaded] = useState(false);
+  // The rows /model will WRITE: the workspace rows for an admin (tenant
+  // scope), the operator's own overrides otherwise (the user-scope fallback
+  // the switch takes on admin_required). The provider pin, the autocomplete
+  // and the examples read these same rows, or an employee's personal OpenAI
+  // key is refused by the workspace's Anthropic one before the request is
+  // ever made (CodeRabbit on #504).
+  const [userConfigs, setUserConfigs] = useState<AgentConfig[]>([]);
+  const refetchUserConfigs = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agent-config?scope=user");
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; configs?: AgentConfig[] };
+      if (r.ok && j?.ok && Array.isArray(j.configs)) setUserConfigs(j.configs);
+    } catch (err) {
+      console.error("[chat_widget.agent_config.user]", err);
+    }
+  }, []);
+  useEffect(() => {
+    if (!isAdmin) void refetchUserConfigs();
+  }, [isAdmin, refetchUserConfigs]);
+  const pinConfigs = isAdmin ? configs : userConfigs;
   // Per-user display names (Solara → "Ada" etc). The hook fetches
   // /api/agent-config?scope=user once at mount and returns labelFor()
   // which falls back to the canonical agent label when the operator
@@ -692,11 +712,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       // only ones /model can successfully switch to. If no configs are
       // loaded yet, show the full registry as a fallback (better than an
       // empty menu mid-onboarding).
-      const pinned = modelPickerProvider(configs, agent);
-      const configuredProviders = new Set(configs.map((c) => c.provider));
+      const pinned = modelPickerProvider(pinConfigs, agent);
+      const configuredProviders = new Set(pinConfigs.map((c) => c.provider));
       const flat: ArgCandidate[] = [];
       for (const [provider, models] of Object.entries(PROVIDER_MODELS)) {
-        const offered = pinned ? provider === pinned : configuredProviders.has(provider) || configs.length === 0;
+        const offered = pinned ? provider === pinned : configuredProviders.has(provider) || pinConfigs.length === 0;
         if (!offered) continue;
         for (const m of models) {
           flat.push({ value: m, label: m, hint: provider });
@@ -705,7 +725,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, agent, configs, agentDisplayName, targetLabels]);
+  }, [slashArgCommand, agentKeys, agent, pinConfigs, agentDisplayName, targetLabels]);
+  // The candidate list can shrink without the query changing (switching to a
+  // keyed agent narrows /model to that provider): a retained index past the
+  // new length would dereference nothing on Enter. Start over on every change.
+  useEffect(() => {
+    setSlashArgSelectedIdx(0);
+  }, [argCandidates]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
@@ -1703,17 +1729,17 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         // A saved key pins this agent to its provider (modelPickerProvider):
         // the listing and the switch stay inside it, and switching providers
         // means pasting that provider's key in Settings.
-        const pinned = modelPickerProvider(configs, agent);
+        const pinned = modelPickerProvider(pinConfigs, agent);
         if (!requested) {
-          // No args — list the models available across the operator's
-          // configured providers so they don't have to guess. Falls back
-          // to the full registry when no configs are loaded.
+          // No args — list the models available across the providers on the
+          // rows /model will write, so they don't have to guess. Falls back
+          // to the full registry when no such rows are loaded.
           const known = pinned
             ? PROVIDER_MODELS[pinned as keyof typeof PROVIDER_MODELS] || []
-            : configs.length
+            : pinConfigs.length
               ? Array.from(
                   new Set(
-                    configs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
+                    pinConfigs.flatMap((c) => PROVIDER_MODELS[c.provider as keyof typeof PROVIDER_MODELS] || []),
                   ),
                 )
               : Object.values(PROVIDER_MODELS).flat();
@@ -1776,6 +1802,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           } catch {
             // non-fatal — header may stay stale until next reload.
           }
+          if (!isAdmin) await refetchUserConfigs();
           appendSystem(
             `Model switched to ${requested} (${provider}). Next turn uses the new model.`,
           );
@@ -2711,10 +2738,13 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
-        // Same accept-or-fall-through semantics as the command menu.
-        if (argMatches.length > 0) {
+        // Same accept-or-fall-through semantics as the command menu. The
+        // index is reset whenever the list changes, and the first match
+        // covers the render in between.
+        const pick = argMatches[slashArgSelectedIdx] ?? argMatches[0];
+        if (pick) {
           e.preventDefault();
-          insertSlashArg(argMatches[slashArgSelectedIdx].value);
+          insertSlashArg(pick.value);
           return;
         }
       }

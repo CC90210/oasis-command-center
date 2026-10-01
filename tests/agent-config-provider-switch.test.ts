@@ -146,8 +146,19 @@ async function main() {
   const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
   assert.match(widget, /function modelPickerProvider\(configs: AgentConfig\[\], agentKey: string\): string \| null/);
   assert.match(widget, /return row\?\.has_key \? row\.provider : null;/, "a row with a key pins the picker to its provider");
-  assert.match(widget, /const pinned = modelPickerProvider\(configs, agent\);\s+const configuredProviders/, "the picker's candidates are pinned");
+  // ... against the rows /model will WRITE: workspace rows for an admin, the
+  // operator's own overrides otherwise (CodeRabbit on #504: a personal OpenAI
+  // key must not be refused by the workspace's Anthropic one).
+  assert.match(widget, /const pinConfigs = isAdmin \? configs : userConfigs;/, "the pin reads the write scope's rows");
+  assert.match(widget, /fetch\("\/api\/agent-config\?scope=user"\)/, "the operator's own rows are loaded for the pin");
+  assert.match(widget, /const pinned = modelPickerProvider\(pinConfigs, agent\);\s+const configuredProviders = new Set\(pinConfigs/, "the picker's candidates are pinned to the same rows");
+  assert.equal((widget.match(/modelPickerProvider\(pinConfigs, agent\)/g) ?? []).length, 2, "both the candidates and /model <id> pin from the same rows");
+  assert.doesNotMatch(widget, /modelPickerProvider\(configs, agent\)/, "nothing pins from the tenant rows alone");
   assert.match(widget, /if \(pinned && provider !== pinned\) \{/, "/model <id> refuses another provider's model");
+  // A narrowed candidate list resets the selection, and Enter never reads past it.
+  assert.match(widget, /setSlashArgSelectedIdx\(0\);\s+\}, \[argCandidates\]\);/, "the selection restarts when the candidates change");
+  assert.match(widget, /const pick = argMatches\[slashArgSelectedIdx\] \?\? argMatches\[0\];\s+if \(pick\) \{/, "Enter guards the index");
+  assert.doesNotMatch(widget, /insertSlashArg\(argMatches\[slashArgSelectedIdx\]\.value\)/, "no unguarded dereference on Enter");
 
   // ── The Settings editor shows the 409's sentence, not its slug ────────────
   // ChatWidget pre-empts the 409 client-side; the editor is the one surface
