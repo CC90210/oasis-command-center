@@ -193,7 +193,7 @@ async function main() {
       ...base,
       ...KINDS.videoPoster,
       presentation: "phone",
-      returnTo: "/founders/marketing/library?group=clients&page=2&view=grid",
+      returnTo: "/founders/marketing/library?group=clients&view=grid&page=2",
     } as unknown as Parameters<typeof AssetTile>[0]),
   );
 
@@ -261,7 +261,17 @@ async function main() {
   let n = native.render(nativeProps);
   native.effects();
   n = native.render(nativeProps);
-  (find(n, "the cover", (el) => el.type === "button").props.onClick as () => void)();
+  player.nativeAfterHydration = draw(n);
+  // Drawn rather than thrown when there is no cover to click, so the test's
+  // assertion names what went wrong.
+  const nativeCover = (() => {
+    try {
+      return find(n, "the cover", (el) => el.type === "button");
+    } catch {
+      return null;
+    }
+  })();
+  if (nativeCover) (nativeCover.props.onClick as () => void)();
   player.nativeAfterClick = draw(native.render(nativeProps));
 
   const slideReorder = renderToStaticMarkup(

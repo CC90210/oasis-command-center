@@ -120,6 +120,7 @@ const drawn = JSON.parse(r.stdout) as {
     openMount: string;
     openAfterHydration: string;
     openCalls: string[];
+    nativeAfterHydration: string;
     nativeAfterClick: string;
   };
   slideReorder: string;
@@ -210,6 +211,7 @@ check("a tile's <video> mounts on the cover's click and on nothing else - not on
   assert.equal(opened.length, 1, "the click mounts the <video>");
   assert.equal(attr(opened[0], "preload"), "none", "and it loads nothing before play() asks for it");
   assert.deepEqual(p.callsAfterClick, ["play"], "the click is what plays it");
+  assert.equal(tags(p.nativeAfterHydration, "video").length, 0, "the plain grid's cover survives hydration too");
   const native = tags(p.nativeAfterClick, "video");
   assert.equal(native.length, 1);
   assert.equal(attr(native[0], "preload"), "none", "the plain grid's player too");
@@ -263,7 +265,7 @@ check("the slide-order thumbnails are lazy and async", () => {
 check("a tile links to its asset page with the Library view it sits in", () => {
   const withView = tags(drawn.tiles["returnTo:phone"], "a").map((a) => attr(a, "href"));
   assert.ok(
-    withView.includes("/founders/marketing/asset/a1?from=%2Ffounders%2Fmarketing%2Flibrary%3Fgroup%3Dclients%26page%3D2%26view%3Dgrid"),
+    withView.includes("/founders/marketing/asset/a1?from=%2Ffounders%2Fmarketing%2Flibrary%3Fgroup%3Dclients%26view%3Dgrid%26page%3D2"),
     `tile links: ${withView.join(", ")}`,
   );
   const plain = tags(drawn.tiles["videoPoster:phone"], "a").map((a) => attr(a, "href"));
