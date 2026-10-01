@@ -25,6 +25,7 @@ import { PhoneMissed, PhoneCall, ThumbsUp, ThumbsDown, PhoneOff, Loader2 } from 
 // A value import here would pull that whole module into the client bundle and
 // fail the build -- same reasoning WebsiteComparison.tsx documents.
 import type { CallOutcome, CallOutcomeRecord } from "@/lib/web-leads/outcome";
+import { NEXT_ACTION_PRESETS, presetToIso } from "@/lib/web-leads/next-action-presets";
 
 const OUTCOME_LABEL: Record<CallOutcome, string> = {
   no_answer: "No answer",
@@ -85,22 +86,10 @@ const NEEDS_NEXT_ACTION: readonly CallOutcome[] = ["no_answer", "connected", "in
  *
  * Offsets are computed AT CLICK TIME rather than at render, so a tab left open
  * overnight cannot submit yesterday's "tomorrow".
+ *
+ * The presets live in lib/web-leads/next-action-presets.ts, shared with Call
+ * Mode, so both call screens offer the same choices and send the same dates.
  */
-const NEXT_ACTION_PRESETS: { key: string; label: string; days: number }[] = [
-  { key: "tomorrow", label: "Tomorrow", days: 1 },
-  { key: "3d", label: "In 3 days", days: 3 },
-  { key: "1w", label: "Next week", days: 7 },
-  { key: "2w", label: "In 2 weeks", days: 14 },
-];
-
-/** Same hour tomorrow, not midnight: a callback owed "tomorrow" means during
- *  tomorrow's working day, and a midnight timestamp would read as overdue from
- *  the moment the day starts. */
-function presetToIso(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString();
-}
 
 // Mirrors the server contract without value-importing its server-only module.
 const MAX_CALL_NOTE_LENGTH = 4000;
