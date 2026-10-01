@@ -50,6 +50,7 @@ import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import { connectionsDot, connectionsHealth } from "@/lib/os/connectors";
+import { withDeadline } from "@/lib/os/deadline";
 import type { ConnectionsStatus } from "@/components/os/RailFooter";
 import { PerfVitals } from "@/components/PerfVitals";
 import { ClientErrorReporter } from "@/components/ClientErrorReporter";
@@ -82,6 +83,12 @@ export const metadata: Metadata = {
 
 /** The only seed slugs the public demo cookie may select. /api/demo/sun, which set it, was deleted 2026-09-29; a browser can still carry one until it expires. */
 const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
+
+/**
+ * The rail's Connections dot is chrome: past this budget the shell draws no
+ * dot (not measured) rather than hold every page for it (lib/os/deadline.ts).
+ */
+const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;
 
 export default async function RootLayout({
   children,
@@ -338,8 +345,12 @@ export default async function RootLayout({
           "connections",
           safe(
             "layout.connections_status",
-            loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId }).then(
-              (facts) => connectionsDot(connectionsHealth(facts, Date.now())),
+            withDeadline(
+              loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId }).then(
+                (facts) => connectionsDot(connectionsHealth(facts, Date.now())),
+              ),
+              RAIL_CONNECTIONS_DEADLINE_MS,
+              "layout.connections",
             ),
             null,
           ),

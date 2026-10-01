@@ -290,6 +290,10 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   const layout = read("app/layout.tsx");
   assert.match(layout, /connectionsDot\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
   assert.match(layout, /connectionsStatus=\{showConnections \? connectionsMeasured : null\}/);
+  // Chrome never holds a page: the facts read answers inside its own budget
+  // or the rail draws no dot (lib/os/deadline.ts, W0).
+  assert.match(layout, /withDeadline\(\s*loadConnectorFacts\(\{[^}]*\}\)\.then\([\s\S]*?\),\s*RAIL_CONNECTIONS_DEADLINE_MS,\s*"layout\.connections",\s*\)/);
+  assert.match(layout, /const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;/);
   assert.match(read("components/os/department/numbers.ts"), /connectionTile\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
 }
 
