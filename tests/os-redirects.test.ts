@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import ts from "typescript";
-import { OS_REDIRECTS } from "../lib/os/redirects";
+import { OS_REDIRECTS, OS_VIEWER_MOVES, withQuery } from "../lib/os/redirects";
 import { MARKETING_HOME_PATH } from "../lib/marketing/routes";
 
 const APP = join(process.cwd(), "app");
@@ -79,6 +79,53 @@ assert.equal(OS_REDIRECTS["/integrations"], "/settings/connections", "Connection
 assert.ok(!("/feed" in OS_REDIRECTS), "/feed is a real Team page — it no longer redirects to /operations");
 assert.ok(!("/money" in OS_REDIRECTS), "/money is a real page, never a redirect");
 
+// ── the viewer moves: the AI team left /t/<slug> (W1a, U1-04) ─────────────
+// "New teammate", the template tiles and a custom teammate's chat opened
+// /t/<slug>/marketplace/new and /t/<slug>/agent/<agent>, which switched the OS
+// rail off for the legacy manifest sidebar. Both have OS pages that read the
+// session's workspace, but those serve only the viewers the AI team serves, so
+// the move depends on who is asking: the old PAGE makes it, after its gate,
+// with redirect() (307). Middleware used to 308 every viewer, which sent every
+// client owner's Build click to a 404 and would have been cached by browsers
+// (review R1). Pinned by execution in tests/os-shell-scope.test.ts (who moves)
+// and tests/middleware-prefix.test.ts (middleware moves no one).
+{
+  assert.deepEqual(
+    OS_VIEWER_MOVES.map((m) => [m.route, m.to]),
+    [
+      ["/t/[slug]/marketplace/new", "/agents/new"],
+      ["/t/[slug]/agent/[agent]", "/agents/[slug]"],
+    ],
+    "the two AI team moves, and only those",
+  );
+  for (const m of OS_VIEWER_MOVES) {
+    // The old page stays: it is the builder and the chat for every viewer the
+    // OS page does not serve.
+    assert.ok(routeExists(m.route), `${m.route} is not a page under app/`);
+    assert.ok(routeExists(m.to), `${m.route} -> ${m.to}, but ${m.to} is not a page under app/`);
+    assert.ok(!(m.to in OS_REDIRECTS), `${m.route} -> ${m.to} is a redirect chain`);
+  }
+  // The targets are the OS pages themselves, not the catch-all.
+  assert.ok(existsSync(join(APP, "agents", "new", "page.tsx")), "app/agents/new/page.tsx");
+  assert.ok(existsSync(join(APP, "agents", "[slug]", "page.tsx")), "app/agents/[slug]/page.tsx");
+  // The query rides along (?edit= from a teammate's Edit link, ?template=).
+  assert.equal(withQuery("/agents/new", {}), "/agents/new");
+  assert.equal(withQuery("/agents/new", { edit: "outreach-sniper", template: undefined }), "/agents/new?edit=outreach-sniper");
+  assert.equal(withQuery("/agents/new", { template: "setter", x: ["1", "2"] }), "/agents/new?template=setter&x=1&x=2");
+  assert.equal(withQuery("/agents/new", { edit: "a b&c" }), "/agents/new?edit=a+b%26c");
+  // Each old page moves only after its own gate, only a viewer the AI team
+  // serves, and never with a 308.
+  for (const file of ["t/[slug]/marketplace/new/page.tsx", "t/[slug]/agent/[agent]/page.tsx"]) {
+    const src = readFileSync(join(APP, file), "utf8");
+    const gate = src.indexOf("requireOwnedTenantSlug(normalised)");
+    const move = src.search(/\bredirect\(/);
+    assert.ok(gate > 0 && move > gate, `app/${file}: the move must come after the owner-or-operator gate`);
+    assert.match(src, /access === "own"|owned && /, `app/${file}: only a viewer on their own workspace's slug moves`);
+    assert.match(src, /aiTeamServes\(await resolveOsViewer\(\)\)/, `app/${file}: only a viewer the AI team serves moves`);
+    assert.doesNotMatch(src, /permanentRedirect/, `app/${file}: a 308 is cached for every later visitor`);
+  }
+}
+
 // ── middleware.ts uses them, and carries no stale literal of its own ──────
 const middleware = readFileSync(join(process.cwd(), "middleware.ts"), "utf8");
 const block = middleware.match(/const REDIRECT_MAP[^=]*=\s*\{([\s\S]*?)\n\s*\};/);
@@ -93,6 +140,10 @@ assert.ok(!literals.some(([from]) => from === "/money"), "/money must not redire
 // The one computed entry: the marketing home collapses onto "/".
 assert.match(block![1], /\[MARKETING_HOME_PATH\]:\s*"\/"/);
 assert.ok(routeExists(MARKETING_HOME_PATH), `${MARKETING_HOME_PATH} must exist for the "/" rewrite to land`);
+// The viewer moves are NOT middleware's: it cannot tell who the OS page serves,
+// and a permanent redirect would be cached for every later visitor.
+assert.doesNotMatch(middleware, /import[^;]*OS_VIEWER_MOVES/, "middleware must not apply the viewer moves");
+assert.doesNotMatch(middleware, /NextResponse\.redirect\([^;]*,\s*308\)/, "middleware answers no permanent move");
 
 // ── every internal link in the app lands somewhere (2026-09-30) ───────────
 //
