@@ -53,7 +53,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendOasisSharedGmail, type OasisSharedSendResult } from "@/lib/integrations/oasis-shared-gmail-send";
 import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
-import { isMissingCustomersSchema, matchCustomerByEmail } from "@/lib/os/customers/store";
+import { isCustomerEmail, isMissingCustomersSchema } from "@/lib/os/customers/store";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
 // The pure half of lib/founders/gate.ts: the same allowlist, without the
@@ -171,8 +171,9 @@ function emailReadiness(tenant: ExecutorTenant): string | null {
  * created the approval. It is support mail when either:
  *   - target_ref is "customer:<id>": a draft filed against a client's record
  *     (lib/os/customers/conversations.ts proposeClientEmail); or
- *   - the recipient is one of THIS workspace's clients (matchCustomerByEmail: a
- *     client's main address or a contact's, archived records not counted). The
+ *   - the recipient is one of THIS workspace's clients (isCustomerEmail: a
+ *     client's main address or a contact's, at one client or at several,
+ *     archived records not counted). The
  *     agent tool propose_email (lib/cloud-tool-runner.ts) files every draft
  *     against a lead or against nothing, whoever it is to, so its target_ref
  *     says nothing about who the recipient is.
@@ -189,7 +190,7 @@ export async function emailPurposeFor(
 ): Promise<OasisMailPurpose> {
   if ((approval.target_ref || "").startsWith("customer:")) return "support";
   try {
-    return (await matchCustomerByEmail(db, tenantId, to)) ? "support" : "sales";
+    return (await isCustomerEmail(db, tenantId, to)) ? "support" : "sales";
   } catch (err) {
     if (isMissingCustomersSchema(err)) return "sales";
     throw err;

@@ -430,6 +430,22 @@ async function main() {
                 VALUES ('c2', ?, 'Gone Co', 'gone@example.test', 'churned', ?, ?, ?)`,
           args: [OASIS_TENANT, at, at, at],
         },
+        // A bookkeeper listed as a contact at two clients: still a client's address.
+        {
+          sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, created_at, updated_at)
+                VALUES ('c4', ?, 'Dee Co', 'dee@example.test', 'active', ?, ?)`,
+          args: [OASIS_TENANT, at, at],
+        },
+        {
+          sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, email, created_at, updated_at)
+                VALUES ('cc2', ?, 'c1', 'Books', 'books@example.test', ?, ?)`,
+          args: [OASIS_TENANT, at, at],
+        },
+        {
+          sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, email, created_at, updated_at)
+                VALUES ('cc3', ?, 'c4', 'Books', 'books@example.test', ?, ?)`,
+          args: [OASIS_TENANT, at, at],
+        },
         // Another workspace's client: never a client of OASIS's.
         {
           sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, created_at, updated_at)
@@ -444,6 +460,7 @@ async function main() {
     assert.equal(await purpose(CLIENT, "lead:l1"), "support", "a client's main address, filed against a lead");
     assert.equal(await purpose("Client@Example.TEST", null), "support", "a client's main address, any case, filed against nothing");
     assert.equal(await purpose("bo@example.test", null), "support", "a contact at a client");
+    assert.equal(await purpose("books@example.test", null), "support", "a contact listed at two clients is a client's address");
     assert.equal(await purpose("lead@example.test", "lead:l1"), "sales", "a lead");
     assert.equal(await purpose("gone@example.test", null), "sales", "an archived client record is not a current client");
     assert.equal(await purpose("theirs@example.test", null), "sales", "another workspace's client is not this workspace's");
