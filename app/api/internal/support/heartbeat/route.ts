@@ -1,5 +1,5 @@
 /**
- * POST /api/internal/support/heartbeat — the support@ reader's status after a
+ * POST /api/internal/support/heartbeat - the support@ reader's status after a
  * sweep. Kept in support_mailbox_status; the SLA cron alerts when support@
  * has not been read for 20 minutes. HMAC-authenticated inside the handler
  * (lib/delivery/support-ingest-auth.ts); see lib/delivery/support-inbox-health.ts.

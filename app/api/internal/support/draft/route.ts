@@ -1,5 +1,5 @@
 /**
- * POST /api/internal/support/draft — the reader files one reply draft (it
+ * POST /api/internal/support/draft - the reader files one reply draft (it
  * becomes ONE reply_ticket approval in Client Success) or reports that it could
  * not write one (the ticket then says "reply by hand"). Nothing is sent from
  * here. HMAC-authenticated inside the handler; see lib/delivery/support-drafts.ts.

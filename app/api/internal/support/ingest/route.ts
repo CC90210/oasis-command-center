@@ -1,5 +1,5 @@
 /**
- * POST /api/internal/support/ingest — one email from support@, posted by the
+ * POST /api/internal/support/ingest - one email from support@, posted by the
  * reader on CC's PC (BEA scripts/support/). Authenticated by an HMAC inside
  * the handler, not by a session, so middleware.ts lists the
  * /api/internal/support/ prefix as public. Everything else, including every

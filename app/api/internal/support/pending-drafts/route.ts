@@ -1,5 +1,5 @@
 /**
- * POST /api/internal/support/pending-drafts — the emails on support@ tickets
+ * POST /api/internal/support/pending-drafts - the emails on support@ tickets
  * that want a reply draft, with what the reader needs to write one. Read only.
  * HMAC-authenticated inside the handler; see lib/delivery/support-drafts.ts.
  */

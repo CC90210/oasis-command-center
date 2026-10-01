@@ -114,9 +114,9 @@ export function supportInboxForDesk(tenantId: string): string | null {
 }
 
 /**
- * Is `address` the mailbox itself or one of its plus-addresses
- * (support+anything@oasisai.work)? Mail to a plus-address lands in the same
- * inbox; the reader keeps the one it was delivered to.
+ * Is `address` the mailbox itself or one of its plus-addresses (the same
+ * local part, a "+" and a tag, at the same domain)? Mail to a plus-address
+ * lands in the same inbox; the reader keeps the one it was delivered to.
  */
 export function isAddressOfMailbox(address: unknown, mailbox: string): boolean {
   if (typeof address !== "string") return false;
