@@ -14,6 +14,8 @@
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { ErrorHelp, isProspectFacingPath } from "@/components/ErrorHelp";
+import { recoverFromStaleBuild, reportClientError } from "@/lib/client-errors/report";
+import { isStaleBuildError } from "@/lib/client-errors/shape";
 
 export default function GlobalError({
   error,
@@ -25,6 +27,9 @@ export default function GlobalError({
   const prospectFacing = isProspectFacingPath(usePathname());
   useEffect(() => {
     console.error("[global-error.tsx]", error);
+    // Runs in the browser; the report is the server's only record of it.
+    reportClientError("global", error);
+    if (isStaleBuildError(error)) recoverFromStaleBuild();
   }, [error]);
 
   return (

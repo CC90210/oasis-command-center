@@ -137,6 +137,12 @@ assert.equal(
   true,
   "/api/perf/vitals is sent from the session-less public form and self-gates on same-origin; 401ing it here breaks the merchant's page",
 );
+// The crash-report beacon follows the same rule: a signed-out page (login, a
+// public form) must be able to report, and only the exact path is public.
+assert.equal(isPublic("/api/client-errors"), true, "/api/client-errors is sent from session-less pages and self-gates on same-origin");
+for (const notPublic of ["/api/client-errors-admin", "/api/client"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated`);
+}
 // The allowlist entry must NOT become a blanket /api/perf prefix.
 for (const notPublic of ["/api/perf", "/api/perf/anything-else", "/api/perf/vitals-admin"]) {
   assert.equal(

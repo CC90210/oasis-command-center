@@ -1,6 +1,7 @@
 import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 import { mayQuoteAndClose } from "@/lib/team-roles";
 import type { LeadSourceTrack } from "@/lib/website-sales-comp";
+import { canonicalFromRepDisposition } from "./call-disposition";
 
 export const OASIS_WEBSITE_TENANT_SLUG = "oasis-webdev";
 
@@ -332,7 +333,13 @@ export function dispositionPatch(
       : "attempting_contact";
   const patch: Record<string, unknown> = {
     stage,
-    last_disposition: disposition,
+    // CANONICAL, not the raw RepDisposition. Both this path and the board
+    // write this field, so until they agreed on a vocabulary the value a
+    // lead carried depended on which screen the rep happened to use -- and
+    // components/today/RepToday.tsx renders it, so one lead read "attempted"
+    // and another read "no_answer" for the same real event. The stage logic
+    // above still switches on `disposition`; only the stored word changes.
+    last_disposition: canonicalFromRepDisposition(disposition),
     last_contact_at: occurredAt,
     // Supabase migration 074 mirrors interaction rows into this field, but
     // Turso has no Postgres trigger. Persist it with the lifecycle write so

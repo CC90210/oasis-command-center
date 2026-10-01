@@ -73,6 +73,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { RecordsError, updateRecord } from "@/lib/manifest/data";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { WEBSITE_SALES_STAGES, type WebsiteSalesStage } from "@/lib/website-sales";
+import { CANONICAL_FROM_CALL_OUTCOME } from "../call-disposition";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
 
@@ -85,13 +86,14 @@ export function isCallOutcome(v: unknown): v is CallOutcome {
 }
 
 /** UI/API vocabulary -> the real leadgen_call_outcomes.outcome CHECK values. */
-const DB_OUTCOME: Record<CallOutcome, string> = {
-  no_answer: "no_answer",
-  connected: "reached",
-  interested: "interested",
-  not_interested: "not_interested",
-  do_not_call: "do_not_call",
-};
+/**
+ * Moved to lib/call-disposition.ts, which now owns the one vocabulary both this
+ * path and the website-sales pipeline agree on. Aliased rather than renamed at
+ * the three call sites below, because this map's meaning has not changed: it is
+ * still "the board's words to the values the database accepts". It is simply no
+ * longer this module's private business.
+ */
+const DB_OUTCOME = CANONICAL_FROM_CALL_OUTCOME;
 
 /** The reverse of DB_OUTCOME, for rendering history back in the UI's own
  *  vocabulary. Any DB value this feature didn't write (a legacy/foreign
@@ -604,7 +606,7 @@ export async function logCallOutcome(input: {
     // be removed from, still carrying yesterday's callback, would keep showing
     // up in the due queue, which exists to tell a rep who to phone next.
     const contextPatch: Record<string, unknown> = {
-      last_disposition: outcome,
+      last_disposition: DB_OUTCOME[outcome],
       next_action_at: nextActionAt,
       ...(outcome === "do_not_call" ? { dnc: true, dnc_at: calledAt } : {}),
       ...(note ? { last_handoff_note: note, last_handoff_note_at: calledAt } : {}),

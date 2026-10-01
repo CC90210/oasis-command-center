@@ -32,7 +32,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const session = await resolveSessionContext();
+  // resolveSessionContext throws on a failed profile read (it will not turn a
+  // storage fault into "log in again"). Unguarded, that was an uncaught 500
+  // on every failed read (seen live 2026-10-01 14:17Z). Answer the same 503
+  // the roster read below answers, so the picker's existing fallback applies.
+  let session: Awaited<ReturnType<typeof resolveSessionContext>>;
+  try {
+    session = await resolveSessionContext();
+  } catch (err) {
+    console.error("[api.web-leads.assignable-reps] session", err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ ok: false, error: "session_unavailable" }, { status: 503 });
+  }
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: session.reason }, { status: 401 });
   }
