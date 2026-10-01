@@ -22,8 +22,7 @@ import { SettingsContent } from "@/components/settings/SettingsContent";
 import { requireSettingsSection } from "@/components/settings/settings-viewer";
 import { PageFrame } from "@/components/os/PageFrame";
 import { ConnectionsHub } from "@/components/os/connections/ConnectionsHub";
-import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import { CONNECTOR_CATALOG, resolveConnectorStatus, type ConnectorStatus } from "@/lib/os/connectors";
+import { loadConnectorStatuses } from "@/components/os/connections/connector-facts";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 
@@ -46,11 +45,9 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
     );
   }
 
-  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId });
-  const now = Date.now();
-  const statuses: Record<string, ConnectorStatus> = Object.fromEntries(
-    CONNECTOR_CATALOG.map((def) => [def.slug, resolveConnectorStatus(def, facts, now)]),
-  );
+  // The same loader as the onboarding connections step and AI brain, so an app
+  // set up in any of them reads the same here (lib/os/connectors.ts resolver).
+  const statuses = await loadConnectorStatuses({ tenantId: viewer.tenantId, userId: viewer.userId });
   const sp = await searchParams;
   // Google's sign-in returns here with ?gmail_oauth=…; its drawer shows the result.
   const initialApp = one(sp.app) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);

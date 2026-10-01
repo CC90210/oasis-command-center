@@ -139,11 +139,13 @@ export type ConnectorDef = {
   does: readonly string[];
   /** Extra search terms. */
   keywords?: readonly string[];
-  /** null = not built yet. The card says "Not built yet" and opens the drawer. */
+  /**
+   * null = not built yet. The card says "Not built yet", and its drawer says
+   * why (`pendingNote`) and files a request on OASIS's desk ("Ask OASIS for
+   * it"): never a release date nobody set (S5-F01).
+   */
   live: { source: ConnectorStatusSource; connect: ConnectorConnect } | null;
-  /** When a not-yet-built connector is expected. */
-  plannedFor?: "Phase 2" | "Later";
-  /** Why it is not live yet, in plain English. */
+  /** Why it is not live (yet, or on this deployment), in plain English. Every not-built app has one. */
   pendingNote?: string;
   /**
    * A connection tied to each person's own login, shown in the drawer under
@@ -154,6 +156,12 @@ export type ConnectorDef = {
   seeAlso?: { href: string; label: string };
   /** The provider's own setup documentation (opens in a new tab). */
   docs?: { href: string; label: string };
+  /**
+   * The ways a workspace can connect this app, each with whether it exists
+   * today (Slack: OASIS's own app, or a workspace's own app). A path that is
+   * not built says so and offers "Ask OASIS for it" in the drawer.
+   */
+  paths?: readonly { title: string; body: string; built: boolean }[];
 };
 
 /** Settings › Connections with this app's drawer open. */
@@ -187,6 +195,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       source: { kind: "tenant_connection", provider: "stripe" },
       connect: { kind: "key_form", label: "Connect Stripe", provider: "stripe" },
     },
+    docs: { href: "https://docs.stripe.com/keys", label: "Stripe's guide to API keys" },
   },
   {
     slug: "quickbooks",
@@ -200,8 +209,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "intuit", "qbo", "bookkeeping"],
     live: null,
-    plannedFor: "Phase 2",
-    pendingNote: "Needs Intuit's app assessment before it can connect to live books.",
+    pendingNote: "Needs OASIS's own Intuit app and Intuit's app assessment before it can connect to live books.",
   },
   {
     slug: "xero",
@@ -215,7 +223,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "bookkeeping"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Needs OASIS's own Xero app before it can connect to your books.",
   },
   {
     slug: "plaid",
@@ -229,7 +237,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Shows cash on hand and runway in Finance", "Read-only: OASIS never moves money"],
     keywords: ["bank", "banking", "cash", "transactions"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Needs OASIS's own Plaid account approved before it can link a bank.",
   },
 
   // Calendar & email
@@ -255,6 +263,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       connect: { kind: "keys", label: "Connect Google", service: "gws" },
     },
     yourAccount: "google",
+    docs: { href: "https://support.google.com/accounts/answer/185833", label: "Google's guide to App Passwords" },
   },
   {
     slug: "calendly",
@@ -268,7 +277,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Puts each booked call on the lead in Pipeline and on your schedule"],
     keywords: ["booking", "scheduling"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Nothing in OASIS reads Calendly bookings yet.",
   },
   {
     slug: "cal-com",
@@ -282,7 +291,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Puts each booked call on the lead in Pipeline and on your schedule"],
     keywords: ["booking", "scheduling", "cal"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Nothing in OASIS reads Cal.com bookings yet.",
   },
 
   // Meetings
@@ -298,8 +307,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Writes call notes and follow-ups for Sales and Client Success"],
     keywords: ["video", "calls", "recording", "transcript"],
     live: null,
-    plannedFor: "Later",
-    pendingNote: "Needs Zoom Marketplace review.",
+    pendingNote: "Needs OASIS's own Zoom app and Zoom Marketplace review before it can connect.",
   },
   {
     slug: "fathom",
@@ -317,7 +325,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Attaches call notes to the right lead or client"],
     keywords: ["notetaker", "transcript", "recording"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Nothing in OASIS reads Fathom's call notes yet.",
   },
   {
     slug: "fireflies",
@@ -331,7 +339,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Attaches call notes to the right lead or client"],
     keywords: ["notetaker", "transcript", "recording"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Nothing in OASIS reads Fireflies' call notes yet.",
   },
 
   // Messaging
@@ -360,6 +368,18 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     },
     pendingNote: "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here.",
     seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
+    paths: [
+      {
+        title: "OASIS's Slack app",
+        body: "How every workspace connects, OASIS's own included: press Add to Slack under Chat apps and your Slack admin approves the app in your Slack. OASIS then holds a token for your Slack workspace only, and Disconnect deletes it.",
+        built: true,
+      },
+      {
+        title: "Your own Slack app",
+        body: "For a Slack whose admin does not allow outside apps: your admin creates the app in your Slack and gives OASIS its credentials. Not built yet.",
+        built: false,
+      },
+    ],
   },
   {
     slug: "telegram",
@@ -377,6 +397,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       connect: { kind: "keys", label: "Set up Telegram", service: "telegram" },
     },
     seeAlso: { href: "/settings/chat-apps", label: "Your own Telegram alerts are under Chat apps" },
+    docs: { href: "https://core.telegram.org/bots/tutorial", label: "Telegram's guide to creating a bot" },
   },
   {
     slug: "twilio",
@@ -422,7 +443,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Drafts replies for your approval"],
     keywords: ["chat", "messages"],
     live: null,
-    plannedFor: "Later",
+    pendingNote: "Nothing in OASIS sends or reads WhatsApp messages yet.",
   },
   {
     slug: "discord",
@@ -436,7 +457,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Your department agents reply in those channels"],
     keywords: ["chat", "community"],
     live: null,
-    plannedFor: "Later",
+    pendingNote: "Nothing in OASIS reads or posts in Discord yet.",
   },
   {
     slug: "microsoft-teams",
@@ -450,7 +471,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Your department agents reply in those channels"],
     keywords: ["chat", "microsoft", "teams"],
     live: null,
-    plannedFor: "Later",
+    pendingNote: "Nothing in OASIS reads or posts in Microsoft Teams yet.",
   },
 
   // Ads & social
@@ -473,8 +494,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     keywords: ["facebook", "instagram", "ads", "lead ads", "advertising"],
     live: null,
-    plannedFor: "Phase 2",
-    pendingNote: "Meta reviews every app that manages ads. Until that clears, OASIS can connect through partner access in your Business Manager.",
+    pendingNote: "Needs OASIS's own Meta app, Business Verification and Meta's App Review before it can connect.",
   },
   {
     slug: "zernio",
@@ -488,7 +508,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Schedules the posts you approve across your social accounts"],
     keywords: ["late", "social", "instagram", "tiktok", "linkedin", "posting"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Nothing in OASIS posts with a workspace's own Zernio account yet.",
   },
   {
     slug: "constant-contact",
@@ -525,7 +545,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Imports your leads and pipeline into OASIS", "Sends texts through your GoHighLevel number"],
     keywords: ["ghl", "highlevel", "crm", "import"],
     live: null,
-    plannedFor: "Phase 2",
+    pendingNote: "Needs OASIS's own GoHighLevel app before it can import your contacts.",
   },
 
   // AI models
@@ -554,6 +574,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       connect: { kind: "key_form", label: "Connect Jev", provider: "jev" },
     },
     seeAlso: { href: "/settings/ai", label: "Mode, cost and agreement are under AI brain" },
+    docs: { href: "https://docs.typesafe.ai", label: "TypeSafe's documentation" },
   },
 ];
 

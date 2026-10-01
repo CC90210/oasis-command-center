@@ -4,13 +4,21 @@
  * ConnectorDrawer — the detail sheet for one app in the Connections hub.
  *
  * Says, in plain English, what OASIS reads and does with the app, which
- * departments depend on it, and its status in the same words as the card. A
- * coming-soon app opens here instead of a connect flow. A live app is set up
- * right here, under the status: a Connections-framework key (Stripe) in
- * KeyConnectionPanel, the app's saved keys (Google's sender, Twilio, the
- * Telegram team bot) in ServiceKeysForm, and your own Google login in the
- * personal panel. Only an OAuth app (Constant Contact) keeps its connect
- * button at the bottom, because that flow runs in a popup.
+ * departments depend on it, and its status in the same words as the card. An
+ * app that is not built opens here too: it says why, and "Ask OASIS for it"
+ * files a ticket the OASIS team sees (RequestConnector), so no card is a dead
+ * end. A live app is set up right here, under the status: a Connections-framework
+ * key (Stripe, Jev) in KeyConnectionPanel, the app's saved keys (Google's
+ * sender, Twilio, the Telegram team bot) in ServiceKeysForm (Twilio adds its
+ * webhook addresses, TwilioWebhooksPanel), and your own Google login in the
+ * personal panel, with the provider's own docs linked. Only an OAuth app
+ * (Constant Contact) keeps its connect button at the bottom, because that flow
+ * runs in a popup.
+ *
+ * ONE DRAWER, THREE ENTRY POINTS: Settings > Connections (ConnectionsHub), the
+ * workspace setup's connections step (ConnectionsHub, `embedded`) and AI brain
+ * (ConnectorDrawerButton). Each reads the same statuses (connector-facts.ts
+ * loadConnectorStatuses) and writes the same stores.
  *
  * DrawerSheet is the sheet itself, shared with the hub's Custom keys card. An
  * overlay, so it is the one place in the hub that carries a shadow (a y-offset,
@@ -26,6 +34,7 @@ import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/Conne
 import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
 import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
+import { RequestConnector } from "@/components/os/connections/RequestConnector";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
@@ -147,8 +156,9 @@ export function ConnectorDrawer({
   onClose,
   onConnect,
   onChanged,
-  supportHref,
   personalGoogle,
+  embedded = false,
+  requestFrom = "Settings > Connections",
 }: {
   open: boolean;
   /** Kept after close so the sheet does not empty mid-transition. */
@@ -158,10 +168,16 @@ export function ConnectorDrawer({
   onConnect: (def: ConnectorDef) => void;
   /** A connect, test or disconnect finished: re-read every status from the server. */
   onChanged: () => void;
-  /** OASIS's support form, for "tell OASIS you use this". */
-  supportHref: string | null;
   /** This workspace connects each person's own Google (not a shared inbox). */
   personalGoogle: boolean;
+  /**
+   * Inside the workspace setup (onboarding): Settings pages are not reachable
+   * until setup finishes, so an app set up on another page says where instead
+   * of linking away and losing the owner's place.
+   */
+  embedded?: boolean;
+  /** Where a "not built yet" request was filed from, for the ticket. */
+  requestFrom?: string;
 }) {
   const live = def?.live ?? null;
   const verb = live ? { reads: "What OASIS reads", does: "What OASIS does" } : { reads: "What OASIS will read", does: "What OASIS will do" };
@@ -170,26 +186,29 @@ export function ConnectorDrawer({
   const keyConfig = keyForm ? providerById(keyForm.provider)?.restrictedKey ?? null : null;
   const savedKeys = live?.connect.kind === "keys" ? live.connect : null;
   const setUpHere = !!keyForm || !!savedKeys;
+  const elsewhere = embedded && live?.connect.kind === "link";
 
-  // An app set up in the drawer has its actions in the body, not down here.
+  // An app set up in the drawer has its actions in the body, not down here. An
+  // app that is not built files a request the OASIS team sees (no dead chip).
   const footer =
     def && !setUpHere ? (
       <footer className="border-t border-hairline px-5 py-4">
         {live ? (
-          <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">
-            {status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention"
-              ? `Manage ${def.name}`
-              : live.connect.label}
-          </button>
-        ) : supportHref ? (
-          <p className="text-[13px] leading-5 text-fg-muted">
-            Use {def.name} today?{" "}
-            <a href={supportHref} target="_blank" rel="noopener noreferrer" className="text-accent underline-offset-2 hover:underline">
-              Tell OASIS
-            </a>
-            .
-          </p>
-        ) : null}
+          elsewhere ? (
+            <p className="text-[13px] leading-5 text-fg-muted">
+              {def.name} is set up in Settings ({def.seeAlso?.label ?? live.connect.label}) once your workspace setup is
+              finished.
+            </p>
+          ) : (
+            <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">
+              {status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention"
+                ? `Manage ${def.name}`
+                : live.connect.label}
+            </button>
+          )
+        ) : (
+          <RequestConnector key={def.slug} name={def.name} reason={def.pendingNote ?? null} from={requestFrom} />
+        )}
       </footer>
     ) : null;
 
@@ -207,11 +226,12 @@ export function ConnectorDrawer({
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Status</h3>
               <StatusLine status={status} />
               {status.detail && <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">{status.detail}</p>}
-              {!live && def.plannedFor && (
+              {!live && (
                 // The state, not a release promise: "scheduled for the next
-                // release" was a date nobody had set.
+                // release" was a date nobody had set. The button below asks.
                 <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
-                  Nothing is built for it yet, so it cannot be connected.
+                  Nothing is built for it yet, so it cannot be connected. Ask OASIS for it below and the request lands
+                  on the OASIS team&apos;s desk.
                 </p>
               )}
             </section>
@@ -235,6 +255,28 @@ export function ConnectorDrawer({
 
           {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={status?.label} />}
 
+          {def.paths && def.paths.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-xs font-medium text-fg-dim">How a workspace connects {def.name}</h3>
+              <ul className="space-y-3">
+                {def.paths.map((p) => (
+                  <li key={p.title} className="rounded-lg border border-hairline bg-bg-raised px-3 py-3">
+                    <div className="text-[13px] font-medium text-fg">
+                      {p.title}
+                      <span className="ml-2 text-[12px] font-normal text-fg-dim">{p.built ? "Available" : "Not built yet"}</span>
+                    </div>
+                    <p className="mt-1 text-[13px] leading-5 text-fg-muted">{p.body}</p>
+                    {!p.built && (
+                      <div className="mt-3">
+                        <RequestConnector key={`${def.slug}:${p.title}`} name={`${def.name} (${p.title})`} reason={p.body} from={requestFrom} />
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           {def.yourAccount === "google" && personalGoogle && (
             <section>
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Your own Google account</h3>
@@ -246,14 +288,17 @@ export function ConnectorDrawer({
             </section>
           )}
 
-          {def.seeAlso && (
-            <p className="text-[13px] leading-5 text-fg-muted">
-              <a href={def.seeAlso.href} className="text-accent underline-offset-2 hover:underline">
-                {def.seeAlso.label}
-              </a>
-              .
-            </p>
-          )}
+          {def.seeAlso &&
+            (embedded ? (
+              <p className="text-[13px] leading-5 text-fg-muted">{def.seeAlso.label}, once your workspace setup is finished.</p>
+            ) : (
+              <p className="text-[13px] leading-5 text-fg-muted">
+                <a href={def.seeAlso.href} className="text-accent underline-offset-2 hover:underline">
+                  {def.seeAlso.label}
+                </a>
+                .
+              </p>
+            ))}
 
           {def.docs && (
             <p className="text-[13px] leading-5 text-fg-muted">
