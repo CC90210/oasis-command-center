@@ -86,6 +86,27 @@ async function main() {
     assert.ok((shape.clampStack(stack) ?? "").split(String.fromCharCode(10)).length <= shape.CLIENT_ERROR_LIMITS.stackLines);
   });
 
+  await check("credentials in a path, a message or a stack are masked; record ids are kept", () => {
+    const token = "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+    assert.equal(shape.pathnameOnly(`/sign/${token}`), "/sign/[token]");
+    assert.equal(shape.pathnameOnly(`/invite/${token}`), "/invite/[token]");
+    assert.equal(shape.pathnameOnly(`/f/oasis-ai-cc/support/${token}`), "/f/oasis-ai-cc/support/[token]");
+    assert.equal(shape.pathnameOnly("/f/oasis-ai-cc/support"), "/f/oasis-ai-cc/support", "an anonymous form link has no token");
+    const id = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+    assert.equal(shape.pathnameOnly(`/pipeline/${id}`), `/pipeline/${id}`, "a UUID is a record id, kept for tracing");
+    assert.equal(shape.pathnameOnly(`/anything/${token}`), "/anything/[redacted]", "a long opaque segment is masked");
+    const parsed = shape.parseClientErrorReport({
+      kind: "window",
+      message: `Failed to fetch https://oasisai.work/sign/${token}`,
+      stack: `Error\n    at load (https://oasisai.work/invite/${token}:1:1)`,
+      path: "/x",
+    });
+    assert.ok(parsed.ok);
+    if (!parsed.ok) return;
+    assert.ok(!parsed.report.message.includes(token) && parsed.report.message.includes("/sign/[token]"));
+    assert.ok(!(parsed.report.stack ?? "").includes(token) && (parsed.report.stack ?? "").includes("/invite/[token]"));
+  });
+
   await check("a digest is kept only when it looks like one", () => {
     const good = shape.parseClientErrorReport({ kind: "boundary", message: "m", path: "/", digest: "1234567890" });
     const bad = shape.parseClientErrorReport({ kind: "boundary", message: "m", path: "/", digest: "<script>" });
@@ -130,14 +151,23 @@ async function main() {
     assert.equal(quiet("window", "ResizeObserver loop completed with undelivered notifications.", "/x"), false);
   });
 
-  await check("an oversize report drops its stack instead of failing", () => {
+  await check("an oversize report drops its stack instead of failing, measured in UTF-8 bytes", () => {
     const sent: string[] = [];
     const rep = report.createClientErrorReporter((b) => sent.push(b), () => 0);
     const err = new Error("big");
     err.stack = Array.from({ length: 15 }, () => "x".repeat(400)).join(String.fromCharCode(10));
     rep("boundary", err, "/x");
     assert.equal(sent.length, 1);
-    assert.ok(sent[0].length <= shape.CLIENT_ERROR_MAX_BODY_BYTES);
+    assert.ok(shape.utf8Bytes(sent[0]) <= shape.CLIENT_ERROR_MAX_BODY_BYTES);
+    // 1,900 CJK characters: under the cap in characters, about 5,700 bytes.
+    const cjk = new Error("wide");
+    cjk.stack = String.fromCharCode(0x6f22).repeat(1_900);
+    const before = sent.length;
+    rep("boundary", cjk, "/y");
+    assert.equal(sent.length, before + 1, "still sent, without the stack");
+    const body = sent[sent.length - 1];
+    assert.ok(shape.utf8Bytes(body) <= shape.CLIENT_ERROR_MAX_BODY_BYTES, "the route's byte cap would accept it");
+    assert.equal((JSON.parse(body) as { stack: unknown }).stack, null);
   });
 
   await check("the stale-build reload happens once per page per minute, and never without storage", () => {
@@ -209,6 +239,27 @@ async function main() {
   } finally {
     console.error = realError;
   }
+
+  await check("retention runs on the schedule: rows past 30 days go, newer rows stay, a missing table is a no-op", async () => {
+    const { purgeClientErrorReports, CLIENT_ERROR_RETENTION_DAYS } = await import("../lib/client-errors/retention");
+    const { getTursoClient } = await import("../lib/turso");
+    const db = getTursoClient();
+    const now = new Date("2026-10-01T12:00:00Z");
+    const old = new Date(now.getTime() - (CLIENT_ERROR_RETENTION_DAYS + 1) * 86_400_000).toISOString();
+    const fresh = new Date(now.getTime() - 86_400_000).toISOString();
+    await db.execute({ sql: "INSERT INTO client_error_reports (id, kind, message, path, created_at) VALUES ('old-1', 'window', 'm', '/', ?), ('new-1', 'window', 'm', '/', ?)", args: [old, fresh] });
+    const result = await purgeClientErrorReports(db, now);
+    assert.equal(result.notInstalled, false);
+    assert.ok(result.deleted >= 1);
+    const left = (await db.execute("SELECT id FROM client_error_reports WHERE id IN ('old-1', 'new-1')")).rows.map((r) => String(r.id));
+    assert.deepEqual(left, ["new-1"]);
+    const { createClient } = await import("@libsql/client");
+    const empty = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "client-errors-empty-")), "e.db")}` });
+    assert.deepEqual(await purgeClientErrorReports(empty, now), { deleted: 0, notInstalled: true });
+    const cron = read("app/api/cron/connection-health/route.ts");
+    assert.match(cron, /await purgeClientErrorReports\(db, new Date\(\)\)/, "the 15-minute cron runs it");
+    assert.doesNotMatch(read("app/api/client-errors/route.ts"), /Math\.random/, "no in-request lottery prune any more");
+  });
 
   // -- 4. Wiring -------------------------------------------------------------
   await check("both error screens report and recover from a stale build; the layout listens for the rest", () => {

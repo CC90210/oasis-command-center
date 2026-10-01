@@ -26,10 +26,8 @@ import { CLIENT_ERROR_MAX_BODY_BYTES, parseClientErrorReport } from "@/lib/clien
 export const dynamic = "force-dynamic";
 
 const RATE_CAP_PER_MIN = 120;
-/** Reports older than this are deleted (data minimisation; they can hold page text). */
-const RETENTION_DAYS = 30;
-/** Roughly one write in this many also prunes expired rows. */
-const PRUNE_EVERY = 50;
+// Retention (30 days) runs on a schedule: lib/client-errors/retention.ts via
+// /api/cron/connection-health, so old rows go even when no new report arrives.
 
 let windowStart = 0;
 let windowCount = 0;
@@ -137,15 +135,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       path: report.path,
       user_agent: userAgent,
     });
-    if (error) {
-      // Before migration bravo__198 is applied the table does not exist: the
-      // log line above is then the whole record, by design.
-      if (!isMissingTable(error.message)) console.error("[client.error.store]", error.message);
-    } else if (Math.floor(Math.random() * PRUNE_EVERY) === 0) {
-      const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000).toISOString();
-      const pruned = await db.from("client_error_reports").delete().lt("created_at", cutoff);
-      if (pruned.error) console.error("[client.error.prune]", pruned.error.message);
-    }
+    // Before migration bravo__198 is applied the table does not exist: the log
+    // line above is then the whole record, by design.
+    if (error && !isMissingTable(error.message)) console.error("[client.error.store]", error.message);
   } catch (err) {
     console.error("[client.error.store]", err instanceof Error ? err.message : String(err));
   }

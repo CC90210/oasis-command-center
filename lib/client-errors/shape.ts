@@ -67,8 +67,38 @@ function clamp(input: string, max: number): string {
 }
 
 /**
- * The pathname only. A query string or hash can carry search text, filter
- * values or a one-time token, so neither is ever kept.
+ * Credentials that live IN a path, not a query string: the signing link
+ * (/sign/<token>), the invite link (/invite/<token>) and a personalised form
+ * link (/f/<tenant>/<form>/<lead_token>) are bearer links (middleware.ts), so
+ * a crash on one of those pages must not log or store its token. Any other
+ * long opaque segment is masked too; a UUID is a record id, kept because it
+ * is what makes a report traceable.
+ */
+const TOKEN_ROUTES: ReadonlyArray<[RegExp, string]> = [
+  [/\/sign\/[^/?#\s"']+/g, "/sign/[token]"],
+  [/\/invite\/[^/?#\s"']+/g, "/invite/[token]"],
+  [/(\/f\/[^/?#\s"']+\/[^/?#\s"']+)\/[^/?#\s"']+/g, "$1/[token]"],
+];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPAQUE_SEGMENT_RE = /^[A-Za-z0-9_.=-]{32,}$/;
+
+/** Replace credential-bearing path parts anywhere in a string (a path, a message, a stack). */
+export function redactTokens(input: string): string {
+  let out = input;
+  for (const [pattern, replacement] of TOKEN_ROUTES) out = out.replace(pattern, replacement);
+  return out;
+}
+
+function redactPathSegments(path: string): string {
+  return redactTokens(path)
+    .split("/")
+    .map((segment) => (OPAQUE_SEGMENT_RE.test(segment) && !UUID_RE.test(segment) ? "[redacted]" : segment))
+    .join("/");
+}
+
+/**
+ * The pathname only, with credentials masked. A query string or hash can carry
+ * search text, filter values or a one-time token, so neither is ever kept.
  */
 export function pathnameOnly(raw: string): string {
   let path = raw;
@@ -78,20 +108,25 @@ export function pathnameOnly(raw: string): string {
   );
   path = path.slice(0, cut);
   if (!path.startsWith("/")) return "/";
-  return clamp(stripControl(path, false), CLIENT_ERROR_LIMITS.path);
+  return clamp(redactPathSegments(stripControl(path, false)), CLIENT_ERROR_LIMITS.path);
 }
 
-/** The first lines of a stack, clamped; null when there is none. */
+/** The first lines of a stack, credentials masked, clamped; null when there is none. */
 export function clampStack(raw: unknown): string | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
-  const lines = stripControl(raw, true).split("\n").slice(0, CLIENT_ERROR_LIMITS.stackLines);
+  const lines = redactTokens(stripControl(raw, true)).split("\n").slice(0, CLIENT_ERROR_LIMITS.stackLines);
   return clamp(lines.join("\n"), CLIENT_ERROR_LIMITS.stack);
 }
 
-/** One-line message, clamped. */
+/** One-line message, credentials masked, clamped. */
 export function cleanMessage(raw: unknown): string {
   if (typeof raw !== "string") return "";
-  return clamp(stripControl(raw, false).trim(), CLIENT_ERROR_LIMITS.message);
+  return clamp(redactTokens(stripControl(raw, false)).trim(), CLIENT_ERROR_LIMITS.message);
+}
+
+/** Size of a string as UTF-8 bytes: what the route's byte cap counts. */
+export function utf8Bytes(input: string): number {
+  return new TextEncoder().encode(input).byteLength;
 }
 
 export type ParsedClientError = { ok: true; report: ClientErrorReport } | { ok: false; error: string };

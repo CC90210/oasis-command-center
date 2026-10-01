@@ -10,9 +10,12 @@
 -- failed for a user on every other click while the server logged nothing.
 --
 -- One row per report. The route caps size and rate, keeps the pathname only
--- (never a query string), strips control characters, and takes tenant_id and
--- user_id from the session, never from the payload (both NULL on a signed-out
--- page). Rows older than 30 days are pruned by the route.
+-- (never a query string), masks credentials in paths, messages and stacks
+-- (/sign/, /invite/ and personalised form tokens, long opaque segments),
+-- strips control characters, and takes tenant_id and user_id from the session,
+-- never from the payload (both NULL on a signed-out page). Rows older than 30
+-- days are pruned every 15 minutes by /api/cron/connection-health
+-- (lib/client-errors/retention.ts).
 --
 -- Additive only. The route works before this file is applied: it logs the
 -- report and skips the insert.

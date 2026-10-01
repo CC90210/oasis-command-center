@@ -18,6 +18,7 @@ import {
   clampStack,
   isNoiseMessage,
   pathnameOnly,
+  utf8Bytes,
   type ClientErrorKind,
 } from "./shape";
 
@@ -60,11 +61,13 @@ export function createClientErrorReporter(send: Sender, now: () => number = Date
     if (previous !== undefined && at - previous < REPORT_DEDUPE_MS) return false;
     lastSent.set(key, at);
     sent += 1;
+    // The route caps the body in UTF-8 BYTES; a stack in a non-Latin script can
+    // be under the cap in characters and over it in bytes.
     let body = JSON.stringify({ kind, ...described, path });
-    if (body.length > CLIENT_ERROR_MAX_BODY_BYTES) {
-      // The stack is the only field that can push a report over the cap.
+    if (utf8Bytes(body) > CLIENT_ERROR_MAX_BODY_BYTES) {
       body = JSON.stringify({ kind, ...described, stack: null, path });
     }
+    if (utf8Bytes(body) > CLIENT_ERROR_MAX_BODY_BYTES) return false; // never send what the route will refuse
     send(body);
     return true;
   };
