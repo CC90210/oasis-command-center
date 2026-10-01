@@ -9,10 +9,12 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { canonicalizeTenantMembers, getTenantMembers, type MemberRow } from "@/lib/team";
+import { canonicalizeTenantMembers, getTenantMembers, isActiveMember, type MemberRow } from "@/lib/team";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
+import { teammateNameFor } from "@/lib/os/teammate-names";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export type ActivityActor = {
   /** Stable filter key. Display labels can be renamed or duplicated. */
@@ -31,6 +33,24 @@ export type ActivityRow = {
   target: string;
   detail: string;
   source: string;
+  /** The integration or automation that wrote the row (lead_interactions.agent_source); part of the grouping key. */
+  sourceKey?: string;
+  /** The lead the row is about, when its source records one. Never rendered: `target` carries the name. */
+  leadId?: string | null;
+  /** On a folded row: how many consecutive identical rows it stands for (always >= 2), and those rows. */
+  count?: number;
+  items?: ActivityRow[];
+};
+
+export type ActivityFeed = {
+  rows: ActivityRow[];
+  /** Every name a row may carry, deactivated members included: the ?actor= filter resolves against this. */
+  actors: ActivityActor[];
+  /** Current members, this workspace's enabled agents, and System: the chips and the roster counts. */
+  activeActors: ActivityActor[];
+  /** Deactivated members with at least one row in the window: the collapsed "Former teammates" group. */
+  formerActors: ActivityActor[];
+  errors: string[];
 };
 
 const SYSTEM_ACTOR: ActivityActor = { key: "system", label: "System", type: "system" };
@@ -41,17 +61,24 @@ export function memberActivityLabel(
   return (member.display_name || member.full_name || member.email || "Team member").trim();
 }
 
-/** Build authoritative identity maps from this tenant's actual members. */
+/**
+ * Build authoritative identity maps from this tenant's actual members.
+ * `formerKeys` are the deactivated members' actor keys: they stay in `actors`
+ * so their old rows keep their name, and the feed keeps them out of the live
+ * roster (chips, counts) with this set.
+ */
 export function buildHumanActorMaps(
   members: MemberRow[],
 ): {
   actors: ActivityActor[];
   byEmail: Map<string, ActivityActor>;
   byId: Map<string, ActivityActor>;
+  formerKeys: Set<string>;
 } {
   const actors: ActivityActor[] = [];
   const byEmail = new Map<string, ActivityActor>();
   const byId = new Map<string, ActivityActor>();
+  const formerKeys = new Set<string>();
   for (const member of canonicalizeTenantMembers(members)) {
     const actor: ActivityActor = {
       key: `human:${member.id}`,
@@ -59,10 +86,11 @@ export function buildHumanActorMaps(
       type: "human",
     };
     actors.push(actor);
+    if (!isActiveMember(member)) formerKeys.add(actor.key);
     if (member.email) byEmail.set(member.email.trim().toLowerCase(), actor);
     if (member.auth_user_id) byId.set(member.auth_user_id, actor);
   }
-  return { actors, byEmail, byId };
+  return { actors, byEmail, byId, formerKeys };
 }
 
 function escapeRegex(value: string): string {
@@ -159,22 +187,103 @@ function dedupeActors(actors: ActivityActor[]): ActivityActor[] {
   });
 }
 
-async function loadTenantAgents(tenantId: string): Promise<ActivityActor[]> {
+/** Consecutive rows this close together fold into one line (a bulk claim is one action, not thirty). */
+export const GROUP_WINDOW_MS = 2 * 60 * 1000;
+
+function sameGroup(a: ActivityRow, b: ActivityRow): boolean {
+  return (
+    a.actorKey === b.actorKey &&
+    a.action === b.action &&
+    (a.sourceKey ?? "") === (b.sourceKey ?? "") &&
+    a.source === b.source
+  );
+}
+
+function withinWindow(head: ActivityRow, row: ActivityRow, windowMs: number): boolean {
+  const a = Date.parse(head.time);
+  const b = Date.parse(row.time);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.abs(a - b) <= windowMs;
+}
+
+/**
+ * Fold consecutive rows with the same (actor, action, source) that fall within
+ * `windowMs` of the group's newest row into one row carrying `count` and
+ * `items`. Rows must already be sorted newest first. A lone row is returned
+ * as it was; the folded row is the newest one, so filters and ids still hold.
+ */
+export function groupActivityRows(rows: ActivityRow[], windowMs = GROUP_WINDOW_MS): ActivityRow[] {
+  const out: ActivityRow[] = [];
+  let group: ActivityRow[] = [];
+  const flush = () => {
+    if (group.length === 1) out.push(group[0]);
+    else if (group.length > 1) out.push({ ...group[0], count: group.length, items: group });
+    group = [];
+  };
+  for (const row of rows) {
+    const head = group[0];
+    if (head && sameGroup(head, row) && withinWindow(head, row, windowMs)) {
+      group.push(row);
+      continue;
+    }
+    flush();
+    group = [row];
+  }
+  flush();
+  return out;
+}
+
+/**
+ * What the feed calls an agent: the department or job it has in THIS kind of
+ * workspace (lib/os/teammate-names), never the persona slug behind it. A slug
+ * that file does not know is one the workspace built itself, so it keeps the
+ * name its owner gave it.
+ */
+export function activityAgentLabel(
+  slug: string,
+  binding: { display_name?: string | null; slug?: string } | undefined,
+  oasis: boolean,
+): string {
+  return teammateNameFor(slug, { oasis })?.name || binding?.display_name || binding?.slug || slug;
+}
+
+async function loadTenantAgents(tenantId: string, oasis?: boolean): Promise<ActivityActor[]> {
   const manifest = await getTenantManifestForUser(tenantId).catch(() => null);
   const bindings = manifest?.agents || [];
   const enabledSlugs = resolveEnabledAgentSlugs({
     manifestAgents: manifest ? bindings : null,
   });
+  const scope = oasis ?? isOasisSurfaceTenant(manifest?.tenant_slug);
   return enabledSlugs.map((slug) => {
     const binding = bindings.find(
       (agent) => resolveAgentKey(agent.slug.toLowerCase()) === slug,
     );
     return {
       key: `agent:${slug}`,
-      label: binding?.display_name || binding?.slug || slug,
+      label: activityAgentLabel(slug, binding, scope),
       type: "agent" as const,
     };
   });
+}
+
+/** The lead's name as the pipeline shows it (lib/web-leads/data.ts), or null. */
+function leadNameFrom(data: unknown): string | null {
+  let record: Record<string, unknown> | null = null;
+  if (typeof data === "string") {
+    try {
+      record = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      record = null;
+    }
+  } else if (data && typeof data === "object") {
+    record = data as Record<string, unknown>;
+  }
+  if (!record) return null;
+  for (const key of ["business_name", "name", "company"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 // Keys whose values must never render in the activity feed.
@@ -245,6 +354,11 @@ export type ActivityFeedOptions = {
    */
   scope?: "workspace" | "sales_team";
   salesActorUserIds?: string[];
+  /**
+   * Whether this is OASIS's own workspace, which decides what the agents are
+   * called (lib/os/teammate-names). Omitted: read off the manifest.
+   */
+  oasis?: boolean;
   /** Test/consumer injection: production callers omit these. */
   db?: ReturnType<typeof getServiceSupabase>;
   members?: MemberRow[];
@@ -255,7 +369,7 @@ export type ActivityFeedOptions = {
 export async function getActivityFeed(
   tenantId: string,
   opts: ActivityFeedOptions = {},
-): Promise<{ rows: ActivityRow[]; actors: ActivityActor[]; errors: string[] }> {
+): Promise<ActivityFeed> {
   const limit = opts.limit ?? 200;
   // Manager mode has one permitted source, so fetch the full advertised limit.
   // Workspace mode merges several sources and keeps the smaller per-source cap.
@@ -276,6 +390,8 @@ export async function getActivityFeed(
       return {
         rows: [],
         actors: [],
+        activeActors: [],
+        formerActors: [],
         errors: [`team_members: ${error instanceof Error ? error.message : "failed"}`],
       };
     }
@@ -302,21 +418,29 @@ export async function getActivityFeed(
     : null;
   const agentActors = salesTeamScope
     ? []
-    : dedupeActors(opts.agents ?? (await loadTenantAgents(tenantId)));
+    : dedupeActors(opts.agents ?? (await loadTenantAgents(tenantId, opts.oasis)));
   const human = (email?: string | null, userId?: string | null): ActivityActor | null =>
     (userId && humanMaps.byId.get(userId)) ||
     (email && humanMaps.byEmail.get(email.trim().toLowerCase())) ||
     null;
   const out: ActivityRow[] = [];
+  const currentHumans = humanMaps.actors.filter((actor) => !humanMaps.formerKeys.has(actor.key));
+  const emptyFeed = (): ActivityFeed => ({
+    rows: [],
+    actors: humanMaps.actors,
+    activeActors: currentHumans,
+    formerActors: [],
+    errors: [],
+  });
 
   // Empty IN clauses are not portable across the Supabase/Turso adapters. More
   // importantly, an empty manager roster must never fall through to a tenant-
   // wide query. Return the honest empty feed before touching an activity table.
   if (salesTeamScope && allowedSalesIds.size === 0) {
-    return { rows: [], actors: humanMaps.actors, errors: [] };
+    return emptyFeed();
   }
   if (salesTeamScope && requestedActor && !requestedSalesUserId) {
-    return { rows: [], actors: humanMaps.actors, errors: [] };
+    return emptyFeed();
   }
 
   const push = (row: Omit<ActivityRow, "actorKey" | "actor" | "actorType">, actor: ActivityActor) => {
@@ -357,7 +481,9 @@ export async function getActivityFeed(
   try {
     let query = db
       .from("lead_interactions")
-      .select("id, type, channel, direction, agent_source, actor_user_id, metadata, to_email, created_at")
+      .select(
+        "id, type, channel, direction, agent_source, actor_user_id, metadata, to_email, subject, content, lead_id, created_at",
+      )
       .eq("tenant_id", tenantId);
     if (salesTeamScope) {
       // Query-level actor scope is the security boundary. Metadata attribution
@@ -388,6 +514,14 @@ export async function getActivityFeed(
           ? resolveActivityAgent(row.agent_source as string, agentActors)
           : null;
       const actor = humanActor || agentActor || SYSTEM_ACTOR;
+      // The writer's own words, not its identifier: a claim stores
+      // "Lead claimed" / "Lead claimed and moved prospect pool -> assigned.",
+      // which beats printing "web_leads_claim". An internal note's body is
+      // the note; for a message to a lead only the subject line is shown.
+      const subject = typeof row.subject === "string" ? row.subject.trim() : "";
+      const content = typeof row.content === "string" ? row.content.trim() : "";
+      const note = row.direction === "internal" ? content || subject : subject;
+      const leadId = typeof row.lead_id === "string" && row.lead_id ? row.lead_id : null;
       push(
         {
           id: `li:${row.id}`,
@@ -396,15 +530,43 @@ export async function getActivityFeed(
           target: row.to_email ? `→ ${row.to_email}` : String(row.channel || ""),
           detail:
             humanActor || agentActor
-              ? safeDetail(String(row.agent_source || ""))
+              ? safeDetail(note || String(row.agent_source || ""))
               : "Automated or unattributed action",
           source: "comms",
+          sourceKey: String(row.agent_source || ""),
+          leadId,
         },
         actor,
       );
     }
   } catch (error) {
     errors.push(`lead_interactions: ${error instanceof Error ? error.message : "failed"}`);
+  }
+
+  // Name the lead a row is about: one tenant-scoped read for the window's lead
+  // ids, never one per row, and only when a row names a lead at all (the
+  // manager feed queries nothing else when its rows carry none). A failed read
+  // leaves the row's channel as its target and is reported, so no row prints
+  // a bare id.
+  const leadIds = [...new Set(out.flatMap((row) => (row.leadId ? [row.leadId] : [])))];
+  if (leadIds.length > 0) try {
+    const result = await db
+      .from("tenant_records")
+      .select("id, data")
+      .eq("tenant_id", tenantId)
+      .in("id", leadIds);
+    if (result.error) throw new Error(result.error.message);
+    const names = new Map<string, string>();
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const name = leadNameFrom(row.data);
+      if (name) names.set(String(row.id), name);
+    }
+    for (const row of out) {
+      const name = row.leadId ? names.get(row.leadId) : undefined;
+      if (name) row.target = scrubValue(name).slice(0, 80);
+    }
+  } catch (error) {
+    errors.push(`lead_names: ${error instanceof Error ? error.message : "failed"}`);
   }
 
   if (!salesTeamScope) try {
@@ -499,11 +661,17 @@ export async function getActivityFeed(
     errors.push(`cron_jobs: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  const actors = dedupeActors([
-    ...humanMaps.actors,
-    ...agentActors,
-    ...(out.some((row) => row.actorKey === SYSTEM_ACTOR.key) ? [SYSTEM_ACTOR] : []),
-  ]);
+  const systemActors = out.some((row) => row.actorKey === SYSTEM_ACTOR.key) ? [SYSTEM_ACTOR] : [];
+  // Every name the rows may carry, for attribution and for the ?actor= filter.
+  const actors = dedupeActors([...humanMaps.actors, ...agentActors, ...systemActors]);
+  // The live roster: current members only. A deactivated member is "former"
+  // when they still have a row in the window, and absent otherwise; either way
+  // they are never a current chip or counted as a team member (S1-C1).
+  const rowActorKeys = new Set(out.map((row) => row.actorKey));
+  const activeActors = dedupeActors([...currentHumans, ...agentActors, ...systemActors]);
+  const formerActors = humanMaps.actors.filter(
+    (actor) => humanMaps.formerKeys.has(actor.key) && rowActorKeys.has(actor.key),
+  );
   let rows = out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
   if (requestedActor) {
     const match = actors.find(
@@ -513,5 +681,5 @@ export async function getActivityFeed(
     );
     rows = match ? rows.filter((row) => row.actorKey === match.key) : [];
   }
-  return { rows: rows.slice(0, limit), actors, errors };
+  return { rows: groupActivityRows(rows).slice(0, limit), actors, activeActors, formerActors, errors };
 }
