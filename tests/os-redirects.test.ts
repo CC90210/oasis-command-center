@@ -305,14 +305,19 @@ const RETIRED_TENANT_SLUGS = new Set(["sun"]);
 
 /** Dead: a retired tenant shell, or anything outside the live tenant catch-all that resolves nowhere. */
 function isDeadLink(path: string): boolean {
-  if (path.startsWith("/t/") && RETIRED_TENANT_SLUGS.has(path.split("/")[2])) return true;
-  if (path === "/t" || path.startsWith("/t/")) return false;
-  return !resolves(path);
+  // literalPath() already drops ?query and #hash; strip here too so the slug
+  // check holds for any caller, not only the extractor.
+  const p = path.split(/[?#]/)[0];
+  if (p.startsWith("/t/") && RETIRED_TENANT_SLUGS.has(p.split("/")[2])) return true;
+  if (p === "/t" || p.startsWith("/t/")) return false;
+  return !resolves(p);
 }
 assert.equal(isDeadLink("/t/acme/leads"), false, "a live tenant's catch-all is exempt");
 assert.equal(isDeadLink("/t/__param__"), false, "a computed slug is some live tenant's");
 assert.equal(isDeadLink("/t/sun"), true, "the retired SunBiz shell");
 assert.equal(isDeadLink("/t/sun/lenders"), true);
+assert.equal(isDeadLink("/t/sun?tab=lenders"), true, "a query string does not hide the retired shell");
+assert.equal(isDeadLink("/t/sun#deals"), true, "nor does a hash");
 assert.equal(isDeadLink("/t/sunrise/leads"), false, "a slug that merely starts with sun");
 assert.equal(isDeadLink("/pipeline"), false);
 assert.equal(isDeadLink("/leads/abc"), true);

@@ -6,6 +6,7 @@
  * Two paths queued that email with no standing check:
  *
  *   - GET/POST /api/cron/renewal-thresholds   raised the event and queued the send
+ *                                             (retired: deleted 2026-10-01, not exercised here)
  *   - POST /api/renewals/[id]/outreach        approve / retry from the drawer
  *
  * Both refused a deactivated agent before resolving any mailbox, recorded the
