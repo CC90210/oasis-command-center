@@ -6,6 +6,7 @@ import { listAgents } from "@/lib/agents/loader";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { requireOwnedTenantSlug } from "@/lib/tenant-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,6 +30,8 @@ export default async function MarketplaceBrowsePage({
   const { category } = await searchParams;
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
+  // This workspace's own members, or a verified operator; anyone else 404s.
+  await requireOwnedTenantSlug(normalised);
 
   const user = await getSessionUser();
   const manifest = await getManifest(normalised);

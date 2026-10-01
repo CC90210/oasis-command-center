@@ -132,7 +132,14 @@ export function breadcrumbTrail(
   if (target) return [target.section, target.tabs[""]];
   const hit = longestPrefixMatch(pathname, entries);
   if (hit) return [hit.label];
-  const segment = pathname.split("/").filter(Boolean)[0] || "";
+  const segments = pathname.split("/").filter(Boolean);
+  // A workspace's own /t/<slug>/<page> renders on its OS shell (app/layout.tsx):
+  // the page is the segment after the slug, never "T". The slug is the
+  // workspace itself, which the first crumb already names.
+  if (segments[0] === "t" && segments.length >= 2) {
+    return [sentenceCase(segments[2] || "") || "Overview"];
+  }
+  const segment = segments[0] || "";
   if (!segment) return ["Today"];
   return [sentenceCase(segment) || "Today"];
 }

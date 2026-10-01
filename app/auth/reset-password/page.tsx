@@ -105,11 +105,11 @@ export default function ResetPasswordPage() {
           );
           return;
         }
-        const slug = body.tenant_slug?.trim();
-        setTimeout(
-          () => window.location.assign(slug ? `/t/${slug}` : "/auth/land?next=%2F"),
-          900,
-        );
+        // The same tenant-aware landing as a reset without an invite:
+        // /auth/land asks homePathForTenant, which is Today ("/") for a
+        // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
+        // manifest shell).
+        setTimeout(() => window.location.assign("/auth/land?next=%2F"), 900);
         return;
       }
 
