@@ -102,8 +102,9 @@ export default async function WelcomePage({
   // Invitees joining an existing tenant don't need the new-tenant
   // scaffolding wizard. If they have a tenant attachment AND that
   // tenant resolves to a Command Center profile, skip the wizard and
-  // land them on Today ("/"), which resolves the workspace from the
-  // session inside the OS shell (W1a, U1-05; it was /t/<slug>, the legacy
+  // land them where every sign-in lands: /auth/land asks
+  // lib/auth-routing.ts homePathForTenant, which is Today ("/") for a
+  // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
   // manifest shell). The personalisation flow stays available via
   // Settings → Personal, which appends ?settings=1 so this redirect won't
   // fire for the re-entrant path (CC bug report 2026-05-29).
@@ -112,7 +113,7 @@ export default async function WelcomePage({
     if (profileSlug) {
       // Through the claim refresh: a session that still carries a "welcome"
       // gate claim would otherwise be sent straight back here (Turso auth).
-      redirect(`/api/auth/onboarding-refresh?next=${encodeURIComponent("/")}`);
+      redirect(`/api/auth/onboarding-refresh?next=${encodeURIComponent("/auth/land?next=%2F")}`);
     }
   }
 

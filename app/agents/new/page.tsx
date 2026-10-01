@@ -3,20 +3,24 @@
  * OS shell (W1a, U1-04).
  *
  * It was /t/<slug>/marketplace/new, which switched the rail off for the legacy
- * manifest sidebar. Middleware 308s that URL here with its query
- * (lib/os/redirects.ts). This page reads only the SESSION's workspace: there is
- * no workspace in the URL, so it can never act on another one.
+ * manifest sidebar. That page moves the viewers this page serves here, with
+ * the query (lib/os/redirects.ts OS_VIEWER_MOVES). This page reads only the
+ * SESSION's workspace: there is no workspace in the URL, so it can never act
+ * on another one.
  *
  * GATES, before any read, are the AI team page's own (app/agents/page.tsx):
- * requireSystemSurface, a provisioned workspace and the rail's "/agents" row
- * (mayOpenOsHref). Building is for owners and admins (persona founder), the
- * rule the roster's New teammate button uses; POST /api/agents refuses anyone
- * else on its own.
+ * requireSystemSurface, then a provisioned workspace and the rail's "/agents"
+ * row (components/os/aiteam/access.ts aiTeamServes, the answer the old page
+ * moves on). Building is for owners and admins (persona founder), the rule the
+ * roster's New teammate button uses; POST /api/agents refuses anyone else on
+ * its own.
  *
  * `?edit=<slug>` edits one of this workspace's own custom teammates (the
  * teammate's Configure panel links here). `?template=<key>` is carried from a
  * template tile; the builder does not read it yet, which the tile says
- * (components/os/aiteam/TemplatePicker.tsx).
+ * (components/os/aiteam/TemplatePicker.tsx). A save opens the teammate's chat
+ * here (/agents/<slug>) and a delete returns to the AI team, never the
+ * marketplace (the builder's `home`).
  */
 
 import Link from "next/link";
@@ -25,15 +29,14 @@ import { ArrowLeft } from "lucide-react";
 import { Card, EmptyState } from "@/components/Card";
 import { CustomAgentBuilder } from "@/components/marketplace/CustomAgentBuilder";
 import { PageFrame } from "@/components/os/PageFrame";
+import { AI_TEAM_HREF, aiTeamServes } from "@/components/os/aiteam/access";
 import { workspaceChatSlug } from "@/components/os/department/channel";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { getAgentBySlug } from "@/lib/agents/loader";
-import { mayOpenOsHref } from "@/lib/os/nav";
 import { requireSystemSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
-const AI_TEAM_HREF = "/agents";
 const TITLE = "New teammate";
 
 function BackToTeam() {
@@ -62,8 +65,7 @@ export default async function NewTeammatePage({
       </PageFrame>
     );
   }
-  if (!viewer.provisioned) notFound();
-  if (!mayOpenOsHref(viewer.navInput, AI_TEAM_HREF)) notFound();
+  if (!aiTeamServes(viewer)) notFound();
 
   if (viewer.surface.persona !== "founder") {
     return (
@@ -108,6 +110,7 @@ export default async function NewTeammatePage({
     >
       <CustomAgentBuilder
         tenantSlug={slug}
+        home="ai-team"
         editing={
           editing
             ? {

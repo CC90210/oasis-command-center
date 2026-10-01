@@ -1018,10 +1018,18 @@ async function main() {
     };
     await login(USERS.multi); // two seats: the maybeSingle read found no workspace for them at all
     assert.equal(hasChat(await page({ params: Promise.resolve({ slug: "suga", agent: "sdr" }) })), true, "own workspace");
-    assert.equal(hasChat(await page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) })), false, "a seat that is not the active one");
+    // Another workspace's page is a 404 before anything about it is read (the
+    // marketplace's gate, W1a review R2): a seat that is not the active one,
+    // and a workspace the viewer is not in at all.
+    await assert.rejects(page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) }), /NEXT_HTTP_ERROR_FALLBACK;404/, "a seat that is not the active one");
     await login(USERS.client);
-    const other = await page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) });
-    assert.equal(hasChat(other), false, "someone else's workspace");
+    await assert.rejects(page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) }), /NEXT_HTTP_ERROR_FALLBACK;404/, "someone else's workspace");
+    // Only a verified operator previewing another workspace gets past that
+    // gate, and is told the chat is not theirs rather than offered one the
+    // route would refuse.
+    await login(USERS.cc);
+    const other = await page({ params: Promise.resolve({ slug: "suga", agent: "sdr" }) });
+    assert.equal(hasChat(other), false, "the operator's preview of another workspace");
     // OCC has no workspace switcher, so the note does not tell anyone to switch.
     assert.match(textOf(other), /This chat belongs to another workspace\./);
     assert.doesNotMatch(textOf(other), /[Ss]witch|not signed in/);

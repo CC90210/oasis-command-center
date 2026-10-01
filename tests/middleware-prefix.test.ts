@@ -197,9 +197,12 @@ for (const gated of ["/api/quests", "/api/quests/anything"]) {
  * (Turso auth with a secret) and proven armed by /pipeline, so a pass-through
  * for /link-expired means the public list let it through, not that no gate ran.
  *
- * The same run pins the AI team moves (lib/os/redirects.ts): the old builder
- * and teammate-chat URLs answer a 308 to the OS routes, keep their query, and
- * do so before the session gate, so a bookmark works signed in or out.
+ * The same run pins that middleware does NOT move the AI team's old builder and
+ * teammate-chat URLs (lib/os/redirects.ts OS_VIEWER_MOVES): it cannot tell
+ * whether the OS page serves the viewer, and a 308 to /agents/new sent every
+ * client owner's Build click to a 404, cached by the browser as permanent
+ * (W1a review R1). Signed out they meet the session gate like any page; the
+ * page itself moves the viewers the OS route serves.
  */
 async function anonymously(path: string): Promise<Response> {
   process.env.EMPIRE_AUTH_BACKEND = "turso";
@@ -221,23 +224,20 @@ async function throughMiddleware(): Promise<void> {
   assert.equal(res.headers.get("location"), null, "no redirect, so no 'Sign in to Command Center'");
   assert.equal(res.headers.get("x-middleware-next"), "1", "middleware passes the request through to the page");
 
-  for (const [from, to] of [
-    ["/t/acme-roofing/marketplace/new", "/agents/new"],
-    ["/t/acme-roofing/marketplace/new?template=setter", "/agents/new?template=setter"],
-    ["/t/acme-roofing/marketplace/new?edit=outreach-sniper", "/agents/new?edit=outreach-sniper"],
-    ["/t/acme-roofing/agent/outreach-sniper", "/agents/outreach-sniper"],
-    ["/t/Acme-Roofing/agent/Outreach-Sniper/", "/agents/outreach-sniper"],
-  ] as const) {
-    const moved = await anonymously(from);
-    assert.equal(moved.status, 308, `${from} is a permanent move`);
-    const location = new URL(moved.headers.get("location") || "");
-    assert.equal(location.origin, "https://oasisai.work", `${from} stays same-origin`);
-    assert.equal(`${location.pathname}${location.search}`, to, from);
-  }
-  // Only those two shapes move. The rest of the workspace's /t/ pages still render.
-  for (const stays of ["/t/acme-roofing/marketplace", "/t/acme-roofing/marketplace/outreach-sniper", "/t/acme-roofing/agent", "/t/acme-roofing/leads"]) {
-    const res2 = await anonymously(stays);
-    assert.notEqual(res2.status, 308, `${stays} must not be moved`);
+  for (const old of [
+    "/t/acme-roofing/marketplace/new",
+    "/t/acme-roofing/marketplace/new?template=setter",
+    "/t/acme-roofing/marketplace/new?edit=outreach-sniper",
+    "/t/acme-roofing/agent/outreach-sniper",
+    "/t/acme-roofing/agent/%73dr",
+    "/t/acme-roofing/marketplace",
+  ]) {
+    const res2 = await anonymously(old);
+    assert.notEqual(res2.status, 308, `${old}: middleware made a permanent move`);
+    assert.equal(res2.status, 307, `${old} meets the session gate like any page`);
+    const location = new URL(res2.headers.get("location") || "");
+    assert.equal(location.pathname, "/login", `${old} was moved somewhere other than sign-in`);
+    assert.equal(location.searchParams.get("next"), new URL(old, "https://oasisai.work").pathname, `${old}: sign-in returns to the page`);
   }
 }
 

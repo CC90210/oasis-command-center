@@ -387,50 +387,78 @@ async function main() {
   // ── Where a new teammate lands (W1a, U1-05) ──────────────────────────────
   // Every path that redeems an invite used to push /t/<slug>: the legacy
   // manifest dashboard, outside the OS shell, as a new client teammate's very
-  // first screen. They all land on Today ("/") now, which resolves the
-  // workspace from the session; lib/auth-routing.ts homePathForTenant stays the
-  // one post-login rule, and for a workspace like Bayside its answer IS "/".
-  await check("the welcome page sends a joined invitee to Today through the claim refresh, never to /t/<slug>", async () => {
+  // first screen. They all go where every sign-in goes now, /auth/land, which
+  // asks lib/auth-routing.ts homePathForTenant, the one post-login rule: Today
+  // ("/") for a workspace like Bayside, and for a dedicated client shell the
+  // same place its sign-in lands. Pushing "/" directly bypassed the rule
+  // (W1a review), so an invitee and a sign-in could land in different places.
+  const LANDING = "/auth/land?next=%2F";
+  await check("the welcome page sends a joined invitee through the claim refresh to the post-login rule, never to /t/<slug>", async () => {
     setSessionCookie(await signFor(STAFF));
     const { default: Welcome } = await import("../app/onboarding/welcome/page");
     await assert.rejects(
       () => Welcome({ searchParams: Promise.resolve({}) }),
       (err: Error) => {
-        assert.equal(err.message, `NEXT_REDIRECT;/api/auth/onboarding-refresh?next=${encodeURIComponent("/")}`);
+        assert.equal(err.message, `NEXT_REDIRECT;/api/auth/onboarding-refresh?next=${encodeURIComponent(LANDING)}`);
         return true;
       },
     );
-    const { homePathForTenant } = await import("../lib/auth-routing");
-    assert.equal(
-      homePathForTenant({ tenantSlug: "bayside-hvac", commandCenterProfileSlug: "bayside-hvac" }),
-      "/",
-      "the post-login rule's own answer for this workspace is the landing every invite path uses",
-    );
+    // The refresh keeps the whole landing URL, query included.
+    const { safeInternalPath } = await import("../lib/turso-auth-admin");
+    assert.equal(safeInternalPath(new URLSearchParams(`next=${encodeURIComponent(LANDING)}`).get("next")), LANDING);
   });
 
-  await check("every invite redemption in the browser lands on '/' with a full page load, never /t/<slug>", () => {
+  await check("/auth/land, where every invite path lands, answers with the post-login rule: Today for Bayside, the shell its sign-in uses for Suga", async () => {
+    const { GET } = await import("../app/auth/land/route");
+    const { homePathForTenant } = await import("../lib/auth-routing");
+    const landFor = async (user: SeedUser): Promise<string> => {
+      setSessionCookie(await signFor(user));
+      const res = await GET(new NextRequest(`https://oasisai.work${LANDING}`));
+      const location = new URL(res.headers.get("location") || "", "https://oasisai.work");
+      return `${location.pathname}${location.search}`;
+    };
+    assert.equal(await landFor(STAFF), "/", "a Bayside teammate lands on Today");
+    assert.equal(homePathForTenant({ tenantSlug: "bayside-hvac", commandCenterProfileSlug: "bayside-hvac" }), "/");
+    // A workspace on the dedicated Suga shell: its sign-in lands on /t/suga, so
+    // its invitee does too. "/" pushed directly would have sent them to Today.
+    const SUGA = "5d5d5d5d-0000-4000-8000-00000000005d";
+    const SUGA_MEMBER = u(12, "crew@suga-media.test", "Cass Crew");
+    await db.execute({
+      sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'suga-media', 'Suga Media', ?)",
+      args: [SUGA, JSON.stringify({ command_center_profile_slug: "suga" })],
+    });
+    await seedAuthUser(db, SUGA_MEMBER);
+    await seedProfile(db, SUGA_MEMBER, SUGA, { role: "member", onboarded: true });
+    assert.equal(await landFor(SUGA_MEMBER), homePathForTenant({ tenantSlug: "suga-media", commandCenterProfileSlug: "suga" }));
+    assert.equal(await landFor(SUGA_MEMBER), "/t/suga");
+  });
+
+  await check("every invite redemption in the browser goes to /auth/land with a full page load, never /t/<slug> or a bare '/'", () => {
     const sources = {
       "app/login/LoginForm.tsx": readFileSync("app/login/LoginForm.tsx", "utf8"),
       "app/signup/page.tsx": readFileSync("app/signup/page.tsx", "utf8"),
       "app/invite/[token]/InviteRedeemForSignedInUser.tsx": readFileSync("app/invite/[token]/InviteRedeemForSignedInUser.tsx", "utf8"),
       "app/auth/reset-password/page.tsx": readFileSync("app/auth/reset-password/page.tsx", "utf8"),
     };
-    const assigns = (src: string) => (src.match(/window\.location\.assign\("\/"\)/g) || []).length;
+    const count = (src: string, re: RegExp) => (src.match(re) || []).length;
+    const lands = (src: string) => count(src, /window\.location\.assign\("\/auth\/land\?next=%2F"\)/g);
     for (const [file, src] of Object.entries(sources)) {
       assert.doesNotMatch(src, /`\/t\/\$\{/, `${file} builds a /t/<slug> URL again: the legacy manifest shell`);
+      assert.equal(count(src, /window\.location\.assign\("\/"\)/g), 0, `${file} loads '/' directly, past the post-login rule`);
     }
     // LoginForm: the Turso path and the Supabase rollback path both redeem.
-    assert.equal(assigns(sources["app/login/LoginForm.tsx"]), 2, "both LoginForm redemption paths load '/'");
+    assert.equal(lands(sources["app/login/LoginForm.tsx"]), 2, "both LoginForm redemption paths");
     // signup: joinWorkspace (Turso) and the rollback path's redeem; its
-    // confirm-email path signs in at /login with next=/.
-    assert.equal(assigns(sources["app/signup/page.tsx"]), 2, "both signup redemption paths load '/'");
+    // confirm-email path signs in at /login with next=/, which is /auth/land.
+    assert.equal(lands(sources["app/signup/page.tsx"]), 2, "both signup redemption paths");
     assert.ok(sources["app/signup/page.tsx"].includes('`&next=${encodeURIComponent("/")}`'), "the confirm-email path signs in to '/'");
     // The signed-in CTA leaves the full-bleed /invite page with a full load, as
     // signup does (U4-19): a soft push left the workspace with no rail.
     const cta = sources["app/invite/[token]/InviteRedeemForSignedInUser.tsx"];
-    assert.equal(assigns(cta), 1);
+    assert.equal(lands(cta), 1);
     assert.doesNotMatch(cta, /router\.(push|replace|refresh)\(|useRouter/, "no soft navigation out of the full-bleed /invite page");
-    assert.equal(assigns(sources["app/auth/reset-password/page.tsx"]), 1, "a reset that redeems an invite loads '/'");
+    // A reset with an invite and one without land the same way.
+    assert.equal(count(sources["app/auth/reset-password/page.tsx"], /window\.location\.assign\("\/auth\/land\?next=%2F"\)/g), 2);
   });
 
   db.close();

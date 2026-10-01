@@ -52,12 +52,13 @@ export function InviteRedeemForSignedInUser({ token, tenantName, roleLabel, emai
         setBusy(false);
         return;
       }
-      // Land on Today ("/"), which resolves the workspace from the session
+      // Land where every sign-in lands: /auth/land asks lib/auth-routing.ts
+      // homePathForTenant, which is Today ("/") for a workspace like theirs
       // (W1a, U1-05; it was /t/<slug>, the legacy manifest shell). A full
       // page load, as /signup does (U4-19): /invite is full-bleed, and the
       // root layout does not re-render on a client-side navigation, so
       // router.push painted the workspace with no rail until a reload.
-      window.location.assign("/");
+      window.location.assign("/auth/land?next=%2F");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Redeem failed");
       setBusy(false);

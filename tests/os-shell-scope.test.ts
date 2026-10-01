@@ -19,28 +19,37 @@
  *      /unsubscribe and /link-expired for an anonymous visitor (they drew the
  *      rail, "Your workspace" and Sign out around a signer), /desktop-link for
  *      a signed-in one (two headers, two logos).
- *   4. /t/<slug>/marketplace, /marketplace/<agent>, /marketplace/new and
- *      /editor answer 404 to a signed-in member of ANOTHER workspace. They
- *      checked only that a manifest existed, so anyone signed in could read
- *      another workspace's agents, display names, prompt overlays, private
- *      prompts and whole manifest. The workspace's own members and a verified
- *      operator still open them.
+ *   4. /t/<slug>/marketplace, /marketplace/<agent>, /marketplace/new, /editor
+ *      and the teammate chat /agent/<agent> answer 404 to a signed-in member of
+ *      ANOTHER workspace. They checked only that a manifest existed, so anyone
+ *      signed in could read another workspace's agents, display names, prompt
+ *      overlays, private prompts and whole manifest. The workspace's own
+ *      members and a verified operator still open them. A read that FAILS while
+ *      deciding ownership is an error, never that same 404 (review R3).
  *   5. The AI team's OS pages read only the session's workspace: /agents/new
- *      mounts the builder on the viewer's own slug, and /agents/<slug> serves
- *      only a teammate this workspace built; another workspace's private agent
- *      and a platform agent are 404s, the operator included. The roster links
- *      them and never /t/<slug>.
- *   6. "new" cannot be a teammate's slug (it is the builder's URL), and the
+ *      mounts the builder on the viewer's own slug (a save opens the teammate's
+ *      chat, a delete the AI team), and /agents/<slug> serves only a teammate
+ *      this workspace built; another workspace's private agent and a platform
+ *      agent are 404s, the operator included. The roster links them and never
+ *      /t/<slug>.
+ *   6. The legacy builder and teammate chat move a viewer to those OS pages
+ *      only when the OS page serves them, by a temporary redirect the page
+ *      makes (never a middleware 308): a client owner who clicks Build on their
+ *      own marketplace reaches a working builder, an operator previewing
+ *      another workspace stays on its page, and a platform agent's chat stays
+ *      put (review R1, R5).
+ *   7. "new" cannot be a teammate's slug (it is the builder's URL), and the
  *      breadcrumb names /t/<slug>/<page> by its page, not "T".
  *
  * Run: node --conditions=react-server --import tsx tests/os-shell-scope.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createClient } from "@libsql/client";
+import { NextRequest } from "next/server";
 
 const ROOT = join(__dirname, "..");
 const dbFile = join(mkdtempSync(join(tmpdir(), "os-shell-scope-")), "test.db");
@@ -101,6 +110,10 @@ stub("next/navigation", {
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT;${url}`);
   },
+  // A 308 a browser would cache for every later visitor; nothing here may use it.
+  permanentRedirect: (url: string) => {
+    throw new Error(`NEXT_PERMANENT_REDIRECT;${url}`);
+  },
   useRouter: () => ({ push: () => undefined, refresh: () => undefined, prefetch: () => undefined, replace: () => undefined }),
   usePathname: () => currentPath,
   useSearchParams: () => new URLSearchParams(),
@@ -132,6 +145,12 @@ stubFile("components/manifest/ManifestEditorChat.tsx", { ManifestEditorChat: Mou
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
 const OTHER = "7c7c7c7c-0000-4000-8000-00000000007c";
+/**
+ * A workspace on a dedicated client shell: tenants.slug "suga-media", shell
+ * slug "suga" from custom_fields (a code seed, so no manifest row: its tenants
+ * row is what says it owns /t/suga).
+ */
+const SUGA_CO = "5d5d5d5d-0000-4000-8000-00000000005d";
 /** A custom teammate OASIS built, and one another workspace built (private). */
 const OASIS_TEAMMATE = "renewals-desk";
 const OTHER_TEAMMATE = "ops-sniper";
@@ -144,6 +163,7 @@ const USERS = {
   owner: u(2, "owner@client.test"), // owner of client-co
   member: u(3, "riley@client.test"), // plain member of client-co
   rival: u(4, "owner@other.test"), // owner of other-co, a different workspace
+  suga: u(5, "owner@suga.test"), // owner of the suga-media workspace (shell slug "suga")
 } as const;
 type Who = keyof typeof USERS;
 
@@ -170,17 +190,48 @@ async function check(name: string, fn: () => Promise<void> | void) {
   }
 }
 
-async function outcome(run: () => unknown): Promise<"404" | `redirect:${string}` | "rendered"> {
+type Outcome = "404" | `redirect:${string}` | `permanent:${string}` | "rendered";
+function classify(err: unknown): Outcome {
+  const msg = (err as Error).message;
+  if (/NEXT_HTTP_ERROR_FALLBACK;404/.test(msg)) return "404";
+  const r = /^NEXT_REDIRECT;(.*)$/.exec(msg);
+  if (r) return `redirect:${r[1]}`;
+  const p = /^NEXT_PERMANENT_REDIRECT;(.*)$/.exec(msg);
+  if (p) return `permanent:${p[1]}`;
+  throw err;
+}
+
+async function outcome(run: () => unknown): Promise<Outcome> {
   try {
     await run();
     return "rendered";
   } catch (err) {
-    const msg = (err as Error).message;
-    if (/NEXT_HTTP_ERROR_FALLBACK;404/.test(msg)) return "404";
-    const r = /^NEXT_REDIRECT;(.*)$/.exec(msg);
-    if (r) return `redirect:${r[1]}`;
-    throw err;
+    return classify(err);
   }
+}
+
+/** A page's outcome, and its tree when it rendered. */
+async function visit(run: () => unknown): Promise<{ outcome: Outcome; tree: unknown }> {
+  try {
+    return { outcome: "rendered", tree: await run() };
+  } catch (err) {
+    return { outcome: classify(err), tree: null };
+  }
+}
+
+/** Every literal href in an unrendered tree (props walked, components not called). */
+function hrefsIn(node: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
+  if (!node || typeof node !== "object" || seen.has(node)) return out;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const n of node) hrefsIn(n, out, seen);
+    return out;
+  }
+  const el = node as { $$typeof?: symbol; props?: Record<string, unknown> };
+  if (!el.$$typeof || !el.props) return out;
+  if (typeof el.props.href === "string") out.push(el.props.href);
+  for (const v of Object.values(el.props)) hrefsIn(v, out, seen);
+  return out;
 }
 
 type El = { type: unknown; props: Record<string, unknown> };
@@ -266,6 +317,10 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'other-co', 'Other Co')", args: [OTHER] },
+      {
+        sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'suga-media', 'Suga Media', ?)",
+        args: [SUGA_CO, JSON.stringify({ command_center_profile_slug: "suga" })],
+      },
       manifestRow("m-client", CLIENT, "client-co", clientManifest),
       manifestRow("m-other", OTHER, "other-co", otherManifest),
       manifestRow("m-oasis", OASIS, "oasis-ops", oasisRow),
@@ -273,6 +328,7 @@ async function main() {
       profile("owner", CLIENT, "owner", 1, "Alex Owner"),
       profile("member", CLIENT, "member", 0, "Riley Member"),
       profile("rival", OTHER, "owner", 1, "Robin Rival"),
+      profile("suga", SUGA_CO, "owner", 1, "Sasha Suga"),
       agentRow(OASIS_TEAMMATE, "Renewals Desk", OASIS, "You keep renewals moving for {{tenant.brand.name}}."),
       agentRow(OTHER_TEAMMATE, "Ops Sniper", OTHER, "OTHER-CO PRIVATE PROMPT: you run operations for {{tenant.brand.name}}."),
     ],
@@ -326,6 +382,17 @@ async function main() {
     assert.ok(osShell(await shellAt("/t/oasis-ops/leads", "cc")), "/t/oasis-ops (OASIS's manifest row)");
   });
 
+  await check("an owner whose /t/<slug> is only their shell slug (custom_fields), not tenants.slug, gets the OS shell; so does tenants.slug", async () => {
+    // suga-media's shell slug is "suga" (a code seed with no manifest row), so
+    // /t/suga matches only the custom_fields override, and /t/suga-media only
+    // the tenants row.
+    for (const path of ["/t/suga/leads", "/t/suga-media/leads", "/t/suga"]) {
+      const s = await shellAt(path, "suga");
+      assert.ok(osShell(s), `${path}: expected the OS rail and header, got sections=${JSON.stringify(s.sidebar?.sections)} header=${JSON.stringify(s.main?.header)}`);
+      assert.equal(s.sidebar!.brand, "Suga Media", `${path}: the workspace's own name, not a manifest preview brand`);
+    }
+  });
+
   await check("a member of another workspace on /t/<other-slug> never gets that workspace's chrome", async () => {
     const s = await shellAt("/t/other-co/leads", "owner");
     assert.ok(osShell(s), "their own OS shell; the page itself refuses them");
@@ -346,24 +413,56 @@ async function main() {
     assert.ok(osShell(await shellAt("/agents", "cc")));
   });
 
-  // ── 4. the marketplace and the editor: the slug's own members, or the operator ─
+  // ── 4. the marketplace, the editor and the teammate chat: the slug's own members, or the operator ─
   const marketplace = (await import("../app/t/[slug]/marketplace/page")).default;
   const marketplaceAgent = (await import("../app/t/[slug]/marketplace/[agent]/page")).default;
   const marketplaceNew = (await import("../app/t/[slug]/marketplace/new/page")).default;
   const editor = (await import("../app/t/[slug]/editor/page")).default;
+  const agentChatLegacy = (await import("../app/t/[slug]/agent/[agent]/page")).default;
+  const newTeammate = (await import("../app/agents/new/page")).default;
+  const teammateChat = (await import("../app/agents/[slug]/page")).default;
+  const { middleware } = await import("../middleware");
   const open = (slug: string, agent = "sdr") => ({
     marketplace: () => marketplace({ params: Promise.resolve({ slug }), searchParams: Promise.resolve({}) }),
     "marketplace/<agent>": () => marketplaceAgent({ params: Promise.resolve({ slug, agent }) }),
     "marketplace/new": () => marketplaceNew({ params: Promise.resolve({ slug }), searchParams: Promise.resolve({}) }),
     editor: () => editor({ params: Promise.resolve({ slug }) }),
+    "agent/<agent>": () => agentChatLegacy({ params: Promise.resolve({ slug, agent }) }),
   });
+
+  /**
+   * Where a click on a legacy URL ends: the legacy page itself, or the AI team
+   * page it moves this viewer to, followed as the browser would.
+   */
+  async function landing(run: () => unknown): Promise<{ moved: string | null; outcome: Outcome; tree: unknown }> {
+    const first = await visit(run);
+    if (!first.outcome.startsWith("redirect:")) return { moved: null, ...first };
+    const target = first.outcome.slice("redirect:".length);
+    const url = new URL(target, "https://oasisai.work");
+    const page = /^\/agents\/([^/]+)$/.exec(url.pathname);
+    assert.ok(page, `a move left for ${target}, which is not an AI team page`);
+    const next =
+      page![1] === "new"
+        ? () => newTeammate({ searchParams: Promise.resolve(Object.fromEntries(url.searchParams)) })
+        : () => teammateChat({ params: Promise.resolve({ slug: decodeURIComponent(page![1]) }) });
+    return { moved: target, ...(await visit(next)) };
+  }
+
+  /** The real middleware, for whoever is signed in. */
+  const throughMiddleware = (path: string) =>
+    middleware(
+      new NextRequest(`https://oasisai.work${path}`, {
+        headers: sessionCookie ? { cookie: `${SESSION_COOKIE_NAME}=${sessionCookie}` } : {},
+      }),
+    );
 
   await check("a signed-in member of ANOTHER workspace gets a 404 from every /t/<slug> agent page", async () => {
     for (const who of ["owner", "member"] as const) {
       await login(who);
       // "sdr" is a public platform agent, so only the workspace gate stands
-      // between this viewer and other-co's name and instructions for it; the
-      // private teammate is refused by the agent's own visibility as well.
+      // between this viewer and other-co's name and instructions for it (and,
+      // on the teammate chat, whether other-co has it on); the private
+      // teammate is refused by the agent's own visibility as well.
       for (const agent of ["sdr", OTHER_TEAMMATE]) {
         for (const [name, run] of Object.entries(open("other-co", agent))) {
           assert.equal(await outcome(run), "404", `${who} read other-co's ${name} (${agent})`);
@@ -372,11 +471,28 @@ async function main() {
     }
   });
 
+  await check("the teammate chat refuses another workspace however its URL is spelled (/t/other-co/agent/%73dr is agent 'sdr')", async () => {
+    await login("owner");
+    // Middleware moves none of it, encoded or not: the page decides.
+    for (const path of ["/t/other-co/agent/%73dr", "/t/other-co/agent/sdr"]) {
+      const res = await throughMiddleware(path);
+      assert.equal(res.headers.get("location"), null, `${path} was redirected by middleware`);
+      assert.equal(res.headers.get("x-middleware-next"), "1", path);
+    }
+    // Next hands the page the decoded segments; any spelling of the slug.
+    for (const slug of ["other-co", "Other-Co", "OTHER-CO"]) {
+      assert.equal(await outcome(() => agentChatLegacy({ params: Promise.resolve({ slug, agent: "sdr" }) })), "404", slug);
+    }
+  });
+
   await check("the workspace's own members still open them, and see what the gate keeps from everyone else", async () => {
     await login("rival");
     for (const agent of ["sdr", OTHER_TEAMMATE]) {
       for (const [name, run] of Object.entries(open("other-co", agent))) {
-        assert.equal(await outcome(run), "rendered", `other-co's owner lost ${name} (${agent})`);
+        // A page that moves this viewer to the AI team's own page must land
+        // on a working one.
+        const end = await landing(run);
+        assert.equal(end.outcome, "rendered", `other-co's owner lost ${name} (${agent})${end.moved ? ` via ${end.moved}` : ""}`);
       }
     }
     // The stand-in itself, not a re-import of its path: the element type the
@@ -387,15 +503,46 @@ async function main() {
     assert.equal(binding?.prompt_overlay, OTHER_OVERLAY, "the detail page carries the workspace's own prompt overlay");
     await login("member");
     for (const [name, run] of Object.entries(open("client-co"))) {
-      assert.equal(await outcome(run), "rendered", `client-co's member lost ${name}`);
+      const end = await landing(run);
+      assert.equal(end.outcome, "rendered", `client-co's member lost ${name}${end.moved ? ` via ${end.moved}` : ""}`);
     }
   });
 
-  await check("a verified operator still opens another workspace's marketplace and editor", async () => {
+  await check("a verified operator still opens another workspace's marketplace, editor and chat, and is never moved off them", async () => {
     await login("cc");
+    // No move: the AI team's pages act on the operator's OWN workspace, so the
+    // builder there would save into OASIS, not the workspace being previewed.
     for (const [name, run] of Object.entries(open("other-co"))) {
       assert.equal(await outcome(run), "rendered", `the operator lost other-co's ${name}`);
     }
+    const builder = findEl(await marketplaceNew({ params: Promise.resolve({ slug: "other-co" }), searchParams: Promise.resolve({}) }), CustomAgentBuilder);
+    assert.equal(builder?.props.tenantSlug, "other-co", "the previewed workspace's builder");
+  });
+
+  await check("a failed read while deciding ownership is an error, never the 404 a stranger gets", async () => {
+    // suga-media owns /t/suga through its tenants row (no manifest row claims
+    // the seed slug), so a failed tenants read is exactly the blip that used to
+    // 404 the workspace's own owner (review R3).
+    await login("suga");
+    const openOwn = () => marketplace({ params: Promise.resolve({ slug: "suga" }), searchParams: Promise.resolve({}) });
+    assert.equal(await outcome(openOwn), "rendered", "precondition: the owner opens their own marketplace");
+    const logged: unknown[][] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    await raw.execute("ALTER TABLE tenants RENAME TO tenants_unreadable");
+    try {
+      await assert.rejects(openOwn(), (err: Error) => {
+        assert.doesNotMatch(err.message, /NEXT_HTTP_ERROR_FALLBACK|NEXT_REDIRECT/, "a failed read answered as a refusal");
+        return true;
+      });
+      assert.ok(logged.some((a) => a[0] === "[tenant-access.owned_slug]"), "the failure is logged under its own tag");
+    } finally {
+      console.error = realError;
+      await raw.execute("ALTER TABLE tenants_unreadable RENAME TO tenants");
+    }
+    assert.equal(await outcome(openOwn), "rendered", "and the page is back once the read works");
   });
 
   await check("an unknown workspace is the same 404, so the answer confirms nothing", async () => {
@@ -406,8 +553,6 @@ async function main() {
   });
 
   // ── 5. the AI team's OS pages read only the session's workspace ─────────
-  const newTeammate = (await import("../app/agents/new/page")).default;
-  const teammateChat = (await import("../app/agents/[slug]/page")).default;
   const { workspaceChatSlug } = await import("../components/os/department/channel");
 
   await check("/agents/new mounts the builder on the viewer's own workspace slug", async () => {
@@ -419,6 +564,44 @@ async function main() {
     assert.ok(own, "precondition: OASIS has a chat slug");
     assert.equal(builder!.props.tenantSlug, own, "the builder's slug is the session workspace's own");
     assert.equal(builder!.props.editing, null);
+  });
+
+  await check("the builder on /agents/new opens a saved teammate's chat and returns a delete to the AI team; the marketplace's keeps its own", async () => {
+    await login("cc");
+    const team = findEl(await newTeammate({ searchParams: Promise.resolve({}) }), CustomAgentBuilder);
+    assert.equal(team?.props.home, "ai-team", "/agents/new tells the builder where it is");
+    // The marketplace's own builder (the operator's preview never moves).
+    const market = findEl(await marketplaceNew({ params: Promise.resolve({ slug: "other-co" }), searchParams: Promise.resolve({}) }), CustomAgentBuilder);
+    assert.ok(market, "the marketplace builder is mounted");
+    assert.equal(market!.props.home, undefined, "the marketplace page keeps the marketplace's paths");
+
+    const { builderPaths } = await import("../components/marketplace/builder-paths");
+    const ai = builderPaths("oasis-ai-cc", "ai-team");
+    assert.equal(ai.saved(OASIS_TEAMMATE), `/agents/${OASIS_TEAMMATE}`, "a save opens the teammate's chat");
+    assert.equal(ai.afterDelete, "/agents", "a delete returns to the AI team");
+    assert.equal(ai.slugHint("<slug>"), "Chat URL: /agents/<slug>");
+    assert.doesNotMatch(
+      [ai.saved("x"), ai.afterDelete, ai.slugHint("x"), ai.createdNote].join(" "),
+      /marketplace|\/t\//i,
+      "nothing on the AI team's builder points back at the marketplace",
+    );
+    for (const p of ["agents/[slug]/page.tsx", "agents/page.tsx"]) assert.ok(existsSync(join(ROOT, "app", p)), `app/${p}`);
+    // Left out, the marketplace's own paths, word for word as before.
+    const mk = builderPaths("client-co");
+    assert.equal(mk.saved("x"), "/t/client-co/marketplace/x");
+    assert.equal(mk.afterDelete, "/t/client-co/marketplace");
+    assert.equal(mk.slugHint("<slug>"), "Marketplace URL: /t/client-co/marketplace/<slug>");
+    assert.equal(mk.createdNote, "Created. Redirecting to the marketplace...");
+
+    // The builder is a client component (it cannot run under react-server), so
+    // its source is read: every place it sends someone comes from builderPaths.
+    const src = readFileSync(join(ROOT, "components/marketplace/CustomAgentBuilder.tsx"), "utf8");
+    assert.match(src, /const paths = builderPaths\(tenantSlug, home\);/);
+    assert.match(src, /router\.push\(paths\.saved\(data\.agent\.slug\)\)/, "a save");
+    assert.match(src, /router\.push\(paths\.afterDelete\)/, "a delete");
+    assert.match(src, /hint=\{paths\.slugHint\(/, "the slug hint");
+    assert.match(src, /setFlash\(isEdit \? "Saved\." : paths\.createdNote\)/, "the note while it opens");
+    assert.doesNotMatch(src, /`\/t\/|\/marketplace\//, "a path built in the builder instead of builder-paths.ts");
   });
 
   await check("/agents/new?edit= edits only a teammate this workspace built", async () => {
@@ -448,10 +631,73 @@ async function main() {
     }
   });
 
-  await check("a client workspace's owner gets the AI team pages' own answer (the rail's /agents row is OASIS-only today)", async () => {
+  // ── 6. the legacy builder and chat hand off to the OS pages, viewer by viewer ─
+  await check("a client owner who clicks Build on their own marketplace reaches a working builder", async () => {
     await login("owner");
-    assert.equal(await outcome(() => newTeammate({ searchParams: Promise.resolve({}) })), "404");
-    assert.equal(await outcome(() => teammateChat({ params: Promise.resolve({ slug: OASIS_TEAMMATE }) })), "404");
+    const hrefs = hrefsIn(await marketplace({ params: Promise.resolve({ slug: "client-co" }), searchParams: Promise.resolve({}) }));
+    assert.ok(hrefs.includes("/t/client-co/marketplace/new"), `the Build custom link: ${hrefs.join(", ")}`);
+    // Middleware lets the click through: a move it made could not know whether
+    // the OS builder serves this viewer (it did not, and 404'd every client).
+    const res = await throughMiddleware("/t/client-co/marketplace/new");
+    assert.equal(res.headers.get("location"), null, `middleware moved the click (status ${res.status})`);
+    assert.equal(res.headers.get("x-middleware-next"), "1");
+    // The page: a working builder on the workspace's own slug, here, or on the
+    // AI team's page once the rail opens it to client owners (decision 22).
+    const end = await landing(() => marketplaceNew({ params: Promise.resolve({ slug: "client-co" }), searchParams: Promise.resolve({}) }));
+    assert.equal(end.outcome, "rendered", `the click ended on ${end.outcome}${end.moved ? ` via ${end.moved}` : ""}`);
+    const builder = findEl(end.tree, CustomAgentBuilder);
+    assert.ok(builder, "the builder is mounted");
+    assert.equal(builder!.props.tenantSlug, "client-co", "the client's own workspace");
+  });
+
+  await check("a viewer the AI team serves moves from the legacy builder to /agents/new, query kept, by a temporary redirect", async () => {
+    await login("cc");
+    const legacyNew = (slug: string, sp: Record<string, string>) =>
+      outcome(() => marketplaceNew({ params: Promise.resolve({ slug }), searchParams: Promise.resolve(sp) }));
+    // `redirect:` is Next's redirect() (307). permanentRedirect() would read
+    // `permanent:`: a 308 the browser caches for every later visitor.
+    assert.equal(await legacyNew("oasis-ai-cc", {}), "redirect:/agents/new");
+    assert.equal(await legacyNew("oasis-ops", {}), "redirect:/agents/new", "a slug OASIS's manifest row claims is its own too");
+    assert.equal(await legacyNew("oasis-ai-cc", { edit: OASIS_TEAMMATE }), `redirect:/agents/new?edit=${OASIS_TEAMMATE}`);
+    assert.equal(await legacyNew("oasis-ai-cc", { template: "setter" }), "redirect:/agents/new?template=setter");
+    const end = await landing(() =>
+      marketplaceNew({ params: Promise.resolve({ slug: "oasis-ai-cc" }), searchParams: Promise.resolve({ edit: OASIS_TEAMMATE }) }),
+    );
+    assert.equal(end.outcome, "rendered");
+    const editing = findEl(end.tree, CustomAgentBuilder)?.props.editing as { slug?: string } | null | undefined;
+    assert.equal(editing?.slug, OASIS_TEAMMATE, "the teammate the Edit link named is in the OS builder");
+  });
+
+  await check("a workspace's own custom teammate moves to /agents/<agent>; a platform agent's chat stays on the workspace's page", async () => {
+    await login("cc");
+    const legacyChat = (agent: string) => visit(() => agentChatLegacy({ params: Promise.resolve({ slug: "oasis-ai-cc", agent }) }));
+    assert.equal((await legacyChat(OASIS_TEAMMATE)).outcome, `redirect:/agents/${OASIS_TEAMMATE}`);
+    // /agents/<agent> serves only the workspace's own teammates, so a platform
+    // agent's chat moved there would end on a 404 (review R5).
+    assert.equal(await outcome(() => teammateChat({ params: Promise.resolve({ slug: "sdr" }) })), "404", "precondition");
+    const platform = await legacyChat("sdr");
+    assert.equal(platform.outcome, "rendered", "the platform agent's chat moved to a 404");
+    assert.equal(findEl(platform.tree, AgentChat)?.props.agentSlug, "sdr");
+  });
+
+  await check("the legacy builder and chat move a viewer exactly when the OS page serves them, so a move never ends on a 404", async () => {
+    const cases: Array<[Who, string, string | null]> = [
+      ["cc", "oasis-ai-cc", OASIS_TEAMMATE],
+      ["owner", "client-co", null],
+      ["member", "client-co", null],
+      ["rival", "other-co", OTHER_TEAMMATE],
+      ["suga", "suga", null],
+    ];
+    for (const [who, slug, teammate] of cases) {
+      await login(who);
+      const served = (await outcome(() => newTeammate({ searchParams: Promise.resolve({}) }))) === "rendered";
+      const legacy = await outcome(() => marketplaceNew({ params: Promise.resolve({ slug }), searchParams: Promise.resolve({}) }));
+      assert.equal(legacy, served ? "redirect:/agents/new" : "rendered", `${who} on /t/${slug}/marketplace/new`);
+      if (!teammate) continue;
+      const chatServed = (await outcome(() => teammateChat({ params: Promise.resolve({ slug: teammate }) }))) === "rendered";
+      const chat = await outcome(() => agentChatLegacy({ params: Promise.resolve({ slug, agent: teammate }) }));
+      assert.equal(chat, chatServed ? `redirect:/agents/${teammate}` : "rendered", `${who} on /t/${slug}/agent/${teammate}`);
+    }
   });
 
   await check("the AI team roster links the builder and each teammate's chat to the OS pages, never /t/<slug>", async () => {
@@ -496,7 +742,7 @@ async function main() {
     assert.deepEqual(all.filter((h) => h.startsWith("/t/")), [], "nothing on the AI team page leaves the OS shell");
   });
 
-  // ── 6. the builder's URL is not a teammate, and /t/ pages have a crumb ──
+  // ── 7. the builder's URL is not a teammate, and /t/ pages have a crumb ──
   await check("'new' cannot be a teammate's slug: /agents/new is the builder", async () => {
     const { createCustomAgent, AgentPersistenceError } = await import("../lib/agents/persistence");
     const base = {

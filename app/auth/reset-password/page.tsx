@@ -105,9 +105,11 @@ export default function ResetPasswordPage() {
           );
           return;
         }
-        // Today ("/") resolves the workspace from the session, inside the OS
-        // shell (W1a, U1-05; it was /t/<slug>, the legacy manifest shell).
-        setTimeout(() => window.location.assign("/"), 900);
+        // The same tenant-aware landing as a reset without an invite:
+        // /auth/land asks homePathForTenant, which is Today ("/") for a
+        // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
+        // manifest shell).
+        setTimeout(() => window.location.assign("/auth/land?next=%2F"), 900);
         return;
       }
 

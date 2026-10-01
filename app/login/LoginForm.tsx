@@ -84,11 +84,11 @@ export function LoginForm() {
             setErr(b.message || b.error || "Invite redemption failed");
             return;
           }
-          // The new teammate lands on Today, like every sign-in: "/" resolves
-          // the workspace from the session (lib/auth-routing.ts
-          // homePathForTenant stays the one post-login rule). /t/<slug> was
-          // the legacy manifest shell (W1a, U1-05).
-          window.location.assign("/");
+          // The new teammate lands where every sign-in lands: /auth/land asks
+          // lib/auth-routing.ts homePathForTenant, the one post-login rule,
+          // which is Today ("/") for a workspace like theirs. /t/<slug> was the
+          // legacy manifest shell (W1a, U1-05).
+          window.location.assign("/auth/land?next=%2F");
           return;
         }
         window.location.assign(`/auth/land?next=${encodeURIComponent(next)}`);
@@ -128,11 +128,12 @@ export function LoginForm() {
         // email mismatch, etc.) and we surface it.
         //
         // Post-redeem routing: invitees joining an existing tenant skip the
-        // new-tenant wizard and land on Today ("/"), which resolves the
-        // workspace from the session (W1a, U1-05; it was /t/<slug>, the
-        // legacy manifest shell). A full page load, not router.push: this
-        // page is full-bleed and the root layout must render the OS shell.
-        window.location.assign("/");
+        // new-tenant wizard and land where every sign-in lands: /auth/land
+        // asks homePathForTenant, which is Today ("/") for a workspace like
+        // theirs (W1a, U1-05; it was /t/<slug>, the legacy manifest shell). A
+        // full page load, not router.push: this page is full-bleed and the
+        // root layout must render the OS shell.
+        window.location.assign("/auth/land?next=%2F");
         return;
       }
       router.push(`/auth/land?next=${encodeURIComponent(next)}`);

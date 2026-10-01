@@ -3,7 +3,8 @@
  * the OS shell (W1a, U1-04).
  *
  * It was /t/<slug>/agent/<agent>, which switched the rail off for the legacy
- * manifest sidebar. Middleware 308s that URL here (lib/os/redirects.ts).
+ * manifest sidebar. That page moves the viewers this page serves here, for a
+ * custom teammate (lib/os/redirects.ts OS_VIEWER_MOVES).
  *
  * This page reads only the SESSION's workspace. It serves a teammate only when
  * this workspace built it, the roster's "custom teammates"
@@ -12,7 +13,8 @@
  * Department leads have their own channel at /team/<dept>.
  *
  * GATES, before any read, are the AI team page's own (app/agents/page.tsx):
- * requireSystemSurface, a provisioned workspace and the rail's "/agents" row.
+ * requireSystemSurface, then a provisioned workspace and the rail's "/agents"
+ * row (components/os/aiteam/access.ts aiTeamServes).
  *
  * The chat posts no workspace slug: /api/agents/chat takes the workspace from
  * the session, as a department channel does.
@@ -24,16 +26,14 @@ import { ArrowLeft, Settings } from "lucide-react";
 import { Card, EmptyState } from "@/components/Card";
 import { AgentChat } from "@/components/agents/AgentChat";
 import { PageFrame } from "@/components/os/PageFrame";
+import { AI_TEAM_HREF, aiTeamServes } from "@/components/os/aiteam/access";
 import { workspaceChatSlug } from "@/components/os/department/channel";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getAgentBySlug } from "@/lib/agents/loader";
-import { mayOpenOsHref } from "@/lib/os/nav";
 import { requireSystemSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
-
-const AI_TEAM_HREF = "/agents";
 
 export default async function TeammateChatPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -49,8 +49,7 @@ export default async function TeammateChatPage({ params }: { params: Promise<{ s
       </PageFrame>
     );
   }
-  if (!viewer.provisioned) notFound();
-  if (!mayOpenOsHref(viewer.navInput, AI_TEAM_HREF)) notFound();
+  if (!aiTeamServes(viewer)) notFound();
 
   const tenantId = viewer.surface.tenantId;
   const [agent, chatSlug] = await Promise.all([

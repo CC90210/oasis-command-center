@@ -122,11 +122,12 @@ function InviteSignup({
   }, []);
 
   /**
-   * Join the workspace with the session we hold. On success, open the app:
-   * "/" resolves the workspace from the session, and the onboarding gate sends
-   * an owner whose workspace is not set up yet to the setup wizard. On failure,
-   * show the sentence for the code (never the code) and offer a retry when the
-   * invite is still valid.
+   * Join the workspace with the session we hold. On success, open the app
+   * where every sign-in lands: /auth/land asks lib/auth-routing.ts
+   * homePathForTenant (Today, "/", for a workspace like theirs), and the
+   * onboarding gate sends an owner whose workspace is not set up yet to the
+   * setup wizard. On failure, show the sentence for the code (never the code)
+   * and offer a retry when the invite is still valid.
    */
   async function joinWorkspace(): Promise<void> {
     const rr = await fetch("/api/auth/redeem-invite", {
@@ -143,7 +144,7 @@ function InviteSignup({
     setJoinRetry(false);
     // Full-page assign: the session is an httpOnly cookie and server
     // components must re-render with it.
-    window.location.assign("/");
+    window.location.assign("/auth/land?next=%2F");
   }
 
   async function onRetryJoin() {
@@ -322,12 +323,12 @@ function InviteSignup({
         setErr(inviteRedeemMessage(body));
         return;
       }
-      // Invitees skip the new-tenant wizard and land on Today ("/"),
-      // which resolves the workspace from the session (W1a, U1-05; it
-      // was /t/<slug>, the legacy manifest shell). A full page load, as
-      // joinWorkspace() above does: this page is full-bleed and the root
-      // layout must render the OS shell.
-      window.location.assign("/");
+      // Invitees skip the new-tenant wizard and land where every sign-in
+      // lands: /auth/land asks homePathForTenant, which is Today ("/") for a
+      // workspace like theirs (W1a, U1-05; it was /t/<slug>, the legacy
+      // manifest shell). A full page load, as joinWorkspace() above does:
+      // this page is full-bleed and the root layout must render the OS shell.
+      window.location.assign("/auth/land?next=%2F");
     } catch (ex: unknown) {
       setErr(ex instanceof Error ? ex.message : "Sign up failed");
     } finally {

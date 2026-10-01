@@ -12,7 +12,7 @@ import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { destinationForClaim, onboardingGateApplies, shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
-import { OS_REDIRECTS, osPatternRedirect } from "./lib/os/redirects";
+import { OS_REDIRECTS } from "./lib/os/redirects";
 
 export const PUBLIC_PATH_PREFIXES = [
   // Public marketing site — /home (served at "/" via the rewrite below),
@@ -210,15 +210,10 @@ export async function middleware(req: NextRequest) {
   if (pathname in REDIRECT_MAP && !isInternalHomeRewrite) {
     return NextResponse.redirect(new URL(REDIRECT_MAP[pathname], req.url));
   }
-  // Moves keyed by a pattern (a workspace or agent slug in the old URL), with
-  // the query kept: the AI Team builder and a teammate's chat left /t/<slug>
-  // for the OS routes /agents/new and /agents/<agent> (lib/os/redirects.ts).
-  const movedTo = osPatternRedirect(pathname);
-  if (movedTo) {
-    const target = new URL(movedTo, req.url);
-    target.search = req.nextUrl.search;
-    return NextResponse.redirect(target, 308);
-  }
+  // The AI Team's old builder and teammate-chat URLs are NOT moved here: who
+  // moves depends on the viewer, which this edge check cannot read. The old
+  // pages move the viewers the OS routes serve (lib/os/redirects.ts
+  // OS_VIEWER_MOVES).
 
   // Pass pathname through as a header so the root layout can decide whether
   // to render the dashboard shell vs full-bleed (marketing/auth) chrome.

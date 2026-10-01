@@ -17,7 +17,7 @@
  */
 import { notFound, redirect } from "next/navigation";
 import { resolveSessionContext } from "./api-auth";
-import { ownsSlug } from "./manifest/tenant-scope";
+import { ownsSlugOrThrow } from "./manifest/tenant-scope";
 import { isPlatformOperatorForAuthUser } from "./platform-operator";
 import { getServiceSupabase, getSessionUser } from "./supabase-server";
 
@@ -121,14 +121,29 @@ export async function requireTenantPreviewAccess(slug: string): Promise<void> {
  * Those pages checked only manifestExists, and middleware only checks for a
  * session, so any signed-in user could read another workspace's enabled
  * agents, their display names and prompt overlays, its private agents' prompts
- * and its whole manifest (W1a security finding). A failed profile read throws
- * (resolveSessionContext): an outage is an error, never a quiet 404.
+ * and its whole manifest (W1a security finding).
+ *
+ * An outage is an error, never a quiet 404: a failed profile read throws
+ * (resolveSessionContext), and so does a failed manifest-row or tenants read
+ * (ownsSlugOrThrow; ownsSlug would answer it "not yours"), logged here first.
+ *
+ * Answers which way the viewer got in: "own" (the session's workspace owns the
+ * slug) or "operator" (a verified operator looking at another workspace). A
+ * page that hands off to an OS route reading only the session's workspace
+ * moves an "own" viewer only.
  */
-export async function requireOwnedTenantSlug(slug: string): Promise<void> {
+export async function requireOwnedTenantSlug(slug: string): Promise<"own" | "operator"> {
   const target = slug.trim().toLowerCase();
   const session = await resolveSessionContext();
   if (!session.ok) notFound();
-  if (await ownsSlug(target, session.tenantId)) return;
-  if (await isPlatformOperatorForAuthUser(session.userId, session.email)) return;
+  let own: boolean;
+  try {
+    own = await ownsSlugOrThrow(target, session.tenantId);
+  } catch (err) {
+    console.error("[tenant-access.owned_slug]", { slug: target, tenant_id: session.tenantId }, err);
+    throw err;
+  }
+  if (own) return "own";
+  if (await isPlatformOperatorForAuthUser(session.userId, session.email)) return "operator";
   notFound();
 }
