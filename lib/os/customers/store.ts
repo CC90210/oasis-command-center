@@ -364,6 +364,30 @@ export async function matchCustomerByEmail(db: Client, tenantId: string, email: 
   return contacts.length === 1 ? String(contacts[0].customer_id) : null;
 }
 
+/**
+ * Is this email one of this workspace's current clients: a client's primary
+ * address or a contact's, archived records not counted? Existence, not
+ * identity. An address listed at two clients (a bookkeeper who serves both) is
+ * a client's address, where matchCustomerByEmail answers "no client" because it
+ * must not guess WHICH client. Tells support mail from sales mail
+ * (lib/os/approvals/executors.ts emailPurposeFor).
+ */
+export async function isCustomerEmail(db: Client, tenantId: string, email: string): Promise<boolean> {
+  requireTenant(tenantId);
+  const norm = normalizeEmail(email);
+  if (!norm) return false;
+  const rs = await db.execute({
+    sql: `SELECT 1 FROM customers WHERE tenant_id = ? AND primary_email = ? AND archived_at IS NULL
+          UNION ALL
+          SELECT 1 FROM customer_contacts cc
+            JOIN customers c ON c.id = cc.customer_id AND c.tenant_id = cc.tenant_id
+           WHERE cc.tenant_id = ? AND cc.email = ? AND c.archived_at IS NULL
+          LIMIT 1`,
+    args: [tenantId, norm, tenantId, norm],
+  });
+  return rs.rows.length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Ledger events this module owns (lib/ledger/catalog.ts)
 // ---------------------------------------------------------------------------

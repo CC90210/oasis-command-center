@@ -67,10 +67,13 @@ export function withLastTurn(status: DepartmentStatus, lastTurn: LastTurn | null
  * The department header: the counts' status (statusFor), then what the channel
  * itself knows. A ready channel adds its last turn; a channel whose AI account
  * could not be checked is Couldn't check, never Not connected (a failed read is
- * not a missing key).
+ * not a missing key), unless the counts found something waiting: an account
+ * that could not be read says nothing about a breached ticket, so a real
+ * "Needs you (n)" stands (the page asks statusFor with every channel not KNOWN
+ * to be unconnected, so the count reaches here).
  */
 export function headerStatus(status: DepartmentStatus, channel: ChannelState): DepartmentStatus {
-  if (channel.kind === "unknown") return { kind: "unknown" };
+  if (channel.kind === "unknown") return status.kind === "needs_you" ? status : { kind: "unknown" };
   return channel.kind === "ready" ? withLastTurn(status, channel.lastTurn) : status;
 }
 

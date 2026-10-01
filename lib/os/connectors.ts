@@ -887,6 +887,48 @@ export function resolveConnectorStatus(
   }
 }
 
+// -- The workspace at a glance ----------------------------------------------
+
+/**
+ * Every built connector's status, counted: how many apps the workspace has set
+ * up (connected, set up but unverified, or needing attention), how many of
+ * those need the owner, how many a live check has proven, and how many could
+ * not be checked. From resolveConnectorStatus, so the rail's Connections dot,
+ * the Operations tab and the hub's own cards can never tell different stories.
+ * Apps not connected and apps not built yet are not counted: neither is a
+ * problem.
+ */
+export type ConnectionsHealth = { setUp: number; attention: number; connected: number; unknown: number };
+
+export function connectionsHealth(
+  facts: ConnectorFacts,
+  nowMs: number,
+  catalog: readonly ConnectorDef[] = CONNECTOR_CATALOG,
+): ConnectionsHealth {
+  const out: ConnectionsHealth = { setUp: 0, attention: 0, connected: 0, unknown: 0 };
+  for (const def of catalog) {
+    if (!def.live) continue;
+    const { kind } = resolveConnectorStatus(def, facts, nowMs);
+    if (kind === "unknown") out.unknown += 1;
+    if (kind === "connected" || kind === "configured" || kind === "attention") out.setUp += 1;
+    if (kind === "connected") out.connected += 1;
+    if (kind === "attention") out.attention += 1;
+  }
+  return out;
+}
+
+/**
+ * The rail's Connections dot. "attention" when any app needs the owner; "ok"
+ * only when at least one app is set up and every one of them is proven
+ * connected; otherwise null, no dot: nothing set up, an app set up but not yet
+ * verified, or a status that could not be read is not a green one.
+ */
+export function connectionsDot(h: ConnectionsHealth): "ok" | "attention" | null {
+  if (h.attention > 0) return "attention";
+  if (h.unknown === 0 && h.setUp > 0 && h.connected === h.setUp) return "ok";
+  return null;
+}
+
 // ── Presentation helpers (pure) ────────────────────────────────────────────
 
 /** Public URL of a connector SVG, or null for a monogram. */

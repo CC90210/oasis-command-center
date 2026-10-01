@@ -15,7 +15,9 @@
  * bravo__186 applied the way scripts/apply_turso_migration.py splits it), the
  * real signed session, the real routes and the real executors — only the
  * mailbox is a fake where a live send is exercised, and next/headers +
- * next/navigation are stood in, as in tests/goals-route-persona.test.ts.
+ * next/navigation are stood in, as in tests/goals-route-persona.test.ts. The
+ * end-to-end send (check 13) runs the real OASIS sender and stands in only
+ * nodemailer, which records and never sends.
  *
  * Run: node --conditions=react-server --import tsx tests/os-approvals.test.ts
  */
@@ -36,7 +38,7 @@ delete process.env.TURSO_DB_URL;
 process.env.EMPIRE_AUTH_BACKEND = "turso";
 process.env.AUTH_SESSION_SECRET = "os-approvals-test-secret-that-is-long-enough-000001";
 // Dry-run is the deployment default; nothing in this file may be able to send.
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "BRAVO_FORCE_DRY_RUN", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD"]) {
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "BRAVO_FORCE_DRY_RUN", "OASIS_MAIL_FROM", "OASIS_MAIL_APP_PASSWORD", "SUPPORT_GMAIL_USER", "SUPPORT_GMAIL_APP_PASSWORD"]) {
   delete process.env[k];
 }
 
@@ -79,6 +81,18 @@ stub("next/navigation", {
   useRouter: () => {
     throw new Error("client hook called under react-server");
   },
+});
+// The end-to-end send (check 13) runs the REAL OASIS sender; nodemailer is its
+// only stand-in, recording the SMTP login and the message instead of sending.
+type SmtpSend = { auth: { user: string; pass: string }; mail: Record<string, unknown> };
+const smtp: SmtpSend[] = [];
+stub("nodemailer", {
+  createTransport: (opts: { auth: { user: string; pass: string } }) => ({
+    sendMail: async (mail: Record<string, unknown>) => {
+      smtp.push({ auth: opts.auth, mail });
+      return { messageId: `<smtp-${smtp.length}@oasisai.work>`, accepted: [String(mail.to)], rejected: [] };
+    },
+  }),
 });
 // The department composer context calls createContext at import time, which
 // react-server does not have. The Overview panel only needs it as a boundary.
@@ -161,6 +175,7 @@ function splitSql(sql: string): string[] {
 
 const MIGRATION = join(ROOT, "database", "turso", "bravo__186_os_approvals.sql");
 const LEDGER_MIGRATION = join(ROOT, "database", "turso", "bravo__190_ledger_core.sql");
+const CUSTOMERS_MIGRATION = join(ROOT, "database", "turso", "bravo__188_os_customers.sql");
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const req = (url: string, body?: unknown, raw?: string) =>
   new Request(url, {
@@ -453,7 +468,9 @@ async function main() {
     const today = readFileSync(join(ROOT, "components/os/today/model.ts"), "utf8");
     assert.match(today, /if \(!input\.approvals\.ok\) unavailable\.push\("approvals"\);/);
     assert.match(today, /capped: n\.unavailable\.length > 0 \|\|/, "an unread source makes the shared total a floor");
-    assert.match(code, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
+    // Every channel not KNOWN to be unconnected keeps its count (W2a: an AI
+    // account that could not be read no longer hides a real Needs you).
+    assert.match(code, /statusFor\(channel\.kind !== "not_connected", needsYou, needsYouCapped\)/);
   });
 
   await check("card: a refreshed row replaces the shown one unless the shown one is newer, and the card follows its prop", () => {
@@ -1608,6 +1625,173 @@ async function main() {
       "app/feed/page.tsx",
     ]) {
       assert.doesNotMatch(readFileSync(join(ROOT, f), "utf8"), /bg-gradient|from-\w+-\d+ to-|shadow-\[0_0_|animate-(pulse|ping|spin|bounce)|drop-shadow|bg-clip-text/, f);
+    }
+  });
+
+  // ── 13. End to end: an agent's email to a CLIENT is support mail ────────
+  // propose_email files every draft against a lead or nothing, whoever it is
+  // to, so a client's email is recognised when it is carried out, from the
+  // workspace's client records. Driven from the callable tool, through the
+  // real approve route, the real executor, the real OASIS sender with its real
+  // opt-out check, and the real /api/unsubscribe. Last in the file: the tables
+  // it adds are seen by no other check.
+  await check("end to end: propose_email to a client, approved, leaves FROM support@ with support Reply-To and a one-click opt-out that stops the next one; to a lead, the sales mailbox", async () => {
+    const customerDdl = splitSql(readFileSync(CUSTOMERS_MIGRATION, "utf8")).filter(
+      (s) => /^CREATE (UNIQUE )?(TABLE|INDEX) /.test(s) && /\b(EXISTS|ON) customer(s|_contacts)\b/.test(s),
+    );
+    assert.equal(customerDdl.length, 8, "the customers and customer_contacts tables and their six indexes");
+    for (const s of customerDdl) await raw.execute(s);
+    // The opt-out list in its live Turso shape (expression unique index included).
+    await raw.executeMultiple(`
+      CREATE TABLE email_suppressions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), email TEXT NOT NULL,
+        tenant_id TEXT, brand TEXT, reason TEXT NOT NULL DEFAULT 'unsubscribe', source TEXT NOT NULL DEFAULT 'web_form',
+        user_agent TEXT, ip_address TEXT, added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE);
+      CREATE UNIQUE INDEX email_suppressions_unique ON email_suppressions
+        (email, COALESCE(tenant_id, '__null__'), COALESCE(brand, '__null__'));
+    `);
+    const at = "2026-10-01T00:00:00.000Z";
+    const CLIENT_CONTACT = "office@harbour-dental.test";
+    // A stranger's workspace that kept the default name "OASIS AI", scanned
+    // before OASIS's own: in production dozens share the name, and a lookup by
+    // name can return any of them.
+    const STRANGER = "5a5a5a5a-0000-4000-8000-00000000005a";
+    await raw.batch(
+      [
+        { sql: "INSERT INTO tenants (rowid, id, slug, name) VALUES (-1, ?, 'stranger-ws', 'OASIS AI')", args: [STRANGER] },
+        {
+          sql: `INSERT INTO customers (id, tenant_id, display_name, primary_email, lifecycle, source_lead_id, created_at, updated_at)
+                VALUES ('cust-harbour', ?, 'Harbour Dental', 'owner@harbour-dental.test', 'active', 'lead-harbour', ?, ?)`,
+          args: [OASIS, at, at],
+        },
+        {
+          sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, email, created_at, updated_at)
+                VALUES ('contact-harbour', ?, 'cust-harbour', 'Front office', ?, ?, ?)`,
+          args: [OASIS, CLIENT_CONTACT, at, at],
+        },
+      ],
+      "write",
+    );
+
+    const ENV = {
+      LIVE_SEND_EMAIL: "1",
+      OASIS_MAIL_FROM: "team@oasisai.work",
+      OASIS_MAIL_APP_PASSWORD: "shared-pass",
+      SUPPORT_GMAIL_USER: "support@oasisai.work",
+      SUPPORT_GMAIL_APP_PASSWORD: "support-pass",
+      OASIS_UNSUBSCRIBE_HMAC_SECRET: "os-approvals-unsubscribe-secret",
+      PUBLIC_APP_URL: undefined,
+    } as const;
+    const saved = Object.fromEntries(Object.keys(ENV).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(ENV)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    const quiet = { warn: console.warn, error: console.error };
+    console.warn = () => {};
+    console.error = () => {};
+    try {
+      const runner = await import("../lib/cloud-tool-runner");
+      const oasisAgent = { tenantId: OASIS, userId: USERS.cc.id, agentKey: "sdr", authUserId: USERS.cc.id, isAdmin: true };
+      const propose = async (input: Record<string, unknown>) => {
+        const r = await runner.executeTool("propose_email", input, oasisAgent);
+        assert.equal(r.is_error, false, r.content);
+        return (JSON.parse(r.content) as { approval_id: string }).approval_id;
+      };
+      const rowOf = async (id: string) =>
+        (await raw.execute({ sql: "SELECT payload_hash, target_ref FROM approvals WHERE tenant_id = ? AND id = ?", args: [OASIS, id] })).rows[0];
+      const approve = async (id: string) => {
+        await login("cc");
+        const res = await approveRoute.POST(req("http://t.test", { payload_hash: String((await rowOf(id)).payload_hash) }) as never, ctx(id));
+        assert.equal(res.status, 200);
+        return ((await res.json()) as Body).approval!;
+      };
+
+      // A client (a contact at Harbour Dental), filed by the tool against the deal's lead.
+      const toClient = await propose({ to: CLIENT_CONTACT, subject: "Your site is live", body: "Hi,\n\nThe new site is live.", lead_id: "lead-harbour" });
+      assert.equal((await rowOf(toClient)).target_ref, "lead:lead-harbour", "the tool files a client's draft against a lead, not a client record");
+      const before = smtp.length;
+      const sentToClient = await approve(toClient);
+      assert.deepEqual([sentToClient.status, sentToClient.execution_result?.outcome], ["executed", "sent"], JSON.stringify(sentToClient.execution_result));
+      assert.equal(smtp.length, before + 1);
+      const c = smtp[smtp.length - 1];
+      assert.deepEqual(c.auth, { user: "support@oasisai.work", pass: "support-pass" }, "logs in as support@, not the sales mailbox");
+      assert.equal(c.mail.from, '"OASIS AI Support" <support@oasisai.work>');
+      assert.equal(c.mail.replyTo, "support@oasisai.work");
+      const headers = c.mail.headers as Record<string, string>;
+      const oneClick = /^<(https:\/\/oasisai\.work\/api\/unsubscribe\?email=office%40harbour-dental\.test&brand=OASIS\+AI&token=[0-9a-f]{16})>$/.exec(headers["List-Unsubscribe"]);
+      assert.ok(oneClick, `List-Unsubscribe is the signed one-click URL only: ${headers["List-Unsubscribe"]}`);
+      assert.equal(headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+      const text = String(c.mail.text);
+      assert.ok(text.endsWith(`unsubscribe here: ${oneClick[1].replace("/api/unsubscribe?", "/unsubscribe?")}`), text);
+      assert.doesNotMatch(text, /reply\s+UNSUBSCRIBE/i);
+
+      // A lead: the shared sales mailbox, replies to the approver, the outreach footer, as before.
+      const toLead = await propose({ to: "prospect@elsewhere.test", subject: "Quick question", body: "Do you have 15 minutes Thursday?", lead_id: "lead-elsewhere" });
+      const sentToLead = await approve(toLead);
+      assert.equal(sentToLead.execution_result?.outcome, "sent", JSON.stringify(sentToLead.execution_result));
+      const l = smtp[smtp.length - 1];
+      assert.deepEqual([l.auth.user, l.mail.from, l.mail.replyTo], ["team@oasisai.work", "team@oasisai.work", USERS.cc.email]);
+      assert.deepEqual(l.mail.headers, { "List-Unsubscribe": "<mailto:team@oasisai.work?subject=UNSUBSCRIBE>" });
+      assert.match(String(l.mail.text), /reached out about your business/);
+
+      // A revision of a client's draft is filed the same way (against the lead) and decided the same way.
+      const draft = await propose({ to: CLIENT_CONTACT, subject: "Launch checklist", body: "Hi,\n\nThree items left.", lead_id: "lead-harbour" });
+      assert.ok((await store.decideApproval(raw, S.cc, draft, { kind: "send_back", note: "Name the three items." }, new Date())).ok);
+      const revised = await propose({
+        to: CLIENT_CONTACT,
+        subject: "Launch checklist",
+        body: "Hi,\n\nThree items left: DNS, logo, copy.",
+        lead_id: "lead-harbour",
+        revises_approval_id: draft,
+      });
+      assert.equal((await rowOf(revised)).target_ref, "lead:lead-harbour");
+      const sentRevision = await approve(revised);
+      assert.equal(sentRevision.execution_result?.outcome, "sent", JSON.stringify(sentRevision.execution_result));
+      const rv = smtp[smtp.length - 1];
+      assert.deepEqual([rv.auth.user, rv.mail.replyTo], ["support@oasisai.work", "support@oasisai.work"], "a revised draft to a client is support mail too");
+
+      // The client presses the mail client's Unsubscribe: an RFC 8058 POST to the header's URL.
+      const unsubscribe = await import("../app/api/unsubscribe/route");
+      const oneClickPost = (url: string) => {
+        const r = new Request(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "List-Unsubscribe=One-Click" });
+        Object.defineProperty(r, "nextUrl", { value: new URL(url) });
+        return r as never;
+      };
+      const forged = await unsubscribe.POST(oneClickPost(oneClick[1].replace("brand=OASIS+AI", "brand=SunBiz")));
+      assert.equal(forged.status, 401, "the link is signed: another brand under the same token is refused");
+      const done = await unsubscribe.POST(oneClickPost(oneClick[1]));
+      assert.equal(done.status, 200, await done.clone().text());
+      const filed = (await raw.execute("SELECT email, tenant_id, brand FROM email_suppressions")).rows.map((r) => ({ email: r.email, tenant_id: r.tenant_id, brand: r.brand }));
+      assert.deepEqual(filed, [{ email: CLIENT_CONTACT, tenant_id: OASIS, brand: "OASIS AI" }], "filed under OASIS's own workspace, never the stranger's that shares the name");
+
+      // The next approved email to that client is refused before SMTP.
+      const again = await propose({ to: CLIENT_CONTACT, subject: "Following up", body: "Hi again.", lead_id: "lead-harbour" });
+      const n = smtp.length;
+      const refused = await approve(again);
+      assert.equal(refused.status, "failed");
+      assert.equal(refused.execution_result?.message, "The recipient has opted out of email, so nothing was sent.");
+      assert.equal(smtp.length, n, "nothing reached SMTP");
+
+      // Support mail sent from another of OASIS's workspaces reads OASIS's list too.
+      const { sendOasisSharedGmail } = await import("../lib/integrations/oasis-shared-gmail-send");
+      const fromStudio = await sendOasisSharedGmail({
+        tenantId: "42423fde-be8b-454f-932a-750e8c9b743d", // slug oasis-webdev, the other OASIS workspace
+        to: CLIENT_CONTACT,
+        subject: "Your request",
+        body: "Hi.",
+        idempotencyKey: "support-ack:e2e",
+        purpose: "support",
+      });
+      assert.deepEqual([fromStudio.ok, !fromStudio.ok && fromStudio.reason], [false, "suppressed"]);
+      assert.equal(smtp.length, n, "nothing reached SMTP");
+    } finally {
+      console.warn = quiet.warn;
+      console.error = quiet.error;
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 

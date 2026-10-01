@@ -42,6 +42,7 @@ import { formatCents } from "@/lib/founders-finances/money";
 import { getTursoClient } from "@/lib/turso";
 import { listActiveConnections } from "@/lib/connections/store";
 import { providerById } from "@/lib/connections/registry";
+import { getTenantIntegrationPresenceForStatus } from "@/lib/tenant-integration-store";
 import { toDateKey } from "@/lib/calendar/dates";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { listCalendars, listEvents } from "@/lib/calendar/store";
@@ -53,6 +54,7 @@ import type { Persona } from "@/lib/role-surfaces";
 import { isReadDeadlineError, withDeadline } from "@/lib/os/deadline";
 import {
   pickHotReplies,
+  REPLY_ANSWER_TYPES,
   summarizeBoard,
   summarizeDelivery,
   summarizeRecords,
@@ -189,19 +191,63 @@ export function loadDelivery(input: {
 }
 
 /**
- * Hot inbound from the last day. priorityInbound is tenant-scoped, and it
- * THROWS when lead_interactions cannot be read (lib/queries.ts recentInbound),
- * so a failed read is "Couldn't check inbound replies", never "no hot replies".
+ * Hot inbound from the last day, less what has been answered. priorityInbound
+ * is tenant-scoped, and it THROWS when lead_interactions cannot be read
+ * (lib/queries.ts recentInbound), so a failed read is "Couldn't check inbound
+ * replies", never "no hot replies". The answers are the sends, DMs, texts and
+ * calls logged on the same leads since the oldest of those replies, read the
+ * same tenant-scoped way; that read failing fails the block too, because a
+ * reply that may already be answered is not known to be waiting.
  */
 export function loadHotReplies(tenantId: string, nowMs: number): Promise<Read<HotReply[]>> {
-  return read("inbound", async () => pickHotReplies(await priorityInbound(tenantId, 10), nowMs));
+  return read("inbound", async () => {
+    const inbound = await priorityInbound(tenantId, 10);
+    const leads = [...new Set(inbound.map((r) => (r.lead_id || "").trim()).filter(Boolean))];
+    const oldest = inbound.reduce((min, r) => Math.min(min, Date.parse(r.created_at)), Infinity);
+    let outbound: Array<{ lead_id: string | null; type: string; created_at: string }> = [];
+    if (leads.length > 0 && Number.isFinite(oldest)) {
+      const res = await getServiceSupabase()
+        .from("lead_interactions")
+        .select("lead_id, type, created_at")
+        .eq("tenant_id", tenantId)
+        .in("lead_id", leads)
+        .in("type", [...REPLY_ANSWER_TYPES])
+        .gte("created_at", new Date(oldest).toISOString());
+      if (res.error) throw new Error(`reply answers read failed: ${res.error.message}`);
+      outbound = (res.data || []) as typeof outbound;
+    }
+    return pickHotReplies(inbound, nowMs, outbound);
+  });
+}
+
+/** The provider ids Zernio has gone by (it was Late until 2026). */
+const ZERNIO_PROVIDERS: readonly string[] = ["zernio", "late"];
+
+/**
+ * Has this workspace connected its own Zernio account? A live
+ * Connections-framework row for it, or a Zernio/Late API key in the
+ * workspace's key store, read for those services alone (the strict status
+ * reader: presence only, never a value). Any of these reads failing, or a
+ * Zernio/Late key that will not decrypt, is a throw: "not connected" would be
+ * a guess. Another app's unreadable key is not this question's answer, so it
+ * never turns the Marketing card into "Couldn't load".
+ */
+async function zernioConnected(tenantId: string): Promise<boolean> {
+  const [connections, keys] = await Promise.all([
+    listActiveConnections(getTursoClient(), tenantId),
+    Promise.all(ZERNIO_PROVIDERS.map((service) => getTenantIntegrationPresenceForStatus(tenantId, service, ["api_key"]))),
+  ]);
+  return connections.some((c) => ZERNIO_PROVIDERS.includes(c.provider)) || keys.some((k) => k.api_key === true);
 }
 
 /**
  * What the Marketing card reads: distinct pieces published in 7 days
  * (post_analytics via momentumMetrics, tenant-scoped; null = that read failed)
  * and when this workspace's post analytics last synced from Zernio, so the
- * card names its source and its freshness instead of a fixed label.
+ * card names its source and its freshness instead of a fixed label. Only when
+ * nothing has ever synced does it ask whether Zernio is connected at all: a
+ * workspace that never connected it is told to connect a social account, not
+ * shown Zernio as a sync that is not happening.
  */
 export function loadContentWeek(tenantId: string): Promise<Read<ContentWeek>> {
   return read("content", async () => {
@@ -216,7 +262,12 @@ export function loadContentWeek(tenantId: string): Promise<Read<ContentWeek>> {
     ]);
     if (latest.error) throw new Error(`post_analytics freshness read failed: ${latest.error.message}`);
     const row = ((latest.data || []) as Array<{ last_synced_at: string | null }>)[0];
-    return { published: momentum.contentPublished7d, lastSyncedAt: row?.last_synced_at ?? null };
+    const lastSyncedAt = row?.last_synced_at ?? null;
+    return {
+      published: momentum.contentPublished7d,
+      lastSyncedAt,
+      zernioConnected: lastSyncedAt ? null : await zernioConnected(tenantId),
+    };
   });
 }
 

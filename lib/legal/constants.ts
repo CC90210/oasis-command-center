@@ -51,29 +51,49 @@ export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
  * changed when they did not. /privacy promises to update this date whenever
  * it changes, so bump it in the same commit as any edit to the policy.
  */
-export const PRIVACY_LAST_UPDATED = "September 30, 2026";
+export const PRIVACY_LAST_UPDATED = "October 1, 2026";
 
 /**
- * Every address the legal pages publish. Each one must be a mailbox a person
- * actually reads, listed in config/verified-mailboxes.json;
- * tests/verified-mailboxes.test.ts fails the build otherwise.
+ * OASIS's one published contact address: support@oasisai.work.
  *
- * Until 2026-09-30 these were four role aliases (privacy@, legal@, dmca@,
- * support@) that had never been created: CC confirmed privacy@ did not exist,
- * the Gmail send-as list held only conaugh@, and no mail had ever reached any of
- * the four. A privacy request, a legal notice or a DMCA takedown sent to them
- * went nowhere, while the policy promised a 30-day answer. They now point at
- * the one verified inbox. To bring a role address back, create it as a Google
- * Workspace alias, send it a test message, add it to verified-mailboxes.json,
- * and only then change it here.
+ * THE single source. The legal pages (LEGAL_CONTACTS and PRIVACY_OFFICER below),
+ * the marketing site, the error and opt-out pages (lib/marketing/routes.ts
+ * CONTACT_EMAIL re-exports this), the privacy manifest
+ * (docs/compliance/PRIVACY_NUTRITION_LABEL.json, held equal by
+ * tests/legal-compliance-drift.test.ts), and the Reply-To of every email OASIS
+ * sends a client (lib/email/support-mailbox.ts) all come from here.
+ *
+ * It must be a mailbox a person actually reads, listed in
+ * config/verified-mailboxes.json; tests/verified-mailboxes.test.ts fails the
+ * build otherwise.
+ *
+ * History. Until 2026-09-30 the legal pages published four role aliases
+ * (privacy@, legal@, dmca@, support@) that had never been created: CC confirmed
+ * privacy@ did not exist, the Gmail send-as list held only conaugh@, and no mail
+ * had ever reached any of the four. A privacy request, a legal notice or a DMCA
+ * takedown sent to them went nowhere, while the policy promised a 30-day
+ * answer. From 2026-09-30 they pointed at the founder's own inbox. On
+ * 2026-10-01 CC created support@oasisai.work as its own Google Workspace user,
+ * to carry every client-facing contact and the OASIS brand, so the founder's
+ * address goes back to being his identity (his login, his calendar, the sales
+ * mailbox) and is published nowhere (tests/support-address.test.ts).
+ *
+ * Privacy, legal and DMCA mail share this inbox. Whatever automation reads it
+ * must hand those to a person rather than answer them.
  */
-const VERIFIED_INBOX = "conaugh@oasisai.work";
+export const OASIS_SUPPORT_EMAIL = "support@oasisai.work";
 
+/**
+ * Every address the legal pages publish, by role. All four are
+ * OASIS_SUPPORT_EMAIL today. To give a role its own address again, create it
+ * in Google Workspace, send it a test message, add it to
+ * verified-mailboxes.json, and only then change it here.
+ */
 export const LEGAL_CONTACTS = {
-  privacy: VERIFIED_INBOX,
-  legal: VERIFIED_INBOX,
-  dmca: VERIFIED_INBOX,
-  support: VERIFIED_INBOX,
+  privacy: OASIS_SUPPORT_EMAIL,
+  legal: OASIS_SUPPORT_EMAIL,
+  dmca: OASIS_SUPPORT_EMAIL,
+  support: OASIS_SUPPORT_EMAIL,
 } as const;
 
 /**
@@ -90,6 +110,9 @@ export const LEGAL_CONTACTS = {
  * `title` carries both languages so the French version of the policy (Charter
  * of the French Language) reuses the statutory French title rather than a
  * retranslation.
+ *
+ * The NAME is the designation and stays a person. The contact is the privacy
+ * contact the rest of the policy gives (support@), which reaches that person.
  */
 export const PRIVACY_OFFICER = {
   name: "Conaugh McKenna",
