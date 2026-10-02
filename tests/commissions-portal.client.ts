@@ -12,10 +12,11 @@
  * lives in the .test.ts.
  *
  * Run by tests/commissions-portal.test.ts with plain `node --import tsx`
- * (input on stdin: { initial, afterPayout, paidRowId, order }). `order` says
- * which of the two reads answers first: "newer-first" is the review's race;
- * "older-first" checks the older read cannot end the busy state while the
- * newer one is still out.
+ * (input on stdin: { initial, afterPayout, paidRowId, order, ... }). `order`
+ * says which of the two reads answers first: "newer-first" is the review's
+ * race; "older-first" checks the older read cannot end the busy state while
+ * the newer one is still out; "form-open" checks a void or paid form already
+ * open when a Refresh starts cannot be confirmed until it answers.
  */
 
 // A module, not a global script: its `main` must not collide with other
@@ -130,7 +131,9 @@ async function main() {
     initial: unknown;
     afterPayout: unknown;
     paidRowId: string;
-    order: "newer-first" | "older-first";
+    order: "newer-first" | "older-first" | "form-open";
+    voidRowId?: string;
+    otherApprovedRowId?: string;
   };
 
   const render = (): El => {
@@ -161,13 +164,40 @@ async function main() {
     return tree;
   };
 
+  const type = (rowId: string, value: string) => {
+    const field = elements(article(render(), rowId)).find((el) => el.type === "input");
+    if (!field) throw new Error(`no form field on ${rowId}`);
+    (field.props.onChange as (event: unknown) => void)({ target: { value } });
+  };
+
   let tree = look("opened");
+  if (input.order === "form-open") {
+    // A form already open when a read starts: its Confirm must wait too.
+    const voidRow = String(input.voidRowId);
+    const paidRow = String(input.otherApprovedRowId);
+    click(button(article(tree, voidRow), /^Void accrual$/), "Void accrual");
+    type(voidRow, "Duplicate attribution confirmed against the signed deal");
+    click(button(render(), /^Refresh$/), "Refresh");
+    await flush();
+    look("refresh in flight with a void form open");
+    calls[0].respond(200, input.initial);
+    await flush();
+    tree = look("refresh answered with a void form open");
+    click(button(article(tree, paidRow), /^Mark as paid$/), "Mark as paid");
+    type(paidRow, "eTransfer-2026-10-02-0002");
+    click(button(render(), /^Refresh$/), "Refresh");
+    await flush();
+    look("refresh in flight with a paid form open");
+    calls[1].respond(200, input.initial);
+    await flush();
+    look("refresh answered with a paid form open");
+    process.stdout.write(JSON.stringify({ methods: calls.map((call) => call.method), steps }));
+    return;
+  }
+
   // 1. Open the paid form on the approved entry and type the reference.
   click(button(article(tree, input.paidRowId), /^Mark as paid$/), "Mark as paid");
-  tree = render();
-  const field = elements(article(tree, input.paidRowId)).find((el) => el.type === "input");
-  if (!field) throw new Error("no payout reference field");
-  (field.props.onChange as (event: unknown) => void)({ target: { value: "eTransfer-2026-10-02-0001" } });
+  type(input.paidRowId, "eTransfer-2026-10-02-0001");
   tree = render();
   // 2. Confirm: the payout is being saved (its answer is held).
   click(button(article(tree, input.paidRowId), /^Confirm paid$/), "Confirm paid");

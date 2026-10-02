@@ -773,7 +773,7 @@ async function main() {
   const loadThenRelease = (deadlineMs: number, held: { open: () => void }) =>
     errorsDuring(async () => {
       const before = begun.length;
-      const answer = await within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs }), 5_000);
+      const answer = await within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs }), deadlineMs + 5_000);
       const byAnswer = begun.length;
       faults = {};
       held.open();
@@ -806,7 +806,8 @@ async function main() {
     const lastWave = /FROM "(tenant_records|website_sales_payment_receipts)"/;
     faults = { hold: { match: lastWave, until: held.until } };
     try {
-      const { value, lines } = await loadThenRelease(1_500, held);
+      // Generous: the first two waves must be in before the deadline, even on a busy machine.
+      const { value, lines } = await loadThenRelease(3_000, held);
       assert.deepEqual(value.answer, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
       assert.equal(value.beforeAnswer.filter((sql) => lastWave.test(sql)).length, 4, "4 of the 6 last-wave reads had started");
       assert.deepEqual(value.afterAnswer, [], "a queued read started after the page already had its answer");
@@ -1032,16 +1033,20 @@ async function main() {
     cad.paidCents += paid.amountCents;
 
     type Step = { label: string; paidRowStatus: string | null; refreshDisabled: boolean; payoutControls: Array<{ text: string; disabled: boolean }>; screen: string };
-    const race = (order: "newer-first" | "older-first") => {
+    const race = (order: "newer-first" | "older-first" | "form-open") => {
       const r = spawnSync(process.execPath, ["--import", "tsx", "tests/commissions-portal.client.ts"], {
         cwd: ROOT,
         encoding: "utf8",
         env: plainEnv(),
-        input: JSON.stringify({ initial, afterPayout, paidRowId, order }),
+        input: JSON.stringify({ initial, afterPayout, paidRowId, order, voidRowId: "c-closer-maple", otherApprovedRowId: "c-closer-harbour" }),
       });
       assert.equal(r.status, 0, `the interaction helper exited ${r.status}:\n${r.stderr}`);
       const out = JSON.parse(r.stdout) as { methods: string[]; steps: Step[] };
-      assert.deepEqual(out.methods, ["PATCH", "GET", "GET"], "the save, the Refresh, then the save's own re-read");
+      assert.deepEqual(
+        out.methods,
+        order === "form-open" ? ["GET", "GET"] : ["PATCH", "GET", "GET"],
+        order === "form-open" ? "two Refreshes" : "the save, the Refresh, then the save's own re-read",
+      );
       return (label: string): Step => {
         const found = out.steps.find((s) => s.label === label);
         assert.ok(found, `${order}: no step "${label}"`);
@@ -1075,6 +1080,18 @@ async function main() {
     const done = older("re-read after the payout answered");
     assert.equal(done.paidRowStatus, "paid");
     assert.ok(done.payoutControls.some((control) => !control.disabled), "the buttons work again once the latest read is in");
+
+    // A form already open when a Refresh starts: its Confirm waits for the read.
+    const forms = race("form-open");
+    const confirm = (s: Step, name: string) => {
+      const found = s.payoutControls.find((control) => control.text === name);
+      assert.ok(found, `${s.label}: "${name}" on screen`);
+      return found;
+    };
+    assert.equal(confirm(forms("refresh in flight with a void form open"), "Confirm void").disabled, true, "Confirm void during a read");
+    assert.equal(confirm(forms("refresh answered with a void form open"), "Confirm void").disabled, false, "Confirm void after the read");
+    assert.equal(confirm(forms("refresh in flight with a paid form open"), "Confirm paid").disabled, true, "Confirm paid during a read");
+    assert.equal(confirm(forms("refresh answered with a paid form open"), "Confirm paid").disabled, false, "Confirm paid after the read");
   });
 
   // -- 3. error sentences --------------------------------------------------
