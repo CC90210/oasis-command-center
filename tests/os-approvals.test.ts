@@ -891,7 +891,9 @@ async function main() {
       console.error = quiet;
     }
     assert.equal(sent.length, before);
-    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["publish_post", "send_email", "send_slack_message"], "only kinds with a sanctioned send path");
+    // reply_ticket (2026-10-01): an approved support@ reply, posted on its ticket
+    // and emailed through the desk's reply path (tests/support-inbox-drafts.test.ts).
+    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["publish_post", "reply_ticket", "send_email", "send_slack_message"], "only kinds with a sanctioned send path");
   });
 
   await check("readiness: an email from a client workspace has no sender here and fails loudly when approved", async () => {

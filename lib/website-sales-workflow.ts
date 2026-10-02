@@ -1,4 +1,9 @@
-import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
+  ownsOasisSalesRecord,
+  roleMayOperateOasisSalesLead,
+} from "@/lib/oasis-sales-pipeline-policy";
 import { mayQuoteAndClose } from "@/lib/team-roles";
 import type { LeadSourceTrack } from "@/lib/website-sales-comp";
 import { canonicalFromRepDisposition } from "./call-disposition";
@@ -46,6 +51,75 @@ export function mayRepRunWebsiteSalesDeal(input: {
   const actor = normalize(input.actorUserId);
   if (!actor) return false;
   return actor === normalize(input.assignedTo) || actor === normalize(input.auditHostUserId);
+}
+
+export type WebsiteSalesLeadSeat = {
+  assignedToUser: boolean;
+  attributedToUser: boolean;
+  actorHoldsDealSeat: boolean;
+  builderMayRunDelivery: boolean;
+  builderOwnsDelivery: boolean;
+  builderOnOwnSalesLead: boolean;
+};
+
+/**
+ * May this actor write this one website-sales lead at all? The ownership half
+ * of PATCH /api/website-sales/[leadId] (the role floor is
+ * mayWorkWebsiteSalesLifecycle, checked before the read). Shared with
+ * GET /api/web-leads/[id]?view=booking so the call screen never offers a
+ * booking the PATCH would refuse: a manager who is only a collaborator is
+ * refused here even though ownsOasisSalesRecord counts collaborators.
+ */
+export function websiteSalesLeadSeat(input: {
+  teamRole: string;
+  isAdmin: boolean;
+  userId: string;
+  row: { id: string; data: Record<string, unknown> };
+}):
+  | ({ ok: true } & WebsiteSalesLeadSeat)
+  | { ok: false; error: "lead_not_assigned_to_agent" | "builder_not_assigned_to_lead" | "builder_delivery_stage_only" } {
+  const { isAdmin, userId, row } = input;
+  const role = input.teamRole.trim().toLowerCase();
+  const current = row.data;
+  const me = userId.toLowerCase();
+  const assignedToUser = String(current.assigned_to || "").toLowerCase() === me;
+  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === me;
+  const actorOwnsSalesLead = ownsOasisSalesRecord(row, userId);
+  const actorHoldsDealSeat = mayRepRunWebsiteSalesDeal({
+    actorUserId: userId,
+    assignedTo: current.assigned_to,
+    auditHostUserId: current.audit_host_user_id,
+  });
+  // A manager's frozen attribution survives a handoff for reporting, but it is
+  // not continuing write authority. Managers operate their own assigned lead
+  // normally and coach every other roster lead read-only. The explicit
+  // admin_access toggle retains its existing tenant-wide semantics via isAdmin.
+  if (role === "manager" && !isAdmin && !assignedToUser && !actorHoldsDealSeat) {
+    return { ok: false, error: "lead_not_assigned_to_agent" };
+  }
+  const isBuilder = role === "builder";
+  const builderMayRunDelivery = mayOperateOasisDeliveryStage(input.teamRole, current.stage);
+  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(row, userId);
+  // CC, 2026-08-25: a builder working HIS OWN sales lead (assigned, or frozen
+  // attribution) walks the normal rep path. The delivery lane exists for his
+  // BUILD work; letting it intercept the selling half 403'd every structured
+  // sales action a selling builder clicked.
+  const builderOnOwnSalesLead = isBuilder && (assignedToUser || attributedToUser);
+  if (isBuilder && !builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)) {
+    return { ok: false, error: builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only" };
+  }
+  if (!isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
+    return { ok: false, error: "lead_not_assigned_to_agent" };
+  }
+  return {
+    ok: true,
+    assignedToUser,
+    attributedToUser,
+    actorHoldsDealSeat,
+    builderMayRunDelivery,
+    builderOwnsDelivery,
+    builderOnOwnSalesLead,
+  };
 }
 
 /**

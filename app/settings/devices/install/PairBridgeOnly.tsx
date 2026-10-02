@@ -83,7 +83,7 @@ export function PairOnlyView({ os, onOs, code, command, secondsLeft, phase, erro
   return (
     <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-5">
       <div>
-        <h2 className="text-base font-bold text-fg">Pair a computer that already has the bridge</h2>
+        <h2 className="text-base font-bold text-fg">Pair a computer that already has the OASIS bridge</h2>
         <p className="text-xs text-fg-muted mt-0.5">
           One command on that computer links its bridge to your workspace. It installs nothing.
         </p>

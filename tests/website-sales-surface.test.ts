@@ -31,11 +31,14 @@ for (const phrase of ["Your job is not to close", "Say this", "If the conversati
 }
 assert.ok(script.includes("$500 setup plus $150/month"), "the rep script states the live Starter price");
 assert.equal(script.includes("$2,000"), false, "the rep script does not quote the retired starting price");
+// The gate labels moved to lib/sales-qualification.ts, which Pipeline renders.
+const qualificationGates = readFileSync("lib/sales-qualification.ts", "utf8");
 assert.ok(
-  lifecycle.includes("Open to $500 setup + $150/month"),
+  qualificationGates.includes("Open to $500 setup + $150/month"),
   "the Pipeline qualification gate matches the live Starter price",
 );
 assert.equal(lifecycle.includes("Open to $2,000+"), false, "the retired qualification gate is gone");
+assert.equal(qualificationGates.includes("Open to $2,000+"), false, "the retired qualification gate is gone");
 assert.match(
   lifecycle,
   /initialOffer\?\.packageId[\s\S]*?\? \(initialOffer\.packageId as WebsitePackageId\)[\s\S]*?: "starter";/,
@@ -83,7 +86,10 @@ assert.match(
   "the assigned builder can advance a fully paid Won lead into onboarding",
 );
 assert.ok(
-  workflowRoute.includes("ownsOasisDeliveryRecord") &&
+  // The ownership half lives in websiteSalesLeadSeat (lib/website-sales-workflow.ts),
+  // shared with the call screen's booking read.
+  workflowRoute.includes("websiteSalesLeadSeat(") &&
+    readFileSync("lib/website-sales-workflow.ts", "utf8").includes("ownsOasisDeliveryRecord(row, userId)") &&
     workflowRoute.includes("!builderOwnsDelivery") &&
     pipelineDetail.includes("ownsOasisDeliveryRecord(activeRecord, session.userId)"),
   "delivery advances require the assigned fulfillment owner in both the API and rendered controls",

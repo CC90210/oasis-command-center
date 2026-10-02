@@ -386,12 +386,17 @@ async function main() {
       assert.deepEqual(nav!.props.sections, FOUNDERS_PORTAL.sections, "the chips get exactly the sections the layout passed");
     }
 
-    // The layout keeps the founder gate and filters the sections on the
-    // server, and no longer draws the banner itself.
+    // The founders layout keeps the founder gate and no longer mounts the
+    // banner at all (2026-10-01): only the Growth preview shell does, and it
+    // filters the sections on the server. Every Finances and Content page is
+    // walked for it in tests/content-hub.test.ts.
     const layout = readFileSync(join(root, "app/founders/layout.tsx"), "utf8");
-    assert.match(layout, /const founder = await resolveFounder\(\);\s*if \(!founder\) notFound\(\);/, "founder gate intact");
-    assert.match(layout, /<FoundersPortalBanner[\s\S]*?sections=\{FOUNDERS_PORTAL\.sections\.filter\([\s\S]*?isFinanceOwnerEmail\(founder\.email\)/, "audience filter intact, on the server");
-    assert.doesNotMatch(layout, /rgba\(31,227,240/, "the banner markup lives only in FoundersPortalBanner");
+    assert.match(layout, /if \(!\(await resolveFounder\(\)\)\) notFound\(\);/, "founder gate intact");
+    assert.doesNotMatch(layout, /FoundersPortalBanner|FoundersSectionNav/, "the founders layout mounts no banner and no chips");
+    const growth = readFileSync(join(root, "app/founders/growth/layout.tsx"), "utf8");
+    assert.match(growth, /const founder = await resolveFounder\(\);\s*if \(!founder\) notFound\(\);/, "the Growth shell's founder gate intact");
+    assert.match(growth, /<FoundersPortalBanner[\s\S]*?sections=\{FOUNDERS_PORTAL\.sections\.filter\([\s\S]*?isFinanceOwnerEmail\(founder\.email\)/, "audience filter intact, on the server");
+    for (const f of [layout, growth]) assert.doesNotMatch(f, /rgba\(31,227,240/, "the banner markup lives only in FoundersPortalBanner");
   });
 
   // ── every tab has its own skeleton ──────────────────────────────────────

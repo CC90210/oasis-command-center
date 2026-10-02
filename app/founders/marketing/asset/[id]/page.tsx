@@ -325,8 +325,8 @@ export default async function AssetDetailPage({
               ) : (
                 <p className="text-xs text-fg-dim">
                   {slidePaths.length - slidePairs.length} of {slidePaths.length} slides could not
-                  be loaded, so the order cannot be changed safely from a partial view. Refresh —
-                  if it persists, the missing objects are named in the server log.
+                  be loaded, so the order cannot be changed safely from a partial view. Try again
+                  in a minute; the cause is logged for the OASIS team.
                 </p>
               )}
             </Card>

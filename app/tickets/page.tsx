@@ -44,6 +44,7 @@ import { deliveryAccessFor, getDeliveryDb, loadAssignmentRoster, loadMemberDirec
 import { listClientTenants, listProjects, listTickets, type Ticket } from "@/lib/delivery/store";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { getDeskForm, type DeskFormState } from "@/lib/delivery/desks";
+import { inboxHealth, loadInboxStatus, type InboxHealth } from "@/lib/delivery/support-inbox-health";
 import { loadCustomerOptions, type CustomerOptions } from "@/lib/os/customers/session";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 
@@ -172,6 +173,19 @@ async function loadDesk(
     failure = err instanceof Error ? err.message : String(err);
   }
 
+  // OASIS's desk also reads support@ (the reader runs on CC's PC): say when it
+  // was last read. A read that fails hides the line, logged; it never blocks
+  // the queue.
+  let inbox: InboxHealth | null = null;
+  if (oasis) {
+    try {
+      const status = await loadInboxStatus(db, viewer.tenantId);
+      inbox = status ? inboxHealth(status.mailbox, status.row, now) : null;
+    } catch (err) {
+      console.error("[tickets.page.support_inbox]", err);
+    }
+  }
+
   const slaFilter = SLA_FILTERS.find((f) => f.value === sp.sla) ?? null;
   const rows = (result?.rows ?? [])
     .map((t) => ({ t, sla: slaStatus(t, now) }))
@@ -203,7 +217,18 @@ async function loadDesk(
     tenants,
     customers,
     form,
+    inbox,
   };
+}
+
+/** "support@ last read 2 minutes ago", or the warning when it has not been read for 20 minutes. */
+function SupportInboxLine({ inbox }: { inbox: InboxHealth }) {
+  const tone = inbox.state === "reading" ? "text-fg-muted" : inbox.state === "not_started" ? "text-fg-dim" : "text-status-warm";
+  return (
+    <p role="status" className={`text-[13px] leading-5 ${tone}`}>
+      {inbox.sentence}
+    </p>
+  );
 }
 
 /**
@@ -258,6 +283,8 @@ function DeskView({ data, sp, vendorRequests }: { data: DeskData; sp: Search; ve
               <KpiTile label="Waiting on client" value={counts.waiting} status="live" />
               <KpiTile label="Unassigned" value={counts.unassigned} status="live" hint="still need the team" />
             </section>
+
+            {data.inbox && <SupportInboxLine inbox={data.inbox} />}
 
             <SupportFormCard form={form} oasis={oasis} />
 

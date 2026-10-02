@@ -821,6 +821,40 @@ export async function expireApproval(db: Client, tenantId: string, id: string, n
   return results[0].rowsAffected === 1;
 }
 
+/**
+ * pending -> cancelled: a card withdrawn before anyone decided it. Used where
+ * the thing a card would act on was settled another way while it was being
+ * filed (lib/delivery/support-drafts.ts: a failure report recorded for the
+ * email while its draft's approval was being created), so nobody can approve
+ * words the record does not stand behind. Written like the withdrawal in a
+ * revision: the compare-and-swap and its "cancelled" event in one batch, the
+ * event only when the swap changed the row. False = not pending (decided,
+ * expired or already withdrawn): nothing changed.
+ */
+export async function cancelPendingApproval(
+  db: Client,
+  tenantId: string,
+  id: string,
+  actor: Actor,
+  meta: Record<string, unknown> | null,
+  now: Date,
+): Promise<boolean> {
+  const t = requireTenant(tenantId);
+  const nowIso = now.toISOString();
+  const results = await db.batch(
+    [
+      {
+        sql: `UPDATE approvals SET status = 'cancelled', updated_at = ?
+              WHERE tenant_id = ? AND id = ? AND status = 'pending'`,
+        args: [nowIso, t, id],
+      },
+      eventIfChanged(t, id, "cancelled", actor, meta, nowIso),
+    ],
+    "write",
+  );
+  return results[0].rowsAffected === 1;
+}
+
 // ---------------------------------------------------------------------------
 // Comment
 // ---------------------------------------------------------------------------

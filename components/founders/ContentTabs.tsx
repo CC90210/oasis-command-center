@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Content's tab bar: Overview - Library - Train - Performance. The one strip
+ * Content's tab bar: Overview - Library - Training - Performance. The one strip
  * that reaches the Library from inside the OS shell (2026-10-01): the rail
  * draws Content as a single row and the breadcrumb knew no sub-pages, so the
  * Library was reachable only through the legacy founders banner, which CC had
@@ -19,9 +19,11 @@
  * is not the Overview, and longest-prefix alone would underline Overview there.
  * The other tabs light on themselves and their sub-paths, longest prefix wins.
  *
- * Train stays a tab for now. It moves to Playbook > Skills ("Teach from a URL")
- * with the Playbook track (docs/os-revamp/01-product-surface-ia-ux.md, the
- * /founders/marketing row).
+ * Training (route /train) stays a tab for now. It moves to Playbook > Skills
+ * ("Teach from a URL") with the Playbook track
+ * (docs/os-revamp/01-product-surface-ia-ux.md, the /founders/marketing row).
+ * It was labelled "Train" until 2026-10-01; CC did not know what the "Training
+ * corpus" was, so the tab is a noun and the page says what it holds.
  *
  * Plain <Link>s, as on Finances: with a loading.tsx beside the layout, Next
  * prefetches each tab's shell and a click paints the skeleton under the tabs
@@ -36,7 +38,7 @@ export const CONTENT_ROOT = "/founders/marketing";
 export const CONTENT_TABS = [
   { href: "/founders/marketing", label: "Overview" },
   { href: "/founders/marketing/library", label: "Library" },
-  { href: "/founders/marketing/train", label: "Train" },
+  { href: "/founders/marketing/train", label: "Training" },
   { href: "/founders/marketing/performance", label: "Performance" },
 ] as const;
 
