@@ -70,10 +70,14 @@ test("no operator-identity check survives in this component at all", () => {
   // for "who is looking" now. Keeping the helper around invites the next person
   // to reach for it, which is exactly how this was written the first time.
   for (const token of ["isOperatorEmail", "isOperator"]) {
-    // Whole identifiers: oasisOperatorAgents (OASIS's bridge agents, keyed by
-    // the workspace's tenant id, not by who is looking) contains the letters.
-    const uses = SRC.split(new RegExp(`\\b${token}\\b`)).length - 1;
-    const inComment = SRC.split(new RegExp(`//.*\\b${token}\\b`)).length - 1;
+    // A SUBSTRING match, so a renamed check (isOperatorViewer, isOperatorAccount)
+    // still fails this. The one exemption is oasisOperatorAgents, whose letters
+    // contain the token: OASIS's bridge agents, keyed by the workspace's tenant
+    // id, not by who is looking. Whole-word matching would have let the renames
+    // through.
+    const live = `(?<!oas)${token}`;
+    const uses = SRC.split(new RegExp(live)).length - 1;
+    const inComment = SRC.split(new RegExp(`//.*${live}`)).length - 1;
     assert.equal(
       uses - inComment,
       0,
