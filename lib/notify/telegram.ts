@@ -45,6 +45,16 @@
  * can observe it — retries, status checks, durable failure markers — and stays
  * invisible until a human happens to mention they are getting someone else's
  * mail.
+ *
+ * LANES ARE OASIS'S, NEVER A CLIENT'S
+ * -----------------------------------
+ * Every lane below is an OASIS deployment credential. A client workspace's
+ * alert never rides one: writeAgentAlert sends it only to the bot that
+ * workspace saved under Connections > Telegram (./workspace-telegram.ts), and
+ * a workspace with no saved bot gets its in-app card and nothing else. Until
+ * 2026-10-02 the lane was chosen per call site, not per workspace, so a
+ * client's customers' texts were escalated into CC's DM. A new lane is for a
+ * new OASIS audience; a client audience is a workspace bot, never a lane.
  */
 import "server-only";
 
