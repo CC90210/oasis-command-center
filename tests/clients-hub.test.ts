@@ -1163,6 +1163,120 @@ async function main() {
     assert.equal((await store.getCustomer(db, OASIS, rec.customer.id))!.stripe_customer_id, "cus_BY_HAND", "the hand link is never overwritten");
   });
 
+  // ── Stripe import: choosing who (CC, 2026-10-02: "I want to be able to just
+  // import one because some of them are inactive") ─────────────────────────────
+  const dialog = await import("../components/os/landings/clients-actions");
+  const sub = (id: string, cus: string, name: string, email: string, status: string, updatedAt: string) => ({
+    sql: `INSERT INTO fin_subscriptions (id, entity_id, stripe_customer_id, customer_name, customer_email, status, currency, monthly_cents, updated_at)
+          VALUES (?, 'fin_ent_oasis', ?, ?, ?, ?, 'CAD', 10000, ?)`,
+    args: [id, cus, name, email, status, updatedAt],
+  });
+  await db.batch(
+    [
+      // One active subscriber. A NEWER canceled subscription does not hide the live one.
+      sub("s-one", "cus_ONE", "One Person", "one@person.test", "active", ago(20)),
+      sub("s-one-old", "cus_ONE", "One Person", "one@person.test", "canceled", ago(1)),
+      pay("p-one-a", { cents: 10000, stripe: "cus_ONE", at: ago(40) }),
+      pay("p-one-b", { cents: 10000, stripe: "cus_ONE", at: ago(10) }),
+      // Neither a test-mode payment nor a refund is a payment the client made.
+      pay("p-one-test", { cents: 10000, stripe: "cus_ONE", live: 0, at: ago(2) }),
+      pay("r-one", { kind: "refund", cents: 500, parent: "p-one-b", stripe: "cus_ONE", at: ago(3) }),
+      // A subscriber who cancelled in June: Past.
+      sub("s-past", "cus_PAST", "Past Person", "past@person.test", "canceled", ago(90)),
+      pay("p-past", { cents: 10000, stripe: "cus_PAST", at: ago(100) }),
+      // Paid once, never subscribed.
+      pay("p-payonly", { cents: 5000, stripe: "cus_PAYONLY", name: "Paid Once", email: "once@person.test", at: ago(50) }),
+    ],
+    "write",
+  );
+  let choosing: Array<Record<string, unknown>> = [];
+  await check("Stripe import GET: each person carries their subscription status and last payment, as the books hold them", async () => {
+    await login(USERS.cc);
+    const g = await call(importRoute.GET());
+    assert.equal(g.status, 200, JSON.stringify(g.body));
+    choosing = g.body.items as Array<Record<string, unknown>>;
+    const by = Object.fromEntries(choosing.map((i) => [i.stripe_customer_id, i]));
+    assert.deepEqual(
+      [by.cus_ONE.action, by.cus_ONE.lifecycle, by.cus_ONE.subscription_status, by.cus_ONE.last_paid_at],
+      ["create", "active", "active", ago(10)],
+      "the live subscription wins over a newer canceled one; the last payment is the newest live one",
+    );
+    assert.deepEqual([by.cus_PAST.lifecycle, by.cus_PAST.subscription_status, by.cus_PAST.last_paid_at], ["churned", "canceled", ago(100)]);
+    assert.deepEqual([by.cus_PAYONLY.lifecycle, by.cus_PAYONLY.subscription_status, by.cus_PAYONLY.last_paid_at], ["churned", null, ago(50)]);
+    for (const i of choosing) assert.ok("subscription_status" in i && "last_paid_at" in i, `every row carries both: ${String(i.stripe_customer_id)}`);
+    assert.equal(dialog.subscriptionLabel("active"), "Subscription active");
+    assert.equal(dialog.subscriptionLabel("canceled"), "Subscription canceled");
+    assert.equal(dialog.subscriptionLabel(null), "No subscription");
+    assert.equal(dialog.lastPaidLabel("2026-09-05T14:00:00.000Z"), "Last paid Sep 5, 2026");
+    assert.equal(dialog.lastPaidLabel(null), "No payment on record");
+  });
+  await check("the dialog ticks Active people and leaves Past ones unticked; Select all, Active only and None do what they say", () => {
+    const rows = choosing as unknown as Parameters<typeof dialog.importSelection>[0];
+    const importableIds = rows.filter(dialog.importable).map((i) => i.stripe_customer_id).sort();
+    assert.deepEqual(importableIds, ["cus_LATE_ARRIVAL", "cus_ONE", "cus_PAST", "cus_PAYONLY"]);
+    assert.deepEqual([...dialog.importSelection(rows, "active")].sort(), ["cus_LATE_ARRIVAL", "cus_ONE"], "Active ticked, Past not");
+    assert.deepEqual([...dialog.importSelection(rows, "all")].sort(), importableIds);
+    assert.deepEqual([...dialog.importSelection(rows, "none")], []);
+    for (const skipped of rows.filter((i) => !dialog.importable(i))) {
+      assert.ok(!dialog.importSelection(rows, "all").has(skipped.stripe_customer_id), `a ${skipped.action} row is never ticked`);
+    }
+  });
+  await check("Stripe import: ONE person, chosen by hand; everyone left unticked is 'left out by you', never 'unreviewed'", async () => {
+    await login(USERS.cc);
+    const rows = choosing as unknown as Parameters<typeof dialog.importSelection>[0];
+    const body = dialog.importRequest(rows, new Set(["cus_ONE"]));
+    assert.deepEqual(body.confirmed, [{ stripe_customer_id: "cus_ONE", action: "create" }]);
+    assert.deepEqual([...body.declined].sort(), ["cus_LATE_ARRIVAL", "cus_PAST", "cus_PAYONLY"]);
+    const before = await customersNow();
+    const r = await importPost(body);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.created, r.body.linked, r.body.declined, r.body.unreviewed, r.body.changed], [1, 0, 3, 0, 0]);
+    assert.equal(await customersNow(), before + 1, "exactly one record");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id = 'cus_ONE'"), 1);
+    for (const out of ["cus_LATE_ARRIVAL", "cus_PAST", "cus_PAYONLY"]) {
+      assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id = ?", [out]), 0, `${out} was imported`);
+    }
+    const said = dialog.importOutcome({
+      created: Number(r.body.created), linked: Number(r.body.linked), skipped: 0,
+      conflicts: 0, declined: Number(r.body.declined), unreviewed: Number(r.body.unreviewed), changed: Number(r.body.changed),
+    });
+    assert.equal(said, "Imported 1. 3 left out by you.");
+  });
+  await check("Stripe import: the default choice leaves Past out; they are counted as declined and never imported", async () => {
+    await login(USERS.cc);
+    const g = await call(importRoute.GET());
+    const rows = g.body.items as Parameters<typeof dialog.importSelection>[0];
+    const body = dialog.importRequest(rows, dialog.importSelection(rows, "active"));
+    assert.deepEqual(body.confirmed.map((i) => i.stripe_customer_id), ["cus_LATE_ARRIVAL"], "cus_ONE is a client now, so only the late arrival is Active");
+    const r = await importPost(body);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.created, r.body.declined, r.body.unreviewed], [1, 2, 0]);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id IN ('cus_PAST', 'cus_PAYONLY')"), 0, "a Past customer was imported");
+    assert.equal(
+      dialog.importOutcome({ created: 1, linked: 0, skipped: 7, conflicts: 2, declined: 2, unreviewed: 1, changed: 0 }),
+      "Imported 1. 2 left out by you. 7 skipped (already a client, or no name or email). 2 conflicts left for you. " +
+        "1 not imported: they reached the books or changed after this list was opened. Open the import again to review them.",
+    );
+  });
+  await check("Stripe import route: declined must be a list of ids, none of them also confirmed; nothing is written otherwise", async () => {
+    await login(USERS.cc);
+    const before = await customersNow();
+    const both = await importPost({ confirm_privacy: true, confirmed: [{ stripe_customer_id: "cus_PAST", action: "create" }], declined: ["cus_PAST"] });
+    assert.equal(both.status, 400);
+    assert.deepEqual([both.body.error, both.body.field], ["import_confirmation_invalid", "declined"]);
+    const notList = await importPost({ confirm_privacy: true, confirmed: [{ stripe_customer_id: "cus_PAST", action: "create" }], declined: "cus_PAYONLY" });
+    assert.equal(notList.status, 400);
+    const twice = await importPost({ confirm_privacy: true, confirmed: [{ stripe_customer_id: "cus_PAST", action: "create" }], declined: ["cus_PAYONLY", "cus_PAYONLY"] });
+    assert.equal(twice.status, 400);
+    assert.equal(await customersNow(), before);
+  });
+  await check("runStripeImport: a declined id that is not on offer (already a client, a conflict) is not counted as declined", async () => {
+    const r = await sync.runStripeImport(db, OASIS, USERS.cc.id, T0, new Map(), new Set(["cus_ONE", "cus_DUPB", "cus_PAST"]));
+    assert.deepEqual(r.declined, ["cus_PAST"], JSON.stringify(r));
+    assert.deepEqual(r.unreviewed, ["cus_PAYONLY"], "shown or not, it is never imported without a tick");
+    assert.deepEqual([r.created, r.linked], [[], []]);
+  });
+
   // ── Support desk ───────────────────────────────────────────────────────────
   const TicketsPage = (await import("../app/tickets/page")).default;
   const ProjectsPage = (await import("../app/projects/page")).default;

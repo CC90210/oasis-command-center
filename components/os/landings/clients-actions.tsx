@@ -428,22 +428,150 @@ export function LinkWorkspaceControl({
 // Import Stripe customers (OASIS, founders)
 // ---------------------------------------------------------------------------
 
-type PlanItem = { action: string; stripe_customer_id: string; name: string | null; email: string | null; lifecycle: string; reason?: string };
+/** One row of the import's plan, as GET /api/clients/import-stripe lists it. */
+export type ImportPlanRow = {
+  action: string;
+  stripe_customer_id: string;
+  name: string | null;
+  email: string | null;
+  lifecycle: string;
+  /** The live subscription's status, else the newest one's; null = no subscription in the books. */
+  subscription_status?: string | null;
+  /** The newest payment's time; null = no payment in the books. */
+  last_paid_at?: string | null;
+  reason?: string;
+};
+
+/** A row the founder can tick: a new record, or a link to the record with the same email. */
+export const importable = (i: ImportPlanRow) => i.action === "create" || i.action === "link";
 
 /**
- * Shows what an import WOULD do (GET), asks the privacy question, and only
- * then imports exactly the listed people (POST { confirm_privacy: true,
- * confirmed: [...] }). Records get a name, an email and the Stripe customer
- * id; nothing else.
+ * Who is ticked. "active" is the default (CC, 2026-10-02: "some of them are
+ * inactive"): the people with a live subscription, never a Past one.
+ */
+export function importSelection(items: readonly ImportPlanRow[], which: "all" | "active" | "none"): Set<string> {
+  return new Set(
+    items
+      .filter((i) => importable(i) && (which === "all" || (which === "active" && i.lifecycle === "active")))
+      .map((i) => i.stripe_customer_id),
+  );
+}
+
+/**
+ * The POST body for a selection: the ticked people, each with the action it
+ * was shown with (the privacy answer covers them and no one else), and the
+ * people shown and left unticked, so the import counts them as left out by
+ * the founder rather than as unreviewed.
+ */
+export function importRequest(items: readonly ImportPlanRow[], selected: ReadonlySet<string>) {
+  const rows = items.filter(importable);
+  return {
+    confirm_privacy: true as const,
+    confirmed: rows.filter((i) => selected.has(i.stripe_customer_id)).map((i) => ({ stripe_customer_id: i.stripe_customer_id, action: i.action })),
+    declined: rows.filter((i) => !selected.has(i.stripe_customer_id)).map((i) => i.stripe_customer_id),
+  };
+}
+
+/** What happened, in one line, e.g. "Imported 1. 1 left out by you." */
+export function importOutcome(r: {
+  created: number;
+  linked: number;
+  skipped: number;
+  conflicts: number;
+  declined: number;
+  unreviewed: number;
+  changed: number;
+}): string {
+  const held = r.unreviewed + r.changed;
+  return [
+    `Imported ${r.created + r.linked}${r.linked > 0 ? ` (${r.created} new, ${r.linked} linked by email)` : ""}.`,
+    r.declined > 0 ? `${r.declined} left out by you.` : null,
+    r.skipped > 0 ? `${r.skipped} skipped (already a client, or no name or email).` : null,
+    r.conflicts > 0 ? `${r.conflicts} conflict${r.conflicts === 1 ? "" : "s"} left for you.` : null,
+    held > 0
+      ? `${held} not imported: they reached the books or changed after this list was opened. Open the import again to review them.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+const SUBSCRIPTION_LABELS: Record<string, string> = {
+  active: "Subscription active",
+  trialing: "Trial",
+  past_due: "Payment past due",
+  canceled: "Subscription canceled",
+  unpaid: "Subscription unpaid",
+  paused: "Subscription paused",
+  incomplete: "Subscription incomplete",
+  incomplete_expired: "Subscription expired",
+};
+
+/** A Stripe subscription status in words; "No subscription" when the books hold none. */
+export function subscriptionLabel(status: string | null | undefined): string {
+  if (!status) return "No subscription";
+  return SUBSCRIPTION_LABELS[status] ?? `Subscription ${status.replace(/_/g, " ")}`;
+}
+
+const PAID_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "short", day: "numeric" });
+
+/** The last payment as a day in the business's time zone; "No payment on record" when there is none. */
+export function lastPaidLabel(at: string | null | undefined): string {
+  if (!at) return "No payment on record";
+  const t = Date.parse(at);
+  return Number.isNaN(t) ? `Last paid ${at}` : `Last paid ${PAID_DAY.format(new Date(t))}`;
+}
+
+function planActionText(i: ImportPlanRow): string {
+  if (i.action === "create") return `new record, ${i.lifecycle === "active" ? "Active" : "Past"}`;
+  if (i.action === "link") return "link to the record with this email";
+  if (i.action === "conflict") return "conflict: the email's record has another Stripe customer";
+  return i.reason === "already_a_client" ? "already a client" : "skipped: no name or email";
+}
+
+function PlanRowText({ i }: { i: ImportPlanRow }) {
+  return (
+    <span className="min-w-0 flex-1">
+      <span className="flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-fg">{i.name ?? i.email ?? "No name or email"}</span>
+        <span className="text-xs text-fg-dim">{planActionText(i)}</span>
+      </span>
+      <span className="block text-xs text-fg-dim">
+        {[i.name ? i.email : null, subscriptionLabel(i.subscription_status), lastPaidLabel(i.last_paid_at)].filter(Boolean).join(" · ")}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Shows what an import WOULD do (GET), with each person's subscription and
+ * last payment; the founder ticks who to import (Active ticked, Past not),
+ * answers the privacy question for the people ticked, and only those are
+ * imported (POST { confirm_privacy: true, confirmed: [...], declined: [...] }).
+ * Records get a name, an email and the Stripe customer id; nothing else.
  */
 export function ImportStripeButton() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [plan, setPlan] = useState<{ summary: Record<string, number>; items: PlanItem[] } | null>(null);
+  const [plan, setPlan] = useState<{ summary: Record<string, number>; items: ImportPlanRow[] } | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [agreed, setAgreed] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+
+  // The privacy answer covers the people ticked when it was given: changing
+  // who is ticked asks it again.
+  const select = (next: Set<string>) => {
+    setSelected(next);
+    setAgreed(false);
+  };
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    select(next);
+  };
 
   const load = async () => {
     setOpen(true);
@@ -461,7 +589,9 @@ export function ImportStripeButton() {
         setError((data && typeof data.message === "string" && data.message) || `Couldn't read the books (HTTP ${res.status}).`);
         return;
       }
-      setPlan({ summary: data.summary as Record<string, number>, items: data.items as PlanItem[] });
+      const items = data.items as ImportPlanRow[];
+      setPlan({ summary: data.summary as Record<string, number>, items });
+      setSelected(importSelection(items, "active"));
     } catch {
       setError("Network error. Nothing was imported.");
     } finally {
@@ -476,7 +606,8 @@ export function ImportStripeButton() {
       </button>
     );
   }
-  const actionable = plan ? (plan.summary.create ?? 0) + (plan.summary.link ?? 0) : 0;
+  const actionable = plan ? plan.items.filter(importable).length : 0;
+  const chosen = plan ? plan.items.filter((i) => importable(i) && selected.has(i.stripe_customer_id)).length : 0;
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16" role="dialog" aria-modal="true" aria-label="Import Stripe customers">
       <div className="w-full max-w-2xl space-y-4 rounded-xl border border-hairline bg-bg-panel p-5">
@@ -492,61 +623,87 @@ export function ImportStripeButton() {
             <p className="text-[13px] text-fg-muted">
               From the Stripe customers in OASIS&rsquo;s books: {plan.summary.create ?? 0} new record(s), {plan.summary.link ?? 0} existing
               record(s) to link by email, {plan.summary.skip ?? 0} skipped, {plan.summary.conflict ?? 0} conflict(s) left for you.
+              {actionable > 0 && " Tick who to import: people with an active subscription are ticked, past ones are not."}
             </p>
+            {actionable > 0 && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                <span className="text-fg-muted">
+                  {chosen} of {actionable} selected
+                </span>
+                <button type="button" className="text-accent hover:underline" disabled={busy} onClick={() => select(importSelection(plan.items, "all"))}>
+                  Select all
+                </button>
+                <button type="button" className="text-accent hover:underline" disabled={busy} onClick={() => select(importSelection(plan.items, "active"))}>
+                  Active only
+                </button>
+                <button type="button" className="text-accent hover:underline" disabled={busy} onClick={() => select(importSelection(plan.items, "none"))}>
+                  None
+                </button>
+              </div>
+            )}
             <ul className="max-h-64 divide-y divide-hairline overflow-y-auto rounded-lg border border-hairline">
-              {plan.items.map((i) => (
-                <li key={i.stripe_customer_id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-[13px]">
-                  <span className="min-w-0 truncate text-fg">{i.name ?? i.email ?? "No name or email"}</span>
-                  <span className="text-xs text-fg-dim">
-                    {i.action === "create"
-                      ? `new record, ${i.lifecycle === "active" ? "Active" : "Past"}`
-                      : i.action === "link"
-                        ? "link to the record with this email"
-                        : i.action === "conflict"
-                          ? "conflict: the email's record has another Stripe customer"
-                          : i.reason === "already_a_client"
-                            ? "already a client"
-                            : "skipped: no name or email"}
-                  </span>
-                </li>
-              ))}
+              {plan.items.map((i) =>
+                importable(i) ? (
+                  <li key={i.stripe_customer_id} className="px-3 py-2 text-[13px]">
+                    <label className="flex cursor-pointer items-start gap-2">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={selected.has(i.stripe_customer_id)}
+                        disabled={busy}
+                        onChange={() => toggle(i.stripe_customer_id)}
+                      />
+                      <PlanRowText i={i} />
+                    </label>
+                  </li>
+                ) : (
+                  // Skipped and conflicting people are listed for the record, not offered.
+                  <li key={i.stripe_customer_id} className="flex items-start gap-2 px-3 py-2 text-[13px]">
+                    <span aria-hidden className="w-[13px] shrink-0" />
+                    <PlanRowText i={i} />
+                  </li>
+                ),
+              )}
             </ul>
             <label className="flex items-start gap-2 text-[13px] text-fg">
-              <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-0.5" />
+              <input type="checkbox" checked={agreed} disabled={chosen === 0} onChange={(e) => setAgreed(e.target.checked)} className="mt-0.5" />
               <span>
-                Some Stripe subscribers are private individuals (Quebec Law 25). I confirm OASIS may keep them as client
-                records with their name and email only.
+                Some Stripe subscribers are private individuals (Quebec Law 25). I confirm OASIS may keep the {chosen}{" "}
+                {chosen === 1 ? "person" : "people"} selected above as client records, with their name and email only.
               </span>
             </label>
             <button
               type="button"
               className="btn-primary"
-              disabled={busy || !agreed || actionable === 0}
+              disabled={busy || !agreed || chosen === 0}
               onClick={async () => {
                 setBusy(true);
                 setError(null);
                 try {
-                  // Exactly the people listed above, with the action each was
-                  // shown with: the privacy answer covers them and no one else.
-                  const confirmed = plan.items
-                    .filter((i) => i.action === "create" || i.action === "link")
-                    .map((i) => ({ stripe_customer_id: i.stripe_customer_id, action: i.action }));
+                  // Exactly the people ticked above, with the action each was
+                  // shown with (the privacy answer covers them and no one
+                  // else), and the people left unticked, so they are counted
+                  // as left out by you rather than as unreviewed.
                   const res = await fetch("/api/clients/import-stripe", {
                     method: "POST",
                     headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ confirm_privacy: true, confirmed }),
+                    body: JSON.stringify(importRequest(plan.items, selected)),
                   });
                   const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
                   if (!res.ok || !data || data.ok !== true) {
                     setError((data && typeof data.message === "string" && data.message) || `The import failed (HTTP ${res.status}).`);
                     return;
                   }
-                  const held = Number(data.unreviewed ?? 0) + Number(data.changed ?? 0);
                   setDone(
-                    `Created ${String(data.created)}, linked ${String(data.linked)}, skipped ${String(data.skipped)}.` +
-                      (held > 0
-                        ? ` ${held} not imported: they reached the books or changed after this list was opened. Open the import again to review them.`
-                        : ""),
+                    importOutcome({
+                      created: Number(data.created ?? 0),
+                      linked: Number(data.linked ?? 0),
+                      skipped: Number(data.skipped ?? 0),
+                      conflicts: Array.isArray(data.conflicts) ? data.conflicts.length : 0,
+                      declined: Number(data.declined ?? 0),
+                      unreviewed: Number(data.unreviewed ?? 0),
+                      changed: Number(data.changed ?? 0),
+                    }),
                   );
                   setPlan(null);
                   router.refresh();
@@ -557,7 +714,7 @@ export function ImportStripeButton() {
                 }
               }}
             >
-              {busy ? "Importing..." : actionable === 0 ? "Nothing to import" : `Import ${actionable}`}
+              {busy ? "Importing..." : actionable === 0 ? "Nothing to import" : `Import ${chosen} selected`}
             </button>
           </>
         )}
