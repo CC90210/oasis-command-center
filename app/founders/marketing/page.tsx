@@ -62,7 +62,7 @@ export default async function MarketingPage() {
   // and a throw is a failure, not an absence — handing it the empty summary put
   // "Nothing waiting on you" back on the screen for every unexpected error, which
   // is precisely what MarketingSummary.degraded was added to stop.
-  // Two reads, one round trip. `summary` is CC's own queue and stays scoped to
+  // Three reads, one round trip. `summary` is CC's own queue and stays scoped to
   // OASIS's own work; `facets` deliberately spans every brand, because the whole
   // point of the tab counts is to show what is behind the tabs he is NOT on.
   const [summary, facets, lifecycle] = await Promise.all([
