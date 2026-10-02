@@ -148,7 +148,8 @@ assert.deepEqual(
 const factsSource = read("components/os/connections/connector-facts.ts");
 for (const def of CONNECTOR_CATALOG) {
   if (!def.live) {
-    assert.ok(def.plannedFor, `${def.slug}: a coming-soon connector must say when`);
+    // The reason it cannot connect, never an era or a date (S5-F01, W10a).
+    assert.ok(def.pendingNote?.trim(), `${def.slug}: a not-built connector must say why`);
     continue;
   }
   const src = def.live.source;
@@ -214,7 +215,8 @@ for (const def of CONNECTOR_CATALOG) {
     assert.doesNotMatch(s.label, /connected/i);
     // The state, in the same words Chat apps uses for the same apps; "Coming
     // soon" / "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
-    assert.equal(s.label, "Not built yet", `${def.slug} (${def.plannedFor}): a card with nothing behind it says so`);
+    assert.equal(s.label, "Not built yet", `${def.slug}: a card with nothing behind it says so`);
+    assert.equal(s.detail, def.pendingNote, `${def.slug}: the drawer says why it is not built`);
   }
 }
 assert.match(read("app/settings/chat-apps/page.tsx"), /label: "Not built yet"/, "Chat apps and Connections say it the same way");
@@ -436,7 +438,10 @@ for (const f of uiFiles) {
 }
 const hub = read("components/os/connections/ConnectionsHub.tsx");
 assert.match(hub, /status \?\? \{ kind: "unknown"/, "the hub must read a missing status as unknown");
-assert.match(read("app/settings/connections/page.tsx"), /resolveConnectorStatus\(/);
+// One loader for every entry point (Connections, the workspace setup, AI
+// brain), and it computes each status through the resolver.
+assert.match(read("app/settings/connections/page.tsx"), /loadConnectorStatuses\(/);
+assert.match(read("components/os/connections/connector-facts.ts"), /resolveConnectorStatus\(def, facts, now\)/);
 assert.match(read("app/settings/chat-apps/page.tsx"), /resolveConnectorStatus\(telegram/);
 // Slack is a Connections-framework card set up under Chat apps, and it says
 // "app not configured yet" wherever OASIS's Slack app is not on the deployment.
@@ -667,7 +672,9 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
 {
   // An owner's page renders the hub and nothing that lists the apps again.
   const page = read("app/settings/connections/page.tsx");
-  const ownerPath = page.slice(page.indexOf("const facts = await loadConnectorFacts"));
+  const ownerStart = page.indexOf("const statuses = await loadConnectorStatuses");
+  assert.ok(ownerStart > 0, "the owner's path loads every status through the shared loader");
+  const ownerPath = page.slice(ownerStart);
   assert.match(ownerPath, /<ConnectionsHub/);
   assert.doesNotMatch(ownerPath, /SettingsContent|IntegrationKeysPanel|Keys and accounts/, "an owner's page lists the apps once");
   assert.equal(existsSync(join(root, "components/settings/IntegrationKeysPanel.tsx")), false, "the page-wide key list is gone");
@@ -693,7 +700,10 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   const drawer = read("components/os/connections/ConnectorDrawer.tsx");
   assert.match(drawer, /<ServiceKeysForm/);
   assert.match(drawer, /def\.yourAccount === "google" && personalGoogle[\s\S]{0,400}<PersonalIntegrationsPanel/);
-  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return openDrawer\(def\.slug\)/);
+  // What a click does is connectorClickAction (keys open the drawer), proven by
+  // render in tests/connections-everywhere.test.ts; the hub acts on it.
+  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return "drawer"/);
+  assert.match(hub, /const next = connectorClickAction\(def, embedded\);\s*if \(next === "drawer" \|\| !action\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
   // Google's sign-in comes back to its drawer, not to a removed anchor.
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);

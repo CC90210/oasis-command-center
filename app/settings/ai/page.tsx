@@ -15,17 +15,18 @@ import { PageFrame } from "@/components/os/PageFrame";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { findActiveConnection, toPublicConnection } from "@/lib/connections/store";
 import { JEV_TEXT_PROCESSING_APPROVED, jevStats, readJevMode } from "@/lib/jev/mode";
-import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import { connectorBySlug, resolveConnectorStatus } from "@/lib/os/connectors";
+import { loadConnectorStatuses } from "@/components/os/connections/connector-facts";
 import { isSlackSchemaMissing } from "@/lib/slack/routing";
 
 export const dynamic = "force-dynamic";
 
 /** The Jev card's facts, each read on its own: one failed read never blanks the others. */
 async function loadJevFacts(tenantId: string, userId: string, nowMs: number): Promise<JevCardFacts> {
-  const hub = await loadConnectorFacts({ tenantId, userId });
+  // The same loader as Settings > Connections and the workspace setup: the
+  // card's drawer (ConnectorDrawerButton) is the Connections drawer itself.
+  const statuses = await loadConnectorStatuses({ tenantId, userId, nowMs });
   const facts: JevCardFacts = {
-    status: resolveConnectorStatus(connectorBySlug("jev")!, hub, nowMs),
+    status: statuses.jev ?? { kind: "unknown", label: "Status unavailable" },
     connection: null,
     mode: null,
     stats: null,

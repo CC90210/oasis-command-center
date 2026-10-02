@@ -10,6 +10,8 @@ import { getManifestSlugForTenant } from "@/lib/manifest/persistence";
 import { departmentProfile } from "@/components/os/department/config";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { DEFAULT_DEPARTMENTS, OPT_IN_MODULES, neutralTeamFor } from "@/lib/provisioning/team";
+import { loadConnectorStatuses } from "@/components/os/connections/connector-facts";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
 export const dynamic = "force-dynamic";
 
@@ -88,7 +90,19 @@ export default async function OnboardingWizardPage() {
     defaultDepartments: [...DEFAULT_DEPARTMENTS],
     modules: OPT_IN_MODULES.map((m) => ({ key: m.key, label: m.label, description: m.description })),
   };
-  return <OnboardingWizardClient userEmail={user.email || ""} canInstallBridge={canInstallBridge} options={options} />;
+  // The connections step renders the Connections hub itself, with statuses from
+  // the same loader as Settings > Connections: an app connected here is the
+  // same row, and reads "Connected" there (and the reverse). A drawer change
+  // re-runs this page (router.refresh) and the wizard keeps its step.
+  const connectorStatuses = await loadConnectorStatuses({ tenantId: access.profile.tenant_id, userId: user.id });
+  return (
+    <OnboardingWizardClient
+      userEmail={user.email || ""}
+      canInstallBridge={canInstallBridge}
+      options={options}
+      connections={{ statuses: connectorStatuses, supportHref: SUPPORT_FORM_PATH }}
+    />
+  );
 }
 
 /**

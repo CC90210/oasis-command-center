@@ -365,6 +365,23 @@ async function main() {
     assert.equal(exchanges[exchanges.length - 1].redirect_uri, "https://oasisai.work/api/connections/slack/callback");
   });
 
+  await check("end to end: after the install, Settings > Connections reads Slack as connected for that workspace only, and each kind of workspace is shown its own path", async () => {
+    const { loadConnectorStatuses } = await import("../components/os/connections/connector-facts");
+    const alpha = (await loadConnectorStatuses({ tenantId: ALPHA, userId: USERS.ownerA.id })).slack;
+    assert.equal(alpha.kind, "connected", JSON.stringify(alpha));
+    assert.match(alpha.label, /^Connected · verified/);
+    assert.equal(alpha.account, "Alpha Slack");
+    const bravo = (await loadConnectorStatuses({ tenantId: BRAVO_CO, userId: USERS.ownerB.id })).slack;
+    assert.notEqual(bravo.kind, "connected", "another workspace's card is untouched");
+    // CC's model (W10a R1): a client connects its own Slack app, which is not
+    // built yet; OASIS's own workspace uses the OASIS app.
+    assert.deepEqual([bravo.kind, bravo.label], ["coming_soon", "Not built yet"]);
+    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not built yet"]]);
+    const paths = connectors.connectorBySlug("slack")!.paths ?? [];
+    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", false]]);
+    assert.ok(paths.every((p) => !/OASIS's own included|every workspace/i.test(p.body)), "no path claims to be every workspace's way in");
+  });
+
   await check("the state is single-use: the same state again is refused and nothing changes", async () => {
     const before = await count("SELECT COUNT(*) AS n FROM tenant_connections");
     const exchangesBefore = exchanges.length;

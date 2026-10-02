@@ -17,8 +17,8 @@
  * Server component; the page reads the facts and passes them in.
  */
 
-import Link from "next/link";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { ConnectorDrawerButton } from "@/components/os/connections/ConnectorDrawerButton";
 import { formatVerifiedAgo, type ConnectorStatus } from "@/lib/os/connectors";
 import type { PublicConnection } from "@/lib/connections/store";
 import type { JevStats, ResolvedJevMode } from "@/lib/jev/mode";
@@ -80,9 +80,15 @@ export function JevCard({
           </p>
         </div>
         {canManage && (
-          <Link href="/settings/connections?app=jev" prefetch={false} className={connected ? "btn-secondary" : "btn-primary"}>
-            {connected ? "Manage key" : "Connect a key"}
-          </Link>
+          // The Connections drawer itself, opened here: the same form, check
+          // and statuses as Settings > Connections and the workspace setup.
+          <ConnectorDrawerButton
+            slug="jev"
+            status={facts.status}
+            label={connected ? "Manage key" : "Connect a key"}
+            className={connected ? "btn-secondary" : "btn-primary"}
+            requestFrom="Settings > AI brain"
+          />
         )}
       </header>
 
