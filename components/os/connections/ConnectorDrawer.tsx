@@ -20,7 +20,7 @@
  * focus goes back to whatever opened it on close.
  */
 
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/ConnectorIcon";
 import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
@@ -170,6 +170,15 @@ export function ConnectorDrawer({
   const keyConfig = keyForm ? providerById(keyForm.provider)?.restrictedKey ?? null : null;
   const savedKeys = live?.connect.kind === "keys" ? live.connect : null;
   const setUpHere = !!keyForm || !!savedKeys;
+  // Bumped by every saved or removed key, so the Twilio panel re-reads the
+  // sender it is about to configure. The status label is no such signal: saving
+  // an Auth Token on an incomplete setup leaves it "Needs attention", and the
+  // panel then confirmed against the old sender while the POST used the new one.
+  const [keysRevision, setKeysRevision] = useState(0);
+  const onKeysChanged = useCallback(() => {
+    setKeysRevision((n) => n + 1);
+    onChanged();
+  }, [onChanged]);
 
   // An app set up in the drawer has its actions in the body, not down here.
   const footer =
@@ -230,10 +239,10 @@ export function ConnectorDrawer({
           )}
 
           {savedKeys && (
-            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onChanged} />
+            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onKeysChanged} />
           )}
 
-          {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={status?.label} />}
+          {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={keysRevision} />}
 
           {def.yourAccount === "google" && personalGoogle && (
             <section>

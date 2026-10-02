@@ -954,6 +954,38 @@ async function main() {
     }
   });
 
+  // CodeRabbit on #520: the server updates Twilio BEFORE it answers, so a lost or
+  // unexplained answer is an unknown outcome, never "Twilio was not changed".
+  await check("after 'Set them', an unconfirmed update says it could not be confirmed, never that Twilio is unchanged", async () => {
+    const { applyResultNotice } = await import("../components/os/connections/TwilioWebhooksPanel");
+    assert.deepEqual(applyResultNotice({ ok: true, status: 200 }, { ok: true, message: "Done." }), { tone: "ok", text: "Done." });
+    const refusal = applyResultNotice({ ok: false, status: 409 }, { ok: false, message: "Save your Auth Token first. Nothing was changed in Twilio.", error: "no_auth_token" });
+    assert.equal(refusal?.text, "Save your Auth Token first. Nothing was changed in Twilio.", "the server's own explanation is shown as is");
+    for (const [res, data] of [
+      [{ ok: false, status: 502 }, null],
+      [{ ok: false, status: 500 }, { ok: false, error: "twilio_failed" }],
+      [{ ok: true, status: 200 }, null],
+      [null, null],
+    ] as const) {
+      const n = applyResultNotice(res, data);
+      assert.equal(n?.tone, "err", JSON.stringify([res, data]));
+      assert.match(n!.text, /could not be confirmed/, JSON.stringify([res, data]));
+      assert.doesNotMatch(n!.text, /not changed|unchanged/i, `claims nothing changed: ${n!.text}`);
+    }
+  });
+
+  // CodeRabbit on #520: the panel re-read its sender only when the status label
+  // changed, and saving an Auth Token on an incomplete setup keeps it "Needs
+  // attention". The drawer now counts saved and removed keys and the panel reloads
+  // on that count. (No DOM in this suite, so the wiring is pinned in source.)
+  await check("the Twilio panel reloads after every saved or removed key, not only when the status label changes", () => {
+    const drawer = read("components/os/connections/ConnectorDrawer.tsx");
+    assert.match(drawer, /setKeysRevision\(\(n\) => n \+ 1\)/, "every key change bumps the revision");
+    assert.match(drawer, /<ServiceKeysForm[^>]*onChanged=\{onKeysChanged\}/, "the key form reports its saves through the revision");
+    assert.match(drawer, /<TwilioWebhooksPanel[^>]*version=\{keysRevision\}/, "the panel reloads on the revision");
+    assert.doesNotMatch(drawer, /version=\{status\?\.label\}/, "not on the status label");
+  });
+
   globalThis.fetch = realFetch;
   console.log(`\n${passed} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);
