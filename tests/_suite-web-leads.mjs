@@ -140,6 +140,9 @@ const TESTS = [
   // What the call-screen booking panel reads first; "may book" must agree
   // with the booking route (book-the-meet plan, Task 5).
   "tests/web-leads-booking-context-route.test.ts",
+  // The call-screen booking flow: call order, failures, request ids, copy,
+  // and do-not-call as a box to tick (book-the-meet plan, Task 6).
+  "tests/book-meet-flow.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
