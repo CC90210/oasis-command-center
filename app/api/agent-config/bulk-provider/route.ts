@@ -36,7 +36,10 @@
  *
  * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed, count }
  *   ok is the workspace account saved (scope=tenant), or at least one personal
- *   row saved (scope=user).
+ *   row saved (scope=user). 409 { error: "superseded", message } when the
+ *   account no longer held this key once every row was written (a disconnect
+ *   or another connect landed meanwhile): the rows this request wrote are
+ *   deleted again.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -270,6 +273,53 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Two tabs: a disconnect can land while this connect is still stamping the
+  // rows above. It retires the account saved first and deletes the rows on
+  // file, then this loop writes new ones: the key stayed on rows a per-agent
+  // chat could spend while every surface said not connected. So, once every
+  // row is written, the account is read again. When it no longer holds this
+  // key (a disconnect or a newer connect landed after the save), every
+  // workspace row this request stamped is deleted, and the owner is told the
+  // key was not kept. Those rows carry this request's own ciphertext (each
+  // save encrypts afresh), so nothing else is touched. A disconnect that
+  // lands after this read deletes the rows itself: it retires, then deletes.
+  let superseded = false;
+  if (scope === "tenant") {
+    const now = await service
+      .from("agent_model_config")
+      .select("encrypted_api_key")
+      .eq("tenant_id", tenantId)
+      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
+      .is("user_id", null)
+      .maybeSingle();
+    if (now.error) {
+      // The account saved; only the look-back failed. Logged, and listed in
+      // `failed` (the card logs it), never silently passed over.
+      console.error("[bulk-provider.workspace_account_recheck]", { tenantId, provider, error: now.error.code || now.error.message });
+      failed.push({ agent_key: WORKSPACE_AI_AGENT_KEY, error: `recheck_failed:${now.error.code || now.error.message}` });
+    } else if ((now.data as { encrypted_api_key?: string | null } | null)?.encrypted_api_key !== encryptedKey) {
+      superseded = true;
+      const cleared = await service
+        .from("agent_model_config")
+        .delete()
+        .eq("tenant_id", tenantId)
+        .is("user_id", null)
+        .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
+        .eq("encrypted_api_key", encryptedKey);
+      if (cleared.error) {
+        console.error("[bulk-provider.superseded_cleanup]", { tenantId, provider, error: cleared.error.code || cleared.error.message });
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "save_failed",
+            message: "The AI account changed while this key saved, and its copies could not be cleared. Disconnect the provider, then connect it again.",
+          },
+          { status: 500 },
+        );
+      }
+    }
+  }
+
   try {
     const authed = await getAuthedSupabase();
     await authed.rpc("log_tenant_event", {
@@ -284,13 +334,24 @@ export async function POST(req: NextRequest) {
         workspace_account: scope === "tenant",
         applied_to: applied,
         failed,
-        has_key: scope === "tenant" || applied.length > 0,
+        superseded,
+        has_key: !superseded && (scope === "tenant" || applied.length > 0),
       },
     });
   } catch {
     // audit-log soft-fail
   }
 
+  if (superseded) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "superseded",
+        message: "The AI account was changed somewhere else while this key saved, so it was not kept: check the card, and connect again if you need to.",
+      },
+      { status: 409 },
+    );
+  }
   return NextResponse.json({
     ok: scope === "tenant" || applied.length > 0,
     scope,
@@ -314,7 +375,9 @@ export async function POST(req: NextRequest) {
  * and it is switched off, but the row stays, so an older legacy row can never
  * answer for the workspace again (lib/ai/workspace-account.ts, DISCONNECT
  * KEEPS THE ROW). It is retired first: if anything after fails, the chats have
- * already stopped using the key.
+ * already stopped using the key. Then the account is read again, and a key
+ * that came back on it meanwhile (a connect in another tab, or the backfill)
+ * is retired and deleted the same way.
  *
  * Query: provider=<provider>&scope=tenant|user
  * Returns: { ok, scope, provider, count }
@@ -339,23 +402,52 @@ export async function DELETE(req: NextRequest) {
   if (scope === "user" && !userId) {
     return NextResponse.json({ ok: false, error: "no_user" }, { status: 401 });
   }
-  if (scope === "tenant") {
-    const retired = await retireWorkspaceAiAccount(tenantId, provider);
-    if (!retired.ok) {
-      console.error("[bulk-provider.workspace_account_retire]", { tenantId, provider, error: retired.error });
+  const service = getServiceSupabase();
+  // Retire, delete, then look at the account again. A connect in another tab,
+  // or the one-time backfill that copies a legacy row into the account, can
+  // put a key on the account between the first two steps; the delete then
+  // took the legacy row and left that copy answering. So while the account
+  // still holds a key on this provider, the round runs again, retire before
+  // delete every time: the disconnect ends with the account retired, or says
+  // it could not (a key that keeps coming back is reported, never left).
+  let count = 0;
+  for (let round = 1; ; round++) {
+    if (scope === "tenant") {
+      const retired = await retireWorkspaceAiAccount(tenantId, provider);
+      if (!retired.ok) {
+        console.error("[bulk-provider.workspace_account_retire]", { tenantId, provider, error: retired.error });
+        return NextResponse.json({ ok: false, error: "disconnect_failed" }, { status: 500 });
+      }
+    }
+    let q = service
+      .from("agent_model_config")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("provider", provider);
+    q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null).neq("agent_key", WORKSPACE_AI_AGENT_KEY);
+    const deleted = await q.select("agent_key");
+    if (deleted.error) {
+      return NextResponse.json({ ok: false, error: deleted.error.message }, { status: 500 });
+    }
+    count += deleted.count ?? 0;
+    if (scope === "user") break;
+    const after = await service
+      .from("agent_model_config")
+      .select("provider, encrypted_api_key")
+      .eq("tenant_id", tenantId)
+      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
+      .is("user_id", null)
+      .maybeSingle();
+    if (after.error) {
+      console.error("[bulk-provider.workspace_account_recheck]", { tenantId, provider, error: after.error.code || after.error.message });
       return NextResponse.json({ ok: false, error: "disconnect_failed" }, { status: 500 });
     }
-  }
-  const service = getServiceSupabase();
-  let q = service
-    .from("agent_model_config")
-    .delete()
-    .eq("tenant_id", tenantId)
-    .eq("provider", provider);
-  q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null).neq("agent_key", WORKSPACE_AI_AGENT_KEY);
-  const { error, count } = await q.select("agent_key");
-  if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    const back = after.data as { provider?: string | null; encrypted_api_key?: string | null } | null;
+    if (!(back?.provider === provider && back.encrypted_api_key)) break;
+    if (round === 3) {
+      console.error("[bulk-provider.workspace_account_raced]", { tenantId, provider });
+      return NextResponse.json({ ok: false, error: "disconnect_raced" }, { status: 409 });
+    }
   }
 
   // Audit-log the disconnect.

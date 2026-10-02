@@ -27,7 +27,7 @@
  * that badge or any vendor tool name on this card.
  */
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -350,7 +350,9 @@ export type ConnectResult =
   /** The test refused the key (nothing was saved). */
   | { kind: "refused"; message: string; canSaveAnyway: boolean }
   /** The key passed (or was saved anyway) but the save did not go through. */
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string }
+  /** The form moved on before the save (stillWanted): nothing was saved. */
+  | { kind: "dropped" };
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -378,10 +380,18 @@ function saveFailureSentence(body: Record<string, unknown>): string {
  * saves nothing and says why in the test's own plain sentence, so a wrong or
  * empty-balance key is caught on the spot instead of reading "Connected"
  * (AIP-05, AIP-07). `skipTest` is "Save anyway", offered only when the
- * provider was down or slow.
+ * provider was down or slow. `stillWanted` is asked once more just before the
+ * save: false (the dialog's form moved on while the test ran) saves nothing.
  */
 export async function connectProviderKey(
-  input: { provider: Provider; apiKey: string; model: string; scope: "tenant" | "user"; skipTest?: boolean },
+  input: {
+    provider: Provider;
+    apiKey: string;
+    model: string;
+    scope: "tenant" | "user";
+    skipTest?: boolean;
+    stillWanted?: () => boolean;
+  },
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): Promise<ConnectResult> {
   const post = async (url: string, body: Record<string, unknown>) => {
@@ -409,6 +419,7 @@ export async function connectProviderKey(
       return { kind: "refused", message, canSaveAnyway: SAVE_ANYWAY_CODES.has(code) };
     }
   }
+  if (input.stillWanted && !input.stillWanted()) return { kind: "dropped" };
   let saved: Record<string, unknown>;
   try {
     saved = await post("/api/agent-config/bulk-provider", {
@@ -433,8 +444,12 @@ export async function connectProviderKey(
 // Inline connect dialog — single API key input + Save
 // ============================================================================
 
-/** What was tested: exactly this provider, trimmed key and model. */
-type TestedKey = { provider: Provider; apiKey: string; model: string };
+/** What a run sent: exactly this provider, trimmed key, model and scope. */
+type TestedKey = { provider: Provider; apiKey: string; model: string; scope: "tenant" | "user" };
+
+function sameKey(a: TestedKey | null, b: TestedKey): boolean {
+  return a !== null && a.provider === b.provider && a.apiKey === b.apiKey && a.model === b.model && a.scope === b.scope;
+}
 
 export function ConnectProviderDialog({
   provider,
@@ -458,27 +473,44 @@ export function ConnectProviderDialog({
   const [untested, setUntested] = useState<TestedKey | null>(null);
   const [model, setModel] = useState(reg?.models[0]?.id || "");
   const [scope, setScope] = useState<"tenant" | "user">(canManageTeam ? "tenant" : "user");
+  // An answer that lands late must not speak for a form that moved on: it
+  // brought "Save anyway" back for a key no longer on screen (Codex review,
+  // PR #535). So every run (a test, or Save anyway) takes the next number,
+  // and its answer is applied only while it is the newest run AND the form,
+  // as last drawn, still shows exactly what it sent. The form is also locked
+  // while a run is out (`saving`), so in the browser it cannot move on.
+  const newestRun = useRef(0);
+  const drawn = useRef<TestedKey | null>(null);
+  useLayoutEffect(() => {
+    drawn.current = { provider, apiKey: apiKey.trim(), model, scope };
+  });
 
   if (!reg) return null;
 
   async function connect(target: TestedKey, skipTest: boolean) {
     if (!target.apiKey || saving) return;
+    const run = ++newestRun.current;
+    const isNewest = () => run === newestRun.current;
+    const formUnchanged = () => sameKey(drawn.current, target);
     setSaving(true);
     setError(null);
     setUntested(null);
-    const result = await connectProviderKey({ ...target, scope, skipTest });
+    const result = await connectProviderKey({ ...target, skipTest, stillWanted: () => isNewest() && formUnchanged() });
+    // A newer run holds the lock and speaks for the form: this one says nothing.
+    if (!isNewest()) return;
+    setSaving(false);
+    if (result.kind === "dropped" || !formUnchanged()) return;
     if (result.kind === "saved") {
-      onConnected(target.provider, scope);
+      onConnected(target.provider, target.scope);
       return;
     }
     setError(result.message);
     if (result.kind === "refused" && result.canSaveAnyway) setUntested(target);
-    setSaving(false);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await connect({ provider, apiKey: apiKey.trim(), model }, false);
+    await connect({ provider, apiKey: apiKey.trim(), model, scope }, false);
   }
 
   if (typeof document === "undefined") return null;
@@ -560,6 +592,7 @@ export function ConnectProviderDialog({
                 autoFocus
                 className="input w-full font-mono text-sm pr-10"
                 autoComplete="off"
+                disabled={saving}
               />
               <button
                 type="button"
@@ -588,6 +621,7 @@ export function ConnectProviderDialog({
                 setUntested(null);
               }}
               className="input w-full text-sm"
+              disabled={saving}
             >
               {reg.models.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -614,6 +648,7 @@ export function ConnectProviderDialog({
                     setScope("tenant");
                     setUntested(null);
                   }}
+                  disabled={saving}
                   className={`rounded-md border px-3 py-2 text-xs font-bold transition-colors ${
                     scope === "tenant"
                       ? "border-accent bg-accent/10 text-accent"
@@ -628,6 +663,7 @@ export function ConnectProviderDialog({
                     setScope("user");
                     setUntested(null);
                   }}
+                  disabled={saving}
                   className={`rounded-md border px-3 py-2 text-xs font-bold transition-colors ${
                     scope === "user"
                       ? "border-accent bg-accent/10 text-accent"
@@ -662,8 +698,9 @@ export function ConnectProviderDialog({
             >
               Cancel
             </button>
-            {/* The provider was down or slow on exactly this key and model,
-                which says nothing about the key: it may be saved as tested. */}
+            {/* The provider was down or slow on exactly this key, model and
+                scope, which says nothing about the key: it may be saved as
+                tested. */}
             {untested && (
               <button
                 type="button"

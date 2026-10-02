@@ -134,6 +134,13 @@ const RELIC2 = "f7f7f7f7-0000-4000-8000-0000000000f7";
 // workspace row and its owner's personal row both point at an address.
 const LOCALCO = "f8f8f8f8-0000-4000-8000-0000000000f8";
 const LOCAL_TEMPLATE = "f8f8f8f8-0000-4000-8000-00000000aaaa";
+// Interleavings (Codex review, round 3): an owner's two tabs; the one-time
+// backfill landing inside a disconnect, and inside a connect, of a workspace
+// whose only key is on the legacy row; a member and an owner at once.
+const RACE = "a9a9a9a9-0000-4000-8000-0000000000a9";
+const BACKFILL_ONE = "b8b8b8b8-0000-4000-8000-0000000000b8";
+const BACKFILL_TWO = "b9b9b9b9-0000-4000-8000-0000000000b9";
+const TEAMCO = "c9c9c9c9-0000-4000-8000-0000000000c9";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -149,6 +156,11 @@ const USERS = {
   relic: u(9, "owner@relic.test"),
   relic2: u(10, "owner@relic2.test"),
   local: u(11, "owner@local.test"),
+  race: u(12, "owner@race.test"),
+  backfillOne: u(13, "owner@backfill-one.test"),
+  backfillTwo: u(14, "owner@backfill-two.test"),
+  team: u(15, "owner@team.test"),
+  teamRep: u(16, "rep@team.test"), // a closer: saves keys for their own chats only
 } as const;
 
 const KEY_ALPHA = "sk-ant-alpha-workspace-key-0001";
@@ -166,6 +178,14 @@ const KEY_RELIC2_NEW = "sk-ant-relic2-new-key-0012";
 // Local model "keys": addresses this server must never call for a client.
 const LOCAL_WORKSPACE_URL = "http://169.254.169.254/latest/meta-data";
 const LOCAL_PERSONAL_URL = "http://10.0.0.5:11434/v1";
+const KEY_RACE = ["sk-ant-race-key-0101", "sk-ant-race-key-0102", "sk-ant-race-key-0103", "sk-ant-race-key-0104"] as const;
+const KEY_BACKFILL_ONE = "sk-ant-backfill-one-legacy-0105";
+const KEY_BACKFILL_TWO_OLD = "sk-or-v1-backfill-two-legacy-0106";
+const KEY_BACKFILL_TWO_NEW = "sk-ant-backfill-two-new-0107";
+const KEY_TEAM = "sk-ant-team-key-0108";
+const KEY_TEAM_REP_OWN = "sk-ant-team-rep-own-key-0109";
+const KEY_TEAM_AGAIN = "sk-ant-team-key-again-0110";
+const KEY_TEAM_REP_NEW = "sk-ant-team-rep-own-key-0111";
 
 async function login(user: U | null) {
   if (!user) {
@@ -392,6 +412,19 @@ async function main() {
         sql: "INSERT INTO gmail_templates (id, tenant_id, name, stage, subject, body, variants, created_at, updated_at) VALUES (?, ?, 'Welcome', 'new', 'Hello', 'Hi {{first_name}}, thanks for reaching out.', '[]', ?, ?)",
         args: [LOCAL_TEMPLATE, LOCALCO, stamp, stamp],
       },
+      // The interleavings' workspaces. The two backfill ones saved their key on
+      // the legacy row before this change, as cj2hassler's workspace did.
+      ...workspace(RACE, "race-co", "Race Co"),
+      ...workspace(BACKFILL_ONE, "backfill-one", "Backfill One"),
+      ...workspace(BACKFILL_TWO, "backfill-two", "Backfill Two"),
+      ...workspace(TEAMCO, "team-co", "Team Co"),
+      profile("p-race", USERS.race, RACE, "owner", 1, ["sdr"]),
+      profile("p-backfill-one", USERS.backfillOne, BACKFILL_ONE, "owner", 1, ["sdr"]),
+      profile("p-backfill-two", USERS.backfillTwo, BACKFILL_TWO, "owner", 1, ["sdr"]),
+      profile("p-team", USERS.team, TEAMCO, "owner", 1, ["sdr"]),
+      profile("p-team-rep", USERS.teamRep, TEAMCO, "closer", 0, ["sdr"]),
+      configRow(BACKFILL_ONE, null, "bravo", "anthropic", "claude-sonnet-4-6", KEY_BACKFILL_ONE),
+      configRow(BACKFILL_TWO, null, "bravo", "openrouter", "anthropic/claude-sonnet-4.6", KEY_BACKFILL_TWO_OLD),
     ],
     "write",
   );
@@ -712,6 +745,62 @@ async function main() {
     );
     assert.deepEqual(steps.connected, [{ provider: "anthropic", scope: "tenant" }]);
   });
+  // An answer that lands late (Codex review of PR #535, round 3). The render
+  // helper's steps edit the form while a test is out by calling its handlers
+  // directly (a browser could not: the form is locked), so each guard is
+  // proven on its own.
+  const late = () => JSON.parse(html.lateAnswers ?? "{}") as Record<string, Record<string, unknown>>;
+  const open = { key: false, model: false, wholeTeam: false, justMe: false };
+  const shut = { key: true, model: true, wholeTeam: true, justMe: true };
+  await check("the connect form is locked while a key is being tested, and unlocks on every answer", () => {
+    const steps = late();
+    assert.deepEqual(steps.lockedWhileTesting, shut, "the key, model or scope could be changed while the test ran");
+    assert.deepEqual(steps.lockedAgain, shut);
+    assert.deepEqual(steps.olderRunLate?.locked, shut, "an older run's late answer unlocked the form while a newer run was out");
+    for (const name of ["timeoutAfterKeyEdit", "passAfterKeyEdit", "timeoutAfterScopeEdit", "timeoutAfterModelEdit", "timeoutAfterProviderChange", "timeoutOnTime", "newerRunAnswer"]) {
+      assert.deepEqual(steps[name]?.locked, open, `${name}: the form stayed locked after the answer`);
+    }
+  });
+  await check("an answer that lands after the form moved on is dropped: no Save anyway for a key no longer on screen, and nothing is saved", () => {
+    const steps = late();
+    // The key changed while its test was out, then the old test timed out.
+    assert.deepEqual(
+      { saveAnyway: steps.timeoutAfterKeyEdit?.saveAnyway, alert: steps.timeoutAfterKeyEdit?.alert, saves: steps.timeoutAfterKeyEdit?.saves },
+      { saveAnyway: false, alert: null, saves: 0 },
+      "a late timeout spoke for a key no longer on screen",
+    );
+    // The key changed, then the old test PASSED: the old key is not saved.
+    assert.deepEqual(
+      { saveAnyway: steps.passAfterKeyEdit?.saveAnyway, alert: steps.passAfterKeyEdit?.alert, saves: steps.passAfterKeyEdit?.saves, connected: steps.passAfterKeyEdit?.connected },
+      { saveAnyway: false, alert: null, saves: 0, connected: 0 },
+      "a late pass saved a key no longer on screen",
+    );
+    for (const [name, what] of [
+      ["timeoutAfterScopeEdit", "the scope"],
+      ["timeoutAfterModelEdit", "the model"],
+      ["timeoutAfterProviderChange", "the provider"],
+    ] as const) {
+      assert.deepEqual({ saveAnyway: steps[name]?.saveAnyway, alert: steps[name]?.alert }, { saveAnyway: false, alert: null }, `a late timeout spoke after ${what} changed`);
+    }
+    // Nothing moved: the same timeout, on time, still offers Save anyway.
+    assert.deepEqual(
+      { saveAnyway: steps.timeoutOnTime?.saveAnyway, alert: steps.timeoutOnTime?.alert },
+      { saveAnyway: true, alert: "The AI provider did not answer within 15 seconds. Try again in a minute." },
+    );
+  });
+  await check("an older test's late answer never speaks over a newer one", () => {
+    const steps = late();
+    assert.deepEqual(
+      { saveAnyway: steps.olderRunLate?.saveAnyway, alert: steps.olderRunLate?.alert },
+      { saveAnyway: false, alert: null },
+      "the older run's timeout offered Save anyway while the newer run was out",
+    );
+    assert.deepEqual(
+      { saveAnyway: steps.newerRunAnswer?.saveAnyway, alert: steps.newerRunAnswer?.alert },
+      { saveAnyway: false, alert: "Your AI account refused the request. Check its billing or key." },
+    );
+    assert.equal(steps.heldLeft, 0 as unknown, "a held test answer never landed");
+  });
   await check("a failed key read is Couldn't check everywhere, never not connected", async () => {
     await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_offline");
     try {
@@ -861,7 +950,7 @@ async function main() {
     }
     const src = readFileSync(join(process.cwd(), "components/settings/ProviderAccountsCard.tsx"), "utf8");
     assert.doesNotMatch(src, /f\.agent_key/, "the dialog lists teammate slugs again");
-    assert.match(src, /connectProviderKey\(\{ \.\.\.target, scope, skipTest \}\)/, "the dialog does not use the tested connect");
+    assert.match(src, /connectProviderKey\(\{ \.\.\.target, skipTest, stillWanted: /, "the dialog does not use the tested connect");
   });
 
   // -- 5. A local model server is the verified operator's only ---------------
@@ -1171,6 +1260,196 @@ async function main() {
     } finally {
       await db.execute("DELETE FROM agent_model_config WHERE id = 'cc-local'");
     }
+  });
+
+  // -- 11. Interleavings (Codex review of PR #535, round 3) ------------------
+  // Every route here writes one statement at a time, with no transaction, so
+  // two requests interleave statement by statement. `interleaved` holds the
+  // app's first statement that matches `at` until the other request (or the
+  // backfill) has run to the end: the exact moment a second tab can land.
+  const { getTursoClient } = await import("../lib/turso");
+  type Stmt = string | { sql: string; args?: unknown[] };
+  let between: { at: (sql: string, args: unknown[]) => boolean; run: () => Promise<void> } | null = null;
+  // The app's client is the cached libSQL client behind a timing proxy that
+  // looks `execute` up on the client at call time: an own `execute` set on it
+  // sees every statement the app runs, then hands it to the client's own.
+  const appClient = getTursoClient() as unknown as { execute: (stmt: Stmt) => Promise<unknown> };
+  appClient.execute = async function (this: object, stmt: Stmt) {
+    const hook = between;
+    if (hook && hook.at(typeof stmt === "string" ? stmt : stmt.sql, typeof stmt === "string" ? [] : (stmt.args ?? []))) {
+      between = null;
+      await hook.run();
+    }
+    return (Object.getPrototypeOf(this) as { execute: (s: Stmt) => Promise<unknown> }).execute.call(this, stmt);
+  };
+  async function interleaved<T>(request: () => Promise<T>, at: (sql: string, args: unknown[]) => boolean, other: () => Promise<void>): Promise<T> {
+    let landed = false;
+    between = {
+      at,
+      run: async () => {
+        landed = true;
+        await other();
+      },
+    };
+    try {
+      const out = await request();
+      assert.ok(landed, "the other request never landed inside this one");
+      return out;
+    } finally {
+      between = null;
+    }
+  }
+  /** `who`'s request, run while another person's request is held (their own session). */
+  const as = async <T>(who: U, request: () => Promise<T>): Promise<T> => {
+    const held = sessionCookie;
+    await login(who);
+    try {
+      return await request();
+    } finally {
+      sessionCookie = held;
+    }
+  };
+  const statement = (verb: string, ...values: string[]) => (sql: string, args: unknown[]) =>
+    sql.startsWith(verb) && values.every((v) => args.includes(v));
+  const disconnect = async (prov: string, scope: "tenant" | "user" = "tenant") =>
+    jsonOf(await bulk.DELETE(req(`/api/agent-config/bulk-provider?provider=${prov}&scope=${scope}`, "DELETE")));
+  /** The backfill's insert-only statement exactly as Bravo runs it, held to one workspace here. */
+  const backfill = (tenant: string) =>
+    db.execute({
+      sql: `INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled)
+            SELECT b.tenant_id, NULL, '__workspace__', b.provider, b.model, b.encrypted_api_key, b.enabled
+            FROM agent_model_config b
+            WHERE b.agent_key = 'bravo' AND b.user_id IS NULL AND b.encrypted_api_key IS NOT NULL
+              AND b.tenant_id NOT IN ('ef8d389e-3f15-43f2-ae00-3660f69a1452', '42423fde-be8b-454f-932a-750e8c9b743d')
+              AND NOT EXISTS (SELECT 1 FROM agent_model_config w
+                              WHERE w.tenant_id = b.tenant_id AND w.agent_key = '__workspace__' AND w.user_id IS NULL)
+              AND b.tenant_id = ?`,
+      args: [tenant],
+    });
+  const keysOn = async (tenant: string) => (await rows(tenant)).filter((r) => r.key !== null).map((r) => `${r.agent_key}/${r.user_id === null ? "team" : "own"}:${r.key}`);
+
+  await check("a disconnect in another tab that lands inside a connect: the connect keeps nothing, says so, and nothing answers", async () => {
+    await login(USERS.race);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_RACE[0] })).status, 200);
+    // The connect saves the account, then (before its teammate rows) the
+    // other tab's disconnect runs from start to end.
+    let other = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const res = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_RACE[1] }),
+      statement("SELECT", RACE, "sdr"),
+      async () => {
+        other = await disconnect("anthropic");
+      },
+    );
+    assert.equal(other!.status, 200, JSON.stringify(other!.body));
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.equal(res.body.error, "superseded");
+    assert.match(String(res.body.message), /^The AI account was changed somewhere else while this key saved, so it was not kept/);
+    // No row keeps either key: the teammate row the connect wrote after the
+    // disconnect is gone, so no per-agent chat can spend it.
+    assert.deepEqual(await keysOn(RACE), []);
+    const perAgent = await resolveChatContext({ id: USERS.race.id, email: USERS.race.email }, "sdr");
+    assert.deepEqual(perAgent.ok ? `answers with ${perAgent.apiKey}` : { status: perAgent.status, code: perAgent.code }, { status: 412, code: "agent_not_configured" });
+    await assertNothingAnswers(RACE, "race-co", USERS.race);
+  });
+  await check("a connect in another tab that lands inside a disconnect: the disconnect still ends with nothing connected", async () => {
+    await login(USERS.race);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_RACE[2] })).status, 200);
+    // The disconnect retires the account, then (before it deletes the rows)
+    // the other tab's connect runs from start to end.
+    let other = null as Awaited<ReturnType<typeof connect>> | null;
+    const res = await interleaved(
+      () => disconnect("anthropic"),
+      statement("DELETE", RACE, "anthropic"),
+      async () => {
+        other = await connect({ provider: "anthropic", api_key: KEY_RACE[3] });
+      },
+    );
+    assert.equal(other!.status, 200, JSON.stringify(other!.body));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(await keysOn(RACE), [], "a key survived the disconnect");
+    await assertNothingAnswers(RACE, "race-co", USERS.race);
+  });
+  await check("the backfill landing inside a disconnect never brings the legacy key back", async () => {
+    // Before: the legacy row answers (no account row yet).
+    const before = await slackTurn(BACKFILL_ONE, "backfill-one", "sales", "sdr");
+    assert.ok(before.ok && before.turn.apiKey === KEY_BACKFILL_ONE, "the legacy row did not answer");
+    await login(USERS.backfillOne);
+    // The disconnect retires (no account row: nothing yet), then the backfill
+    // copies the legacy row into a new account row, then the disconnect
+    // deletes the legacy row.
+    let copied = -1;
+    const res = await interleaved(
+      () => disconnect("anthropic"),
+      statement("DELETE", BACKFILL_ONE, "anthropic"),
+      async () => {
+        copied = (await backfill(BACKFILL_ONE)).rowsAffected;
+      },
+    );
+    assert.equal(copied, 1, "the backfill did not copy the legacy row: the interleaving was not exercised");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(await keysOn(BACKFILL_ONE), [], "the legacy key survived the disconnect");
+    await assertNothingAnswers(BACKFILL_ONE, "backfill-one", USERS.backfillOne);
+  });
+  await check("the backfill landing inside a connect: the new key is the account, the old one is gone, and a second backfill copies nothing", async () => {
+    await login(USERS.backfillTwo);
+    // The connect finds no account row, then the backfill inserts one from
+    // the legacy row, then the connect's own insert meets the unique index.
+    let copied = -1;
+    const res = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_BACKFILL_TWO_NEW }),
+      statement("INSERT", BACKFILL_TWO, account.WORKSPACE_AI_AGENT_KEY),
+      async () => {
+        copied = (await backfill(BACKFILL_TWO)).rowsAffected;
+      },
+    );
+    assert.equal(copied, 1, "the backfill did not copy the legacy row: the interleaving was not exercised");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const acct = await account.readWorkspaceAiAccount(BACKFILL_TWO);
+    assert.deepEqual([acct?.source, acct?.provider], ["workspace", "anthropic"]);
+    assert.equal(acct?.encryptedApiKey ? decryptField(acct.encryptedApiKey) : null, KEY_BACKFILL_TWO_NEW);
+    assert.ok(!(await keysOn(BACKFILL_TWO)).some((k) => k.endsWith(KEY_BACKFILL_TWO_OLD)), "the old key is still on a row");
+    const turn = await slackTurn(BACKFILL_TWO, "backfill-two", "sales", "sdr");
+    assert.ok(turn.ok && turn.turn.apiKey === KEY_BACKFILL_TWO_NEW, JSON.stringify(turn));
+    assert.equal((await backfill(BACKFILL_TWO)).rowsAffected, 0, "a second backfill copied the legacy row over the account");
+  });
+  await check("a member's own key and the owner's team account never touch each other, whichever lands first", async () => {
+    await login(USERS.team);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM })).status, 200);
+    // The member has a key for their own chats and replaces it; the owner's
+    // disconnect lands inside the replacement, just before the member's row
+    // is rewritten.
+    await login(USERS.teamRep);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM_REP_OWN, scope: "user" })).status, 200);
+    let ownerOff = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const mine = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_TEAM_REP_NEW, scope: "user" }),
+      statement("UPDATE", TEAMCO, USERS.teamRep.id),
+      async () => {
+        ownerOff = await as(USERS.team, () => disconnect("anthropic"));
+      },
+    );
+    assert.equal(ownerOff!.status, 200, JSON.stringify(ownerOff!.body));
+    assert.equal(mine.status, 200, JSON.stringify(mine.body));
+    assert.deepEqual(await keysOn(TEAMCO), [`sdr/own:${KEY_TEAM_REP_NEW}`], "the owner's disconnect took the member's own key, or left the team's");
+    assert.equal((await q.aiServicesWithKey(TEAMCO)).size, 0, "the member's own key reads Connected for the team");
+    assert.deepEqual([...(await account.readPersonalAiServices(TEAMCO, USERS.teamRep.id))], ["anthropic"]);
+    const slackOff = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
+    assert.deepEqual(slackOff.ok ? `answers with ${slackOff.turn.apiKey}` : slackOff.status, 412, "a Slack mention answered on the member's own key");
+    // The member removes their key; the owner's connect lands inside it.
+    let ownerOn = null as Awaited<ReturnType<typeof connect>> | null;
+    const removed = await interleaved(
+      () => disconnect("anthropic", "user"),
+      statement("DELETE", TEAMCO, USERS.teamRep.id),
+      async () => {
+        ownerOn = await as(USERS.team, () => connect({ provider: "anthropic", api_key: KEY_TEAM_AGAIN }));
+      },
+    );
+    assert.equal(ownerOn!.status, 200, JSON.stringify(ownerOn!.body));
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.deepEqual(await keysOn(TEAMCO), [`__workspace__/team:${KEY_TEAM_AGAIN}`, `sdr/team:${KEY_TEAM_AGAIN}`], "the member's removal took the team's key, or kept their own");
+    const slackOn = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
+    assert.ok(slackOn.ok && slackOn.turn.apiKey === KEY_TEAM_AGAIN, JSON.stringify(slackOn));
   });
 
   console.log(`ai-workspace-account: ${failures === 0 ? "OK" : `${failures} FAILED`}`);
