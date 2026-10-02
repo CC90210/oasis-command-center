@@ -34,6 +34,8 @@ type LedgerOptions = SummaryOptions & {
    * its whole row here, so its list and its totals come from one read.
    */
   columns?: string;
+  /** Once aborted (the caller has answered), no further page is read. */
+  signal?: AbortSignal;
 };
 
 /** What the Commissions list needs from a ledger row. */
@@ -241,6 +243,7 @@ export async function loadWebsiteSalesCommissionSummaryRows<
   const rows: T[] = [];
   const seen = new Set<string>();
   for (let from = 0; ; from += COMMISSION_PAGE_SIZE) {
+    options.signal?.throwIfAborted();
     let query = db
       .from("website_sales_commissions")
       .select(columns)

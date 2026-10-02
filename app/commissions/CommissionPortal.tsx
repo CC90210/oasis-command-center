@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   BadgeCheck,
@@ -112,7 +112,9 @@ export function showsNoCommissionYet(state: PortalState): boolean {
  * (`initial`, lib/website-sales-commission-portal.ts), so its first paint has
  * the numbers and it makes no request when it mounts. It asks the GET route
  * again only when someone presses Refresh (on the explainer too, so a first
- * commission shows without reloading the page) or after a payout change.
+ * commission shows without reloading the page) or after a payout change. Only
+ * the latest read's answer is drawn, and the payout buttons wait while a read
+ * is in flight, so an older answer can never undo a payout on screen.
  *
  * `error` holds a CODE (a route's, or one of the two below for a request that
  * never answered); it is turned into a sentence in exactly one place, where
@@ -127,9 +129,13 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
   const [payoutReference, setPayoutReference] = useState("");
   const [voidReason, setVoidReason] = useState("");
   const [workingId, setWorkingId] = useState<string | null>(null);
+  // Which read owns the screen: each read takes the next number, and only
+  // the latest one's answer is drawn.
+  const latestRead = useRef(0);
   const setError = useCallback((code: string | null) => setState((current) => ({ ...current, error: code })), []);
 
   const load = useCallback(async () => {
+    const read = ++latestRead.current;
     setRefreshing(true);
     setError(null);
     let payload: CommissionPortalPayload | null = null;
@@ -141,9 +147,12 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
       payload = response.ok || (body && !body.ok) ? body : null;
     } catch {
       payload = null;
-    } finally {
-      setRefreshing(false);
     }
+    // Last read wins. A Refresh still in flight when a payout change starts
+    // its own re-read can answer after it, with the numbers from before the
+    // change; drawing that would put the paid entry back to approved.
+    if (read !== latestRead.current) return;
+    setRefreshing(false);
     setState((current) => portalStateAfter(current, payload, "commission_refresh_unavailable"));
   }, [setError]);
 
@@ -370,7 +379,7 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
                             <>
                               <button
                                 type="button"
-                                disabled={!canApprove || isWorking}
+                                disabled={!canApprove || isWorking || refreshing}
                                 onClick={() => void mutate(row, "approve")}
                                 className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-xs font-bold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
                               >
@@ -380,19 +389,19 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
                               {isOwnCommission && <p className="text-[11px] text-amber-300">Another founder must approve your commission.</p>}
                               {!row.paymentVerified && <p className="text-[11px] text-amber-300">A verified payment receipt is required.</p>}
                               {canVoid && editor?.id !== row.id && (
-                                <button type="button" onClick={() => { setEditor({ id: row.id, mode: "void" }); setVoidReason(""); }} className="w-full rounded-lg border border-rose-400/30 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-400/10">
+                                <button type="button" disabled={refreshing} onClick={() => { setEditor({ id: row.id, mode: "void" }); setVoidReason(""); }} className="w-full rounded-lg border border-rose-400/30 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-40">
                                   Void accrual
                                 </button>
                               )}
                             </>
                           )}
                           {canPay && editor?.id !== row.id && (
-                            <button type="button" onClick={() => { setEditor({ id: row.id, mode: "paid" }); setPayoutReference(""); }} className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-400">
+                            <button type="button" disabled={refreshing} onClick={() => { setEditor({ id: row.id, mode: "paid" }); setPayoutReference(""); }} className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40">
                               <Banknote size={13} /> Mark as paid
                             </button>
                           )}
                           {row.status === "approved" && canVoid && editor?.id !== row.id && (
-                            <button type="button" onClick={() => { setEditor({ id: row.id, mode: "void" }); setVoidReason(""); }} className="w-full rounded-lg border border-rose-400/30 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-400/10">
+                            <button type="button" disabled={refreshing} onClick={() => { setEditor({ id: row.id, mode: "void" }); setVoidReason(""); }} className="w-full rounded-lg border border-rose-400/30 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-40">
                               Void accrual
                             </button>
                           )}
@@ -412,7 +421,7 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
                       <p className="mt-1 text-[11px] text-fg-muted">Enter the bank, e-transfer, payroll, or batch reference after the money has actually been sent.</p>
                       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                         <input id={`payout-${row.id}`} value={payoutReference} onChange={(event) => setPayoutReference(event.target.value)} maxLength={200} placeholder="e.g. eTransfer-2026-08-24-0042" className="min-w-0 flex-1 rounded-lg border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg outline-none focus:border-emerald-400/60" />
-                        <button type="button" disabled={payoutReference.trim().length < 3 || isWorking} onClick={() => void mutate(row, "mark_paid")} className="rounded-lg bg-emerald-500 px-4 py-2 text-xs font-bold text-white disabled:opacity-40">Confirm paid</button>
+                        <button type="button" disabled={payoutReference.trim().length < 3 || isWorking || refreshing} onClick={() => void mutate(row, "mark_paid")} className="rounded-lg bg-emerald-500 px-4 py-2 text-xs font-bold text-white disabled:opacity-40">Confirm paid</button>
                         <button type="button" onClick={() => setEditor(null)} className="rounded-lg border border-bg-border px-3 py-2 text-xs font-semibold text-fg-muted">Cancel</button>
                       </div>
                     </div>
@@ -424,7 +433,7 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
                       <p className="mt-1 text-[11px] text-fg-muted">This is permanent. Use a specific, auditable reason; refunds are handled as separate offset rows.</p>
                       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                         <input id={`void-${row.id}`} value={voidReason} onChange={(event) => setVoidReason(event.target.value)} maxLength={500} placeholder="e.g. Duplicate attribution confirmed against signed deal" className="min-w-0 flex-1 rounded-lg border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg outline-none focus:border-rose-400/60" />
-                        <button type="button" disabled={voidReason.trim().length < 8 || isWorking} onClick={() => void mutate(row, "void")} className="rounded-lg bg-rose-500 px-4 py-2 text-xs font-bold text-white disabled:opacity-40">Confirm void</button>
+                        <button type="button" disabled={voidReason.trim().length < 8 || isWorking || refreshing} onClick={() => void mutate(row, "void")} className="rounded-lg bg-rose-500 px-4 py-2 text-xs font-bold text-white disabled:opacity-40">Confirm void</button>
                         <button type="button" onClick={() => setEditor(null)} className="rounded-lg border border-bg-border px-3 py-2 text-xs font-semibold text-fg-muted">Cancel</button>
                       </div>
                     </div>

@@ -28,6 +28,8 @@
  * FAILURE. A wave answers as soon as one of its reads fails (each read logs
  * its own failure with its detail at once), and the whole load has a deadline,
  * so a read that never answers cannot hold the page on its loading screen.
+ * Once the load has answered, it stops: reads waiting for a slot are dropped
+ * and no later wave or ledger page starts (one AbortController per load).
  * Every failure comes back as a code; the screen turns the code into a
  * sentence (lib/ui/error-copy.ts).
  */
@@ -205,24 +207,52 @@ type LeadRow = { id: string; data: unknown };
 /** Runs a task when one of the load's read slots is free. */
 type Limiter = <T>(task: () => PromiseLike<T>) => Promise<T>;
 
+/** A load that has answered stops: this is what its reads throw when they are dropped. */
+function isCancelled(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === "AbortError";
+}
+
 /**
- * At most `max` tasks at once. Made per load, never at module scope: nothing
- * pending may be shared across requests on Workers.
+ * At most `max` tasks at once, for one load. Once the load is cancelled (it
+ * has answered, or one of its reads failed, which fails the whole load), no
+ * task starts: the ones waiting for a slot are dropped and new ones refused.
+ * A failed task cancels the load BEFORE it gives up its slot, so the slot is
+ * never handed to a read whose answer nobody will use. Made per load, never
+ * at module scope: nothing pending may be shared across requests on Workers.
  */
-function createLimiter(max: number): Limiter {
+function createLimiter(max: number, cancel: AbortController): Limiter {
+  const signal = cancel.signal;
   let active = 0;
-  const waiting: Array<() => void> = [];
+  // A finishing task hands its slot straight to the next one waiting (true),
+  // so a slot is never counted twice; the abort wakes every waiter without
+  // one (false).
+  const waiting: Array<(slot: boolean) => void> = [];
+  signal.addEventListener("abort", () => {
+    for (const wake of waiting.splice(0)) wake(false);
+  }, { once: true });
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next(true);
+    else active -= 1;
+  };
   return async <T>(task: () => PromiseLike<T>): Promise<T> => {
-    if (active < max) active += 1;
-    // A finishing task hands its slot straight to the next one waiting, so
-    // a slot is never counted twice.
-    else await new Promise<void>((resolve) => waiting.push(resolve));
+    signal.throwIfAborted();
+    if (active < max) {
+      active += 1;
+    } else {
+      const slot = await new Promise<boolean>((resolve) => waiting.push(resolve));
+      if (signal.aborted) {
+        if (slot) release();
+        signal.throwIfAborted();
+      }
+    }
     try {
       return await task();
+    } catch (error) {
+      if (!isCancelled(error)) cancel.abort();
+      throw error;
     } finally {
-      const next = waiting.shift();
-      if (next) next();
-      else active -= 1;
+      release();
     }
   };
 }
@@ -290,11 +320,13 @@ type WaveResult = { ok: true; values: unknown[] } | { ok: false; code: Commissio
 
 /**
  * A wave's reads, all at once. It answers as soon as one fails, without
- * waiting for the others (one of them may never answer); each read logs its
- * own failure the moment it happens, even one that lands after the wave has
- * answered, and none is left as an unhandled rejection. When two fail, the
- * first to fail names the code; both are logged, and both read the same on
- * screen.
+ * waiting for the others (one of them may never answer); the failed read has
+ * already cancelled the load (createLimiter), so the others' chunk reads
+ * still waiting for a slot never start. Each read logs its own failure the
+ * moment it happens, even one that lands after the wave has answered (a read
+ * dropped by the cancel is not a failure and is not logged), and none is
+ * left as an unhandled rejection. When two fail, the first to fail names the
+ * code; both read the same on screen.
  */
 function runWave(steps: readonly WaveStep[]): Promise<WaveResult> {
   return new Promise((resolve) => {
@@ -318,7 +350,7 @@ function runWave(steps: readonly WaveStep[]): Promise<WaveResult> {
             }
           },
           (error: unknown) => {
-            console.error(`[website-sales.commissions.${step.tag}]`, error);
+            if (!isCancelled(error)) console.error(`[website-sales.commissions.${step.tag}]`, error);
             if (!answered) {
               answered = true;
               resolve({ ok: false, code: step.code });
@@ -345,15 +377,22 @@ export async function loadCommissionPortal(
   persona: Persona,
   options: CommissionPortalOptions = {},
 ): Promise<CommissionPortalResult> {
+  // One cancel per load. Whatever answers (the reads, a failed read or the
+  // deadline), the load stops there: a read still waiting for a slot is
+  // dropped and no later wave or ledger page begins, so a slow database is
+  // not handed more work for an answer nobody is waiting for. Statements
+  // already sent finish on their own: neither the Turso adapter
+  // (lib/turso-postgrest.ts) nor @libsql/client accepts a signal per query.
+  const cancel = new AbortController();
   // `work` never rejects, so whatever the reads do after the deadline has
   // answered is still caught here, never an unhandled rejection.
-  const work = readCommissionPortal(session, persona).catch((error: unknown) => {
+  const work = readCommissionPortal(session, persona, cancel).catch((error: unknown) => {
     // Each read below has its own code. This catches what none of them
     // expected (a row that breaks the mapping, a persona missing from the
     // capability map): the page reads on the server now, so a throw here
     // would replace the whole page with the error screen instead of putting
-    // one plain sentence on it.
-    console.error("[website-sales.commissions.portal]", error);
+    // one plain sentence on it. A load stopped after its answer is not news.
+    if (!isCancelled(error)) console.error("[website-sales.commissions.portal]", error);
     return fail(500, "commission_portal_unavailable");
   });
   try {
@@ -364,19 +403,23 @@ export async function loadCommissionPortal(
     // screen forever.
     console.error("[website-sales.commissions.portal]", error);
     return fail(500, "commission_portal_unavailable");
+  } finally {
+    cancel.abort();
   }
 }
 
 async function readCommissionPortal(
   session: CommissionPortalSession,
   persona: Persona,
+  cancel: AbortController,
 ): Promise<CommissionPortalResult> {
   if (!maySeeCommissionSurface(SURFACE_CAPABILITIES[persona])) {
     return fail(403, "forbidden_commission_role");
   }
 
   const db = getServiceSupabase();
-  const limit = createLimiter(CHUNK_READS_IN_FLIGHT);
+  const signal = cancel.signal;
+  const limit = createLimiter(CHUNK_READS_IN_FLIGHT, cancel);
   let ledgerScope: CommissionLedgerScope = "tenant";
   let repScope: { repUserId?: string; repUserIds?: string[] } = {};
   if (!session.isAdmin && persona === "manager") {
@@ -405,14 +448,18 @@ async function readCommissionPortal(
   // Wave 1: the complete ledger in scope, read ONCE, with the rep boundary.
   // The rows on screen and the totals both come from it, so a row is never
   // shown without being counted, or counted with another status or amount.
+  // Each wave first checks that the load has not already answered.
+  signal.throwIfAborted();
   let ledger: CommissionRow[];
   try {
     ledger = await loadWebsiteSalesCommissionSummaryRows<CommissionRow>(db, {
       tenantId: session.tenantId,
       ...repScope,
       columns: COMMISSION_SELECT,
+      signal,
     });
   } catch (error) {
+    if (isCancelled(error)) throw error;
     console.error("[website-sales.commissions.listing]", error);
     return fail(500, "commission_listing_unavailable");
   }
@@ -429,6 +476,7 @@ async function readCommissionPortal(
         .filter((id): id is string => !!id),
     ),
   ];
+  signal.throwIfAborted();
   const second = await runWave([
     {
       tag: "deals",
@@ -470,6 +518,7 @@ async function readCommissionPortal(
     .filter((deal): deal is DealRow => Boolean(deal));
   const leadIds = [...new Set(listedDeals.map((deal) => deal.lead_id).filter(Boolean))];
   const receiptIds = [...new Set(listedDeals.map((deal) => deal.verified_payment_id).filter((id): id is string => !!id))];
+  signal.throwIfAborted();
   const third = await runWave([
     {
       tag: "leads",

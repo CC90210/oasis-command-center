@@ -426,7 +426,9 @@ async function main() {
   let slow = false;
   let inFlight = 0;
   let maxInFlight = 0;
-  let faults: { fail?: RegExp; stall?: RegExp } = {};
+  /** Every statement the loader started, in order (its SQL), however it then fared. */
+  const begun: string[] = [];
+  let faults: { fail?: RegExp; stall?: RegExp; hold?: { match: RegExp; until: Promise<void> } } = {};
   let after: { match: RegExp; then: () => Promise<void> } | null = null;
   let reorder: { commit: () => Promise<void> } | null = null;
   const held: Array<{ sql: string; run: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
@@ -452,6 +454,9 @@ async function main() {
     assert.equal(typeof original, "function", `libSQL client has a prototype ${name}`);
     client[name] = async function (this: unknown, ...a: unknown[]) {
       const sql = name === "execute" ? sqlOf(a[0]) : "";
+      begun.push(sql);
+      const hold = faults.hold;
+      if (hold && hold.match.test(sql)) await hold.until;
       if (reorder && /FROM "website_sales_commissions"/.test(sql)) {
         return new Promise((resolve, reject) => {
           held.push({ sql, run: () => original.apply(this, a), resolve, reject });
@@ -747,6 +752,87 @@ async function main() {
     }
   });
 
+  // -- a load that has answered starts nothing more ---------------------------
+  // The deadline answers while a read is held; the held read is then let go.
+  // Every statement the loader starts is recorded (`begun`), so anything it
+  // still started after its answer is counted.
+  const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const gate = () => {
+    let open = () => undefined as void;
+    const until = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { until, open };
+  };
+  await check("cancel: once the deadline has answered, a ledger page that answers late starts no next page and no later wave", async () => {
+    // 700 entries are two ledger pages. Hold the first; the deadline answers;
+    // then let it go.
+    const held = gate();
+    faults = { hold: { match: /FROM "website_sales_commissions"[\s\S]*OFFSET 0\b/, until: held.until } };
+    try {
+      const { value } = await errorsDuring(() =>
+        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 150 }), 3_000));
+      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
+      const startedByAnswer = begun.length;
+      faults = {};
+      held.open();
+      await settle(400);
+      assert.deepEqual(begun.slice(startedByAnswer), [], "a read started after the page already had its answer");
+    } finally {
+      faults = {};
+      held.open();
+    }
+  });
+
+  await check("cancel: once the deadline has answered, chunk reads still waiting for a slot never start", async () => {
+    // 450 deals: the last wave has 6 chunk reads (3 of clients, 3 of payments)
+    // and 4 slots. Hold those reads: 4 start, 2 wait; then the deadline.
+    const held = gate();
+    const lastWave = /FROM "(tenant_records|website_sales_payment_receipts)"/;
+    faults = { hold: { match: lastWave, until: held.until } };
+    try {
+      const before = begun.length;
+      const { value } = await errorsDuring(() =>
+        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 1_500 }), 5_000));
+      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
+      const started = begun.slice(before);
+      assert.equal(started.filter((sql) => lastWave.test(sql)).length, 4, `4 of the 6 last-wave reads started:\n${started.join("\n")}`);
+      const startedByAnswer = begun.length;
+      faults = {};
+      held.open();
+      await settle(400);
+      assert.deepEqual(begun.slice(startedByAnswer), [], "a queued read started after the page already had its answer");
+    } finally {
+      faults = {};
+      held.open();
+    }
+  });
+
+  await check("cancel: when a read fails, the reads still waiting for a slot never start", async () => {
+    // The last wave again: the 3 client reads take 3 slots and fail at once;
+    // 1 payments read takes the 4th slot and is held; 2 wait. The failure
+    // fails the load, so those 2 must never start.
+    const held = gate();
+    faults = {
+      fail: /FROM "tenant_records"/,
+      hold: { match: /FROM "website_sales_payment_receipts"/, until: held.until },
+    };
+    try {
+      const before = begun.length;
+      const { value } = await errorsDuring(() =>
+        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 5_000 }), 4_000));
+      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_leads_unavailable" } });
+      faults = {};
+      held.open();
+      await settle(400);
+      const payments = begun.slice(before).filter((sql) => /FROM "website_sales_payment_receipts"/.test(sql));
+      assert.equal(payments.length, 1, `only the payments read that had a slot started (${payments.length} did)`);
+    } finally {
+      faults = {};
+      held.open();
+    }
+  });
+
   // -- isolation: another workspace's data never reaches this one --------------
   const leaks = (body: unknown, markers: string[]) => markers.filter((marker) => JSON.stringify(body).includes(marker));
   const A_TOTALS: Totals[] = [
@@ -818,18 +904,21 @@ async function main() {
     assert.equal(founderPaint.header?.title, "Commissions");
   });
 
-  // The client half, rendered where React is whole.
-  const renderPortal = (cases: Record<string, unknown>) => {
+  // The client half runs in child processes, where React is whole.
+  const plainEnv = () => {
     const nodeOptions = (process.env.NODE_OPTIONS || "")
       .split(/\s+/)
       .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
       .join(" ");
     const env = { ...process.env, NODE_OPTIONS: nodeOptions };
     if (!nodeOptions) delete env.NODE_OPTIONS;
+    return env;
+  };
+  const renderPortal = (cases: Record<string, unknown>) => {
     const r = spawnSync(process.execPath, ["--import", "tsx", "tests/commissions-portal.render.ts"], {
       cwd: ROOT,
       encoding: "utf8",
-      env,
+      env: plainEnv(),
       input: JSON.stringify({ cases }),
     });
     assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
@@ -915,6 +1004,54 @@ async function main() {
       );
     }
     assert.match(src, /<NoCommissionYet onRefresh=\{\(\) => void load\(\)\}/, "the explainer's Refresh asks the route again");
+  });
+
+  await check("last read wins: a Refresh from before a payout that answers last cannot undo it; payout buttons wait while a read is in flight", async () => {
+    const base = founderPaint.initial;
+    assert.ok(base && base.ok);
+    const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+    const paidRowId = "c-manager-maple";
+    // A second approved entry, so "Mark as paid" is on screen during the race.
+    const initial = copy(base);
+    for (const row of initial.data) if (row.id === "c-closer-harbour") row.status = "approved";
+    assert.equal(initial.data.find((row) => row.id === paidRowId)?.status, "approved", "the entry starts approved");
+    const afterPayout = copy(initial);
+    const paid = afterPayout.data.find((row) => row.id === paidRowId)!;
+    paid.status = "paid";
+    paid.paidAt = "2026-10-02T16:00:00Z";
+    paid.payoutReference = "eTransfer-2026-10-02-0001";
+    const cad = afterPayout.summary.totals.find((totals) => totals.currency === "CAD")!;
+    cad.approvedCents -= paid.amountCents;
+    cad.paidCents += paid.amountCents;
+
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/commissions-portal.client.ts"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: plainEnv(),
+      input: JSON.stringify({ initial, afterPayout, paidRowId }),
+    });
+    assert.equal(r.status, 0, `the interaction helper exited ${r.status}:\n${r.stderr}`);
+    type Step = { label: string; paidRowStatus: string | null; refreshDisabled: boolean; payoutControls: Array<{ text: string; disabled: boolean }>; screen: string };
+    const out = JSON.parse(r.stdout) as { methods: string[]; steps: Step[] };
+    const step = (label: string): Step => {
+      const found = out.steps.find((s) => s.label === label);
+      assert.ok(found, `no step "${label}"`);
+      return found;
+    };
+    assert.deepEqual(out.methods, ["PATCH", "GET", "GET"], "the save, the Refresh, then the save's own re-read");
+    assert.equal(step("opened").paidRowStatus, "approved");
+    assert.ok(step("opened").payoutControls.some((control) => !control.disabled), "with no read in flight the payout buttons work");
+    for (const label of ["refresh in flight", "payout saved, its re-read in flight"]) {
+      const s = step(label);
+      assert.ok(s.payoutControls.length >= 3, `${label}: payout buttons on screen`);
+      assert.deepEqual(s.payoutControls.filter((control) => !control.disabled), [], `${label}: a payout button is usable while a read is in flight`);
+    }
+    const saved = step("re-read after the payout answered");
+    assert.equal(saved.paidRowStatus, "paid");
+    const last = step("older refresh answered last");
+    assert.equal(last.paidRowStatus, "paid", "the older Refresh put the paid entry back");
+    assert.equal(last.screen, saved.screen, "the older Refresh changed what is on screen");
+    assert.equal(last.refreshDisabled, false, "the screen is not left waiting");
   });
 
   // -- 3. error sentences --------------------------------------------------
