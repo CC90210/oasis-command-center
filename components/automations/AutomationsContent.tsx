@@ -28,6 +28,7 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
+import { oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -84,11 +85,18 @@ export async function AutomationsContent({
   const manifestAgentKeys = (manifest?.agents || [])
     .filter((agent) => agent.enabled)
     .map((agent) => agent.slug);
-  const automationAgentKeys = Array.from(
-    new Set((profileAgentKeys.length > 0 ? profileAgentKeys : manifestAgentKeys)
-      .map((key) => String(key).trim().toLowerCase())
-      .filter(Boolean)),
-  );
+  // The agents a job may run as: in OASIS's own workspace the ones its bridge
+  // runs, the set /api/cron-jobs accepts there and /operations lists (W4a
+  // review R4, verifier D3); its manifest roster is its department leads, and
+  // the API refuses those library templates. Every other workspace keeps its
+  // roster.
+  const automationAgentKeys =
+    oasisOperatorAgents(profile?.tenant_id) ??
+    Array.from(
+      new Set((profileAgentKeys.length > 0 ? profileAgentKeys : manifestAgentKeys)
+        .map((key) => String(key).trim().toLowerCase())
+        .filter(Boolean)),
+    );
   const isClientAutomationSurface =
     !externalTenantSurfacesBlocked() && tenantSlug === "sun";
   // The bridge installer is operator-only (/settings/devices/install gives a

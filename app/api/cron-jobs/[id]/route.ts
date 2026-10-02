@@ -10,7 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import {
   normalizeEmpireRow,
   normalizeTenantCronRow,
@@ -92,7 +92,8 @@ export async function PATCH(
   }
   if (typeof body.agent_key === "string") {
     const nextAgentKey = body.agent_key.toLowerCase();
-    const allowedAgents = await getTenantEnabledAgents(tenantId);
+    // OASIS's own workspace: the agents its bridge runs (W4a review R4).
+    const allowedAgents = oasisOperatorAgents(tenantId) ?? (await getTenantEnabledAgents(tenantId));
     if (allowedAgents.length > 0 && !allowedAgents.includes(nextAgentKey)) {
       return NextResponse.json(
         {

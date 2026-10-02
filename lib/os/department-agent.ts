@@ -33,7 +33,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider, type StreamEvent } from "@/lib/providers";
 import type { OperatorFallback } from "@/lib/operator-credentials";
 import { getAgentBySlug } from "@/lib/agents/loader";
-import { getManifest } from "@/lib/manifest/loader";
+import { getWorkspaceManifest } from "@/lib/manifest/loader";
+import type { TenantManifest } from "@/lib/manifest/schema";
 import { IDENTITY_LOCK_OVERLAY } from "@/lib/agent-personas";
 import { getTenant } from "@/lib/queries";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
@@ -137,15 +138,28 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const agentSlug = (req.agentSlug || "").trim().toLowerCase();
   const dept = req.department;
 
-  // A department channel: the agent must be the one this workspace binds to
-  // that department, so a department label is never pinned on another agent.
+  // The workspace's manifest: its roster says who leads each department. Read
+  // strictly (W4a review R3): a read that fails is "we could not confirm your
+  // workspace", never a department judged unbound or pinned on another agent.
+  let manifest: TenantManifest;
+  try {
+    manifest = await getWorkspaceManifest(tenantId, tenantSlug);
+  } catch (err) {
+    console.error("[department-agent.manifest]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return { ok: false, status: 503, error: "workspace_unavailable" };
+  }
+
+  // A department channel: the agent must be the one this workspace's manifest
+  // binds to that department (config.ts departmentChannelFor), so a department
+  // label is never pinned on another agent, and a lead switched off answers
+  // nothing.
   if (dept) {
     // getTenant answers null when the tenants read fails. That is not "not
     // OASIS": judging the binding on it would refuse OASIS's own departments.
     const tenant = await getTenant(tenantId);
     if (!tenant?.slug) return { ok: false, status: 503, error: "workspace_unavailable" };
-    const binding = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug) });
-    if (binding.kind !== "agent" || binding.agentSlug !== agentSlug) {
+    const lead = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug), manifest });
+    if (lead.kind !== "agent" || lead.agentSlug !== agentSlug) {
       return { ok: false, status: 400, error: "department_agent_mismatch" };
     }
   }
@@ -156,7 +170,6 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   if (!agent.is_public && agent.tenant_id !== tenantId) return { ok: false, status: 403, error: "agent_not_visible" };
 
   const channelKey = dept ? departmentChannelKey(dept.key) : agentChannelKey(agent.slug);
-  const manifest = await getManifest(tenantSlug, tenantId);
   const binding = manifest.agents.find((a) => a.slug === agent.slug);
 
   // The WORKSPACE row (user_id IS NULL) of the `bravo` config: a teammate's

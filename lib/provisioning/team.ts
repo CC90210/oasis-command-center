@@ -8,15 +8,19 @@
  *
  * NEUTRAL BY CONSTRUCTION. A client never gets an OASIS house agent (the
  * personas that run OASIS itself) or a SunBiz one. Each department's teammate is
- * whatever components/os/department/config.ts binds that department to in a
- * workspace that is not OASIS's own (today: Sales -> the `sdr` library
- * template, Client Success -> `customer-support`; both prompts name only the
- * client's own brand). A department with no neutral agent yet gets no
- * teammate, and its channel says "not set up" rather than borrowing one.
- * Teammates are named for their department ("Sales lead"), never for the agent.
+ * the neutral library template components/os/department/config.ts names for it
+ * (neutralTemplateFor; today: Sales -> `sdr`, Client Success ->
+ * `customer-support`; both prompts name only the client's own brand). A
+ * department with no neutral agent yet gets no teammate, and its channel says
+ * "not set up" rather than borrowing one. Teammates are named for their
+ * department ("Sales lead"), never for the agent.
+ *
+ * Each binding records the departments it leads (`departments`, W4a): the
+ * workspace's manifest is the one roster its channels, AI Team page and
+ * Settings read, so a lead with no `departments` would answer nowhere.
  */
 
-import { departmentChannelFor } from "@/components/os/department/config";
+import { neutralTemplateFor } from "@/components/os/department/config";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { ManifestAgentBinding } from "@/lib/manifest/schema";
 import type { DepartmentKey, ModuleKey } from "@/lib/os/types";
@@ -82,18 +86,23 @@ export function modulesForSetup(departments: readonly DepartmentKey[], modules: 
 
 /**
  * The manifest agents for these departments. One binding per neutral agent
- * (an agent that leads two departments is listed once, under the first), the
- * first one primary. No tool_palette: a client agent's missing palette is "no
- * tools" (lib/manifest/schema.ts resolveAgentToolPalette).
+ * (an agent that leads two departments is listed once, named for the first,
+ * with both in `departments`), the first one primary. No tool_palette: a
+ * client agent's missing palette is "no tools" (lib/manifest/schema.ts
+ * resolveAgentToolPalette).
  */
 export function neutralTeamFor(departments: readonly DepartmentKey[]): ManifestAgentBinding[] {
   const out: ManifestAgentBinding[] = [];
   for (const dept of OS_DEPARTMENTS) {
     if (!departments.includes(dept.key)) continue;
-    const binding = departmentChannelFor(dept.key, { oasis: false });
-    if (binding.kind !== "agent") continue;
-    if (out.some((a) => a.slug === binding.agentSlug)) continue;
-    out.push({ slug: binding.agentSlug, display_name: `${dept.label} lead`, enabled: true, primary: out.length === 0 });
+    const slug = neutralTemplateFor(dept.key);
+    if (!slug) continue;
+    const already = out.find((a) => a.slug === slug);
+    if (already) {
+      already.departments = [...(already.departments ?? []), dept.key];
+      continue;
+    }
+    out.push({ slug, display_name: `${dept.label} lead`, enabled: true, primary: out.length === 0, departments: [dept.key] });
   }
   return out;
 }

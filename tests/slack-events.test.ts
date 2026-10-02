@@ -224,13 +224,20 @@ async function main() {
   await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
 
   const stamp = "2026-09-01T00:00:00.000Z";
+  // Each client workspace as OASIS provisions it (W4a: its manifest is the one
+  // roster, so its Sales and Client Success leads answer because it binds them).
+  const { buildProvisionedManifest } = await import("../lib/provisioning/manifest");
+  const { DEFAULT_DEPARTMENTS } = await import("../lib/provisioning/team");
+  const provisioned = (slug: string, name: string) =>
+    JSON.stringify(buildProvisionedManifest({ slug, name, departments: DEFAULT_DEPARTMENTS, modules: [], now: stamp }));
+  const BRAVO_CO_MANIFEST = provisioned("bravo-co", "Bravo Co");
   await db.batch(
     [
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'alpha-co', 'Alpha Co')", args: [ALPHA] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'bravo-co', 'Bravo Co')", args: [BRAVO_CO] },
-      { sql: "INSERT INTO tenant_manifests VALUES ('m-alpha', ?, 'alpha-co', '{}', 1, 1, ?, ?)", args: [ALPHA, stamp, stamp] },
-      { sql: "INSERT INTO tenant_manifests VALUES ('m-bravo', ?, 'bravo-co', '{}', 1, 1, ?, ?)", args: [BRAVO_CO, stamp, stamp] },
+      { sql: "INSERT INTO tenant_manifests VALUES ('m-alpha', ?, 'alpha-co', ?, 1, 1, ?, ?)", args: [ALPHA, provisioned("alpha-co", "Alpha Co"), stamp, stamp] },
+      { sql: "INSERT INTO tenant_manifests VALUES ('m-bravo', ?, 'bravo-co', ?, 1, 1, ?, ?)", args: [BRAVO_CO, BRAVO_CO_MANIFEST, stamp, stamp] },
       { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-owner-a', 'owner@alpha.test')", args: [] },
       { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-member-a', 'member@alpha.test')", args: [] },
       {
@@ -752,6 +759,33 @@ async function main() {
     assert.match(String(posts[posts.length - 1].body.text), /^Finance is not set up in this workspace yet/);
   });
 
+  // W4a review R3: who leads a department is the workspace manifest now. A
+  // read that fails must be retried, not answered from the empty seed a client
+  // would get, which posts "<Department> is not set up" into its own Slack.
+  await check("a manifest read that fails is retried (the job throws): no 'not set up' notice, no model call", async () => {
+    let prepared = 0;
+    const postsBefore = posts.length;
+    const job = { ...dispatched[0], eventId: "EvMENTIONDB1", text: `<@${BOT_A}> Client Success, draft a reply to Acme`, channelDepartment: null };
+    await db.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    try {
+      await assert.rejects(
+        jobs.runSlackMentionJob(job, {
+          db,
+          now,
+          prepare: (async () => {
+            prepared += 1;
+            return { ok: false, status: 500, error: "should_not_run" };
+          }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+        }),
+        /manifest_by_tenant_lookup_failed/,
+      );
+    } finally {
+      await db.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    assert.equal(prepared, 0, "a turn was prepared on a roster nobody could read");
+    assert.equal(posts.length, postsBefore, `a notice reached the client's Slack: ${String(posts[posts.length - 1]?.body.text ?? "")}`);
+  });
+
   await check("a hand-off that fails removes the receipt and answers 500, so Slack's retry runs it", async () => {
     dispatchThrows = true;
     const body = eventBody(mention("UMEMBER1", "C0CLIENTS", "retry me"), { eventId: "EvDISPATCH1" });
@@ -782,15 +816,24 @@ async function main() {
     assert.equal(routing.departmentForMention({ text: "<@UBOT> where are we?", channelDepartment: "client_success", defaultDepartment: "sales" }).department, "client_success");
   });
 
-  await check("only departments with an AI teammate can answer: all six in OASIS, Sales and Client Success in a client workspace", () => {
-    assert.deepEqual(routing.answeringDepartments({ oasis: true }), ["chief_of_staff", "sales", "marketing", "client_success", "finance", "operations"]);
-    assert.deepEqual(routing.answeringDepartments({ oasis: false }), ["sales", "client_success"]);
-    assert.equal(routing.defaultMentionDepartment({ oasis: true }), "chief_of_staff");
-    assert.equal(routing.defaultMentionDepartment({ oasis: false }), "sales", "a client workspace has no Chief of Staff teammate");
+  await check("only departments with an AI teammate can answer: all six in OASIS, Sales and Client Success in a client workspace", async () => {
+    // Who answers is the workspace manifest's roster (W4a), the web channels' own reader.
+    const { parseManifest } = await import("../lib/manifest/schema");
+    const { OASIS_AI_CC_SEED } = await import("../lib/manifest/seeds");
+    const client = { oasis: false, manifest: parseManifest(JSON.parse(BRAVO_CO_MANIFEST)) };
+    for (const oasis of [{ oasis: true }, { oasis: true, manifest: OASIS_AI_CC_SEED }]) {
+      assert.deepEqual(routing.answeringDepartments(oasis), ["chief_of_staff", "sales", "marketing", "client_success", "finance", "operations"]);
+      assert.equal(routing.defaultMentionDepartment(oasis), "chief_of_staff");
+    }
+    assert.deepEqual(routing.answeringDepartments(client), ["sales", "client_success"]);
+    assert.equal(routing.defaultMentionDepartment(client), "sales", "a client workspace has no Chief of Staff teammate");
+    // No manifest, nobody answers: a client is never handed a static lead.
+    assert.deepEqual(routing.answeringDepartments({ oasis: false }), []);
     // The Settings page offers exactly these (source wiring: the page filters
-    // OS_DEPARTMENTS by answeringDepartments before rendering the map).
+    // OS_DEPARTMENTS by answeringDepartments, over the workspace manifest,
+    // before rendering the map).
     const page = read("app/settings/chat-apps/page.tsx");
-    assert.match(page, /answeringDepartments\(\{ oasis: viewer\.access\.oasisWorkspace \}\)/);
+    assert.match(page, /answeringDepartments\(\{ oasis: viewer\.access\.oasisWorkspace, manifest \}\)/);
     assert.match(page, /departments=\{mappableDepartments\}/);
   });
 
@@ -1353,7 +1396,7 @@ async function main() {
       assert.equal(await asked({ integrations: ["slack"] }), false, "the old array shape says nothing about chat apps");
       assert.equal(await asked({}), false);
     } finally {
-      await db.execute({ sql: "UPDATE tenant_manifests SET manifest = '{}' WHERE tenant_id = ?", args: [BRAVO_CO] });
+      await db.execute({ sql: "UPDATE tenant_manifests SET manifest = ? WHERE tenant_id = ?", args: [BRAVO_CO_MANIFEST, BRAVO_CO] });
     }
   });
 

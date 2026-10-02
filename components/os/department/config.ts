@@ -6,14 +6,25 @@
  * the same answers, and tests/os-departments.test.ts runs every one of them in
  * bare node.
  *
+ * WHO LEADS A DEPARTMENT (W4a, 2026-10-01). The workspace's manifest says: the
+ * binding whose `departments` names it (lib/manifest/schema.ts). That is the
+ * one roster every surface reads through departmentChannelFor: the department
+ * channel and its header, the AI Team page, Settings > AI brain, Slack, the
+ * chat route and the welcome wizard. OASIS's seed binds its own agents (Chief
+ * of Staff and Operations → bravo, Sales → sdr, Marketing → maven, Client
+ * Success → customer-support, Finance → atlas). The static table below answers
+ * ONLY for OASIS's own workspace, and only for a department its manifest names
+ * no lead for (a stored manifest written before `departments` existed). Any
+ * other workspace gets exactly the leads its manifest binds, and an honest "not
+ * set up" channel where it binds none.
+ *
  * THE ONE RULE THIS FILE HOLDS: a workspace that is not OASIS's own never sees
- * an OASIS agent, an OASIS persona name or OASIS copy. OASIS binds its own
- * agents (Chief of Staff → bravo, Marketing → maven, Finance → atlas, as the
- * design doc §(b) "Agent binding" says). Every other workspace gets a neutral
- * library template where one exists (lib/agents/library.ts: `sdr`,
- * `customer-support` — both prompts say only "{{tenant.brand.name}}"), and an
- * honest "not set up" channel where none does. Rendering the default agent
- * instead would put Bravo's prompt ("You are Bravo…") in a client's channel.
+ * an OASIS agent, an OASIS persona name or OASIS copy. A client binding that
+ * names a house agent (lib/agents.ts isHouseAgentSlug) is ignored, so no
+ * manifest edit can put Bravo's prompt ("You are Bravo…") in a client's
+ * channel. OASIS provisions a client's departments with neutral library
+ * templates (lib/agents/library.ts: `sdr`, `customer-support`, both prompts
+ * say only "{{tenant.brand.name}}"; lib/provisioning/team.ts).
  *
  * Why not a department prompt overlay on bravo? /api/agents/chat composes the
  * system prompt from the library prompt plus the MANIFEST binding's overlay; it
@@ -22,8 +33,11 @@
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
+import type { ManifestAgentBinding, TenantManifest } from "@/lib/manifest/schema";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { QUICK_ACTIONS } from "@/lib/quick-actions";
+import { isHouseAgentSlug } from "@/lib/agents";
+import { isBindingOn } from "@/lib/manifest/agent-roster";
 
 /** Which agent answers in a department's channel. */
 export type DepartmentChannelBinding =
@@ -126,53 +140,137 @@ export function departmentProfile(key: DepartmentKey): DepartmentProfile {
  */
 const DRAFTS_ONLY = "Replies are drafts. Nothing is sent from this channel.";
 
-const OASIS_BINDINGS: Record<DepartmentKey, { agentSlug: string; greeting: string }> = {
-  chief_of_staff: {
-    agentSlug: "bravo",
-    greeting: `Ask for today's priorities, a status across departments, or hand off a goal. ${DRAFTS_ONLY}`,
-  },
-  sales: {
-    agentSlug: "sdr",
-    greeting: `Ask who to follow up with, what to say, or what is stalled. ${DRAFTS_ONLY}`,
-  },
-  marketing: {
-    agentSlug: "maven",
-    greeting: `Ask for content ideas, a campaign plan, or a read on what is working. ${DRAFTS_ONLY}`,
-  },
-  client_success: {
-    agentSlug: "customer-support",
-    greeting: `Ask for a reply to a client, a project status, or what is at risk. ${DRAFTS_ONLY}`,
-  },
-  finance: {
-    agentSlug: "atlas",
-    greeting: `Ask about cash, collections, or where revenue stands against the goal. ${DRAFTS_ONLY}`,
-  },
-  operations: {
-    // Bravo's library role is operations ("Runs operations, debugging…"), so
-    // Operations shares Chief of Staff's agent rather than borrowing one that
-    // does not fit (qa-reviewer is an adversarial document reviewer).
-    agentSlug: "bravo",
-    greeting: `Ask what ran overnight, what failed, or what to automate next. ${DRAFTS_ONLY}`,
-  },
+/** The first line in each department's empty channel, whoever leads it. */
+const GREETINGS: Record<DepartmentKey, string> = {
+  chief_of_staff: `Ask for today's priorities, a status across departments, or hand off a goal. ${DRAFTS_ONLY}`,
+  sales: `Ask who to follow up with, what to say, or what is stalled. ${DRAFTS_ONLY}`,
+  marketing: `Ask for content ideas, a campaign plan, or a read on what is working. ${DRAFTS_ONLY}`,
+  client_success: `Ask for a reply to a client, a project status, or what is at risk. ${DRAFTS_ONLY}`,
+  finance: `Ask about cash, collections, or where revenue stands against the goal. ${DRAFTS_ONLY}`,
+  operations: `Ask what ran overnight, what failed, or what to automate next. ${DRAFTS_ONLY}`,
 };
 
-/** Neutral library templates. Departments absent here have no neutral agent yet. */
-const NEUTRAL_BINDINGS: Partial<Record<DepartmentKey, { agentSlug: string; greeting: string }>> = {
-  sales: OASIS_BINDINGS.sales,
-  client_success: OASIS_BINDINGS.client_success,
+/**
+ * OASIS's own leads, as OASIS_SEED binds them (lib/manifest/seeds.ts). Read
+ * only for OASIS's workspace, and only for a department its manifest names no
+ * lead for: a stored OASIS manifest written before `departments` existed keeps
+ * the channels it had.
+ */
+const OASIS_LEADS: Record<DepartmentKey, string> = {
+  chief_of_staff: "bravo",
+  sales: "sdr",
+  marketing: "maven",
+  client_success: "customer-support",
+  finance: "atlas",
+  // Bravo's library role is operations ("Runs operations, debugging…"), so
+  // Operations shares Chief of Staff's agent rather than borrowing one that
+  // does not fit (qa-reviewer is an adversarial document reviewer).
+  operations: "bravo",
+};
+
+/**
+ * The neutral library template OASIS sets up as a client department's lead
+ * (lib/provisioning/team.ts). Departments absent here have no neutral agent
+ * yet, so provisioning gives them no lead.
+ */
+const NEUTRAL_TEMPLATES: Partial<Record<DepartmentKey, string>> = {
+  sales: "sdr",
+  client_success: "customer-support",
 };
 
 const NOT_SET_UP = "This department's AI teammate has not been set up for your workspace yet.";
+const TURNED_OFF = "This department's AI teammate is turned off for your workspace.";
 
-export function departmentChannelFor(key: DepartmentKey, opts: { oasis: boolean }): DepartmentChannelBinding {
-  const bound = opts.oasis ? OASIS_BINDINGS[key] : NEUTRAL_BINDINGS[key];
-  return bound ? { kind: "agent", ...bound } : { kind: "unavailable", reason: NOT_SET_UP };
+/**
+ * Whose department is it: OASIS's own workspace or another, and the
+ * workspace's manifest. Pass the manifest wherever the caller has it; without
+ * one, OASIS falls back to its static leads and every other workspace has none
+ * (fail closed: no manifest is never a reason to borrow an agent).
+ */
+export type DepartmentScope = {
+  oasis: boolean;
+  manifest?: Pick<TenantManifest, "agents" | "os"> | null;
+};
+
+/** The department each neutral template leads (the inverse of NEUTRAL_TEMPLATES). */
+const NEUTRAL_TEMPLATE_DEPARTMENT: Readonly<Record<string, DepartmentKey>> = Object.fromEntries(
+  (Object.entries(NEUTRAL_TEMPLATES) as Array<[DepartmentKey, string]>).map(([dept, slug]) => [slug, dept]),
+);
+
+/**
+ * A neutral lead written before `departments` existed: provisioning and the
+ * setup wizard bound `sdr` and `customer-support` with none until W4a. It
+ * leads the department its template is for, but only when the workspace's
+ * stored setup (manifest.os.departments) chose that department. An explicit
+ * [] stays a custom teammate (CodeRabbit on #517). Read-time only: nothing is
+ * written, and "Set up again" stores the departments for good.
+ */
+function withSetupDepartments(binding: ManifestAgentBinding, chosen: readonly DepartmentKey[] | undefined): ManifestAgentBinding {
+  if (binding.departments !== undefined || !chosen) return binding;
+  const dept = NEUTRAL_TEMPLATE_DEPARTMENT[binding.slug.toLowerCase()];
+  return dept && chosen.includes(dept) ? { ...binding, departments: [dept] } : binding;
 }
 
-/** Every agent slug any workspace may be bound to — for tests and the roster. */
-export const OASIS_BOUND_SLUGS: readonly string[] = [...new Set(Object.values(OASIS_BINDINGS).map((b) => b.agentSlug))];
+/** The workspace's bindings, minus any house agent outside OASIS's own workspace. */
+export function workspaceBindings(scope: DepartmentScope): ManifestAgentBinding[] {
+  const agents = scope.manifest?.agents ?? [];
+  if (scope.oasis) return [...agents];
+  const chosen = scope.manifest?.os?.departments;
+  return agents.filter((a) => !isHouseAgentSlug(a.slug)).map((a) => withSetupDepartments(a, chosen));
+}
+
+/** lib/manifest/agent-roster.ts's rule: a core binding is always on. */
+export const bindingIsOn: (binding: Pick<ManifestAgentBinding, "enabled" | "core">) => boolean = isBindingOn;
+
+/** The manifest binding that leads `key` here (the first that names it), or null. */
+export function manifestLeadFor(key: DepartmentKey, scope: DepartmentScope): ManifestAgentBinding | null {
+  return workspaceBindings(scope).find((a) => (a.departments ?? []).includes(key)) ?? null;
+}
+
+/**
+ * Who leads `key` in this workspace: its manifest's binding, or, in OASIS's
+ * own workspace only, OASIS's static lead when the manifest names none
+ * (`binding` is then null). Null: nobody leads it here.
+ *
+ * `control` is the binding whose switch turns this lead on and off: the lead's
+ * own binding, or, for OASIS's static lead, a binding of the same agent that
+ * names no department (a stored OASIS manifest from before `departments`).
+ * The channel and the roster (lib/os/teammates.ts) both read it, so a lead the
+ * AI Team shows Off never answers in its channel (W4a review R5).
+ */
+export function departmentLead(
+  key: DepartmentKey,
+  scope: DepartmentScope,
+): { slug: string; binding: ManifestAgentBinding | null; control: ManifestAgentBinding | null } | null {
+  const binding = manifestLeadFor(key, scope);
+  if (binding) return { slug: binding.slug, binding, control: binding };
+  if (!scope.oasis) return null;
+  const slug = OASIS_LEADS[key];
+  const control = workspaceBindings(scope).find((a) => a.slug.toLowerCase() === slug) ?? null;
+  return { slug, binding: null, control };
+}
+
+export function departmentChannelFor(key: DepartmentKey, scope: DepartmentScope): DepartmentChannelBinding {
+  const lead = departmentLead(key, scope);
+  if (!lead) return { kind: "unavailable", reason: NOT_SET_UP };
+  if (lead.control && !bindingIsOn(lead.control)) return { kind: "unavailable", reason: TURNED_OFF };
+  return { kind: "agent", agentSlug: lead.slug, greeting: GREETINGS[key] };
+}
+
+/** The neutral template OASIS provisions as this department's lead in a client workspace, or null. */
+export function neutralTemplateFor(key: DepartmentKey): string | null {
+  return NEUTRAL_TEMPLATES[key] ?? null;
+}
+
+/** The static lead for `key` (OASIS's own, or the neutral template), with no manifest. */
+export function staticLeadSlug(key: DepartmentKey, opts: { oasis: boolean }): string | null {
+  return opts.oasis ? OASIS_LEADS[key] : neutralTemplateFor(key);
+}
+
+/** Every agent slug the static tables bind — for tests and the roster. */
+export const OASIS_BOUND_SLUGS: readonly string[] = [...new Set(Object.values(OASIS_LEADS))];
 export const NEUTRAL_BOUND_SLUGS: readonly string[] = [
-  ...new Set(Object.values(NEUTRAL_BINDINGS).map((b) => b!.agentSlug)),
+  ...new Set(Object.values(NEUTRAL_TEMPLATES).filter((s): s is string => typeof s === "string")),
 ];
 
 // ── Suggested asks ────────────────────────────────────────────────────────
@@ -251,9 +349,9 @@ const NEUTRAL_ASKS: Record<DepartmentKey, readonly SuggestedAsk[]> = {
  */
 const HOUSE_AGENT_DEPARTMENT: Readonly<Record<string, string>> = (() => {
   const out: Record<string, string> = {};
-  for (const [key, bound] of Object.entries(OASIS_BINDINGS) as Array<[DepartmentKey, { agentSlug: string }]>) {
+  for (const [key, agentSlug] of Object.entries(OASIS_LEADS) as Array<[DepartmentKey, string]>) {
     const label = OS_DEPARTMENTS.find((d) => d.key === key)?.label;
-    if (label && !(bound.agentSlug in out)) out[bound.agentSlug] = label;
+    if (label && !(agentSlug in out)) out[agentSlug] = label;
   }
   return out;
 })();

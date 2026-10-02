@@ -45,6 +45,8 @@ import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackSettings, type SlackSettings } from "@/lib/slack/settings";
 import { SLACK_APPROVAL_RULE, slackInstallBanner } from "@/lib/slack/copy";
 import { answeringDepartments } from "@/lib/slack/routing";
+import { getManifest } from "@/lib/manifest/loader";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { SLACK_RETENTION_DAYS } from "@/lib/slack/retention";
 
 export const dynamic = "force-dynamic";
@@ -94,8 +96,12 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   const banner = slackInstallBanner(params.slack, params.reason);
   const conn = slackSettings?.connection ?? null;
   // Only departments with an AI teammate in THIS workspace can answer in Slack,
-  // so only they are offered (the channels API refuses the rest).
-  const answering = answeringDepartments({ oasis: viewer.access.oasisWorkspace });
+  // so only they are offered (the channels API refuses the rest). Who leads a
+  // department is the workspace manifest's answer, read the way the Slack job
+  // and the chat route read it (the slug this workspace owns).
+  const manifestSlug = await resolveOwnedSlug(viewer.tenantId);
+  const manifest = manifestSlug ? await getManifest(manifestSlug, viewer.tenantId) : null;
+  const answering = answeringDepartments({ oasis: viewer.access.oasisWorkspace, manifest });
   const mappableDepartments = OS_DEPARTMENTS.filter((d) => answering.includes(d.key)).map((d) => ({ key: d.key, label: d.label }));
 
   return (
