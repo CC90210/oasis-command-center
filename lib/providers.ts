@@ -43,6 +43,12 @@ export type ChatRequest = {
    *  endpoint isn't on the public internet) and useful for self-hosted
    *  OpenAI-compatible endpoints (LM Studio, vLLM, llama.cpp server). */
   baseUrl?: string;
+  /**
+   * The caller verified the person is the platform operator. Required for
+   * provider `ollama`: its address comes from a saved row, so without this
+   * streamChat refuses before calling it (lib/ai/workspace-account.ts).
+   */
+  allowLocalModel?: boolean;
   /** REQUIRED: meters this call for the tenant it serves (lib/ai/usage.ts modelCallMeter). */
   meter: ModelCallMeter;
 };
@@ -249,6 +255,14 @@ export const PROVIDER_TO_SERVICE: Record<string, string> = {
  * Public entry point — async generator that yields StreamEvents.
  * ============================================================================ */
 export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent> {
+  // A local model server is called only for the verified operator: its address
+  // came from a saved row, and a row saved for anyone else must not make this
+  // server call it. Every caller resolves that verdict; a caller that does not
+  // pass it gets no request (Codex review, PR #535).
+  if (req.provider === "ollama" && req.allowLocalModel !== true) {
+    yield { type: "error", message: "local_model_not_allowed" };
+    return;
+  }
   // Ollama / LM Studio run locally without auth — empty key is fine.
   // Every other provider needs a key.
   if (!req.apiKey && req.provider !== "ollama") {

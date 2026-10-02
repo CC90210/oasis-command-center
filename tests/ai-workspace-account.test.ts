@@ -126,6 +126,14 @@ const SOLO = "c3c3c3c3-0000-4000-8000-0000000000c3";
 const LEGACY = "d4d4d4d4-0000-4000-8000-0000000000d4";
 // A fresh workspace for the connect-dialog flow.
 const FRESH = "e5e5e5e5-0000-4000-8000-0000000000e5";
+// Two workspaces that saved an OpenRouter key on the legacy row, then connect
+// Anthropic and disconnect it (Codex review, PR #535).
+const RELIC = "f6f6f6f6-0000-4000-8000-0000000000f6";
+const RELIC2 = "f7f7f7f7-0000-4000-8000-0000000000f7";
+// A workspace with local-model rows saved before the save-time rule: its
+// workspace row and its owner's personal row both point at an address.
+const LOCALCO = "f8f8f8f8-0000-4000-8000-0000000000f8";
+const LOCAL_TEMPLATE = "f8f8f8f8-0000-4000-8000-00000000aaaa";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -138,6 +146,9 @@ const USERS = {
   solo: u(6, "owner@solo.test"),
   legacy: u(7, "owner@legacy.test"),
   fresh: u(8, "owner@fresh.test"),
+  relic: u(9, "owner@relic.test"),
+  relic2: u(10, "owner@relic2.test"),
+  local: u(11, "owner@local.test"),
 } as const;
 
 const KEY_ALPHA = "sk-ant-alpha-workspace-key-0001";
@@ -147,6 +158,14 @@ const KEY_OASIS = "sk-ant-oasis-legacy-row-key-0004";
 const KEY_LEGACY_OLD = "sk-or-v1-legacy-old-key-0005";
 const KEY_LEGACY_NEW = "sk-ant-legacy-new-key-0006";
 const KEY_FRESH = "sk-ant-fresh-key-0007";
+const KEY_RELIC_OLD = "sk-or-v1-relic-old-key-0008";
+const KEY_RELIC_NEW = "sk-ant-relic-new-key-0009";
+const KEY_RELIC_LATER = "sk-or-v1-relic-saved-later-0010";
+const KEY_RELIC2_OLD = "sk-or-v1-relic2-old-key-0011";
+const KEY_RELIC2_NEW = "sk-ant-relic2-new-key-0012";
+// Local model "keys": addresses this server must never call for a client.
+const LOCAL_WORKSPACE_URL = "http://169.254.169.254/latest/meta-data";
+const LOCAL_PERSONAL_URL = "http://10.0.0.5:11434/v1";
 
 async function login(user: U | null) {
   if (!user) {
@@ -293,6 +312,9 @@ async function main() {
       user_id TEXT, display_name_override TEXT);
     CREATE UNIQUE INDEX idx_agent_model_config_default_per_agent ON agent_model_config (tenant_id, agent_key) WHERE (user_id IS NULL);
     CREATE UNIQUE INDEX idx_agent_model_config_override_per_user ON agent_model_config (tenant_id, user_id, agent_key) WHERE (user_id IS NOT NULL);
+    -- The SunBiz template-variant route reads one template before it asks a model.
+    CREATE TABLE gmail_templates (id TEXT PRIMARY KEY, tenant_id TEXT, name TEXT, stage TEXT, subject TEXT,
+      body TEXT, variants TEXT, created_at TEXT, updated_at TEXT);
   `);
   // Every turn and every Test is a metered model call, and every channel turn
   // is recorded: the two migrations as the lead runs them.
@@ -353,6 +375,23 @@ async function main() {
       configRow(SOLO, USERS.solo.id, "bravo", "anthropic", "claude-sonnet-4-6", KEY_SOLO_PERSONAL),
       // LEGACY: a key saved before this change, on the legacy row.
       configRow(LEGACY, null, "bravo", "openrouter", "anthropic/claude-sonnet-4.6", KEY_LEGACY_OLD),
+      // RELIC and RELIC2: an OpenRouter key on the legacy row (Codex review).
+      ...workspace(RELIC, "relic-co", "Relic Co"),
+      ...workspace(RELIC2, "relic2-co", "Relic Two"),
+      profile("p-relic", USERS.relic, RELIC, "owner", 1, ["sdr"]),
+      profile("p-relic2", USERS.relic2, RELIC2, "owner", 1, ["sdr"]),
+      configRow(RELIC, null, "bravo", "openrouter", "anthropic/claude-sonnet-4.6", KEY_RELIC_OLD),
+      configRow(RELIC2, null, "bravo", "openrouter", "anthropic/claude-sonnet-4.6", KEY_RELIC2_OLD),
+      // LOCALCO: local-model rows written before the save-time rule (or by any
+      // other path): the workspace row, and its owner's personal row.
+      ...workspace(LOCALCO, "local-co", "Local Co"),
+      profile("p-local", USERS.local, LOCALCO, "owner", 1, ["sdr"]),
+      configRow(LOCALCO, null, "bravo", "ollama", "llama3.3", LOCAL_WORKSPACE_URL),
+      configRow(LOCALCO, USERS.local.id, "bravo", "ollama", "llama3.3", LOCAL_PERSONAL_URL),
+      {
+        sql: "INSERT INTO gmail_templates (id, tenant_id, name, stage, subject, body, variants, created_at, updated_at) VALUES (?, ?, 'Welcome', 'new', 'Hello', 'Hi {{first_name}}, thanks for reaching out.', '[]', ?, ?)",
+        args: [LOCAL_TEMPLATE, LOCALCO, stamp, stamp],
+      },
     ],
     "write",
   );
@@ -363,6 +402,10 @@ async function main() {
   const chat = await import("../app/api/agents/chat/route");
   const generate = await import("../app/api/agents/generate/route");
   const manifestChat = await import("../app/api/manifest/chat/route");
+  const solara = await import("../app/api/gmail-templates/[id]/solara/route");
+  const { resolveChatContext } = await import("../lib/chat-auth");
+  const { streamChat } = await import("../lib/providers");
+  const { modelCallMeter } = await import("../lib/ai/usage");
   const { NextRequest } = await import("next/server");
   const { resolveOsViewer } = await import("../components/os/department/viewer");
   const { resolveChannelState, workspaceChatReadiness } = await import("../components/os/department/channel");
@@ -646,6 +689,29 @@ async function main() {
     // The operator's own chat runs the tool loop on an Anthropic key: his badge stays.
     assert.match(plain(html.operatorAnthropic), /tool_use/);
   });
+  await check("Save anyway is only for the exact key and model that timed out: any edit takes it away, and it saves exactly that", () => {
+    const steps = JSON.parse(html.saveAnyway ?? "{}") as Record<string, unknown>;
+    assert.equal(steps.afterTimeout, true, "a timeout did not offer Save anyway");
+    assert.equal(steps.afterKeyEdit, false, "Save anyway stayed after the key was edited");
+    assert.equal(steps.afterKeyBack, false, "an edit away and back brought Save anyway back without a new test");
+    assert.equal(steps.afterSecondTimeout, true);
+    assert.equal(steps.afterModelEdit, false, "Save anyway stayed after the model was changed");
+    assert.equal(steps.afterModelTimeout, true);
+    assert.equal(steps.afterScopeEdit, false, "Save anyway stayed after the scope was changed");
+    assert.equal(steps.afterRefusal, false, "a refused key was offered Save anyway");
+    assert.equal(steps.beforeSave, true);
+    assert.deepEqual(
+      steps.saveCalls,
+      [
+        {
+          url: "/api/agent-config/bulk-provider",
+          body: { provider: "anthropic", api_key: "sk-ant-tested-key-A", model: "claude-opus-4-7", scope: "tenant" },
+        },
+      ],
+      "Save anyway saved something other than the timed-out key and model, or tested again",
+    );
+    assert.deepEqual(steps.connected, [{ provider: "anthropic", scope: "tenant" }]);
+  });
   await check("a failed key read is Couldn't check everywhere, never not connected", async () => {
     await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_offline");
     try {
@@ -691,9 +757,13 @@ async function main() {
     await login(USERS.legacy);
     const res = await connect({ provider: "anthropic", api_key: KEY_LEGACY_NEW });
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    // The owner's teammate list is the neutral lead only: the legacy row is untouched...
-    assert.ok((await rows(LEGACY)).some((r) => r.agent_key === "bravo" && r.key === KEY_LEGACY_OLD));
-    // ...and every surface follows the account row, not the stale legacy key.
+    // The owner's teammate list is the neutral lead only, yet the old team key
+    // moved with the team: the legacy row now holds the new key, and the old
+    // key is on no row at all (it cannot be spent unseen later).
+    const after1 = await rows(LEGACY);
+    assert.ok(after1.some((r) => r.agent_key === "bravo" && r.key === KEY_LEGACY_NEW && r.provider === "anthropic"), JSON.stringify(after1.map((r) => [r.agent_key, r.provider])));
+    assert.ok(!after1.some((r) => r.key === KEY_LEGACY_OLD), "the old key is still stored");
+    // Every surface follows the account row.
     const after = await slackTurn(LEGACY, "legacy-co", "sales", "sdr");
     assert.ok(after.ok, JSON.stringify(after));
     if (after.ok) assert.equal(after.turn.apiKey, KEY_LEGACY_NEW);
@@ -791,7 +861,7 @@ async function main() {
     }
     const src = readFileSync(join(process.cwd(), "components/settings/ProviderAccountsCard.tsx"), "utf8");
     assert.doesNotMatch(src, /f\.agent_key/, "the dialog lists teammate slugs again");
-    assert.match(src, /connectProviderKey\(\{ provider, apiKey: apiKey\.trim\(\), model, scope, skipTest \}\)/, "the dialog does not use the tested connect");
+    assert.match(src, /connectProviderKey\(\{ \.\.\.target, scope, skipTest \}\)/, "the dialog does not use the tested connect");
   });
 
   // -- 5. A local model server is the verified operator's only ---------------
@@ -896,13 +966,18 @@ async function main() {
     assert.equal(sent.length, 0);
   });
 
-  // -- 8. Disconnect removes the account ----------------------------------------
-  await check("disconnecting the provider removes the workspace account, and the channels say so", async () => {
+  // -- 8. Disconnect retires the account: its key is wiped, the row stays ------
+  await check("disconnecting the provider retires the workspace account (key wiped, switched off), and the channels say so", async () => {
     await login(USERS.alpha);
     const res = await jsonOf(await bulk.DELETE(req("/api/agent-config/bulk-provider?provider=anthropic&scope=tenant", "DELETE")));
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.ok(!(await rows(ALPHA)).some((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY), "the account row survived the disconnect");
-    assert.equal(await account.readWorkspaceAiAccount(ALPHA), null);
+    const left = await rows(ALPHA);
+    const retired = left.filter((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY);
+    assert.deepEqual(retired.map((r) => [r.key, r.enabled]), [[null, 0]], "the account row is kept, with no key, switched off");
+    assert.ok(!left.some((r) => r.key === KEY_ALPHA), "the disconnected key is still stored somewhere");
+    const acct = await account.readWorkspaceAiAccount(ALPHA);
+    assert.equal(acct?.source, "workspace");
+    assert.equal(account.hasUsableKey(acct), false);
     assert.equal((await q.aiServicesWithKey(ALPHA)).size, 0);
     const viewer = await viewerFor(USERS.alpha);
     assert.equal((await resolveChannelState(dept("sales"), viewer)).kind, "not_connected");
@@ -914,6 +989,188 @@ async function main() {
     const acct = await account.readWorkspaceAiAccount(LEGACY);
     assert.equal(acct?.source, "workspace");
     assert.equal(acct?.provider, "anthropic");
+    assert.ok(account.hasUsableKey(acct), "a disconnect of another provider retired the account");
+  });
+
+  // -- 9. A disconnected account never brings an older key back (Codex review) --
+  /** No surface may answer, test or show Connected for this workspace, and nothing is sent. */
+  const assertNothingAnswers = async (tenant: string, slug: string, owner: U) => {
+    const acct = await account.readWorkspaceAiAccount(tenant);
+    assert.equal(acct?.source, "workspace", "the retired account row is the answer, never the legacy row");
+    assert.equal(account.hasUsableKey(acct), false, "a usable account after the disconnect");
+    assert.equal((await q.aiServicesWithKey(tenant)).size, 0, "Connected after the disconnect");
+    const viewer = await viewerFor(owner);
+    assert.equal((await resolveChannelState(dept("sales"), viewer)).kind, "not_connected", "the channel reads ready");
+    sent = [];
+    provider = answering("must not be asked");
+    const slack = await slackTurn(tenant, slug, "sales", "sdr");
+    assert.deepEqual(slack.ok ? { apiKey: slack.turn.apiKey } : { status: slack.status, error: slack.error }, { status: 412, error: "agent_not_configured" });
+    await login(owner);
+    const web = await chatTurn({ agent_slug: "sdr", department: "sales" });
+    assert.equal(web.status, 412, "the web chat answered");
+    const tested = await testKey({ provider: "anthropic" });
+    assert.equal(tested.status, 404, JSON.stringify(tested.body));
+    assert.equal(tested.body.code, "no_key_on_file");
+    const gen = await jsonOf(await generate.POST(req("/api/agents/generate", "POST", { name: "Helper", category: "sales", description: "Answers customer questions." })));
+    assert.equal(gen.status, 412, JSON.stringify(gen.body));
+    assert.equal(sent.length, 0, `a request was made: ${sent.map((s) => `${s.url} ${keyOf(s)}`).join(", ")}`);
+  };
+  await check("legacy OpenRouter key, connect Anthropic, disconnect Anthropic: no usable account, not Connected, no request, and the old key is gone", async () => {
+    // Before: the legacy row answers.
+    const before = await slackTurn(RELIC2, "relic2-co", "sales", "sdr");
+    assert.ok(before.ok && before.turn.apiKey === KEY_RELIC2_OLD, "the legacy row did not answer");
+    await login(USERS.relic2);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_RELIC2_NEW })).status, 200);
+    const res = await jsonOf(await bulk.DELETE(req("/api/agent-config/bulk-provider?provider=anthropic&scope=tenant", "DELETE")));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    await assertNothingAnswers(RELIC2, "relic2-co", USERS.relic2);
+    // The old key moved with the team on connect, so the disconnect took it
+    // too: no row still holds either key, and the per-agent chat has none.
+    const left = await rows(RELIC2);
+    assert.ok(!left.some((r) => r.key === KEY_RELIC2_OLD || r.key === KEY_RELIC2_NEW), JSON.stringify(left.map((r) => [r.agent_key, r.provider, r.enabled])));
+    const perAgent = await resolveChatContext({ id: USERS.relic2.id, email: USERS.relic2.email }, "bravo");
+    assert.deepEqual(perAgent.ok ? "ok" : { status: perAgent.status, code: perAgent.code }, { status: 412, code: "agent_not_configured" });
+  });
+  await check("a key on the legacy row that survives the disconnect still never answers: the retired account row stands in for it", async () => {
+    await login(USERS.relic);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_RELIC_NEW })).status, 200);
+    // After the connect, an OpenRouter key is saved on the legacy row again
+    // (the per-agent route accepts it): two workspace keys, two providers.
+    const saved = await jsonOf(
+      await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "bravo", provider: "openrouter", model: "anthropic/claude-sonnet-4.6", api_key: KEY_RELIC_LATER })),
+    );
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    // While connected, the account answers, never the legacy row.
+    const live = await slackTurn(RELIC, "relic-co", "sales", "sdr");
+    assert.ok(live.ok && live.turn.apiKey === KEY_RELIC_NEW, "the legacy row answered over the account");
+    const res = await jsonOf(await bulk.DELETE(req("/api/agent-config/bulk-provider?provider=anthropic&scope=tenant", "DELETE")));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    // The OpenRouter row survived (another provider)...
+    assert.ok((await rows(RELIC)).some((r) => r.agent_key === "bravo" && r.key === KEY_RELIC_LATER), "the setup did not leave a legacy key behind");
+    // ...and still nothing answers on it, says Connected, or sends it.
+    await assertNothingAnswers(RELIC, "relic-co", USERS.relic);
+  });
+  await check("connecting again after a disconnect fills in the same account row", async () => {
+    await login(USERS.relic2);
+    assert.equal((await connect({ provider: "openrouter", api_key: KEY_RELIC2_OLD })).status, 200);
+    const accounts = (await rows(RELIC2)).filter((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY);
+    assert.deepEqual(accounts.map((r) => [r.provider, r.key, r.enabled]), [["openrouter", KEY_RELIC2_OLD, 1]]);
+    const turn = await slackTurn(RELIC2, "relic2-co", "sales", "sdr");
+    assert.ok(turn.ok && turn.turn.apiKey === KEY_RELIC2_OLD, JSON.stringify(turn));
+  });
+  await check("OASIS, which has no account row, disconnects exactly as before: no account row appears, its key still answers", async () => {
+    await db.execute({
+      sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('oasis-maven', ?, NULL, 'maven', 'openrouter', 'anthropic/claude-sonnet-4.6', ?, 1, ?)",
+      args: [OASIS, encryptField("sk-or-v1-oasis-maven"), stamp],
+    });
+    await login(USERS.partner);
+    const res = await jsonOf(await bulk.DELETE(req("/api/agent-config/bulk-provider?provider=openrouter&scope=tenant", "DELETE")));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const left = await rows(OASIS);
+    assert.ok(!left.some((r) => r.agent_key === "maven" && r.user_id === null), "the disconnected row is still there");
+    assert.ok(!left.some((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY), "a disconnect created an account row for OASIS");
+    assert.equal((await account.readWorkspaceAiAccount(OASIS))?.source, "legacy");
+    const turn = await slackTurn(OASIS, "oasis-ai-cc", "chief-of-staff", "bravo");
+    assert.ok(turn.ok && turn.turn.apiKey === KEY_OASIS, JSON.stringify(turn));
+  });
+
+  // -- 10. A saved local model answers for the verified operator only ---------
+  // Rows saved before the save-time 403 (or by any other path): LOCALCO's
+  // workspace row and its owner's personal row both point at an address.
+  // Nothing may call it: the provider stub records any request, and every
+  // check below asserts there was none.
+  const noLocalCalls = () => {
+    sent = [];
+    provider = () => new Response("this server must not call a saved local model address", { status: 599 });
+  };
+  await check("a saved local model never answers a department chat or a Slack mention, and the channel is not ready", async () => {
+    noLocalCalls();
+    await login(USERS.local);
+    const web = await chatTurn({ agent_slug: "sdr", department: "sales" });
+    assert.equal(web.status, 412, "the department chat used a saved local model");
+    const slack = await slackTurn(LOCALCO, "local-co", "sales", "sdr");
+    assert.deepEqual(slack.ok ? "ok" : { status: slack.status, error: slack.error }, { status: 412, error: "agent_not_configured" });
+    const viewer = await viewerFor(USERS.local);
+    assert.equal((await resolveChannelState(dept("sales"), viewer)).kind, "not_connected");
+    assert.equal((await q.aiServicesWithKey(LOCALCO)).size, 0);
+    assert.equal(sent.length, 0, `the server called ${sent.map((s) => s.url).join(", ")}`);
+  });
+  await check("a saved local model is refused 403 on the chat, builder, workspace editor and template-variant paths, before any request", async () => {
+    noLocalCalls();
+    // /api/chat, /api/chat/resume and /api/chat/compact: their shared resolver.
+    const personal = await resolveChatContext({ id: USERS.local.id, email: USERS.local.email }, "bravo");
+    assert.deepEqual(personal.ok ? "ok" : { status: personal.status, code: personal.code }, { status: 403, code: "local_model_not_allowed" });
+    await login(USERS.local);
+    for (const [label, res] of [
+      ["builder", await jsonOf(await generate.POST(req("/api/agents/generate", "POST", { name: "Helper", category: "sales", description: "Answers customer questions." })))],
+      ["workspace editor", await jsonOf(await manifestChat.POST(req("/api/manifest/chat", "POST", { slug: "local-co", message: "Rename the Sales tab" })))],
+      [
+        "template variant",
+        await jsonOf(
+          await solara.POST(req(`/api/gmail-templates/${LOCAL_TEMPLATE}/solara`, "POST", { guidance: "shorter" }), {
+            params: Promise.resolve({ id: LOCAL_TEMPLATE }),
+          }),
+        ),
+      ],
+    ] as const) {
+      assert.equal(res.status, 403, `${label}: ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.error, "local_model_not_allowed", label);
+      assert.equal(res.body.message, account.LOCAL_MODEL_REFUSAL, label);
+    }
+    // Without the personal row, the workspace row is refused the same way.
+    const parked = `parked-${USERS.local.id}`;
+    await db.execute({ sql: "UPDATE agent_model_config SET user_id = ? WHERE tenant_id = ? AND user_id = ?", args: [parked, LOCALCO, USERS.local.id] });
+    try {
+      const workspaceRow = await resolveChatContext({ id: USERS.local.id, email: USERS.local.email }, "bravo");
+      assert.deepEqual(workspaceRow.ok ? "ok" : { status: workspaceRow.status, code: workspaceRow.code }, { status: 403, code: "local_model_not_allowed" });
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET user_id = ? WHERE tenant_id = ? AND user_id = ?", args: [USERS.local.id, LOCALCO, parked] });
+    }
+    assert.equal(sent.length, 0, `the server called ${sent.map((s) => s.url).join(", ")}`);
+  });
+  await check("the model call itself refuses a local model without the operator's verdict (lib/providers.ts)", async () => {
+    noLocalCalls();
+    const meter = modelCallMeter({ tenantId: LOCALCO, surface: "agents.chat", authKind: "local", billingMode: "local" });
+    const events: Array<{ type: string; message?: string }> = [];
+    for await (const ev of streamChat({ provider: "ollama", model: "llama3.3", apiKey: "", baseUrl: LOCAL_WORKSPACE_URL, messages: [{ role: "user", content: "hi" }], meter })) {
+      events.push(ev as { type: string; message?: string });
+    }
+    assert.deepEqual(events, [{ type: "error", message: "local_model_not_allowed" }]);
+    assert.equal(sent.length, 0, "the model call reached the address");
+    // With the verdict, the same call is made: the flag is what decides.
+    for await (const ev of streamChat({ provider: "ollama", model: "llama3.3", apiKey: "", baseUrl: "http://127.0.0.1:11434/v1", allowLocalModel: true, messages: [{ role: "user", content: "hi" }], meter })) {
+      void ev;
+    }
+    assert.ok(sent.some((s) => s.url.startsWith("http://127.0.0.1:11434")), "the operator's local model was not called");
+  });
+  await check("the verified operator's verdict still lets a local model answer", async () => {
+    const turn = await prepareAgentTurn({
+      tenantId: LOCALCO,
+      tenantSlug: "local-co",
+      agentSlug: "sdr",
+      department: dept("sales"),
+      operator: { name: "Operator", email: USERS.cc.email },
+      platformFallback: null,
+      revealModel: true,
+      userId: USERS.cc.id,
+      localModelAllowed: true,
+    });
+    assert.ok(turn.ok, JSON.stringify(turn));
+    if (turn.ok) {
+      assert.equal(turn.turn.provider, "ollama");
+      assert.equal(turn.turn.localModelAllowed, true);
+    }
+    // The chat resolver: the operator's own local model row answers for him.
+    await db.execute({
+      sql: "INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES ('cc-local', ?, ?, 'bravo', 'ollama', 'llama3.3', ?, 1, ?)",
+      args: [OASIS, USERS.cc.id, encryptField("http://127.0.0.1:11434/v1"), stamp],
+    });
+    try {
+      const ctx = await resolveChatContext({ id: USERS.cc.id, email: USERS.cc.email }, "bravo");
+      assert.ok(ctx.ok && ctx.provider === "ollama" && ctx.isOperator, JSON.stringify(ctx));
+    } finally {
+      await db.execute("DELETE FROM agent_model_config WHERE id = 'cc-local'");
+    }
   });
 
   console.log(`ai-workspace-account: ${failures === 0 ? "OK" : `${failures} FAILED`}`);

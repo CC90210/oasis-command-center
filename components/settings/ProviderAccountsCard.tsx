@@ -433,7 +433,10 @@ export async function connectProviderKey(
 // Inline connect dialog — single API key input + Save
 // ============================================================================
 
-function ConnectProviderDialog({
+/** What was tested: exactly this provider, trimmed key and model. */
+type TestedKey = { provider: Provider; apiKey: string; model: string };
+
+export function ConnectProviderDialog({
   provider,
   canManageTeam,
   onClose,
@@ -449,30 +452,33 @@ function ConnectProviderDialog({
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [canSaveAnyway, setCanSaveAnyway] = useState(false);
+  // The exact key the provider was down or slow on. "Save anyway" saves THAT,
+  // and any edit to the form takes the offer away: a key or model nobody
+  // tested is never saved untested (Codex review, PR #535).
+  const [untested, setUntested] = useState<TestedKey | null>(null);
   const [model, setModel] = useState(reg?.models[0]?.id || "");
   const [scope, setScope] = useState<"tenant" | "user">(canManageTeam ? "tenant" : "user");
 
   if (!reg) return null;
 
-  async function connect(skipTest: boolean) {
-    if (!apiKey.trim() || saving) return;
+  async function connect(target: TestedKey, skipTest: boolean) {
+    if (!target.apiKey || saving) return;
     setSaving(true);
     setError(null);
-    setCanSaveAnyway(false);
-    const result = await connectProviderKey({ provider, apiKey: apiKey.trim(), model, scope, skipTest });
+    setUntested(null);
+    const result = await connectProviderKey({ ...target, scope, skipTest });
     if (result.kind === "saved") {
-      onConnected(provider, scope);
+      onConnected(target.provider, scope);
       return;
     }
     setError(result.message);
-    setCanSaveAnyway(result.kind === "refused" && result.canSaveAnyway);
+    if (result.kind === "refused" && result.canSaveAnyway) setUntested(target);
     setSaving(false);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await connect(false);
+    await connect({ provider, apiKey: apiKey.trim(), model }, false);
   }
 
   if (typeof document === "undefined") return null;
@@ -546,7 +552,10 @@ function ConnectProviderDialog({
               <input
                 type={showKey ? "text" : "password"}
                 value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  setUntested(null);
+                }}
                 placeholder={reg.placeholder}
                 autoFocus
                 className="input w-full font-mono text-sm pr-10"
@@ -574,7 +583,10 @@ function ConnectProviderDialog({
             </label>
             <select
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => {
+                setModel(e.target.value);
+                setUntested(null);
+              }}
               className="input w-full text-sm"
             >
               {reg.models.map((m) => (
@@ -598,7 +610,10 @@ function ConnectProviderDialog({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => setScope("tenant")}
+                  onClick={() => {
+                    setScope("tenant");
+                    setUntested(null);
+                  }}
                   className={`rounded-md border px-3 py-2 text-xs font-bold transition-colors ${
                     scope === "tenant"
                       ? "border-accent bg-accent/10 text-accent"
@@ -609,7 +624,10 @@ function ConnectProviderDialog({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setScope("user")}
+                  onClick={() => {
+                    setScope("user");
+                    setUntested(null);
+                  }}
                   className={`rounded-md border px-3 py-2 text-xs font-bold transition-colors ${
                     scope === "user"
                       ? "border-accent bg-accent/10 text-accent"
@@ -644,13 +662,14 @@ function ConnectProviderDialog({
             >
               Cancel
             </button>
-            {/* The provider was down or slow, which says nothing about the key. */}
-            {canSaveAnyway && (
+            {/* The provider was down or slow on exactly this key and model,
+                which says nothing about the key: it may be saved as tested. */}
+            {untested && (
               <button
                 type="button"
-                onClick={() => void connect(true)}
+                onClick={() => void connect(untested, true)}
                 className="btn-secondary"
-                disabled={!apiKey.trim() || saving}
+                disabled={saving}
               >
                 Save anyway
               </button>

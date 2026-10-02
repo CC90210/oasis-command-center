@@ -14,17 +14,31 @@
  * THE ROW. agent_model_config with agent_key WORKSPACE_AI_AGENT_KEY
  * ("__workspace__") and user_id IS NULL. The team-wide connect
  * (app/api/agent-config/bulk-provider) writes it on every connect, whatever
- * teammates the workspace has, and its disconnect removes it. No migration:
- * the partial unique index idx_agent_model_config_default_per_agent
- * (tenant_id, agent_key) WHERE user_id IS NULL keeps it one row per workspace,
- * and agent_key has no CHECK. It is not a teammate: the agent-config routes
- * never list it or accept it as one.
+ * teammates the workspace has. No migration: the partial unique index
+ * idx_agent_model_config_default_per_agent (tenant_id, agent_key) WHERE
+ * user_id IS NULL keeps it one row per workspace, and agent_key has no CHECK.
+ * It is not a teammate: the agent-config routes never list it or accept it as
+ * one.
  *
- * THE LEGACY ROW. A workspace with no __workspace__ row answers on its
- * `bravo` workspace row, the row every channel read before this file. That is
- * how OASIS's own workspace keeps answering exactly as it does today (which
- * key OASIS's default AI uses is decision D12), and how a workspace that saved
- * a key before this change keeps working until the backfill copies it.
+ * DISCONNECT KEEPS THE ROW. Disconnecting the account's provider RETIRES the
+ * row (retireWorkspaceAiAccount: key wiped, switched off) instead of deleting
+ * it. The row is the record that this workspace connected through Settings,
+ * so the legacy row below can never answer for it again: deleting it would
+ * have revived whatever older key was still on the legacy row (Codex review,
+ * PR #535). A retired row is not usable, so every surface says not connected,
+ * and the next connect simply fills it in again.
+ *
+ * THE LEGACY ROW. A workspace with NO __workspace__ row (live or retired)
+ * answers on its `bravo` workspace row, the row every channel read before this
+ * file. That is how OASIS's own workspace keeps answering exactly as it does
+ * today until someone connects an account for it here (which key OASIS's
+ * default AI uses is decision D12), and how a workspace that saved a key
+ * before this change keeps working until the backfill copies it.
+ *
+ * A LOCAL MODEL ACCOUNT. Provider "ollama" is a server address, not a key. A
+ * row with it answers only for the verified platform operator, at every
+ * reader (see LOCAL_MODEL_PROVIDER); lib/providers.ts refuses to call one
+ * without that verdict too.
  *
  * WHO READS IT (all through readWorkspaceAiAccount, so they cannot disagree):
  *   - lib/os/department-agent.ts prepareAgentTurn: every department chat,
@@ -53,12 +67,16 @@ export const LEGACY_WORKSPACE_AI_AGENT_KEY = "bravo";
 /**
  * Provider "ollama" is a local model server: its "key" is a web address the
  * server itself calls (lib/agents/provider-probe.ts, lib/providers.ts). Anyone
- * allowed to save or test one could make the server call any address (AIP-11),
- * so only the verified platform operator may; everyone else gets this 403.
+ * allowed to save, test OR USE one could make the server call any address
+ * (AIP-11), so only the verified platform operator may: the agent-config
+ * routes refuse to save or test it, and every reader that turns a saved row
+ * into a request refuses it too (a row saved before that rule, or by another
+ * path, must not answer for anyone else). Everyone else gets this sentence.
  */
+export const LOCAL_MODEL_PROVIDER = "ollama";
 export const LOCAL_MODEL_REFUSAL = "Local AI models can't be connected here. Connect a cloud AI account instead.";
 
-/** Whether this signed-in person may save or test a local model server (see LOCAL_MODEL_REFUSAL). */
+/** Whether this signed-in person may save, test or use a local model server (see LOCAL_MODEL_REFUSAL). */
 export async function mayUseLocalModel(authUserId: string | null | undefined, email: string | null | undefined): Promise<boolean> {
   return isPlatformOperatorForAuthUser(authUserId, email);
 }
@@ -210,6 +228,30 @@ export async function saveWorkspaceAiAccount(
     const raced = again.data as { id: string } | null;
     if (!again.error && raced?.id) return await update(raced.id);
     return { ok: false, error: inserted.error.code || inserted.error.message };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The team-wide disconnect of `provider`: when the workspace's account is on
+ * it, wipe its key and switch it off, and KEEP the row (see DISCONNECT KEEPS
+ * THE ROW above). A workspace with no account row (OASIS until someone
+ * connects one here) gets none: nothing changes for it. Never throws.
+ */
+export async function retireWorkspaceAiAccount(
+  tenantId: string,
+  provider: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const { error } = await getServiceSupabase()
+      .from("agent_model_config")
+      .update({ enabled: false, encrypted_api_key: null })
+      .eq("tenant_id", tenantId)
+      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
+      .is("user_id", null)
+      .eq("provider", provider);
+    return error ? { ok: false, error: error.code || error.message } : { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

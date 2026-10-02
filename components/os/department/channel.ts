@@ -30,7 +30,7 @@ import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
-import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -96,7 +96,8 @@ export async function workspaceChatSlug(tenantId: string): Promise<string | null
  * The route's provider rule, exactly:
  *   - the workspace's AI account (lib/ai/workspace-account.ts, the one row
  *     lib/os/department-agent.ts reads; never a teammate's personal key),
- *     enabled, with a key; or
+ *     enabled, with a key; a local model account counts only for the verified
+ *     operator, as the route only lets it answer for them; or
  *   - the verified operator (isPlatformOperatorForAuthUser: alias AND an OASIS
  *     owner/admin profile by auth id) WHEN a platform key is configured. Being
  *     the operator is not a key: with no platform key the route answers 412,
@@ -110,7 +111,13 @@ async function providerReady(
   email: string | null,
 ): Promise<ProviderReadiness> {
   try {
-    if (hasUsableKey(await readWorkspaceAiAccount(tenantId))) return "ready";
+    const account = await readWorkspaceAiAccount(tenantId);
+    if (
+      hasUsableKey(account) &&
+      (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
+    ) {
+      return "ready";
+    }
   } catch (err) {
     console.error("[os.channel.provider]", err);
     return "unknown";

@@ -46,7 +46,14 @@ import { encryptField } from "@/lib/field-encryption";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
-import { LOCAL_MODEL_REFUSAL, mayUseLocalModel, saveWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import {
+  LEGACY_WORKSPACE_AI_AGENT_KEY,
+  LOCAL_MODEL_REFUSAL,
+  WORKSPACE_AI_AGENT_KEY,
+  mayUseLocalModel,
+  retireWorkspaceAiAccount,
+  saveWorkspaceAiAccount,
+} from "@/lib/ai/workspace-account";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -199,6 +206,23 @@ export async function POST(req: NextRequest) {
   const service = getServiceSupabase();
   const applied: string[] = [];
   const failed: Array<{ agent_key: string; error: string }> = [];
+  // The old team key moves with the team: a workspace that kept a key on the
+  // legacy `bravo` workspace row before it had an account row gets that row
+  // stamped too, when it is not a target already. Left behind, the old key sat
+  // unseen and stayed spendable by a per-agent chat after this account was
+  // disconnected (Codex review, PR #535). It is only ever UPDATED here, never
+  // created: a workspace without that row does not get one.
+  if (scope === "tenant" && !targetAgents.includes(LEGACY_WORKSPACE_AI_AGENT_KEY)) {
+    const legacy = await service
+      .from("agent_model_config")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("agent_key", LEGACY_WORKSPACE_AI_AGENT_KEY)
+      .is("user_id", null)
+      .maybeSingle();
+    if (legacy.error) failed.push({ agent_key: LEGACY_WORKSPACE_AI_AGENT_KEY, error: `lookup_failed:${legacy.error.code || legacy.error.message}` });
+    else if (legacy.data) targetAgents.push(LEGACY_WORKSPACE_AI_AGENT_KEY);
+  }
   // Sequential — Supabase upsert with onConflict isn't reliable across the
   // current PostgREST setup for compound keys (we'd need a real unique
   // index on (tenant_id, agent_key)). Doing it as N small writes is fine
@@ -285,8 +309,12 @@ export async function POST(req: NextRequest) {
  * use this to revoke a connected provider before re-pasting a new key or
  * switching providers entirely. Without this they could only paste a new
  * key on top, leaving the old one encrypted-at-rest forever. scope=tenant
- * removes every workspace row (user_id IS NULL) on that provider, the
- * workspace's AI account row among them.
+ * removes every workspace row (user_id IS NULL) on that provider, and RETIRES
+ * the workspace's AI account row when it is on that provider: its key is wiped
+ * and it is switched off, but the row stays, so an older legacy row can never
+ * answer for the workspace again (lib/ai/workspace-account.ts, DISCONNECT
+ * KEEPS THE ROW). It is retired first: if anything after fails, the chats have
+ * already stopped using the key.
  *
  * Query: provider=<provider>&scope=tenant|user
  * Returns: { ok, scope, provider, count }
@@ -311,13 +339,20 @@ export async function DELETE(req: NextRequest) {
   if (scope === "user" && !userId) {
     return NextResponse.json({ ok: false, error: "no_user" }, { status: 401 });
   }
+  if (scope === "tenant") {
+    const retired = await retireWorkspaceAiAccount(tenantId, provider);
+    if (!retired.ok) {
+      console.error("[bulk-provider.workspace_account_retire]", { tenantId, provider, error: retired.error });
+      return NextResponse.json({ ok: false, error: "disconnect_failed" }, { status: 500 });
+    }
+  }
   const service = getServiceSupabase();
   let q = service
     .from("agent_model_config")
     .delete()
     .eq("tenant_id", tenantId)
     .eq("provider", provider);
-  q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null);
+  q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null).neq("agent_key", WORKSPACE_AI_AGENT_KEY);
   const { error, count } = await q.select("agent_key");
   if (error) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });

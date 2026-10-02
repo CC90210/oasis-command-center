@@ -125,6 +125,114 @@ async function main() {
     accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set(["google_ai"]) }),
   );
 
+  // The connect dialog itself (Codex review, PR #535): "Save anyway" belongs to
+  // the exact provider, key and model the provider timed out on, and any edit
+  // takes it away. The dialog is driven frame by frame through its own state,
+  // with the two routes it calls answered by a recording fetch. Its portal
+  // needs a DOM container: a bare element-shaped one is enough here, and is set
+  // only for this part (the card renders above ran without one).
+  const { ConnectProviderDialog } = await import("../components/settings/ProviderAccountsCard");
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  let testAnswer: Record<string, unknown> = {};
+  (globalThis as unknown as { fetch: unknown }).fetch = async (url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    calls.push({ url, body });
+    const json = url.endsWith("/test-connection") ? testAnswer : { ok: true, scope: body.scope, workspace_account: true, applied_to: [], failed: [], count: 0 };
+    return new Response(JSON.stringify(json), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  (globalThis as unknown as { document: unknown }).document = { body: { nodeType: 1 } };
+  const timedOut = { ok: false, status: "error", provider: "anthropic", code: "timeout", message: "The AI provider did not answer within 15 seconds. Try again in a minute." };
+  const refused = { ok: false, status: "error", provider: "anthropic", code: "provider_401", message: "Your AI account refused the request. Check its billing or key." };
+  const connected: Array<{ provider: string; scope: string }> = [];
+  const dialogFrames = framesOf(ConnectProviderDialog);
+  const props = {
+    provider: "anthropic" as const,
+    canManageTeam: true,
+    onClose: () => undefined,
+    onConnected: (provider: string, scope: string) => connected.push({ provider, scope }),
+  };
+  /** Every element in the dialog, through its portal. */
+  const all = (node: unknown): El[] => {
+    const found: El[] = [];
+    const walk = (n: unknown): void => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (!n || typeof n !== "object") return;
+      if ("props" in n) {
+        found.push(n as El);
+        return walk((n as El).props.children);
+      }
+      if ("children" in n) walk((n as { children: unknown }).children);
+    };
+    walk(node);
+    return found;
+  };
+  const text = (el: El): string => {
+    const c = el.props.children;
+    return Array.isArray(c) ? c.filter((x) => typeof x === "string").join("") : typeof c === "string" ? c : "";
+  };
+  const frameNow = () => all(dialogFrames(props));
+  const saveAnyway = () => frameNow().find((el) => el.type === "button" && text(el) === "Save anyway") ?? null;
+  const typeKey = (value: string) => {
+    const input = frameNow().find((el) => el.type === "input" && typeof el.props.onChange === "function");
+    if (!input) throw new Error("render: the key input not found");
+    (input.props.onChange as (e: unknown) => void)({ target: { value } });
+  };
+  const pickModel = (value: string) => {
+    const select = frameNow().find((el) => el.type === "select");
+    if (!select) throw new Error("render: the model select not found");
+    (select.props.onChange as (e: unknown) => void)({ target: { value } });
+  };
+  const pickScope = (label: string) => {
+    const button = frameNow().find((el) => el.type === "button" && text(el) === label);
+    if (!button) throw new Error(`render: the ${label} button not found`);
+    (button.props.onClick as () => void)();
+  };
+  const submit = async () => {
+    const form = frameNow().find((el) => el.type === "form");
+    if (!form) throw new Error("render: the form not found");
+    await (form.props.onSubmit as (e: unknown) => Promise<void>)({ preventDefault: () => undefined });
+  };
+  const steps: Record<string, unknown> = {};
+  typeKey("sk-ant-tested-key-A");
+  testAnswer = timedOut;
+  await submit();
+  steps.afterTimeout = saveAnyway() !== null;
+  typeKey("sk-ant-untested-key-B");
+  steps.afterKeyEdit = saveAnyway() !== null;
+  typeKey("sk-ant-tested-key-A");
+  steps.afterKeyBack = saveAnyway() !== null;
+  await submit();
+  steps.afterSecondTimeout = saveAnyway() !== null;
+  pickModel("claude-opus-4-7");
+  steps.afterModelEdit = saveAnyway() !== null;
+  await submit();
+  steps.afterModelTimeout = saveAnyway() !== null;
+  pickScope("Just me");
+  steps.afterScopeEdit = saveAnyway() !== null;
+  pickScope("Whole team");
+  await submit();
+  testAnswer = refused;
+  typeKey("sk-ant-refused-key-C");
+  await submit();
+  steps.afterRefusal = saveAnyway() !== null;
+  // A last timeout on key A with the model it was tested on, then Save anyway:
+  // exactly that is saved, with no second test.
+  typeKey("sk-ant-tested-key-A");
+  testAnswer = timedOut;
+  await submit();
+  const button = saveAnyway();
+  steps.beforeSave = button !== null;
+  const callsBefore = calls.length;
+  if (button) {
+    // The button starts the save without returning it: wait for it to finish.
+    (button.props.onClick as () => void)();
+    for (let i = 0; i < 200 && connected.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+  }
+  steps.saveCalls = calls.slice(callsBefore);
+  steps.connected = connected;
+  delete (globalThis as unknown as { document?: unknown }).document;
+  out.saveAnyway = JSON.stringify(steps);
+
   process.stdout.write(JSON.stringify(out));
 }
 

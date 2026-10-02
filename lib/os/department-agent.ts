@@ -47,7 +47,7 @@ import {
   type TurnFailureCode,
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
-import { hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
 import { redactAll } from "@/lib/secret-redaction";
 
@@ -72,6 +72,13 @@ export type AgentTurnRequest = {
   /** The job the turn belongs to (a Slack event), for the usage ledger. */
   jobId?: string | null;
   chatMode?: "plan" | "build";
+  /**
+   * The caller verified the person is the platform operator: a workspace
+   * account on a local model server (its "key" is a web address the server
+   * calls) may answer for them, and for nobody else. Absent (a Slack mention)
+   * is no: such an account is treated as no usable account.
+   */
+  localModelAllowed?: boolean;
 };
 
 export type PreparedTurn = {
@@ -87,6 +94,8 @@ export type PreparedTurn = {
   system: string;
   meter: ModelCallMeter;
   revealModel: boolean;
+  /** Carried to lib/providers.ts, which calls a local model server only with it. */
+  localModelAllowed: boolean;
 };
 
 export type PrepareRefusal = {
@@ -189,7 +198,11 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   let model: string;
   let apiKey = "";
   let keySource: "tenant" | "platform" = "tenant";
-  if (hasUsableKey(cfg)) {
+  // A local model account answers only with the caller's verified-operator
+  // verdict; for anyone else (and for every Slack mention) it is no usable
+  // account, so no request to its address is ever made (Codex review, PR #535).
+  const localModelAllowed = req.localModelAllowed === true;
+  if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
     provider = cfg.provider;
     model = binding?.model_override || cfg.model;
     try {
@@ -275,6 +288,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       system,
       meter,
       revealModel: req.revealModel,
+      localModelAllowed,
     },
   };
 }
@@ -287,6 +301,7 @@ export function streamAgentTurn(turn: PreparedTurn, messages: readonly ChatMessa
     model: turn.model,
     apiKey: isOllama ? "" : turn.apiKey,
     baseUrl: isOllama ? turn.apiKey : undefined,
+    allowLocalModel: turn.localModelAllowed,
     system: turn.system,
     messages: messages.filter((m) => m.role === "user" || m.role === "assistant"),
     maxTokens,

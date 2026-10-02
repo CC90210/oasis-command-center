@@ -29,7 +29,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
-import { readPersonAiAccount, type UsableAiAccount } from "@/lib/ai/workspace-account";
+import {
+  LOCAL_MODEL_PROVIDER,
+  LOCAL_MODEL_REFUSAL,
+  mayUseLocalModel,
+  readPersonAiAccount,
+  type UsableAiAccount,
+} from "@/lib/ai/workspace-account";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
@@ -124,6 +130,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // A saved local model server answers for the verified operator only: its
+  // "key" is a web address this server would call (lib/ai/workspace-account.ts).
+  const localModelAllowed = cfg?.provider === LOCAL_MODEL_PROVIDER ? await mayUseLocalModel(user.id, user.email) : false;
+  if (cfg?.provider === LOCAL_MODEL_PROVIDER && !localModelAllowed) {
+    return NextResponse.json({ ok: false, error: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL }, { status: 403 });
+  }
+
   let provider: Provider;
   let model: string;
   let apiKey = "";
@@ -180,6 +193,7 @@ export async function POST(req: NextRequest) {
       model,
       apiKey: isOllama ? "" : apiKey,
       baseUrl: isOllama ? apiKey : undefined,
+      allowLocalModel: localModelAllowed,
       system,
       messages,
       maxTokens: 2048,

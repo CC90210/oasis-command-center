@@ -228,6 +228,8 @@ export async function POST(req: NextRequest) {
     operator: { name: operatorName, email: user.email || "" },
     platformFallback: fallback,
     revealModel: isOperator,
+    // A local model account answers for the verified operator only.
+    localModelAllowed: isOperator,
     userId: user.id,
     chatMode: body.chat_mode,
   });
