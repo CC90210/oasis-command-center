@@ -57,7 +57,7 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
   return (
     <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-5">
       <div>
-        <h2 className="text-base font-bold text-fg">Pair this machine</h2>
+        <h2 className="text-base font-bold text-fg">Connect this computer</h2>
         <p className="text-xs text-fg-muted mt-0.5">
           One command on your machine. The dashboard polls for your bridge to come online — usually 60–90 seconds.
         </p>
@@ -91,7 +91,7 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
         <>
           <div className="space-y-2">
             <div className="text-[11px] uppercase tracking-wider font-bold text-fg-dim">
-              This machine
+              This computer
             </div>
             <div className="flex gap-2">
               <button
@@ -103,7 +103,7 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
                     : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                 }`}
               >
-                New machine — full install
+                New computer: full install
               </button>
               <button
                 type="button"
@@ -114,14 +114,25 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
                     : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                 }`}
               >
-                Already set up — pair only
+                Already installed: connect only
               </button>
             </div>
             <p className="text-[11px] text-fg-dim leading-relaxed">
               {mode === "install"
-                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."
-                : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
+                ? "Installs the OASIS bridge on this computer, then connects it. Use it on a computer that has never had the bridge."
+                : "Connects a computer that already has the OASIS bridge. Nothing is installed. After it runs, restart the bridge so it picks up its new token."}
             </p>
+            {/* The full install clones a private repository, which only
+                OASIS's own computers can read today. Collapsed, so nobody
+                else is asked to sign in to GitHub. */}
+            {mode === "install" && (
+              <details className="text-[11px] text-fg-dim leading-relaxed">
+                <summary className="cursor-pointer hover:text-fg-muted">OASIS team computers only</summary>
+                <p className="mt-1.5">
+                  {"The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."}
+                </p>
+              </details>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -205,7 +216,11 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
           <div className="rounded-lg border border-status-engaged/40 bg-status-engaged/10 p-4 flex items-start gap-3">
             <Check className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold text-fg">{mode === "pair" ? "Paired ✓" : "Bridge is online."}</div>
+              <div className="font-bold text-fg">
+                {mode === "pair"
+                  ? "This computer is paired with OASIS AI Command Center."
+                  : "This computer is connected to OASIS AI Command Center."}
+              </div>
               <div className="text-sm text-fg-muted mt-1">
                 {mode === "pair" ? (
                   <>
@@ -214,10 +229,7 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
                     e.g. <span className="font-mono">{bridgeRestartCommand(os)}</span> — and it&apos;ll connect with the new token.
                   </>
                 ) : (
-                  <>
-                    Open any agent chat. The mode picker in the chat header will start defaulting to{" "}
-                    <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine&apos;s Claude subscription with full file + script access.
-                  </>
+                  <>Agents can now use this computer for files, tools and scheduled jobs.</>
                 )}
               </div>
             </div>

@@ -37,7 +37,7 @@ export function bridgeRestartCommand(os: BridgeHostOS): string {
  */
 export function bridgeRecoveryGuidance(os: BridgeHostOS | null): string {
   if (!os) {
-    return "Open Settings → Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the paired machine";
+    return "Open Settings > Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the connected computer";
   }
   return `Run \`${oasisLauncher(os)} bridge status\`, then \`${bridgeRestartCommand(os)}\` if it is down`;
 }

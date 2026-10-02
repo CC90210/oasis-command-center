@@ -52,7 +52,7 @@ export const OASIS_ADDONS: readonly AddonDef[] = [
       "Starts at login (a Startup shortcut on Windows, a LaunchAgent on a Mac) and sits in the background.",
     ],
     privacy:
-      "The speech model runs on your computer, with no OASIS account, key or server. The one step that leaves the machine is the AI edit that turns speech into written text, which runs through the Claude Code or OpenCode you are already logged into. Switch it off and nothing leaves at all.",
+      "The speech model runs on your computer, with no OASIS account, key or server. The one step that leaves the machine is the AI clean-up of your words, done with the AI tool you are already signed in to on this computer; switch it off and nothing leaves.",
     installGuide: { href: "https://github.com/CC90210/Oasis-Wispr#readme", label: "Install guide" },
   },
   {
