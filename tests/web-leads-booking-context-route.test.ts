@@ -1,5 +1,5 @@
 /**
- * web-leads-booking-context-route.test.ts — GET /api/web-leads/[id]/booking,
+ * web-leads-booking-context-route.test.ts — GET /api/web-leads/[id]?view=booking,
  * what the call-screen "Book the Meet" panel reads before it renders.
  *
  * Proves the gate stack (401 / 403 another tenant / 404 out of scope), that
@@ -11,7 +11,10 @@
  *     panel asks for the "owner asked for this meeting" confirmation the
  *     booking route requires (Adon, 2026-10-02: "allow");
  *   - a lapsed claim is not, do-not-call or not (claim_released);
- *   - booked, lost and non-cold-outbound leads are not booked from here.
+ *   - booked, lost and non-cold-outbound leads are not booked from here;
+ *   - a manager who is only a COLLABORATOR is refused, exactly as the
+ *     booking PATCH refuses them (lead_not_assigned_to_agent), and the PATCH
+ *     is called here to prove the two answers agree, not just asserted.
  *
  * The route runs for real against a local libSQL database; the only stand-in
  * is next/headers' cookie jar. Harness copied from tests/book-meet-route.test.ts.
@@ -65,6 +68,7 @@ const OWNER = "5e5e5e5e-0000-4000-8000-000000000001";
 const OPENER = "5e5e5e5e-0000-4000-8000-000000000002";
 const OTHER = "5e5e5e5e-0000-4000-8000-000000000003";
 const SECOND_FOUNDER = "5e5e5e5e-0000-4000-8000-000000000004";
+const MANAGER = "5e5e5e5e-0000-4000-8000-000000000005";
 const FOREIGN = "5e5e5e5e-0000-4000-8000-000000000009";
 const FOREIGN_TENANT = "9a9a9a9a-0000-4000-8000-000000000001";
 const OWNER_EMAIL = "conaugh@oasisai.work";
@@ -77,6 +81,7 @@ const L_LOST = "7a7a7a7a-0000-4000-8000-000000000005";
 const L_INBOUND = "7a7a7a7a-0000-4000-8000-000000000006";
 const L_OTHERS = "7a7a7a7a-0000-4000-8000-000000000007";
 const L_DNC_LAPSED = "7a7a7a7a-0000-4000-8000-000000000008";
+const L_COLLAB = "7a7a7a7a-0000-4000-8000-000000000009";
 
 const recentIso = () => new Date(Date.now() - 60_000).toISOString();
 const eightDaysAgo = () => new Date(Date.now() - 8 * 864e5).toISOString();
@@ -179,6 +184,7 @@ async function main() {
         [SECOND_FOUNDER, "adon@oasisai.work"],
         [OPENER, "opener@oasis.test"],
         [OTHER, "other@oasis.test"],
+        [MANAGER, "manager@oasis.test"],
         [FOREIGN, "foreign@sunbiz.test"],
       ].map(([id, email]) => ({
         sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`,
@@ -188,6 +194,7 @@ async function main() {
       profile("p-second", SECOND_FOUNDER, "adon@oasisai.work", "admin", TENANT),
       profile("p-opener", OPENER, "opener@oasis.test", "opener", TENANT),
       profile("p-other", OTHER, "other@oasis.test", "opener", TENANT),
+      profile("p-manager", MANAGER, "manager@oasis.test", "manager", TENANT),
       profile("p-foreign", FOREIGN, "foreign@sunbiz.test", "owner", FOREIGN_TENANT, true),
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-webdev', 'OASIS AI')", args: [TENANT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'sunbiz', 'SunBiz')", args: [FOREIGN_TENANT] },
@@ -203,6 +210,7 @@ async function main() {
       lead(L_INBOUND, { sales_motion: "inbound" }),
       lead(L_OTHERS, { assigned_to: OTHER }),
       lead(L_DNC_LAPSED, { dnc: true, stage: "assigned", claimed_at: eightDaysAgo(), last_call_at: null }),
+      lead(L_COLLAB, { collaborators: [MANAGER] }),
     ],
     "write",
   );
@@ -210,13 +218,14 @@ async function main() {
   const { signSession, SESSION_COOKIE } = await import("../lib/turso-auth");
   assert.equal(SESSION_COOKIE, SESSION_COOKIE_NAME, "the cookie-jar stand-in reads the wrong cookie name");
   const { NextRequest } = await import("next/server");
-  const route = await import("../app/api/web-leads/[id]/booking/route");
+  const route = await import("../app/api/web-leads/[id]/route");
+  const bookingRoute = await import("../app/api/website-sales/[leadId]/route");
 
   const signIn = (sub: string, email: string) => {
     sessionCookie = signSession({ sub, email, exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
   };
   const get = async (id: string) => {
-    const res = await route.GET(new NextRequest(`http://localhost/api/web-leads/${id}/booking`), {
+    const res = await route.GET(new NextRequest(`http://localhost/api/web-leads/${id}?view=booking`), {
       params: Promise.resolve({ id }),
     });
     return { status: res.status, body: (await res.json()) as Body };
@@ -306,6 +315,45 @@ async function main() {
       status === 404 || (status === 200 && body.canBook === false && body.blocked === "not_yours"),
       JSON.stringify({ status, body }),
     );
+  });
+
+  await check("without ?view=booking the route still returns the whole lead, not the booking view", async () => {
+    signIn(OPENER, "opener@oasis.test");
+    const res = await route.GET(new NextRequest(`http://localhost/api/web-leads/${L_OK}`), {
+      params: Promise.resolve({ id: L_OK }),
+    });
+    const body = (await res.json()) as Body;
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.canBook, undefined, "the plain read must not carry the booking view");
+    assert.equal(body.id, L_OK);
+  });
+
+  await check("manager who is only a collaborator: not bookable, and the booking PATCH agrees (403)", async () => {
+    signIn(MANAGER, "manager@oasis.test");
+    const { status, body } = await get(L_COLLAB);
+    // A collaborator manager CAN see the lead (coaching view), so this is a
+    // 200 with a refusal, never a 404 that would pass for the wrong reason.
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.canBook, false, JSON.stringify(body));
+    assert.equal(body.blocked, "not_yours");
+    const patch = await bookingRoute.PATCH(
+      new NextRequest(`http://localhost/api/website-sales/${L_COLLAB}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "book_founder", expectedStage: "connected" }),
+      }),
+      { params: Promise.resolve({ leadId: L_COLLAB }) },
+    );
+    const patchBody = (await patch.json()) as Body;
+    assert.equal(patch.status, 403, JSON.stringify(patchBody));
+    assert.equal(patchBody.error, "lead_not_assigned_to_agent");
+  });
+
+  await check("the same lead's assigned rep may book it (the collaborator refusal is about the seat, not the lead)", async () => {
+    signIn(OPENER, "opener@oasis.test");
+    const { status, body } = await get(L_COLLAB);
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.canBook, true);
   });
 
   if (failures > 0) {

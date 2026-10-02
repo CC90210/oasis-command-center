@@ -20,9 +20,6 @@ for (const route of [
   // Added 2026-09-03 with the presence layer: same write-that-names-a-lead
   // shape, same gate stack, same reasoning.
   "app/api/web-leads/[id]/presence/route.ts",
-  // Added with the call-screen booking panel: a read that names a lead id,
-  // same gate stack (book-the-meet plan, Task 5).
-  "app/api/web-leads/[id]/booking/route.ts",
 ]) {
   const src = read(route);
   assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
@@ -223,7 +220,6 @@ for (const route of [
   "app/api/web-leads/[id]/route.ts",
   "app/api/web-leads/[id]/recheck/route.ts",
   "app/api/web-leads/[id]/presence/route.ts",
-  "app/api/web-leads/[id]/booking/route.ts",
 ]) {
   const src = read(route);
   const buildsViewerInline =

@@ -185,9 +185,16 @@ assert.match(
   /const repMayRunDeal\s*=\s*mayQuoteAndClose\(session\.teamRole\)\s*&&\s*actorHoldsDealSeat/,
   "the deal gate must require BOTH a close-capable role and the current assigned/audit-host seat",
 );
+// The seat itself is computed by websiteSalesLeadSeat (shared with the call
+// screen's booking read); the route must take actorHoldsDealSeat from it.
 assert.match(
   salesRoute,
-  /mayRepRunWebsiteSalesDeal\(\{[\s\S]*?assignedTo:current\.assigned_to,[\s\S]*?auditHostUserId:current\.audit_host_user_id/,
+  /const \{[^}]*\bactorHoldsDealSeat\b[^}]*\} = seat;/,
+  "the deal seat must come from the shared websiteSalesLeadSeat predicate",
+);
+assert.match(
+  stripComments(read("lib/website-sales-workflow.ts")),
+  /mayRepRunWebsiteSalesDeal\(\{[\s\S]*?assignedTo:\s*current\.assigned_to,[\s\S]*?auditHostUserId:\s*current\.audit_host_user_id/,
   "historical opener attribution cannot be reused as present-day authority to quote or close",
 );
 // The old bare-role check must not creep back.

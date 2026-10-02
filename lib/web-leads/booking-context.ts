@@ -8,7 +8,8 @@
  * is the PERSON (contactNameFor), never the business.
  *
  * "MAY BOOK" MUST AGREE WITH THE BOOKING ROUTE (app/api/website-sales/[leadId]
- * PATCH book_founder). Do-not-call is NOT a block (Adon, 2026-10-02: "allow"):
+ * PATCH book_founder). Its ownership gate is websiteSalesLeadSeat, which the
+ * route reports here as lead_not_assigned_to_agent / builder_* (not_yours). Do-not-call is NOT a block (Adon, 2026-10-02: "allow"):
  * the route books it when the rep confirms the owner asked for the meeting,
  * so this returns canBook with doNotCall:true and the panel asks for that
  * confirmation. A lapsed claim IS a block, judged with dnc set aside exactly
@@ -104,7 +105,8 @@ export function bookingContextFrom(input: {
   if (!access.ok && access.error !== "do_not_call") {
     blocked =
       access.error === "claim_released" ? "claim_released"
-      : access.error === "forbidden_role" || access.error === "not_found" ? "not_yours"
+      : access.error === "forbidden_role" || access.error === "not_found" ||
+        access.error === "lead_not_assigned_to_agent" || access.error.startsWith("builder_") ? "not_yours"
       : access.error === "sales_role_required" ? "sales_role_required"
       : "access_check_failed";
   } else if (
