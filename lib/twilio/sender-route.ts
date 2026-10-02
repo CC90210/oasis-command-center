@@ -93,12 +93,11 @@ export async function syncTwilioSenderRoute(
   if (!tenantId) return { ok: false, error: "tenant_missing" };
   const sender = await currentTwilioSender(tenantId, opts.env ?? process.env);
   if (!sender.ok) return sender;
-  const phone = { value: sender.fromPhone };
-  const service = { value: sender.messagingServiceSid };
+  const { fromPhone, messagingServiceSid } = sender;
 
   const id = twilioSenderRouteId(tenantId);
   const at = (opts.now ?? new Date()).toISOString();
-  if (!phone.value && !service.value) {
+  if (!fromPhone && !messagingServiceSid) {
     await db.execute({
       sql: `UPDATE channel_accounts
                SET is_active = 0, from_phone = NULL, twilio_messaging_service_sid = NULL, updated_at = ?
@@ -119,10 +118,10 @@ export async function syncTwilioSenderRoute(
             is_active = 1,
             updated_at = excluded.updated_at
           WHERE channel_accounts.tenant_id = excluded.tenant_id`,
-    args: [id, tenantId, phone.value, service.value, at, at],
+    args: [id, tenantId, fromPhone, messagingServiceSid, at, at],
   });
   if (written.rowsAffected !== 1) return { ok: false, error: "route_row_not_written" };
-  return { ok: true, active: true, fromPhone: phone.value, messagingServiceSid: service.value };
+  return { ok: true, active: true, fromPhone, messagingServiceSid };
 }
 
 /**
