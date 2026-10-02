@@ -225,6 +225,19 @@ async function main() {
     assert.equal(slaRunOk(purgeFails), false);
   });
 
+  await check("a 'support@ not read' alert that could not be sent keeps the run red until a later run sends it", async () => {
+    await beat(at(172));
+    const down = fakeNotify();
+    down.deps.telegram = async () => ({ ok: false, reason: "telegram down" });
+    const failed = await runSlaCheck(db, down.deps, at(195));
+    assert.equal(failed.support_inbox.failures.length, 1, "the alert was due and could not go out");
+    assert.deepEqual(failed.support_inbox.errors, []);
+    assert.equal(slaRunOk(failed), false);
+    const sent = await runSlaCheck(db, fakeNotify().deps, at(196));
+    assert.deepEqual(sent.support_inbox.alerted, [MAILBOX]);
+    assert.equal(slaRunOk(sent), true);
+  });
+
   await check("a replayed or late heartbeat never overwrites a newer one: answered 200 ok, recorded false, nothing changed", async () => {
     const send = async (body: Record<string, unknown>, signedAt: Date, now: Date) =>
       answerOf(await health.handleSupportHeartbeat(signedRequest("/api/internal/support/heartbeat", body, signedAt), { db, env: ENV, now }));

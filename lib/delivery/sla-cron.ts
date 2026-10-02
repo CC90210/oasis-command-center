@@ -52,9 +52,13 @@ export type SlaCheckResult = {
   support_inbox: StaleAlertResult & { purged: number; errors: string[] };
 };
 
-/** A run is green only when every breach alert went out and both support inbox steps ran. */
+/**
+ * A run is green only when every breach alert went out, both support inbox
+ * steps ran, and every "support@ not read" alert went out: an undelivered
+ * alert keeps the run red until a later run delivers it, like a breach alert.
+ */
 export function slaRunOk(r: Pick<SlaCheckResult, "alert_failures" | "support_inbox">): boolean {
-  return r.alert_failures.length === 0 && r.support_inbox.errors.length === 0;
+  return r.alert_failures.length === 0 && r.support_inbox.errors.length === 0 && r.support_inbox.failures.length === 0;
 }
 
 function thrown(err: unknown): string {
