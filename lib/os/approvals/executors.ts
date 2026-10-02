@@ -37,21 +37,41 @@
  *                 isDryRun("slack") (LIVE_SEND_SLACK / DASHBOARD_LIVE_SEND /
  *                 BRAVO_FORCE_DRY_RUN). The posted reply is mirrored onto the
  *                 conversation (direction outbound).
+ *   reply_ticket  an AI-drafted reply to a ticket that came in by email
+ *                 (lib/delivery/support-drafts.ts): posted on the ticket as
+ *                 the approver's public reply, then emailed threaded from the
+ *                 support lane by lib/delivery/notify.ts sendTicketReplyEmail,
+ *                 the same path a teammate's reply from the ticket page takes.
+ *                 OASIS's desk only; refused when stale (the client wrote
+ *                 again), the ticket closed, the recipient was never verified
+ *                 or the email's record does not name the approval as its
+ *                 draft. Dry-run first: isDryRun("email").
  *
  * Dependencies are injected (ExecutorDeps) so tests drive the real executors
  * with a fake mailbox and a temp database; production passes nothing.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import type { Client, ResultSet } from "@libsql/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getTursoClient } from "@/lib/turso";
+import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import type { BrandKey } from "@/lib/email/brands";
 import type { EmailSigner } from "@/lib/config/email-signature";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
-import { sendOasisSharedGmail, type OasisSharedSendResult } from "@/lib/integrations/oasis-shared-gmail-send";
-import type { OasisMailPurpose } from "@/lib/email/support-mailbox";
+import {
+  resolveOasisSupportMailboxFrom,
+  sendOasisSharedGmail,
+  type OasisSharedSendResult,
+} from "@/lib/integrations/oasis-shared-gmail-send";
+import { supportInboxForDesk, type OasisMailPurpose } from "@/lib/email/support-mailbox";
+import { addTicketComment, deskReader, getTicket, profileContact, type Ticket } from "@/lib/delivery/store";
+import { deskUsesOasisLanes, sendTicketReplyEmail, type NotifyDeps } from "@/lib/delivery/notify";
+import { isVerifiedRecipient } from "@/lib/delivery/email-thread";
+import { SUPPORT_DRAFT_AGENT, supportDraftKey } from "@/lib/delivery/support-drafts";
+import { clientEmailMirrorStatements } from "@/lib/os/customers/message-mirror";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { isCustomerEmail, isMissingCustomersSchema } from "@/lib/os/customers/store";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -64,6 +84,7 @@ import {
   ACTION_KIND_LABELS,
   publishAssetSnapshot,
   validatePublishPostPayload,
+  validateReplyTicketPayload,
   validateSendEmailPayload,
   validateSendSlackMessagePayload,
   type ApprovalActionKind,
@@ -99,6 +120,12 @@ export type ExecutorDeps = {
   publishEvent: (event: AgentEventPublish) => Promise<void>;
   /** Post a Slack reply for a tenant (lib/slack/send.ts). Absent = the real one. */
   postSlack?: (args: SlackPostArgs) => Promise<SlackPostOutcome>;
+  /**
+   * The address support mail leaves from, or null when no mailbox is
+   * configured (oasis-shared-gmail-send.ts resolveOasisSupportMailboxFrom).
+   * Absent = the real one. reply_ticket refuses before posting anything when null.
+   */
+  supportMailboxFrom?: (tenantId: string) => Promise<string | null>;
 };
 
 export function defaultExecutorDeps(): ExecutorDeps {
@@ -453,6 +480,264 @@ const sendSlackMessage: Executor = {
 };
 
 // ---------------------------------------------------------------------------
+// reply_ticket
+// ---------------------------------------------------------------------------
+
+/**
+ * The approved reply's comment id: one per approval, so the comment is posted
+ * once even if this ever ran twice (the claim in execute.ts already makes it
+ * run once).
+ */
+export function replyCommentIdFor(approvalId: string): string {
+  const h = createHash("sha256").update(`reply_ticket:${approvalId}`, "utf8").digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function replyReadiness(tenant: ExecutorTenant): string | null {
+  return deskUsesOasisLanes(tenant.id)
+    ? null
+    : "Only OASIS's support desk answers tickets by email from here, so an approved ticket reply cannot go out from this workspace.";
+}
+
+/**
+ * An approved reply to a ticket that came in by email (support-drafts.ts
+ * files it). In this order, and nothing leaves before the last check:
+ *   1. the ticket is re-read on its desk; a closed ticket is refused;
+ *   2. the approval must be the support drafter's own for this email (its
+ *      key, requester and ticket), and the email's record must name it as its
+ *      draft, or name nothing yet (then it is named now); any other approval,
+ *      or a record settled another way (a failure report won the race), is
+ *      refused: draft_not_current;
+ *   3. STALE: the client wrote again after the message the draft answers, so
+ *      the draft answers a question that is no longer the last one: refused
+ *      (the newer message gets its own draft);
+ *   4. the recipient is still the ticket's requester, and a verified email on
+ *      the ticket came from it (a forward's address never did:
+ *      recipient_not_verified; approving reviews words, not identity);
+ *   5. dry run (isDryRun("email")) sends and posts nothing;
+ *   6. a support mailbox must be configured, or nothing is posted either;
+ *   7. the reply is posted as the APPROVER's public team comment (stamping the
+ *      first response and ticket.first_response when it is the first), then
+ *      emailed threaded from the support lane as a reply to the client's own
+ *      ticket (notify.ts sendTicketReplyEmail: it reaches them even after a
+ *      marketing opt-out), with no approver Cc (the ticket and support@'s Sent
+ *      folder hold the copy), and mirrored into the client's Conversations.
+ */
+const replyTicket: Executor = {
+  readiness: (tenant) => replyReadiness(tenant),
+  async run(ctx) {
+    const notReady = replyReadiness(ctx.tenant);
+    if (notReady) return failed("no_sender", notReady);
+    const v = validateReplyTicketPayload(ctx.payload);
+    if (!v.ok) return failed("payload_invalid", `The stored reply is not valid (${v.error}).`);
+    const p = v.value;
+    const tenantId = ctx.tenant.id;
+    const ticket = await getTicket(ctx.db, deskReader(tenantId), p.ticket_id);
+    if (!ticket) return failed("ticket_not_found", "The ticket no longer exists, so nothing was sent.", EMAIL_PROVIDER);
+    if (ticket.status === "closed") {
+      return failed("ticket_closed", `${ticket.ticket_number} was closed after this reply was drafted, so nothing was sent.`, EMAIL_PROVIDER);
+    }
+    const answered = await readAnsweredMessage(ctx.db, tenantId, p.message_record_id, ticket.id);
+    if (!answered) return failed("message_not_found", "The email this reply answers is no longer on the ticket, so nothing was sent.", EMAIL_PROVIDER);
+    // The email's record names the draft it stands behind, and only the
+    // drafter's own approval for this email can be it. Anything else (another
+    // reply approval with a valid payload, or a draft a failure report beat
+    // while it was being filed) is never sent.
+    if (!isOwnSupportDraft(ctx.approval, answered.id, ticket.id) || !(await claimDraftRecord(ctx.db, tenantId, answered.id, ctx.approval.id))) {
+      return failed(
+        "draft_not_current",
+        `This reply is not the draft on record for the client's email on ${ticket.ticket_number} (the drafter reported it could not write one, or the email was settled another way), so nothing was sent.`,
+        EMAIL_PROVIDER,
+      );
+    }
+    if (await clientWroteSince(ctx.db, tenantId, ticket.id, answered)) {
+      return failed(
+        "stale_draft",
+        `The client wrote again on ${ticket.ticket_number} after this reply was drafted, so it was not sent. The newer message gets a draft of its own.`,
+        EMAIL_PROVIDER,
+      );
+    }
+    if ((ticket.client_email || "").trim().toLowerCase() !== p.to) {
+      return failed("recipient_changed", `${ticket.ticket_number}'s client address changed after this reply was drafted, so nothing was sent.`, EMAIL_PROVIDER);
+    }
+    // Approving reviews the words, not who receives them: only an address a
+    // verified email on this ticket came from is ever sent to. There is no
+    // override here; a draft for any other address is filed as a private note
+    // (support-drafts.ts), and a person who confirmed it replies from the ticket.
+    if (!(await isVerifiedRecipient(ctx.db, tenantId, ticket.id, p.to))) {
+      return failed(
+        "recipient_not_verified",
+        `Recipient not verified: no verified email on ${ticket.ticket_number} came from ${p.to} (a forwarded email's address is copied from its text), so nothing was sent. Confirm the address, then reply from the ticket.`,
+        EMAIL_PROVIDER,
+      );
+    }
+    if (ctx.deps.isDryRun("email")) {
+      return { ok: true, result: { outcome: "dry_run", provider: EMAIL_PROVIDER, would_send: { to: p.to, subject: p.subject, ticket: ticket.ticket_number } } };
+    }
+    const mailboxFrom = await (ctx.deps.supportMailboxFrom ?? resolveOasisSupportMailboxFrom)(tenantId);
+    if (!mailboxFrom) {
+      return failed("not_configured", `${emailFailureMessage("not_configured", "")} The reply was not posted to the ticket either.`, EMAIL_PROVIDER);
+    }
+
+    const author = ctx.approver ? await profileContact(ctx.db, ctx.approver.userId, tenantId) : { name: "OASIS team", email: null };
+    const commentId = replyCommentIdFor(ctx.approval.id);
+    const posted = await addTicketComment(
+      ctx.db,
+      tenantId,
+      ticket.id,
+      {
+        id: commentId,
+        body: p.body,
+        is_internal: false,
+        author_type: "team",
+        author: { userId: ctx.approver?.userId ?? null, name: author.name },
+        channel: "email",
+      },
+      new Date(),
+    );
+    if (!posted.ok) {
+      return failed(posted.error, `The reply could not be posted to ${ticket.ticket_number} (${posted.error}), so nothing was sent.`, EMAIL_PROVIDER);
+    }
+    const emailed = await sendTicketReplyEmail(
+      ctx.db,
+      tenantId,
+      ticket,
+      { id: commentId, body: p.body, authorName: author.name, preSigned: true },
+      notifyDepsFor(ctx),
+    );
+    if (!emailed.ok) {
+      return failed(
+        emailed.reason ?? "send_failed",
+        `${emailFailureMessage(emailed.reason ?? "send_failed", emailed.error ?? "")} The reply is on ${ticket.ticket_number} as a public comment, marked not emailed.`,
+        EMAIL_PROVIDER,
+      );
+    }
+    await mirrorReply(ctx.db, tenantId, ticket, { commentId, body: p.body, subject: p.subject, approverId: ctx.approver?.userId ?? null, approvalId: ctx.approval.id });
+    return {
+      ok: true,
+      result: { outcome: "sent", provider: EMAIL_PROVIDER, message_id: emailed.messageId, from: mailboxFrom, comment_id: commentId },
+    };
+  },
+};
+
+/** The NotifyDeps the reply path needs, sending through this executor's own mail dependency. */
+function notifyDepsFor(ctx: ExecutorContext): NotifyDeps {
+  return {
+    telegram: async () => ({ ok: false, reason: "not used by the reply executor" }),
+    email: async (m) => {
+      const r = await ctx.deps.sendEmail({
+        tenantId: ctx.tenant.id,
+        to: m.to,
+        cc: m.cc ?? null,
+        subject: m.subject,
+        body: m.body,
+        idempotencyKey: m.idempotencyKey,
+        purpose: "support",
+        inReplyTo: m.inReplyTo ?? null,
+        references: m.references ?? null,
+        ownTicketReply: m.ownTicketReply ?? null,
+      });
+      return r.ok ? { ok: true } : { ok: false, reason: `${r.reason}: ${r.error}` };
+    },
+    founderEmails: [],
+    appOrigin: publicAppBaseUrl(),
+  };
+}
+
+type AnsweredMessage = { id: string; comment_id: string | null; received_at: string };
+
+async function readAnsweredMessage(db: Client, tenantId: string, recordId: string, ticketId: string): Promise<AnsweredMessage | null> {
+  const r = (
+    await db.execute({
+      sql: `SELECT id, comment_id, received_at FROM support_email_messages
+            WHERE tenant_id = ? AND id = ? AND ticket_id = ? AND direction = 'inbound' LIMIT 1`,
+      args: [tenantId, recordId, ticketId],
+    })
+  ).rows[0];
+  return r ? { id: String(r.id), comment_id: r.comment_id == null ? null : String(r.comment_id), received_at: String(r.received_at) } : null;
+}
+
+/**
+ * Was this approval filed by the support drafter for this email on this
+ * ticket (support-drafts.ts: its key, its requester, its target)? Only such an
+ * approval may claim the email's record below.
+ */
+function isOwnSupportDraft(approval: Pick<ApprovalRow, "idempotency_key" | "requested_by_type" | "requested_by_id" | "target_ref">, recordId: string, ticketId: string): boolean {
+  return (
+    approval.idempotency_key === supportDraftKey(recordId) &&
+    approval.requested_by_type === "agent" &&
+    approval.requested_by_id === SUPPORT_DRAFT_AGENT &&
+    approval.target_ref === `ticket:${ticketId}`
+  );
+}
+
+/**
+ * Is this approval the email's draft? A compare-and-swap on the email's
+ * record (support-drafts.ts files it there): true when the record already
+ * names this approval, or names nothing yet (the filing request died between
+ * creating the approval and naming it), which it then does, so a late failure
+ * report cannot land under a reply being sent. False when the record was
+ * settled another way: a failure report won the race, or the draft was filed
+ * as a note.
+ */
+async function claimDraftRecord(db: Client, tenantId: string, recordId: string, approvalId: string): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `UPDATE support_email_messages SET draft_status = 'filed', draft_approval_id = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND direction = 'inbound'
+            AND (draft_status IS NULL OR (draft_status = 'filed' AND draft_approval_id = ?))`,
+    args: [approvalId, new Date().toISOString(), tenantId, recordId, approvalId],
+  });
+  return rs.rowsAffected === 1;
+}
+
+/** Did the client write on the ticket after the message the draft answers (by email or in the portal)? */
+async function clientWroteSince(db: Client, tenantId: string, ticketId: string, answered: AnsweredMessage): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `SELECT 1 AS ok FROM ticket_comments
+          WHERE tenant_id = ? AND ticket_id = ? AND author_type = 'client' AND created_at > ? AND id <> ? LIMIT 1`,
+    args: [tenantId, ticketId, answered.received_at, answered.comment_id ?? ""],
+  });
+  return rs.rows.length > 0;
+}
+
+/** The sent reply in the client's Conversations, for a ticket linked to a client record. Never fails the send. */
+async function mirrorReply(
+  db: Client,
+  tenantId: string,
+  ticket: Ticket,
+  r: { commentId: string; body: string; subject: string; approverId: string | null; approvalId: string },
+): Promise<void> {
+  if (!ticket.customer_id || !ticket.client_email) return;
+  try {
+    const c = (
+      await db.execute({ sql: "SELECT id, display_name, source_lead_id FROM customers WHERE tenant_id = ? AND id = ? LIMIT 1", args: [tenantId, ticket.customer_id] })
+    ).rows[0];
+    if (!c) return;
+    const at = new Date().toISOString();
+    await db.batch(
+      clientEmailMirrorStatements({
+        tenantId,
+        client: { id: String(c.id), display_name: String(c.display_name ?? ""), source_lead_id: c.source_lead_id == null ? null : String(c.source_lead_id) },
+        direction: "outbound",
+        id: r.commentId,
+        provider: "support_desk_reply",
+        providerMessageId: r.commentId,
+        at,
+        subject: r.subject,
+        body: r.body,
+        clientEmail: ticket.client_email,
+        deskEmail: supportInboxForDesk(tenantId) ?? "",
+        actorUserId: r.approverId,
+        metadata: { ticket_id: ticket.id, approval_id: r.approvalId },
+      }),
+      "write",
+    );
+  } catch (err) {
+    console.error("[approvals.reply_ticket] sent, but not mirrored into Conversations", err instanceof Error ? err.message : err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
 
@@ -460,6 +745,7 @@ export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> 
   send_email: sendEmail,
   publish_post: publishPost,
   send_slack_message: sendSlackMessage,
+  reply_ticket: replyTicket,
 };
 
 export function noExecutorMessage(kind: string): string {

@@ -34,7 +34,7 @@
  * fails loudly rather than landing unrecorded.
  */
 import { randomUUID } from "node:crypto";
-import type { Client, InStatement, ResultSet } from "@libsql/client";
+import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
@@ -305,6 +305,8 @@ export type TicketComment = {
   is_internal: boolean;
   email_status: string | null;
   created_at: string;
+  /** How it arrived (email, portal, form). Null before migration bravo__200 and for older comments. */
+  channel?: string | null;
 };
 
 function mapComment(r: Row): TicketComment {
@@ -319,6 +321,7 @@ function mapComment(r: Row): TicketComment {
     is_internal: !isClientVisibleComment({ is_internal: r.is_internal }),
     email_status: s(r.email_status),
     created_at: String(r.created_at ?? ""),
+    channel: s(r.channel),
   };
 }
 
@@ -977,12 +980,13 @@ export async function updateTask(
 
 export const DELIVERY_LEDGER_PRODUCER = "lib/delivery/store.ts";
 
-type TicketEventKind = "opened" | "first_response" | "resolved";
+type TicketEventKind = "opened" | "first_response" | "resolved" | "reopened";
 
 const TICKET_EVENT_KEYS: Record<TicketEventKind, string> = {
   opened: "ticket.opened",
   first_response: "ticket.first_response",
   resolved: "ticket.resolved",
+  reopened: "ticket.reopened",
 };
 
 function ticketEvent(
@@ -992,8 +996,12 @@ function ticketEvent(
     ticketId: string;
     customerId: string | null;
     actorUserId: string | null;
-    /** The n in the catalog's key shape: the occurrence of this event on this ticket. */
-    n: number;
+    /**
+     * The last part of the catalog's key shape: the occurrence of this event on
+     * this ticket (n), or for ticket.reopened the comment that reopened it, so
+     * two reopenings racing each other never share a key.
+     */
+    n: number | string;
     payload: Record<string, unknown>;
     conditional: boolean;
   },
@@ -1056,6 +1064,12 @@ async function findTicketIdBySubmission(db: Client, tenantId: string, submission
   return rs.rows.length ? String(rows(rs)[0].id) : null;
 }
 
+/** Is `id` already a ticket on this desk? */
+async function ticketExists(db: Client, tenantId: string, id: string): Promise<boolean> {
+  const rs = await db.execute({ sql: "SELECT 1 AS ok FROM support_tickets WHERE tenant_id = ? AND id = ? LIMIT 1", args: [tenantId, id] });
+  return rs.rows.length > 0;
+}
+
 /**
  * Create a ticket and allocate its number in the same statement.
  *
@@ -1069,6 +1083,11 @@ async function findTicketIdBySubmission(db: Client, tenantId: string, submission
  * which is unique per tenant. Creating it a second time — the reconcile sweep
  * racing the live request, a retried after() callback — returns the ticket
  * that already exists with created:false instead of a duplicate.
+ *
+ * A SUPPLIED ID is a key too: the support inbox plans its ticket id before it
+ * writes anything (email-intake.ts), so a retried or concurrent ingest of one
+ * email asks for the same id and gets the ticket the first attempt made,
+ * created:false, never a second ticket and never an error.
  *
  * Numbering and idempotency are both PER DESK: each workspace's tickets start
  * at T-0001, and a submission id only ever matches its own desk's ticket.
@@ -1084,6 +1103,9 @@ export async function createTicket(
   if (input.form_submission_id) {
     const existing = await findTicketIdBySubmission(db, tenantId, input.form_submission_id);
     if (existing) return { ticket: (await getTicket(db, reader, existing))!, created: false };
+  }
+  if (input.id && (await ticketExists(db, tenantId, input.id))) {
+    return { ticket: (await getTicket(db, reader, input.id))!, created: false };
   }
   const id = input.id ?? randomUUID();
   const at = now.toISOString();
@@ -1152,6 +1174,10 @@ export async function createTicket(
       if (input.form_submission_id) {
         const existing = await findTicketIdBySubmission(db, tenantId, input.form_submission_id);
         if (existing) return { ticket: (await getTicket(db, reader, existing))!, created: false };
+      }
+      // A concurrent create with the same supplied id won the insert.
+      if (input.id && (await ticketExists(db, tenantId, input.id))) {
+        return { ticket: (await getTicket(db, reader, input.id))!, created: false };
       }
       if (attempt === 5) {
         throw new Error(`ticket_number_allocation_failed after ${attempt} attempts: ${e.message ?? String(err)}`);
@@ -1401,8 +1427,12 @@ export async function updateTicket(
 }
 
 export type CommentResult =
-  | { ok: true; comment: TicketComment; firstResponse: boolean; reopened: boolean }
-  | { ok: false; status: 404 | 409; error: "not_found" | "ticket_closed" };
+  | { ok: true; comment: TicketComment; firstResponse: boolean; reopened: boolean; existing?: true }
+  | { ok: false; status: 404 | 409; error: "not_found" | "ticket_closed" | "superseded" };
+
+/** How a comment reached the desk (ticket_comments.channel, migration bravo__200). */
+export const COMMENT_CHANNELS = ["email", "portal", "form"] as const;
+export type CommentChannel = (typeof COMMENT_CHANNELS)[number];
 
 /**
  * Add to the thread.
@@ -1412,14 +1442,44 @@ export type CommentResult =
  * stop the SLA clock, because none of them reaches the client.
  *
  * A client writing on a ticket that is waiting on them, or already resolved,
- * moves it back to open: the ball is in the team's court again. A closed
- * ticket takes no more client comments; they open a new one.
+ * moves it back to open: the ball is in the team's court again, and the
+ * ledger records ticket.reopened (in the same batch, only from the write
+ * that inserted the comment). A closed ticket takes no more client comments;
+ * they open a new one.
+ *
+ * A SUPPLIED `id` makes the call idempotent: when a comment with that id is
+ * already on this ticket nothing is written and it is returned with
+ * existing:true (the support inbox plans its ids before it writes, so a
+ * retried email is filed once). `channel` is written only when given, so a
+ * database without migration bravo__200 keeps taking every other comment.
+ *
+ * ONE TRANSACTION, EACH STEP ON THE ONE BEFORE. The ticket's state is checked
+ * in the insert itself, not only in the read above it: a client's comment is
+ * inserted only while the ticket is not closed. The ticket is then touched
+ * (updated_at) only if THIS call inserted the comment, reopened only if that
+ * happened and it is waiting on the client or resolved at that moment, and
+ * ticket.reopened / ticket.first_response are recorded only by the write that
+ * made that change. So a ticket closed, resolved or answered between the read
+ * and the write is never moved by a comment that did not land.
+ *
+ * A `guard` (an SQL condition and its arguments) is checked in the insert the
+ * same way. When it no longer holds, nothing is written and the answer is
+ * `superseded`. The support inbox guards a client's email on its claim still
+ * holding the plan that chose this ticket.
  */
 export async function addTicketComment(
   db: Client,
   tenantId: string,
   ticketId: string,
-  input: { body: string; is_internal: boolean; author_type: "client" | "team"; author: Author },
+  input: {
+    body: string;
+    is_internal: boolean;
+    author_type: "client" | "team";
+    author: Author;
+    id?: string;
+    channel?: CommentChannel;
+    guard?: { sql: string; args: InValue[] };
+  },
   now: Date,
 ): Promise<CommentResult> {
   requireTenant(tenantId);
@@ -1431,36 +1491,91 @@ export async function addTicketComment(
     }),
   )[0];
   if (!cur) return { ok: false, status: 404, error: "not_found" };
+  if (input.id) {
+    const prior = rows(
+      await db.execute({
+        sql: "SELECT * FROM ticket_comments WHERE tenant_id = ? AND ticket_id = ? AND id = ? LIMIT 1",
+        args: [tenantId, ticketId, input.id],
+      }),
+    )[0];
+    if (prior) return { ok: true, comment: mapComment(prior), firstResponse: false, reopened: false, existing: true };
+  }
   const status = String(cur.status) as TicketStatus;
   if (input.author_type === "client" && status === "closed") return { ok: false, status: 409, error: "ticket_closed" };
   const at = now.toISOString();
-  const id = randomUUID();
+  const id = input.id ?? randomUUID();
   const isInternal = input.author_type === "client" ? false : input.is_internal;
+  const channelCol = input.channel ? ", channel" : "";
+  const values: InValue[] = [
+    id,
+    ticketId,
+    tenantId,
+    input.author_type,
+    input.author.userId,
+    input.author.name,
+    input.body,
+    isInternal ? 1 : 0,
+    at,
+    ...(input.channel ? [input.channel] : []),
+  ];
+  const isClient = input.author_type === "client";
+  // The insert's own conditions: the ticket is here (and, for a client, not
+  // closed) at the moment of the write, and the caller's guard holds.
+  const conditions = [
+    `EXISTS (SELECT 1 FROM support_tickets WHERE tenant_id = ? AND id = ?${isClient ? " AND status <> 'closed'" : ""})`,
+    ...(input.guard ? [input.guard.sql] : []),
+  ];
   const stmts: InStatement[] = [
     {
-      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, ticketId, tenantId, input.author_type, input.author.userId, input.author.name, input.body, isInternal ? 1 : 0, at],
+      // ON CONFLICT (id): a concurrent call with the same supplied id inserted
+      // first; this one changes nothing, and nothing after it is written.
+      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
+            SELECT ${values.map(() => "?").join(", ")} WHERE ${conditions.join(" AND ")}
+            ON CONFLICT (id) DO NOTHING`,
+      args: [...values, tenantId, ticketId, ...(input.guard ? input.guard.args : [])],
+    },
+    // Touched only by the call that inserted the comment.
+    {
+      sql: "UPDATE support_tickets SET updated_at = ? WHERE tenant_id = ? AND id = ? AND changes() = 1",
+      args: [at, tenantId, ticketId],
     },
   ];
-  const firstResponse = input.author_type === "team" && !isInternal && !cur.first_response_at;
-  const reopened = input.author_type === "client" && (status === "waiting_on_client" || status === "resolved");
-  const sets = ["updated_at = ?"];
-  const args: Array<string | null> = [at];
-  if (reopened) {
-    sets.push("status = 'open'", "resolved_at = NULL", "closed_at = NULL");
-  }
-  stmts.push({
-    sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
-    args: [...args, tenantId, ticketId],
-  });
-  if (firstResponse) {
-    // Set once: only the reply that finds it still empty sets it, even if two
-    // public replies race, and only that reply records ticket.first_response.
-    stmts.push({
-      sql: "UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL",
-      args: [at, tenantId, ticketId],
-    });
+  let reopenAt = -1;
+  let firstResponseAt = -1;
+  if (isClient) {
+    // A client writing on a ticket waiting on them, or resolved AT THIS
+    // MOMENT, reopens it; the reopening is recorded only by that write, keyed
+    // by this comment (a count read before the batch could hand two racing
+    // reopenings the same key, and the second would be dropped).
+    reopenAt =
+      stmts.push({
+        sql: `UPDATE support_tickets SET status = 'open', resolved_at = NULL, closed_at = NULL
+              WHERE tenant_id = ? AND id = ? AND status IN ('waiting_on_client', 'resolved') AND changes() = 1`,
+        args: [tenantId, ticketId],
+      }) - 1;
+    stmts.push(
+      ticketEvent(
+        "reopened",
+        {
+          tenantId,
+          ticketId,
+          customerId: s(cur.customer_id),
+          actorUserId: actorId(input.author.userId),
+          n: id,
+          payload: {},
+          conditional: true,
+        },
+        now,
+      ),
+    );
+  } else if (!isInternal) {
+    // Set once: only the public reply that finds it still empty sets it, even
+    // if two race, and only that reply records ticket.first_response.
+    firstResponseAt =
+      stmts.push({
+        sql: "UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL AND changes() = 1",
+        args: [at, tenantId, ticketId],
+      }) - 1;
     const opened = Date.parse(String(cur.created_at ?? ""));
     stmts.push(
       ticketEvent(
@@ -1478,7 +1593,28 @@ export async function addTicketComment(
       ),
     );
   }
-  await db.batch(stmts, "write");
+  const results = await db.batch(stmts, "write");
+  if (results[0].rowsAffected !== 1) {
+    // Nothing written. A concurrent call with this id wrote it first (then it
+    // is this comment, already on the ticket); or, since the read above, the
+    // ticket closed or went, or the caller's guard stopped holding.
+    const written = rows(
+      await db.execute({
+        sql: "SELECT * FROM ticket_comments WHERE tenant_id = ? AND ticket_id = ? AND id = ? LIMIT 1",
+        args: [tenantId, ticketId, id],
+      }),
+    )[0];
+    if (written) return { ok: true, comment: mapComment(written), firstResponse: false, reopened: false, existing: true };
+    const ticketNow = rows(
+      await db.execute({ sql: "SELECT status FROM support_tickets WHERE tenant_id = ? AND id = ?", args: [tenantId, ticketId] }),
+    )[0];
+    if (!ticketNow) return { ok: false, status: 404, error: "not_found" };
+    if (isClient && String(ticketNow.status) === "closed") return { ok: false, status: 409, error: "ticket_closed" };
+    if (input.guard) return { ok: false, status: 409, error: "superseded" };
+    throw new Error(`addTicketComment: comment ${id} was not written on ticket ${ticketId} and nothing explains why`);
+  }
+  const firstResponse = firstResponseAt >= 0 && results[firstResponseAt].rowsAffected === 1;
+  const reopened = reopenAt >= 0 && results[reopenAt].rowsAffected === 1;
   return {
     ok: true,
     comment: {
@@ -1491,11 +1627,34 @@ export async function addTicketComment(
       is_internal: isInternal,
       email_status: null,
       created_at: at,
+      channel: input.channel ?? null,
     },
     firstResponse,
     reopened,
   };
 }
+
+/**
+ * An internal system line on a ticket's thread, as ONE statement for the
+ * caller's own batch: the support inbox's routing note ("sender not
+ * verified", "follow-up to T-0042", a bounce). Idempotent on its id, so a
+ * retried ingest never writes the line twice. Never client-visible
+ * (is_internal 1), never a first response.
+ */
+export function systemNoteStatement(
+  tenantId: string,
+  ticketId: string,
+  note: { id: string; body: string; at: string },
+): InStatement {
+  return {
+    sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
+          VALUES (?, ?, ?, 'system', NULL, 'Support inbox', ?, 1, ?)
+          ON CONFLICT (id) DO NOTHING`,
+    args: [note.id, ticketId, requireTenant(tenantId), note.body.slice(0, LIMITS_COMMENT_BODY), note.at],
+  };
+}
+
+const LIMITS_COMMENT_BODY = 10_000;
 
 export async function setCommentEmailStatus(db: Client, tenantId: string, commentId: string, status: string): Promise<void> {
   await db.execute({
@@ -1653,7 +1812,13 @@ export async function reclaimFailedBreachAlerts(
   return won;
 }
 
-/** Tickets that claimed a founder alert or client ack but never recorded it being sent. */
+/**
+ * Tickets whose intake notifications never ran (their after() was torn down):
+ * no founder alert claimed, or no client acknowledgement claimed for a ticket
+ * that has an address. Email tickets are included: their acknowledgement is
+ * decided once, at ingest, and acknowledgeClient re-reads that decision
+ * (email-ack.ts), so the retry can only send an ack that was meant to go.
+ */
 export async function listPendingIntakeNotifications(
   db: Client,
   tenantId: string,
@@ -1662,7 +1827,7 @@ export async function listPendingIntakeNotifications(
 ): Promise<string[]> {
   const rs = await db.execute({
     sql: `SELECT id FROM support_tickets
-          WHERE tenant_id = ? AND source IN ('form', 'portal') AND created_at < ?
+          WHERE tenant_id = ? AND source IN ('form', 'portal', 'email') AND created_at < ?
             AND (founder_alert_at IS NULL OR (client_ack_at IS NULL AND client_email IS NOT NULL))
           ORDER BY created_at, id LIMIT ?`,
     args: [requireTenant(tenantId), olderThan.toISOString(), limit],

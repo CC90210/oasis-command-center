@@ -65,17 +65,24 @@ export const TICKET_SEVERITY_LABELS: Record<TicketSeverity, string> = {
   low: "Low",
 };
 
-export const TICKET_CATEGORIES = ["bug", "change_request", "question", "billing", "other"] as const;
+/**
+ * "access" (2026-10-01) is a client who cannot sign in or reach their own
+ * account, from the support inbox's classifier. The public form does not offer
+ * it (its options are its own, lib/delivery/support-form.ts).
+ */
+export const TICKET_CATEGORIES = ["bug", "change_request", "question", "billing", "access", "other"] as const;
 export type TicketCategory = (typeof TICKET_CATEGORIES)[number];
 export const TICKET_CATEGORY_LABELS: Record<TicketCategory, string> = {
   bug: "Bug",
   change_request: "Change request",
   question: "Question",
   billing: "Billing",
+  access: "Access",
   other: "Other",
 };
 
-export const TICKET_SOURCES = ["form", "portal", "internal"] as const;
+/** "email": a message to support@, filed by lib/delivery/email-intake.ts. */
+export const TICKET_SOURCES = ["form", "portal", "internal", "email"] as const;
 export type TicketSource = (typeof TICKET_SOURCES)[number];
 
 export const TICKET_STATUSES = ["open", "in_progress", "waiting_on_client", "resolved", "closed"] as const;
@@ -286,6 +293,102 @@ export function parseTicketNumber(value: unknown): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isSafeInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * The ticket a subject line names: "[T-0042]", "(T-0042)" or a bare "T-0042"
+ * standing as its own word (not inside "XT-0042" or "T-00421a"). Every desk
+ * email carries the tag (messages.ts), so a client's reply names its ticket
+ * even when their mail client dropped the threading headers. Two DIFFERENT
+ * numbers in one subject name no ticket: ambiguity is never guessed through.
+ * Returns the ticket's sequence number, which is per desk (store.ts).
+ */
+export function findTicketRefInSubject(subject: unknown): number | null {
+  if (typeof subject !== "string" || !subject) return null;
+  let found: number | null = null;
+  // No lookbehind: this module reaches client bundles, and older Safari
+  // refuses a lookbehind regex literal outright (the whole page would fail).
+  for (const m of subject.matchAll(/(^|[^A-Za-z0-9-])(T-\d{4,9})(?![A-Za-z0-9])/gi)) {
+    const seq = parseTicketNumber(m[2]);
+    if (seq === null) continue;
+    if (found !== null && found !== seq) return null;
+    found = seq;
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// The support inbox (support@): its vocabulary and threading rules
+// ---------------------------------------------------------------------------
+
+/** What the support inbox's classifier calls a request (BEA scripts/support/config.py). */
+export const SUPPORT_FACETS = ["bug", "how_to", "billing", "access", "feature_request", "other"] as const;
+export type SupportFacet = (typeof SUPPORT_FACETS)[number];
+export const SUPPORT_URGENCIES = ["critical", "high", "normal", "low"] as const;
+export type SupportUrgency = (typeof SUPPORT_URGENCIES)[number];
+
+const FACET_CATEGORY: Record<SupportFacet, TicketCategory> = {
+  bug: "bug",
+  how_to: "question",
+  billing: "billing",
+  access: "access",
+  feature_request: "change_request",
+  other: "other",
+};
+const URGENCY_SEVERITY: Record<SupportUrgency, TicketSeverity> = {
+  critical: "critical",
+  high: "high",
+  normal: "medium",
+  low: "low",
+};
+
+/**
+ * The ticket a classified email becomes. "Urgent" is a severity, never a
+ * category. A value the classifier invents (a newer reader) degrades to
+ * other / medium rather than refusing a client's request over a label, the
+ * same rule the public form follows (parseSupportSubmission).
+ */
+export function supportFacetToTicket(facet: unknown, urgency: unknown): { category: TicketCategory; severity: TicketSeverity } {
+  return {
+    category: isOneOf(SUPPORT_FACETS, facet) ? FACET_CATEGORY[facet] : "other",
+    severity: isOneOf(SUPPORT_URGENCIES, urgency) ? URGENCY_SEVERITY[urgency] : "medium",
+  };
+}
+
+/** The longest Message-ID kept (RFC 5322 caps a header line at 998 characters). */
+export const MESSAGE_ID_MAX = 998;
+
+/**
+ * One Message-ID as "<local@domain>": the first <...> group, whitespace
+ * removed, case kept. The same normalisation the reader applies
+ * (BEA scripts/support/mime.py normalize_message_id), so both sides hash the
+ * same string. Null when there is nothing usable.
+ */
+export function normalizeMessageId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (!text) return null;
+  const m = /<([^<>]+)>/.exec(text);
+  const inner = (m ? m[1] : text.replace(/^[<>\s]+|[<>\s]+$/g, "")).replace(/\s+/g, "");
+  if (!inner || inner.length > MESSAGE_ID_MAX) return null;
+  return `<${inner}>`;
+}
+
+/**
+ * A subject as the "same conversation" heuristic compares it: reply and
+ * forward prefixes (English, French, German, Nordic) and ticket tags removed,
+ * whitespace collapsed, lower case. "Re: [T-0042] Login broken" and
+ * "login  broken" are the same subject.
+ */
+export function normalizeSubjectForThread(subject: unknown): string {
+  let s = typeof subject === "string" ? subject : "";
+  s = s.replace(/[[(]\s*T-\d{4,9}\s*[\])]/gi, " ");
+  for (;;) {
+    const next = s.replace(/^\s*(?:re|fwd?|tr|aw|sv)\s*(?:\[\d+\])?\s*:\s*/i, "");
+    if (next === s) break;
+    s = next;
+  }
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 // ---------------------------------------------------------------------------

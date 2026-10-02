@@ -13,8 +13,9 @@
  * does not have (agent_name), against a support_tickets table that did not
  * exist, and relied on "background systems" to turn those rows into alerts.
  *
- * Returns 500 when a breach alert failed to send, so the cron runner's own
- * failure reporting sees it; the per-ticket reason is on each ticket.
+ * Returns 500 when a breach alert failed to send, or a support inbox step
+ * threw, so the cron runner's own failure reporting sees it; the per-ticket
+ * reason is on each ticket, a step's error in support_inbox.errors.
  *
  * SCHEDULED every 15 minutes, in all three places a cron schedule lives:
  * config/cron-registry.json, workers/oasis-cc-cron/src/index.ts, and the
@@ -25,7 +26,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { defaultNotifyDeps } from "@/lib/delivery/notify";
-import { runSlaCheck } from "@/lib/delivery/sla-cron";
+import { runSlaCheck, slaRunOk } from "@/lib/delivery/sla-cron";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,10 +42,10 @@ async function handle(req: NextRequest) {
     const result = await runSlaCheck(getTursoClient(), defaultNotifyDeps(), new Date());
     // Alert failures fail the run, and every run after it until the retry
     // goes through or the ticket is answered or closed: a dead alert channel
-    // stays red. An unparseable orphan submission is reported in the body and
-    // logged, but would re-fail every run for a week, so it does not flip the
-    // status.
-    const ok = result.alert_failures.length === 0;
+    // stays red. So does a support inbox step that threw (slaRunOk). An
+    // unparseable orphan submission is reported in the body and logged, but
+    // would re-fail every run for a week, so it does not flip the status.
+    const ok = slaRunOk(result);
     return NextResponse.json({ ok, ...result }, { status: ok ? 200 : 500 });
   } catch (err) {
     console.error("[cron.sla-check]", err instanceof Error ? err.stack : err);
