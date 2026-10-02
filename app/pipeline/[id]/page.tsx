@@ -22,6 +22,7 @@ import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { nonEmptyString } from "@/lib/format-helpers";
 import { BattleCard } from "@/components/web-leads/BattleCard";
+import { factsFrom } from "@/lib/web-leads/claim";
 import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
@@ -322,6 +323,7 @@ export default async function PipelineLeadDetailPage({
           }
           initialPromisedDemo={nonEmptyString(activeRecord.data.promised_demo)}
           initialFounderMeetingSmsConsent={founderMeetingSmsConsent}
+          leadDoNotCall={factsFrom(activeRecord.data).dnc}
           initialOffer={{
             packageId: nonEmptyString(activeRecord.data.recommended_tier),
             setupAmount: numberValue(activeRecord.data.quoted_setup_amount),

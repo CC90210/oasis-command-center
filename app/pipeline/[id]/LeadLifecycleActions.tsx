@@ -83,6 +83,8 @@ type Props = {
   initialHandoffNote?: string | null;
   initialPromisedDemo?: string | null;
   initialFounderMeetingSmsConsent?: boolean;
+  /** Internal do-not-call. Booking then needs the rep to confirm the owner asked for the meeting. */
+  leadDoNotCall?: boolean;
   initialOffer?: InitialOffer;
   initialBuildBrief?: Partial<BuildBriefDraft> | null;
 };
@@ -310,6 +312,7 @@ export function LeadLifecycleActions({
   initialHandoffNote = null,
   initialPromisedDemo = null,
   initialFounderMeetingSmsConsent = false,
+  leadDoNotCall = false,
   initialOffer,
   initialBuildBrief,
 }: Props) {
@@ -360,6 +363,10 @@ export function LeadLifecycleActions({
   const [contactConfirmed, setContactConfirmed] = useState(false);
   const [clientAgreedToTime, setClientAgreedToTime] = useState(false);
   const [handoffComplete, setHandoffComplete] = useState(false);
+  const [ownerRequestedMeeting, setOwnerRequestedMeeting] = useState(false);
+  // A do-not-call lead books only on this confirmation; the server refuses
+  // it otherwise (do_not_call) and stores who confirmed it and when.
+  const doNotCallConfirmed = !leadDoNotCall || ownerRequestedMeeting;
   const [smsConsent, setSmsConsent] = useState(false);
   const [founderMeetingSmsConsent, setFounderMeetingSmsConsent] = useState(
     initialFounderMeetingSmsConsent,
@@ -507,6 +514,7 @@ export function LeadLifecycleActions({
     contactConfirmed &&
     clientAgreedToTime &&
     handoffComplete &&
+    doNotCallConfirmed &&
     // THE BUTTON ASKS "can a booking be created", not "is this host connected".
     // See the founderCanBook comment above: the shared workspace calendar can
     // carry it, and refusing here left the rep staring at a disabled button
@@ -524,6 +532,7 @@ export function LeadLifecycleActions({
     if (!contactConfirmed) return "Confirm the client contact details";
     if (!clientAgreedToTime) return "Confirm the client agreed to the selected time";
     if (!handoffComplete) return "Confirm the internal handoff is complete";
+    if (!doNotCallConfirmed) return "This business is on do-not-call: confirm the owner asked for this meeting";
     if (founderCanBook === false)
       return "Selected host must reconnect Google, and no shared workspace calendar is configured";
     return null;
@@ -662,6 +671,7 @@ export function LeadLifecycleActions({
           contactConfirmed,
           clientAgreedToTime,
           handoffComplete,
+          ...(leadDoNotCall ? { ownerRequestedMeeting } : {}),
         },
         smsConsent: Boolean(bookingContact.phone.trim() && smsConsent),
         smsConsentArtifact: smsConsent ? founderSmsConsentArtifact() : null,
@@ -819,7 +829,7 @@ export function LeadLifecycleActions({
     founderContactValid && founderPhoneValid,
     Boolean(founderUserId && founderMeetingAt && founderMeetingIsFuture) && founderCanBook !== false,
     Boolean(promisedDemo.trim() && transitionNote.trim()),
-    contactConfirmed && clientAgreedToTime && handoffComplete,
+    contactConfirmed && clientAgreedToTime && handoffComplete && doNotCallConfirmed,
     founderBookingReady,
   ][bookingStep];
   const moveToBookingStep = (next: number) => {
@@ -1469,6 +1479,18 @@ export function LeadLifecycleActions({
                 label={<>The internal founder handoff note is complete.</>}
               />
             </div>
+
+            {leadDoNotCall ? (
+              <ConfirmationCheckCard
+                checked={ownerRequestedMeeting}
+                onChange={setOwnerRequestedMeeting}
+                label={
+                  <>
+                    This business is on do-not-call. The owner asked for this meeting on this call.
+                  </>
+                }
+              />
+            ) : null}
 
             {bookingContact.phone.trim() ? (
               <ConfirmationCheckCard

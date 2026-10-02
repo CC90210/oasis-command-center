@@ -72,6 +72,7 @@ import {
   type MemberStanding,
 } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
 import {
   isCompleteQualificationPayload,
   normalizeQualificationForStorage,
@@ -595,6 +596,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     ) {
       return NextResponse.json({ok:false,error:"booking_confirmations_required"},{status:400});
     }
+    // Same claim rule lib/leads/rep-lead-access.ts applies to logging a call:
+    // a rep whose claim lapsed back into the pool no longer holds the lead.
+    // isActionableBy also refuses every do-not-call lead, so the lapse is
+    // judged with dnc set aside; do-not-call has its own rule below.
+    const claimFacts = factsFrom(current);
+    if (
+      !session.isAdmin &&
+      isInBookOf(claimFacts, session.userId) &&
+      !isActionableBy({ ...claimFacts, dnc:false }, session.userId, Date.now())
+    ) {
+      return NextResponse.json({ok:false,error:"claim_released"},{status:409});
+    }
+    // Do-not-call (Adon, 2026-10-02: "allow"). A do-not-call business may still
+    // be booked when the owner asks for the meeting on this call, but only on
+    // an explicit, literal-true confirmation from the rep, which is stored
+    // with who gave it and when. Without it nothing reaches Google. Binds
+    // admins and owners too. The dnc flag itself is never cleared here.
+    const dncMeetingOverride = claimFacts.dnc
+      ? confirmations.ownerRequestedMeeting === true
+        ? { confirmed_by:session.userId, confirmed_at:occurredAt }
+        : null
+      : undefined;
+    if (dncMeetingOverride === null) {
+      return NextResponse.json({ok:false,error:"do_not_call"},{status:409});
+    }
     const qualifiedDuringHandoff = currentStage !== "qualified";
     if (!transitionNote) return NextResponse.json({ok:false,error:"handoff_note_required"},{status:400});
     const founderUserId = typeof body.founderUserId === "string" ? body.founderUserId.trim() : "";
@@ -688,6 +714,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     ].filter((userId, index, list) => list.indexOf(userId) === index).slice(0, 5);
     patch = {
       stage:"founder_meeting_booked",
+      ...(dncMeetingOverride ? { dnc_meeting_override:dncMeetingOverride } : {}),
       ...(qualifiedDuringHandoff
         ? {
             qualification:normalizeQualificationForStorage(body.qualification),
