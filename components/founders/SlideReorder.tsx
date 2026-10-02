@@ -86,10 +86,14 @@ export function SlideReorder({
             key={slidePaths[slideIdx]}
             className="group/slide relative w-[74px] shrink-0 overflow-hidden rounded-md border border-bg-border bg-bg-deep"
           >
+            {/* Lazy and async like every Library image: each thumbnail is a
+                full-size slide, so a long deck must not fetch them all up front. */}
             {/* eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, short-lived by design */}
             <img
               src={slideUrls[slideIdx]}
               alt={`Slide ${pos + 1}`}
+              loading="lazy"
+              decoding="async"
               className="h-[92px] w-full object-cover"
             />
             <span className="absolute left-1 top-1 rounded bg-bg-deep/85 px-1 text-[9px] font-bold tabular-nums text-fg-muted">
