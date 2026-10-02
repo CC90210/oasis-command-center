@@ -142,10 +142,12 @@ function freshPage(page: string, readers: Record<string, Record<string, unknown>
   for (const [request, overrides] of Object.entries(readers)) {
     const p = require.resolve(request);
     saved.set(p, require.cache[p]);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stub
     stub(request, { __esModule: true, ...require(request), ...overrides });
   }
   delete require.cache[pagePath];
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- a fresh CommonJS instance of the page, which reads the stubs above
     return require(pagePath).default;
   } finally {
     for (const [p, m] of saved) {
@@ -625,6 +627,7 @@ async function main() {
   // straight through outside one), so this renders the Overview with React's
   // own server renderer, the one Next streams pages with.
   await check("one request reads the Library's summary once, however many sections show it", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- Next's vendored renderer is a CommonJS file with no type declarations
     const { renderToPipeableStream } = require("next/dist/compiled/react-server-dom-webpack/server.node") as {
       renderToPipeableStream: (
         model: unknown,
