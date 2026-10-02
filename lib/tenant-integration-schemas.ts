@@ -16,7 +16,9 @@ export type IntegrationFieldDef = {
   /** Render as a password input (masked). */
   sensitive: boolean;
   /** Server-side pattern check applied at upsert. */
-  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase";
+  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase" | "twilio_sid";
+  /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
+  sidPrefix?: "AC" | "SK" | "MG";
 };
 
 export type IntegrationSchema = {
@@ -61,12 +63,17 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     service: "twilio",
     label: "Twilio",
     description:
-      "Direct SMS stays email-only until the Account SID, Auth Token, and either a From Number or Messaging Service SID are saved and pass Test.",
+      "Your own Twilio account. Texting stays off until the Account SID, the Auth Token (or an API key), and a From Number or Messaging Service SID are saved and pass Test.",
     fields: [
-      { key: "account_sid", label: "Account SID", sensitive: false, validation: "alphanum_uppercase" },
-      { key: "auth_token", label: "Auth Token", sensitive: true, hint: "Find this under Twilio → Account Info." },
-      { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212" },
-      { key: "messaging_service_sid", label: "Messaging Service SID", sensitive: false, validation: "alphanum_uppercase", hint: "Optional MG... SID. When set, it replaces From Number for outbound sends." },
+      // Twilio SIDs are two letters and 32 hex characters, usually lower case
+      // (^AC[0-9a-fA-F]{32}$ in Twilio's API spec). alphanum_uppercase refused
+      // every real one pasted from Twilio's console.
+      { key: "account_sid", label: "Account SID", sensitive: false, validation: "twilio_sid", sidPrefix: "AC", hint: "Starts with AC. In Twilio: Account Info on the console home page." },
+      { key: "auth_token", label: "Auth Token", sensitive: true, hint: "Account Info in Twilio. Needed for incoming texts: Twilio signs each one with it, and OASIS refuses any it cannot verify." },
+      { key: "api_key_sid", label: "API key SID (optional)", sensitive: false, validation: "twilio_sid", sidPrefix: "SK", hint: "Starts with SK. With its secret below, OASIS sends with the key instead of the Auth Token." },
+      { key: "api_key_secret", label: "API key secret (optional)", sensitive: true, hint: "Shown once when the key is created in Twilio (API keys & tokens)." },
+      { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "A number on this Twilio account that can text. E.164 format, e.g. +14165551212" },
+      { key: "messaging_service_sid", label: "Messaging Service SID", sensitive: false, validation: "twilio_sid", sidPrefix: "MG", hint: "Optional MG... SID. When set, it replaces From Number for outbound sends." },
     ],
   },
   {
@@ -240,6 +247,12 @@ export function validateIntegrationValue(
       return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? null : "invalid email";
     case "alphanum_uppercase":
       return /^[A-Z0-9_]+$/.test(value) ? null : "expected uppercase letters / digits / underscore";
+    case "twilio_sid": {
+      const prefix = field.sidPrefix ?? "";
+      return /^(AC|SK|MG)[0-9a-fA-F]{32}$/.test(value.trim()) && value.trim().startsWith(prefix)
+        ? null
+        : `expected a Twilio SID: ${prefix || "two letters"} followed by 32 letters and digits (0-9, a-f)`;
+    }
     default:
       return null;
   }

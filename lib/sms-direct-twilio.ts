@@ -50,6 +50,10 @@
 import "server-only";
 import { getTenantIntegrationBundle } from "./tenant-integration-store";
 import { checkPhoneOptOut } from "./lead-interactions-queries";
+import { isDryRun } from "./integrations/send-mode";
+import { publicAppBaseUrl } from "./api-helpers";
+import { twilioAuthFor, twilioAuthHeader, twilioInboundVerifiable } from "./twilio/connection";
+import { twilioWebhookUrls } from "./twilio/shared";
 
 export type DirectTwilioResult =
   | {
@@ -68,14 +72,20 @@ export type DirectTwilioResult =
 export type TwilioCredentialBundle = {
   account_sid?: string;
   auth_token?: string;
+  /** An API key (SK...) and its secret: sends with them instead of the Auth Token. */
+  api_key_sid?: string;
+  api_key_secret?: string;
   from_number?: string;
   messaging_service_sid?: string;
 };
 
+/**
+ * The workspace can send: an Account SID, a credential (the Auth Token, or an
+ * API key with its secret) and a sender (a number or a messaging service).
+ */
 export function twilioCredentialsReady(bundle: TwilioCredentialBundle): boolean {
   return Boolean(
-    bundle.account_sid &&
-    bundle.auth_token &&
+    twilioAuthFor(bundle) &&
     (bundle.messaging_service_sid || bundle.from_number),
   );
 }
@@ -83,6 +93,7 @@ export function twilioCredentialsReady(bundle: TwilioCredentialBundle): boolean 
 export function buildTwilioMessageForm(
   bundle: TwilioCredentialBundle,
   input: { to: string; body: string },
+  opts: { statusCallback?: string | null } = {},
 ): URLSearchParams {
   const form = new URLSearchParams();
   form.set("To", input.to);
@@ -92,12 +103,15 @@ export function buildTwilioMessageForm(
     form.set("From", bundle.from_number);
   }
   form.set("Body", input.body);
+  // Twilio reports what the carrier did with this text to OASIS's status
+  // webhook (verified with the workspace's own Auth Token there).
+  if (opts.statusCallback) form.set("StatusCallback", opts.statusCallback);
   return form;
 }
 
 /**
  * Returns true when the tenant has the minimum set of Twilio creds
- * (account_sid + auth_token + from_number) to dispatch via the
+ * (account SID + Auth Token or API key + a sender) to dispatch via the
  * direct path. The route uses this to decide whether to try
  * direct dispatch before falling through to the hosted-agent path.
  */
@@ -111,6 +125,12 @@ export async function sendSmsDirectTwilio(input: {
   to: string;
   body: string;
 }): Promise<DirectTwilioResult> {
+  // The live-send gate, at the chokepoint itself: every caller checks
+  // isDryRun("twilio") first, but a send that skips that check must still go
+  // nowhere. Nothing is read or called before it (LIVE_SEND_TWILIO).
+  if (isDryRun("twilio")) {
+    return { ok: false, provider: "twilio_direct", error: "live_send_disabled", http_status: 409 };
+  }
   // Opt-out gate — this direct path bypasses send_gateway's suppression, so
   // re-check and FAIL CLOSED before dispatch (channel is gated off today but
   // must ship safe when enabled). CASL/TCPA. [[fail-closed-default]]
@@ -123,9 +143,8 @@ export async function sendSmsDirectTwilio(input: {
   }
 
   const creds = await getTenantIntegrationBundle(input.tenantId, "twilio");
-  const sid = creds.account_sid;
-  const token = creds.auth_token;
-  if (!twilioCredentialsReady(creds) || !sid || !token) {
+  const auth = twilioAuthFor(creds);
+  if (!twilioCredentialsReady(creds) || !auth) {
     return {
       ok: false,
       provider: "twilio_direct",
@@ -133,14 +152,18 @@ export async function sendSmsDirectTwilio(input: {
       http_status: 503,
     };
   }
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`;
-  const form = buildTwilioMessageForm(creds, input);
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(auth.accountSid)}/Messages.json`;
+  // Delivery updates only where OASIS can verify them: a workspace with only an
+  // API key has no Auth Token to check Twilio's signature with.
+  const form = buildTwilioMessageForm(creds, input, {
+    statusCallback: twilioInboundVerifiable(creds) ? twilioWebhookUrls(publicAppBaseUrl()).status : null,
+  });
 
   try {
     const r = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: "Basic " + Buffer.from(`${sid}:${token}`).toString("base64"),
+        Authorization: twilioAuthHeader(auth),
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },

@@ -172,7 +172,10 @@ for (const def of CONNECTOR_CATALOG) {
   const schema = findIntegrationSchema(src.service);
   assert.ok(schema, `${def.slug}: status service "${src.service}" is not an integration the store knows`);
   const fields = new Set(schema!.fields.map((f) => f.key));
-  const named = [...src.requireAll, ...(src.kind === "tenant_keys" ? src.requireAny ?? [] : [])];
+  const named = [
+    ...src.requireAll,
+    ...(src.kind === "tenant_keys" ? [...(src.requireAny ?? []), ...(src.credentialAlternatives ?? []).flat()] : []),
+  ];
   for (const f of named) assert.ok(fields.has(f), `${def.slug}: "${src.service}.${f}" is not a stored field`);
   if (src.kind === "workspace_heartbeat") {
     assert.match(factsSource, new RegExp(`"${src.service}"`), `${def.slug}: heartbeats for ${src.service} are never loaded`);

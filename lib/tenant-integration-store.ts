@@ -559,6 +559,19 @@ export async function deleteTenantIntegrationValue(input: {
 }
 
 /**
+ * A stored test result as a boolean. libSQL hands an INTEGER column back as 0/1
+ * (and as "0"/"1" over HTTP), so a reader comparing `=== true` never saw a
+ * passing test: the Twilio card could not turn green and "Last check failed"
+ * never showed (W10a, 2026-10-01). Anything unrecognised is "not tested".
+ */
+export function storedTestResult(value: unknown): boolean | null {
+  if (value === true || value === false) return value;
+  if (value === 1 || value === "1" || value === "true") return true;
+  if (value === 0 || value === "0" || value === "false") return false;
+  return null;
+}
+
+/**
  * List every stored field for a tenant — returns presence + test
  * status only, NEVER the encrypted ciphertext or decrypted plaintext.
  * Settings page consumes this to render the "Verified / Not set /
@@ -603,7 +616,7 @@ export async function listTenantIntegrationStatus(
       field_key: row.field_key,
       has_value: storedPresent || envPresent,
       last_tested_at: row.last_tested_at,
-      last_test_ok: row.last_test_ok,
+      last_test_ok: storedTestResult(row.last_test_ok),
       last_test_error: row.last_test_error,
       updated_at: row.updated_at,
       source: storedPresent ? "stored" : envPresent ? "environment" : null,

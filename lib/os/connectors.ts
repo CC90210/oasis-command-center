@@ -35,6 +35,7 @@ import {
 } from "@/lib/integrations/workspace-connection-status";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
 import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
+import { TWILIO_FAILURE_STATES } from "@/lib/twilio/shared";
 
 // ── Catalog shape ──────────────────────────────────────────────────────────
 
@@ -91,6 +92,15 @@ export type ConnectorStatusSource =
       requireAll: readonly string[];
       /** At least one of these must also be present (Twilio: a number OR a messaging service). */
       requireAny?: readonly string[];
+      /** One of these field sets must be complete (Twilio: the Auth Token, OR an API key and its secret). */
+      credentialAlternatives?: readonly (readonly string[])[];
+      /**
+       * The plain words for a failed test, keyed by the code the test stored
+       * (Twilio: "needs_number" -> "Needs a number"). Set, the card reads only a
+       * test that still describes the saved keys: a value saved after the test
+       * clears its own result, and the card then says "not tested yet".
+       */
+      failureStates?: Readonly<Record<string, { kind: "attention" | "configured"; label: string; detail: string }>>;
       verifiable: boolean;
     }
   | { kind: "oauth_tokens"; service: string; requireAll: readonly string[] };
@@ -142,6 +152,8 @@ export type ConnectorDef = {
   yourAccount?: "google";
   /** Where the rest of this app's setup lives, when it is not all here. */
   seeAlso?: { href: string; label: string };
+  /** The provider's own setup documentation (opens in a new tab). */
+  docs?: { href: string; label: string };
 };
 
 /** Settings › Connections with this app's drawer open. */
@@ -374,19 +386,29 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales", "client_success"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Tw", reason: "Removed from Simple Icons at Twilio's request" },
-    reads: ["Delivery status of the texts OASIS sends"],
-    does: ["Sends SMS from your Twilio number once the connection test passes"],
+    reads: [
+      "Texts your customers send to your Twilio number, once it points at OASIS",
+      "Twilio's delivery report for each text OASIS sends",
+    ],
+    does: [
+      "Sends texts from your own Twilio number or messaging service, once the connection test passes",
+      "Sends only while live texting is switched on. While it is off, OASIS asks Twilio to send nothing, so no text leaves your number",
+      "Checks Twilio's signature on every incoming text with your Auth Token and refuses any it cannot verify",
+    ],
     keywords: ["sms", "text", "phone"],
     live: {
       source: {
         kind: "tenant_keys",
         service: "twilio",
-        requireAll: ["account_sid", "auth_token"],
+        requireAll: ["account_sid"],
+        credentialAlternatives: [["auth_token"], ["api_key_sid", "api_key_secret"]],
         requireAny: ["from_number", "messaging_service_sid"],
+        failureStates: TWILIO_FAILURE_STATES,
         verifiable: true,
       },
       connect: { kind: "keys", label: "Add your Twilio keys", service: "twilio" },
     },
+    docs: { href: "https://www.twilio.com/docs/messaging", label: "Twilio's messaging docs" },
   },
   {
     slug: "whatsapp",
@@ -578,6 +600,10 @@ export type KeyRowFact = {
   has_value: boolean;
   last_tested_at: string | null;
   last_test_ok: boolean | null;
+  /** The failed test's code (Twilio: a plain state such as "needs_number"). */
+  last_test_error?: string | null;
+  /** "environment": OASIS's own deployment value, which a test never records on. */
+  source?: "stored" | "environment" | null;
 };
 
 /** One integrations_health row, newest first per service. */
@@ -650,8 +676,39 @@ function keyedStatus(
   if (!rows.some((r) => r.has_value)) return { kind: "not_connected", label: "Not connected" };
 
   const requireAny = source.kind === "tenant_keys" ? source.requireAny : undefined;
+  const alternatives = source.kind === "tenant_keys" ? source.credentialAlternatives : undefined;
   const complete =
-    source.requireAll.every(present) && (!requireAny || requireAny.some(present));
+    source.requireAll.every(present) &&
+    (!alternatives || alternatives.some((group) => group.every(present))) &&
+    (!requireAny || requireAny.some(present));
+
+  // A source that names its test's states (Twilio) says the newest one in the
+  // owner's words, but only while it still describes the saved keys: saving a
+  // value clears that value's own test result, so a stored value with no
+  // result means the keys changed after the test. OASIS's deployment values
+  // (source "environment") are never tested, so they never count as changed.
+  const states = source.kind === "tenant_keys" ? source.failureStates : undefined;
+  if (states) {
+    const changedSinceTest = rows.some((r) => r.has_value && !r.last_tested_at && r.source !== "environment");
+    if (changedSinceTest) {
+      return complete
+        ? {
+            kind: "configured",
+            label: "Set up · not tested yet",
+            detail: "The keys changed after the last test. Run Test so OASIS checks them with the provider.",
+          }
+        : {
+            kind: "attention",
+            label: "Needs attention",
+            detail: "Setup is incomplete: some required details are missing.",
+          };
+    }
+    const failed = rows.filter((r) => r.last_test_ok === false && r.last_tested_at);
+    const newest = latestIso(failed.map((r) => r.last_tested_at));
+    const code = failed.find((r) => r.last_tested_at === newest)?.last_test_error ?? null;
+    const state = code && Object.prototype.hasOwnProperty.call(states, code) ? states[code] : null;
+    if (state) return { kind: state.kind, label: state.label, detail: state.detail };
+  }
   if (!complete) {
     return {
       kind: "attention",
@@ -672,7 +729,7 @@ function keyedStatus(
     return {
       kind: "attention",
       label: "Needs attention",
-      detail: "The last connection test failed. Open Credentials and run Test again.",
+      detail: "The last connection test failed. Open this app and run Test again.",
     };
   }
   if (!source.verifiable) {
@@ -694,7 +751,7 @@ function keyedStatus(
     : {
         kind: "configured",
         label: "Set up · not tested yet",
-        detail: "The key is saved but has not passed a connection test. Run Test in Credentials.",
+        detail: "The key is saved but has not passed a connection test. Open this app and run Test.",
       };
 }
 
