@@ -60,7 +60,8 @@ the report also shows who gets a 404 where (the access table).
 - **Horizontal page scroll:** the page is wider than the screen, with the
   elements that push past the right edge.
 - **Slow:** more than 3 seconds from the start of navigation until `<main>`
-  holds content (no loading skeleton left), or content that never appeared.
+  holds content of its own (text outside the shell's breadcrumb header and
+  footer, with no loading skeleton left), or content that never appeared.
 
 Defects are ranked in that order. The report groups repeats by the element or
 shell component that causes them (the rail, the breadcrumb header, the page

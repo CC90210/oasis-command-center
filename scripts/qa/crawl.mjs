@@ -156,10 +156,12 @@ async function mintSessions(viewers) {
 // ---------------------------------------------------------------------------
 
 /**
- * Records when <main> first holds real content: text outside the header,
- * footer and nav, with no loading skeleton (aria-busy) left in it. A page with
- * no <main> (the full-bleed ones) counts its body once the document has
- * parsed. Runs before any page script.
+ * Records when <main> first holds real content: text outside the shell's own
+ * breadcrumb header and footer (components/MainShell.tsx draws both as direct
+ * children of the canvas inside <main>), with no loading skeleton (aria-busy)
+ * left in it. A page whose content is itself a nav (the /admin index) counts.
+ * A page with no <main> (the full-bleed ones) counts its body once the
+ * document has parsed. Runs before any page script.
  */
 const READY_PROBE = `(() => {
   const ready = () => {
@@ -171,7 +173,7 @@ const READY_PROBE = `(() => {
       const t = walker.currentNode;
       if (!t.nodeValue || !t.nodeValue.trim()) continue;
       const el = t.parentElement;
-      if (!el || el.closest("header, footer, nav, script, style")) continue;
+      if (!el || el.closest("main > div > header, main > div > footer, script, style")) continue;
       window.__qaMainReadyAt = performance.now();
       return true;
     }
