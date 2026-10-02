@@ -319,4 +319,7 @@ const nextConfig = {
   },
 };
 
+// TEMPORARY (perf/worker-bundle-diet): bundle-composition diagnostic, removed before merge.
+if (process.env.BUNDLE_DIAG === "1") require("./scripts/diag-webpack-plugin.cjs")(nextConfig);
+
 module.exports = nextConfig;
