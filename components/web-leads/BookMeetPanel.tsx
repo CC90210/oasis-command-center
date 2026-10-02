@@ -433,7 +433,7 @@ export function BookMeetForm(p: BookMeetFormProps) {
         </p>
         {status.kind === "unconfirmed" ? (
           <p className="text-xs text-fg-muted">
-            Change details only if the time or email was wrong. If Google already sent the first invite, it is cancelled automatically within 15 minutes and they get the new one.
+            Change details only if the time or email was wrong. If Google already sent the first invite, it is cancelled automatically within 20 minutes and they get the new one.
           </p>
         ) : null}
       </div>
@@ -509,7 +509,7 @@ function smsConsentArtifact(): Record<string, unknown> {
   };
 }
 
-export function BookMeetPanel(props: {
+type BookMeetPanelProps = {
   leadId: string;
   businessName: string;
   variant: "card" | "callmode";
@@ -517,7 +517,20 @@ export function BookMeetPanel(props: {
   onBooked?: (meeting: BookedMeeting) => void;
   onNextLead?: () => void;
   onUnresolvedChange?: (unresolved: boolean) => void;
-}) {
+};
+
+/**
+ * ONE LEAD PER MOUNT. Call Mode keeps the panel on screen and changes leadId
+ * on "Next lead". The draft (which carries leadId), the result, outcomeSaved
+ * and the request ids all belong to one lead; carried over, the next submit
+ * would log the call and book the Meet on the PREVIOUS lead. The key makes
+ * every lead a fresh panel, so no caller has to remember to remount it.
+ */
+export function BookMeetPanel(props: BookMeetPanelProps) {
+  return <BookMeetPanelForLead key={props.leadId} {...props} />;
+}
+
+function BookMeetPanelForLead(props: BookMeetPanelProps) {
   const { leadId, onUnresolvedChange, onBooked } = props;
   const [ctx, setCtx] = useState<{ state: "loading" } | { state: "error" } | { state: "ready"; body: ContextBody }>({ state: "loading" });
   const [hosts, setHosts] = useState<{ state: "loading" | "ready" | "unavailable"; list: HostOption[]; fallback: boolean }>({ state: "loading", list: [], fallback: false });

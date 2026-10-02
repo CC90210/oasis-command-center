@@ -48,7 +48,7 @@ const states: Record<string, BookMeetFormProps> = {
   noEmail: { ...base, draft: { ...draft, contact: { ...draft.contact, email: "" } }, altEmails: [] },
   blocked: { ...base, blocked: { code: "claim_released", message: "Your hold on this lead ran out and it went back to the Leads pool. Claim it again first. Nothing was booked." } },
   working: { ...base, blockedReason: null, status: { kind: "working", step: "booking" } },
-  unconfirmed: { ...base, blockedReason: null, status: { kind: "unconfirmed", code: "calendar_create_failed", message: "Google or our records did not finish the booking. The meeting is not confirmed. Press Try again now: it reuses the same booking and will not send a second invite. If it is not finished within 15 minutes, any invite already sent is cancelled automatically." } },
+  unconfirmed: { ...base, blockedReason: null, status: { kind: "unconfirmed", code: "calendar_create_failed", message: "Google or our records did not finish the booking. The meeting is not confirmed. Press Try again now: it reuses the same booking and will not send a second invite. If it is not finished within 20 minutes, any invite already sent is cancelled automatically." } },
   retrySafe: { ...base, blockedReason: null, status: { kind: "retry_safe", code: "network", message: "The call did not save. Nothing was booked yet. Press Try again." } },
   fixEmail: { ...base, blockedReason: null, status: { kind: "fix", code: "client_email_required", field: "email", message: "The invite needs a real email address. Nothing was booked." } },
   dnc: {

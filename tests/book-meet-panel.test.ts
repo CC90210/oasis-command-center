@@ -56,10 +56,10 @@ assert.doesNotMatch(html.blocked, /type="checkbox"/);
 assert.match(html.working, /Booking with Google/);
 assert.match(html.working, /aria-busy="true"/);
 
-// Unconfirmed: alert, Try again, 15-minute warning, fields read-only.
+// Unconfirmed: alert, Try again, 20-minute warning, fields read-only.
 assert.match(html.unconfirmed, /role="alert"/);
 assert.match(html.unconfirmed, /Try again/);
-assert.match(html.unconfirmed, /15 minutes/);
+assert.match(html.unconfirmed, /20 minutes/);
 assert.match(html.unconfirmed, /readonly|disabled/);
 
 // Retry-safe: the message says "Press Try again", so the button must say it too.
@@ -98,6 +98,12 @@ assert.doesNotMatch(src, /\b(?:text|bg|border|ring|accent)-(?:amber|emerald|gree
 assert.doesNotMatch(src, /—/, "em dash in the component source");
 assert.doesNotMatch(src, /localStorage|sessionStorage/, "client contact details must not be stored in the browser");
 assert.match(src, /type="checkbox"/, "confirmations use native, keyboard-accessible checkboxes");
+// One lead per mount: Call Mode changes leadId on a live panel, and any state
+// carried over would book the PREVIOUS lead. Static markup cannot run effects,
+// so pin the structure: the export only keys a fresh per-lead panel.
+const exported = src.match(/export function BookMeetPanel\([^)]*\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+assert.match(exported, /<BookMeetPanelForLead key=\{props\.leadId\} \{\.\.\.props\} \/>/, "BookMeetPanel must remount per lead via key={props.leadId}");
+assert.doesNotMatch(exported, /use(?:State|Ref|Effect|Memo|Callback)\(/, "per-lead state must live below the key, never in the exported wrapper");
 for (const inferred of ["effectiveContactConfirmed", "effectiveClientAgreedToTime", "effectiveHandoffComplete", "effectiveOwnerRequested"]) {
   assert.ok(!src.includes(inferred), `${inferred} must not exist`);
 }
