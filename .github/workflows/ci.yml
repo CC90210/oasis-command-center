@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45 # TEMPORARY (was 30) for the diagnostic smoke test, restored before merge
     steps:
       - uses: actions/checkout@v4
       # SAME TOOLCHAIN AS THE DEPLOY (2026-09-29, F0 release gate).
@@ -232,3 +232,7 @@ jobs:
       - name: Worker bundle composition (TEMPORARY diagnostic, removed before merge)
         if: always()
         run: node scripts/diag-worker-bundle.mjs
+      - name: Worker smoke test under wrangler dev (TEMPORARY diagnostic, removed before merge)
+        if: always()
+        timeout-minutes: 12
+        run: node scripts/diag-worker-smoke.mjs

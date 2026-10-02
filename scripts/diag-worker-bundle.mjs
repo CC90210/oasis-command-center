@@ -198,16 +198,3 @@ for (const f of [".open-next/middleware/handler.mjs", ".open-next/worker.js", ".
 console.log("\n=== wrangler dry-run outdir ===");
 for (const [p, s] of walk(".wrangler/ci-dry-run")) console.log(`${kib(s)} KiB  ${p}`);
 
-// Information only: how much of worker.js is wrangler re-printing the already
-// minified handler.mjs without minification. Not used by any check.
-try {
-  const { execSync } = await import("node:child_process");
-  const outMin = execSync("npx wrangler deploy --dry-run --outdir .wrangler/diag-minify --minify 2>&1", {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  const line = outMin.split("\n").find((l) => l.includes("Total Upload"));
-  console.log(`\n=== same dry run with wrangler --minify (information only) ===\n${line || "(no size line)"}`);
-} catch (err) {
-  console.log(`wrangler --minify dry run failed: ${err && err.message ? err.message.split("\n")[0] : err}`);
-}
