@@ -92,12 +92,11 @@ for (const f of diagFiles) {
   const keys = Object.keys(raw);
   console.log(`${f}: ${keys.length} chunk files; sample keys: ${keys.slice(0, 8).join(" | ")}`);
   for (const k of keys) {
-    // chunk.files are relative to the compiler's output.path; normalise to the
-    // path under .next/server/ that the esbuild metafile uses.
-    let n = norm(k).replace(/^(\.\.\/)+/, "");
-    const s = n.indexOf("server/");
-    if (n.startsWith("server/")) n = n.slice("server/".length);
-    else if (s > 0 && n.slice(0, s).endsWith(".next/")) n = n.slice(s + "server/".length);
+    // chunk.files are relative to the server compiler's output.path, which is
+    // .next/server/chunks: split chunks are bare "69706.js", entries are
+    // "../app/.../page.js". Normalise to the path under .next/server/.
+    const kk = norm(k);
+    const n = kk.startsWith("../") ? kk.slice(3) : `chunks/${kk}`;
     chunkMap[n] = raw[k];
   }
 }
@@ -144,6 +143,33 @@ for (const [rel, bytes] of nextServer) {
   chunkTops.push([rel, bytes, inChunk.slice(0, 4).map(([k, s]) => `${k}=${(s / 1024).toFixed(0)}K`).join(" ")]);
 }
 console.log(`\nwebpack inputs without a module map: ${kib(unattributed)} KiB`);
+
+// Duplication: the same module (same source, same layer) emitted into more
+// than one chunk. Each copy is a full copy of its code.
+{
+  const copies = {};
+  const bytes = {};
+  for (const [rel, b] of nextServer) {
+    const mods = chunkMap[rel];
+    if (!mods) continue;
+    const total = Object.values(mods).reduce((a, c) => a + c, 0) || 1;
+    for (const [kl, size] of Object.entries(mods)) {
+      if (kl.startsWith("other:")) continue;
+      copies[kl] = (copies[kl] || 0) + 1;
+      bytes[kl] = (bytes[kl] || 0) + (b * size) / total;
+    }
+  }
+  let all = 0;
+  let unique = 0;
+  const waste = {};
+  for (const kl of Object.keys(bytes)) {
+    all += bytes[kl];
+    unique += bytes[kl] / copies[kl];
+    if (copies[kl] > 1) waste[`${kl} x${copies[kl]}`] = bytes[kl] - bytes[kl] / copies[kl];
+  }
+  console.log(`\n=== duplication: attributed ${kib(all)} KiB, of which one copy each ${kib(unique)} KiB; extra copies ${kib(all - unique)} KiB ===`);
+  top(waste, 40, "modules emitted into more than one chunk (KiB in the extra copies)");
+}
 top(byLayer, 20, "webpack bytes by layer (estimated, prorated by module source size)");
 top(byPkg, 80, "webpack bytes by npm package, all layers (estimated)");
 const pkgLayer = {};
