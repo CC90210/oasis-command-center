@@ -5,10 +5,12 @@
  *   app        which Slack app this workspace installs (CC, 2026-10-01): a
  *              client its OWN app, once saved (lib/slack/own-app.ts); OASIS's
  *              own workspace the OASIS app (the Worker secrets,
- *              registry.providerAvailability). A saved own app counts as
- *              configured wherever installs can run. With no app to install,
- *              the page says why and offers no button: an Install that cannot
- *              finish is a dead button.
+ *              registry.providerAvailability). Either counts as configured
+ *              only where installs can run (slackInstallsPossible: the
+ *              consent-state secret at OAUTH_STATE_SECRET_MIN_LENGTH, the rule
+ *              the state signer and the Slack job key use). With no app to
+ *              install, the page says why and offers no button: an Install
+ *              that cannot finish is a dead button.
  *   connection the workspace's live Slack connection (team, status, verified).
  *   routes     the channel map (slack_channel_routes); null when migration
  *              bravo__197 is not applied (said as such, never as "no channels").
@@ -35,7 +37,7 @@ export type SlackSettings = {
   ownApp: SlackOwnAppRead["state"];
   /** OASIS's own workspace (it installs the OASIS app); every other is a client. */
   oasisWorkspace: boolean;
-  /** No install of any app can run on this deployment (no consent-state secret). */
+  /** No install of any app can run on this deployment (no consent-state secret, or one too short to sign with). */
   installsUnavailable: boolean;
   /** Worker secret NAMES still missing (never values); shown to the platform operator only. */
   missingSecrets: string[];
@@ -62,7 +64,7 @@ export async function loadSlackSettings(
   const own: SlackOwnAppRead = oasisWorkspace ? { state: "none" } : await readSlackOwnApp(tenantId);
   const installsPossible = slackInstallsPossible(env);
   const installApp: SlackSettings["installApp"] = oasisWorkspace
-    ? oasisAppReady
+    ? oasisAppReady && installsPossible
       ? "oasis"
       : null
     : own.state === "saved" && installsPossible

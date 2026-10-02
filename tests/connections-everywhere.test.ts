@@ -345,6 +345,34 @@ async function main() {
     }
   });
 
+  // OASIS's own Slack app is set up here only where its install can run: the
+  // consent state is signed with CONNECTIONS_OAUTH_STATE_SECRET, at least
+  // OAUTH_STATE_SECRET_MIN_LENGTH long (the rule the state signer and the Slack
+  // job key use). A shorter one is no app to install, and no Add to Slack.
+  await check("Settings > Chat apps: OASIS's Slack app with a consent-state secret one character short of the minimum is not configured and offers no Add to Slack; at the minimum it is offered", async () => {
+    const { default: ChatAppsPage } = await import("../app/settings/chat-apps/page");
+    const { loadSlackSettings } = await import("../lib/slack/settings");
+    const { OAUTH_STATE_SECRET_MIN_LENGTH } = await import("../lib/connections/rules");
+    const addToSlack = (page: unknown) => elementsOf(page, "a").filter((a) => a.href === "/api/connections/slack/authorize");
+    await login(USERS.cc);
+    for (const [label, length, installable] of [
+      ["one character short", OAUTH_STATE_SECRET_MIN_LENGTH - 1, false],
+      ["exactly the minimum", OAUTH_STATE_SECRET_MIN_LENGTH, true],
+    ] as const) {
+      const env = { ...SLACK_ENV, CONNECTIONS_OAUTH_STATE_SECRET: "s".repeat(length) };
+      Object.assign(process.env, env);
+      try {
+        const s = await loadSlackSettings(db, OASIS, { env, nowMs: Date.now() });
+        assert.deepEqual([s.appConfigured, s.installApp, s.installsUnavailable], installable ? [true, "oasis", false] : [false, null, true], label);
+        const page = await ChatAppsPage({ searchParams: Promise.resolve({}) });
+        assert.equal(addToSlack(page).length, installable ? 1 : 0, `${label}: Add to Slack`);
+        assert.equal(textOf(page).includes("OASIS's Slack app is not set up on this deployment yet"), !installable, `${label}: the page says why there is no button`);
+      } finally {
+        for (const k of Object.keys(SLACK_ENV)) delete process.env[k];
+      }
+    }
+  });
+
   // -- 2. One drawer, three entry points, one loader --------------------------------
 
   // W10a R7: through the drawer's own API, as an owner still in the setup.
