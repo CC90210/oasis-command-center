@@ -321,6 +321,17 @@ const nextConfig = {
         destination: "/work",
         permanent: true,
       },
+      // The marketing share card moved from a route that drew it on every
+      // request (/opengraph-image-pwu6ef) to Next's static image file, served
+      // at /opengraph-image-pwu6ef.png with a hash of the PNG's bytes in the
+      // og:image URL (2026-10-02, Worker bundle diet). Pages already link the
+      // new URL; this sends any old copy of the link, such as a crawler
+      // re-fetching an image it cached, to the same card.
+      {
+        source: "/opengraph-image-pwu6ef",
+        destination: "/opengraph-image-pwu6ef.png",
+        permanent: true,
+      },
     ];
   },
   // Production security headers — applied to every response (including

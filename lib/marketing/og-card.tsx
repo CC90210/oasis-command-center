@@ -3,11 +3,14 @@ import { ImageResponse } from "next/og";
 /**
  * Share card for every marketing page: the DESIGN SOURCE.
  *
- * app/(marketing)/opengraph-image.tsx serves the PNG this renders, prebuilt
- * into lib/marketing/og-card.generated.ts. The route used to render it per
- * request, which put @vercel/og into the Cloudflare Worker: about 2 MiB of the
- * 64 MiB upload limit (the Satori library, resvg.wasm, yoga.wasm and a
- * fallback font) to draw one fixed card that has no inputs.
+ * The page serves app/(marketing)/opengraph-image.png, the PNG this renders,
+ * through Next's static metadata-image convention (alt text in
+ * opengraph-image.alt.txt beside it). Next puts a hash of the PNG's bytes in
+ * the og:image URL, so a new card gets a new URL. The card used to be rendered
+ * per request by an opengraph-image.tsx route, which put @vercel/og into the
+ * Cloudflare Worker: about 2 MiB of the 64 MiB upload limit (the Satori
+ * library, resvg.wasm, yoga.wasm and a fallback font) to draw one fixed card
+ * that has no inputs.
  *
  * NOTHING THE WORKER BUNDLES MAY IMPORT THIS FILE. OpenNext adds @vercel/og to
  * the Worker as soon as any route's file trace reaches it. Only
@@ -16,7 +19,7 @@ import { ImageResponse } from "next/og";
  *
  * To change the card: edit the JSX below, run
  *   node --import tsx scripts/gen-og-card.ts
- * and commit the regenerated module. tests/og-card-static.test.ts fails while
+ * and commit the regenerated PNG. tests/og-card-static.test.ts fails while
  * the committed PNG differs from what this file renders.
  *
  * Callers outside Next (the script, the test) set globalThis.React first:
@@ -31,7 +34,7 @@ import { ImageResponse } from "next/og";
  * six words. The system fallback is the right trade here.
  */
 
-/** Must equal the route's exported `size`; the test checks both and the PNG header. */
+/** Next reads the og:image width and height from the PNG; the test checks its header. */
 export const OG_CARD_SIZE = { width: 1200, height: 630 };
 
 const CYAN = "#00D4FF";
