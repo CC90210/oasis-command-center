@@ -28,12 +28,20 @@ type SummaryOptions = {
   excludePartyRole?: CommissionPartyRole;
 };
 
-type ListingOptions = {
-  tenantId: string;
-  repUserId?: string;
-  repUserIds?: string[];
-  columns: string;
-  recentLimit?: number;
+type LedgerOptions = SummaryOptions & {
+  /**
+   * What to select; must include SUMMARY_COLUMNS. The Commissions page reads
+   * its whole row here, so its list and its totals come from one read.
+   */
+  columns?: string;
+};
+
+/** What the Commissions list needs from a ledger row. */
+export type WebsiteSalesCommissionListingRow = {
+  id: string;
+  created_at: string;
+  entry_type: string;
+  status: string;
 };
 
 export type WebsiteSalesCommissionListing<T extends { id: string }> = {
@@ -61,80 +69,42 @@ type DealCurrencyRow = {
 const COMMISSION_PAGE_SIZE = 500;
 const DEAL_LOOKUP_CHUNK_SIZE = 200;
 const CURRENCY_ORDER: CommissionCurrency[] = ["CAD", "USD"];
+/** The columns the totals are built from; every ledger read includes them. */
+const SUMMARY_COLUMNS = ["id", "deal_id", "rep_user_id", "status", "amount_cents", "amount"] as const;
 
 /**
- * Returns a bounded recent history plus every accrued/approved accrual. The
- * latter is deliberately unbounded and paged: an old commission must never
+ * The Commissions page's rows, taken from the complete ledger it read for its
+ * totals: the newest `recentLimit` entries plus every accrued or approved
+ * accrual. The latter is deliberately unbounded: an old commission must never
  * disappear from the only founder approve/pay surface merely because 500 newer
  * rows were written.
+ *
+ * WHY FROM THE SAME READ (2026-10-02). The rows and the totals were two reads.
+ * Run together, a deal that closed between them could appear in the list and
+ * not in the totals; run one after the other (the route before that), the
+ * totals could count a row the list did not show. Taken from one read, every
+ * row on screen is a row the totals counted, with the same status and amount.
+ * The order is the SQL's it replaces: created_at, then id, newest first,
+ * compared as plain text (as SQLite's default collation compares them).
  */
-export async function loadWebsiteSalesCommissionListing<T extends { id: string }>(
-  db: SupabaseClient,
-  options: ListingOptions,
-): Promise<WebsiteSalesCommissionListing<T>> {
-  const tenantId = options.tenantId.trim();
-  const repUserId = options.repUserId?.trim();
-  if (options.repUserId !== undefined && options.repUserIds !== undefined) {
-    throw new Error("commission_listing_rep_scope_ambiguous");
-  }
-  const repUserIds = options.repUserIds === undefined
-    ? undefined
-    : Array.from(new Set(options.repUserIds.map((id) => id.trim())));
-  const columns = options.columns.trim();
-  const recentLimit = options.recentLimit ?? COMMISSION_PAGE_SIZE;
-  if (!tenantId) throw new Error("commission_listing_tenant_required");
-  if (options.repUserId !== undefined && !repUserId) throw new Error("commission_listing_rep_required");
-  if (repUserIds?.some((id) => !id)) throw new Error("commission_listing_rep_required");
-  if (!columns) throw new Error("commission_listing_columns_required");
+export function listWebsiteSalesCommissions<T extends WebsiteSalesCommissionListingRow>(
+  ledger: readonly T[],
+  recentLimit: number = COMMISSION_PAGE_SIZE,
+): WebsiteSalesCommissionListing<T> {
   if (!Number.isSafeInteger(recentLimit) || recentLimit < 1 || recentLimit > 1_000) {
     throw new Error("commission_listing_recent_limit_invalid");
   }
-  if (repUserIds?.length === 0) {
-    return { rows: [], recentCount: 0, outstandingCount: 0 };
-  }
-
-  let recentQuery = db
-    .from("website_sales_commissions")
-    .select(columns)
-    .eq("tenant_id", tenantId);
-  if (repUserId) recentQuery = recentQuery.eq("rep_user_id", repUserId);
-  if (repUserIds) recentQuery = recentQuery.in("rep_user_id", repUserIds);
-  const outstandingPage = (from: number) => {
-    let outstandingQuery = db
-      .from("website_sales_commissions")
-      .select(columns)
-      .eq("tenant_id", tenantId)
-      .eq("entry_type", "accrual")
-      .in("status", ["accrued", "approved"]);
-    if (repUserId) outstandingQuery = outstandingQuery.eq("rep_user_id", repUserId);
-    if (repUserIds) outstandingQuery = outstandingQuery.in("rep_user_id", repUserIds);
-    return outstandingQuery
-      .order("id", { ascending: true })
-      .range(from, from + COMMISSION_PAGE_SIZE - 1);
+  const text = (a: unknown, b: unknown) => {
+    const left = String(a ?? "");
+    const right = String(b ?? "");
+    return left < right ? -1 : left > right ? 1 : 0;
   };
-  // The recent page and the first outstanding page do not depend on each other,
-  // so they are one round trip, not two (LOAD-02). Later outstanding pages
-  // still follow one another: each exists only if the one before was full.
-  const [recentResult, firstOutstanding] = await Promise.all([
-    recentQuery
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(recentLimit),
-    outstandingPage(0),
-  ]);
-  if (recentResult.error) throw new Error(`commission_listing_recent_failed:${recentResult.error.message}`);
-  const recentRows = (recentResult.data ?? []) as unknown as T[];
-
-  const outstandingRows: T[] = [];
-  let result = firstOutstanding;
-  for (let from = 0; ; ) {
-    if (result.error) throw new Error(`commission_listing_outstanding_failed:${result.error.message}`);
-    const page = (result.data ?? []) as unknown as T[];
-    outstandingRows.push(...page);
-    if (page.length < COMMISSION_PAGE_SIZE) break;
-    from += COMMISSION_PAGE_SIZE;
-    result = await outstandingPage(from);
-  }
+  const recentRows = [...ledger]
+    .sort((a, b) => text(b.created_at, a.created_at) || text(b.id, a.id))
+    .slice(0, recentLimit);
+  const outstandingRows = ledger
+    .filter((row) => row.entry_type === "accrual" && (row.status === "accrued" || row.status === "approved"))
+    .sort((a, b) => text(a.id, b.id));
 
   const rowsById = new Map<string, T>();
   for (const row of recentRows) rowsById.set(row.id, row);
@@ -235,13 +205,16 @@ function addRow(
 /**
  * The complete, tenant-scoped ledger rows a summary is built from, read in
  * stable pages. Split out of loadWebsiteSalesCommissionSummary (2026-10-02) so
- * the Commissions page can read them beside its row list and look the deals up
- * once for both (lib/website-sales-commission-portal.ts).
+ * the Commissions page can take its row list and its totals from this one read
+ * (lib/website-sales-commission-portal.ts); it passes `columns` for its whole
+ * row.
  */
-export async function loadWebsiteSalesCommissionSummaryRows(
+export async function loadWebsiteSalesCommissionSummaryRows<
+  T extends WebsiteSalesCommissionSummaryRow = WebsiteSalesCommissionSummaryRow,
+>(
   db: SupabaseClient,
-  options: SummaryOptions,
-): Promise<WebsiteSalesCommissionSummaryRow[]> {
+  options: LedgerOptions,
+): Promise<T[]> {
   const tenantId = options.tenantId.trim();
   if (!tenantId) throw new Error("commission_summary_tenant_required");
   if (options.repUserId !== undefined && options.repUserIds !== undefined) {
@@ -259,13 +232,18 @@ export async function loadWebsiteSalesCommissionSummaryRows(
     ? undefined
     : Array.from(new Set(options.repUserIds.map((id) => id.trim())));
   if (repUserIds?.some((id) => !id)) throw new Error("commission_summary_rep_required");
+  const columns = options.columns?.trim() || SUMMARY_COLUMNS.join(",");
+  const selected = new Set(columns.split(",").map((column) => column.trim()));
+  const missing = SUMMARY_COLUMNS.filter((column) => !selected.has(column));
+  if (missing.length > 0) throw new Error(`commission_summary_columns_missing:${missing.join(",")}`);
   if (repUserIds?.length === 0) return [];
 
-  const rows: CommissionRow[] = [];
+  const rows: T[] = [];
+  const seen = new Set<string>();
   for (let from = 0; ; from += COMMISSION_PAGE_SIZE) {
     let query = db
       .from("website_sales_commissions")
-      .select("id,deal_id,rep_user_id,status,amount_cents,amount")
+      .select(columns)
       .eq("tenant_id", tenantId);
     if (repUserId) query = query.eq("rep_user_id", repUserId);
     if (repUserIds) query = query.in("rep_user_id", repUserIds);
@@ -275,8 +253,16 @@ export async function loadWebsiteSalesCommissionSummaryRows(
       .order("id", { ascending: true })
       .range(from, from + COMMISSION_PAGE_SIZE - 1);
     if (result.error) throw new Error(`commission_summary_rows_failed:${result.error.message}`);
-    const page = (result.data ?? []) as CommissionRow[];
-    rows.push(...page);
+    const page = (result.data ?? []) as unknown as T[];
+    // Pages are offsets in id order. A deal that closes while they are read
+    // moves the rows after it down one place, so a row can come back on the
+    // next page; the ledger never deletes, so none is skipped. Count each id
+    // once, or a total could include one commission twice.
+    for (const row of page) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      rows.push(row);
+    }
     if (page.length < COMMISSION_PAGE_SIZE) break;
   }
   return rows;

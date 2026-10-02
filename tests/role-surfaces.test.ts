@@ -782,9 +782,18 @@ assert.ok(
     commissionPortal.includes("repUserIds"),
   "a manager commission ledger must use a server-resolved direct-report scope",
 );
+// One ledger read carries the manager/rep boundary, and both the visible rows
+// and the complete totals are taken from it (2026-10-02), so the boundary
+// cannot differ between them.
 assert.equal(
   (commissionPortal.match(/\.\.\.repScope/g) ?? []).length,
-  2,
+  1,
+  "the manager/rep boundary must be on the one ledger read",
+);
+assert.ok(
+  /loadWebsiteSalesCommissionSummaryRows<CommissionRow>\(db, \{\s*tenantId: session\.tenantId,\s*\.\.\.repScope,/.test(commissionPortal) &&
+    commissionPortal.includes("listWebsiteSalesCommissions(ledger, RECENT_LEDGER_LIMIT)") &&
+    commissionPortal.includes("summarizeWebsiteSalesCommissions(ledger, deals)"),
   "the same manager/rep boundary must constrain both visible ledger rows and complete totals",
 );
 assert.ok(

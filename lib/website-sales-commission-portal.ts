@@ -11,22 +11,30 @@
  * wrapper around the same function, for the portal's Refresh and for the
  * re-read after a payout change.
  *
- * READS, in waves (everything in a wave runs at once; the depth is pinned by
- * tests/commissions-portal.test.ts):
+ * READS, in waves (the depth is pinned by tests/commissions-portal.test.ts):
  *   0. a manager only: their direct-report roster (who is in scope)
- *   1. the recent rows, the first page of outstanding rows, and the complete
- *      ledger the totals are built from
- *   2. website_deals, ONCE, for every deal either list names: the totals'
- *      currencies and each row's client, package and receipt (it used to be
- *      read twice, once by the summary and once by the route)
- *   3. leads, receipts and profiles
+ *   1. the complete ledger in scope, ONCE. The rows on screen and the totals
+ *      both come from it, so every row shown is counted in the totals with the
+ *      same status and amount (two reads at two moments could disagree when a
+ *      deal closed between them). One page per 500 rows, one after another.
+ *   2. website_deals, once, for every deal the ledger names (the totals'
+ *      currencies and each row's client, package and receipt), beside the
+ *      profiles of the people on the rows
+ *   3. leads and receipts
+ * Lookups go in chunks of 200 ids, at most CHUNK_READS_IN_FLIGHT at a time
+ * for the whole load, so a big ledger does not stack them one after another
+ * and never floods the database client either.
  *
- * Every failure is logged here with its detail and returned as a code; the
- * screen turns the code into a sentence (lib/ui/error-copy.ts).
+ * FAILURE. A wave answers as soon as one of its reads fails (each read logs
+ * its own failure with its detail at once), and the whole load has a deadline,
+ * so a read that never answers cannot hold the page on its loading screen.
+ * Every failure comes back as a code; the screen turns the code into a
+ * sentence (lib/ui/error-copy.ts).
  */
 import "server-only";
 
 import type { SessionContext } from "@/lib/api-auth";
+import { withDeadline } from "@/lib/os/deadline";
 import {
   SURFACE_CAPABILITIES,
   maySeeCommissionSurface,
@@ -35,7 +43,7 @@ import {
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getOasisSalesRepRoster } from "@/lib/team";
 import {
-  loadWebsiteSalesCommissionListing,
+  listWebsiteSalesCommissions,
   loadWebsiteSalesCommissionSummaryRows,
   summarizeWebsiteSalesCommissions,
   type CommissionLedgerStatus,
@@ -46,6 +54,14 @@ const RECENT_LEDGER_LIMIT = 500;
 const COMMISSION_SELECT =
   "id,deal_id,rep_user_id,payment_reference,entry_type,party_role,basis_amount_cents,rate_bps,amount_cents,collected_setup_amount,rate,amount,status,approved_by,approved_at,paid_by,paid_at,payout_reference,voided_by,voided_at,void_reason,created_at";
 const LOOKUP_CHUNK_SIZE = 200;
+/**
+ * Chunk reads in flight at once, for one load. The libSQL client's own queue
+ * is unbounded on purpose (LIBSQL_CLIENT_OPTIONS, lib/turso.ts: twenty
+ * statements in flight once hung the Worker), so this load bounds itself.
+ */
+const CHUNK_READS_IN_FLIGHT = 4;
+/** The whole load's budget (Today's reads get 12 s each, components/os/today/loaders.ts). */
+export const COMMISSION_PORTAL_DEADLINE_MS = 10_000;
 
 export type CommissionLedgerScope = "tenant" | "manager_team" | "self";
 
@@ -142,7 +158,7 @@ type CommissionRow = {
   collected_setup_amount: number;
   rate: number;
   amount: number;
-  status: string;
+  status: CommissionLedgerStatus;
   approved_by: string | null;
   approved_at: string | null;
   paid_by: string | null;
@@ -186,6 +202,35 @@ type ProfileRow = {
 
 type LeadRow = { id: string; data: unknown };
 
+/** Runs a task when one of the load's read slots is free. */
+type Limiter = <T>(task: () => PromiseLike<T>) => Promise<T>;
+
+/**
+ * At most `max` tasks at once. Made per load, never at module scope: nothing
+ * pending may be shared across requests on Workers.
+ */
+function createLimiter(max: number): Limiter {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(task: () => PromiseLike<T>): Promise<T> => {
+    if (active < max) active += 1;
+    // A finishing task hands its slot straight to the next one waiting, so
+    // a slot is never counted twice.
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
+}
+
+/**
+ * Rows for `ids`, read in chunks of LOOKUP_CHUNK_SIZE. Every chunk starts at
+ * once within the load's read slots, so 201 ids cost one wait, not two.
+ */
 async function loadRowsInChunks<T>(
   ids: string[],
   label: string,
@@ -193,14 +238,18 @@ async function loadRowsInChunks<T>(
     data: unknown;
     error: { message: string } | null;
   }>,
+  limit: Limiter,
 ): Promise<T[]> {
-  const rows: T[] = [];
+  const chunks: string[][] = [];
   for (let offset = 0; offset < ids.length; offset += LOOKUP_CHUNK_SIZE) {
-    const result = await read(ids.slice(offset, offset + LOOKUP_CHUNK_SIZE));
-    if (result.error) throw new Error(`${label}:${result.error.message}`);
-    rows.push(...((result.data ?? []) as T[]));
+    chunks.push(ids.slice(offset, offset + LOOKUP_CHUNK_SIZE));
   }
-  return rows;
+  const pages = await Promise.all(chunks.map((chunk) => limit(async () => {
+    const result = await read(chunk);
+    if (result.error) throw new Error(`${label}:${result.error.message}`);
+    return (result.data ?? []) as T[];
+  })));
+  return pages.flat();
 }
 
 function profileName(profile: ProfileRow | undefined, fallback: string): string {
@@ -231,43 +280,88 @@ function fail(status: number, error: CommissionPortalErrorCode): CommissionPorta
 }
 
 type WaveStep = {
-  result: PromiseSettledResult<unknown>;
   /** The log tag the route has always used for this read. */
   tag: string;
   code: CommissionPortalErrorCode;
+  run: () => Promise<unknown>;
 };
 
+type WaveResult = { ok: true; values: unknown[] } | { ok: false; code: CommissionPortalErrorCode };
+
 /**
- * Called when a read in a wave failed: logs every failed read with its detail
- * and returns the code of the first one in the order listed, so the code does
- * not depend on which read lost a race.
+ * A wave's reads, all at once. It answers as soon as one fails, without
+ * waiting for the others (one of them may never answer); each read logs its
+ * own failure the moment it happens, even one that lands after the wave has
+ * answered, and none is left as an unhandled rejection. When two fail, the
+ * first to fail names the code; both are logged, and both read the same on
+ * screen.
  */
-function firstFailure(steps: readonly WaveStep[]): CommissionPortalErrorCode {
-  const failed = steps.filter((step) => step.result.status === "rejected");
-  for (const step of failed) {
-    console.error(`[website-sales.commissions.${step.tag}]`, (step.result as PromiseRejectedResult).reason);
-  }
-  return (failed[0] ?? steps[0]).code;
+function runWave(steps: readonly WaveStep[]): Promise<WaveResult> {
+  return new Promise((resolve) => {
+    const values: unknown[] = new Array(steps.length);
+    let remaining = steps.length;
+    let answered = false;
+    if (remaining === 0) {
+      resolve({ ok: true, values });
+      return;
+    }
+    steps.forEach((step, index) => {
+      Promise.resolve()
+        .then(() => step.run())
+        .then(
+          (value) => {
+            values[index] = value;
+            remaining -= 1;
+            if (!answered && remaining === 0) {
+              answered = true;
+              resolve({ ok: true, values });
+            }
+          },
+          (error: unknown) => {
+            console.error(`[website-sales.commissions.${step.tag}]`, error);
+            if (!answered) {
+              answered = true;
+              resolve({ ok: false, code: step.code });
+            }
+          },
+        );
+    });
+  });
 }
+
+export type CommissionPortalOptions = {
+  /** The whole load's budget; tests shorten it. */
+  deadlineMs?: number;
+};
 
 /**
  * The Commissions portal for a signed-in session: its viewer, the visible
  * rows, the complete totals and the paging facts, or a status and an error
  * code. The persona gate is checked here, so the page and the route share it.
- * Never throws.
+ * Never throws, and answers within the deadline.
  */
 export async function loadCommissionPortal(
   session: CommissionPortalSession,
   persona: Persona,
+  options: CommissionPortalOptions = {},
 ): Promise<CommissionPortalResult> {
-  try {
-    return await readCommissionPortal(session, persona);
-  } catch (error) {
+  // `work` never rejects, so whatever the reads do after the deadline has
+  // answered is still caught here, never an unhandled rejection.
+  const work = readCommissionPortal(session, persona).catch((error: unknown) => {
     // Each read below has its own code. This catches what none of them
     // expected (a row that breaks the mapping, a persona missing from the
     // capability map): the page reads on the server now, so a throw here
     // would replace the whole page with the error screen instead of putting
     // one plain sentence on it.
+    console.error("[website-sales.commissions.portal]", error);
+    return fail(500, "commission_portal_unavailable");
+  });
+  try {
+    return await withDeadline(work, options.deadlineMs ?? COMMISSION_PORTAL_DEADLINE_MS, "commissions.portal");
+  } catch (error) {
+    // Only the deadline lands here: a read that never answered
+    // (lib/os/deadline.ts). The page shows a sentence instead of its loading
+    // screen forever.
     console.error("[website-sales.commissions.portal]", error);
     return fail(500, "commission_portal_unavailable");
   }
@@ -282,6 +376,7 @@ async function readCommissionPortal(
   }
 
   const db = getServiceSupabase();
+  const limit = createLimiter(CHUNK_READS_IN_FLIGHT);
   let ledgerScope: CommissionLedgerScope = "tenant";
   let repScope: { repUserId?: string; repUserIds?: string[] } = {};
   if (!session.isAdmin && persona === "manager") {
@@ -307,61 +402,26 @@ async function readCommissionPortal(
     repScope = { repUserId: session.userId };
   }
 
-  // Wave 1: the visible rows and the complete ledger behind the totals, with
-  // the same rep boundary on both.
-  const [listingRead, summaryRowsRead] = await Promise.allSettled([
-    loadWebsiteSalesCommissionListing<CommissionRow>(db, {
+  // Wave 1: the complete ledger in scope, read ONCE, with the rep boundary.
+  // The rows on screen and the totals both come from it, so a row is never
+  // shown without being counted, or counted with another status or amount.
+  let ledger: CommissionRow[];
+  try {
+    ledger = await loadWebsiteSalesCommissionSummaryRows<CommissionRow>(db, {
       tenantId: session.tenantId,
       ...repScope,
       columns: COMMISSION_SELECT,
-      recentLimit: RECENT_LEDGER_LIMIT,
-    }),
-    loadWebsiteSalesCommissionSummaryRows(db, {
-      tenantId: session.tenantId,
-      ...repScope,
-    }),
-  ]);
-  if (listingRead.status === "rejected" || summaryRowsRead.status === "rejected") {
-    return fail(500, firstFailure([
-      { result: listingRead, tag: "listing", code: "commission_listing_unavailable" },
-      { result: summaryRowsRead, tag: "summary", code: "commission_summary_unavailable" },
-    ]));
+    });
+  } catch (error) {
+    console.error("[website-sales.commissions.listing]", error);
+    return fail(500, "commission_listing_unavailable");
   }
-  const listing = listingRead.value;
+  const listing = listWebsiteSalesCommissions(ledger, RECENT_LEDGER_LIMIT);
   const commissions = listing.rows;
-  const summaryRows = summaryRowsRead.value;
 
-  // Wave 2: every deal either list names, read once.
-  const dealIds = [...new Set([...summaryRows, ...commissions].map((row) => row.deal_id).filter(Boolean))];
-  let deals: DealRow[];
-  try {
-    deals = await loadRowsInChunks<DealRow>(dealIds, "commission_deals_failed", (chunk) =>
-      db
-        .from("website_deals")
-        .select("id,lead_id,package_id,currency,setup_amount,monthly_amount,payment_provider,verified_payment_id,closed_at")
-        .eq("tenant_id", session.tenantId)
-        .in("id", chunk)
-        .order("id", { ascending: true }),
-    );
-  } catch (error) {
-    console.error("[website-sales.commissions.deals]", error);
-    return fail(500, "commission_deals_unavailable");
-  }
-  let summary: WebsiteSalesCommissionSummary;
-  try {
-    summary = summarizeWebsiteSalesCommissions(summaryRows, deals);
-  } catch (error) {
-    console.error("[website-sales.commissions.summary]", error);
-    return fail(500, "commission_summary_unavailable");
-  }
-  const dealsById = new Map(deals.map((deal) => [deal.id, deal]));
-
-  // Wave 3: the names, receipts and people behind the visible rows.
-  const listedDeals = [...new Set(commissions.map((row) => row.deal_id))]
-    .map((id) => dealsById.get(id))
-    .filter((deal): deal is DealRow => Boolean(deal));
-  const leadIds = [...new Set(listedDeals.map((deal) => deal.lead_id).filter(Boolean))];
-  const receiptIds = [...new Set(listedDeals.map((deal) => deal.verified_payment_id).filter((id): id is string => !!id))];
+  // Wave 2: every deal the ledger names, read once (the totals' currencies and
+  // the rows' clients), beside the people on the visible rows.
+  const dealIds = [...new Set(ledger.map((row) => row.deal_id).filter(Boolean))];
   const profileIds = [
     ...new Set(
       commissions
@@ -369,44 +429,78 @@ async function readCommissionPortal(
         .filter((id): id is string => !!id),
     ),
   ];
-  const [leadsRead, receiptsRead, profilesRead] = await Promise.allSettled([
-    loadRowsInChunks<LeadRow>(leadIds, "commission_leads_failed", (chunk) =>
-      db
-        .from("tenant_records")
-        .select("id,data")
-        .eq("tenant_id", session.tenantId)
-        .eq("entity_type", "lead")
-        .in("id", chunk)
-        .order("id", { ascending: true }),
-    ),
-    loadRowsInChunks<ReceiptRow>(receiptIds, "commission_receipts_failed", (chunk) =>
-      db
-        .from("website_sales_payment_receipts")
-        .select("id,provider,provider_reference,status,amount_cents,currency,verified_at")
-        .eq("tenant_id", session.tenantId)
-        .in("id", chunk)
-        .order("id", { ascending: true }),
-    ),
-    loadRowsInChunks<ProfileRow>(profileIds, "commission_profiles_failed", (chunk) =>
-      db
-        .from("user_profiles")
-        .select("auth_user_id,email,full_name,display_name,team_role")
-        .eq("tenant_id", session.tenantId)
-        .in("auth_user_id", chunk)
-        .order("auth_user_id", { ascending: true }),
-    ),
+  const second = await runWave([
+    {
+      tag: "deals",
+      code: "commission_deals_unavailable",
+      run: () => loadRowsInChunks<DealRow>(dealIds, "commission_deals_failed", (chunk) =>
+        db
+          .from("website_deals")
+          .select("id,lead_id,package_id,currency,setup_amount,monthly_amount,payment_provider,verified_payment_id,closed_at")
+          .eq("tenant_id", session.tenantId)
+          .in("id", chunk)
+          .order("id", { ascending: true }), limit),
+    },
+    {
+      tag: "profiles",
+      code: "commission_profiles_unavailable",
+      run: () => loadRowsInChunks<ProfileRow>(profileIds, "commission_profiles_failed", (chunk) =>
+        db
+          .from("user_profiles")
+          .select("auth_user_id,email,full_name,display_name,team_role")
+          .eq("tenant_id", session.tenantId)
+          .in("auth_user_id", chunk)
+          .order("auth_user_id", { ascending: true }), limit),
+    },
   ]);
-  if (leadsRead.status === "rejected" || receiptsRead.status === "rejected" || profilesRead.status === "rejected") {
-    return fail(500, firstFailure([
-      { result: leadsRead, tag: "leads", code: "commission_leads_unavailable" },
-      { result: receiptsRead, tag: "receipts", code: "commission_receipts_unavailable" },
-      { result: profilesRead, tag: "profiles", code: "commission_profiles_unavailable" },
-    ]));
+  if (!second.ok) return fail(500, second.code);
+  const [deals, profiles] = second.values as [DealRow[], ProfileRow[]];
+  let summary: WebsiteSalesCommissionSummary;
+  try {
+    summary = summarizeWebsiteSalesCommissions(ledger, deals);
+  } catch (error) {
+    console.error("[website-sales.commissions.summary]", error);
+    return fail(500, "commission_summary_unavailable");
   }
-  const leadsById = new Map(leadsRead.value.map((lead) => [lead.id, lead.data]));
-  const receiptsById = new Map(receiptsRead.value.map((receipt) => [receipt.id, receipt]));
+  const dealsById = new Map(deals.map((deal) => [deal.id, deal]));
+
+  // Wave 3: the clients and receipts behind the visible rows.
+  const listedDeals = [...new Set(commissions.map((row) => row.deal_id))]
+    .map((id) => dealsById.get(id))
+    .filter((deal): deal is DealRow => Boolean(deal));
+  const leadIds = [...new Set(listedDeals.map((deal) => deal.lead_id).filter(Boolean))];
+  const receiptIds = [...new Set(listedDeals.map((deal) => deal.verified_payment_id).filter((id): id is string => !!id))];
+  const third = await runWave([
+    {
+      tag: "leads",
+      code: "commission_leads_unavailable",
+      run: () => loadRowsInChunks<LeadRow>(leadIds, "commission_leads_failed", (chunk) =>
+        db
+          .from("tenant_records")
+          .select("id,data")
+          .eq("tenant_id", session.tenantId)
+          .eq("entity_type", "lead")
+          .in("id", chunk)
+          .order("id", { ascending: true }), limit),
+    },
+    {
+      tag: "receipts",
+      code: "commission_receipts_unavailable",
+      run: () => loadRowsInChunks<ReceiptRow>(receiptIds, "commission_receipts_failed", (chunk) =>
+        db
+          .from("website_sales_payment_receipts")
+          .select("id,provider,provider_reference,status,amount_cents,currency,verified_at")
+          .eq("tenant_id", session.tenantId)
+          .in("id", chunk)
+          .order("id", { ascending: true }), limit),
+    },
+  ]);
+  if (!third.ok) return fail(500, third.code);
+  const [leads, receipts] = third.values as [LeadRow[], ReceiptRow[]];
+  const leadsById = new Map(leads.map((lead) => [lead.id, lead.data]));
+  const receiptsById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
   const profilesById = new Map(
-    profilesRead.value
+    profiles
       .filter((profile): profile is ProfileRow & { auth_user_id: string } => !!profile.auth_user_id)
       .map((profile) => [profile.auth_user_id, profile]),
   );

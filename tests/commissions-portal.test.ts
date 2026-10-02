@@ -33,6 +33,19 @@
  *      under the row below that.
  *   7. The GET route is a thin wrapper: the same body as the loader.
  *
+ * And, from the review of 2026-10-02:
+ *   8. One read for the rows and the totals: a deal that closes in the middle
+ *      of a load is on the list and in the totals, or in neither; a deal that
+ *      closes between two ledger pages is never counted twice.
+ *   9. A failed read answers at once (its sibling may never answer) and is
+ *      logged at once; a read that never answers ends at the deadline.
+ *  10. Past 200 deals and 500 entries (450 and 700): the right totals and
+ *      list, at most 5 sequential round trips, at most 4 reads in flight.
+ *  11. Isolation with real rows in other workspaces, including rows that
+ *      point at another workspace's client, receipt, person and deal.
+ *  12. The empty page keeps Refresh, and a first commission replaces the
+ *      explainer with the list.
+ *
  * Run: node --conditions=react-server --import tsx tests/commissions-portal.test.ts
  */
 import assert from "node:assert/strict";
@@ -226,6 +239,118 @@ async function setupDatabase(): Promise<void> {
   raw.close();
 }
 
+// -- Other workspaces (isolation and size; review of 2026-10-02) -------------
+// B holds data no other workspace may ever see. C and D are workspaces whose
+// own rows point at B's records (a deal naming B's lead and receipt, an entry
+// approved by B's person, an entry on B's deal). Ids are unique across
+// workspaces, so a reference like that is the only way a query that lost its
+// tenant filter could pull B's data onto another workspace's page.
+const TENANT_B = "0b0b0b0b-0000-4000-8000-0000000000b0";
+const TENANT_C = "0c0c0c0c-0000-4000-8000-0000000000c0";
+const TENANT_D = "0d0d0d0d-0000-4000-8000-0000000000d0";
+const TENANT_BIG = "0e0e0e0e-0000-4000-8000-0000000000e0";
+const B_OWNER = "0b000000-0000-4000-8000-000000000001";
+const B_REP = "0b000000-0000-4000-8000-000000000002";
+const C_OWNER = "0c0c0000-0000-4000-8000-000000000001";
+const D_OWNER = "0d0d0000-0000-4000-8000-000000000001";
+const BIG_OWNER = "0e0e0000-0000-4000-8000-000000000001";
+const BIG_REPS = ["0e0e0000-0000-4000-8000-000000000011", "0e0e0000-0000-4000-8000-000000000012", "0e0e0000-0000-4000-8000-000000000013"];
+const BIG_DEALS = 450;
+const BIG_ENTRIES = 700;
+/** Text that exists only in workspace B's records. */
+const B_MARKERS = [
+  "Tenant B Bakery", "pi_tenantB_secret_ref", "Bianca Tenant-B", "bianca@tenant-b.test", "Boris Tenant-B",
+  "boris@tenant-b.test", "c-tenantB-1", "c-tenantB-2", "payout-tenantB-ref", "777777",
+];
+
+async function setupOtherTenants(): Promise<void> {
+  const raw = createClient({ url: `file:${dbFile}` });
+  const stamp = "2026-09-01T00:00:00Z";
+  const profile = (tenant: string, userId: string, role: string, owner: 0 | 1, name: string, email: string) => ({
+    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, admin_access,
+            onboarding_completed_at, full_name, display_name, agents_enabled, updated_at, joined_at)
+          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, '[]', ?, ?)`,
+    args: [`p-${userId}`, userId, email, tenant, role, owner, stamp, name, name, stamp, stamp],
+  });
+  const lead = (tenant: string, id: string, businessName: string) => ({
+    sql: `INSERT INTO tenant_records (id, tenant_id, entity_type, data, created_at, updated_at) VALUES (?, ?, 'lead', ?, ?, ?)`,
+    args: [id, tenant, JSON.stringify({ business_name: businessName, stage: "won" }), stamp, stamp],
+  });
+  const deal = (tenant: string, id: string, leadId: string, currency: string, setup: number, receiptId: string) => ({
+    sql: `INSERT INTO website_deals (id, tenant_id, lead_id, package_id, currency, setup_amount, monthly_amount,
+            payment_provider, verified_payment_id, closed_at) VALUES (?, ?, ?, 'growth', ?, ?, 150, 'stripe', ?, ?)`,
+    args: [id, tenant, leadId, currency, setup, receiptId, stamp],
+  });
+  const receipt = (tenant: string, id: string, reference: string, currency: string, cents: number) => ({
+    sql: `INSERT INTO website_sales_payment_receipts (id, tenant_id, provider, provider_reference, status, amount_cents, currency, verified_at)
+          VALUES (?, ?, 'stripe', ?, 'verified', ?, ?, ?)`,
+    args: [id, tenant, reference, cents, currency, stamp],
+  });
+  const entry = (
+    tenant: string, id: string, dealId: string, repId: string, status: string, cents: number, createdAt: string,
+    extra: { approvedBy?: string; payoutReference?: string } = {},
+  ) => ({
+    sql: `INSERT INTO website_sales_commissions (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type,
+            party_role, basis_amount_cents, rate_bps, amount_cents, collected_setup_amount, rate, amount, status,
+            approved_by, approved_at, payout_reference, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'accrual', 'closer', ?, 2500, ?, ?, 0.25, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      id, tenant, dealId, repId, `ref-${id}`, cents * 4, cents, (cents * 4) / 100, cents / 100, status,
+      extra.approvedBy ?? null, extra.approvedBy ? stamp : null, extra.payoutReference ?? null, createdAt, createdAt,
+    ],
+  });
+  const statements = [
+    // B: its own people, client, deal, receipt and entries.
+    profile(TENANT_B, B_OWNER, "owner", 1, "Bianca Tenant-B", "bianca@tenant-b.test"),
+    profile(TENANT_B, B_REP, "closer", 0, "Boris Tenant-B", "boris@tenant-b.test"),
+    lead(TENANT_B, "lead-tenantB-1", "Tenant B Bakery"),
+    deal(TENANT_B, "deal-tenantB-1", "lead-tenantB-1", "CAD", 7777.77, "rc-tenantB-1"),
+    receipt(TENANT_B, "rc-tenantB-1", "pi_tenantB_secret_ref", "CAD", 777777),
+    entry(TENANT_B, "c-tenantB-1", "deal-tenantB-1", B_REP, "accrued", 4242, "2026-09-21T15:00:00Z"),
+    entry(TENANT_B, "c-tenantB-2", "deal-tenantB-1", B_OWNER, "paid", 4343, "2026-09-22T15:00:00Z", {
+      approvedBy: B_OWNER,
+      payoutReference: "payout-tenantB-ref",
+    }),
+    // C: its own deal names B's lead and B's receipt, and its entry was
+    // "approved" by B's owner.
+    profile(TENANT_C, C_OWNER, "owner", 1, "Cora Tenant-C", "cora@tenant-c.test"),
+    deal(TENANT_C, "deal-tenantC-1", "lead-tenantB-1", "CAD", 500, "rc-tenantB-1"),
+    entry(TENANT_C, "c-tenantC-1", "deal-tenantC-1", C_OWNER, "approved", 12500, "2026-09-23T15:00:00Z", { approvedBy: B_OWNER }),
+    // D: an entry on B's deal.
+    profile(TENANT_D, D_OWNER, "owner", 1, "Dana Tenant-D", "dana@tenant-d.test"),
+    entry(TENANT_D, "c-tenantD-1", "deal-tenantB-1", D_OWNER, "accrued", 1000, "2026-09-24T15:00:00Z"),
+    // BIG: more than 200 deals and more than 500 entries. Entry i is on deal
+    // i % 450, by rep i % 3; statuses cycle accrued, approved, paid, voided.
+    profile(TENANT_BIG, BIG_OWNER, "owner", 1, "Bea Big", "bea@big.test"),
+    ...BIG_REPS.map((rep, i) => profile(TENANT_BIG, rep, "closer", 0, `Big Rep ${i + 1}`, `rep${i + 1}@big.test`)),
+  ];
+  for (let d = 0; d < BIG_DEALS; d += 1) {
+    const n = String(d).padStart(3, "0");
+    const currency = d % 2 === 0 ? "CAD" : "USD";
+    statements.push(lead(TENANT_BIG, `lead-big-${n}`, `Big Client ${n}`));
+    statements.push(deal(TENANT_BIG, `deal-big-${n}`, `lead-big-${n}`, currency, 1000 + d, `rc-big-${n}`));
+    statements.push(receipt(TENANT_BIG, `rc-big-${n}`, `pi_big_${n}`, currency, (1000 + d) * 100));
+  }
+  const STATUSES = ["accrued", "approved", "paid", "voided"];
+  for (let i = 0; i < BIG_ENTRIES; i += 1) {
+    const status = STATUSES[i % 4];
+    statements.push(entry(
+      TENANT_BIG,
+      `c-big-${String(i).padStart(3, "0")}`,
+      `deal-big-${String(i % BIG_DEALS).padStart(3, "0")}`,
+      BIG_REPS[i % 3],
+      status,
+      1000 + i,
+      new Date(Date.UTC(2026, 6, 1) + i * 60_000).toISOString(),
+      status === "approved" || status === "paid" ? { approvedBy: BIG_OWNER } : {},
+    ));
+  }
+  for (let offset = 0; offset < statements.length; offset += 200) {
+    await raw.batch(statements.slice(offset, offset + 200), "write");
+  }
+  raw.close();
+}
+
 /** Every element in a returned tree, WITHOUT rendering any component. */
 function elementsOf(node: unknown, out: { type: unknown; props: Record<string, unknown> }[] = [], depth = 0) {
   if (depth > 80 || node === null || node === undefined || typeof node !== "object") return out;
@@ -272,6 +397,7 @@ const DELAY = 30;
 
 async function main() {
   await setupDatabase();
+  await setupOtherTenants();
   const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 
   const portal = await import("../lib/website-sales-commission-portal");
@@ -287,23 +413,87 @@ async function main() {
 
   console.log("commissions-portal:");
 
-  // -- latency injection: every trip waits DELAY ms, and its start is kept --
+  // -- the database seam --------------------------------------------------
   // As in tests/finances-roundtrips.test.ts: getTursoClient() is lib/perf's
   // instrumenting Proxy over the libSQL client every read here goes through
-  // (getServiceSupabase's Turso adapter and the roster read share it).
+  // (getServiceSupabase's Turso adapter and the roster read share it). Each
+  // statement can be slowed (DELAY, start kept), counted while in flight,
+  // failed or stalled by its SQL, followed by a commit once (`after`), or
+  // held with the ledger reads issued alongside it and replayed in an order
+  // that puts a commit between them (`reorder`).
   const client = getTursoClient() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
   let starts: number[] = [];
   let slow = false;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let faults: { fail?: RegExp; stall?: RegExp } = {};
+  let after: { match: RegExp; then: () => Promise<void> } | null = null;
+  let reorder: { commit: () => Promise<void> } | null = null;
+  const held: Array<{ sql: string; run: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+  const sqlOf = (statement: unknown) =>
+    typeof statement === "string" ? statement : String((statement as { sql?: unknown } | null)?.sql ?? "");
+  /** The ledger reads issued together: the one without row details (the totals') first, then the commit, then the rest. */
+  async function releaseHeld() {
+    const batch = held.splice(0);
+    const commit = reorder?.commit;
+    reorder = null;
+    const ordered = [...batch].sort((x, y) => Number(/payment_reference/.test(x.sql)) - Number(/payment_reference/.test(y.sql)));
+    for (const [index, entry] of ordered.entries()) {
+      try {
+        entry.resolve(await entry.run());
+      } catch (error) {
+        entry.reject(error);
+      }
+      if (index === 0 && commit) await commit();
+    }
+  }
   for (const name of ["execute", "batch"] as const) {
     const original = (Object.getPrototypeOf(client) as Record<string, (...a: unknown[]) => Promise<unknown>>)[name];
     assert.equal(typeof original, "function", `libSQL client has a prototype ${name}`);
     client[name] = async function (this: unknown, ...a: unknown[]) {
-      if (slow) {
-        starts.push(Date.now());
-        await new Promise((r) => setTimeout(r, DELAY));
+      const sql = name === "execute" ? sqlOf(a[0]) : "";
+      if (reorder && /FROM "website_sales_commissions"/.test(sql)) {
+        return new Promise((resolve, reject) => {
+          held.push({ sql, run: () => original.apply(this, a), resolve, reject });
+          if (held.length === 1) setImmediate(() => void releaseHeld());
+        });
       }
-      return original.apply(this, a);
+      if (faults.stall?.test(sql)) return new Promise(() => undefined);
+      if (faults.fail?.test(sql)) throw new Error("injected read failure");
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (slow) {
+          starts.push(Date.now());
+          await new Promise((r) => setTimeout(r, DELAY));
+        }
+        const result = await original.apply(this, a);
+        if (after && after.match.test(sql)) {
+          const hook = after;
+          after = null;
+          await hook.then();
+        }
+        return result;
+      } finally {
+        inFlight -= 1;
+      }
     };
+  }
+  /** `p`, or "timed out" once `ms` pass: a load that never answers must fail its check, not hang the run. */
+  const within = <T,>(p: Promise<T>, ms: number) =>
+    Promise.race([p, new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), ms))]);
+  /** console.error lines written while `fn` runs (kept off the test output). */
+  async function errorsDuring<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map((x) => (x instanceof Error ? `${x.name}: ${x.message}` : String(x))).join(" "));
+    };
+    try {
+      return { value: await fn(), lines };
+    } finally {
+      console.error = original;
+    }
   }
   const waves = (ts: number[]) => {
     let n = 0;
@@ -334,17 +524,17 @@ async function main() {
     isAdmin,
     isTrueAdmin: isAdmin,
   });
-  // Bounds are the measured AFTER figures. BEFORE (the route on main at
-  // 9dee58a7, measured once on this fixture, not re-run): recent,
-  // outstanding, summary rows, summary deals, deals, leads, receipts,
-  // profiles one after another = 8 sequential (9 for a manager, roster
-  // first), with website_deals read twice. The whole GET request, with its
-  // two session reads, went 10 -> 5 sequential (manager 11 -> 6), and the
-  // page no longer makes that request at all.
+  // Bounds are the measured AFTER figures: the ledger once, then deals beside
+  // profiles, then leads beside receipts (a manager reads the roster first).
+  // BEFORE (the route on main at 9dee58a7, measured once on this fixture, not
+  // re-run): recent, outstanding, summary rows, summary deals, deals, leads,
+  // receipts, profiles one after another = 8 sequential (9 for a manager),
+  // with website_deals read twice. The page no longer makes that request at
+  // all. Past 200 deals and 500 entries, see the BIG check below.
   const SCOPES = [
-    { name: "founder (every entry)", session: session("cc", true), persona: "founder" as const, rows: 4, depth: 3, trips: 7 },
-    { name: "manager (own + direct reports)", session: session("manager", false), persona: "manager" as const, rows: 3, depth: 4, trips: 8 },
-    { name: "closer (own entries)", session: session("closer", false), persona: "sales" as const, rows: 2, depth: 3, trips: 7 },
+    { name: "founder (every entry)", session: session("cc", true), persona: "founder" as const, rows: 4, depth: 3, trips: 5 },
+    { name: "manager (own + direct reports)", session: session("manager", false), persona: "manager" as const, rows: 3, depth: 4, trips: 6 },
+    { name: "closer (own entries)", session: session("closer", false), persona: "sales" as const, rows: 2, depth: 3, trips: 5 },
   ];
   const table: Record<string, { trips: number; sequential: number }> = {};
   for (const s of SCOPES) {
@@ -395,6 +585,210 @@ async function main() {
     const outcome = await portal.loadCommissionPortal(session("cc", true), "no-such-persona" as never);
     assert.deepEqual(outcome, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
     assert.equal(errorSentence("commission_portal_unavailable"), "We couldn't load commissions just now. Try again in a moment.");
+  });
+
+  // -- one read for the rows and the totals ----------------------------------
+  type Totals = { currency: string; accruedCents: number; approvedCents: number; paidCents: number; offsetCents: number; netCents: number };
+  /** The summary's totals rebuilt from rows, the way lib/website-sales-commission-summary.ts builds them. */
+  const totalsOf = (rows: Array<{ status: string; amountCents: number; currency: string }>): Totals[] => {
+    const buckets = new Map<string, Totals>();
+    for (const row of rows) {
+      const t = buckets.get(row.currency) ?? { currency: row.currency, accruedCents: 0, approvedCents: 0, paidCents: 0, offsetCents: 0, netCents: 0 };
+      if (row.status !== "voided") {
+        t[`${row.status}Cents` as "accruedCents"] += row.amountCents;
+        t.netCents += row.amountCents;
+      }
+      buckets.set(row.currency, t);
+    }
+    return ["CAD", "USD"].flatMap((c) => (buckets.has(c) ? [buckets.get(c)!] : []));
+  };
+  await check("snapshot: a deal that closes while the ledger is read is on the list AND in the totals, or in neither", async () => {
+    // The ledger reads issued together are held; the one without row details
+    // (a totals-only read) runs first, then a deal closes, then the rest. Two
+    // reads for the rows and the totals would show the new entry on the list
+    // and leave it out of every total.
+    reorder = {
+      commit: () =>
+        client.execute({
+          sql: `INSERT INTO website_sales_commissions (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type, party_role,
+                  basis_amount_cents, rate_bps, amount_cents, collected_setup_amount, rate, amount, status, created_at, updated_at)
+                VALUES ('c-closed-mid-read', ?, 'deal-maple', ?, 'ref-mid-read', 'accrual', 'closer', 39600, 2500, 9900, 396, 0.25, 99, 'accrued', ?, ?)`,
+          args: [OASIS, USERS.closer.id, "2026-09-26T15:00:00Z", "2026-09-26T15:00:00Z"],
+        }).then(() => undefined),
+    };
+    try {
+      const outcome = await portal.loadCommissionPortal(session("cc", true), "founder");
+      assert.equal(reorder, null, "a ledger read was held and the deal closed in the middle");
+      assert.ok(outcome.body.ok, JSON.stringify(outcome.body));
+      const { data, summary, page } = outcome.body;
+      assert.equal(page.hasMore, false, "every entry fits on the list, so the list must add up to the totals");
+      assert.equal(summary.entryCount, data.length, `${data.length} rows on screen, ${summary.entryCount} counted`);
+      assert.deepEqual(summary.totals, totalsOf(data), "the totals are the rows on screen, status for status and amount for amount");
+      for (const rep of new Set(data.map((row) => row.repUserId))) {
+        assert.deepEqual(summary.byRep[rep], totalsOf(data.filter((row) => row.repUserId === rep)), `rep ${rep}`);
+      }
+    } finally {
+      reorder = null;
+      await client.execute({ sql: "DELETE FROM website_sales_commissions WHERE id = 'c-closed-mid-read'", args: [] });
+    }
+  });
+
+  // -- failures answer at once; nothing waits forever -------------------------
+  await check("fail fast: a failed read answers at once and is logged at once, even while a sibling read never answers", async () => {
+    faults = { fail: /FROM "tenant_records"/, stall: /FROM "website_sales_payment_receipts"/ };
+    try {
+      const t0 = Date.now();
+      const { value, lines } = await errorsDuring(() =>
+        within(portal.loadCommissionPortal(session("cc", true), "founder", { deadlineMs: 5_000 }), 3_000));
+      const ms = Date.now() - t0;
+      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_leads_unavailable" } });
+      assert.ok(ms < 1_500, `answered after ${ms} ms`);
+      assert.ok(
+        lines.some((line) => line.startsWith("[website-sales.commissions.leads]") && line.includes("injected read failure")),
+        `the failure was logged with its tag: ${lines.join(" | ")}`,
+      );
+    } finally {
+      faults = {};
+    }
+  });
+
+  await check("deadline: a read that never answers ends as the plain sentence, not an endless loading screen", async () => {
+    faults = { stall: /FROM "website_deals"/ };
+    try {
+      const t0 = Date.now();
+      const { value, lines } = await errorsDuring(() =>
+        within(portal.loadCommissionPortal(session("cc", true), "founder", { deadlineMs: 300 }), 3_000));
+      const ms = Date.now() - t0;
+      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
+      assert.ok(ms < 2_000, `answered after ${ms} ms`);
+      assert.ok(
+        lines.some((line) => line.startsWith("[website-sales.commissions.portal]") && line.includes("Read did not answer in time")),
+        `the timeout was logged: ${lines.join(" | ")}`,
+      );
+      assert.ok(portal.COMMISSION_PORTAL_DEADLINE_MS > 0 && portal.COMMISSION_PORTAL_DEADLINE_MS <= 12_000, "the default budget is Today's or less");
+    } finally {
+      faults = {};
+    }
+  });
+
+  // -- past 200 deals and 500 entries -----------------------------------------
+  // What the answer must be, from the database's own SQL (not the loader's code).
+  const bigExpected = await (async () => {
+    const sums = await client.execute({
+      sql: `SELECT d.currency AS currency, c.status AS status, SUM(c.amount_cents) AS cents
+            FROM website_sales_commissions c JOIN website_deals d ON d.id = c.deal_id AND d.tenant_id = c.tenant_id
+            WHERE c.tenant_id = ? GROUP BY d.currency, c.status`,
+      args: [TENANT_BIG],
+    }) as { rows: Array<Record<string, unknown>> };
+    const totals = ["CAD", "USD"].map((currency) => {
+      const cents = (status: string) => Number(sums.rows.find((r) => r.currency === currency && r.status === status)?.cents ?? 0);
+      return {
+        currency,
+        accruedCents: cents("accrued"),
+        approvedCents: cents("approved"),
+        paidCents: cents("paid"),
+        offsetCents: cents("offset"),
+        netCents: cents("accrued") + cents("approved") + cents("paid") + cents("offset"),
+      };
+    });
+    const ids = async (sql: string) =>
+      ((await client.execute({ sql, args: [TENANT_BIG] })) as { rows: Array<Record<string, unknown>> }).rows.map((r) => String(r.id));
+    const recent = await ids("SELECT id FROM website_sales_commissions WHERE tenant_id = ? ORDER BY created_at DESC, id DESC LIMIT 500");
+    const outstanding = await ids(
+      "SELECT id FROM website_sales_commissions WHERE tenant_id = ? AND entry_type = 'accrual' AND status IN ('accrued', 'approved') ORDER BY id",
+    );
+    const seen = new Set(recent);
+    return { totals, listedIds: [...recent, ...outstanding.filter((id) => !seen.has(id))] };
+  })();
+  const bigSession = { userId: BIG_OWNER, tenantId: TENANT_BIG, isAdmin: true, isTrueAdmin: true };
+  await check(
+    `past 200 deals and 500 entries (${BIG_DEALS} deals, ${BIG_ENTRIES} entries): right totals and list, at most 5 steps in a row, at most 4 reads at once`,
+    async () => {
+      maxInFlight = 0;
+      const m = await measure(() => portal.loadCommissionPortal(bigSession, "founder"));
+      const peak = maxInFlight;
+      console.log(`        measured: ${m.trips} round trips, ${m.depth} sequential, ${peak} at most in flight`);
+      assert.ok(m.value.body.ok, JSON.stringify(m.value.body).slice(0, 300));
+      const { data, summary } = m.value.body;
+      assert.equal(summary.entryCount, BIG_ENTRIES);
+      assert.deepEqual(summary.totals, bigExpected.totals, "totals match the database's own sums");
+      assert.deepEqual(data.map((row) => row.id), bigExpected.listedIds, "the newest 500 plus every older outstanding entry, in order");
+      assert.ok(data.every((row) => row.clientName.startsWith("Big Client ") && row.paymentVerified), "every listed row has its client and receipt");
+      assert.ok(m.depth <= 5, `${m.depth} sequential round trips > 5 (two ledger pages, deals beside profiles, then leads and receipts)`);
+      assert.ok(m.trips <= 12, `${m.trips} round trips > 12`);
+      assert.ok(peak <= 4, `${peak} reads in flight at once > 4`);
+    },
+  );
+
+  await check("pages: a deal that closes between two pages of the ledger is counted once, never twice", async () => {
+    // An id that sorts before every other moves each later row down one place,
+    // so the last row of page one comes back as the first row of page two.
+    after = {
+      match: /FROM "website_sales_commissions"[\s\S]*OFFSET 0\b/,
+      then: () =>
+        client.execute({
+          sql: `INSERT INTO website_sales_commissions (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type, party_role,
+                  basis_amount_cents, rate_bps, amount_cents, collected_setup_amount, rate, amount, status, created_at, updated_at)
+                VALUES ('c-big--first', ?, 'deal-big-000', ?, 'ref-big-first', 'accrual', 'closer', 4000, 2500, 1000, 40, 0.25, 10, 'accrued', ?, ?)`,
+          args: [TENANT_BIG, BIG_REPS[0], "2026-06-30T00:00:00Z", "2026-06-30T00:00:00Z"],
+        }).then(() => undefined),
+    };
+    try {
+      const outcome = await portal.loadCommissionPortal(bigSession, "founder");
+      assert.equal(after, null, "the deal closed between the pages");
+      assert.ok(outcome.body.ok, JSON.stringify(outcome.body).slice(0, 300));
+      assert.equal(outcome.body.summary.entryCount, BIG_ENTRIES, "each entry counted once");
+      assert.deepEqual(outcome.body.summary.totals, bigExpected.totals, "no entry counted twice in a total");
+      const ids = outcome.body.data.map((row) => row.id);
+      assert.equal(new Set(ids).size, ids.length, "no entry listed twice");
+    } finally {
+      after = null;
+      await client.execute({ sql: "DELETE FROM website_sales_commissions WHERE id = 'c-big--first'", args: [] });
+    }
+  });
+
+  // -- isolation: another workspace's data never reaches this one --------------
+  const leaks = (body: unknown, markers: string[]) => markers.filter((marker) => JSON.stringify(body).includes(marker));
+  const A_TOTALS: Totals[] = [
+    { currency: "CAD", accruedCents: 12_500, approvedCents: 3_000, paidCents: 0, offsetCents: 0, netCents: 15_500 },
+    { currency: "USD", accruedCents: 75_000, approvedCents: 0, paidCents: 125_000, offsetCents: 0, netCents: 200_000 },
+  ];
+  await check("isolation: another workspace's ids, names, references and totals never reach a founder, manager or closer here", async () => {
+    for (const [who, isAdmin, persona] of [["cc", true, "founder"], ["manager", false, "manager"], ["closer", false, "sales"]] as const) {
+      const body = (await portal.loadCommissionPortal(session(who, isAdmin), persona)).body;
+      assert.ok(body.ok, `${who}: ${JSON.stringify(body)}`);
+      assert.deepEqual(leaks(body, B_MARKERS), [], `${who} sees workspace B's data`);
+    }
+    const founder = (await portal.loadCommissionPortal(session("cc", true), "founder")).body;
+    assert.ok(founder.ok);
+    assert.equal(founder.summary.entryCount, 4, "only this workspace's four entries are counted");
+    assert.deepEqual(founder.summary.totals, A_TOTALS, "only this workspace's money is in the totals");
+  });
+
+  await check("isolation: rows that point at another workspace's client, receipt and person show none of them", async () => {
+    const body = (await portal.loadCommissionPortal({ userId: C_OWNER, tenantId: TENANT_C, isAdmin: true, isTrueAdmin: true }, "founder")).body;
+    assert.ok(body.ok, JSON.stringify(body));
+    assert.deepEqual(body.data.map((row) => row.id), ["c-tenantC-1"]);
+    assert.deepEqual(leaks(body, B_MARKERS), [], "workspace C sees workspace B's data");
+  });
+
+  await check("isolation: an entry on another workspace's deal fails closed, with none of that deal on the page", async () => {
+    const { value: body } = await errorsDuring(async () =>
+      (await portal.loadCommissionPortal({ userId: D_OWNER, tenantId: TENANT_D, isAdmin: true, isTrueAdmin: true }, "founder")).body);
+    assert.deepEqual(body, { ok: false, error: "commission_summary_unavailable" });
+    assert.deepEqual(leaks(body, [...B_MARKERS, "lead-tenantB-1"]), []);
+  });
+
+  await check("isolation: a closer sees only their own entries; a manager their own and their reports', never another team's", async () => {
+    const closer = (await portal.loadCommissionPortal(session("closer", false), "sales")).body;
+    assert.ok(closer.ok);
+    assert.deepEqual(closer.data.map((row) => row.id).sort(), ["c-closer-harbour", "c-closer-maple"]);
+    assert.equal(closer.summary.entryCount, 2);
+    const manager = (await portal.loadCommissionPortal(session("manager", false), "manager")).body;
+    assert.ok(manager.ok);
+    assert.deepEqual(manager.data.map((row) => row.id).sort(), ["c-closer-harbour", "c-closer-maple", "c-manager-maple"]);
+    assert.equal(manager.summary.entryCount, 3);
+    assert.equal(JSON.stringify(manager).includes("c-other-harbour"), false, "another team's entry");
   });
 
   // -- 2. first paint -------------------------------------------------------
@@ -515,8 +909,12 @@ async function main() {
     }
     assert.ok(loadCalls.length > 0);
     for (const call of loadCalls) {
-      assert.ok(["jsx:onClick", "const:mutate"].includes(owner(call)), `load() runs from ${owner(call)}, not a click or a payout change`);
+      assert.ok(
+        ["jsx:onClick", "jsx:onRefresh", "const:mutate"].includes(owner(call)),
+        `load() runs from ${owner(call)}, not a click (Refresh, on the list or the explainer) or a payout change`,
+      );
     }
+    assert.match(src, /<NoCommissionYet onRefresh=\{\(\) => void load\(\)\}/, "the explainer's Refresh asks the route again");
   });
 
   // -- 3. error sentences --------------------------------------------------
@@ -534,6 +932,7 @@ async function main() {
     for (const m of union.matchAll(/"([a-z_]+)"/g)) codes.add(m[1]);
     for (const src of [routeSrc, portalSrc]) for (const m of src.matchAll(/\|\| "([a-z_]+)"/g)) codes.add(m[1]);
     for (const m of portalSrc.matchAll(/setError\("([a-z_]+)"\)/g)) codes.add(m[1]);
+    for (const m of portalSrc.matchAll(/portalStateAfter\([^)]*?"([a-z_]+)"\)/g)) codes.add(m[1]);
     for (const m of transition.matchAll(/transition_commission_entry: ([a-z_]+)/g)) codes.add(m[1]);
     for (const known of [
       "unauthorized", "forbidden_commission_role", "commission_scope_unavailable", "commission_listing_unavailable",
@@ -632,6 +1031,44 @@ async function main() {
     const out = await route.GET();
     assert.equal(out.status, 401);
     assert.deepEqual(await out.json(), { ok: false, error: "unauthorized" });
+  });
+
+  // Last: it gives the new closer a first commission.
+  await check("empty to first entry: the explainer keeps Refresh, and a first commission replaces it with the list", async () => {
+    assert.match(
+      rendered.html.empty,
+      /<button[^>]*>(?:(?!<\/button>)[\s\S])*Refresh<\/button>/,
+      "the explainer has its own Refresh button",
+    );
+    const { portalStateAfter, showsNoCommissionYet } = await import("../app/commissions/CommissionPortal");
+    const empty = portalStateAfter(null, newRepPaint.initial ?? null, "commission_portal_unavailable");
+    assert.equal(showsNoCommissionYet(empty), true, "the page opens on the explainer");
+    // A verified payment gives the closer a first commission; Refresh asks the
+    // route, which now answers with it.
+    await client.execute({
+      sql: `INSERT INTO website_sales_commissions (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type, party_role,
+              basis_amount_cents, rate_bps, amount_cents, collected_setup_amount, rate, amount, status, created_at, updated_at)
+            VALUES ('c-newrep-first', ?, 'deal-maple', ?, 'ref-newrep-first', 'accrual', 'closer', 20000, 2500, 5000, 200, 0.25, 50, 'accrued', ?, ?)`,
+      args: [OASIS, USERS.newRep.id, "2026-10-02T15:00:00Z", "2026-10-02T15:00:00Z"],
+    });
+    await login("newRep");
+    const res = await route.GET();
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Payload;
+    assert.ok(body.ok && body.data.length === 1, JSON.stringify(body).slice(0, 200));
+    const refreshed = portalStateAfter(empty, body, "commission_refresh_unavailable");
+    assert.equal(showsNoCommissionYet(refreshed), false, "the explainer gives way to the list");
+    assert.deepEqual(refreshed.rows.map((row) => row.id), ["c-newrep-first"]);
+    assert.equal(refreshed.summary?.entryCount, 1);
+    // A Refresh that fails while the page is empty says so, instead of still
+    // claiming there is no commission.
+    const failed = portalStateAfter(empty, null, "commission_refresh_unavailable");
+    assert.equal(showsNoCommissionYet(failed), false);
+    assert.equal(failed.error, "commission_refresh_unavailable");
+    // And the list draws the first entry, where React is whole.
+    const text = readable(renderPortal({ first: body }).html.first);
+    assert.ok(text.includes("Maple Dental"), text.slice(0, 200));
+    assert.doesNotMatch(text, /No commission yet/);
   });
 
   if (failures) {

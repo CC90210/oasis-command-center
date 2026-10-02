@@ -69,53 +69,83 @@ function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+/** What the portal draws from: the last answer it had, and the code of the last failure. */
+export type PortalState = {
+  rows: Commission[];
+  viewer: CommissionPortalViewer | undefined;
+  summary: WebsiteSalesCommissionSummary | null;
+  page: CommissionPortalPage | undefined;
+  error: string | null;
+};
+
+/**
+ * The portal's state after an answer (the page's first one, or a Refresh). A
+ * complete answer replaces everything. Anything else keeps the rows already
+ * on screen, drops the totals (totals from before a failed read must not pass
+ * for current ones) and records the answer's code, or `fallbackCode` when
+ * there was no answer at all.
+ */
+export function portalStateAfter(
+  previous: PortalState | null,
+  payload: CommissionPortalPayload | null,
+  fallbackCode: string,
+): PortalState {
+  if (payload?.ok && payload.viewer && payload.summary && payload.page) {
+    return { rows: payload.data ?? [], viewer: payload.viewer, summary: payload.summary, page: payload.page, error: null };
+  }
+  return {
+    rows: previous?.rows ?? [],
+    viewer: previous?.viewer,
+    summary: null,
+    page: undefined,
+    error: (payload && !payload.ok && payload.error) || fallbackCode,
+  };
+}
+
+/** Nothing earned in this view (and nothing listed): one explainer instead of four zero totals. */
+export function showsNoCommissionYet(state: PortalState): boolean {
+  return !state.error && state.summary !== null && state.summary.entryCount === 0 && state.rows.length === 0;
+}
+
 /**
  * The Commissions portal. It starts with the data the page read on the server
  * (`initial`, lib/website-sales-commission-portal.ts), so its first paint has
  * the numbers and it makes no request when it mounts. It asks the GET route
- * again only when someone presses Refresh or after a payout change.
+ * again only when someone presses Refresh (on the explainer too, so a first
+ * commission shows without reloading the page) or after a payout change.
  *
  * `error` holds a CODE (a route's, or one of the two below for a request that
  * never answered); it is turned into a sentence in exactly one place, where
  * it is drawn (lib/ui/error-copy.ts). The code itself is never on screen.
  */
 export function CommissionPortal({ initial }: { initial: CommissionPortalPayload }) {
-  const [rows, setRows] = useState<Commission[]>(initial.ok ? initial.data : []);
-  const [viewer, setViewer] = useState<CommissionPortalViewer | undefined>(initial.ok ? initial.viewer : undefined);
-  const [summary, setSummary] = useState<WebsiteSalesCommissionSummary | null>(initial.ok ? initial.summary : null);
-  const [page, setPage] = useState<CommissionPortalPage | undefined>(initial.ok ? initial.page : undefined);
+  const [state, setState] = useState<PortalState>(() => portalStateAfter(null, initial, "commission_portal_unavailable"));
+  const { rows, viewer, summary, page, error } = state;
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(initial.ok ? null : initial.error);
   const [statusFilter, setStatusFilter] = useState<"all" | Commission["status"]>("all");
   const [editor, setEditor] = useState<Editor>(null);
   const [payoutReference, setPayoutReference] = useState("");
   const [voidReason, setVoidReason] = useState("");
   const [workingId, setWorkingId] = useState<string | null>(null);
+  const setError = useCallback((code: string | null) => setState((current) => ({ ...current, error: code })), []);
 
   const load = useCallback(async () => {
     setRefreshing(true);
     setError(null);
+    let payload: CommissionPortalPayload | null = null;
     try {
       const response = await fetch("/api/website-sales/commissions", { cache: "no-store" });
-      const payload = (await response.json().catch(() => null)) as CommissionPortalPayload | null;
-      if (!response.ok || !payload?.ok || !payload.viewer || !payload.summary || !payload.page) {
-        setSummary(null);
-        setPage(undefined);
-        setError((payload && !payload.ok && payload.error) || "commission_refresh_unavailable");
-        return;
-      }
-      setRows(payload.data ?? []);
-      setViewer(payload.viewer);
-      setSummary(payload.summary);
-      setPage(payload.page);
+      const body = (await response.json().catch(() => null)) as CommissionPortalPayload | null;
+      // A refusal carries its own code; a success status without a complete
+      // answer counts as no answer.
+      payload = response.ok || (body && !body.ok) ? body : null;
     } catch {
-      setSummary(null);
-      setPage(undefined);
-      setError("commission_refresh_unavailable");
+      payload = null;
     } finally {
       setRefreshing(false);
     }
-  }, []);
+    setState((current) => portalStateAfter(current, payload, "commission_refresh_unavailable"));
+  }, [setError]);
 
   const filtered = useMemo(
     () => (statusFilter === "all" ? rows : rows.filter((row) => row.status === statusFilter)),
@@ -156,12 +186,13 @@ export function CommissionPortal({ initial }: { initial: CommissionPortalPayload
     } finally {
       setWorkingId(null);
     }
-  }, [load, payoutReference, voidReason]);
+  }, [load, payoutReference, voidReason, setError]);
 
   // Nothing has been earned yet (and nothing is listed): one explainer
-  // instead of four zero totals and an empty list.
-  if (!error && summary && summary.entryCount === 0 && rows.length === 0) {
-    return <NoCommissionYet />;
+  // instead of four zero totals and an empty list. It keeps Refresh, the
+  // only way to see a first commission without reloading the page.
+  if (showsNoCommissionYet(state)) {
+    return <NoCommissionYet onRefresh={() => void load()} refreshing={refreshing} />;
   }
 
   return (
@@ -444,7 +475,7 @@ function percent(bps: number): string {
  * earned in this view. The rates are lib/website-sales-comp.ts's own: the
  * numbers the payout runs on and the agreements state.
  */
-function NoCommissionYet() {
+function NoCommissionYet({ onRefresh, refreshing }: { onRefresh: () => void; refreshing: boolean }) {
   const rates = [
     { role: "You open it", rate: percent(COMPANY_TRACK_BPS.opener), detail: "You book the meeting and someone else closes." },
     { role: "You close it", rate: percent(COMPANY_TRACK_BPS.closer), detail: "You close a lead the company brought in." },
@@ -453,9 +484,20 @@ function NoCommissionYet() {
   ];
   return (
     <section className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card">
-      <div className="flex items-center gap-2 text-sm font-semibold text-fg">
-        <CircleDollarSign size={16} className="text-accent" />
-        No commission yet
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+          <CircleDollarSign size={16} className="text-accent" />
+          No commission yet
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-elev px-3 py-2 text-xs font-semibold text-fg-muted transition-colors hover:text-fg disabled:opacity-50"
+        >
+          <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+          Refresh
+        </button>
       </div>
       <p className="mt-2 text-sm text-fg-muted">
         Commission appears here once a client&apos;s setup payment is confirmed. It is a share of that setup payment, set by the part you played:
