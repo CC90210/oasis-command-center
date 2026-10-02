@@ -83,9 +83,11 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   // /playbook reads OASIS's own SOPs from content/playbooks, and those are not
   // another workspace's to browse.
   { id: "playbook", href: "/playbook", label: "Playbook", icon: "Library", section: "team", audience: "everyone", oasisOnly: true },
-  // OASIS-only and system-gated until the AI Team roster replaces today's
-  // /agents, which is the operator fleet page behind requireSystemSurface.
-  { id: "ai-team", href: "/agents", label: "AI Team", icon: "Bot", section: "team", audience: "system", oasisOnly: true },
+  // The AI Team (the workspace's manifest roster, app/agents/page.tsx), for
+  // owners and admins of ANY workspace (decision 22, 2026-10-01). It was
+  // OASIS-only while /agents was the operator fleet, which now lives at
+  // Admin > Fleet; a client owner's only agent surface was a Settings card.
+  { id: "ai-team", href: "/agents", label: "AI Team", icon: "Bot", section: "team", audience: "manage" },
   ...OS_DEPARTMENTS.map(departmentRow),
 
   // ── GROWTH › Sales ──────────────────────────────────────────────────────
