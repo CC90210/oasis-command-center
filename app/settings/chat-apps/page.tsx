@@ -198,13 +198,15 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   <div className="min-w-0 text-[13px] leading-5">
                     <div className="font-medium text-fg">{conn.account_label ?? conn.account_id ?? "Slack workspace"}</div>
                     <div className="text-fg-muted">
-                      {conn.last_health_detail ??
-                        `Mirrored messages are deleted after ${SLACK_RETENTION_DAYS} days. Replies wait for approval in the Feed or in Slack.`}
+                      {conn.status === "disconnecting"
+                        ? "The disconnect did not finish. OASIS has stopped reading and answering in this Slack workspace. Press Disconnect to finish it."
+                        : (conn.last_health_detail ??
+                          `Mirrored messages are deleted after ${SLACK_RETENTION_DAYS} days. Replies wait for approval in the Feed or in Slack.`)}
                     </div>
                   </div>
                   {viewer.access.canManage && <SlackDisconnect teamName={conn.account_label} retentionDays={SLACK_RETENTION_DAYS} />}
                 </div>
-                {slackSettings.routesNotInstalled ? (
+                {conn.status === "disconnecting" ? null : slackSettings.routesNotInstalled ? (
                   <p className="text-[13px] leading-5 text-status-warm">
                     The channel map is not available on this deployment yet (its database tables are not installed), so
                     nothing is mirrored or answered.

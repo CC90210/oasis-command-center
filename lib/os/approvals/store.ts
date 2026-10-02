@@ -543,8 +543,20 @@ export type CreateApprovalResult =
  * tenant, the same kind, still pending or sent back (or already cancelled with
  * no successor), and not already revised. A pending old row is cancelled in the
  * same batch, so two live revisions of one draft cannot exist.
+ *
+ * `opts.guard` is a condition from the CALLING CODE (never from `input`, which
+ * may come from a request): the row goes in only while it holds, checked in
+ * the insert itself. lib/slack/jobs.ts binds a Slack reply to the connection
+ * generation the @mention arrived on (lib/connections/store.ts
+ * liveConnectionGuard), so a draft that finishes after a disconnect creates
+ * nothing ("guard_refused").
  */
-export async function createApproval(db: Client, input: unknown, now: Date): Promise<CreateApprovalResult> {
+export async function createApproval(
+  db: Client,
+  input: unknown,
+  now: Date,
+  opts: { guard?: { sql: string; args: InValue[] } } = {},
+): Promise<CreateApprovalResult> {
   const v = validateNewApproval(input);
   if (!v.ok) return v;
   const a = v.value;
@@ -608,6 +620,10 @@ export async function createApproval(db: Client, input: unknown, now: Date): Pro
                    AND NOT EXISTS (SELECT 1 FROM approvals WHERE tenant_id = ? AND supersedes_id = ?)`;
     insertGuardArgs.push(a.tenantId, old.id, a.tenantId, old.id);
   }
+  if (opts.guard) {
+    insertGuard = `(${insertGuard}) AND (${opts.guard.sql})`;
+    insertGuardArgs.push(...opts.guard.args);
+  }
 
   stmts.push({
     sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, routine_run_id,
@@ -667,6 +683,8 @@ export async function createApproval(db: Client, input: unknown, now: Date): Pro
   });
   const existing = rows(rs)[0];
   if (!existing) {
+    // The caller's guard no longer held when the row would have gone in.
+    if (opts.guard && !a.supersedesId) return { ok: false, error: "guard_refused" };
     // Only a revision can insert nothing without a key conflict: the old row
     // moved on (approved, executing, or revised by a concurrent caller)
     // between the read and the batch.

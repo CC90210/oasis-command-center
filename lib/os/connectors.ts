@@ -904,6 +904,13 @@ function frameworkStatus(
         detail: row.last_health_detail ?? undefined,
         account,
       };
+    case "disconnecting":
+      return {
+        kind: "attention",
+        label: "Disconnect not finished",
+        detail: `OASIS has stopped using ${def.name}, but the disconnect did not finish. Disconnect it again to finish.`,
+        account,
+      };
     case "expired":
       return {
         kind: "attention",

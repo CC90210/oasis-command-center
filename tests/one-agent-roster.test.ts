@@ -805,6 +805,9 @@ async function main() {
     v: 1 as const,
     kind: "mention" as const,
     tenantId: CLIENT,
+    // The connection the mention came through, at its generation (token_version 0 above).
+    connectionId: "conn-slack-client",
+    generation: 0,
     teamId: "T0CLIENT",
     channelId: "C0CLIENTS",
     channelName: "clients",

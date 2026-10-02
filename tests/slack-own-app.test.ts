@@ -132,6 +132,16 @@ const CODES: Record<string, { app: string; team: string; name: string; token: st
   "code-oasis": { app: OASIS_APP_ENV.SLACK_CLIENT_ID, team: "T0OASIS", name: "OASIS Slack", token: "xoxb-oasis-app" },
   // OASIS's app installed in CLIENT B's Slack: a code OASIS's app really issues.
   "code-b-oasis": { app: OASIS_APP_ENV.SLACK_CLIENT_ID, team: "T0CLIENTB", name: "Client B Slack", token: "xoxb-client-b-oasis-app" },
+  "code-a-oasis": { app: OASIS_APP_ENV.SLACK_CLIENT_ID, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-oasis-app" },
+  // Client A installing its own app again, once per check that needs a fresh token.
+  "code-a2": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-2" },
+  "code-a3": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-3" },
+  "code-a4": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-4" },
+  "code-a5": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-5" },
+  "code-a6": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-6" },
+  "code-a-race-save": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-save" },
+  "code-a-race-route": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-route" },
+  "code-a-race-probe": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-probe" },
 };
 const exchanges: Array<Record<string, string>> = [];
 // auth.revoke: every token a disconnect sent, in order; the tokens Slack has
@@ -269,6 +279,13 @@ async function main() {
   const registry = await import("../lib/connections/registry");
   const oauthLib = await import("../lib/connections/oauth");
   const { credentialServiceFor } = await import("../lib/connections/rules");
+  const installLib = await import("../lib/slack/install");
+  const service = await import("../lib/connections/service");
+  const connStore = await import("../lib/connections/store");
+  const credStore = await import("../lib/tenant-integration-store");
+  const health = await import("../lib/connections/health");
+  const slackStatusLib = await import("../lib/slack/status");
+  const testRoute = await import("../app/api/connections/[provider]/test/route");
   const { loadConnectorStatuses, loadConnectorFacts } = await import("../components/os/connections/connector-facts");
   const { loadSlackSettings } = await import("../lib/slack/settings");
   const { decryptField } = await import("../lib/field-encryption");
@@ -616,6 +633,69 @@ async function main() {
     assert.equal((await post(eventsRoute, String(setup.events_url), verification, APP_A.signing_secret)).status, 200);
   });
 
+  await check("with OASIS's app LIVE, a client whose own app is removed is never served by it: its Request URLs 404, OASIS-signed requests cannot act for it, installs refuse, status and health never pick OASIS's app", async () => {
+    await login(USERS.ownerA);
+    for (const k of Object.keys(APP_A)) assert.equal((await removeApp(k)).status, 200, k);
+    const lastCheck = async (tenantId: string) =>
+      String((await db.execute({ sql: "SELECT last_health_at FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [tenantId] })).rows[0].last_health_at);
+    try {
+      await withOasisApp(async () => {
+        assert.equal(registry.providerAvailability(registry.providerById("slack")!, process.env), "live", "OASIS's app is live here");
+        const form = "application/x-www-form-urlencoded";
+        const press = new URLSearchParams({
+          payload: JSON.stringify({
+            type: "block_actions",
+            team: { id: "T0CLIENTA" },
+            user: { id: "U0PERSON" },
+            response_url: "https://hooks.slack.com/actions/T0CLIENTA/2/x",
+            actions: [{ action_id: APPROVE_ACTION_ID, value: `${randomUUID()}|${"b".repeat(64)}` }],
+          }),
+        }).toString();
+        // 1. The client's own Request URLs are gone, whatever OASIS's app does.
+        assert.equal((await post(eventsRoute, eventsUrl(CLIENT_A), verification, APP_A.signing_secret)).status, 404);
+        assert.equal((await post(interactivityRoute, `https://oasisai.work/api/webhooks/slack/interactivity?workspace=${CLIENT_A}`, press, APP_A.signing_secret, form)).status, 404);
+        // 2. OASIS-signed requests cannot act for the client.
+        const forged = await toJson(await post(eventsRoute, eventsUrl(), messageEvent("T0CLIENTA", "EvREMOVED0001"), OASIS_APP_ENV.SLACK_SIGNING_SECRET));
+        assert.deepEqual([forged.status, forged.body.dropped], [200, "team_not_this_workspace"]);
+        laterTasks.length = 0;
+        assert.equal((await post(interactivityRoute, "https://oasisai.work/api/webhooks/slack/interactivity", press, OASIS_APP_ENV.SLACK_SIGNING_SECRET, form)).status, 200);
+        const callsBefore = calls.length;
+        for (const task of laterTasks.splice(0)) await task();
+        assert.deepEqual(calls.slice(callsBefore), [], "the press did nothing for the client");
+        // 3. Installs refuse, at Add to Slack and at the callback (a valid state, a code OASIS's app issued).
+        assert.equal(landed(await authorize()).searchParams.get("reason"), "own_app_missing");
+        const started = await oauthLib.startAuthorize(db, {
+          provider: registry.providerForEnv("slack", process.env)!,
+          tenantId: CLIENT_A,
+          userId: USERS.ownerA.id,
+          scopes: [...registry.providerById("slack")!.scopes.base],
+          redirectUri: "https://oasisai.work/api/connections/slack/callback",
+          now: new Date(),
+          env: process.env,
+        });
+        const exchangesBefore = exchanges.length;
+        assert.equal(landed(await callback({ code: "code-a-oasis", state: started.state })).searchParams.get("reason"), "own_app_missing");
+        assert.equal(exchanges.length, exchangesBefore, "OASIS's app never exchanged a code for the client");
+        // 4. Status and health never pick OASIS's app for the client.
+        assert.equal(await ownApp.slackAppFor(CLIENT_A), "none");
+        assert.equal((await slackStatusLib.loadSlackPresence(db, CLIENT_A)).kind, "not_configured");
+        const settings = await loadSlackSettings(db, CLIENT_A, { nowMs: Date.now() });
+        assert.deepEqual([settings.installApp, settings.appConfigured], [null, false]);
+        assert.deepEqual((await slackStatus(CLIENT_A, USERS.ownerA.id)).paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not set up yet"]]);
+        const tested = await toJson(await testRoute.POST(new Request("https://oasisai.work/api/connections/slack/test", { method: "POST" }), ctx("slack")));
+        assert.deepEqual([tested.status, tested.body.error], [409, "slack_app_not_set_up"], "Test again does not check it through OASIS's app");
+        const old = "2026-01-01T00:00:00.000Z";
+        await db.execute({ sql: "UPDATE tenant_connections SET last_health_at = ? WHERE provider = 'slack' AND revoked_at IS NULL", args: [old] });
+        const pass = await health.runConnectionHealthPass({ db, now: () => new Date() });
+        assert.deepEqual(pass.errors, [], JSON.stringify(pass));
+        assert.equal(await lastCheck(CLIENT_A), old, "the hourly pass did not check the client through OASIS's app");
+        assert.notEqual(await lastCheck(OASIS), old, "it did check OASIS's own connection, on OASIS's app");
+      });
+    } finally {
+      for (const [k, v] of Object.entries(APP_A)) assert.equal((await saveApp(k, v)).status, 200, k);
+    }
+  });
+
   await check("where OASIS's app is not set up, a client's own-app Slack connection stays checkable (Test again, the hourly pass) and present on its AI Team; one with no app here is neither", async () => {
     const health = await import("../lib/connections/health");
     const status = await import("../lib/slack/status");
@@ -702,17 +782,26 @@ async function main() {
     (await db.execute({ sql: "SELECT id FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [tenantId] })).rows.map((r) => String(r.id));
   const disconnect = async () =>
     toJson(await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack")));
-  const stillConnected = async (tenantId: string, team: string, why: string) => {
-    const [id] = await liveSlack(tenantId);
-    assert.ok(id, `${why}: the connection is still live`);
+  const connRow = async (tenantId: string) =>
+    (await db.execute({ sql: "SELECT id, status, token_version FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [tenantId] })).rows.map((r) => ({
+      id: String(r.id),
+      status: String(r.status),
+      generation: Number(r.token_version),
+    }));
+  /** A disconnect that began and did not finish: held disconnecting, durably, with nothing deleted yet. */
+  const unfinishedDisconnect = async (tenantId: string, team: string, why: string) => {
+    const rows = await connRow(tenantId);
+    assert.deepEqual(rows.map((r) => r.status), ["disconnecting"], `${why}: held disconnecting (not connected, not revoked)`);
     const token = "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'";
-    assert.equal(await count(token, [tenantId, credentialServiceFor(id)]), 1, `${why}: its token is still stored`);
-    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND external_key = ?", [tenantId, team]), 1, `${why}: its team still routes here`);
+    assert.equal(await count(token, [tenantId, credentialServiceFor(rows[0].id)]), 1, `${why}: nothing deleted: the token is kept to be switched off`);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND external_key = ?", [tenantId, team]), 1, `${why}: the route is kept for the disconnect to remove`);
   };
   const A_TOKEN = CODES["code-a"].token;
 
-  await check("Disconnect asks Slack to switch the bot token off before deleting anything; when Slack does not confirm it, nothing is deleted and the owner is told Slack is still connected", async () => {
+  await check("Disconnect claims the connection's next generation, then asks Slack to switch the token off; when Slack does not confirm it, nothing is deleted, the connection is held disconnecting (unused), and the owner is told it did not finish", async () => {
     await login(USERS.ownerA);
+    const startGeneration = (await connRow(CLIENT_A))[0].generation;
+    let presses = 0;
     for (const mode of ["fatal_error", "not_revoked", "rate_limited", "network"] as const) {
       revokeFails = mode;
       const before = revocations.length;
@@ -722,14 +811,29 @@ async function main() {
       } finally {
         revokeFails = null;
       }
+      presses += 1;
       assert.deepEqual(revocations.slice(before), [A_TOKEN], `${mode}: the switch-off was asked for, with A's own token`);
       assert.equal(r.status, 502, `${mode}: ${JSON.stringify(r.body)}`);
-      assert.deepEqual([r.body.ok, r.body.error, r.body.disconnected], [false, "slack_revoke_failed", undefined], mode);
-      assert.match(String(r.body.message), /Slack is still connected and nothing was deleted\. Try Disconnect again/);
-      await stillConnected(CLIENT_A, "T0CLIENTA", mode);
+      assert.deepEqual([r.body.ok, r.body.error, r.body.disconnected, r.body.disconnecting], [false, "slack_revoke_failed", undefined, true], mode);
+      assert.match(String(r.body.message), /OASIS has stopped using this Slack workspace, but the disconnect is not finished\. Press Disconnect again/);
+      await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", mode);
+      assert.equal((await connRow(CLIENT_A))[0].generation, startGeneration + presses, `${mode}: each press claimed the next generation`);
     }
+    // Held disconnecting, the connection is not used: its events find no workspace, its card says so.
+    const event = await toJson(await post(eventsRoute, String(setup.events_url), messageEvent("T0CLIENTA", "EvDISCONNECT1"), APP_A.signing_secret));
+    assert.deepEqual([event.status, event.body.dropped], [200, "unknown_team"]);
+    const card = await slackStatus(CLIENT_A, USERS.ownerA.id);
+    assert.deepEqual([card.kind, card.label], ["attention", "Disconnect not finished"], JSON.stringify(card));
+    assert.equal((await loadSlackSettings(db, CLIENT_A, { nowMs: Date.now() })).connection?.status, "disconnecting");
+    assert.equal((await slackStatusLib.loadSlackPresence(db, CLIENT_A)).kind, "not_connected");
+    // Test again on it records no health over the disconnect (and never turns it back to connected).
+    const historyBefore = await count("SELECT COUNT(*) AS n FROM connection_health_checks WHERE tenant_id = ?", [CLIENT_A]);
+    const tested = await toJson(await testRoute.POST(new Request("https://oasisai.work/api/connections/slack/test", { method: "POST" }), ctx("slack")));
+    assert.equal(tested.status, 200, JSON.stringify(tested.body));
+    assert.equal((tested.body.connection as { status?: string }).status, "disconnecting");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM connection_health_checks WHERE tenant_id = ?", [CLIENT_A]), historyBefore, "no health written over a disconnect");
     // A stored token that cannot be read is never assumed off: nothing is sent, nothing deleted.
-    const [id] = await liveSlack(CLIENT_A);
+    const [{ id }] = await connRow(CLIENT_A);
     const at = "WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'";
     const args = [CLIENT_A, credentialServiceFor(id)];
     const saved = String((await db.execute({ sql: `SELECT encrypted_value FROM tenant_integration_credentials ${at}`, args })).rows[0].encrypted_value);
@@ -737,12 +841,12 @@ async function main() {
     try {
       const before = revocations.length;
       const r = await disconnect();
-      assert.deepEqual([r.status, r.body.error, r.body.disconnected], [500, "slack_token_unreadable", undefined], JSON.stringify(r.body));
+      assert.deepEqual([r.status, r.body.error, r.body.disconnected, r.body.disconnecting], [500, "slack_token_unreadable", undefined, true], JSON.stringify(r.body));
       assert.equal(revocations.length, before, "nothing sent to Slack");
     } finally {
       await db.execute({ sql: `UPDATE tenant_integration_credentials SET encrypted_value = ? ${at}`, args: [saved, ...args] });
     }
-    await stillConnected(CLIENT_A, "T0CLIENTA", "unreadable token");
+    await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", "unreadable token");
   });
 
   await check("with Slack's confirmation a client's own-app connection is removed, even where OASIS's app is not set up: token switched off at Slack, then deleted with its route; pressed again, nothing is sent", async () => {
@@ -775,6 +879,206 @@ async function main() {
     assert.deepEqual(revocations.slice(before), [OASIS_TOKEN], "asked with OASIS's connection's own token");
     assert.deepEqual(await liveSlack(OASIS), []);
     assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND provider = 'slack'", [OASIS]), 0);
+  });
+
+  // -- 7. Disconnect against an install of the same connection ----------------------
+
+  const storedToken = async (connectionId: string) => {
+    const r = (await db.execute({ sql: "SELECT encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'", args: [CLIENT_A, credentialServiceFor(connectionId)] })).rows[0];
+    return r ? decryptField(String(r.encrypted_value)) : null;
+  };
+  /** Client A installs its own app with `code` through the real routes. */
+  const installA = async (code: string) => {
+    await login(USERS.ownerA);
+    const state = landed(await authorize()).searchParams.get("state") ?? "";
+    return landed(await callback({ code, state }));
+  };
+  /** Nothing of A's Slack is left: no live row, no stored credential, no route. */
+  const nothingLeft = async (connectionId: string, why: string) => {
+    assert.deepEqual(await liveSlack(CLIENT_A), [], `${why}: no live connection`);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ?", [CLIENT_A, credentialServiceFor(connectionId)]), 0, `${why}: no stored credential`);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE provider = 'slack' AND external_key = 'T0CLIENTA'"), 0, `${why}: no route`);
+  };
+
+  await check("an install that arrives while a disconnect is unfinished is refused: nothing is stored over it, its own token is switched off at Slack, and the next Disconnect finishes", async () => {
+    assert.equal((await installA("code-a2")).searchParams.get("slack"), "connected");
+    const [{ id }] = await connRow(CLIENT_A);
+    const T2 = CODES["code-a2"].token;
+    revokeFails = "fatal_error";
+    try {
+      assert.equal((await disconnect()).status, 502);
+    } finally {
+      revokeFails = null;
+    }
+    await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", "after the failed switch-off");
+    // The callback for another install of the same Slack team.
+    const done = await installA("code-a3");
+    assert.deepEqual([done.searchParams.get("slack"), done.searchParams.get("reason")], ["error", "connection_busy"], done.search);
+    const T3 = CODES["code-a3"].token;
+    assert.ok(revokedAtSlack.has(T3), "the refused install's own token was switched off at Slack");
+    assert.equal(await storedToken(id), T2, "nothing was stored over the disconnecting connection");
+    await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", "after the refused install");
+    // The next press finishes, switching off the token the connection really holds.
+    const before = revocations.length;
+    const r = await disconnect();
+    assert.deepEqual([r.status, r.body.disconnected, r.body.slack_token], [200, true, "revoked"], JSON.stringify(r.body));
+    assert.deepEqual(revocations.slice(before), [T2]);
+    await nothingLeft(id, "finished");
+  });
+
+  await check("an install already in flight when a disconnect runs loses at whichever step it is on (token save, route, first probe): it writes nothing more, its token is switched off, nothing is left behind", async () => {
+    const slackDef = registry.providerById("slack")!;
+    const actorA = { tenantId: CLIENT_A, userId: USERS.ownerA.id, profileId: `p-${USERS.ownerA.id}`, email: USERS.ownerA.email };
+    for (const [step, pattern, code] of [
+      ["token save", /INSERT INTO tenant_integration_credentials/, "code-a-race-save"],
+      ["route", /INSERT INTO provider_webhook_routes/, "code-a-race-route"],
+      ["first probe", /consecutive_failures = \?/, "code-a-race-probe"],
+    ] as const) {
+      await login(USERS.ownerA);
+      const state = landed(await authorize()).searchParams.get("state") ?? "";
+      const installEnv = await ownApp.slackInstallEnv(CLIENT_A);
+      assert.ok(installEnv.ok);
+      // The owner's Disconnect runs to the end at the moment the install reaches `step`.
+      let raced: Awaited<ReturnType<typeof service.disconnectConnection>> | null = null;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          const hook = async (sqls: string[]) => {
+            if (raced === null && sqls.some((s) => pattern.test(s))) raced = await service.disconnectConnection({ db, now: () => new Date() }, actorA, slackDef);
+          };
+          if (prop === "execute") {
+            return async (stmt: Parameters<typeof db.execute>[0]) => {
+              await hook([typeof stmt === "string" ? stmt : stmt.sql]);
+              return target.execute(stmt);
+            };
+          }
+          if (prop === "batch") {
+            return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+              await hook(stmts.map((s) => (typeof s === "string" ? s : s.sql)));
+              return target.batch(stmts, mode);
+            };
+          }
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      const done = await installLib.completeSlackInstall(
+        { db: racing as unknown as typeof db, now: () => new Date() },
+        {
+          provider: registry.providerForEnv("slack", installEnv.ok ? installEnv.env : {})!,
+          state,
+          code,
+          redirectUri: "https://oasisai.work/api/connections/slack/callback",
+          session: { tenantId: CLIENT_A, userId: USERS.ownerA.id, email: USERS.ownerA.email },
+          env: installEnv.ok ? installEnv.env : {},
+        },
+      );
+      assert.ok(raced, `${step}: the disconnect ran mid-install`);
+      assert.deepEqual([raced!.status, raced!.body.disconnected], [200, true], `${step}: ${JSON.stringify(raced!.body)}`);
+      assert.deepEqual(done, { ok: false, failure: "connection_busy" }, step);
+      assert.ok(revokedAtSlack.has(CODES[code].token), `${step}: the install's token was switched off at Slack`);
+      const id = String((await db.execute({ sql: "SELECT id FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack'", args: [CLIENT_A] })).rows[0].id);
+      await nothingLeft(id, step);
+    }
+  });
+
+  await check("the disconnect's last step is one batch: a failure inside it changes nothing (still disconnecting, never 'connected' with a dead token), and the next Disconnect finishes", async () => {
+    assert.equal((await installA("code-a4")).searchParams.get("slack"), "connected");
+    const [{ id }] = await connRow(CLIENT_A);
+    const T4 = CODES["code-a4"].token;
+    // The credential delete, the batch's third statement, aborts: the whole batch rolls back.
+    await db.execute("CREATE TRIGGER test_block_cred_delete BEFORE DELETE ON tenant_integration_credentials BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END");
+    let r: Awaited<ReturnType<typeof disconnect>>;
+    try {
+      r = await disconnect();
+    } finally {
+      await db.execute("DROP TRIGGER IF EXISTS test_block_cred_delete");
+    }
+    assert.deepEqual([r.status, r.body.error, r.body.disconnecting], [500, "disconnect_unfinished", true], JSON.stringify(r.body));
+    assert.match(String(r.body.message), /Slack's access is switched off, but OASIS could not finish removing the connection here\. Press Disconnect again/);
+    assert.ok(revokedAtSlack.has(T4), "Slack switched the token off before the batch");
+    await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", "after the failed batch");
+    const card = await slackStatus(CLIENT_A, USERS.ownerA.id);
+    assert.deepEqual([card.kind, card.label], ["attention", "Disconnect not finished"], "the card never says connected for a dead token");
+    // The next press: Slack already refuses the token, which counts as off; the batch finishes.
+    const again = await disconnect();
+    assert.deepEqual([again.status, again.body.disconnected, again.body.slack_token], [200, true, "already_invalid"], JSON.stringify(again.body));
+    await nothingLeft(id, "finished");
+  });
+
+  await check("a Disconnect that lost its generation to a newer press finishes nothing: the row, its credential and its route stay for the newer one", async () => {
+    assert.equal((await installA("code-a5")).searchParams.get("slack"), "connected");
+    const [{ id, generation }] = await connRow(CLIENT_A);
+    const now = () => new Date();
+    const first = await connStore.beginDisconnect(db, { tenantId: CLIENT_A, connectionId: id, generation, now: now() });
+    assert.equal(first, generation + 1);
+    // A second press takes the next generation before the first finishes.
+    assert.equal(await connStore.beginDisconnect(db, { tenantId: CLIENT_A, connectionId: id, generation: first!, now: now() }), generation + 2);
+    assert.equal(await connStore.beginDisconnect(db, { tenantId: CLIENT_A, connectionId: id, generation: first!, now: now() }), null, "a stale generation claims nothing");
+    const late = await connStore.finishDisconnect(db, {
+      tenantId: CLIENT_A,
+      connectionId: id,
+      generation: first!,
+      revokedBy: USERS.ownerA.id,
+      now: now(),
+      alsoDelete: (revoked) => [credStore.deleteTenantIntegrationServiceWhile({ tenantId: CLIENT_A, service: credentialServiceFor(id), guard: revoked })],
+    });
+    assert.deepEqual(late, { revoked: false, deleted: [0] });
+    await unfinishedDisconnect(CLIENT_A, "T0CLIENTA", "after the stale finish");
+    // The press that holds the generation finishes it.
+    const r = await disconnect();
+    assert.deepEqual([r.status, r.body.disconnected, r.body.slack_token], [200, true, "revoked"], JSON.stringify(r.body));
+    assert.ok(revokedAtSlack.has(CODES["code-a5"].token));
+    await nothingLeft(id, "finished");
+  });
+
+  await check("a Disconnect whose read raced an install's claim refuses (the claim moved the generation), never taking the install over or reaching Slack", async () => {
+    assert.equal((await installA("code-a6")).searchParams.get("slack"), "connected");
+    const [{ id, generation }] = await connRow(CLIENT_A);
+    const T6 = CODES["code-a6"].token;
+    const slackDef = registry.providerById("slack")!;
+    const actorA = { tenantId: CLIENT_A, userId: USERS.ownerA.id, profileId: `p-${USERS.ownerA.id}`, email: USERS.ownerA.email };
+    // The Disconnect has read the row; an install of the same team claims it just before the Disconnect claims the next generation.
+    let claimed = false;
+    const racing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (stmt: Parameters<typeof db.execute>[0]) => {
+            if (!claimed && /SET status = 'disconnecting'/.test(typeof stmt === "string" ? stmt : stmt.sql)) {
+              claimed = true;
+              const claim = await connStore.claimConnection(db, {
+                tenantId: CLIENT_A,
+                provider: "slack",
+                authKind: "app_install",
+                scopeKind: "tenant",
+                userId: null,
+                externalAccountId: "T0CLIENTA",
+                externalAccountLabel: "Client A Slack",
+                environment: null,
+                grantedScopes: [],
+                scopeSetVersion: 1,
+                connectedBy: USERS.ownerA.id,
+                now: new Date(),
+              });
+              assert.ok(claim.ok && claim.connection.token_version === generation + 1, "the install's claim is the next generation");
+            }
+            return target.execute(stmt);
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const before = revocations.length;
+    const r = await service.disconnectConnection({ db: racing as unknown as typeof db, now: () => new Date() }, actorA, slackDef);
+    assert.ok(claimed, "the claim landed between the read and the Disconnect's claim");
+    assert.deepEqual([r.status, r.body.error], [409, "connection_busy"], JSON.stringify(r.body));
+    assert.equal(revocations.length, before, "Slack was never asked");
+    assert.deepEqual(await connRow(CLIENT_A), [{ id, status: "pending", generation: generation + 1 }], "the install's claim stands");
+    // Pressed again, the Disconnect takes the install's generation and finishes.
+    const again = await disconnect();
+    assert.deepEqual([again.status, again.body.disconnected], [200, true], JSON.stringify(again.body));
+    assert.ok(revokedAtSlack.has(T6));
+    await nothingLeft(id, "finished");
   });
 
   globalThis.fetch = realFetch;

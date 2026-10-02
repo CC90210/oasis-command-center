@@ -147,7 +147,7 @@ async function decidePress(
   }
   const tenantId = routed.tenantId;
 
-  const token = await slackTokenFor(deps.db, tenantId, press.teamId);
+  const token = await slackTokenFor(deps.db, tenantId, press.teamId, { id: routed.connectionId, generation: routed.generation });
   if (!token.ok) return reply("OASIS cannot check who you are in this Slack workspace right now. Decide this approval in OASIS.", false);
   const who = await resolveSlackIdentity(deps.db, { tenantId, teamId: press.teamId, slackUserId: press.slackUserId, token: token.token, now, fetchImpl: deps.fetchImpl });
   if (!who.ok) return reply("OASIS could not check who you are in Slack just now. Try again, or decide this approval in OASIS.", false);

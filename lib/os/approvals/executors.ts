@@ -91,7 +91,7 @@ import {
   type ExecutionResult,
 } from "@/lib/os/approvals/rules";
 import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
-import { postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
+import { SLACK_CONNECTION_CHANGED_COPY, postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
 
 export type ExecutorTenant = { id: string; slug: string | null };
 
@@ -457,12 +457,18 @@ const sendSlackMessage: Executor = {
   async run(ctx) {
     const v = validateSendSlackMessagePayload(ctx.payload);
     if (!v.ok) return failed("payload_invalid", `The stored Slack reply is not valid (${v.error}).`);
-    const { team_id, channel_id, thread_ts, text } = v.value;
+    const { team_id, channel_id, thread_ts, text, connection_id, connection_generation } = v.value;
     if (ctx.deps.isDryRun("slack")) {
       return {
         ok: true,
         result: { outcome: "dry_run", provider: SLACK_PROVIDER, would_send: { channel: channel_id, thread_ts, characters: text.length } },
       };
+    }
+    // Posted only through the Slack connection, and the generation of it, the
+    // reply was drafted under: never after that connection was disconnected,
+    // nor through a later install of it (lib/slack/send.ts slackTokenFor).
+    if (connection_id === undefined || connection_generation === undefined) {
+      return failed("slack_connection_changed", SLACK_CONNECTION_CHANGED_COPY, SLACK_PROVIDER);
     }
     const post = ctx.deps.postSlack ?? ((args: SlackPostArgs) => postSlackReply(ctx.db, args));
     const sent = await post({
@@ -473,6 +479,7 @@ const sendSlackMessage: Executor = {
       text,
       department: v.value.department ?? ctx.approval.department_key ?? null,
       approvalId: ctx.approval.id,
+      connection: { id: connection_id, generation: connection_generation },
     });
     if (sent.ok) return { ok: true, result: { outcome: "sent", provider: SLACK_PROVIDER, message_id: sent.ts } };
     return failed(sent.reason, sent.message, SLACK_PROVIDER);

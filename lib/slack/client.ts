@@ -121,6 +121,9 @@ export function authTest(token: string, opts: Opts = {}): Promise<SlackCallResul
 /** Slack answers { ok: true, revoked: true } once the token is switched off. */
 export type SlackRevoked = { revoked?: boolean };
 
+/** Slack's answers that mean a token is already dead: revoked, the app removed, or the workspace gone. */
+export const SLACK_TOKEN_ALREADY_DEAD: ReadonlySet<string> = new Set(["invalid_auth", "token_revoked", "account_inactive"]);
+
 export function revokeToken(token: string, opts: Opts = {}): Promise<SlackCallResult<SlackRevoked>> {
   return call<SlackRevoked>("auth.revoke", new URLSearchParams(), { ...opts, token });
 }

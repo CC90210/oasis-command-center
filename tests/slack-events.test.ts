@@ -280,6 +280,7 @@ async function main() {
   const jobSig = await import("../lib/slack/job-signature");
   const jobsRoute = await import("../app/api/webhooks/slack/jobs/route");
   const tokens = await import("../lib/connections/token-store");
+  const connStore = await import("../lib/connections/store");
   const approvalsStore = await import("../lib/os/approvals/store");
   const executors = await import("../lib/os/approvals/executors");
   const rules = await import("../lib/os/approvals/rules");
@@ -1496,7 +1497,8 @@ async function main() {
     try {
       const fallbackFor = async (profileId: string, eventId: string) => {
         let seen: unknown = "not called";
-        const job = { ...dispatched[0], tenantId: OASIS, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
+        // OASIS's own connection (connected above at generation 0).
+        const job = { ...dispatched[0], tenantId: OASIS, connectionId: "conn-slack-oasis", generation: 0, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
         await jobs.runSlackMentionJob(job, {
           db,
           now,
@@ -1515,6 +1517,136 @@ async function main() {
       if (savedKey === undefined) delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
       else process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = savedKey;
     }
+  });
+
+  // -- 3b. Work is bound to the connection generation it was accepted on -------
+  // (lib/connections/store.ts liveConnectionGuard). A check that moves ALPHA's
+  // connection on (a disconnect starting, a reinstall) puts it back after, so
+  // the checks below keep their fixture.
+
+  const alphaGeneration = async () => Number((await db.execute("SELECT token_version FROM tenant_connections WHERE id = 'conn-slack-a'")).rows[0].token_version);
+  const restoreAlpha = (generation: number) =>
+    db.execute({ sql: "UPDATE tenant_connections SET status = 'connected', token_version = ?, revoked_at = NULL WHERE id = 'conn-slack-a'", args: [generation] });
+  /** The real disconnect's first step, on ALPHA's connection at the generation it is on now. */
+  const startDisconnectOfAlpha = async () =>
+    connStore.beginDisconnect(db, { tenantId: ALPHA, connectionId: "conn-slack-a", generation: await alphaGeneration(), now: now() });
+
+  await check("an event read before a disconnect started writes nothing after it: no receipt, no mirrored text, no job", async () => {
+    const generation = await alphaGeneration();
+    const mirroredBefore = (await slackRows(ALPHA)).length;
+    const receiptsBefore = await count("SELECT COUNT(*) AS n FROM slack_event_receipts");
+    const jobsBefore = dispatched.length;
+    for (const [kind, ev] of [
+      ["message", message("UMEMBER1", "C0CLIENTS", "said just before the disconnect")],
+      ["mention", mention("UMEMBER1", "C0CLIENTS", "Client Success, asked just before the disconnect")],
+    ] as const) {
+      // Route, token and identity are read; the disconnect lands before the write.
+      let moved = false;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          const hook = async (sqls: string[]) => {
+            if (!moved && sqls.some((s) => /INSERT INTO slack_event_receipts/.test(s))) moved = (await startDisconnectOfAlpha()) !== null;
+          };
+          if (prop === "execute") {
+            return async (stmt: Parameters<typeof db.execute>[0]) => {
+              await hook([typeof stmt === "string" ? stmt : stmt.sql]);
+              return target.execute(stmt);
+            };
+          }
+          if (prop === "batch") {
+            return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+              await hook(stmts.map((s) => (typeof s === "string" ? s : s.sql)));
+              return target.batch(stmts, mode);
+            };
+          }
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      try {
+        const r = await events.handleSlackEvents(signed(eventBody(ev)), { ...deps(), db: racing as unknown as typeof db });
+        assert.ok(moved, `${kind}: the disconnect started mid-event`);
+        assert.deepEqual([r.status, r.body.dropped], [200, "connection_changed"], `${kind}: ${JSON.stringify(r.body)}`);
+      } finally {
+        await restoreAlpha(generation);
+      }
+    }
+    assert.equal((await slackRows(ALPHA)).length, mirroredBefore, "no mirrored text");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_event_receipts"), receiptsBefore, "no receipt");
+    assert.equal(dispatched.length, jobsBefore, "no job");
+  });
+
+  await check("a mention job creates no approval when its connection was disconnected during the turn, and none at all when it was reinstalled before the job ran", async () => {
+    const generation = await alphaGeneration();
+    const postsBefore = posts.length;
+    const ephemeralsBefore = ephemerals.length;
+    try {
+      // The disconnect starts while the model is drafting.
+      const job = { ...dispatched[0], eventId: "EvTURNRACE01" };
+      const out = await jobs.runSlackMentionJob(job, {
+        ...turnDeps("a draft that finished after the disconnect"),
+        runText: (async () => {
+          await startDisconnectOfAlpha();
+          return { ok: true, text: "a draft that finished after the disconnect" };
+        }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["runText"]>,
+      });
+      assert.deepEqual(out, { outcome: "dropped", reason: "connection_changed" });
+      assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND idempotency_key = ?", [ALPHA, jobs.approvalKeyForEvent("EvTURNRACE01")]), 0, "no approval");
+    } finally {
+      await restoreAlpha(generation);
+    }
+    // A job bound to another generation (the connection was installed again since) never starts a turn.
+    let prepared = 0;
+    const stale = await jobs.runSlackMentionJob({ ...dispatched[0], eventId: "EvOLDGEN0001", generation: generation + 7 }, {
+      db,
+      now,
+      prepare: (async () => {
+        prepared += 1;
+        return { ok: false, status: 500, error: "should_not_run" };
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    });
+    assert.deepEqual([stale, prepared], [{ outcome: "dropped", reason: "connection_changed" }, 0]);
+    assert.deepEqual([posts.length, ephemerals.length], [postsBefore, ephemeralsBefore], "nothing posted in Slack");
+  });
+
+  await check("an approval drafted under an earlier generation never posts, even once the same Slack is connected again; one with no binding never posts either", async () => {
+    const generation = await alphaGeneration();
+    const { id, hash } = await pendingSlackApproval("EvOLDAPPROVE1");
+    const stored = approvalsStore.parsePayload((await approvalsStore.getApprovalInTenant(db, ALPHA, id))!);
+    assert.deepEqual([stored.connection_id, stored.connection_generation], ["conn-slack-a", generation], "the draft carries its connection and generation");
+    const postsBefore = posts.length;
+    try {
+      // Disconnected and installed again: the same row, a later generation, connected.
+      assert.notEqual(await startDisconnectOfAlpha(), null);
+      await restoreAlpha(generation + 2);
+      const r = await pressApprove("UOWNER1", `${id}|${hash}`);
+      assert.match(String(r.replaced), /drafted while an earlier Slack connection was in place/);
+      assert.equal(posts.length, postsBefore, "nothing posted through the new connection");
+      const row = await approvalsStore.getApprovalInTenant(db, ALPHA, id);
+      assert.deepEqual([row?.status, (row?.execution_result as { reason?: string } | null)?.reason], ["failed", "slack_connection_changed"]);
+    } finally {
+      await restoreAlpha(generation);
+    }
+    // A Slack reply stored with no connection binding is never posted live.
+    const created = await approvalsStore.createApproval(
+      db,
+      {
+        tenantId: ALPHA,
+        departmentKey: "client_success",
+        requestedBy: { type: "agent", id: "csm" },
+        actionKind: "send_slack_message",
+        title: "Slack reply in #clients",
+        payload: { team_id: TEAM_A, channel_id: "C0CLIENTS", thread_ts: "1727700000.000400", text: "no binding" },
+      },
+      now(),
+    );
+    assert.ok(created.ok);
+    const deps = { ...executors.defaultExecutorDeps(), publishEvent: async () => undefined };
+    const exec = executors.EXECUTORS.send_slack_message!;
+    const row = (created as { approval: Parameters<typeof exec.run>[0]["approval"] }).approval;
+    const unbound = await exec.run({ db, approval: row, payload: approvalsStore.parsePayload(row), tenant: { id: ALPHA, slug: "alpha-co" }, approver: null, deps });
+    assert.deepEqual([unbound.ok, (unbound as { result?: { reason?: string } }).result?.reason], [false, "slack_connection_changed"], JSON.stringify(unbound));
+    assert.equal(posts.length, postsBefore);
   });
 
   // Anti-vacuity: the real network is still not reachable from here.

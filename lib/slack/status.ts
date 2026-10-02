@@ -52,7 +52,8 @@ export async function loadSlackPresence(
   if (app === "unknown" || !db) return { kind: "unknown" };
   try {
     const conn = await findActiveConnection(db, tenantId, "slack");
-    if (!conn) return { kind: "not_connected" };
+    // A connection being disconnected answers nothing.
+    if (!conn || conn.status === "disconnecting") return { kind: "not_connected" };
     const byDepartment = new Map<DepartmentKey, string[]>();
     try {
       for (const r of await listChannelRoutes(db, tenantId)) {

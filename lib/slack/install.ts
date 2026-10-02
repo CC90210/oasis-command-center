@@ -12,14 +12,23 @@
  *      Enterprise Grid org install (v1 installs one workspace at a time).
  *   3. The team must not already belong to another OASIS workspace
  *      (provider_webhook_routes, unique per Slack team).
- *   4. The connection is CLAIMED for this tenant, pinned to the Slack team.
- *   5. The bot token is SAVED encrypted (token-store saveBotToken). A failed
- *      save undoes the claim: a connection is never "connected" without its
- *      token.
+ *   4. The connection is CLAIMED for this tenant, pinned to the Slack team: a
+ *      NEW GENERATION of it (lib/connections/store.ts claimConnection). A row
+ *      being disconnected is refused, never installed over.
+ *   5. The bot token is SAVED encrypted (token-store saveBotTokenAt), only
+ *      while the row is still this claim, atomically. A failed save undoes the
+ *      claim: a connection is never "connected" without its token.
  *   6. The team is ROUTED to this tenant (registerWebhookRoute), which is how
- *      every later event finds its workspace. Losing that race undoes 4 and 5.
- *   7. A live auth.test is RECORDED as the connection's first health check:
- *      green means Slack answered, not that a token was saved.
+ *      every later event finds its workspace, fenced on the claim the same
+ *      way. Losing that race undoes 4 and 5.
+ *   7. A live auth.test is RECORDED as the connection's first health check,
+ *      fenced on the claim too: green means Slack answered, not that a token
+ *      was saved.
+ * An install that meets a disconnect of the same connection (or a newer
+ * install) at 4, 5, 6 or 7 has lost: it writes nothing more, touches nothing
+ * of theirs, switches its own token off at Slack, and says so
+ * (connection_busy). A disconnect that began first therefore never ends with a
+ * live token stored under a "disconnected" row.
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -30,6 +39,7 @@ import {
   claimConnection,
   findActiveConnection,
   getConnection,
+  pendingClaimGuard,
   recordHealthCheck,
   registerWebhookRoute,
   resolveWebhookRoute,
@@ -37,9 +47,9 @@ import {
 } from "@/lib/connections/store";
 import { auditConnection, probeFor, type ConnectionsDeps } from "@/lib/connections/health";
 import { undoUnsavedClaim } from "@/lib/connections/service";
-import { saveBotToken } from "@/lib/connections/token-store";
-import { deleteTenantIntegrationService } from "@/lib/tenant-integration-store";
-import { exchangeInstallCode, type SlackFetch } from "@/lib/slack/client";
+import { saveBotTokenAt } from "@/lib/connections/token-store";
+import { deleteTenantIntegrationServiceWhile } from "@/lib/tenant-integration-store";
+import { SLACK_TOKEN_ALREADY_DEAD, exchangeInstallCode, revokeToken, type SlackFetch } from "@/lib/slack/client";
 
 export type SlackInstallFailure =
   | "state_invalid"
@@ -51,7 +61,8 @@ export type SlackInstallFailure =
   | "enterprise_install_unsupported"
   | "team_connected_elsewhere"
   | "another_team_connected"
-  | "token_save_failed";
+  | "token_save_failed"
+  | "connection_busy";
 
 export type SlackInstallResult =
   | { ok: true; tenantId: string; teamId: string; teamName: string | null; connection: ConnectionRow }
@@ -127,16 +138,25 @@ export async function completeSlackInstall(
     now: deps.now(),
   });
   if (!claim.ok) {
+    if (claim.error === "connection_busy") return lostToAnotherChange(deps, tenantId, token);
     return claim.error === "account_connected_elsewhere"
       ? { ok: false, failure: "team_connected_elsewhere" }
       : { ok: false, failure: "another_team_connected", detail: claim.current.external_account_label ?? undefined };
   }
   const conn = claim.connection;
+  const generation = conn.token_version;
 
-  try {
-    await saveBotToken(tenantId, conn.id, { bot_token: token, bot_user_id: install.bot_user_id ?? null });
-  } catch (err) {
-    console.error("[slack.install] bot token save failed", { tenantId, connectionId: conn.id, error: err instanceof Error ? err.message : String(err) });
+  const saved = await saveBotTokenAt(db, {
+    tenantId,
+    connectionId: conn.id,
+    generation,
+    token: { bot_token: token, bot_user_id: install.bot_user_id ?? null },
+    now: deps.now(),
+  });
+  if (!saved.ok) {
+    // A disconnect (or a newer install) took the row first: nothing was stored.
+    if (saved.reason === "connection_changed") return lostToAnotherChange(deps, tenantId, token);
+    console.error("[slack.install] bot token save failed", { tenantId, connectionId: conn.id, error: saved.error ?? null });
     await undoUnsavedClaim(deps, tenantId, claim);
     return { ok: false, failure: "token_save_failed" };
   }
@@ -147,12 +167,20 @@ export async function completeSlackInstall(
     externalKey: teamId,
     connectionId: conn.id,
     now: deps.now(),
+    generation,
   });
   if (!route.ok) {
+    // A disconnect took the row after the token went in: it owns the token now
+    // (switches it off and deletes it with the row). Nothing here is undone.
+    if (route.error === "connection_changed" || route.error === "connection_not_found") return lostToAnotherChange(deps, tenantId, token);
     // Another workspace routed this team between the check and here. Nothing
-    // of this install may stay: the token goes, then the claim.
-    const removed = await deleteTenantIntegrationService({ tenantId, service: credentialServiceFor(conn.id) });
-    if (!removed.ok) console.error("[slack.install] token delete after a lost route failed", { tenantId, connectionId: conn.id, error: removed.error });
+    // of this install may stay: the token goes (only while the row is still
+    // this claim), then the claim.
+    try {
+      await db.execute(deleteTenantIntegrationServiceWhile({ tenantId, service: credentialServiceFor(conn.id), guard: pendingClaimGuard(tenantId, conn.id, generation) }));
+    } catch (err) {
+      console.error("[slack.install] token delete after a lost route failed", { tenantId, connectionId: conn.id, error: err instanceof Error ? err.message : String(err) });
+    }
     await undoUnsavedClaim(deps, tenantId, claim);
     return { ok: false, failure: "team_connected_elsewhere" };
   }
@@ -172,7 +200,11 @@ export async function completeSlackInstall(
     latencyMs: result.latencyMs,
     accountLabel: mismatch ? null : result.accountLabel ?? teamName,
     now: deps.now(),
+    generation,
   });
+  // A disconnect took the row after the route went in: it owns the row and
+  // its token now. Never "connected" for a connection that is going away.
+  if (!recorded.recorded) return lostToAnotherChange(deps, tenantId, token);
   await auditConnection({
     tenantId,
     actor: { userId: consent.userId, email: input.session.email },
@@ -182,6 +214,20 @@ export async function completeSlackInstall(
   });
   const final = (await getConnection(db, tenantId, conn.id)) ?? recorded.connection;
   return { ok: true, tenantId, teamId, teamName, connection: final };
+}
+
+/**
+ * This install met a disconnect of the same connection (or a newer install)
+ * and lost: its token is switched off at Slack, so no live token is left that
+ * nobody holds, and nothing of the other change is touched. Never logs the
+ * token. Switching off a token a disconnect already switched off is harmless.
+ */
+async function lostToAnotherChange(deps: { fetchImpl?: SlackFetch }, tenantId: string, token: string): Promise<SlackInstallResult> {
+  const off = await revokeToken(token, { fetchImpl: deps.fetchImpl });
+  if (!off.ok && !SLACK_TOKEN_ALREADY_DEAD.has(off.error)) {
+    console.error("[slack.install] an install that lost to a disconnect could not switch its token off at Slack", { tenantId, error: off.error });
+  }
+  return { ok: false, failure: "connection_busy" };
 }
 
 /** The tenant's live Slack connection, or null. */

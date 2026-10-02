@@ -36,6 +36,7 @@ const REASONS: Readonly<Record<string, string>> = {
   team_connected_elsewhere: "That Slack workspace is already connected to another OASIS workspace. Disconnect it there first.",
   another_team_connected: "A different Slack workspace is already connected here. Disconnect it first.",
   token_save_failed: "OASIS could not save Slack's token, so nothing was connected. Try again.",
+  connection_busy: "Slack was being disconnected or installed here at the same moment, so nothing was installed. Wait a moment, then press Add to Slack again.",
   missing_code: "Slack sent the browser back without an install code. Start again from this page.",
   no_install_flow: "That app cannot be installed from here.",
   app_url_missing: "This deployment does not know its own address, so Slack cannot send the browser back. Tell OASIS support.",

@@ -31,6 +31,14 @@ import { postEphemeral, postMessage, type SlackFetch } from "@/lib/slack/client"
 import { mirrorStatement } from "@/lib/slack/mirror";
 import { departmentLabelOf, getChannelRoute, isSlackSchemaMissing } from "@/lib/slack/routing";
 
+/**
+ * The Slack connection a piece of work was accepted under: its id and its
+ * generation (tenant_connections.token_version, lib/connections/store.ts).
+ * Work bound to one is never carried out on another, or on a later generation
+ * of the same one (a disconnect, or a reinstall, moved it on).
+ */
+export type SlackConnectionBinding = { id: string; generation: number };
+
 export type SlackPostArgs = {
   tenantId: string;
   teamId: string;
@@ -39,18 +47,33 @@ export type SlackPostArgs = {
   text: string;
   department: DepartmentKey | null;
   approvalId: string;
+  /** The connection the approved reply was drafted under (its approval's payload). */
+  connection: SlackConnectionBinding;
 };
 
 export type SlackPostOutcome = { ok: true; ts: string } | { ok: false; reason: string; message: string };
 
 type Token = { ok: true; token: string; botUserId: string | null } | { ok: false; reason: string; message: string };
 
-/** The tenant's live Slack connection for `teamId`, and its bot token. */
-export async function slackTokenFor(db: Client, tenantId: string, teamId: string): Promise<Token> {
+/** What a post bound to an earlier Slack connection (or generation of it) says, instead of posting. */
+export const SLACK_CONNECTION_CHANGED_COPY =
+  "This was drafted while an earlier Slack connection was in place. Slack has since been disconnected or installed again, so nothing was posted. Ask again in Slack.";
+
+/**
+ * The tenant's live Slack connection for `teamId`, and its bot token. A
+ * connection being disconnected is not live. With `connection`, only that
+ * connection on that generation will do.
+ */
+export async function slackTokenFor(db: Client, tenantId: string, teamId: string, connection?: SlackConnectionBinding): Promise<Token> {
   const conn = await findActiveConnection(db, tenantId, "slack");
-  if (!conn) return { ok: false, reason: "slack_not_connected", message: "Slack is not connected to this workspace, so nothing was posted." };
+  if (!conn || conn.status === "disconnecting") {
+    return { ok: false, reason: "slack_not_connected", message: "Slack is not connected to this workspace, so nothing was posted." };
+  }
   if (conn.external_account_id !== teamId) {
     return { ok: false, reason: "slack_team_mismatch", message: "This reply is for a Slack workspace that is not the one connected here, so nothing was posted." };
+  }
+  if (connection && (conn.id !== connection.id || conn.token_version !== connection.generation)) {
+    return { ok: false, reason: "slack_connection_changed", message: SLACK_CONNECTION_CHANGED_COPY };
   }
   if (conn.status === "expired" || conn.status === "revoked") {
     return { ok: false, reason: "slack_token_rejected", message: "Slack no longer accepts OASIS's token for this workspace. Install the app again in Settings > Chat apps." };
@@ -85,7 +108,7 @@ function slackFailureMessage(error: string): string {
 }
 
 export async function postSlackReply(db: Client, args: SlackPostArgs, opts: { fetchImpl?: SlackFetch; now?: () => Date } = {}): Promise<SlackPostOutcome> {
-  const token = await slackTokenFor(db, args.tenantId, args.teamId);
+  const token = await slackTokenFor(db, args.tenantId, args.teamId, args.connection);
   if (!token.ok) return token;
   // Posted as the words that were approved. Slack reads &, < and > in a
   // message as its own markup (<!channel> pings everyone, <@U..> mentions,
@@ -279,10 +302,12 @@ export async function postApprovalRequest(
     payloadHash: string;
     openUrl: string | null;
     reviewer: string | null;
+    /** The connection the mention came through (lib/slack/jobs.ts). */
+    connection: SlackConnectionBinding;
   },
   opts: { fetchImpl?: SlackFetch } = {},
 ): Promise<ApprovalRequestOutcome> {
-  const token = await slackTokenFor(db, input.tenantId, input.teamId);
+  const token = await slackTokenFor(db, input.tenantId, input.teamId, input.connection);
   if (!token.ok) return { notice: token, review: token };
   const label = departmentLabelOf(input.department);
   const posted = await postMessage(
@@ -320,10 +345,10 @@ export async function postApprovalRequest(
 
 export async function postNotice(
   db: Client,
-  input: { tenantId: string; teamId: string; channelId: string; threadTs: string; text: string },
+  input: { tenantId: string; teamId: string; channelId: string; threadTs: string; text: string; connection: SlackConnectionBinding },
   opts: { fetchImpl?: SlackFetch } = {},
 ): Promise<SlackPostOutcome> {
-  const token = await slackTokenFor(db, input.tenantId, input.teamId);
+  const token = await slackTokenFor(db, input.tenantId, input.teamId, input.connection);
   if (!token.ok) return token;
   const posted = await postMessage(token.token, { channel: input.channelId, thread_ts: input.threadTs, text: input.text }, { fetchImpl: opts.fetchImpl });
   if (!posted.ok) return { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };

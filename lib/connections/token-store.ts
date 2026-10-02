@@ -41,11 +41,13 @@ import {
   getTenantIntegrationBundle,
   readTenantCredentialStrict,
   setTenantIntegrationBundle,
+  setTenantIntegrationBundleWhile,
 } from "@/lib/tenant-integration-store";
 import { BOT_TOKEN_FIELD, REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFor } from "@/lib/connections/rules";
 import { alertConnectionWorsened } from "@/lib/connections/health";
 import {
   getConnection,
+  pendingClaimGuard,
   recordHealthCheck,
   releaseRefreshLease,
   takeRefreshLease,
@@ -137,7 +139,8 @@ export function isConfirmedRefreshRefusal(err: unknown): boolean {
  * none of the lease machinery above applies: it is stored once, encrypted,
  * under the connection's own credential service, and read back strictly (no
  * env fallback). Removing the app in Slack revokes it; the health probe
- * (auth.test) then turns the connection expired.
+ * (auth.test) then turns the connection expired. An install saves with
+ * saveBotTokenAt instead, fenced on its own claim.
  */
 export async function saveBotToken(
   tenantId: string,
@@ -154,6 +157,30 @@ export async function saveBotToken(
     createdBy,
   });
   if (!saved.ok) throw new TokenStoreError("save_failed", saved.error);
+}
+
+/**
+ * An install's bot token, saved ONLY while the connection is still the
+ * pending claim this install made at `generation` (lib/connections/store.ts
+ * pendingClaimGuard), atomically. "connection_changed": a disconnect, or a
+ * newer install of the same connection, moved it on first, and nothing was
+ * written. The token is never logged.
+ */
+export async function saveBotTokenAt(
+  db: Client,
+  input: { tenantId: string; connectionId: string; generation: number; token: { bot_token: string; bot_user_id: string | null }; now: Date },
+): Promise<{ ok: true } | { ok: false; reason: "connection_changed" | "save_failed"; error?: string }> {
+  const bundle: Record<string, string> = { [BOT_TOKEN_FIELD]: input.token.bot_token };
+  if (input.token.bot_user_id) bundle.bot_user_id = input.token.bot_user_id;
+  const saved = await setTenantIntegrationBundleWhile(db, {
+    tenantId: input.tenantId,
+    service: credentialServiceFor(input.connectionId),
+    bundle,
+    guard: pendingClaimGuard(input.tenantId, input.connectionId, input.generation),
+    now: input.now,
+  });
+  if (saved.ok) return { ok: true };
+  return saved.error === "guard_refused" ? { ok: false, reason: "connection_changed" } : { ok: false, reason: "save_failed", error: saved.error };
 }
 
 export type BotTokenRead =
@@ -221,7 +248,7 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
 
   const conn = await getConnection(db, input.tenantId, input.connectionId);
   if (!conn) throw new TokenStoreError("connection_not_found");
-  if (conn.revoked_at) throw new TokenStoreError("connection_revoked");
+  if (conn.revoked_at || conn.status === "disconnecting") throw new TokenStoreError("connection_revoked");
   if (conn.status === "expired") throw new TokenStoreError("refresh_failed", "The provider refused the last refresh. Reconnect.");
 
   const tokens = await loadTokens(input.tenantId, input.connectionId);

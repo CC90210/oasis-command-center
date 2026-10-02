@@ -7,8 +7,10 @@
  * 404 when the provider is not connected here. A probe that finds a problem is
  * still a 200 — the problem is the answer, in `connection.status`.
  *
- * Slack made with the workspace's OWN Slack app is checkable even where
- * OASIS's Slack app is not set up (lib/slack/own-app.ts slackAppFor).
+ * Slack is checkable through the app its workspace uses, and only that
+ * (lib/slack/own-app.ts slackAppFor): a client's own app wherever OASIS's app
+ * is or is not set up, OASIS's app for OASIS's own workspace. OASIS's app being
+ * live never makes a client's Slack checkable.
  */
 import { resolveProvider, testConnection } from "@/lib/connections/service";
 import { providerById } from "@/lib/connections/registry";
@@ -24,8 +26,14 @@ export async function POST(_req: Request, ctx: { params: Promise<{ provider: str
     const resolved = await resolveConnectionsActor();
     if (!resolved.ok) return resolved.response;
     const slack = providerId === "slack" ? providerById("slack") : null;
-    if (slack && (await slackAppFor(resolved.actor.tenantId)) === "own") {
-      return serviceResponse(await testConnection(resolved.deps, resolved.actor, slack));
+    if (slack) {
+      const app = await slackAppFor(resolved.actor.tenantId);
+      if (app === "own" || app === "oasis") return serviceResponse(await testConnection(resolved.deps, resolved.actor, slack));
+      return serviceResponse(
+        app === "unknown"
+          ? { status: 503, body: { ok: false, error: "slack_app_unavailable", message: "This workspace's Slack app details could not be read just now. Try again in a minute." } }
+          : { status: 409, body: { ok: false, error: "slack_app_not_set_up", message: "Slack cannot be checked here: the Slack app this workspace uses is not set up." } },
+      );
     }
     const provider = resolveProvider(providerId);
     if (!provider.ok) return serviceResponse(provider.result);

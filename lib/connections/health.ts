@@ -444,10 +444,12 @@ export async function probeStoredConnection(
   actor: AuditActor,
 ): Promise<HealthRecordResult> {
   const provider = providerForEnv(row.provider, process.env);
-  // A Slack connection made with the workspace's OWN Slack app stays checkable
-  // where OASIS's app is not set up: the probe needs only its own stored token.
-  const checkable =
-    provider?.availability === "live" || (row.provider === "slack" && (await slackAppFor(row.tenant_id)) === "own");
+  // Slack is checkable through the app its workspace uses, and only that
+  // (lib/slack/own-app.ts slackAppFor): OASIS's app for OASIS's own workspace,
+  // while it is set up here; a client's own saved app, wherever OASIS's app is
+  // or is not. OASIS's app being live never makes a client's Slack checkable.
+  const slackApp = row.provider === "slack" ? await slackAppFor(row.tenant_id) : null;
+  const checkable = row.provider === "slack" ? slackApp === "oasis" || slackApp === "own" : provider?.availability === "live";
   const probe = provider && checkable ? probeFor(provider.id) : null;
   if (!provider || !probe) throw new Error(`provider_not_probeable:${row.provider}`);
 
@@ -691,16 +693,16 @@ export async function runConnectionHealthPass(
   const worstMs = opts.probeWorstCaseMs ?? PROBE_WORST_CASE_MS;
   const now = deps.now();
   const pruned = await pruneConnectionHistory(deps.db, now);
-  const providers = probedProviders();
+  const probed = probedProviders();
   const due = await listConnectionsDueForHealth(deps.db, {
-    providers,
-    // Where OASIS's Slack app is not set up, a client that saved its own Slack
-    // app still has a checkable Slack connection (probeStoredConnection).
-    // OASIS's own workspaces use only OASIS's app (lib/slack/own-app.ts), so a
-    // Slack app one of them saved never makes its connection checkable here.
-    alsoWhereTenantSaved: providers.includes("slack")
-      ? undefined
-      : { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS, exceptTenantIds: oasisSlackAppWorkspaceIds() },
+    // Slack is listed by the app each workspace uses (lib/slack/own-app.ts),
+    // never by OASIS's app alone: a client's connection only through the
+    // client's own saved app (a Slack app one of OASIS's own workspaces saved
+    // plays no part), and OASIS's own workspaces only while OASIS's app is set
+    // up here. probeStoredConnection applies the same rule.
+    providers: probed.filter((p) => p !== "slack"),
+    alsoWhereTenantSaved: { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS, exceptTenantIds: oasisSlackAppWorkspaceIds() },
+    alsoForTenants: probed.includes("slack") ? { provider: "slack", tenantIds: oasisSlackAppWorkspaceIds() } : undefined,
     staleBefore: new Date(now.getTime() - HEALTH_RECHECK_AFTER_MS),
     limit: opts.limit ?? HEALTH_PASS_LIMIT,
   });

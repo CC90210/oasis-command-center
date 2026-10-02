@@ -378,6 +378,13 @@ export type SendSlackMessagePayload = {
   text: string;
   channel_name?: string;
   department?: DepartmentKey;
+  /**
+   * The Slack connection the reply was drafted under, and its generation
+   * (lib/slack/jobs.ts). The executor posts only through that same connection
+   * on that same generation; a reply without them is never posted.
+   */
+  connection_id?: string;
+  connection_generation?: number;
 };
 
 /** Slack's own limit is 40,000; a department reply longer than this is not a reply. */
@@ -403,9 +410,28 @@ export function validateSendSlackMessagePayload(raw: unknown): Valid<SendSlackMe
     if (!isOneOf(DEPARTMENT_KEYS, raw.department)) return { ok: false, error: "department_invalid", field: "department" };
     department = raw.department;
   }
+  // The connection binding: both or neither.
+  const hasConnection = raw.connection_id !== undefined || raw.connection_generation !== undefined;
+  if (hasConnection) {
+    if (typeof raw.connection_id !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(raw.connection_id)) {
+      return { ok: false, error: "connection_id_invalid", field: "connection_id" };
+    }
+    const g = raw.connection_generation;
+    if (typeof g !== "number" || !Number.isInteger(g) || g < 0 || g > 2_147_483_647) {
+      return { ok: false, error: "connection_generation_invalid", field: "connection_generation" };
+    }
+  }
   return {
     ok: true,
-    value: { team_id, channel_id, thread_ts, text, ...(channel_name ? { channel_name } : {}), ...(department ? { department } : {}) },
+    value: {
+      team_id,
+      channel_id,
+      thread_ts,
+      text,
+      ...(channel_name ? { channel_name } : {}),
+      ...(department ? { department } : {}),
+      ...(hasConnection ? { connection_id: raw.connection_id as string, connection_generation: raw.connection_generation as number } : {}),
+    },
   };
 }
 

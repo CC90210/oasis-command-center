@@ -415,7 +415,9 @@ async function main() {
     const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Record<string, unknown>;
     const forgedBody = Buffer.from(JSON.stringify({ ...payload, t: BRAVO_CO })).toString("base64url");
     const exchangesBefore = exchanges.length;
-    for (const tampered of [`${forgedBody}.${sig}`, `${body}.${sig.slice(0, -2)}AA`, "not-a-state"]) {
+    // The signature's last two characters changed (never to themselves: a signature ending "AA" stays valid otherwise).
+    const otherTail = sig.endsWith("AA") ? "BB" : "AA";
+    for (const tampered of [`${forgedBody}.${sig}`, `${body}.${sig.slice(0, -2)}${otherTail}`, "not-a-state"]) {
       const res = await callback({ code: "code-alpha", state: tampered });
       assert.equal(landed(res).searchParams.get("reason"), "state_invalid", tampered.slice(0, 20));
     }

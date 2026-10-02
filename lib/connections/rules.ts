@@ -22,6 +22,11 @@ export const CONNECTION_STATUSES = [
   "revoked",
   "error",
   "pending_review",
+  // A disconnect has claimed the connection's next generation (token_version)
+  // and not finished yet: nothing uses it, nothing may install over it, and a
+  // later Disconnect finishes it (lib/connections/service.ts
+  // disconnectConnection). Durable, so a failure part-way says so.
+  "disconnecting",
 ] as const;
 export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 
@@ -263,6 +268,7 @@ export type ProbeOutcome = { verdict: HealthVerdict; code: ProbeErrorCode | null
  *   down: anything else     → error
  *   revoked                 → stays revoked, whatever a probe says. Only a new
  *                             connect brings a connection back.
+ *   disconnecting           -> stays disconnecting: only the disconnect moves it.
  */
 export function statusAfterProbe(
   current: ConnectionStatus,
@@ -270,7 +276,7 @@ export function statusAfterProbe(
   consecutiveFailures: number,
 ): { status: ConnectionStatus; consecutiveFailures: number } {
   const failures = Math.max(0, Math.trunc(consecutiveFailures) || 0);
-  if (current === "revoked") return { status: "revoked", consecutiveFailures: failures };
+  if (current === "revoked" || current === "disconnecting") return { status: current, consecutiveFailures: failures };
   switch (outcome.verdict) {
     case "healthy":
       return { status: "connected", consecutiveFailures: 0 };

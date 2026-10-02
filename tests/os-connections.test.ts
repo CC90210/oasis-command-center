@@ -727,7 +727,13 @@ async function main() {
     assert.equal(await store.getConnection(db, TENANT_B, alphaConnectionId), null);
     assert.equal(await store.findActiveConnection(db, TENANT_B, "stripe"), null);
     assert.equal((await store.listActiveConnections(db, TENANT_B)).length, 0);
-    assert.equal(await store.revokeConnection(db, { tenantId: TENANT_B, connectionId: alphaConnectionId, revokedBy: USERS.ownerB.id, now }), false);
+    // A disconnect named with B's tenant claims nothing and revokes nothing of A's.
+    const aGeneration = (await store.getConnection(db, TENANT_A, alphaConnectionId))!.token_version;
+    assert.equal(await store.beginDisconnect(db, { tenantId: TENANT_B, connectionId: alphaConnectionId, generation: aGeneration, now }), null);
+    assert.deepEqual(
+      await store.finishDisconnect(db, { tenantId: TENANT_B, connectionId: alphaConnectionId, generation: aGeneration, revokedBy: USERS.ownerB.id, now }),
+      { revoked: false, deleted: [] },
+    );
     await assert.rejects(
       store.recordHealthCheck(db, {
         tenantId: TENANT_B,
@@ -760,7 +766,9 @@ async function main() {
       await store.registerWebhookRoute(db, { tenantId: TENANT_A, provider: "stripe", externalKey: "acct_1Alpha", connectionId: alphaConnectionId, now }),
       { ok: true },
     );
-    assert.deepEqual(await store.resolveWebhookRoute(db, "stripe", "acct_1Alpha"), { tenantId: TENANT_A, connectionId: alphaConnectionId });
+    // With the generation the connection is on: work accepted for it is bound to that.
+    const generation = (await store.getConnection(db, TENANT_A, alphaConnectionId))!.token_version;
+    assert.deepEqual(await store.resolveWebhookRoute(db, "stripe", "acct_1Alpha"), { tenantId: TENANT_A, connectionId: alphaConnectionId, generation });
     assert.equal(await store.resolveWebhookRoute(db, "stripe", "acct_nobody"), null);
   });
 

@@ -12,20 +12,22 @@
  */
 import "server-only";
 import {
-  deleteTenantIntegrationService,
-  setTenantIntegrationValue,
+  deleteTenantIntegrationServiceWhile,
+  setTenantIntegrationBundleWhile,
 } from "@/lib/tenant-integration-store";
 import { providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
 import {
+  beginDisconnect,
   claimConnection,
   deleteUnprovenClaim,
   findActiveConnection,
+  finishDisconnect,
   listRecentHealthChecks,
   markConnectionError,
+  pendingClaimGuard,
   recordHealthCheck,
   restoreRevokedClaim,
-  revokeConnection,
   toPublicConnection,
   type ClaimResult,
   type PublicConnection,
@@ -38,7 +40,7 @@ import {
 } from "@/lib/connections/health";
 import { slackDisconnectStatements } from "@/lib/slack/routing";
 import { readBotToken } from "@/lib/connections/token-store";
-import { revokeToken as revokeSlackToken } from "@/lib/slack/client";
+import { SLACK_TOKEN_ALREADY_DEAD, revokeToken as revokeSlackToken } from "@/lib/slack/client";
 
 export type ConnectionsActor = {
   tenantId: string;
@@ -161,6 +163,7 @@ export async function connectWithRestrictedKey(
         `This ${provider.label} account is already connected to another OASIS workspace. It has to be disconnected there before it can be connected here.`,
       );
     }
+    if (claim.error === "connection_busy") return connectionBusy(provider);
     return fail(
       409,
       "provider_already_connected",
@@ -169,13 +172,17 @@ export async function connectWithRestrictedKey(
   }
 
   const conn = claim.connection;
-  const saved = await setTenantIntegrationValue({
+  // Saved only while the row is still this claim (its generation): a
+  // disconnect that started in between keeps the key out entirely.
+  const saved = await setTenantIntegrationBundleWhile(deps.db, {
     tenantId: actor.tenantId,
     service: credentialServiceFor(conn.id),
-    fieldKey: provider.restrictedKey.credentialField,
-    value: check.key,
+    bundle: { [provider.restrictedKey.credentialField]: check.key },
     createdBy: actor.profileId,
+    guard: pendingClaimGuard(actor.tenantId, conn.id, conn.token_version),
+    now: deps.now(),
   });
+  if (!saved.ok && saved.error === "guard_refused") return connectionBusy(provider);
   if (!saved.ok) {
     console.error("[connections.connect] credential save failed", {
       tenantId: actor.tenantId,
@@ -198,7 +205,11 @@ export async function connectWithRestrictedKey(
     accountLabel: result.accountLabel,
     environment: result.environment,
     now: deps.now(),
+    generation: conn.token_version,
   });
+  // A disconnect took the row after the key went in: it owns it now, and its
+  // own batch deletes the key. Never "connected" for a row that is going away.
+  if (!recorded.recorded) return connectionBusy(provider);
   await auditConnection({
     tenantId: actor.tenantId,
     actor: { userId: actor.userId, email: actor.email },
@@ -231,6 +242,9 @@ export async function connectWithRestrictedKey(
  * would refuse every later connect with provider_already_connected and tell
  * the owner nothing, while an errored one says what happened and can be
  * disconnected from its card.
+ *
+ * Every step is fenced on the claim's own generation: once a disconnect (or a
+ * newer claim) has moved the row on, the undo touches nothing of theirs.
  */
 export async function undoUnsavedClaim(
   deps: ConnectionsDeps,
@@ -238,13 +252,14 @@ export async function undoUnsavedClaim(
   claim: Extract<ClaimResult, { ok: true }>,
 ): Promise<void> {
   const connectionId = claim.connection.id;
+  const generation = claim.connection.token_version;
   const reactivated = claim.previous?.revoked_at ? claim.previous : null;
   if (claim.created || reactivated) {
     let undone = false;
     try {
       undone = reactivated
-        ? await restoreRevokedClaim(deps.db, { tenantId, previous: reactivated, now: deps.now() })
-        : await deleteUnprovenClaim(deps.db, tenantId, connectionId);
+        ? await restoreRevokedClaim(deps.db, { tenantId, previous: reactivated, now: deps.now(), generation })
+        : await deleteUnprovenClaim(deps.db, tenantId, connectionId, generation);
     } catch (err) {
       console.error("[connections.connect] undoing the claim threw", {
         tenantId,
@@ -261,7 +276,17 @@ export async function undoUnsavedClaim(
     code: "credential_missing",
     detail: "OASIS could not save the new key. Paste it again.",
     now: deps.now(),
+    generation,
   });
+}
+
+/** A connect that met a disconnect of the same connection (or another connect) mid-way: nothing was connected. */
+function connectionBusy(provider: ProviderDef): ServiceResult {
+  return fail(
+    409,
+    "connection_busy",
+    `${provider.label} was being disconnected or connected at the same moment, so nothing was connected. Wait a moment, then try again.`,
+  );
 }
 
 // ── Test again ────────────────────────────────────────────────────────────
@@ -282,9 +307,6 @@ export async function testConnection(
 
 // ── Disconnect ────────────────────────────────────────────────────────────
 
-/** Slack's answers that mean a token is already dead: revoked, the app removed, or the workspace gone. */
-const SLACK_TOKEN_ALREADY_DEAD: ReadonlySet<string> = new Set(["invalid_auth", "token_revoked", "account_inactive"]);
-
 type SlackTokenOff = { ok: true; slackToken: "revoked" | "already_invalid" | "not_stored" } | { ok: false; result: ServiceResult };
 
 /**
@@ -293,10 +315,13 @@ type SlackTokenOff = { ok: true; slackToken: "revoked" | "already_invalid" | "no
  * an active bot user, in the client's Slack. A token Slack already refuses
  * (invalid_auth, token_revoked, account_inactive) counts as off. Anything else
  * (a timeout, a network failure, a rate limit, any other answer) is not known
- * to be off, so nothing is deleted and the owner is told to try again. So is
- * a stored token that cannot be read: it may become readable again (a missing
- * encryption key), and only then can it be switched off. The token is never
- * logged.
+ * to be off, so nothing is deleted. So is a stored token that cannot be read:
+ * it may become readable again (a missing encryption key), and only then can
+ * it be switched off. The token is never logged.
+ *
+ * Runs after beginDisconnect, so the token read here is the generation's own:
+ * no install can store another under a disconnecting row. When it fails the
+ * row stays disconnecting (OASIS no longer uses it) and the owner is told so.
  */
 async function switchOffSlackToken(deps: ConnectionsDeps, tenantId: string, connectionId: string): Promise<SlackTokenOff> {
   const token = await readBotToken(tenantId, connectionId);
@@ -308,8 +333,8 @@ async function switchOffSlackToken(deps: ConnectionsDeps, tenantId: string, conn
       ok: false,
       result:
         token.reason === "lookup_failed"
-          ? fail(503, "slack_token_unavailable", "OASIS could not read its Slack token just now, so nothing was disconnected. Try again in a minute.")
-          : fail(500, "slack_token_unreadable", "OASIS could not read its saved Slack token, so it could not switch it off in Slack. Nothing was disconnected. Tell OASIS support."),
+          ? unfinished(503, "slack_token_unavailable", "OASIS could not read its Slack token just now, so it could not switch it off in Slack yet. OASIS has stopped using this Slack workspace. Press Disconnect again in a minute to finish.")
+          : unfinished(500, "slack_token_unreadable", "OASIS could not read its saved Slack token, so it could not switch it off in Slack. OASIS has stopped using this Slack workspace. Tell OASIS support."),
     };
   }
   const r = await revokeSlackToken(token.token, { fetchImpl: deps.fetchImpl });
@@ -323,20 +348,35 @@ async function switchOffSlackToken(deps: ConnectionsDeps, tenantId: string, conn
   });
   return {
     ok: false,
-    result: fail(
+    result: unfinished(
       502,
       "slack_revoke_failed",
-      "Slack did not confirm it switched off OASIS's access, so Slack is still connected and nothing was deleted. Try Disconnect again in a minute.",
+      "Slack did not confirm it switched off OASIS's access. OASIS has stopped using this Slack workspace, but the disconnect is not finished. Press Disconnect again in a minute to finish.",
     ),
   };
 }
 
+/** A disconnect that began and could not finish: the row stays disconnecting, and the next press finishes it. */
+function unfinished(status: number, error: string, message: string): ServiceResult {
+  return fail(status, error, message, { disconnecting: true });
+}
+
 /**
- * Slack only: switch the bot token off at Slack first (switchOffSlackToken);
- * until Slack confirms it, nothing below runs and the connection stays as it
- * was. Then delete the stored credential, then mark the connection revoked. If
- * the delete fails the connection stays and the caller gets a 500: a card must
- * never say "disconnected" while the key is still stored.
+ * Disconnect this workspace's live connection, in three steps:
+ *   1. beginDisconnect: claim the connection's next generation and mark it
+ *      disconnecting (compare-and-set on the generation read). From here
+ *      nothing uses it, no install may store a token under it, and work bound
+ *      to the old generation writes nothing. A connect in between moved the
+ *      generation, so this refuses (connection_busy) rather than race it.
+ *   2. Slack only: switch the bot token off at Slack (switchOffSlackToken).
+ *   3. finishDisconnect: ONE batch revokes the row (compare-and-set on the
+ *      claimed generation), drops its routes, and deletes its credential and
+ *      the provider's own data, each fenced on that revocation. A card never
+ *      says "disconnected" while a key is stored, nor "connected" after the
+ *      token was switched off.
+ * A failure after step 1 leaves the row disconnecting, durably: the card says
+ * the disconnect did not finish, and the next Disconnect takes the next
+ * generation and finishes it (a token Slack already refuses counts as off).
  */
 export async function disconnectConnection(
   deps: ConnectionsDeps,
@@ -345,6 +385,16 @@ export async function disconnectConnection(
 ): Promise<ServiceResult> {
   const row = await findActiveConnection(deps.db, actor.tenantId, provider.id);
   if (!row) return { status: 200, body: { ok: true, already_disconnected: true } };
+
+  const generation = await beginDisconnect(deps.db, {
+    tenantId: actor.tenantId,
+    connectionId: row.id,
+    generation: row.token_version,
+    now: deps.now(),
+  });
+  if (generation === null) {
+    return fail(409, "connection_busy", `${provider.label} changed while it was being disconnected. Try Disconnect again.`);
+  }
 
   // Whichever Slack app it was installed with (OASIS's or the workspace's
   // own), the bot token is the connection's own, and goes off the same way.
@@ -355,38 +405,46 @@ export async function disconnectConnection(
     slackToken = off.slackToken;
   }
 
-  // What the provider kept that must go with the connection (Slack: the
-  // channel map and the people it looked up). Worked out before anything is
-  // deleted, and deleted in the revoke's own batch.
-  const alsoDelete = provider.id === "slack" ? await slackDisconnectStatements(deps.db, actor.tenantId, row.external_account_id) : [];
-
-  const removed = await deleteTenantIntegrationService({ tenantId: actor.tenantId, service: credentialServiceFor(row.id) });
-  if (!removed.ok) {
-    console.error("[connections.disconnect] credential delete failed", {
+  let finished: Awaited<ReturnType<typeof finishDisconnect>>;
+  try {
+    // The credential, and what the provider kept that must go with the
+    // connection (Slack: the channel map and the people it looked up), all in
+    // the revoke's own batch and fenced on it.
+    finished = await finishDisconnect(deps.db, {
+      tenantId: actor.tenantId,
+      connectionId: row.id,
+      generation,
+      revokedBy: actor.userId,
+      now: deps.now(),
+      alsoDelete: async (revoked) => [
+        deleteTenantIntegrationServiceWhile({ tenantId: actor.tenantId, service: credentialServiceFor(row.id), guard: revoked }),
+        ...(provider.id === "slack" ? await slackDisconnectStatements(deps.db, actor.tenantId, row.external_account_id, revoked) : []),
+      ],
+    });
+  } catch (err) {
+    console.error("[connections.disconnect] the finishing batch failed; the connection stays disconnecting", {
       tenantId: actor.tenantId,
       provider: provider.id,
       connectionId: row.id,
-      error: removed.error,
+      error: err instanceof Error ? err.message : String(err),
     });
-    return fail(
+    return unfinished(
       500,
-      "credential_delete_failed",
+      "disconnect_unfinished",
       slackToken === "revoked" || slackToken === "already_invalid"
-        ? "Slack's access is switched off, but OASIS could not finish removing the connection here. Press Disconnect again."
-        : "OASIS could not delete the stored key, so nothing was disconnected. Try again.",
+        ? "Slack's access is switched off, but OASIS could not finish removing the connection here. Press Disconnect again to finish."
+        : "OASIS could not finish removing the connection. It is no longer used. Press Disconnect again to finish.",
     );
   }
-  const revoked = await revokeConnection(deps.db, {
-    tenantId: actor.tenantId,
-    connectionId: row.id,
-    revokedBy: actor.userId,
-    now: deps.now(),
-    alsoDelete,
-  });
-  if (!revoked) {
-    // Revoked concurrently (another tab). The key is gone either way.
-    return { status: 200, body: { ok: true, already_disconnected: true } };
+  if (!finished.revoked) {
+    // Another Disconnect took the next generation and finished (or is
+    // finishing) it: this one changed nothing.
+    const now = await findActiveConnection(deps.db, actor.tenantId, provider.id);
+    return now
+      ? fail(409, "connection_busy", `${provider.label} changed while it was being disconnected. Try Disconnect again.`)
+      : { status: 200, body: { ok: true, already_disconnected: true } };
   }
+  const credentialsDeleted = finished.deleted[0] ?? 0;
   await auditConnection({
     tenantId: actor.tenantId,
     actor: { userId: actor.userId, email: actor.email },
@@ -395,13 +453,13 @@ export async function disconnectConnection(
     after: {
       provider: provider.id,
       account_id: row.external_account_id,
-      credentials_deleted: removed.deleted,
+      credentials_deleted: credentialsDeleted,
       ...(slackToken ? { slack_token: slackToken } : {}),
     },
   });
   return {
     status: 200,
-    body: { ok: true, disconnected: true, credentials_deleted: removed.deleted, ...(slackToken ? { slack_token: slackToken } : {}) },
+    body: { ok: true, disconnected: true, credentials_deleted: credentialsDeleted, ...(slackToken ? { slack_token: slackToken } : {}) },
   };
 }
 
