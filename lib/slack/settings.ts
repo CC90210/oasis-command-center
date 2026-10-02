@@ -24,15 +24,14 @@ import { findActiveConnection, toPublicConnection, type PublicConnection } from 
 import { missingProviderEnv, providerAvailability, providerById } from "@/lib/connections/registry";
 import { chatAppsFrom, readManifestIntegrations } from "@/lib/jev/mode";
 import { isSlackSchemaMissing, listChannelRoutes, type ChannelRoute } from "@/lib/slack/routing";
-import { readSlackOwnApp, slackInstallsPossible, type SlackOwnAppRead } from "@/lib/slack/own-app";
-import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
+import { readSlackOwnApp, slackAppKindFor, slackInstallsPossible, type SlackOwnAppRead } from "@/lib/slack/own-app";
 
 export type SlackSettings = {
   /** There is an app this workspace can install here (`installApp` is not null). */
   appConfigured: boolean;
   /** The app Add to Slack installs for this workspace: its own, OASIS's, or none yet. */
   installApp: "own" | "oasis" | null;
-  /** This workspace's own Slack app: saved, partly saved, not saved, or unreadable. */
+  /** A client's own Slack app: saved, partly saved, not saved, or unreadable. Always "none" for OASIS's own workspace. */
   ownApp: SlackOwnAppRead["state"];
   /** OASIS's own workspace (it installs the OASIS app); every other is a client. */
   oasisWorkspace: boolean;
@@ -55,14 +54,20 @@ export async function loadSlackSettings(
   const env = opts.env ?? process.env;
   const slack = providerById("slack");
   const oasisAppReady = !!slack && providerAvailability(slack, env) === "live";
-  const oasisWorkspace = tenantMayUseEnvFallback(tenantId);
-  const own = await readSlackOwnApp(tenantId);
+  // The one rule (lib/slack/own-app.ts slackAppKindFor): OASIS's own workspace
+  // installs the OASIS app, and a Slack app it saved plays no part (read as
+  // "none"); a client installs its own saved app, never OASIS's (CC: the
+  // client brings its own Slack app).
+  const oasisWorkspace = slackAppKindFor(tenantId) === "oasis";
+  const own: SlackOwnAppRead = oasisWorkspace ? { state: "none" } : await readSlackOwnApp(tenantId);
   const installsPossible = slackInstallsPossible(env);
-  // A saved own app is this workspace's app wherever installs can run; with
-  // none, OASIS's own workspace installs the OASIS app, and a client has none
-  // until it saves its own (CC: the client brings its own Slack app).
-  const installApp: SlackSettings["installApp"] =
-    own.state === "saved" && installsPossible ? "own" : own.state === "none" && oasisWorkspace && oasisAppReady ? "oasis" : null;
+  const installApp: SlackSettings["installApp"] = oasisWorkspace
+    ? oasisAppReady
+      ? "oasis"
+      : null
+    : own.state === "saved" && installsPossible
+      ? "own"
+      : null;
   const conn = await findActiveConnection(db, tenantId, "slack");
   let routes: ChannelRoute[] | null = null;
   let routesNotInstalled = false;

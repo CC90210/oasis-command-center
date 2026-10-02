@@ -37,6 +37,8 @@ import {
   type ConnectionsDeps,
 } from "@/lib/connections/health";
 import { slackDisconnectStatements } from "@/lib/slack/routing";
+import { readBotToken } from "@/lib/connections/token-store";
+import { revokeToken as revokeSlackToken } from "@/lib/slack/client";
 
 export type ConnectionsActor = {
   tenantId: string;
@@ -280,10 +282,61 @@ export async function testConnection(
 
 // ── Disconnect ────────────────────────────────────────────────────────────
 
+/** Slack's answers that mean a token is already dead: revoked, the app removed, or the workspace gone. */
+const SLACK_TOKEN_ALREADY_DEAD: ReadonlySet<string> = new Set(["invalid_auth", "token_revoked", "account_inactive"]);
+
+type SlackTokenOff = { ok: true; slackToken: "revoked" | "already_invalid" | "not_stored" } | { ok: false; result: ServiceResult };
+
 /**
- * Delete the stored credential FIRST, then mark the connection revoked. If the
- * delete fails the connection stays as it was and the caller gets a 500: a
- * card must never say "disconnected" while the key is still stored.
+ * Switch a Slack connection's bot token off AT SLACK (auth.revoke) before
+ * OASIS forgets it: deleting OASIS's copy alone would leave a live token, and
+ * an active bot user, in the client's Slack. A token Slack already refuses
+ * (invalid_auth, token_revoked, account_inactive) counts as off. Anything else
+ * (a timeout, a network failure, a rate limit, any other answer) is not known
+ * to be off, so nothing is deleted and the owner is told to try again. So is
+ * a stored token that cannot be read: it may become readable again (a missing
+ * encryption key), and only then can it be switched off. The token is never
+ * logged.
+ */
+async function switchOffSlackToken(deps: ConnectionsDeps, tenantId: string, connectionId: string): Promise<SlackTokenOff> {
+  const token = await readBotToken(tenantId, connectionId);
+  if (!token.ok) {
+    // No token stored: OASIS holds nothing that could still reach Slack.
+    if (token.reason === "missing") return { ok: true, slackToken: "not_stored" };
+    console.error("[connections.disconnect] the Slack token could not be read, so it was not switched off", { tenantId, connectionId, reason: token.reason });
+    return {
+      ok: false,
+      result:
+        token.reason === "lookup_failed"
+          ? fail(503, "slack_token_unavailable", "OASIS could not read its Slack token just now, so nothing was disconnected. Try again in a minute.")
+          : fail(500, "slack_token_unreadable", "OASIS could not read its saved Slack token, so it could not switch it off in Slack. Nothing was disconnected. Tell OASIS support."),
+    };
+  }
+  const r = await revokeSlackToken(token.token, { fetchImpl: deps.fetchImpl });
+  if (r.ok && r.data.revoked === true) return { ok: true, slackToken: "revoked" };
+  if (!r.ok && SLACK_TOKEN_ALREADY_DEAD.has(r.error)) return { ok: true, slackToken: "already_invalid" };
+  console.error("[connections.disconnect] Slack did not confirm the token was switched off; nothing deleted", {
+    tenantId,
+    connectionId,
+    error: r.ok ? "not_revoked" : r.error,
+    status: r.ok ? null : r.status,
+  });
+  return {
+    ok: false,
+    result: fail(
+      502,
+      "slack_revoke_failed",
+      "Slack did not confirm it switched off OASIS's access, so Slack is still connected and nothing was deleted. Try Disconnect again in a minute.",
+    ),
+  };
+}
+
+/**
+ * Slack only: switch the bot token off at Slack first (switchOffSlackToken);
+ * until Slack confirms it, nothing below runs and the connection stays as it
+ * was. Then delete the stored credential, then mark the connection revoked. If
+ * the delete fails the connection stays and the caller gets a 500: a card must
+ * never say "disconnected" while the key is still stored.
  */
 export async function disconnectConnection(
   deps: ConnectionsDeps,
@@ -292,6 +345,15 @@ export async function disconnectConnection(
 ): Promise<ServiceResult> {
   const row = await findActiveConnection(deps.db, actor.tenantId, provider.id);
   if (!row) return { status: 200, body: { ok: true, already_disconnected: true } };
+
+  // Whichever Slack app it was installed with (OASIS's or the workspace's
+  // own), the bot token is the connection's own, and goes off the same way.
+  let slackToken: "revoked" | "already_invalid" | "not_stored" | null = null;
+  if (provider.id === "slack") {
+    const off = await switchOffSlackToken(deps, actor.tenantId, row.id);
+    if (!off.ok) return off.result;
+    slackToken = off.slackToken;
+  }
 
   // What the provider kept that must go with the connection (Slack: the
   // channel map and the people it looked up). Worked out before anything is
@@ -306,7 +368,13 @@ export async function disconnectConnection(
       connectionId: row.id,
       error: removed.error,
     });
-    return fail(500, "credential_delete_failed", "OASIS could not delete the stored key, so nothing was disconnected. Try again.");
+    return fail(
+      500,
+      "credential_delete_failed",
+      slackToken === "revoked" || slackToken === "already_invalid"
+        ? "Slack's access is switched off, but OASIS could not finish removing the connection here. Press Disconnect again."
+        : "OASIS could not delete the stored key, so nothing was disconnected. Try again.",
+    );
   }
   const revoked = await revokeConnection(deps.db, {
     tenantId: actor.tenantId,
@@ -324,9 +392,17 @@ export async function disconnectConnection(
     actor: { userId: actor.userId, email: actor.email },
     action: "connection.revoked",
     connectionId: row.id,
-    after: { provider: provider.id, account_id: row.external_account_id, credentials_deleted: removed.deleted },
+    after: {
+      provider: provider.id,
+      account_id: row.external_account_id,
+      credentials_deleted: removed.deleted,
+      ...(slackToken ? { slack_token: slackToken } : {}),
+    },
   });
-  return { status: 200, body: { ok: true, disconnected: true, credentials_deleted: removed.deleted } };
+  return {
+    status: 200,
+    body: { ok: true, disconnected: true, credentials_deleted: removed.deleted, ...(slackToken ? { slack_token: slackToken } : {}) },
+  };
 }
 
 // ── Status ────────────────────────────────────────────────────────────────

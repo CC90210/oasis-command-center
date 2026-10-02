@@ -12,11 +12,12 @@
  * response: on the SLACK_AGENT_JOBS Cloudflare Queue when the Worker has that
  * binding, otherwise in after() (lib/slack/jobs.ts dispatchSlackMentionJob).
  *
- * TWO KINDS OF CALLER. With no query string, OASIS's own Slack app (checked
- * with SLACK_SIGNING_SECRET, unchanged). With ?workspace=<id>, a workspace's
- * own Slack app: checked with that workspace's signing secret only, and its
- * events count only for the Slack team routed to that workspace
- * (lib/slack/own-app.ts slackRequestScope).
+ * TWO KINDS OF CALLER. With no query string, OASIS's own Slack app: checked
+ * with SLACK_SIGNING_SECRET, and its events count only for OASIS's own
+ * workspaces. With ?workspace=<id>, a client's own Slack app: checked with that
+ * client's signing secret only, and its events count only for the Slack team
+ * routed to that client (lib/slack/own-app.ts slackRequestScope and
+ * slackAppMaySpeakFor).
  */
 import { NextResponse, after, type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
         db,
         now,
         env: scope.env,
-        expectTenantId: scope.expectTenantId,
+        app: scope.app,
         dispatchMention: async (job) =>
           dispatchSlackMentionJob(job, {
             queue: await slackJobQueueBinding(),

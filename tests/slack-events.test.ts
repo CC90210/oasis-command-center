@@ -305,6 +305,18 @@ async function main() {
   };
   await connect(ALPHA, TEAM_A, "conn-slack-a", TOKEN_A, BOT_A);
   await connect(BRAVO_CO, TEAM_B, "conn-slack-b", TOKEN_B, "UBOTBRAVO");
+  // ALPHA is a client, so it uses its OWN Slack app (lib/slack/own-app.ts
+  // slackAppKindFor): saved here, its signing secret is the one this suite
+  // signs with. BRAVO_CO saved none.
+  const { setTenantIntegrationBundle } = await import("../lib/tenant-integration-store");
+  const alphaApp = await setTenantIntegrationBundle({
+    tenantId: ALPHA,
+    service: "slack_app",
+    bundle: { client_id: "1234.5678", client_secret: "alphaownappclientsecret00000001", signing_secret: process.env.SLACK_SIGNING_SECRET! },
+  });
+  if (!alphaApp.ok) throw new Error(`fixture: ALPHA's Slack app was not saved: ${alphaApp.error}`);
+  /** ALPHA's own app: what slackRequestScope gives a request at ALPHA's own Request URLs. */
+  const ALPHA_APP = { kind: "own", tenantId: ALPHA } as const;
   const now = () => new Date();
   await routing.saveChannelRoute(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0CLIENTS", channelName: "clients", department: "client_success", customerId: CUSTOMER_A, createdBy: null, now: now() });
   await routing.saveChannelRoute(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0GENERAL", channelName: "general", department: null, customerId: null, createdBy: null, now: now() });
@@ -344,9 +356,12 @@ async function main() {
   });
   const dispatched: Array<Parameters<typeof jobs.runSlackMentionJob>[0]> = [];
   let dispatchThrows = false;
+  // Events checked as ALPHA's own app (its Request URL carries ?workspace=ALPHA);
+  // they may act only for ALPHA. A check about another workspace says so.
   const deps = () => ({
     db,
     now,
+    app: ALPHA_APP as { kind: "own"; tenantId: string },
     dispatchMention: async (job: Parameters<typeof jobs.runSlackMentionJob>[0]) => {
       if (dispatchThrows) throw new Error("queue down");
       dispatched.push(job);
@@ -448,7 +463,11 @@ async function main() {
 
   await check("the same channel id under ANOTHER team does not mirror into the first workspace", async () => {
     const before = (await slackRows()).length;
-    const r = await events.handleSlackEvents(signed(eventBody(message("UBMEMBER", "C0CLIENTS", "bravo side"), { team: TEAM_B })), deps());
+    // At Bravo's own Request URL (its own app), where team B's events arrive.
+    const r = await events.handleSlackEvents(signed(eventBody(message("UBMEMBER", "C0CLIENTS", "bravo side"), { team: TEAM_B })), {
+      ...deps(),
+      app: { kind: "own", tenantId: BRAVO_CO },
+    });
     assert.equal(r.status, 200);
     assert.equal(r.body.ignored, "channel_not_mapped", "Bravo never mapped C0CLIENTS");
     assert.equal((await slackRows()).length, before);
@@ -616,7 +635,7 @@ async function main() {
       actions: [{ action_id: send.APPROVE_ACTION_ID, value }],
     };
     const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
-    return interactivity.handleSlackInteractivity(signed(body), { db, now });
+    return interactivity.handleSlackInteractivity(signed(body), { db, now, app: ALPHA_APP });
   };
 
   await check("a teammate who is not an owner or admin cannot approve from Slack; nothing is posted", async () => {
@@ -854,7 +873,11 @@ async function main() {
     assert.deepEqual(status.slackHomeFor(alpha, ["client_success"]), { kind: "channels", names: ["clients"] });
     assert.deepEqual(status.slackHomeFor(alpha, ["sales"]), { kind: "mention_only" });
     assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, OASIS, env), ["sales"]), { kind: "not_connected" });
-    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, ALPHA, {}), ["sales"]), { kind: "not_configured" });
+    // OASIS's own workspace with OASIS's app not on the deployment: nothing can answer.
+    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, OASIS, {}), ["sales"]), { kind: "not_configured" });
+    // A client is never served by OASIS's app: connected, but with no Slack app
+    // of its own, nothing can answer, even with OASIS's app on the deployment.
+    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, BRAVO_CO, env), ["sales"]), { kind: "not_configured" });
     assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(null, ALPHA, env), ["sales"]), { kind: "unknown" });
 
     const React = await import("react");
@@ -1124,9 +1147,10 @@ async function main() {
       actions: [{ action_id: send.APPROVE_ACTION_ID, value: `${id}|${hash}` }],
     };
     const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
+    // ALPHA is a client: its presses arrive at its own Interactivity URL.
     const req = (b: string, sig?: string) => {
       const s = signed(b);
-      return new NextRequest("https://oasisai.work/api/webhooks/slack/interactivity", {
+      return new NextRequest(`https://oasisai.work/api/webhooks/slack/interactivity?workspace=${ALPHA}`, {
         method: "POST",
         body: b,
         headers: { "content-type": "application/x-www-form-urlencoded", "x-slack-request-timestamp": s.timestamp, "x-slack-signature": sig ?? s.signature },

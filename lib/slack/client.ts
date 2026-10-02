@@ -7,6 +7,9 @@
  *   oauth.v2.access     finish an install (the code for a bot token)
  *   auth.test           the connection's health probe: is the token alive,
  *                       and which team is it for
+ *   auth.revoke         switch the bot token off at Slack on disconnect (the
+ *                       bot user is deactivated; the app stays installed until
+ *                       someone removes it in Slack)
  *   users.info          who wrote a message: guest? another company's user?
  *                       which email (to link to a teammate)?
  *   conversations.list  the public channels the Settings channel map offers
@@ -111,6 +114,15 @@ export type SlackAuthTest = { team_id?: string; team?: string; user_id?: string;
 
 export function authTest(token: string, opts: Opts = {}): Promise<SlackCallResult<SlackAuthTest>> {
   return call<SlackAuthTest>("auth.test", {}, { ...opts, token });
+}
+
+// -- auth.revoke -------------------------------------------------------------
+
+/** Slack answers { ok: true, revoked: true } once the token is switched off. */
+export type SlackRevoked = { revoked?: boolean };
+
+export function revokeToken(token: string, opts: Opts = {}): Promise<SlackCallResult<SlackRevoked>> {
+  return call<SlackRevoked>("auth.revoke", new URLSearchParams(), { ...opts, token });
 }
 
 // -- users.info --------------------------------------------------------------

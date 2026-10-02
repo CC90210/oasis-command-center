@@ -4,8 +4,9 @@
  *
  * Public by path, authenticated INSIDE with Slack's v0 signature over the raw
  * form body (lib/slack/verify.ts): OASIS's app's secret with no query string,
- * or, with ?workspace=<id>, that workspace's own app's secret only, for the
- * Slack team routed to that workspace (lib/slack/own-app.ts slackRequestScope).
+ * for OASIS's own workspaces only, or, with ?workspace=<id>, that client's own
+ * app's secret only, for the Slack team routed to that client
+ * (lib/slack/own-app.ts slackRequestScope and slackAppMaySpeakFor).
  * Slack wants the press acknowledged within
  * 3 seconds, so this answers as soon as the signature and the press are read
  * (acceptSlackInteraction) and runs the press's work after the answer, in
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
     if (!scope.ok) return NextResponse.json(scope.body, { status: scope.status, headers: NO_STORE });
     const accepted = await acceptSlackInteraction(
       { rawBody, timestamp, signature },
-      { db: getTursoClient(), now: () => new Date(), env: scope.env, expectTenantId: scope.expectTenantId },
+      { db: getTursoClient(), now: () => new Date(), env: scope.env, app: scope.app },
     );
     const work = accepted.work;
     if (work) {

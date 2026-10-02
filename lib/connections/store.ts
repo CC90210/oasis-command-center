@@ -758,10 +758,12 @@ export async function listConnectionsDueForHealth(
     providers: readonly string[];
     /**
      * Also this provider's connections in workspaces that saved every one of
-     * these credential fields (Slack: a workspace's own Slack app, which keeps
-     * its connection checkable where OASIS's app is not set up). Presence only.
+     * these credential fields (Slack: a client's own Slack app, which keeps
+     * its connection checkable where OASIS's app is not set up), except the
+     * workspaces in `exceptTenantIds` (Slack: OASIS's own, whose saved app
+     * plays no part). Presence only.
      */
-    alsoWhereTenantSaved?: { provider: string; service: string; fields: readonly string[] };
+    alsoWhereTenantSaved?: { provider: string; service: string; fields: readonly string[]; exceptTenantIds?: readonly string[] };
     staleBefore: Date;
     limit: number;
   },
@@ -775,11 +777,14 @@ export async function listConnectionsDueForHealth(
     args.push(...input.providers);
   }
   if (also) {
+    const except = also.exceptTenantIds ?? [];
     which.push(`(provider = ? AND tenant_id IN (
               SELECT tenant_id FROM tenant_integration_credentials
               WHERE service = ? AND field_key IN (${also.fields.map(() => "?").join(", ")})
-              GROUP BY tenant_id HAVING COUNT(DISTINCT field_key) = ?))`);
-    args.push(also.provider, also.service, ...also.fields, also.fields.length);
+              GROUP BY tenant_id HAVING COUNT(DISTINCT field_key) = ?)${
+                except.length > 0 ? ` AND tenant_id NOT IN (${except.map(() => "?").join(", ")})` : ""
+              })`);
+    args.push(also.provider, also.service, ...also.fields, also.fields.length, ...except);
   }
   const rs = await db.execute({
     sql: `SELECT ${CONNECTION_COLUMNS} FROM tenant_connections

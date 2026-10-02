@@ -17,11 +17,13 @@
  * A browser navigation lands back on the provider's settings page with a
  * reason code (?slack=error&reason=...), never on a JSON error page.
  *
- * WHOSE SLACK APP. A workspace that saved its own Slack app (Settings >
- * Connections > Slack) installs THAT app: its client ID goes to Slack and its
- * secret finishes the install (lib/slack/own-app.ts slackInstallEnv). With
- * nothing saved, OASIS's app, exactly as before. A half-saved or unreadable
- * app is refused, never swapped for OASIS's.
+ * WHOSE SLACK APP (lib/slack/own-app.ts slackInstallEnv, one rule by
+ * workspace id). OASIS's own workspaces install OASIS's app (a Slack app they
+ * saved plays no part). A client installs the app it saved in Settings >
+ * Connections > Slack: its client ID goes to Slack and its secret finishes the
+ * install. A client with no app saved, part of one, or one that cannot be read
+ * is refused (own_app_missing / own_app_incomplete / own_app_unreadable),
+ * never given OASIS's app, even where OASIS's app is set up.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveProvider } from "@/lib/connections/service";

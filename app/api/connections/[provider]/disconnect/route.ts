@@ -4,6 +4,12 @@
  * is marked revoked (and its webhook routes dropped). Owner/admin only; the
  * tenant is the session's, so another workspace's connection cannot be named.
  *
+ * Slack (either app, OASIS's or the workspace's own): before anything is
+ * deleted, the bot token is switched off at Slack (auth.revoke). Until Slack
+ * confirms it, or says the token is already dead, nothing is deleted and the
+ * answer says Slack is still connected, so Disconnect can simply be pressed
+ * again (lib/connections/service.ts switchOffSlackToken).
+ *
  * Idempotent: nothing connected answers 200 { already_disconnected: true }.
  * If the key cannot be deleted, nothing is marked revoked and the answer is 500.
  *

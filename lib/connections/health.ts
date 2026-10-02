@@ -37,7 +37,7 @@ import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { probeJevKey } from "@/lib/jev/client";
 import { authTest as slackAuthTest } from "@/lib/slack/client";
-import { SLACK_APP_FIELDS, SLACK_APP_SERVICE, slackAppFor } from "@/lib/slack/own-app";
+import { SLACK_APP_FIELDS, SLACK_APP_SERVICE, oasisSlackAppWorkspaceIds, slackAppFor } from "@/lib/slack/own-app";
 import {
   BOT_TOKEN_FIELD,
   HEALTH_RECHECK_AFTER_MS,
@@ -694,11 +694,13 @@ export async function runConnectionHealthPass(
   const providers = probedProviders();
   const due = await listConnectionsDueForHealth(deps.db, {
     providers,
-    // Where OASIS's Slack app is not set up, a workspace that saved its own
-    // Slack app still has a checkable Slack connection (probeStoredConnection).
+    // Where OASIS's Slack app is not set up, a client that saved its own Slack
+    // app still has a checkable Slack connection (probeStoredConnection).
+    // OASIS's own workspaces use only OASIS's app (lib/slack/own-app.ts), so a
+    // Slack app one of them saved never makes its connection checkable here.
     alsoWhereTenantSaved: providers.includes("slack")
       ? undefined
-      : { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS },
+      : { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS, exceptTenantIds: oasisSlackAppWorkspaceIds() },
     staleBefore: new Date(now.getTime() - HEALTH_RECHECK_AFTER_MS),
     limit: opts.limit ?? HEALTH_PASS_LIMIT,
   });

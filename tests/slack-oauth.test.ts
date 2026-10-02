@@ -61,8 +61,14 @@ stub("next/headers", {
   draftMode: async () => ({ isEnabled: false }),
 });
 
-const ALPHA = "a1a1a1a1-0000-4000-8000-0000000000a1";
-const BRAVO_CO = "b2b2b2b2-0000-4000-8000-0000000000b2";
+// OASIS's own two workspaces, by id: OASIS's Slack app installs ONLY into
+// OASIS's own workspaces (lib/slack/own-app.ts slackAppKindFor); a client
+// installs its own app (tests/slack-own-app.test.ts). Their slugs stay a
+// provisioned workspace's, so the channel map's roster is the manifest's (W4a).
+const ALPHA = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+const BRAVO_CO = "42423fde-be8b-454f-932a-750e8c9b743d";
+/** A client workspace: it never installs OASIS's app, and is shown its own path. */
+const CLIENT = "c3c3c3c3-0000-4000-8000-0000000000c3";
 type U = { id: string; email: string };
 const USERS: Record<"ownerA" | "adminA" | "ownerB" | "memberA", U> = {
   ownerA: { id: "0d000000-0000-4000-8000-000000000001", email: "owner@alpha.test" },
@@ -99,6 +105,8 @@ const CHANNELS: Record<string, { name: string; is_member: boolean; is_archived: 
   C0PARTNERS: { name: "partners", is_member: true, is_archived: false, is_ext_shared: true },
 };
 const exchanges: Array<Record<string, string>> = [];
+// auth.revoke: the token each disconnect switched off at Slack.
+const revocations: string[] = [];
 // conversations.list: "complete" ends after one page; "endless" always hands back a cursor,
 // so listPublicChannels gives up at its page cap and reports the list as truncated.
 let listMode: "complete" | "endless" = "complete";
@@ -127,6 +135,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
     const c = Object.values(CODES).find((x) => x.token === token);
     return json(c ? { ok: true, team_id: c.authTeam ?? c.team, team: c.name } : { ok: false, error: "invalid_auth" });
+  }
+  if (url.pathname === "/api/auth.revoke") {
+    const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
+    revocations.push(token);
+    return json(Object.values(CODES).some((x) => x.token === token) ? { ok: true, revoked: true } : { ok: false, error: "invalid_auth" });
   }
   if (url.pathname === "/api/conversations.info") {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
@@ -373,10 +386,13 @@ async function main() {
     assert.equal(alpha.account, "Alpha Slack");
     const bravo = (await loadConnectorStatuses({ tenantId: BRAVO_CO, userId: USERS.ownerB.id })).slack;
     assert.notEqual(bravo.kind, "connected", "another workspace's card is untouched");
-    // CC's model (W10a R1): a client connects its own Slack app
-    // (tests/slack-own-app.test.ts); OASIS's own workspace uses the OASIS app.
     assert.deepEqual([bravo.kind, bravo.label], ["not_connected", "Not connected"]);
-    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not set up yet"]]);
+    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["The OASIS Slack app", "Available"]]);
+    // CC's model (W10a R1): a client connects its own Slack app
+    // (tests/slack-own-app.test.ts), whatever OASIS's app is doing here.
+    const client = (await loadConnectorStatuses({ tenantId: CLIENT, userId: USERS.ownerB.id })).slack;
+    assert.deepEqual([client.kind, client.label], ["not_connected", "Not connected"]);
+    assert.deepEqual(client.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not set up yet"]]);
     const paths = connectors.connectorBySlug("slack")!.paths ?? [];
     assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", true]]);
     assert.ok(paths.every((p) => !/OASIS's own included|every workspace/i.test(p.body)), "no path claims to be every workspace's way in");
@@ -510,10 +526,14 @@ async function main() {
       args: [ALPHA, `p-${USERS.ownerA.id}`, at, at, at],
     });
     await login(USERS.ownerA);
+    const revokedBefore = revocations.length;
     const res = await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack"));
     const body = (await res.json()) as Record<string, unknown>;
     assert.equal(res.status, 200, JSON.stringify(body));
     assert.equal(body.disconnected, true);
+    // The bot token was switched off at Slack first, with the connection's own token.
+    assert.deepEqual(revocations.slice(revokedBefore), ["xoxb-alpha-install-token"]);
+    assert.equal(body.slack_token, "revoked");
     assert.equal(await routesOf(ALPHA), 0, "the channel map went with the connection");
     assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE tenant_id = ?", [ALPHA]), 0, "so did the Slack people");
     // The confirmation the owner reads before clicking says exactly that.

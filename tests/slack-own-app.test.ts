@@ -11,12 +11,21 @@
  * says "connected" or "Available" when nothing can be installed; setup steps
  * that do not match the URLs the code serves.
  *
+ * THE RULE (lib/slack/own-app.ts slackAppKindFor, 2026-10-02 review): OASIS's
+ * own workspaces use OASIS's app and only it; a client uses its own app and
+ * never OASIS's. So a client with nothing saved is refused at Add to Slack and
+ * at the callback even where OASIS's app is set up; OASIS's workspace ignores a
+ * Slack app it saved; OASIS's Request URLs act only for OASIS's workspaces; and
+ * Disconnect switches the bot token off at Slack (auth.revoke) before deleting
+ * anything, saying so when Slack does not confirm it.
+ *
  * Real routes, real session, real encrypted key store, real install, state and
  * signature checks on a local libSQL file (migrations bravo__187 and
- * bravo__197). Slack's oauth.v2.access and auth.test are mocked at the fetch
- * boundary (they check which app's client ID and secret were used); any other
- * host fails the test. OASIS's own Slack app path keeps its own suites
- * (tests/slack-oauth.test.ts, tests/slack-events.test.ts).
+ * bravo__197). Slack's oauth.v2.access, auth.test and auth.revoke are mocked at
+ * the fetch boundary (they check which app's client ID and secret were used,
+ * and which token was switched off); any other host fails the test. OASIS's
+ * own Slack app path keeps its own suites (tests/slack-oauth.test.ts,
+ * tests/slack-events.test.ts).
  *
  * Run: node --conditions=react-server --import tsx tests/slack-own-app.test.ts
  */
@@ -121,12 +130,22 @@ const CODES: Record<string, { app: string; team: string; name: string; token: st
   "code-a": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app" },
   "code-b": { app: APP_B.client_id, team: "T0CLIENTB", name: "Client B Slack", token: "xoxb-client-b-own-app" },
   "code-oasis": { app: OASIS_APP_ENV.SLACK_CLIENT_ID, team: "T0OASIS", name: "OASIS Slack", token: "xoxb-oasis-app" },
+  // OASIS's app installed in CLIENT B's Slack: a code OASIS's app really issues.
+  "code-b-oasis": { app: OASIS_APP_ENV.SLACK_CLIENT_ID, team: "T0CLIENTB", name: "Client B Slack", token: "xoxb-client-b-oasis-app" },
 };
 const exchanges: Array<Record<string, string>> = [];
+// auth.revoke: every token a disconnect sent, in order; the tokens Slack has
+// switched off; and how the next revoke fails (null: Slack answers normally).
+const revocations: string[] = [];
+const revokedAtSlack = new Set<string>();
+let revokeFails: null | "fatal_error" | "not_revoked" | "rate_limited" | "network" = null;
+// Every host + path the code called, so a check can prove a call never happened.
+const calls: string[] = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const url = new URL(href);
+  calls.push(`${url.hostname}${url.pathname}`);
   if (url.hostname !== "slack.com") throw new Error(`unexpected network call in test: ${href}`);
   const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   if (url.pathname === "/api/oauth.v2.access") {
@@ -140,7 +159,22 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.pathname === "/api/auth.test") {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
     const c = Object.values(CODES).find((x) => x.token === token);
+    if (c && revokedAtSlack.has(token)) return json({ ok: false, error: "token_revoked" });
     return json(c ? { ok: true, team_id: c.team, team: c.name } : { ok: false, error: "invalid_auth" });
+  }
+  if (url.pathname === "/api/auth.revoke") {
+    const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
+    revocations.push(token);
+    if (revokeFails === "network") throw new TypeError("fetch failed");
+    if (revokeFails === "rate_limited") {
+      return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "30" } });
+    }
+    if (revokeFails === "fatal_error") return json({ ok: false, error: "fatal_error" });
+    if (revokeFails === "not_revoked") return json({ ok: true, revoked: false });
+    if (!Object.values(CODES).some((x) => x.token === token)) return json({ ok: false, error: "invalid_auth" });
+    if (revokedAtSlack.has(token)) return json({ ok: false, error: "token_revoked" });
+    revokedAtSlack.add(token);
+    return json({ ok: true, revoked: true });
   }
   return json({ ok: false, error: "unknown_method" });
 }) as typeof fetch;
@@ -229,9 +263,12 @@ async function main() {
   const callbackRoute = await import("../app/api/connections/[provider]/callback/route");
   const eventsRoute = await import("../app/api/webhooks/slack/events/route");
   const interactivityRoute = await import("../app/api/webhooks/slack/interactivity/route");
+  const disconnectRoute = await import("../app/api/connections/[provider]/disconnect/route");
   const interactivity = await import("../lib/slack/interactivity");
   const ownApp = await import("../lib/slack/own-app");
   const registry = await import("../lib/connections/registry");
+  const oauthLib = await import("../lib/connections/oauth");
+  const { credentialServiceFor } = await import("../lib/connections/rules");
   const { loadConnectorStatuses, loadConnectorFacts } = await import("../components/os/connections/connector-facts");
   const { loadSlackSettings } = await import("../lib/slack/settings");
   const { decryptField } = await import("../lib/field-encryption");
@@ -369,6 +406,45 @@ async function main() {
     assert.equal(landed(await callback({ code: "code-a", state })).searchParams.get("reason"), "state_invalid");
   });
 
+  await check("a client with no Slack app of its own is never given OASIS's app, even where OASIS's app is set up: Add to Slack refuses and nothing starts", async () => {
+    await login(USERS.ownerB);
+    assert.equal((await ownApp.readSlackOwnApp(CLIENT_B)).state, "none");
+    const before = await count("SELECT COUNT(*) AS n FROM oauth_states");
+    await withOasisApp(async () => {
+      const to = landed(await authorize());
+      assert.equal(to.origin + to.pathname, "https://oasisai.work/settings/chat-apps", "never sent to Slack with OASIS's client ID");
+      assert.equal(to.searchParams.get("reason"), "own_app_missing");
+      assert.deepEqual(await ownApp.slackInstallEnv(CLIENT_B), { ok: false, reason: "own_app_missing" });
+    });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM oauth_states"), before, "no consent started");
+  });
+
+  await check("the callback refuses a client with no Slack app of its own, even with a valid state and OASIS's app set up: no code exchanged, nothing connected", async () => {
+    // A signed, stored, unexpired state naming OASIS's app for this client:
+    // exactly what Add to Slack issued a client with nothing saved before the
+    // rule. With it, a code OASIS's app really issued for the client's Slack.
+    const oasisEnv = { ...process.env, ...OASIS_APP_ENV };
+    const started = await oauthLib.startAuthorize(db, {
+      provider: registry.providerForEnv("slack", oasisEnv)!,
+      tenantId: CLIENT_B,
+      userId: USERS.ownerB.id,
+      scopes: [...registry.providerById("slack")!.scopes.base],
+      redirectUri: "https://oasisai.work/api/connections/slack/callback",
+      now: new Date(),
+      env: oasisEnv,
+    });
+    await login(USERS.ownerB);
+    const exchangesBefore = exchanges.length;
+    await withOasisApp(async () => {
+      const done = landed(await callback({ code: "code-b-oasis", state: started.state }));
+      assert.equal(done.searchParams.get("slack"), "error", done.search);
+      assert.equal(done.searchParams.get("reason"), "own_app_missing");
+    });
+    assert.equal(exchanges.length, exchangesBefore, "OASIS's client secret never met the client's code");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack'", [CLIENT_B]), 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE external_key = 'T0CLIENTB'"), 0);
+  });
+
   await check("a half-saved app is refused, never swapped for OASIS's app, even where OASIS's app is set up; nothing starts", async () => {
     await login(USERS.ownerB);
     assert.equal((await saveApp("client_id", APP_B.client_id)).status, 200);
@@ -393,6 +469,33 @@ async function main() {
       assert.equal(status.kind, "connected");
       assert.deepEqual(status.paths?.map((p) => [p.title, p.state]), [["The OASIS Slack app", "Available"]]);
     });
+  });
+
+  // A Slack app OASIS's own workspace saved anyway: well formed, and inert. It
+  // stays saved to the end, so the later checks also prove it is never read
+  // as OASIS's workspace's app (presence, the hourly pass).
+  const APP_O = { client_id: "5555555555.6666666666", client_secret: "oasissavedclientsecret0000000000", signing_secret: "oasissavedsigningsecret000000000" };
+
+  await check("OASIS's own workspace installs OASIS's app even with a Slack app saved: the saved one plays no part and has no Request URL", async () => {
+    await login(USERS.oasisOwner);
+    for (const [k, v] of Object.entries(APP_O)) assert.equal((await saveApp(k, v)).status, 200, k);
+    assert.equal((await ownApp.readSlackOwnApp(OASIS)).state, "saved");
+    await withOasisApp(async () => {
+      const loc = landed(await authorize());
+      assert.equal(loc.searchParams.get("client_id"), OASIS_APP_ENV.SLACK_CLIENT_ID, "OASIS's app, not the saved one");
+      const done = await callback({ code: "code-oasis", state: loc.searchParams.get("state") ?? "" });
+      assert.equal(landed(done).searchParams.get("slack"), "connected", landed(done).search);
+      assert.deepEqual([exchanges.at(-1)!.client_id, exchanges.at(-1)!.client_secret], [OASIS_APP_ENV.SLACK_CLIENT_ID, OASIS_APP_ENV.SLACK_CLIENT_SECRET]);
+      const s = await loadSlackSettings(db, OASIS, { nowMs: Date.now() });
+      assert.deepEqual([s.installApp, s.ownApp, s.oasisWorkspace], ["oasis", "none", true]);
+    });
+    // Where OASIS's app is not set up, the saved app does not stand in for it.
+    const off = await loadSlackSettings(db, OASIS, { nowMs: Date.now() });
+    assert.deepEqual([off.appConfigured, off.installApp], [false, null]);
+    assert.deepEqual((await loadConnectorFacts({ tenantId: OASIS, userId: USERS.oasisOwner.id })).appNotConfigured, ["slack"]);
+    // And a request signed with the saved app's secret has no URL to arrive at.
+    const r = await toJson(await post(eventsRoute, eventsUrl(OASIS), verification, APP_O.signing_secret));
+    assert.deepEqual([r.status, r.body.error], [404, "workspace_app_not_found"]);
   });
 
   // -- 4. The workspace's own Request URLs ------------------------------------------
@@ -420,6 +523,48 @@ async function main() {
     const own = await toJson(await post(eventsRoute, String(setup.events_url), messageEvent("T0CLIENTA", "EvOWNTEAM0001"), APP_A.signing_secret));
     assert.deepEqual([own.status, own.body.ignored], [200, "channel_not_mapped"]);
     assert.equal(await receipts(), before);
+  });
+
+  await check("OASIS's Request URL acts only for OASIS's own workspaces: an OASIS-signed event naming a client's Slack team is dropped; OASIS's own team still gets through", async () => {
+    const receipts = async () => count("SELECT COUNT(*) AS n FROM slack_event_receipts");
+    const before = await receipts();
+    await withOasisApp(async () => {
+      const forged = await toJson(await post(eventsRoute, eventsUrl(), messageEvent("T0CLIENTA", "EvOASISFORGE1"), OASIS_APP_ENV.SLACK_SIGNING_SECRET));
+      assert.deepEqual([forged.status, forged.body.dropped], [200, "team_not_this_workspace"], JSON.stringify(forged.body));
+      const own = await toJson(await post(eventsRoute, eventsUrl(), messageEvent("T0OASIS", "EvOASISOWN001"), OASIS_APP_ENV.SLACK_SIGNING_SECRET));
+      assert.deepEqual([own.status, own.body.ignored], [200, "channel_not_mapped"], "OASIS's own team passes the app check");
+    });
+    assert.equal(await receipts(), before);
+    // The rule both ways round: an app speaks only for the workspaces that use it.
+    assert.equal(ownApp.slackAppMaySpeakFor({ kind: "oasis" }, OASIS), true);
+    assert.equal(ownApp.slackAppMaySpeakFor({ kind: "oasis" }, CLIENT_A), false);
+    assert.equal(ownApp.slackAppMaySpeakFor({ kind: "own", tenantId: CLIENT_A }, CLIENT_A), true);
+    assert.equal(ownApp.slackAppMaySpeakFor({ kind: "own", tenantId: CLIENT_A }, CLIENT_B), false);
+    assert.equal(ownApp.slackAppMaySpeakFor({ kind: "own", tenantId: OASIS }, OASIS), false, "an OASIS workspace has no app of its own");
+  });
+
+  await check("OASIS's Interactivity URL acts only for OASIS's own workspaces: an OASIS-signed press for a client's Slack team decides nothing and calls nothing", async () => {
+    const payload = {
+      type: "block_actions",
+      team: { id: "T0CLIENTA" },
+      user: { id: "U0PERSON" },
+      response_url: "https://hooks.slack.com/actions/T0CLIENTA/1/x",
+      actions: [{ action_id: APPROVE_ACTION_ID, value: `${randomUUID()}|${"a".repeat(64)}` }],
+    };
+    const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
+    await withOasisApp(async () => {
+      laterTasks.length = 0;
+      const res = await post(interactivityRoute, "https://oasisai.work/api/webhooks/slack/interactivity", body, OASIS_APP_ENV.SLACK_SIGNING_SECRET, "application/x-www-form-urlencoded");
+      assert.equal(res.status, 200, "Slack is answered");
+      assert.equal(laterTasks.length, 1);
+      const callsBefore = calls.length;
+      await laterTasks[0]();
+      assert.deepEqual(calls.slice(callsBefore), [], "no users.info lookup and no card update for a client's team");
+      // The handler itself, as any caller that names no app gets it: OASIS's.
+      const s = slackSigned(OASIS_APP_ENV.SLACK_SIGNING_SECRET, body);
+      const outcome = await interactivity.handleSlackInteractivity({ rawBody: body, timestamp: s.timestamp, signature: s.signature }, { db, now: () => new Date() });
+      assert.equal(outcome.body.ignored, "team_not_this_workspace");
+    });
   });
 
   await check("an unknown workspace, a malformed one, or one with no complete saved app has no Request URL: 404, nothing processed", async () => {
@@ -450,7 +595,7 @@ async function main() {
     const s = slackSigned(APP_A.signing_secret, body);
     const outcome = await interactivity.handleSlackInteractivity(
       { rawBody: body, timestamp: s.timestamp, signature: s.signature },
-      { db, now: () => new Date(), env: scope.ok ? scope.env : undefined, expectTenantId: scope.ok ? scope.expectTenantId : undefined },
+      { db, now: () => new Date(), env: scope.ok ? scope.env : undefined, app: scope.ok ? scope.app : undefined },
     );
     assert.equal(outcome.body.ignored, "team_not_this_workspace");
   });
@@ -511,6 +656,16 @@ async function main() {
     assert.deepEqual((await slackStatus(CLIENT_B, USERS.ownerB.id)).paths?.map((p) => p.state), ["Saved"]);
   });
 
+  await check("a client's own app signs only at its own Request URL and only for its own team: A's or OASIS's secret at B's URL is refused; B's app naming A's team is dropped", async () => {
+    const bUrl = eventsUrl(CLIENT_B);
+    assert.equal((await post(eventsRoute, bUrl, verification, APP_A.signing_secret)).status, 401, "A's secret at B's URL");
+    assert.equal((await post(eventsRoute, bUrl, verification, OASIS_APP_ENV.SLACK_SIGNING_SECRET)).status, 401, "OASIS's secret at B's URL");
+    const ok = await toJson(await post(eventsRoute, bUrl, verification, APP_B.signing_secret));
+    assert.deepEqual([ok.status, ok.body.challenge], [200, "challenge-own-app"], "B's own URL works for B");
+    const forged = await toJson(await post(eventsRoute, bUrl, messageEvent("T0CLIENTA", "EvBFORGED0001"), APP_B.signing_secret));
+    assert.deepEqual([forged.status, forged.body.dropped], [200, "team_not_this_workspace"]);
+  });
+
   await check("the Slack drawer shows a client the setup steps and its app's form under its own path; OASIS's workspace never sees them", async () => {
     const client = await slackStatus(CLIENT_B, USERS.ownerB.id);
     const oasis = await slackStatus(OASIS, USERS.oasisOwner.id);
@@ -537,14 +692,85 @@ async function main() {
     assert.doesNotMatch(text(markup.oasis), /Set up your Slack app|Your own Slack app/);
   });
 
-  await check("a client using its own app can always disconnect Slack, even where OASIS's app is not set up", async () => {
-    const disconnectRoute = await import("../app/api/connections/[provider]/disconnect/route");
+  // -- 6. Disconnect switches the bot token off AT SLACK first --------------------
+
+  const liveSlack = async (tenantId: string) =>
+    (await db.execute({ sql: "SELECT id FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [tenantId] })).rows.map((r) => String(r.id));
+  const disconnect = async () =>
+    toJson(await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack")));
+  const stillConnected = async (tenantId: string, team: string, why: string) => {
+    const [id] = await liveSlack(tenantId);
+    assert.ok(id, `${why}: the connection is still live`);
+    const token = "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'";
+    assert.equal(await count(token, [tenantId, credentialServiceFor(id)]), 1, `${why}: its token is still stored`);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND external_key = ?", [tenantId, team]), 1, `${why}: its team still routes here`);
+  };
+  const A_TOKEN = CODES["code-a"].token;
+
+  await check("Disconnect asks Slack to switch the bot token off before deleting anything; when Slack does not confirm it, nothing is deleted and the owner is told Slack is still connected", async () => {
     await login(USERS.ownerA);
-    const r = await toJson(await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack")));
+    for (const mode of ["fatal_error", "not_revoked", "rate_limited", "network"] as const) {
+      revokeFails = mode;
+      const before = revocations.length;
+      let r: Awaited<ReturnType<typeof disconnect>>;
+      try {
+        r = await disconnect();
+      } finally {
+        revokeFails = null;
+      }
+      assert.deepEqual(revocations.slice(before), [A_TOKEN], `${mode}: the switch-off was asked for, with A's own token`);
+      assert.equal(r.status, 502, `${mode}: ${JSON.stringify(r.body)}`);
+      assert.deepEqual([r.body.ok, r.body.error, r.body.disconnected], [false, "slack_revoke_failed", undefined], mode);
+      assert.match(String(r.body.message), /Slack is still connected and nothing was deleted\. Try Disconnect again/);
+      await stillConnected(CLIENT_A, "T0CLIENTA", mode);
+    }
+    // A stored token that cannot be read is never assumed off: nothing is sent, nothing deleted.
+    const [id] = await liveSlack(CLIENT_A);
+    const at = "WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'";
+    const args = [CLIENT_A, credentialServiceFor(id)];
+    const saved = String((await db.execute({ sql: `SELECT encrypted_value FROM tenant_integration_credentials ${at}`, args })).rows[0].encrypted_value);
+    await db.execute({ sql: `UPDATE tenant_integration_credentials SET encrypted_value = 'not-a-ciphertext' ${at}`, args });
+    try {
+      const before = revocations.length;
+      const r = await disconnect();
+      assert.deepEqual([r.status, r.body.error, r.body.disconnected], [500, "slack_token_unreadable", undefined], JSON.stringify(r.body));
+      assert.equal(revocations.length, before, "nothing sent to Slack");
+    } finally {
+      await db.execute({ sql: `UPDATE tenant_integration_credentials SET encrypted_value = ? ${at}`, args: [saved, ...args] });
+    }
+    await stillConnected(CLIENT_A, "T0CLIENTA", "unreadable token");
+  });
+
+  await check("with Slack's confirmation a client's own-app connection is removed, even where OASIS's app is not set up: token switched off at Slack, then deleted with its route; pressed again, nothing is sent", async () => {
+    assert.equal(process.env.SLACK_CLIENT_ID, undefined, "OASIS's app is not set up in this check");
+    await login(USERS.ownerA);
+    const [id] = await liveSlack(CLIENT_A);
+    const before = revocations.length;
+    const r = await disconnect();
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(r.body.disconnected, true);
-    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", [CLIENT_A]), 0);
+    assert.deepEqual([r.body.disconnected, r.body.slack_token], [true, "revoked"]);
+    assert.deepEqual(revocations.slice(before), [A_TOKEN], "switched off at Slack with A's own token");
+    assert.ok(revokedAtSlack.has(A_TOKEN), "Slack holds it switched off");
+    assert.deepEqual(await liveSlack(CLIENT_A), []);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ?", [CLIENT_A, credentialServiceFor(id)]), 0, "the token is deleted");
     assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND provider = 'slack'", [CLIENT_A]), 0);
+    const again = await disconnect();
+    assert.deepEqual([again.status, again.body.already_disconnected], [200, true]);
+    assert.equal(revocations.length, before + 1, "nothing connected, nothing sent");
+  });
+
+  await check("OASIS's own connection (OASIS's app) goes through the same switch-off; a token Slack already refuses counts as switched off", async () => {
+    await login(USERS.oasisOwner);
+    const OASIS_TOKEN = CODES["code-oasis"].token;
+    // OASIS's app was removed in Slack, so Slack already refuses its token.
+    revokedAtSlack.add(OASIS_TOKEN);
+    const before = revocations.length;
+    const r = await disconnect();
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.disconnected, r.body.slack_token], [true, "already_invalid"]);
+    assert.deepEqual(revocations.slice(before), [OASIS_TOKEN], "asked with OASIS's connection's own token");
+    assert.deepEqual(await liveSlack(OASIS), []);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND provider = 'slack'", [OASIS]), 0);
   });
 
   globalThis.fetch = realFetch;

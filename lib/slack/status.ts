@@ -2,8 +2,9 @@
  * lib/slack/status.ts - where each department lives in Slack, for the AI Team
  * roster and the department tab (no longer a hard-coded "Phase 2").
  *
- *   not_configured  neither OASIS's Slack app (this deployment) nor the
- *                   workspace's own Slack app is set up, so nothing can answer
+ *   not_configured  the Slack app this workspace uses is not set up (OASIS's
+ *                   app on this deployment for OASIS's own workspace, its own
+ *                   saved app for a client), so nothing can answer
  *   not_connected   this workspace has not installed it
  *   mention_only    installed, no channel mapped to this department: it still
  *                   answers an @mention that names it
@@ -37,8 +38,9 @@ export async function loadSlackPresence(
   tenantId: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<SlackPresence> {
-  // OASIS's app on this deployment, or the workspace's own Slack app (a client
-  // brings its own): either verifies its events, so a connection can answer.
+  // The app this workspace uses (lib/slack/own-app.ts slackAppKindFor): OASIS's
+  // app here for OASIS's own workspace, its own saved app for a client. It
+  // verifies the workspace's events, so a connection can answer.
   let app: Awaited<ReturnType<typeof slackAppFor>>;
   try {
     app = await slackAppFor(tenantId, env);

@@ -41,6 +41,7 @@ import { executeApproval } from "@/lib/os/approvals/execute";
 import type { ExecutorDeps } from "@/lib/os/approvals/executors";
 import { isSlackResponseUrl, respondToAction, type SlackFetch } from "@/lib/slack/client";
 import { verifySlackRequest } from "@/lib/slack/verify";
+import { slackAppMaySpeakFor, type SlackRequestApp } from "@/lib/slack/own-app";
 import { resolveSlackIdentity, slackApproverProfile } from "@/lib/slack/identity";
 import { APPROVE_ACTION_ID, parseApproveButtonValue, slackTokenFor } from "@/lib/slack/send";
 import { isSlackTeamId, isSlackUserId } from "@/lib/slack/routing";
@@ -52,11 +53,12 @@ export type InteractivityDeps = {
   now: () => Date;
   env?: Env;
   /**
-   * Set when the press came to a workspace's OWN Interactivity URL
-   * (?workspace=<id>, checked with that workspace's signing secret): the press
-   * may then decide only for the Slack team routed to that workspace.
+   * The app whose signing secret `env` holds (lib/slack/own-app.ts
+   * slackRequestScope gives both): OASIS's when absent, as `env` is then the
+   * Worker's own. On EVERY press, the workspace its team is routed to must use
+   * that app (slackAppMaySpeakFor) before anything is decided.
    */
-  expectTenantId?: string;
+  app?: SlackRequestApp;
   fetchImpl?: SlackFetch;
   executorDeps?: ExecutorDeps;
 };
@@ -134,8 +136,13 @@ async function decidePress(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", press.teamId);
   if (!routed) return { status: 200, body: { ok: true, ignored: "unknown_team" } };
-  if (deps.expectTenantId !== undefined && routed.tenantId !== deps.expectTenantId) {
-    console.error("[slack.interactivity] a workspace's own app sent a press for a team routed elsewhere; ignored", { workspace: deps.expectTenantId });
+  const app: SlackRequestApp = deps.app ?? { kind: "oasis" };
+  if (!slackAppMaySpeakFor(app, routed.tenantId)) {
+    console.error("[slack.interactivity] a press named a Slack team whose workspace does not use the app that signed it; ignored", {
+      app: app.kind,
+      ...(app.kind === "own" ? { workspace: app.tenantId } : {}),
+      routedTenantId: routed.tenantId,
+    });
     return { status: 200, body: { ok: true, ignored: "team_not_this_workspace" } };
   }
   const tenantId = routed.tenantId;

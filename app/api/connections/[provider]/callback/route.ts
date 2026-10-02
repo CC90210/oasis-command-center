@@ -14,9 +14,11 @@
  * refusal, a reason code. The code, the state and the token never appear in a
  * redirect or a log.
  *
- * The install finishes with the same app it started with: the workspace's own
- * Slack app when one is saved, OASIS's app when nothing is (lib/slack/own-app.ts
- * slackInstallEnv, as the authorize route).
+ * The install finishes with the workspace's app by the same rule as the
+ * authorize route (lib/slack/own-app.ts slackInstallEnv): OASIS's app for
+ * OASIS's own workspaces, a client's own saved app for a client. A client with
+ * no complete app is refused before its state is used or its code exchanged,
+ * however the consent was started, and is never finished with OASIS's app.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveProvider } from "@/lib/connections/service";

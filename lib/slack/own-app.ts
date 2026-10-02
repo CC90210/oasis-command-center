@@ -1,7 +1,29 @@
 /**
- * lib/slack/own-app.ts - a workspace's OWN Slack app, end to end on the server
- * (CC, 2026-10-01: a client brings its own Slack app; OASIS's own workspace
- * uses the OASIS app).
+ * lib/slack/own-app.ts - which Slack app serves a workspace, and a workspace's
+ * OWN Slack app end to end on the server (CC, 2026-10-01: a client brings its
+ * own Slack app; OASIS's own workspace uses the OASIS app).
+ *
+ * THE RULE, in one place (slackAppKindFor): OASIS's own workspaces, the same
+ * id allowlist that alone may use this deployment's env credentials
+ * (tenantMayUseEnvFallback), use OASIS's Slack app (the Worker secrets) and
+ * nothing else; every other workspace, a client, uses its OWN saved Slack app
+ * and never OASIS's. Everything below follows from it:
+ *   - the install (slackInstallEnv): an OASIS workspace installs OASIS's app
+ *     (a Slack app it saved plays no part); a client installs its own complete
+ *     saved app, or nothing, however OASIS's app is set up;
+ *   - the requests (slackRequestScope, slackAppMaySpeakFor): Slack signs every
+ *     event and button press with the signing secret of the app it came from.
+ *     One with no ?workspace= is checked with OASIS's app's secret and may act
+ *     only for an OASIS workspace; one with ?workspace=<id> is checked with
+ *     that client's own signing secret and may act only for <id>. The events
+ *     and interactivity handlers check the routed workspace on EVERY request;
+ *   - a connection's app is its workspace's app by this rule, not a stored
+ *     field: the install only ever uses the workspace's app, so the rule names
+ *     the app every connection was installed with. A connection the rule no
+ *     longer matches (its workspace moved on or off the allowlist) fails
+ *     closed: its events are refused until it is installed again. (Production
+ *     held no Slack connection, route or saved Slack app on 2026-10-02, so no
+ *     row predates the rule.)
  *
  * THE CREDENTIALS are the workspace's "slack_app" values in the encrypted
  * credential store (client ID, client secret, signing secret), saved in the
@@ -11,19 +33,15 @@
  *
  * THE INSTALL runs through the same routes, state and checks as OASIS's app
  * (lib/connections/oauth.ts, lib/slack/install.ts): the workspace's app is laid
- * over the env those already read (slackOwnAppEnv). A workspace with a saved
- * app always installs THAT app; one with nothing saved uses OASIS's app exactly
- * as before; a half-saved or unreadable one is refused, never quietly swapped.
+ * over the env those already read (slackOwnAppEnv). A half-saved, unreadable or
+ * missing app is refused, never quietly swapped for OASIS's.
  *
- * THE REQUESTS Slack sends to a workspace's own Request URLs carry
- * ?workspace=<id> (lib/slack/own-app-setup.ts). Each is checked with THAT
- * workspace's signing secret only, and may speak only for the Slack team routed
- * to that workspace (the events and interactivity handlers check
- * expectTenantId), so a workspace's secret can never sign for another's team.
- * A request with no ?workspace= is OASIS's app's, checked as before.
+ * THE REQUESTS Slack sends to a client's own Request URLs carry
+ * ?workspace=<id> (lib/slack/own-app-setup.ts), so a workspace's secret can
+ * never sign for another's team, and OASIS's secret never for a client's.
  */
 import "server-only";
-import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
+import { OASIS_ENV_CREDENTIAL_TENANT_IDS, readTenantCredentialStrict, tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import { providerAvailability, providerById } from "@/lib/connections/registry";
 import { oauthStateSecret } from "@/lib/connections/oauth";
 import { SLACK_SIGNING_SECRET_ENV } from "@/lib/slack/verify";
@@ -40,6 +58,23 @@ export type SlackOwnAppRead =
   | { state: "incomplete"; missing: string[] }
   | { state: "none" }
   | { state: "unreadable" };
+
+/** The Slack app a workspace uses: OASIS's ("oasis") or its own ("own"). */
+export type SlackAppKind = "oasis" | "own";
+
+/**
+ * THE RULE (see the header): OASIS's own workspaces use OASIS's Slack app,
+ * every other workspace its own. By workspace id, exact match, so an unknown
+ * or malformed id is a client and can never reach OASIS's app.
+ */
+export function slackAppKindFor(tenantId: string): SlackAppKind {
+  return tenantMayUseEnvFallback(tenantId) ? "oasis" : "own";
+}
+
+/** The workspaces slackAppKindFor gives OASIS's app, for a query that must leave them out. */
+export function oasisSlackAppWorkspaceIds(): string[] {
+  return [...OASIS_ENV_CREDENTIAL_TENANT_IDS];
+}
 
 /** The workspace's own Slack app, strictly: no env, and an unreadable value is not a missing one. */
 export async function readSlackOwnApp(tenantId: string): Promise<SlackOwnAppRead> {
@@ -73,14 +108,17 @@ export function slackOwnAppEnv(env: Env, app: SlackOwnApp): Env {
 
 /**
  * Which Slack app makes this workspace's Slack work here, for a connection it
- * already has: OASIS's app (live on this deployment) or its own saved app.
- * Either verifies its events and leaves the connection's own token to check,
- * so the connection can be shown, re-checked and used. "none": neither, so a
- * connection cannot work here; "unknown": its app could not be read.
+ * already has, by the rule: an OASIS workspace OASIS's app, while it is live on
+ * this deployment; a client its own saved app (never OASIS's). Either verifies
+ * its events and leaves the connection's own token to check, so the connection
+ * can be shown, re-checked and used. "none": the workspace's app is not set up
+ * here, so a connection cannot work; "unknown": a client's app could not be read.
  */
 export async function slackAppFor(tenantId: string, env: Env = process.env): Promise<"oasis" | "own" | "none" | "unknown"> {
-  const slack = providerById("slack");
-  if (slack && providerAvailability(slack, env) === "live") return "oasis";
+  if (slackAppKindFor(tenantId) === "oasis") {
+    const slack = providerById("slack");
+    return slack && providerAvailability(slack, env) === "live" ? "oasis" : "none";
+  }
   const own = await readSlackOwnApp(tenantId);
   return own.state === "saved" ? "own" : own.state === "unreadable" ? "unknown" : "none";
 }
@@ -100,40 +138,65 @@ export function slackInstallsPossible(env: Env = process.env): boolean {
 }
 
 export type SlackInstallEnv =
-  | { ok: true; app: "own" | "oasis"; env: Env }
-  | { ok: false; reason: "own_app_incomplete" | "own_app_unreadable" };
+  | { ok: true; app: SlackAppKind; env: Env }
+  | { ok: false; reason: "own_app_missing" | "own_app_incomplete" | "own_app_unreadable" };
 
 /**
- * The env Add to Slack (and its callback) runs with for this workspace: its own
- * app when one is saved, OASIS's app when nothing is saved (unchanged).
+ * The env Add to Slack (and its callback) runs with for this workspace, by the
+ * rule: an OASIS workspace OASIS's app (the env as it is; a Slack app it saved
+ * plays no part), a client its own complete saved app laid over the env. A
+ * client with no app, part of one, or one that cannot be read is refused, and
+ * is never given OASIS's app, whether or not OASIS's app is set up here.
  */
 export async function slackInstallEnv(tenantId: string, env: Env = process.env): Promise<SlackInstallEnv> {
+  if (slackAppKindFor(tenantId) === "oasis") return { ok: true, app: "oasis", env };
   const own = await readSlackOwnApp(tenantId);
   if (own.state === "saved") return { ok: true, app: "own", env: slackOwnAppEnv(env, own.app) };
-  if (own.state === "none") return { ok: true, app: "oasis", env };
-  return { ok: false, reason: own.state === "incomplete" ? "own_app_incomplete" : "own_app_unreadable" };
+  return {
+    ok: false,
+    reason: own.state === "none" ? "own_app_missing" : own.state === "incomplete" ? "own_app_incomplete" : "own_app_unreadable",
+  };
 }
 
 const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The app whose signing secret checked a Slack request: OASIS's, or one client's own. */
+export type SlackRequestApp = { kind: "oasis" } | { kind: "own"; tenantId: string };
+
+/**
+ * May a request checked with `app`'s signing secret act for `tenantId`, the
+ * workspace its Slack team is routed to? Only when that workspace uses that
+ * app (slackAppKindFor): OASIS's app for OASIS's own workspaces only, a
+ * client's own app for that one client only. The events and interactivity
+ * handlers ask this on every request they act on.
+ */
+export function slackAppMaySpeakFor(app: SlackRequestApp, tenantId: string): boolean {
+  const kind = slackAppKindFor(tenantId);
+  return app.kind === "oasis" ? kind === "oasis" : kind === "own" && app.tenantId === tenantId;
+}
+
 export type SlackRequestScope =
-  | { ok: true; env: Env; expectTenantId?: string }
+  | { ok: true; env: Env; app: SlackRequestApp }
   | { ok: false; status: number; body: Record<string, unknown> };
 
 /**
- * Which signing secret checks a Slack request, from the URL Slack sent it to:
- *   no ?workspace=   OASIS's app (SLACK_SIGNING_SECRET), exactly as before;
- *   ?workspace=<id>  that workspace's own app's signing secret ONLY, and the
- *                    request may speak only for the team routed to <id>.
- * An unknown workspace, or one with no saved app, is 404; a credential that
+ * Which app a Slack request is checked as, from the URL Slack sent it to:
+ *   no ?workspace=   OASIS's app: SLACK_SIGNING_SECRET, and the request may
+ *                    act only for an OASIS workspace;
+ *   ?workspace=<id>  that client's own app's signing secret ONLY, and the
+ *                    request may act only for <id>.
+ * An unknown workspace, an OASIS one (it uses OASIS's app, so it has no such
+ * URL), or a client with no complete saved app is 404; a credential that
  * cannot be read is 503, so Slack retries instead of losing the event.
  */
 export async function slackRequestScope(workspace: string | null, env: Env = process.env): Promise<SlackRequestScope> {
-  if (workspace === null) return { ok: true, env };
+  if (workspace === null) return { ok: true, env, app: { kind: "oasis" } };
   const id = workspace.trim();
-  if (!TENANT_ID.test(id)) return { ok: false, status: 404, body: { ok: false, error: "workspace_app_not_found" } };
+  if (!TENANT_ID.test(id) || slackAppKindFor(id) !== "own") {
+    return { ok: false, status: 404, body: { ok: false, error: "workspace_app_not_found" } };
+  }
   const own = await readSlackOwnApp(id);
   if (own.state === "unreadable") return { ok: false, status: 503, body: { ok: false, error: "workspace_app_unavailable" } };
   if (own.state !== "saved") return { ok: false, status: 404, body: { ok: false, error: "workspace_app_not_found" } };
-  return { ok: true, env: slackOwnAppEnv(env, own.app), expectTenantId: id };
+  return { ok: true, env: slackOwnAppEnv(env, own.app), app: { kind: "own", tenantId: id } };
 }

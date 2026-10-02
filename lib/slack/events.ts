@@ -9,7 +9,9 @@
  *   2. url_verification: answer Slack's challenge (it is signed too).
  *   3. The TEAM decides the workspace: provider_webhook_routes (written by the
  *      install). An unknown team is acknowledged and dropped; a team is never
- *      guessed into a workspace.
+ *      guessed into a workspace. That workspace must use the app whose secret
+ *      checked the request (lib/slack/own-app.ts slackAppMaySpeakFor), or the
+ *      event is dropped.
  *   4. DROPPED, acknowledged, never answered or mirrored:
  *        - a channel shared with another company (is_ext_shared_channel);
  *        - anything a bot wrote (OASIS's own replies come back this way);
@@ -35,6 +37,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { resolveWebhookRoute } from "@/lib/connections/store";
 import type { SlackFetch } from "@/lib/slack/client";
 import { verifySlackRequest } from "@/lib/slack/verify";
+import { slackAppMaySpeakFor, type SlackRequestApp } from "@/lib/slack/own-app";
 import { resolveSlackIdentity } from "@/lib/slack/identity";
 import { mirrorStatement } from "@/lib/slack/mirror";
 import { slackTokenFor } from "@/lib/slack/send";
@@ -48,12 +51,13 @@ export type SlackEventsDeps = {
   now: () => Date;
   env?: Env;
   /**
-   * Set when the request came to a workspace's OWN Request URL
-   * (?workspace=<id>, checked with that workspace's signing secret: lib/slack/
-   * own-app.ts). The event may then speak only for the Slack team routed to
-   * that workspace: a workspace's secret can never sign for another's team.
+   * The app whose signing secret `env` holds (lib/slack/own-app.ts
+   * slackRequestScope gives both): OASIS's when absent, as `env` is then the
+   * Worker's own. On EVERY event, the workspace its team is routed to must use
+   * that app (slackAppMaySpeakFor): OASIS's app speaks only for OASIS's own
+   * workspaces, a client's own app only for that client.
    */
-  expectTenantId?: string;
+  app?: SlackRequestApp;
   fetchImpl?: SlackFetch;
   /** Hand an @mention to the agent job (queue or after the response). Throws when it could not. */
   dispatchMention: (job: SlackMentionJob) => Promise<unknown>;
@@ -109,8 +113,13 @@ export async function handleSlackEvents(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", teamId);
   if (!routed) return ok({ dropped: "unknown_team" });
-  if (deps.expectTenantId !== undefined && routed.tenantId !== deps.expectTenantId) {
-    console.error("[slack.events] a workspace's own app sent an event for a team routed elsewhere; dropped", { workspace: deps.expectTenantId });
+  const app: SlackRequestApp = deps.app ?? { kind: "oasis" };
+  if (!slackAppMaySpeakFor(app, routed.tenantId)) {
+    console.error("[slack.events] an event named a Slack team whose workspace does not use the app that signed it; dropped", {
+      app: app.kind,
+      ...(app.kind === "own" ? { workspace: app.tenantId } : {}),
+      routedTenantId: routed.tenantId,
+    });
     return ok({ dropped: "team_not_this_workspace" });
   }
   const tenantId = routed.tenantId;
