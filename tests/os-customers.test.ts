@@ -693,6 +693,7 @@ async function main() {
   // ── the pages, server side ─────────────────────────────────────────────
   const ClientsPage = (await import("../app/clients/page")).default;
   const ClientRecordPage = (await import("../app/clients/[id]/page")).default;
+  const ClientRecordLayout = (await import("../app/clients/[id]/layout")).default;
   const TicketsPage = (await import("../app/tickets/page")).default;
   const page = async (el: Promise<unknown>) => textOf(await el).join("\n");
   const is404 = async (el: Promise<unknown>) => {
@@ -703,8 +704,13 @@ async function main() {
       return /NEXT_HTTP_ERROR_FALLBACK;404/.test((err as Error).message);
     }
   };
-  const record = (id: string, tab?: string) =>
-    ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+  // The record as Next draws it: the layout (header, New ticket, tab bar)
+  // around the open tab. The tab renders first: a tab switch renders it alone,
+  // so it must refuse on its own.
+  const record = async (id: string, tab?: string) => {
+    const body = await ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+    return ClientRecordLayout({ params: Promise.resolve({ id }), children: body as never });
+  };
 
   await login(USERS.clientA);
   await check("/clients: A's owner sees A's client records, never B's", async () => {

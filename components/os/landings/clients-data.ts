@@ -8,7 +8,9 @@
  *   won deals          canSeeAllPipeline inside an OASIS workspace. A rep,
  *                      manager or marketer sees clients through their own
  *                      deals in Pipeline; the whole won list is the tenant's
- *                      book, which is exactly what their scope excludes.
+ *                      book, which is exactly what their scope excludes. A
+ *                      deal about a retired business is left out
+ *                      (lib/os/customers/retired.ts).
  *   projects, tickets  lib/delivery/access.ts: a founder standing in OASIS.
  *                      A client workspace's delivery rows are OASIS's work FOR
  *                      that workspace — OASIS is their vendor, not their
@@ -22,6 +24,7 @@ import "server-only";
 import { listRecords } from "@/lib/manifest/data";
 import { getDeliveryAccess, getDeliveryDb } from "@/lib/delivery/session";
 import { LIST_LIMIT, listProjects, listTickets } from "@/lib/delivery/store";
+import { isRetiredClientRef } from "@/lib/os/customers/retired";
 import type { OsPageViewer } from "@/components/os/landings/page-gate";
 import {
   CLIENT_STAGES,
@@ -57,7 +60,10 @@ async function loadWonDeals(viewer: OsPageViewer): Promise<SourceState<ClientLea
     });
     return {
       state: "ok",
-      rows: r.rows.map((row) => ({ id: row.id, updated_at: row.updated_at, data: row.data || {} })),
+      // A deal about a retired business is not a client (lib/os/customers/retired.ts).
+      rows: r.rows
+        .map((row) => ({ id: row.id, updated_at: row.updated_at, data: row.data || {} }))
+        .filter((row) => !isRetiredClientRef(row.data)),
       truncated: r.total > r.rows.length,
     };
   } catch (err) {

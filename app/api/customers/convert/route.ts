@@ -6,7 +6,9 @@
  * lead id from another workspace is simply not found. Idempotent: converting a
  * lead that already has a client returns that client (200, created: false),
  * however often it is pressed. Owners and admins only, the same as creating a
- * client by hand. Nothing about the lead or its stage changes.
+ * client by hand. Nothing about the lead or its stage changes. A deal about a
+ * retired business (its data.client_tenant_id is a retired tenant) is refused
+ * with 409 retired_business and nothing is written (lib/os/customers/retired.ts).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { convertLeadToCustomer } from "@/lib/os/customers/store";

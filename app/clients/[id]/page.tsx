@@ -1,10 +1,10 @@
 /**
- * /clients/[id] — one client of the business (a `customers` record): the hub
- * OASIS runs a client from.
+ * /clients/[id]: one client of the business (a `customers` record), the hub
+ * OASIS runs a client from. This page is the OPEN TAB only; the header and the
+ * tab bar are app/clients/[id]/layout.tsx, read once per record, so a tab
+ * click renders this page alone.
  *
- * Header: name, health badge, company, status, owner; "New ticket" for the
- * desk's team; "Mark engagement ended" for owners and admins; the deal it
- * came from. Tabs (?tab=):
+ * Tabs (?tab=):
  *   Overview       key facts, last touch, contacts, open items, the editor.
  *   Conversations  email, SMS and Slack in one thread, the agents' drafts
  *                  awaiting approval, and a composer that asks before it sends
@@ -18,36 +18,36 @@
  *                  "inferred from the deal".
  *   Health         the signals behind the badge, and what could not be read.
  *   Files          documents on the source deal and attachments on tickets.
+ * A tab this workspace can never show anything on is not offered (Money and
+ * Usage outside OASIS, clientTabsFor), and a ?tab= naming one opens Overview.
  * Real data only; a tab with nothing says so, a tab that failed says that.
  * Every tab but Overview and Money is the desk team's (owners and admins):
  * they hold every message, document and datum of the client.
  *
- * GATE, first statement: requireOsRoute("/clients") — the same rule as the
- * list. A client of another workspace is a 404, the same as no client at all.
+ * GATE, first statement: requireOsRoute("/clients"), the same rule as the
+ * list and the layout. A client of another workspace is a 404, the same as no
+ * client at all.
  */
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Card, EmptyState, Tag } from "@/components/Card";
-import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
 import { floorCount } from "@/lib/os/count";
 import { Field, LoadError, SeverityTag, SlaBadge, StageTag, TicketStatusTag } from "@/components/delivery/badges";
-import { TicketCreateForm } from "@/components/delivery/TicketForms";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import {
-  CLIENT_TABS,
+  clientTabsFor,
   loadClientRecord,
   loadWorkspaceDirectory,
-  ownerName,
   ownerOptions,
+  resolveClientTab,
   type ClientRecordData,
-  type ClientTab,
   type Loaded,
 } from "@/components/os/landings/clients-records-data";
-import { AddContactForm, ClientEditor, EndEngagementButton, RemoveContactButton } from "@/components/os/landings/clients-actions";
+import { AddContactForm, ClientEditor, RemoveContactButton } from "@/components/os/landings/clients-actions";
 import { ClientConversations } from "@/components/os/landings/client-conversations";
-import { ClientHealthBadge, ClientHealthBreakdown } from "@/components/os/landings/client-health-badge";
+import { ClientHealthBreakdown } from "@/components/os/landings/client-health-badge";
 import { ClientMoneyPanel } from "@/components/os/landings/client-money";
 import { ClientUsagePanel } from "@/components/os/landings/client-usage";
 import { clientsViewerFromSurface, type ClientsViewer } from "@/lib/os/customers/session";
@@ -57,35 +57,10 @@ import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
-import { loadAssignmentRoster } from "@/lib/delivery/session";
 import type { Ticket } from "@/lib/delivery/store";
-import type { MemberRow } from "@/lib/team";
-
-/**
- * The desk's assignment roster for "New ticket". A failure does not hide the
- * form: it renders with no assignee choices and a notice says why (OASIS's
- * roster needs both founders active, lib/team.ts).
- */
-async function deskRoster(viewer: ClientsViewer): Promise<{ rows: MemberRow[]; notice: string | null } | null> {
-  if (!viewer.desk) return null;
-  try {
-    return { rows: await loadAssignmentRoster(viewer.tenantId), notice: null };
-  } catch (err) {
-    console.error("[os.clients.record.roster]", err);
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      rows: [],
-      notice: msg.includes("oasis_pipeline_assignment_roster_incomplete")
-        ? "New tickets can't be assigned from here right now: the assignment roster needs both founders as active members."
-        : "The assignee list couldn't be loaded, so new tickets start unassigned. The error has been logged.",
-    };
-  }
-}
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Client" };
-
-const TAB_KEYS = new Set(CLIENT_TABS.map((t) => t.key));
 
 export default async function ClientRecordPage({
   params,
@@ -97,131 +72,45 @@ export default async function ClientRecordPage({
   const viewer = await requireOsRoute("/clients");
   const { id } = await params;
   const sp = (await searchParams) ?? {};
-  const tab: ClientTab = TAB_KEYS.has(sp.tab as ClientTab) ? (sp.tab as ClientTab) : "overview";
   const cv = clientsViewerFromSurface(viewer.surface)!;
-  const [record, directory, roster] = await Promise.all([
+  // Only a tab this workspace offers; anything else (?tab=money in a client
+  // workspace included) opens Overview, as the tab bar shows it.
+  const tab = resolveClientTab(sp.tab, clientTabsFor(cv));
+  const [record, directory] = await Promise.all([
     loadClientRecord(cv, id, tab, { isOperator: viewer.navInput.isOperator }),
-    loadWorkspaceDirectory(cv.tenantId),
-    deskRoster(cv),
+    // The Overview editor's owner choices; no other tab names teammates.
+    tab === "overview" ? loadWorkspaceDirectory(cv.tenantId) : Promise.resolve(null),
   ]);
 
-  if (record.state === "not_set_up") {
-    return (
-      <PageFrame title="Client">
-        <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
-          Client records are not set up in this database yet (migration bravo__188).
-        </p>
-      </PageFrame>
-    );
-  }
-  if (record.state === "error") {
-    return (
-      <PageFrame title="Client">
-        <LoadError what="this client" />
-      </PageFrame>
-    );
-  }
+  if (record.state === "not_set_up") return <NotLoaded state="not_set_up" what="This client" />;
+  if (record.state === "error") return <LoadError what="this client" />;
   if (record.state !== "ok" || !record.value) notFound();
   const data = record.value;
   const c = data.customer;
   const canOpen = (href: string) => mayOpenOsHref(viewer.navInput, href);
-  const owner = ownerName(c.owner_user_id, directory);
-  const subtitle = [
-    c.company_name && c.company_name !== c.display_name ? c.company_name : null,
-    CUSTOMER_LIFECYCLE_LABELS[c.lifecycle],
-    owner ? `Owner: ${owner}` : c.owner_user_id ? null : "No owner",
-  ]
-    .filter(Boolean)
-    .join(" · ");
   // A deal in OASIS's pipeline opens at /pipeline/<id>; another workspace's
   // lead page lives in its own manifest, so the deal is named, not linked.
   const dealHref = c.source_lead_id && cv.oasis ? `/pipeline/${c.source_lead_id}` : null;
 
   return (
-    <PageFrame
-      title={
-        <span className="inline-flex flex-wrap items-center gap-2">
-          {c.display_name}
-          {cv.desk && <ClientHealthBadge health={data.health} />}
-          {c.archived_at && <Tag>Archived</Tag>}
-        </span>
-      }
-      subtitle={subtitle}
-      actions={
-        <>
-          <Link href="/clients" prefetch={false} className="btn-secondary">
-            All clients
-          </Link>
-          {dealHref && canOpen("/pipeline") && (
-            <Link href={dealHref} prefetch={false} className="btn-secondary">
-              Open the deal
-            </Link>
-          )}
-          {cv.desk && tab !== "conversations" && (
-            <Link href={`/clients/${c.id}?tab=conversations`} prefetch={false} className="btn-secondary">
-              Write to client
-            </Link>
-          )}
-          {cv.canWrite && c.lifecycle !== "churned" && <EndEngagementButton customerId={c.id} clientName={c.display_name} />}
-          {cv.desk && cv.desk.canAct && roster && (
-            <TicketCreateForm
-              roster={roster.rows
-                .filter((m) => m.auth_user_id)
-                .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }))}
-              projects={
-                data.projects.state === "ok"
-                  ? data.projects.value.rows.map((p) => ({ value: p.id, label: p.title, clientTenantId: p.client_tenant_id }))
-                  : []
-              }
-              clientTenants={[]}
-              customers={[{ value: c.id, label: c.display_name }]}
-              initialCustomerId={c.id}
-            />
-          )}
-        </>
-      }
-    >
-      <div className="space-y-6">
-        {roster?.notice && (
-          <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
-            {roster.notice}
-          </p>
-        )}
-        <nav aria-label="Client record" className="flex flex-wrap gap-1 border-b border-hairline">
-          {CLIENT_TABS.map((t) => {
-            const active = t.key === tab;
-            return (
-              <Link
-                key={t.key}
-                href={t.key === "overview" ? `/clients/${c.id}` : `/clients/${c.id}?tab=${t.key}`}
-                prefetch={false}
-                aria-current={active ? "page" : undefined}
-                className={`-mb-px border-b-2 px-3 py-2 text-[13px] ${active ? "border-fg font-medium text-fg" : "border-transparent text-fg-muted hover:text-fg"}`}
-              >
-                {t.label}
-              </Link>
-            );
-          })}
-        </nav>
-
-        {tab === "overview" && <OverviewTab data={data} viewer={cv} owners={ownerOptions(directory)} dealHref={dealHref} />}
-        {tab === "conversations" && <ConversationsTab data={data} viewer={cv} />}
-        {tab === "tickets" && <TicketsTab state={data.tickets} />}
-        {tab === "projects" && <ProjectsTab state={data.projects} />}
-        {tab === "money" && <MoneyTab state={data.money} canOpenMoney={canOpen("/money")} />}
-        {tab === "usage" && <UsageTab state={data.usage} customerId={c.id} linkable={data.linkableWorkspaces} />}
-        {tab === "files" && <FilesTab state={data.files} hasDeal={Boolean(c.source_lead_id)} />}
-        {tab === "activity" && <ActivityTab state={data.activity} hasDeal={Boolean(c.source_lead_id)} />}
-        {tab === "health" &&
-          (cv.desk ? (
-            <Card>
-              <ClientHealthBreakdown health={data.health} moneyTracked={data.moneyAccess !== "not_tracked"} />
-            </Card>
-          ) : (
-            <OwnersOnly what="Health signals" />
-          ))}
-      </div>
-    </PageFrame>
+    <>
+      {tab === "overview" && <OverviewTab data={data} viewer={cv} owners={ownerOptions(directory)} dealHref={dealHref} />}
+      {tab === "conversations" && <ConversationsTab data={data} viewer={cv} />}
+      {tab === "tickets" && <TicketsTab state={data.tickets} />}
+      {tab === "projects" && <ProjectsTab state={data.projects} />}
+      {tab === "money" && <MoneyTab state={data.money} canOpenMoney={canOpen("/money")} />}
+      {tab === "usage" && <UsageTab state={data.usage} customerId={c.id} linkable={data.linkableWorkspaces} />}
+      {tab === "files" && <FilesTab state={data.files} hasDeal={Boolean(c.source_lead_id)} />}
+      {tab === "activity" && <ActivityTab state={data.activity} hasDeal={Boolean(c.source_lead_id)} />}
+      {tab === "health" &&
+        (cv.desk && data.health ? (
+          <Card>
+            <ClientHealthBreakdown health={data.health} moneyTracked={data.moneyAccess !== "not_tracked"} />
+          </Card>
+        ) : (
+          <OwnersOnly what="Health signals" />
+        ))}
+    </>
   );
 }
 
@@ -318,9 +207,11 @@ function OwnersOnly({ what }: { what: string }) {
 function NotLoaded({ state, what }: { state: Loaded<unknown>["state"]; what: string }) {
   if (state === "not_allowed") return <OwnersOnly what={what} />;
   if (state === "not_set_up") {
+    // Client records themselves are missing; the reason is in the log
+    // (clients-records-data.ts attempt), not on the screen.
     return (
-      <p role="status" className="text-[13px] text-status-warm">
-        {what} for client records need migration bravo__188, which is not applied to this database yet.
+      <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
+        Client records aren&rsquo;t available right now. The error has been logged.
       </p>
     );
   }
@@ -443,7 +334,10 @@ function OverviewTab({
                 "Added by hand"
               )}
             </Field>
-            <Field label="Client since">{timeAgo(c.created_at)}</Field>
+            {/* When this record was made, which is not when the client started (CS-15). */}
+            <Field label="Record added">
+              <span title={c.created_at}>{timeAgo(c.created_at)}</span>
+            </Field>
             <Field label="Last touch">
               {data.lastTouch.state === "ok"
                 ? data.lastTouch.value

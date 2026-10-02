@@ -23,7 +23,13 @@
  * A count built from a list that stopped at its read cap is a FLOOR, not a
  * total: it renders as "N+" (shownCount), never as the number alone. Which
  * counts a capped list turns into floors is decided here, in `floors`.
+ *
+ * A deal about a retired business (its data.client_tenant_id is a retired
+ * tenant, lib/os/customers/retired.ts) is never a client here, whatever its
+ * stage: SunBiz was retired on 2026-09-28 and must not come back through a
+ * "Convert to client" button.
  */
+import { isRetiredClientRef } from "@/lib/os/customers/retired";
 
 /** Stages that mean "this deal is now a client" (paid, then delivery). */
 export const CLIENT_STAGES = ["won", "onboarding", "in_build", "client_review", "launched"] as const;
@@ -189,6 +195,7 @@ export function buildClientRows(input: {
 
   const pastKeys = new Set<string>();
   for (const lead of input.leads) {
+    if (isRetiredClientRef(lead.data)) continue;
     const stage = str(lead.data.stage) || "";
     const ended = (ENDED_LEAD_STAGES as readonly string[]).includes(stage);
     if (!ended && !(CLIENT_STAGES as readonly string[]).includes(stage)) continue;

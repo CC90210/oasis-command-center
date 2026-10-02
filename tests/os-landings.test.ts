@@ -742,6 +742,34 @@ async function main() {
       await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
     }
   });
+  await check("/clients: a blank start draws no 'Not yet client records' section at all, not an empty card (CC, 2026-10-02)", async () => {
+    await login("cc");
+    const before = text(await ClientsPage());
+    assert.ok(before.includes("Not yet client records"), "control: the paid deal is listed under its heading");
+    // Nothing left in OASIS's book: the deal lost, its project archived, both tickets resolved.
+    await raw.batch(
+      [
+        "UPDATE tenant_records SET data = json_set(data, '$.stage', 'lost') WHERE id = 'lead-won'",
+        "UPDATE delivery_projects SET archived_at = '2026-10-02T00:00:00.000Z' WHERE id = 'proj-1'",
+        "UPDATE support_tickets SET status = 'resolved' WHERE id IN ('t-1', 't-2')",
+      ],
+      "write",
+    );
+    try {
+      const blank = text(await ClientsPage());
+      assert.ok(!blank.includes("Not yet client records"), "a blank start still draws the section");
+      assert.ok(!blank.includes("Nothing left to convert"), "nor the old empty card");
+    } finally {
+      await raw.batch(
+        [
+          "UPDATE tenant_records SET data = json_set(data, '$.stage', 'in_build') WHERE id = 'lead-won'",
+          "UPDATE delivery_projects SET archived_at = NULL WHERE id = 'proj-1'",
+          "UPDATE support_tickets SET status = 'open' WHERE id IN ('t-1', 't-2')",
+        ],
+        "write",
+      );
+    }
+  });
 
   // ── /growth/ads ────────────────────────────────────────────────────────
   await check("/growth/ads: no number on the page; every tile says Not connected", async () => {
