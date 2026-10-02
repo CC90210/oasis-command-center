@@ -70,8 +70,10 @@ test("no operator-identity check survives in this component at all", () => {
   // for "who is looking" now. Keeping the helper around invites the next person
   // to reach for it, which is exactly how this was written the first time.
   for (const token of ["isOperatorEmail", "isOperator"]) {
-    const uses = SRC.split(token).length - 1;
-    const inComment = SRC.split(new RegExp(`//.*${token}`)).length - 1;
+    // Whole identifiers: oasisOperatorAgents (OASIS's bridge agents, keyed by
+    // the workspace's tenant id, not by who is looking) contains the letters.
+    const uses = SRC.split(new RegExp(`\\b${token}\\b`)).length - 1;
+    const inComment = SRC.split(new RegExp(`//.*\\b${token}\\b`)).length - 1;
     assert.equal(
       uses - inComment,
       0,

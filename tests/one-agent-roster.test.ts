@@ -709,6 +709,49 @@ async function main() {
       assert.match(readFileSync(join(ROOT, page), "utf8"), /oasisOperatorAgents\(/, `${page} lists OASIS's business roster`);
     }
   });
+  // Verifier D3: the job picker on /automations was built from OASIS's roster,
+  // so it offered sdr and customer-support (the API refuses them) and not Aura.
+  await check("/automations offers a job only agents the cron API accepts: OASIS's bridge agents, a client's own roster", async () => {
+    const { AutomationsContent } = await import("../components/automations/AutomationsContent");
+    const { CronJobsManager } = await import("../components/automations/CronJobsManager");
+    const { oasisOperatorAgents } = await import("../lib/manifest/tenant-scope");
+    const { isHouseAgentSlug } = await import("../lib/agents");
+    const cronRoute = await import("../app/api/cron-jobs/route");
+    const find = (node: unknown, type: unknown): { props: Record<string, unknown> } | null => {
+      if (!node || typeof node !== "object") return null;
+      if (Array.isArray(node)) {
+        for (const n of node) {
+          const hit = find(n, type);
+          if (hit) return hit;
+        }
+        return null;
+      }
+      const el = node as { type?: unknown; props?: Record<string, unknown> };
+      if (el.type === type && el.props) return el as { props: Record<string, unknown> };
+      return el.props ? find(el.props.children, type) : null;
+    };
+    const offered = async (who: U) => {
+      await login(who);
+      const picker = find(await AutomationsContent({}), CronJobsManager);
+      assert.ok(picker, `no job picker for ${who.email}`);
+      const keys = picker.props.agentKeys as string[];
+      for (const key of keys) {
+        const res = await post(cronRoute, "/api/cron-jobs", {
+          name: `Picked ${key}`,
+          schedule: "0 8 * * *",
+          action_type: "snapshot_run",
+          action_payload: { snapshot: "daily" },
+          agent_key: key,
+        });
+        assert.equal(res.status, 200, `${who.email} was offered "${key}", which the cron API refuses: ${JSON.stringify(await res.json())}`);
+      }
+      return keys;
+    };
+    assert.deepEqual(await offered(USERS.cc), oasisOperatorAgents(OASIS), "OASIS is offered the agents its bridge runs");
+    const client = await offered(USERS.owner);
+    assert.ok(client.includes("sdr"), `the client's own lead is not offered: ${client.join(", ")}`);
+    assert.ok(!client.some((k) => isHouseAgentSlug(k)), `a client is offered a house agent: ${client.join(", ")}`);
+  });
 
   if (failures > 0) {
     console.log(`one-agent-roster: ${failures} check(s) failed`);
