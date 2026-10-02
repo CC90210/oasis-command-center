@@ -434,6 +434,24 @@ async function main() {
     }
   });
 
+  await check("counts that load beside a list that does not say the list failed, never 'nothing in it yet'", async () => {
+    // The counts read two columns and the list reads ten: a table that has only
+    // the counts' columns lets the counts succeed while the list read breaks.
+    await raw.execute("ALTER TABLE marketing_corpus RENAME TO marketing_corpus_away");
+    await raw.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT, state TEXT, label TEXT)");
+    await raw.execute({ sql: "INSERT INTO marketing_corpus (id, tenant_id, state, label) VALUES ('c-split', ?, 'indexed', 'exemplar')", args: [OASIS] });
+    try {
+      const text = textOf(await resolve(await TrainPage(), false));
+      assert.match(text, /Learned/, "the counts loaded and are shown");
+      assert.match(text, /Couldn't load the list of links/);
+      assert.doesNotMatch(text, /Nothing in it yet/, "a failed list is not an empty one");
+      assert.doesNotMatch(text, /\[(marketing|founders|safe)[:.]|server log/, "no log tag or server talk on the screen");
+    } finally {
+      await raw.execute("DROP TABLE marketing_corpus");
+      await raw.execute("ALTER TABLE marketing_corpus_away RENAME TO marketing_corpus");
+    }
+  });
+
   // ── 4. Overview: no card waits on another tab's data ─────────────────────
   const { default: MarketingPage } = await import("../app/founders/marketing/page");
   let overview: unknown = null;

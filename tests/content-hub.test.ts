@@ -305,6 +305,17 @@ async function main() {
     }
   });
 
+  await check("no Content page puts a log tag or 'server log' on the screen; a failure says it plainly and that the cause is logged for the OASIS team", () => {
+    const files = walkFiles(join(root, "app/founders/marketing")).map(rel).filter((f) => /\.tsx?$/.test(f));
+    assert.ok(files.length >= 6, `walked the Content pages: ${files.length}`);
+    const TAG = /\[(marketing|founders|safe)[:.][^\]]*\]|server log/i;
+    for (const f of files) {
+      // Code, not comments: a comment may name the tag the server logs under.
+      const lines = code(f).split(/\r?\n/).filter((l) => !/^\s*(\/\/|\/?\*)/.test(l));
+      for (const l of lines) assert.doesNotMatch(l, TAG, `${f}: ${l.trim().slice(0, 160)}`);
+    }
+  });
+
   // ── 5. one name ──────────────────────────────────────────────────────────
   await check("one name: Content in FOUNDERS_NAV, the h1, every <title>, the back links and MarketingToday; no 'Studio', no 'Marketing · OASIS'", () => {
     assert.equal(FOUNDERS_NAV.find((n) => n.href === CONTENT_ROOT)?.label, "Content");

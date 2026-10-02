@@ -104,7 +104,7 @@ function TrainingLoading() {
 async function TrainingContents({ tenantId }: { tenantId: string }) {
   const [stats, items] = await Promise.all([
     safe("marketing.corpus.stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
-    safe("marketing.corpus.items", getCorpusItems(tenantId, 40), []),
+    safe("marketing.corpus.items", getCorpusItems(tenantId, 40), { rows: [], degraded: true }),
   ]);
 
   // A failed count is not an empty corpus: the list below would read "nothing
@@ -113,7 +113,7 @@ async function TrainingContents({ tenantId }: { tenantId: string }) {
     return (
       <MarketingEmpty
         headline="Couldn't read the training material"
-        detail="The counts and the list did not load, so this is not an empty list. Nothing has been lost. Refresh; if it persists the server log has the reason under [marketing:corpus.stats]."
+        detail="The counts and the list did not load, so this is not an empty list. Nothing has been lost. Try again in a minute; the cause is logged for the OASIS team."
       />
     );
   }
@@ -139,7 +139,13 @@ async function TrainingContents({ tenantId }: { tenantId: string }) {
           )}
         </div>
 
-        {items.length === 0 ? (
+        {items.degraded ? (
+          // The counts above loaded; the list did not. Not "nothing in it yet".
+          <MarketingEmpty
+            headline="Couldn't load the list of links"
+            detail="The counts above are current and nothing has been lost; only the list did not load. Try again in a minute; the cause is logged for the OASIS team."
+          />
+        ) : items.rows.length === 0 ? (
           <MarketingEmpty
             headline="Nothing in it yet"
             detail="Every link you add above becomes a style note the marketing agent can draw on. Examples to copy teach it the shape; examples to avoid teach it the limits."
@@ -148,7 +154,7 @@ async function TrainingContents({ tenantId }: { tenantId: string }) {
         ) : (
           <Card noPadding>
             <ul className="divide-y divide-bg-border">
-              {items.map((it) => {
+              {items.rows.map((it) => {
                 const c = ingestStateCopy((it.state as IngestState) || "queued");
                 return (
                   <li key={it.id} className="flex items-center gap-4 px-5 py-3.5">

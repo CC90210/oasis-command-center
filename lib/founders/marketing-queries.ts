@@ -330,16 +330,6 @@ async function pageAll<T>(
 }
 
 /**
- * The LIST readers (assets, media, corpus rows) return [] on any error, so
- * "absent" and "broken" are the same decision to them: stop. They keep this
- * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
- * and only a count can lie by saying zero.
- */
-function quiet(label: string, err: { code?: string; message?: string } | null): boolean {
-  return classify(label, err) !== "ok";
-}
-
-/**
  * Page size for the own-brand asset read. Same value and same `.range()` loop as
  * getMarketingBrands further down this file: PostgREST caps a response at
  * `max-rows` (1,000 on Supabase) and returns the short page WITHOUT an error, so
@@ -1272,9 +1262,17 @@ export async function getCorpusStats(
   }
 }
 
-/** Most recent corpus items, newest first. */
-export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusRow[]> {
-  if (!tenantId) return [];
+/** The newest corpus links, and whether the read failed (a failed read is not an empty list). */
+export type CorpusItems = { rows: CorpusRow[]; degraded: boolean };
+
+/**
+ * Most recent corpus items, newest first. Unlike the other list readers this
+ * one says when it failed: the Training tab prints "Nothing in it yet" for an
+ * empty list, so an empty list from a broken read would hide material that is
+ * there (the counts read separately and can succeed while this one fails).
+ */
+export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusItems> {
+  if (!tenantId) return { rows: [], degraded: false };
   try {
     const db = getServiceSupabase();
     const r = await db
@@ -1283,13 +1281,12 @@ export async function getCorpusItems(tenantId: string, limit = 40): Promise<Corp
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);
-    if (r.error) {
-      quiet("corpus.items", r.error);
-      return [];
-    }
-    return (r.data || []) as CorpusRow[];
+    const verdict = classify("corpus.items", r.error);
+    if (verdict === "absent") return { rows: [], degraded: false };
+    if (verdict === "broken") return { rows: [], degraded: true };
+    return { rows: (r.data || []) as CorpusRow[], degraded: false };
   } catch (e) {
     console.warn("[marketing:corpus.items] unexpected", e);
-    return [];
+    return { rows: [], degraded: true };
   }
 }

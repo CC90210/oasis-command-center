@@ -515,7 +515,7 @@ export default async function MarketingLibraryPage({
             }
             detail={
               libraryDegraded
-                ? "The query failed, so this is not a statement about what the library holds. Nothing has been lost — refresh, and if it persists the server log carries the reason under [marketing:assets]."
+                ? "The library did not load, so this is not a statement about what it holds. Nothing has been lost. Try again in a minute; the cause is logged for the OASIS team."
                 : status
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : lifecycle

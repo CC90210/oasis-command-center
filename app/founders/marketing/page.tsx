@@ -272,7 +272,7 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
           // The verdict count is its own read now, so its failure lands here too.
           <MarketingEmpty
             headline="Couldn't load your queue"
-            detail="A query failed, so these counts are incomplete — treat them as a floor, not a total. Nothing has been lost; this is a read-side failure. Refresh, and if it persists the server log carries the reason under [marketing:summary] or [marketing:lifecycle]."
+            detail="Part of this did not load, so these counts are incomplete: treat them as a floor, not a total. Nothing has been lost. Try again in a minute; the cause is logged for the OASIS team."
             hint="Showing whatever did load, rather than a zero that would look like good news."
           />
         ) : needsYou === 0 ? (
