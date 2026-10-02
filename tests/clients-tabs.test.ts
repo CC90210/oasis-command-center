@@ -328,15 +328,19 @@ async function main() {
   const record = async (id: string, tab?: string) => {
     const body = await ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
     const layout = await ClientRecordLayout({ params: Promise.resolve({ id }), children: body as never });
-    const [tabBar] = findAll(layout, bar.OsTabBar);
-    assert.ok(tabBar, "the record's tab bar is drawn by its layout");
-    return { body: textOf(body).join("\n"), tabBar: tabBar.props as { param?: string; active?: string; tabs: Tab[] } };
+    const [recordTabs] = findAll(layout, status.ClientRecordTabs);
+    assert.ok(recordTabs, "the record's tab bar is drawn by its layout");
+    // ClientRecordTabs is the shared OsTabBar, reading ?tab= from the address bar.
+    const drawn = status.ClientRecordTabs(recordTabs.props as { tabs: Tab[] }) as unknown as { type: unknown; props: Record<string, unknown> };
+    assert.equal(drawn.type, bar.OsTabBar);
+    return { body: textOf(body).join("\n"), tabBar: drawn.props as { param?: string; label?: string; tabs: Tab[] } };
   };
   await login(USERS.clientA);
   await check("a client workspace's record: no Money and no Usage tab; ?tab=usage and ?tab=money open Overview", async () => {
     for (const tab of ["usage", "money"]) {
       const r = await record(acme.id, tab);
       assert.equal(r.tabBar.param, "tab", "the bar reads ?tab= from the address bar");
+      assert.equal(r.tabBar.label, "Client record");
       assert.deepEqual(
         r.tabBar.tabs.map((t) => t.key),
         ["overview", "conversations", "tickets", "projects", "activity", "health", "files"],
@@ -422,8 +426,32 @@ async function main() {
     }
     assert.match(stripped("app/clients/page.tsx"), /<ClientsByStatus\b/);
     assert.match(stripped("components/os/landings/clients-status.tsx"), /<OsTabBar label="Client status"/);
-    assert.match(stripped("app/clients/[id]/layout.tsx"), /<OsTabBar\s+label="Client record"\s+param="tab"/);
-    assert.doesNotMatch(stripped("app/clients/[id]/page.tsx"), /OsTabBar|loadClientHeader|loadAssignmentRoster/, "the page draws the open tab only");
+    assert.match(stripped("components/os/landings/clients-status.tsx"), /<OsTabBar label="Client record" param="tab"/);
+    assert.match(stripped("app/clients/[id]/layout.tsx"), /<ClientRecordTabs\b/);
+    assert.doesNotMatch(stripped("app/clients/[id]/page.tsx"), /OsTabBar|ClientRecordTabs|loadClientHeader|loadAssignmentRoster/, "the page draws the open tab only");
+  });
+  await check("no new client boundary: server code reaches OsTabBar and the status view only through clients-actions.tsx (each boundary module costs ~147 KiB of Worker upload)", () => {
+    // Every "use client" module a server component imports is listed three
+    // times in each of the 538 route manifests: on 2026-10-02 OsTabBar.tsx and
+    // clients-status.tsx, imported directly, put the Worker 235 KiB past its
+    // budget. A server file may name OsTabBar's types (erased), not import it.
+    const offenders: string[] = [];
+    for (const dir of ["app", "components", "lib"]) {
+      for (const f of walk(join(root, dir))) {
+        const src = code(f);
+        if (/^\s*["']use client["'];/.test(src)) continue;
+        for (const m of src.matchAll(/^import\s+(?!type\b)[^;]*?from\s+["']([^"']+)["']/gm)) {
+          if (/(^|\/)(OsTabBar|clients-status)$/.test(m[1])) offenders.push(`${f} imports ${m[1]}`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
+    const actions = code("components/os/landings/clients-actions.tsx");
+    assert.match(actions, /^"use client";/, "clients-actions.tsx is the Clients pages' client boundary");
+    assert.match(
+      actions,
+      /export \{ ClearClientFilters, ClientRecordTabs, ClientStatusField, ClientsByStatus \} from "@\/components\/os\/landings\/clients-status";/,
+    );
   });
   await check("both Clients pages have a loading boundary that paints at once", () => {
     for (const [f, variant] of [["app/clients/loading.tsx", "page"], ["app/clients/[id]/loading.tsx", "section"]] as const) {
@@ -451,6 +479,8 @@ async function main() {
     assert.deepEqual(current(html("record")), ["/clients/c1?tab=money"]);
     assert.deepEqual(current(html("recordNoTab")), ["/clients/c1"], "no ?tab=: Overview");
     assert.deepEqual(current(html("recordUnknownTab")), ["/clients/c1"], "a tab this record does not offer: Overview, as the page renders");
+    assert.match(html("recordLayoutBar"), /<nav aria-label="Client record"/);
+    assert.deepEqual(current(html("recordLayoutBar")), ["/clients/c1?tab=tickets"], "the layout's bar follows ?tab=");
     assert.deepEqual(r.recordPrefetch, [false, false, false, false]);
     assert.deepEqual(r.recordWarm, ["prefetch /clients/c1?tab=tickets", "prefetch /clients/c1?tab=conversations"]);
     assert.deepEqual(r.recordClick, { cancelled: false, href: "/clients/c1?tab=tickets" });

@@ -24,6 +24,10 @@
  * CustomerRow) and handed over as elements, one per record, so health badges,
  * owners and last touch read exactly as before; this file only chooses which
  * of them to show. All splits current clients from Past ones, as before.
+ *
+ * Server components never import this file (or components/os/OsTabBar.tsx)
+ * directly: they use the re-exports in clients-actions.tsx, the Clients pages'
+ * one client boundary. Why is in that file's header.
  */
 
 import type { ReactNode } from "react";
@@ -188,4 +192,14 @@ export function ClearClientFilters({ formFiltered }: { formFiltered: boolean }) 
       Clear
     </Link>
   );
+}
+
+/**
+ * A client record's tab bar, drawn by its layout (app/clients/[id]/layout.tsx).
+ * A layout is not rendered again when only ?tab= changes, so the bar reads the
+ * tab from the address bar (`param`); a missing or unknown one is Overview,
+ * the first tab, as the page renders it.
+ */
+export function ClientRecordTabs({ tabs }: { tabs: readonly OsTab[] }) {
+  return <OsTabBar label="Client record" param="tab" tabs={tabs} />;
 }

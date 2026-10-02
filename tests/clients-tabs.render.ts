@@ -79,7 +79,7 @@ async function main() {
 
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { OsTabBar } = await import("../components/os/OsTabBar");
-  const { ClientsByStatus, ClientStatusField, ClearClientFilters } = await import("../components/os/landings/clients-status");
+  const { ClientsByStatus, ClientStatusField, ClearClientFilters, ClientRecordTabs } = await import("../components/os/landings/clients-status");
   const { WriteToClientLink } = await import("../components/os/landings/client-conversations");
   const h = React.createElement;
   const render = (el: React.ReactElement, url = "") => {
@@ -104,6 +104,8 @@ async function main() {
   out.recordClick = click("/clients/c1?tab=tickets");
   out.recordNoTab = render(recordBar(), "");
   out.recordUnknownTab = render(recordBar(), "tab=usage");
+  // The record layout's own bar (clients-status.tsx ClientRecordTabs).
+  out.recordLayoutBar = render(h(ClientRecordTabs, { tabs: recordTabs }), "tab=tickets");
   pending = true;
   out.recordPending = render(recordBar(), "tab=money");
   pending = false;

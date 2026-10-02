@@ -25,12 +25,11 @@ import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import { Tag } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
-import { OsTabBar } from "@/components/os/OsTabBar";
 import { LoadError } from "@/components/delivery/badges";
 import { TicketCreateForm } from "@/components/delivery/TicketForms";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { clientTabsFor, loadClientHeader, loadWorkspaceDirectory, ownerName } from "@/components/os/landings/clients-records-data";
-import { EndEngagementButton } from "@/components/os/landings/clients-actions";
+import { ClientRecordTabs, EndEngagementButton } from "@/components/os/landings/clients-actions";
 import { WriteToClientLink } from "@/components/os/landings/client-conversations";
 import { ClientHealthBadge } from "@/components/os/landings/client-health-badge";
 import { clientsViewerFromSurface, type ClientsViewer } from "@/lib/os/customers/session";
@@ -144,9 +143,7 @@ export default async function ClientRecordLayout({ params, children }: { params:
         )}
         {/* Each tab is a server render of the page below; the bar answers the
             click at once and shows the wait (components/os/OsTabBar.tsx). */}
-        <OsTabBar
-          label="Client record"
-          param="tab"
+        <ClientRecordTabs
           tabs={clientTabsFor(cv).map((t) => ({
             key: t.key,
             label: t.label,

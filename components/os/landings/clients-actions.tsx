@@ -11,12 +11,23 @@
  * sentence out on failure, a server refresh on success), so the page re-reads
  * through the tenant-scoped store instead of trusting local state. Nothing
  * here names a workspace: every route takes the tenant from the session.
+ *
+ * THE CLIENTS PAGES' ONE CLIENT BOUNDARY. The pages' other browser parts (the
+ * status tabs, the record's tab bar) are re-exported from here rather than
+ * imported by the server pages from their own files. Every "use client" module
+ * a server component imports directly is listed, three times, in EVERY route's
+ * client-reference manifest (538 routes): measured on 2026-10-02, two such new
+ * modules added 293 KiB to the Worker upload, past its budget. A module only
+ * client code imports (clients-status.tsx, components/os/OsTabBar.tsx) adds
+ * nothing there. tests/clients-tabs.test.ts keeps it that way.
  */
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { CUSTOMER_LIFECYCLES, CUSTOMER_LIFECYCLE_LABELS, type CustomerLifecycle } from "@/lib/os/customers/rules";
 import { useDeliveryAction, type Option } from "@/components/delivery/useDeliveryAction";
+
+export { ClearClientFilters, ClientRecordTabs, ClientStatusField, ClientsByStatus } from "@/components/os/landings/clients-status";
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? <p className="text-sm text-status-hot" role="alert">{error}</p> : null;

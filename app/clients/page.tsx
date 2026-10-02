@@ -65,12 +65,14 @@ import {
   type ListedClient,
 } from "@/components/os/landings/clients-records-data";
 import {
+  ClearClientFilters,
+  ClientStatusField,
+  ClientsByStatus,
   ConvertToClientButton,
   EndDealEngagementButton,
   ImportStripeButton,
   NewClientButton,
 } from "@/components/os/landings/clients-actions";
-import { ClearClientFilters, ClientStatusField, ClientsByStatus } from "@/components/os/landings/clients-status";
 import type { OsTab } from "@/components/os/OsTabBar";
 import { ClientHealthBadge } from "@/components/os/landings/client-health-badge";
 import { clientsViewerFromSurface } from "@/lib/os/customers/session";
