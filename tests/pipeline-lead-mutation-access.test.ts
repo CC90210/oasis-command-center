@@ -117,15 +117,18 @@ assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}
 assert.match(page, /canMutateLead && ownedSlug \? \([\s\S]*?<LeadContextEditor/);
 assert.match(page, /canMutateLead \? <LeadNoteComposer/);
 assert.match(page, /readableRepUserIds/);
-const managerGateStart = websiteSalesRoute.indexOf(
-  'session.teamRole.trim().toLowerCase() === "manager"',
-);
-const managerGateEnd = websiteSalesRoute.indexOf(
-  'return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"}',
+// The ownership gate lives in websiteSalesLeadSeat, shared with the call
+// screen's booking read; the route must still call it and refuse on it.
+assert.match(websiteSalesRoute, /const seat = websiteSalesLeadSeat\(/);
+assert.match(websiteSalesRoute, /if \(!seat\.ok\) return NextResponse\.json\(\{ok:false,error:seat\.error\},\{status:403\}\)/);
+const seatPredicate = read("lib/website-sales-workflow.ts");
+const managerGateStart = seatPredicate.indexOf('role === "manager"');
+const managerGateEnd = seatPredicate.indexOf(
+  'return { ok: false, error: "lead_not_assigned_to_agent" }',
   managerGateStart,
 );
 assert.ok(managerGateStart >= 0 && managerGateEnd > managerGateStart, "manager write gate is present");
-const managerWriteGate = websiteSalesRoute.slice(managerGateStart, managerGateEnd);
+const managerWriteGate = seatPredicate.slice(managerGateStart, managerGateEnd);
 assert.match(managerWriteGate, /!assignedToUser/);
 assert.doesNotMatch(
   managerWriteGate,

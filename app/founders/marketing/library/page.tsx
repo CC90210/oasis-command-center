@@ -91,7 +91,6 @@ import {
   type Track,
 } from "@/lib/founders-marketing-core";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
-import { TileVideo } from "@/components/founders/TileVideo";
 
 export const dynamic = "force-dynamic";
 
@@ -333,50 +332,6 @@ export default async function MarketingLibraryPage({
             />
           ))}
         </div>
-      )}
-
-      {group === "clients" && (!brand || brand === "arthrisil") && (
-        <Card title="Arthrisil · Social-proof edit V6" subtitle="Client creative · Internal review · 48s · 9:16">
-          <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
-            {/* The same lazy player as every Library tile: a cover until someone
-                presses play, then a <video>. It used to mount a <video> on
-                arrival, poster and all, whenever the Clients tab opened. */}
-            <div className="mx-auto aspect-[9/16] max-h-[70vh] w-full overflow-hidden rounded-2xl border border-bg-border bg-black">
-              <TileVideo
-                src="/media/arthrisil-marketing/arthrisil-social-proof-v6.mp4"
-                posterUrl="/media/arthrisil-marketing/end-card-preview.png"
-                width={1080}
-                height={1920}
-                title="Arthrisil social-proof edit V6"
-              />
-            </div>
-            <div className="space-y-4">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Client asset</p>
-                <h2 className="mt-2 text-xl font-semibold text-fg">Arthritis impact → Dr. Azoulay → Arthrisil</h2>
-                <p className="mt-2 text-sm leading-6 text-fg-muted">
-                  Three complete outside perspectives establish pain and lost mobility. Dr. Michael then enters on camera before
-                  speaking in one single-source, transcript-led sequence: morning stiffness, a natural solution, 27 years of
-                  experience, and the Arthrisil reveal. A luminous bottle-outline close completes the ad.
-                </p>
-              </div>
-              <dl className="grid grid-cols-2 gap-3 text-sm">
-                <div><dt className="text-fg-dim">Brand</dt><dd className="font-semibold text-fg">Arthrisil</dd></div>
-                <div><dt className="text-fg-dim">Status</dt><dd className="font-semibold text-fg">In review</dd></div>
-                <div><dt className="text-fg-dim">Channel</dt><dd className="font-semibold text-fg">Organic social</dd></div>
-                <div><dt className="text-fg-dim">Rights</dt><dd className="font-semibold text-amber-300">Internal only</dd></div>
-              </dl>
-              <div className="flex flex-wrap gap-2" aria-label="Asset tags">
-                {["arthrisil", "client", "doctor", "social-proof", "arthritis", "vertical-video", "j-cut", "music-bed", "internal-review"].map((tag) => (
-                  <span key={tag} className="rounded-full border border-bg-border bg-bg-deep px-2.5 py-1 text-xs text-fg-muted">{tag}</span>
-                ))}
-              </div>
-              <p className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-fg-muted">
-                Public release is blocked until third-party clip permissions are documented. Product copy is limited to licensed claim language; unsupported superlatives from the source footage were excluded.
-              </p>
-            </div>
-          </div>
-        </Card>
       )}
 
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill

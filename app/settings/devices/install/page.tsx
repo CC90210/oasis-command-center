@@ -69,8 +69,8 @@ export default async function BridgeInstallPage() {
 
   const header = (
     <PageHeader
-      title="Install the local bridge"
-      subtitle="Give your agents full Claude Code parity — file system, bash, every MCP — by pairing this machine to your tenant."
+      title="Connect a computer to OASIS AI Command Center"
+      subtitle="Your agents can then run automations, use its terminal and files, and start the AI command-line tools installed on it, whatever model they use."
       action={back}
     />
   );
@@ -86,17 +86,16 @@ export default async function BridgeInstallPage() {
           <div className="flex items-center gap-2 mb-2">
             <Cloud className="w-4 h-4 text-fg-muted" />
             <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-              Cloud only (API key)
+              Cloud only (your AI account)
             </div>
           </div>
           <div className="text-sm text-fg mb-2">What you have now</div>
           <ul className="text-xs text-fg-muted space-y-1.5 leading-relaxed">
-            <li>• Native Anthropic tool_use loop</li>
-            <li>• Records read / write / search / delete</li>
-            <li>• http_get and http_post against public URLs</li>
-            <li>• Integration status + lead lookup</li>
+            <li>&bull; Records read / write / search / delete</li>
+            <li>&bull; http_get and http_post against public URLs</li>
+            <li>&bull; Integration status + lead lookup</li>
             <li className="text-fg-dim italic">
-              No local file access, no shell, no MCPs
+              No access to a computer&apos;s files, terminal or local tools
             </li>
           </ul>
         </div>
@@ -104,18 +103,14 @@ export default async function BridgeInstallPage() {
           <div className="flex items-center gap-2 mb-2">
             <Cpu className="w-4 h-4 text-accent" />
             <div className="text-xs font-bold uppercase tracking-wider text-accent">
-              Local bridge (Claude Code CLI)
+              With a connected computer
             </div>
           </div>
-          <div className="text-sm text-fg mb-2">What the install unlocks</div>
+          <div className="text-sm text-fg mb-2">What connecting adds</div>
           <ul className="text-xs text-fg-muted space-y-1.5 leading-relaxed">
-            <li>• Read / Edit / Write / Bash / Glob / Grep on your repos</li>
-            <li>• All Claude Code MCPs (Playwright, Supabase, Context7…)</li>
-            <li>• Python scripts and scheduled cron jobs</li>
-            <li>• Real SMS / email sends via your local .env.agents</li>
-            <li className="text-accent">
-              Uses your Claude Code subscription (no per-token API charges)
-            </li>
+            <li>&bull; Reads and edits files, and runs terminal commands, on that computer</li>
+            <li>&bull; Scripts and scheduled jobs</li>
+            <li>&bull; Chat through an AI command-line tool installed there, from Anthropic, OpenAI or Google</li>
           </ul>
         </div>
       </div>

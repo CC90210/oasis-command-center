@@ -90,7 +90,7 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
   try {
     const r = await fetch("/api/bridge/cli-status", { signal, cache: "no-store" });
     if (!r.ok) {
-      return { kind: "error", message: `bridge returned ${r.status}` };
+      return { kind: "error", message: `Couldn't reach this computer's bridge (status ${r.status})` };
     }
     const body = (await r.json()) as {
       ok?: boolean;
