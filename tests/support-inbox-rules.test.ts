@@ -352,6 +352,37 @@ async function main() {
     assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM outcome_events WHERE subject_id = ? AND event_key = 'ticket.reopened'", args: [t.id] })).rows[0].n), 0);
   });
 
+  await check("two client comments that each reopen the ticket, with a resolve between their writes, record TWO ticket.reopened", async () => {
+    const t = (await store.createTicket(db, OASIS, { ...base, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, now)).ticket;
+    await store.updateTicket(db, OASIS, t.id, { status: "resolved" }, { userId: "u", name: "CC" }, now);
+    const reopenings = async () =>
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM outcome_events WHERE subject_id = ? AND event_key = 'ticket.reopened'", args: [t.id] })).rows[0].n);
+    // Comment A has read the resolved ticket and is about to write. Comment B
+    // lands first and reopens it; a person resolves it again; then A writes.
+    let held = false;
+    const late = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+            if (!held && stmts.some((x) => /INSERT INTO ticket_comments/.test(typeof x === "string" ? x : x.sql))) {
+              held = true;
+              const b = await store.addTicketComment(db, OASIS, t.id, { body: "Comment B", is_internal: false, author_type: "client", author: { userId: null, name: "Jane" } }, now);
+              assert.ok(b.ok && b.reopened, "B reopened it");
+              await store.updateTicket(db, OASIS, t.id, { status: "resolved" }, { userId: "u", name: "CC" }, now);
+            }
+            return target.batch(stmts, mode);
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as typeof db;
+    const a = await store.addTicketComment(late, OASIS, t.id, { body: "Comment A", is_internal: false, author_type: "client", author: { userId: null, name: "Jane" } }, now);
+    assert.ok(a.ok && a.reopened, JSON.stringify(a));
+    assert.equal((await db.execute({ sql: "SELECT status FROM support_tickets WHERE id = ?", args: [t.id] })).rows[0].status, "open");
+    assert.equal(await reopenings(), 2, "each real reopening is on the ledger");
+  });
+
   await check("a ticket closed between the read and the write refuses a client's comment (ticket_closed) and keeps nothing", async () => {
     const t = (await store.createTicket(db, OASIS, { ...base, id: "99999999-9999-4999-8999-999999999999" }, now)).ticket;
     // The ticket is open when read; a person closes it just before the write.

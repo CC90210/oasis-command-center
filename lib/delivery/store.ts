@@ -996,8 +996,12 @@ function ticketEvent(
     ticketId: string;
     customerId: string | null;
     actorUserId: string | null;
-    /** The n in the catalog's key shape: the occurrence of this event on this ticket. */
-    n: number;
+    /**
+     * The last part of the catalog's key shape: the occurrence of this event on
+     * this ticket (n), or for ticket.reopened the comment that reopened it, so
+     * two reopenings racing each other never share a key.
+     */
+    n: number | string;
     payload: Record<string, unknown>;
     conditional: boolean;
   },
@@ -1540,12 +1544,9 @@ export async function addTicketComment(
   let firstResponseAt = -1;
   if (isClient) {
     // A client writing on a ticket waiting on them, or resolved AT THIS
-    // MOMENT, reopens it; the n-th reopening is recorded only by that write.
-    const prior = await db.execute({
-      sql: `SELECT COUNT(*) AS n FROM outcome_events
-            WHERE tenant_id = ? AND subject_type = 'ticket' AND subject_id = ? AND event_key = ?`,
-      args: [tenantId, ticketId, TICKET_EVENT_KEYS.reopened],
-    });
+    // MOMENT, reopens it; the reopening is recorded only by that write, keyed
+    // by this comment (a count read before the batch could hand two racing
+    // reopenings the same key, and the second would be dropped).
     reopenAt =
       stmts.push({
         sql: `UPDATE support_tickets SET status = 'open', resolved_at = NULL, closed_at = NULL
@@ -1560,7 +1561,7 @@ export async function addTicketComment(
           ticketId,
           customerId: s(cur.customer_id),
           actorUserId: actorId(input.author.userId),
-          n: Number(rows(prior)[0]?.n ?? 0) + 1,
+          n: id,
           payload: {},
           conditional: true,
         },
