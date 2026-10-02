@@ -18,8 +18,8 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkOneByteSource, checkWorkerSize } from "../scripts/check-worker-bundle";
-import { checkServerTree, requestedChunks, scanRuntime, type ServerTree } from "../scripts/check-worker-chunks";
-import { CHUNK_FAILURE, REACHED_DATABASE, chunkFailureLines, mintSession, removeChunkCase } from "../scripts/check-worker-runtime";
+import { checkServerTree, requestedChunks, scanRuntime, selfTest, type ServerTree } from "../scripts/check-worker-chunks";
+import { CHUNK_FAILURE, REACHED_DATABASE, afterReady, chunkFailureLines, mintSession, removeChunkCase } from "../scripts/check-worker-runtime";
 import { verifySessionEdge } from "../lib/turso-auth-edge";
 
 const root = path.resolve(__dirname, "..");
@@ -295,6 +295,12 @@ const problemsOf = (tree: ServerTree) => checkServerTree(tree).problems.join("\n
   const empty = problemsOf(fixtureTree({ sources: [] }));
   assert.match(empty, /found no entry startup list/);
   assert.match(empty, /found no async chunk load/);
+  // The self-test the CLI runs on the real tree: both mutations are caught on a
+  // sound tree, and a tree with nothing to mutate is a failure, not a pass.
+  assert.deepEqual(selfTest(fixtureTree()), []);
+  assert.deepEqual(selfTest(fixtureTree({ sources: [{ file: "app/p.js", source: "t.X(0,[900],()=>a(1))" }] })), [
+    "self-test: no requested chunk has a case to remove",
+  ]);
 
   // The script's exit codes on a real directory tree.
   const scratch = mkdtempSync(path.join(tmpdir(), "worker-chunks-"));
@@ -310,7 +316,7 @@ const problemsOf = (tree: ServerTree) => checkServerTree(tree).problems.join("\n
       spawnSync(process.execPath, ["--import", "tsx", "scripts/check-worker-chunks.ts", server], { cwd: root, encoding: "utf8" });
     const pass = run();
     assert.equal(pass.status, 0, pass.stderr);
-    assert.match(pass.stdout, /every one is inlined/);
+    assert.match(pass.stdout, /every one is inlined \(self-test: a dropped case and a fake async id are both caught\)/);
     writeFileSync(path.join(server, "webpack-runtime.js"), patchedRuntime([1, 2]));
     const fail = run();
     assert.equal(fail.status, 1, "a chunk missing from the switch exits 1");
@@ -346,6 +352,7 @@ const problemsOf = (tree: ServerTree) => checkServerTree(tree).problems.join("\n
     assert.ok(!CHUNK_FAILURE.test(line), `an expected no-database failure is not a load failure: ${line}`);
   }
   assert.deepEqual(chunkFailureLines("ok\nError: Unknown chunk 7\nfine"), ["Error: Unknown chunk 7"]);
+  assert.equal(afterReady("bundling warnings\n[wrangler:info] Ready on http://127.0.0.1:8800\nPOST /x 500"), "Ready on http://127.0.0.1:8800\nPOST /x 500");
   // REACHED_DATABASE must match what lib/turso.ts actually throws with no database configured.
   const tursoSource = readFileSync(path.join(root, "lib/turso.ts"), "utf8");
   const thrown = /throw new Error\(\s*"([^"]+)"/.exec(tursoSource);

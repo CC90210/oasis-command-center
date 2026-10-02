@@ -43,7 +43,8 @@
 
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 /** What a chunk or module that cannot be loaded looks like, in a body or the log. */
@@ -106,6 +107,15 @@ const HANDLER = path.join(ROOT, ".open-next/server-functions/default/handler.mjs
 const OG_PNG = path.join(ROOT, "app/(marketing)/opengraph-image.png");
 const REQUEST_TIMEOUT_MS = 30_000;
 const READY_TIMEOUT_MS = 120_000;
+const ACCESS_LOG_WAIT_MS = 10_000;
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The log after wrangler says Ready: the part that belongs to the requests. */
+export function afterReady(log: string): string {
+  const at = log.search(/Ready on http:\/\//);
+  return at < 0 ? log : log.slice(at);
+}
 
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const statusIs =
@@ -186,8 +196,10 @@ function groups(): Group[] {
     {
       name: "API and not-found",
       probes: [
-        { name: "GET /api/health", path: "/api/health", signedIn: true, expect: statusIs(200) },
-        { name: "unknown page", path: "/no-such-page-runtime-gate", expect: statusIs(404) },
+        // Public, and answers 200 even when the session lookup fails: it logs
+        // that failure, so it too must reach the database step.
+        { name: "GET /api/health", path: "/api/health", expect: statusIs(200), reachesDatabase: true },
+        { name: "unknown page", path: "/no-such-page-runtime-gate", signedIn: true, expect: statusIs(404) },
       ],
     },
   ];
@@ -227,15 +239,25 @@ async function runGroup(group: Group, index: number, secret: string, found: Foun
     "--var", "EMPIRE_DATA_BACKEND:turso_cloud",
     "--var", `AUTH_SESSION_SECRET:${secret}`,
   ];
+  // The log goes to a file, not a pipe: wrangler's access lines and the
+  // Worker's console output arrive there while the process runs (pipes lost
+  // them when the process was stopped right after a request).
+  const logFile = path.join(tmpdir(), `worker-runtime-gate-${process.pid}-${index}.log`);
+  const fd = openSync(logFile, "w");
   const child = spawn("npx", args, {
     cwd: ROOT,
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", fd, fd],
     env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false", FORCE_COLOR: "0", NO_COLOR: "1" },
   });
-  let log = "";
-  child.stdout!.on("data", (d) => (log += d.toString()));
-  child.stderr!.on("data", (d) => (log += d.toString()));
+  closeSync(fd);
+  const readLog = () => {
+    try {
+      return readFileSync(logFile, "utf8");
+    } catch {
+      return "";
+    }
+  };
   let exited = false;
   child.on("exit", () => (exited = true));
   const problems: string[] = [];
@@ -259,21 +281,21 @@ async function runGroup(group: Group, index: number, secret: string, found: Foun
   };
   try {
     const started = Date.now();
-    while (!new RegExp(`Ready on http://127\\.0\\.0\\.1:${port}`).test(log)) {
+    while (!new RegExp(`Ready on http://127\\.0\\.0\\.1:${port}`).test(readLog())) {
       if (exited) {
         problems.push(`${group.name}: wrangler dev exited before it was ready`);
-        return { problems, log, lines };
+        return { problems, log: "", lines };
       }
       if (Date.now() - started > READY_TIMEOUT_MS) {
         problems.push(`${group.name}: wrangler dev not ready after ${READY_TIMEOUT_MS / 1000}s`);
-        return { problems, log, lines };
+        return { problems, log: "", lines };
       }
       await new Promise((r) => setTimeout(r, 250));
     }
     const ready = Date.now() - started;
     const cookie = mintSession(secret);
     for (const probe of group.probes) {
-      const logBefore = log.length;
+      const logBefore = readLog().length;
       let r: Result;
       try {
         r = await request(`http://127.0.0.1:${port}`, probe, found, cookie);
@@ -281,8 +303,17 @@ async function runGroup(group: Group, index: number, secret: string, found: Foun
         problems.push(`${group.name} / ${probe.name}: ${(err as Error).message}`);
         continue;
       }
-      await new Promise((res) => setTimeout(res, 300)); // let the log catch up with the response
-      const own = log.slice(logBefore);
+      // wrangler writes its access line for a request after the response, and
+      // the Worker's own console output around it. Wait for that line before
+      // reading this request's share of the log, then a little longer.
+      const target = typeof probe.path === "function" ? probe.path(found) : probe.path;
+      const access = new RegExp(`\\[wrangler:info\\] ${probe.method || "GET"} ${escapeRegExp(target.split("?")[0])}[?\\s]`);
+      for (let waited = 0; waited < ACCESS_LOG_WAIT_MS && !access.test(readLog().slice(logBefore)); waited += 100) {
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      await new Promise((res) => setTimeout(res, 1000));
+      const own = readLog().slice(logBefore);
+      if (!access.test(own)) lines.push(`  note: no access-log line for ${probe.name} within ${ACCESS_LOG_WAIT_MS / 1000}s`);
       const issues: string[] = [];
       if (r.status === "timeout" || r.status === "connect-error") issues.push(`${r.status} after ${r.ms}ms`);
       const bodyFailure = CHUNK_FAILURE.exec(r.body.slice(0, 200_000));
@@ -295,9 +326,14 @@ async function runGroup(group: Group, index: number, secret: string, found: Foun
       for (const i of issues) problems.push(`${group.name} / ${probe.name}: ${i}`);
     }
     lines.unshift(`group "${group.name}": fresh workerd ready in ${ready}ms`);
-    return { problems, log, lines };
+    return { problems, log: readLog(), lines };
   } finally {
     await stop();
+    try {
+      unlinkSync(logFile);
+    } catch {
+      // already gone
+    }
   }
 }
 
@@ -324,7 +360,7 @@ async function main(): Promise<number> {
     const out = await runGroup(all[i], i, secret, found);
     console.log(out.lines.join("\n"));
     problems.push(...out.problems);
-    if (out.problems.length) console.log(`--- log of group "${all[i].name}" (last 60 lines) ---\n${out.log.split("\n").slice(-60).join("\n")}`);
+    if (out.problems.length) console.log(`--- log of group "${all[i].name}" after Ready ---\n${afterReady(out.log).split("\n").slice(0, 120).join("\n")}`);
   }
 
   // Self-test: the same kind of request against a handler missing one chunk.
@@ -354,7 +390,7 @@ async function main(): Promise<number> {
           console.log(`  self-test: the gate reported the request that needed chunk ${ids.join(", ")} ("Unknown chunk"), as it must`);
         } else {
           problems.push(`self-test: with chunk ${ids.join(", ")} removed the gate reported nothing it could tie to it (${out.problems.join("; ") || "no problems"}); it cannot see a missing chunk`);
-          console.log(`--- log of the self-test (last 60 lines) ---\n${out.log.split("\n").slice(-60).join("\n")}`);
+          console.log(`--- log of the self-test after Ready ---\n${afterReady(out.log).split("\n").slice(0, 120).join("\n")}`);
         }
       }
     } finally {

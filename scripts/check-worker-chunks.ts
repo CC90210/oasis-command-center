@@ -27,9 +27,12 @@
  *      list each entry hands to __webpack_require__.X(0, [ids], ...), and the
  *      __webpack_require__.e(id) that every dynamic import compiles to.
  * An empty scan fails: no startup list or no async load means the patterns no
- * longer match webpack's output, not that there is nothing to check.
+ * longer match webpack's output, not that there is nothing to check. After a
+ * pass it mutates the real tree in memory (one requested chunk dropped from the
+ * switch, one async load of a chunk that does not exist) and fails unless both
+ * are caught, so the check cannot quietly stop checking.
  *
- * Exit 0 = all inlined; 1 = a gap, or an input is missing or unreadable.
+ * Exit 0 = all inlined and the self-test caught both mutations; 1 otherwise.
  *
  * Run: node --import tsx scripts/check-worker-chunks.ts .open-next/server-functions/default/.next/server
  */
@@ -148,6 +151,34 @@ export function checkServerTree(tree: ServerTree): ChunkVerdict {
   return { ok: problems.length === 0, problems, summary };
 }
 
+/**
+ * Two mutations of the real tree, in memory, that the check must catch: one
+ * requested chunk dropped from every runtime's switch, and one async load of a
+ * chunk id that does not exist. Returns what went unnoticed (empty = sound).
+ * Run on every build, so the check cannot quietly stop checking.
+ */
+export function selfTest(tree: ServerTree): string[] {
+  const missed: string[] = [];
+  const cased = new Set(tree.runtimes.flatMap((r) => [...scanRuntime(r.file, r.source).cases.keys()]));
+  const requested = tree.sources.flatMap((s) => {
+    const { startup, async } = requestedChunks(s.source);
+    return [...startup, ...async];
+  });
+  const victim = requested.find((id) => cased.has(id));
+  if (victim === undefined) return ["self-test: no requested chunk has a case to remove"];
+  const dropCase = new RegExp(`case ${victim}: [\\w$]+\\(require\\("\\./chunks/${victim}\\.js"\\)\\); break;`, "g");
+  const dropped = { ...tree, runtimes: tree.runtimes.map((r) => ({ ...r, source: r.source.replace(dropCase, "") })) };
+  if (!checkServerTree(dropped).problems.some((p) => p.startsWith(`chunk ${victim}:`))) {
+    missed.push(`self-test: chunk ${victim} removed from the switch went unnoticed`);
+  }
+  const fakeId = 987654321;
+  const withFake = { ...tree, sources: [...tree.sources, { file: "chunks/self-test.js", source: `await c.e(${fakeId}).then(c.bind(c,1))` }] };
+  if (!checkServerTree(withFake).problems.some((p) => p.startsWith(`chunk ${fakeId}:`))) {
+    missed.push(`self-test: an async load of nonexistent chunk ${fakeId} went unnoticed`);
+  }
+  return missed;
+}
+
 function listJs(dir: string, rel: string, out: SourceFile[]): void {
   for (const name of readdirSync(dir)) {
     const abs = path.join(dir, name);
@@ -179,13 +210,20 @@ function main(): number {
     console.error(`check-worker-chunks: pass the server tree OpenNext bundled (got ${serverDir ?? "nothing"})`);
     return 1;
   }
-  const verdict = checkServerTree(readServerTree(serverDir));
+  const tree = readServerTree(serverDir);
+  const verdict = checkServerTree(tree);
   if (!verdict.ok) {
     console.error(`check-worker-chunks: FAIL, ${verdict.problems.length} problem(s). ${verdict.summary}`);
     for (const p of verdict.problems.slice(0, 50)) console.error(`  ${p}`);
     return 1;
   }
-  console.log(`check-worker-chunks: ${verdict.summary}; every one is inlined`);
+  const missed = selfTest(tree);
+  if (missed.length) {
+    console.error(`check-worker-chunks: FAIL, the check itself is not sound on this tree:`);
+    for (const m of missed) console.error(`  ${m}`);
+    return 1;
+  }
+  console.log(`check-worker-chunks: ${verdict.summary}; every one is inlined (self-test: a dropped case and a fake async id are both caught)`);
   return 0;
 }
 
