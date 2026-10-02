@@ -343,7 +343,8 @@ async function main() {
       const tree = await resolve(el, false);
       const text = textOf(tree);
       assert.match(text, /Back to Content/, "the frame");
-      assert.match(text, /The analytics read failed/);
+      assert.match(text, /Could not load these numbers right now/);
+      assert.doesNotMatch(text, /\[founders:|server log/, "no log tag or server talk on the screen");
       assert.match(text, /Could not read the metrics/);
       assert.doesNotMatch(text, /Nothing published in the last 30 days/, "a failure is not an empty month");
     } finally {
@@ -370,7 +371,8 @@ async function main() {
       text = textOf(await resolve(await Page(), false));
     });
     assert.match(text, /Back to Content/, "the frame");
-    assert.match(text, /The analytics read failed/);
+    assert.match(text, /Could not load these numbers right now/);
+    assert.doesNotMatch(text, /\[founders:|server log/, "no log tag or server talk on the screen");
     assert.match(text, /Could not read the metrics/);
     assert.doesNotMatch(text, /Nothing published in the last 30 days/, "a failure is not an empty month");
     assert.ok(log.some((l) => l.includes(THROWN)), `the reason is in the server log: ${log.join(" | ")}`);

@@ -156,8 +156,8 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
       {perf.degraded && (
         <Card>
           <p className="text-sm text-status-warm">
-            The analytics read failed. This is not &ldquo;no data&rdquo; — it is no answer. The
-            reason is in the server log under <code>[founders:performance]</code>.
+            Could not load these numbers right now. That is not the same as having none. Try
+            again in a minute; the cause is logged for the OASIS team.
           </p>
         </Card>
       )}
