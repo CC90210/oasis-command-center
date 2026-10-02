@@ -69,7 +69,25 @@ const diagDir = "diag-out";
 const diagFiles = fs.existsSync(diagDir) ? fs.readdirSync(diagDir).filter((f) => f.startsWith("server-modules-")) : [];
 console.log(`\nwebpack diag files: ${diagFiles.join(", ") || "(none)"}`);
 const chunkMap = {};
-for (const f of diagFiles) Object.assign(chunkMap, JSON.parse(fs.readFileSync(path.join(diagDir, f), "utf8")));
+for (const f of diagFiles) {
+  const raw = JSON.parse(fs.readFileSync(path.join(diagDir, f), "utf8"));
+  const keys = Object.keys(raw);
+  console.log(`${f}: ${keys.length} chunk files; sample keys: ${keys.slice(0, 8).join(" | ")}`);
+  for (const k of keys) {
+    // chunk.files are relative to the compiler's output.path; normalise to the
+    // path under .next/server/ that the esbuild metafile uses.
+    let n = norm(k).replace(/^(\.\.\/)+/, "");
+    const s = n.indexOf("server/");
+    if (n.startsWith("server/")) n = n.slice("server/".length);
+    else if (s > 0 && n.slice(0, s).endsWith(".next/")) n = n.slice(s + "server/".length);
+    chunkMap[n] = raw[k];
+  }
+}
+{
+  let matched = 0;
+  for (const [rel] of nextServer) if (chunkMap[rel]) matched++;
+  console.log(`metafile .next/server inputs: ${nextServer.length}; with a module map: ${matched}; sample inputs: ${nextServer.slice(0, 5).map(([r]) => r).join(" | ")}`);
+}
 
 const byKeyLayer = {};
 const byPkg = {};
@@ -135,3 +153,17 @@ for (const f of [".open-next/middleware/handler.mjs", ".open-next/worker.js", ".
 }
 console.log("\n=== wrangler dry-run outdir ===");
 for (const [p, s] of walk(".wrangler/ci-dry-run")) console.log(`${kib(s)} KiB  ${p}`);
+
+// Information only: how much of worker.js is wrangler re-printing the already
+// minified handler.mjs without minification. Not used by any check.
+try {
+  const { execSync } = await import("node:child_process");
+  const outMin = execSync("npx wrangler deploy --dry-run --outdir .wrangler/diag-minify --minify 2>&1", {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const line = outMin.split("\n").find((l) => l.includes("Total Upload"));
+  console.log(`\n=== same dry run with wrangler --minify (information only) ===\n${line || "(no size line)"}`);
+} catch (err) {
+  console.log(`wrangler --minify dry run failed: ${err && err.message ? err.message.split("\n")[0] : err}`);
+}
