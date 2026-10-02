@@ -196,14 +196,11 @@ export async function listCustomers(
   requireTenant(tenantId);
   const where = ["c.tenant_id = ?"];
   const args: Array<string> = [tenantId];
-  if (!filters.includeArchived) {
-    where.push("c.archived_at IS NULL");
-    // A record linked to a retired business's workspace is history, not a
-    // client: listed only with Include archived (lib/os/customers/retired.ts).
-    const live = notRetiredTenantSql("c.client_tenant_id");
-    where.push(live.sql);
-    args.push(...live.args);
-  }
+  if (!filters.includeArchived) where.push("c.archived_at IS NULL");
+  // A record linked to a retired business's workspace is history, not a
+  // client: listed only with Include archived (lib/os/customers/retired.ts).
+  // Added last, so its arguments follow every other filter's.
+  const retired = filters.includeArchived ? null : notRetiredTenantSql("c.client_tenant_id");
   if (filters.lifecycle && isOneOf(CUSTOMER_LIFECYCLES, filters.lifecycle)) {
     where.push("c.lifecycle = ?");
     args.push(filters.lifecycle);
@@ -232,16 +229,27 @@ export async function listCustomers(
       (SELECT MAX(t.created_at) FROM support_tickets t
          WHERE t.tenant_id = c.tenant_id AND t.customer_id = c.id) AS last_ticket_at`
     : "";
-  const rs = await db.execute({
-    sql: `SELECT c.*${delivery}
-          FROM customers c
-          WHERE ${where.join(" AND ")}
-          ORDER BY CASE c.lifecycle WHEN 'onboarding' THEN 0 WHEN 'active' THEN 1 WHEN 'paused' THEN 2
-                                    WHEN 'prospect' THEN 3 ELSE 4 END,
-                   c.updated_at DESC, c.id
-          LIMIT ${CUSTOMER_LIST_LIMIT + 1}`,
-    args,
-  });
+  const read = (guard: { sql: string; args: string[] } | null) =>
+    db.execute({
+      sql: `SELECT c.*${delivery}
+            FROM customers c
+            WHERE ${[...where, ...(guard ? [guard.sql] : [])].join(" AND ")}
+            ORDER BY CASE c.lifecycle WHEN 'onboarding' THEN 0 WHEN 'active' THEN 1 WHEN 'paused' THEN 2
+                                      WHEN 'prospect' THEN 3 ELSE 4 END,
+                     c.updated_at DESC, c.id
+            LIMIT ${CUSTOMER_LIST_LIMIT + 1}`,
+      args: [...args, ...(guard ? guard.args : [])],
+    });
+  let rs: ResultSet;
+  try {
+    rs = await read(retired);
+  } catch (err) {
+    // A database without migration bravo__195 has no client_tenant_id, so no
+    // record there can name a retired workspace: the list reads without the
+    // guard, as every other read treats that database ("not linked").
+    if (!retired || !/no such column: (?:c\.)?client_tenant_id\b/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    rs = await read(null);
+  }
   const all = rows(rs).map((r) => ({
     ...mapCustomer(r),
     open_ticket_count: opts.withDelivery ? nOrNull(r.open_ticket_count) ?? 0 : null,
