@@ -86,7 +86,10 @@ assert.match(
   "the assigned builder can advance a fully paid Won lead into onboarding",
 );
 assert.ok(
-  workflowRoute.includes("ownsOasisDeliveryRecord") &&
+  // The ownership half lives in websiteSalesLeadSeat (lib/website-sales-workflow.ts),
+  // shared with the call screen's booking read.
+  workflowRoute.includes("websiteSalesLeadSeat(") &&
+    readFileSync("lib/website-sales-workflow.ts", "utf8").includes("ownsOasisDeliveryRecord(row, userId)") &&
     workflowRoute.includes("!builderOwnsDelivery") &&
     pipelineDetail.includes("ownsOasisDeliveryRecord(activeRecord, session.userId)"),
   "delivery advances require the assigned fulfillment owner in both the API and rendered controls",

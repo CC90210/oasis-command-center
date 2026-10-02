@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 const lifecycle = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
 const detail = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
 const workflowRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
+const seatPredicate = readFileSync("lib/website-sales-workflow.ts", "utf8");
 const setStageRoute = readFileSync("app/api/leads/[id]/set-stage/route.ts", "utf8");
 const notesRoute = readFileSync("app/api/leads/[id]/notes/route.ts", "utf8");
 const pipeline = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
@@ -161,7 +162,8 @@ assert(
   workflowRoute.includes("mayWorkWebsiteSalesLifecycle") &&
     workflowRoute.includes("forbidden_sales_role") &&
     workflowRoute.includes("builderOnOwnSalesLead") &&
-    workflowRoute.includes("!builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)") &&
+    workflowRoute.includes("websiteSalesLeadSeat(") &&
+    seatPredicate.includes("!builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)") &&
     detail.includes("mayQuoteAndClose(session.teamRole)"),
   "only authorized sales roles can mutate lifecycle state; a builder on his OWN sales lead takes the rep path instead of the delivery lane, and the page's deal controls read the one DEAL_CLOSING_ROLES list",
 );
