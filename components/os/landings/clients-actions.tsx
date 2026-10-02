@@ -530,10 +530,14 @@ function planActionText(i: ImportPlanRow): string {
 }
 
 function PlanRowText({ i }: { i: ImportPlanRow }) {
+  const name = i.name ?? i.email ?? "No name or email";
   return (
     <span className="min-w-0 flex-1">
       <span className="flex flex-wrap items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-fg">{i.name ?? i.email ?? "No name or email"}</span>
+        {/* A long name is cut with an ellipsis; the whole of it is on hover. */}
+        <span className="min-w-0 truncate text-fg" title={name}>
+          {name}
+        </span>
         <span className="text-xs text-fg-dim">{planActionText(i)}</span>
       </span>
       <span className="block text-xs text-fg-dim">
