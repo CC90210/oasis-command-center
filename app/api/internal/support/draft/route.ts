@@ -1,8 +1,10 @@
 /**
  * POST /api/internal/support/draft - the reader files one reply draft (it
- * becomes ONE reply_ticket approval in Client Success) or reports that it could
- * not write one (the ticket then says "reply by hand"). Nothing is sent from
- * here. HMAC-authenticated inside the handler; see lib/delivery/support-drafts.ts.
+ * becomes ONE reply_ticket approval in Client Success, or, for an address no
+ * verified email came from, a private "Recipient not verified" note on the
+ * ticket) or reports that it could not write one (the ticket then says "reply
+ * by hand"). Nothing is sent from here. HMAC-authenticated inside the handler;
+ * see lib/delivery/support-drafts.ts.
  */
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleSupportDraft } from "@/lib/delivery/support-drafts";
