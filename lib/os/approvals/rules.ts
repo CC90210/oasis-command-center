@@ -85,6 +85,7 @@ export const APPROVAL_ACTION_KINDS = [
   "send_invoice",
   "share_deliverable",
   "send_slack_message",
+  "reply_ticket",
 ] as const;
 export type ApprovalActionKind = (typeof APPROVAL_ACTION_KINDS)[number];
 
@@ -97,6 +98,7 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
   send_invoice: "Invoice",
   share_deliverable: "Deliverable",
   send_slack_message: "Slack reply",
+  reply_ticket: "Ticket reply",
 };
 
 export const REQUESTER_TYPES = ["agent", "routine", "human"] as const;
@@ -115,6 +117,7 @@ export const DEFAULT_RISK: Record<ApprovalActionKind, RiskLevel> = {
   send_invoice: "spend",
   share_deliverable: "data",
   send_slack_message: "outbound",
+  reply_ticket: "outbound",
 };
 
 /** Where a decision was made. v1 decides in the app only. */
@@ -406,6 +409,80 @@ export function validateSendSlackMessagePayload(raw: unknown): Valid<SendSlackMe
   };
 }
 
+/**
+ * An AI-drafted reply to a support ticket that arrived by email (the support
+ * inbox, lib/delivery/support-drafts.ts files it; lib/os/approvals/executors.ts
+ * reply_ticket carries it out). Not send_email: an approved reply goes ON THE
+ * TICKET as a public team reply (stopping the first-response clock), threaded
+ * in the client's own conversation, from support@, with nobody's personal
+ * inbox as its Reply-To.
+ *
+ * `critic` is the draft critic's verdict, shown to the approver; null when no
+ * critic ran. `to` and `subject` are what the card shows; the executor sends
+ * to the ticket's requester and refuses if that address changed.
+ */
+export type ReplyTicketCritic = {
+  verdict: "ship" | "revise" | "escalate";
+  score: number;
+  issues: Array<{ type: string; excerpt: string; reason: string }>;
+  notes: string;
+};
+
+export type ReplyTicketPayload = {
+  ticket_id: string;
+  ticket_number: string;
+  message_record_id: string;
+  to: string;
+  subject: string;
+  body: string;
+  critic: ReplyTicketCritic | null;
+  model_ref: string;
+};
+
+export const CRITIC_VERDICTS = ["ship", "revise", "escalate"] as const;
+export const REPLY_TICKET_BODY_MAX = 5_000;
+
+const ID_TOKEN = /^[A-Za-z0-9-]{1,64}$/;
+
+export function validateReplyTicketPayload(raw: unknown): Valid<ReplyTicketPayload> {
+  if (!plainObject(raw)) return { ok: false, error: "payload_invalid" };
+  const ticket_id = typeof raw.ticket_id === "string" ? raw.ticket_id.trim() : "";
+  if (!ID_TOKEN.test(ticket_id)) return { ok: false, error: "ticket_id_invalid", field: "ticket_id" };
+  const ticket_number = typeof raw.ticket_number === "string" ? raw.ticket_number.trim() : "";
+  if (!/^T-\d{4,9}$/.test(ticket_number)) return { ok: false, error: "ticket_number_invalid", field: "ticket_number" };
+  const message_record_id = typeof raw.message_record_id === "string" ? raw.message_record_id.trim() : "";
+  if (!ID_TOKEN.test(message_record_id)) return { ok: false, error: "message_record_id_invalid", field: "message_record_id" };
+  const to = typeof raw.to === "string" ? raw.to.trim().toLowerCase() : "";
+  if (!isEmail(to)) return { ok: false, error: "to_invalid", field: "to" };
+  const subject = typeof raw.subject === "string" ? raw.subject.trim() : "";
+  if (!subject) return { ok: false, error: "subject_required", field: "subject" };
+  if (subject.length > EMAIL_SUBJECT_MAX || HEADER_UNSAFE.test(subject)) return { ok: false, error: "subject_invalid", field: "subject" };
+  const body = typeof raw.body === "string" ? raw.body.replace(/\r\n/g, "\n").trim() : "";
+  if (!body) return { ok: false, error: "body_required", field: "body" };
+  if (body.length > REPLY_TICKET_BODY_MAX) return { ok: false, error: "body_too_long", field: "body" };
+  const model_ref = typeof raw.model_ref === "string" ? raw.model_ref.trim() : "";
+  if (!model_ref || model_ref.length > 64) return { ok: false, error: "model_ref_invalid", field: "model_ref" };
+  let critic: ReplyTicketCritic | null = null;
+  if (raw.critic !== null && raw.critic !== undefined) {
+    const c = raw.critic;
+    if (!plainObject(c) || !isOneOf(CRITIC_VERDICTS, c.verdict)) return { ok: false, error: "critic_invalid", field: "critic" };
+    const score = typeof c.score === "number" && Number.isFinite(c.score) ? Math.round(Math.min(10, Math.max(0, c.score)) * 10) / 10 : null;
+    if (score === null) return { ok: false, error: "critic_invalid", field: "critic.score" };
+    if (!Array.isArray(c.issues) || c.issues.length > 10) return { ok: false, error: "critic_invalid", field: "critic.issues" };
+    const issues: ReplyTicketCritic["issues"] = [];
+    for (const i of c.issues) {
+      if (!plainObject(i)) return { ok: false, error: "critic_invalid", field: "critic.issues" };
+      issues.push({
+        type: String(i.type ?? "other").slice(0, 32),
+        excerpt: String(i.excerpt ?? "").slice(0, 300),
+        reason: String(i.reason ?? "").slice(0, 300),
+      });
+    }
+    critic = { verdict: c.verdict, score, issues, notes: String(c.notes ?? "").slice(0, 1000) };
+  }
+  return { ok: true, value: { ticket_id, ticket_number, message_record_id, to, subject, body, critic, model_ref } };
+}
+
 export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<Record<string, unknown>> {
   switch (kind) {
     case "send_email":
@@ -414,6 +491,8 @@ export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<R
       return validateSendSlackMessagePayload(raw) as Valid<Record<string, unknown>>;
     case "publish_post":
       return validatePublishPostPayload(raw) as Valid<Record<string, unknown>>;
+    case "reply_ticket":
+      return validateReplyTicketPayload(raw) as Valid<Record<string, unknown>>;
     default:
       return validateGenericPayload(raw);
   }
@@ -421,7 +500,7 @@ export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<R
 
 /** The one-paragraph preview the card shows before anyone expands the payload. */
 export function previewFor(kind: ApprovalActionKind, payload: Record<string, unknown>): string {
-  if (kind === "send_email") {
+  if (kind === "send_email" || kind === "reply_ticket") {
     const body = typeof payload.body === "string" ? payload.body : "";
     return body.length > 280 ? `${body.slice(0, 279).trimEnd()}…` : body;
   }
@@ -667,7 +746,7 @@ export function scopeSeesNothing(scope: ApprovalScope): boolean {
  * word for what happened; the card renders it and never infers success.
  */
 export type ExecutionResult =
-  | { outcome: "sent"; provider: string; message_id?: string | null; from?: string | null }
+  | { outcome: "sent"; provider: string; message_id?: string | null; from?: string | null; comment_id?: string | null }
   | { outcome: "dry_run"; provider: string; would_send?: Record<string, unknown> }
   | { outcome: "queued"; provider: string; intent_id?: string | null; platforms?: string[] }
   | { outcome: "failed"; reason: string; message: string; provider?: string | null };

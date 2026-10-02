@@ -74,6 +74,16 @@ import {
  */
 export const OASIS_MAIL_SERVICE = "oasis_gmail";
 
+/** The most ids a References header carries: the thread's root and its newest. */
+const MAX_REFERENCES = 11;
+
+/** A Message-ID fit for a threading header ("<local@domain>", nothing else), or null. */
+function threadId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const v = raw.trim();
+  return /^<[^<>\s]{1,996}>$/.test(v) ? v : null;
+}
+
 export type OasisSharedSendResult =
   | { ok: true; provider: "oasis_shared_gmail"; gmail_message_id: string; from_address: string }
   | {
@@ -147,6 +157,16 @@ export function composeOasisMessage(args: {
   idempotencyKey?: string;
   /** "support": Reply-To support@, support footer with the recipient's opt-out link, one-click List-Unsubscribe, no address-derived sign-off. */
   purpose?: OasisMailPurpose;
+  /** The client's message this answers ("<id>"): the In-Reply-To header, so it threads in their mail client. */
+  inReplyTo?: string | null;
+  /** The thread so far, oldest first: the References header. */
+  references?: readonly string[] | null;
+  /**
+   * "auto-replied" (RFC 3834) on a message no person wrote, the support desk's
+   * instant acknowledgement: a client's out-of-office then never answers it,
+   * and nothing on our side answers theirs.
+   */
+  autoSubmitted?: "auto-replied" | null;
 }): {
   from: string;
   to: string;
@@ -154,12 +174,20 @@ export function composeOasisMessage(args: {
   replyTo?: string;
   subject: string;
   messageId?: string;
+  inReplyTo?: string;
+  references?: string[];
   headers: Record<string, string>;
   text: string;
   html?: string;
 } {
   const { fromAddress } = args;
   const support = args.purpose === "support";
+  // Threading headers carry only well-formed ids: a value with whitespace, a
+  // line break or a stray bracket is header injection, not a Message-ID.
+  const inReplyTo = threadId(args.inReplyTo);
+  const allRefs = [...new Set((args.references ?? []).map(threadId).filter((v): v is string => v !== null))];
+  // The root and the newest: a client's mail client threads on either.
+  const references = allRefs.length > MAX_REFERENCES ? [allRefs[0], ...allRefs.slice(-(MAX_REFERENCES - 1))] : allRefs;
 
   // Never copy the recipient, and never copy THIS MAILBOX. Sending from the
   // shared address and Cc'ing it puts a duplicate beside the copy already in its
@@ -193,6 +221,8 @@ export function composeOasisMessage(args: {
     ...(args.idempotencyKey
       ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
       : {}),
+    ...(inReplyTo ? { inReplyTo } : {}),
+    ...(references.length ? { references } : {}),
     // SALES: the opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring
     // it as a header too lets a mail client offer its own one-click control and
     // keeps filters from treating a branded HTML message as unattributed bulk.
@@ -203,12 +233,15 @@ export function composeOasisMessage(args: {
     // records the opt-out at once (/api/unsubscribe writes email_suppressions,
     // the list every sender checks). No mailto: a reply would reach support@,
     // where a person reads it and nothing records it.
-    headers: support
-      ? {
-          "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, OASIS_SUPPRESSION_BRAND)}>`,
-          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-        }
-      : { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` },
+    headers: {
+      ...(support
+        ? {
+            "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, OASIS_SUPPRESSION_BRAND)}>`,
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+          }
+        : { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` }),
+      ...(args.autoSubmitted === "auto-replied" ? { "Auto-Submitted": "auto-replied" } : {}),
+    },
     // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
     // plain-text helper — it joins with "\n\n---\n" and detects an existing
     // signature by comparing the last LINE — so it is applied here and never to
@@ -226,7 +259,7 @@ export function composeOasisMessage(args: {
   };
 }
 
-export async function sendOasisSharedGmail(args: {
+export type OasisSharedSendArgs = {
   tenantId: string;
   to: string;
   /**
@@ -257,7 +290,54 @@ export async function sendOasisSharedGmail(args: {
    * to support@, support footer. Omitted = "sales", unchanged.
    */
   purpose?: OasisMailPurpose;
-}): Promise<OasisSharedSendResult> {
+  /** Threading (composeOasisMessage): the message this answers and the thread so far. */
+  inReplyTo?: string | null;
+  references?: readonly string[] | null;
+  /** "auto-replied": the desk's instant acknowledgement (RFC 3834). */
+  autoSubmitted?: "auto-replied" | null;
+  /**
+   * A REPLY TO THE RECIPIENT'S OWN SUPPORT TICKET (CC's decision, 2026-10-01).
+   * It answers a request the client made, so it is transactional: it goes out
+   * even after they opted out of marketing (CASL s.6(5)(b): a message sent in
+   * response to the recipient's own request is not a commercial solicitation).
+   * See isOwnTicketReply for how narrow this is.
+   */
+  ownTicketReply?: OwnTicketReply | null;
+};
+
+/**
+ * Who a reply to an own ticket is for: the ticket and the address it records
+ * as its requester (support_tickets.client_email), read by the caller from the
+ * ticket row, never from anything the recipient sent.
+ */
+export type OwnTicketReply = { ticketId: string; requester: string };
+
+/**
+ * Is this send a reply to the recipient's OWN support ticket, which the
+ * opt-out list does not stop? Deliberately narrow, all four at once:
+ *   - support mail (purpose "support"): OASIS's desk, never a sales email;
+ *   - it names a ticket (ownTicketReply.ticketId);
+ *   - it goes to exactly that ticket's requester, and to nobody else on To
+ *     (the Cc line is still checked by the approvals executor);
+ *   - it is a REPLY: the caller is the desk's reply path
+ *     (lib/delivery/notify.ts sendTicketReplyEmail), used by a teammate's
+ *     public reply and by an approved reply draft. The instant
+ *     acknowledgement never sets it, so an opted-out sender gets no
+ *     acknowledgement.
+ * A suppression stops every other email to the same address as before.
+ */
+export function isOwnTicketReply(args: Pick<OasisSharedSendArgs, "purpose" | "to" | "ownTicketReply">): boolean {
+  const own = args.ownTicketReply;
+  if (args.purpose !== "support" || !own) return false;
+  const requester = (own.requester || "").trim().toLowerCase();
+  return !!own.ticketId && !!requester && requester === (args.to || "").trim().toLowerCase();
+}
+
+export async function sendOasisSharedGmail(args: OasisSharedSendArgs): Promise<OasisSharedSendResult> {
+  // THE ONE EXCEPTION TO THE OPT-OUT GATE: a reply to the recipient's own
+  // ticket (isOwnTicketReply). Everything else, the desk's acknowledgement
+  // included, is checked below exactly as before.
+  if (isOwnTicketReply(args)) return sendAfterOptOutGate(args);
   // OPT-OUT GATE FIRST, before any credential work or send. Fail closed: a
   // suppression lookup that errors must not be read as "not suppressed".
   // checkEmailSuppressed CATCHES ITS OWN ERRORS and returns
@@ -306,7 +386,11 @@ export async function sendOasisSharedGmail(args: {
       error: "recipient in email_suppressions",
     };
   }
+  return sendAfterOptOutGate(args);
+}
 
+/** Everything after the opt-out gate: the credential, the brand guard, the message, the send. */
+async function sendAfterOptOutGate(args: OasisSharedSendArgs): Promise<OasisSharedSendResult> {
   // CREDENTIAL SOURCE: Vercel env FIRST, tenant row second.
   //
   // The repo's own security posture puts deployment secrets in Vercel env, and

@@ -37,7 +37,9 @@ import "server-only";
 import { after } from "next/server";
 import type { Client } from "@libsql/client";
 import { sendTelegram } from "@/lib/notify/telegram";
-import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
+import { sendOasisSharedGmail, type OwnTicketReply } from "@/lib/integrations/oasis-shared-gmail-send";
+import { isDryRun } from "@/lib/integrations/send-mode";
+import { supportInboxForDesk } from "@/lib/email/support-mailbox";
 import { OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
@@ -52,20 +54,43 @@ import {
 } from "@/lib/delivery/store";
 import {
   clientAckEmail,
+  clientEmailAckEmail,
   clientReplyEmail,
   newTicketFounderEmail,
   newTicketTelegram,
   slaBreachFounderEmail,
   slaBreachTelegram,
 } from "@/lib/delivery/messages";
+import { deskMessageId, loadAckFacts, loadTicketThread, recordAckOutcome, recordOutboundMessage } from "@/lib/delivery/email-thread";
 
 export type SendResult = { ok: boolean; reason?: string };
 
+/** One desk email. The threading fields and ownTicketReply reach the shared sender unchanged. */
+export type DeskEmail = {
+  to: string;
+  cc?: string[];
+  subject: string;
+  body: string;
+  idempotencyKey: string;
+  inReplyTo?: string | null;
+  references?: readonly string[] | null;
+  autoSubmitted?: "auto-replied" | null;
+  ownTicketReply?: OwnTicketReply | null;
+};
+
 export type NotifyDeps = {
   telegram: (text: string) => Promise<SendResult>;
-  email: (m: { to: string; cc?: string[]; subject: string; body: string; idempotencyKey: string }) => Promise<SendResult>;
+  email: (m: DeskEmail) => Promise<SendResult>;
   founderEmails: readonly string[];
   appOrigin: string;
+  /**
+   * The dashboard's send mode (lib/integrations/send-mode.ts). Absent = the
+   * real one. Read by the support inbox's acknowledgement, the one desk email
+   * that no person triggers.
+   */
+  isDryRun?: (channel: string) => boolean;
+  /** The Feed's event tape (agent_events), for the support inbox's stale alert. Absent = not published. */
+  publishEvent?: (e: { eventType: string; tenantId: string; severity: "info" | "warn" | "error"; payload: Record<string, unknown> }) => Promise<void>;
 };
 
 export function defaultNotifyDeps(): NotifyDeps {
@@ -80,11 +105,20 @@ export function defaultNotifyDeps(): NotifyDeps {
         body: m.body,
         idempotencyKey: m.idempotencyKey,
         purpose: "support",
+        inReplyTo: m.inReplyTo ?? null,
+        references: m.references ?? null,
+        autoSubmitted: m.autoSubmitted ?? null,
+        ownTicketReply: m.ownTicketReply ?? null,
       });
       return r.ok ? { ok: true } : { ok: false, reason: `${r.reason}: ${r.error}` };
     },
     founderEmails: OASIS_PIPELINE_ASSIGNMENT_EMAILS,
     appOrigin: publicAppBaseUrl(),
+    isDryRun,
+    publishEvent: async (e) => {
+      const { publishAgentEvent } = await import("@/lib/manifest/events");
+      await publishAgentEvent({ ...e, publisher: "dept:client_success" });
+    },
   };
 }
 
@@ -186,19 +220,157 @@ export async function acknowledgeClient(
 ): Promise<string | null> {
   const ticket = await getTicket(db, deskReader(tenantId), ticketId);
   if (!ticket || !ticket.client_email) return null;
+  if (ticket.source === "email") return acknowledgeEmailTicket(db, tenantId, ticket, deps, now);
   if (!(await claimNotification(db, tenantId, ticketId, "client_ack_at", now))) return null;
   if (!deskUsesOasisLanes(tenantId)) {
     await recordNotification(db, tenantId, ticketId, "client_ack_at", NO_MAILBOX);
     return NO_MAILBOX;
   }
   const mail = clientAckEmail(ticket);
+  const key = `support-ack:${ticketId}`;
   const r = await settle(
-    deps.email({ to: ticket.client_email, subject: mail.subject, body: withSupportLink(mail.body, deps), idempotencyKey: `support-ack:${ticketId}` }),
+    deps.email({ to: ticket.client_email, subject: mail.subject, body: withSupportLink(mail.body, deps), idempotencyKey: key }),
   );
   const status = outcome("email", r);
   if (!r.ok) console.error("[delivery.notify.client_ack]", { ticket: ticket.ticket_number, status });
   await recordNotification(db, tenantId, ticketId, "client_ack_at", status);
+  // Recorded, so a client's reply to it threads back onto this ticket.
+  if (r.ok) await recordDeskSend(db, tenantId, ticket, { origin: "ack", commentId: null, key, to: ticket.client_email, subject: mail.subject, now });
   return status;
+}
+
+/** What the outcome line says when the acknowledgement was decided against at ingest. */
+const ACK_SKIP_WORDS: Record<string, string> = {
+  opt_out: "the sender asked to stop receiving email",
+  not_wanted: "the support inbox did not ask for one (acknowledgements are off, or the sender could not be verified)",
+  not_a_new_ticket: "the email added to an existing ticket",
+  sender_not_verified: "the sender could not be verified",
+  automated: "the email was sent by a machine",
+  sender_limit: "this sender already got several acknowledgements recently",
+};
+
+/**
+ * THE INSTANT ACKNOWLEDGEMENT OF AN EMAIL (design section 6). Whether one goes
+ * at all was decided ONCE, at ingest (email-intake.ts ackDecision: the reader
+ * asked for it, a new ticket, a verified human sender, not an opt-out, under
+ * the per-sender limit) and written on the message before the ticket existed.
+ * This re-reads that decision, so the reconcile pass that retries a lost
+ * after() can only send an acknowledgement that was meant to go.
+ *
+ * Then: claimed once (client_ack_at, as the form's), the recipient pinned to
+ * the verified address that sent the email (a ticket address changed since is
+ * refused), the dashboard's send mode (dry run sends nothing), the shared
+ * sender's opt-out check. It goes from support@, threaded on the client's
+ * message (In-Reply-To, References), marked Auto-Submitted, tagged [T-0042],
+ * and is recorded so their reply threads back.
+ */
+async function acknowledgeEmailTicket(
+  db: Client,
+  tenantId: string,
+  ticket: Ticket,
+  deps: NotifyDeps,
+  now: Date,
+): Promise<string | null> {
+  const facts = await loadAckFacts(db, tenantId, ticket.id);
+  if (!(await claimNotification(db, tenantId, ticket.id, "client_ack_at", now))) return null;
+  const finish = async (status: string, ackStatus: string, sentAt: string | null) => {
+    await recordNotification(db, tenantId, ticket.id, "client_ack_at", status);
+    if (facts) await recordAckOutcome(db, tenantId, facts.claimId, ackStatus, sentAt);
+    return status;
+  };
+  if (!facts) return finish("email: not sent (no record of the email that opened this ticket)", "not_sent:no_record", null);
+  if (!deskUsesOasisLanes(tenantId)) return finish(NO_MAILBOX, "not_sent:no_mailbox", null);
+  const decided = facts.ackStatus ?? "";
+  if (decided !== "scheduled") {
+    const reason = decided.startsWith("skipped:") ? decided.slice("skipped:".length) : decided || "not_decided";
+    return finish(`email: not sent (${ACK_SKIP_WORDS[reason] ?? reason})`, decided || "not_sent:not_decided", null);
+  }
+  // PINNED RECIPIENT. It acknowledges the email that opened the ticket, so it
+  // goes to the address that SENT that email, and only while the record says
+  // Gmail authenticated it; never to whatever the ticket says now. A ticket
+  // address changed since (a person's edit before a late reconcile pass) is
+  // refused and recorded, not followed.
+  if (!facts.senderVerified) return finish("email: not sent (the sender could not be verified)", "not_sent:sender_not_verified", null);
+  const to = facts.fromAddress ?? "";
+  if (!to || (ticket.client_email ?? "").trim().toLowerCase() !== to) {
+    return finish("email: not sent (the ticket's client address changed after the email arrived)", "not_sent:recipient_changed", null);
+  }
+  if ((deps.isDryRun ?? isDryRun)("email")) {
+    return finish("email: not sent (dry run: email sending is off on this deployment)", "dry_run", null);
+  }
+  const mail = clientEmailAckEmail(ticket, facts.subject);
+  const key = `support-ack:${ticket.id}`;
+  const references = [...facts.references, ...(facts.messageId ? [facts.messageId] : [])];
+  const r = await settle(
+    deps.email({
+      to,
+      subject: mail.subject,
+      body: withSupportLink(mail.body, deps),
+      idempotencyKey: key,
+      inReplyTo: facts.messageId,
+      references,
+      autoSubmitted: "auto-replied",
+    }),
+  );
+  if (r.ok) {
+    await recordDeskSend(db, tenantId, ticket, {
+      origin: "ack",
+      commentId: null,
+      key,
+      to,
+      subject: mail.subject,
+      now,
+      inReplyTo: facts.messageId,
+      references,
+    });
+    return finish("email: sent", "sent", now.toISOString());
+  }
+  // The shared sender's own opt-out check said no: nothing failed.
+  if ((r.reason || "").startsWith("suppressed")) {
+    return finish("email: not sent (the sender has opted out of email)", "not_sent:suppressed", null);
+  }
+  const status = outcome("email", r);
+  console.error("[delivery.notify.client_ack_email]", { ticket: ticket.ticket_number, status });
+  return finish(status, "failed", null);
+}
+
+/** Record a desk email that left, for threading. Never fails the send it records. */
+async function recordDeskSend(
+  db: Client,
+  tenantId: string,
+  ticket: Pick<Ticket, "id" | "ticket_number">,
+  m: {
+    origin: "ack" | "reply";
+    commentId: string | null;
+    key: string;
+    to: string;
+    subject: string;
+    now: Date;
+    inReplyTo?: string | null;
+    references?: readonly string[];
+  },
+): Promise<void> {
+  const mailbox = supportInboxForDesk(tenantId);
+  if (!mailbox) return;
+  try {
+    await recordOutboundMessage(db, {
+      tenantId,
+      mailbox,
+      ticketId: ticket.id,
+      commentId: m.commentId,
+      origin: m.origin,
+      idempotencyKey: m.key,
+      to: m.to,
+      subject: m.subject,
+      inReplyTo: m.inReplyTo ?? null,
+      references: m.references ?? [],
+      at: m.now.toISOString(),
+    });
+  } catch (err) {
+    // The email went; only its threading record failed. The client's reply
+    // still finds the ticket by the [T-0042] tag in the subject.
+    console.error("[delivery.notify.record_send]", { ticket: ticket.ticket_number, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /** Both intake notifications, independently: one failing never blocks the other. */
@@ -222,32 +394,87 @@ export async function runIntakeNotifications(
 export async function emailClientReply(
   db: Client,
   tenantId: string,
-  ticket: Pick<Ticket, "id" | "ticket_number" | "client_name" | "client_email" | "status">,
+  ticket: Pick<Ticket, "id" | "ticket_number" | "client_name" | "client_email" | "status"> & { source?: string },
   comment: { id: string; body: string; authorName: string },
   deps: NotifyDeps,
 ): Promise<string> {
-  if (!ticket.client_email) {
-    const status = "email: not sent (ticket has no client email)";
+  return (await sendTicketReplyEmail(db, tenantId, ticket, comment, deps)).status;
+}
+
+export type TicketReplyEmailResult = {
+  /** The outcome line stored on the comment ("email: sent", "email: FAILED (...)"). */
+  status: string;
+  ok: boolean;
+  /** The shared sender's reason code when it did not go ("not_configured", "send_failed"...). */
+  reason: string | null;
+  error: string | null;
+  /** The Message-ID it carries (derived from its idempotency key), when it went. */
+  messageId: string | null;
+};
+
+/**
+ * A public reply on a ticket, emailed to the client: a teammate's reply from
+ * the ticket page, or an approved reply draft (lib/os/approvals/executors.ts
+ * reply_ticket, `preSigned`).
+ *
+ * THREADED. When the ticket has a recorded email thread (support@, migration
+ * bravo__200) it answers the client's latest message (In-Reply-To) inside the
+ * thread (References), under their own subject tagged with the ticket number.
+ * It is recorded once sent, so their answer threads back.
+ *
+ * A REPLY TO THE CLIENT'S OWN TICKET IS TRANSACTIONAL: it goes to the ticket's
+ * requester even after they opted out of marketing (ownTicketReply; the rule
+ * and how narrow it is: oasis-shared-gmail-send.ts isOwnTicketReply).
+ */
+export async function sendTicketReplyEmail(
+  db: Client,
+  tenantId: string,
+  ticket: Pick<Ticket, "id" | "ticket_number" | "client_name" | "client_email" | "status"> & { source?: string },
+  comment: { id: string; body: string; authorName: string; preSigned?: boolean },
+  deps: NotifyDeps,
+  now: Date = new Date(),
+): Promise<TicketReplyEmailResult> {
+  const done = async (status: string, r: Partial<TicketReplyEmailResult> = {}): Promise<TicketReplyEmailResult> => {
     await setCommentEmailStatus(db, tenantId, comment.id, status);
-    return status;
-  }
-  if (!deskUsesOasisLanes(tenantId)) {
-    await setCommentEmailStatus(db, tenantId, comment.id, NO_MAILBOX);
-    return NO_MAILBOX;
-  }
-  const mail = clientReplyEmail(ticket, { body: comment.body, authorName: comment.authorName });
+    return { status, ok: false, reason: null, error: null, messageId: null, ...r };
+  };
+  if (!ticket.client_email) return done("email: not sent (ticket has no client email)", { reason: "no_client_email" });
+  if (!deskUsesOasisLanes(tenantId)) return done(NO_MAILBOX, { reason: "no_mailbox" });
+  const thread = await loadTicketThread(db, tenantId, ticket.id);
+  const mail = clientReplyEmail(
+    ticket,
+    { body: comment.body, authorName: comment.authorName, preSigned: comment.preSigned },
+    ticket.source === "email" && thread ? thread.rootSubject ?? "" : null,
+  );
+  const key = `support-reply:${comment.id}`;
   const r = await settle(
     deps.email({
       to: ticket.client_email,
       subject: mail.subject,
       body: withSupportLink(mail.body, deps),
-      idempotencyKey: `support-reply:${comment.id}`,
+      idempotencyKey: key,
+      inReplyTo: thread?.inReplyTo ?? null,
+      references: thread?.references ?? null,
+      ownTicketReply: { ticketId: ticket.id, requester: ticket.client_email },
     }),
   );
   const status = outcome("email", r);
-  if (!r.ok) console.error("[delivery.notify.client_reply]", { ticket: ticket.ticket_number, status });
-  await setCommentEmailStatus(db, tenantId, comment.id, status);
-  return status;
+  if (!r.ok) {
+    console.error("[delivery.notify.client_reply]", { ticket: ticket.ticket_number, status });
+    const [code, ...rest] = (r.reason || "unknown").split(": ");
+    return done(status, { reason: code, error: rest.join(": ") || null });
+  }
+  await recordDeskSend(db, tenantId, ticket, {
+    origin: "reply",
+    commentId: comment.id,
+    key,
+    to: ticket.client_email,
+    subject: mail.subject,
+    now,
+    inReplyTo: thread?.inReplyTo ?? null,
+    references: thread?.references ?? [],
+  });
+  return done(status, { ok: true, messageId: deskMessageId(key) });
 }
 
 /**

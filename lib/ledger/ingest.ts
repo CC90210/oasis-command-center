@@ -268,9 +268,10 @@ function toEmitInput(
  * signature can be checked (the HMAC covers it), and a chunked request carries
  * no Content-Length, so an unauthenticated caller must not be able to make the
  * handler buffer an unbounded body: past `max` the stream is cancelled and the
- * answer is null (413).
+ * answer is null (413). Shared with the support inbox's routes
+ * (lib/delivery/support-ingest-auth.ts), which authenticate the same way.
  */
-async function readBodyCapped(req: Request, max: number): Promise<string | null> {
+export async function readBodyCapped(req: Request, max: number): Promise<string | null> {
   if (!req.body) return "";
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];

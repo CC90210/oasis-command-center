@@ -556,17 +556,34 @@ async function matchCustomer(db: Client, desk: SupportDesk, email: string): Prom
 }
 
 type Match = { client_tenant_id: string | null; project_id: string | null; client_match: string; customer_id: string | null };
+export type RequesterMatch = Match;
 
 async function matchRequester(db: Client, desk: SupportDesk, sub: SupportSubmission): Promise<Match> {
+  return matchRequesterEmail(db, desk, sub.email, sub.project_hint);
+}
+
+/**
+ * Who a requester is, from their email address: on OASIS's desk a project and
+ * client workspace (matchClientByEmail) plus a client record; on any other
+ * desk its own client records and projects. The support inbox
+ * (email-intake.ts) asks the same question for a VERIFIED sender, so a ticket
+ * from email links to a client exactly as a ticket from the form does.
+ */
+export async function matchRequesterEmail(
+  db: Client,
+  desk: SupportDesk,
+  email: string,
+  projectHint: string | null,
+): Promise<RequesterMatch> {
   if (desk.oasis) {
-    const m: ClientMatch = await matchClientByEmail(db, sub.email, sub.project_hint);
-    return { ...m, customer_id: await matchCustomer(db, desk, sub.email) };
+    const m: ClientMatch = await matchClientByEmail(db, email, projectHint);
+    return { ...m, customer_id: await matchCustomer(db, desk, email) };
   }
   // Any other desk: its own client records and projects. Its rows never name a
   // client workspace — that is OASIS's vendor relationship, not theirs.
   const [customerId, projectId] = await Promise.all([
-    matchCustomer(db, desk, sub.email),
-    matchDeskProjectByEmail(db, desk.tenantId, sub.email, sub.project_hint),
+    matchCustomer(db, desk, email),
+    matchDeskProjectByEmail(db, desk.tenantId, email, projectHint),
   ]);
   return {
     client_tenant_id: null,
