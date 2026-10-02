@@ -16,10 +16,10 @@ export async function getPerformance(tenantId: string, days = 30): Promise<PerfS
   // No tenant is a broken caller, not a quiet tenant. Returning the empty shape
   // here would paint "nothing published yet" over a resolution failure.
   //
-  // It has to LOG, too. The page tells the reader the reason is in the server
-  // log under [founders:performance] — a degraded state that writes nothing
-  // sends them looking for an entry that was never written, which is a worse
-  // failure than the silence it replaced.
+  // It has to LOG, too. The page says the numbers could not be loaded and that
+  // the cause is logged for the OASIS team; a degraded state that writes
+  // nothing leaves whoever investigates looking for an entry that was never
+  // written, which is a worse failure than the silence it replaced.
   if (!tenantId) {
     console.warn("[founders:performance] no tenant on the caller — cannot scope the read");
     return { ...EMPTY_PERF, degraded: true };

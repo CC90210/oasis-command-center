@@ -185,8 +185,9 @@ export type MarketingSummary = {
   by_status: Record<string, number>;
   open_reviews: number;
   open_requests: number;
-  corpus_indexed: number;
-  corpus_pending: number;
+  // No corpus counts since 2026-10-01: the training material is the Training
+  // tab's own read (getCorpusStats), so the Library's numbers neither wait on
+  // it nor degrade when it fails.
   /**
    * True when a query FAILED, as opposed to returning nothing.
    *
@@ -218,8 +219,6 @@ export const DEGRADED_MARKETING_SUMMARY: MarketingSummary = {
   by_status: {},
   open_reviews: 0,
   open_requests: 0,
-  corpus_indexed: 0,
-  corpus_pending: 0,
   degraded: true,
 };
 
@@ -229,8 +228,6 @@ export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
   by_status: {},
   open_reviews: 0,
   open_requests: 0,
-  corpus_indexed: 0,
-  corpus_pending: 0,
   degraded: false,
 };
 
@@ -330,16 +327,6 @@ async function pageAll<T>(
     consume(rows);
     if (rows.length < PAGE_SIZE) return "ok";
   }
-}
-
-/**
- * The LIST readers (assets, media, corpus rows) return [] on any error, so
- * "absent" and "broken" are the same decision to them: stop. They keep this
- * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
- * and only a count can lie by saying zero.
- */
-function quiet(label: string, err: { code?: string; message?: string } | null): boolean {
-  return classify(label, err) !== "ok";
 }
 
 /**
@@ -446,37 +433,53 @@ export async function getMarketingSummary(
     // A failed chunk keeps the chunks that succeeded and marks the summary
     // degraded. Discarding them and reporting 0 was the same lie as above, at
     // smaller scale: "nothing waiting on you" when the query simply broke.
-    let openReviews = 0;
-    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-      const r = await db
-        .from("marketing_review")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .is("acted_on_at", null)
-        .in("asset_id", ids);
-      const verdict = classify("summary.reviews", r.error);
-      if (verdict !== "ok") {
-        if (verdict === "broken") degraded = true;
-        break;
+    //
+    // THE THREE COUNTS BELOW RUN TOGETHER (2026-10-01). They need the asset
+    // ids, or nothing, and not each other, but they ran one after another,
+    // with a corpus read behind them: three round trips in a row after the
+    // asset pages, which the Content Overview waited on before it drew
+    // anything. Each chunk loop is still sequential inside itself with the same
+    // stop-on-failure rule, and every `.from()` is still called in the same
+    // order per table. The corpus read left the summary: the training material
+    // is the Training tab's own read (getCorpusStats), so a failure there no
+    // longer degrades the Library's numbers.
+    const openReviewsP = (async () => {
+      let openReviews = 0;
+      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+        const r = await db
+          .from("marketing_review")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .is("acted_on_at", null)
+          .in("asset_id", ids);
+        const verdict = classify("summary.reviews", r.error);
+        if (verdict !== "ok") {
+          if (verdict === "broken") degraded = true;
+          break;
+        }
+        openReviews += r.count || 0;
       }
-      openReviews += r.count || 0;
-    }
+      return openReviews;
+    })();
 
-    let requestsBound = 0;
-    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-      const r = await db
-        .from("marketing_request")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .in("status", ["open", "claimed"])
-        .in("asset_id", ids);
-      const verdict = classify("summary.requests", r.error);
-      if (verdict !== "ok") {
-        if (verdict === "broken") degraded = true;
-        break;
+    const requestsBoundP = (async () => {
+      let requestsBound = 0;
+      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+        const r = await db
+          .from("marketing_request")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .in("status", ["open", "claimed"])
+          .in("asset_id", ids);
+        const verdict = classify("summary.requests", r.error);
+        if (verdict !== "ok") {
+          if (verdict === "broken") degraded = true;
+          break;
+        }
+        requestsBound += r.count || 0;
       }
-      requestsBound += r.count || 0;
-    }
+      return requestsBound;
+    })();
 
     // marketing_request.asset_id IS nullable — "a request not tied to an asset"
     // is the intended case (see the MATCH SIMPLE note on marketing_request_asset_fk).
@@ -484,37 +487,25 @@ export async function getMarketingSummary(
     // it belongs to the founders' own queue and is counted. Bound requests follow
     // their asset's brand. Two counts rather than one `.or()` because the bridge's
     // `.or()` support is not something this reader should depend on.
-    const [requestsUnbound, corpus] = await Promise.all([
+    const [openReviews, requestsBound, requestsUnbound] = await Promise.all([
+      openReviewsP,
+      requestsBoundP,
       db
         .from("marketing_request")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
         .in("status", ["open", "claimed"])
         .is("asset_id", null),
-      // TENANT-SCOPED ONLY, ON PURPOSE — do not "fix" this to match the two
-      // counts above. marketing_corpus is what Maven LEARNS FROM, not what OASIS
-      // has shipped, and you learn from everything you have made: a client ad
-      // that performed is training signal exactly like our own. The brand
-      // boundary exists so the founders LIBRARY shows our own deliverables; it is
-      // not a rule about training data. marketing_corpus.asset_id IS nullable, so
-      // scoping it here would be perfectly possible — which is exactly why this
-      // comment exists. Pinned by tests/marketing-core.test.ts.
-      db.from("marketing_corpus").select("state").eq("tenant_id", tenantId),
     ]);
 
     if (classify("summary.requests.unbound", requestsUnbound.error) === "broken") degraded = true;
-    if (classify("summary.corpus", corpus.error) === "broken") degraded = true;
 
-    const corpusRows = (corpus.data || []) as Array<{ state: string }>;
     return {
       total: rows.length,
       by_track,
       by_status,
       open_reviews: openReviews,
       open_requests: requestsBound + (requestsUnbound.count || 0),
-      corpus_indexed: corpusRows.filter((c) => c.state === "indexed").length,
-      corpus_pending: corpusRows.filter((c) => c.state === "queued" || c.state === "extracting")
-        .length,
       degraded,
     };
   } catch (e) {
@@ -1215,23 +1206,45 @@ export type CorpusStats = {
   failed: number;
   exemplars: number;
   counter_examples: number;
+  /**
+   * True when the read FAILED, as opposed to the corpus being empty: the
+   * Training tab and the Content overview's Training card then say they could
+   * not read it instead of "nothing yet". Same reason as MarketingSummary.degraded.
+   */
+  degraded: boolean;
 };
 
 export const EMPTY_CORPUS_STATS: CorpusStats = {
   total: 0, queued: 0, extracting: 0, indexed: 0, failed: 0,
-  exemplars: 0, counter_examples: 0,
+  exemplars: 0, counter_examples: 0, degraded: false,
 };
 
-/** Counts for the Train screen. Never throws; pre-migration returns zeroes. */
-export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
+/**
+ * Counts for the Training tab and the overview's Training card. Never throws;
+ * pre-migration (no table) returns honest zeroes, any other failure is degraded.
+ *
+ * TENANT-SCOPED ONLY, ON PURPOSE — do not "fix" this to match the Library's
+ * brand-scoped counts. marketing_corpus is what the marketing agent LEARNS
+ * FROM, not what OASIS has shipped, and you learn from everything you have
+ * made: a client ad that performed is training signal exactly like our own.
+ * The brand boundary exists so the founders LIBRARY shows our own
+ * deliverables; it is not a rule about training data. marketing_corpus.asset_id
+ * IS nullable, so scoping it here would be perfectly possible — which is
+ * exactly why this comment exists. Pinned by tests/marketing-core.test.ts (it
+ * pinned the same read inside getMarketingSummary until 2026-10-01).
+ *
+ * `db` is injectable for tests only, as in getMarketingSummary.
+ */
+export async function getCorpusStats(
+  tenantId: string,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<CorpusStats> {
   if (!tenantId) return EMPTY_CORPUS_STATS;
   try {
-    const db = getServiceSupabase();
     const r = await db.from("marketing_corpus").select("state, label").eq("tenant_id", tenantId);
-    if (r.error) {
-      quiet("corpus.stats", r.error);
-      return EMPTY_CORPUS_STATS;
-    }
+    const verdict = classify("corpus.stats", r.error);
+    if (verdict === "absent") return EMPTY_CORPUS_STATS;
+    if (verdict === "broken") return { ...EMPTY_CORPUS_STATS, degraded: true };
     const rows = (r.data || []) as Array<{ state: string; label: string }>;
     return {
       total: rows.length,
@@ -1241,16 +1254,25 @@ export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
       failed: rows.filter((x) => x.state === "failed").length,
       exemplars: rows.filter((x) => x.label === "exemplar").length,
       counter_examples: rows.filter((x) => x.label === "counter_example").length,
+      degraded: false,
     };
   } catch (e) {
     console.warn("[marketing:corpus.stats] unexpected", e);
-    return EMPTY_CORPUS_STATS;
+    return { ...EMPTY_CORPUS_STATS, degraded: true };
   }
 }
 
-/** Most recent corpus items, newest first. */
-export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusRow[]> {
-  if (!tenantId) return [];
+/** The newest corpus links, and whether the read failed (a failed read is not an empty list). */
+export type CorpusItems = { rows: CorpusRow[]; degraded: boolean };
+
+/**
+ * Most recent corpus items, newest first. Unlike the other list readers this
+ * one says when it failed: the Training tab prints "Nothing in it yet" for an
+ * empty list, so an empty list from a broken read would hide material that is
+ * there (the counts read separately and can succeed while this one fails).
+ */
+export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusItems> {
+  if (!tenantId) return { rows: [], degraded: false };
   try {
     const db = getServiceSupabase();
     const r = await db
@@ -1259,13 +1281,12 @@ export async function getCorpusItems(tenantId: string, limit = 40): Promise<Corp
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);
-    if (r.error) {
-      quiet("corpus.items", r.error);
-      return [];
-    }
-    return (r.data || []) as CorpusRow[];
+    const verdict = classify("corpus.items", r.error);
+    if (verdict === "absent") return { rows: [], degraded: false };
+    if (verdict === "broken") return { rows: [], degraded: true };
+    return { rows: (r.data || []) as CorpusRow[], degraded: false };
   } catch (e) {
     console.warn("[marketing:corpus.items] unexpected", e);
-    return [];
+    return { rows: [], degraded: true };
   }
 }
