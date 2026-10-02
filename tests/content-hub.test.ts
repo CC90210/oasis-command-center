@@ -18,7 +18,10 @@
  *      crumb for anyone else (their page is a 404). The section crumb is the
  *      rail's own name for the row.
  *   4. The founders portal banner is hidden on every Content path, as on
- *      Finances, and still renders on the Growth preview shell.
+ *      Finances, and still renders on the Growth preview shell. Stronger: for
+ *      every page the file system has under Content and Finances, nothing in
+ *      its layout chain or its imports can render the banner or its chips
+ *      (the founders layout no longer mounts it; the Growth layout does).
  *   5. One name. FOUNDERS_NAV, the Overview's <h1> and <title>, every <title>
  *      under the hub, the back links and MarketingToday say Content; no hub
  *      file calls it "Studio" or "Marketing" in code (comments may say how it
@@ -73,6 +76,64 @@ function walkFiles(dir: string, out: string[] = []): string[] {
     else if (/\.tsx?$/.test(name)) out.push(full);
   }
   return out;
+}
+
+/** "app/founders/marketing/asset/[id]/page.tsx" -> "/founders/marketing/asset/[id]" (route groups dropped). */
+function routeOf(page: string): string {
+  const segs = page.replace(/^app\//, "").split("/").slice(0, -1).filter((s) => !/^\(.*\)$/.test(s));
+  return `/${segs.join("/")}`;
+}
+
+/**
+ * What Next renders around a page: every layout, template, loading, error and
+ * not-found file from app/ down to the page's own folder, then the page.
+ */
+function layoutChain(page: string): string[] {
+  const dirs = page.split("/").slice(0, -1);
+  const chain: string[] = [];
+  for (let i = 1; i <= dirs.length; i += 1) {
+    const dir = dirs.slice(0, i).join("/");
+    for (const name of ["layout", "template", "loading", "error", "not-found"]) {
+      for (const ext of [".tsx", ".ts"]) {
+        if (existsSync(join(root, dir, name + ext))) chain.push(`${dir}/${name}${ext}`);
+      }
+    }
+  }
+  chain.push(page);
+  return chain;
+}
+
+/** Repo-relative files reachable through runtime imports (type-only imports are erased, so they are skipped). */
+const importsCache = new Map<string, string[]>();
+function importsOf(file: string): string[] {
+  const hit = importsCache.get(file);
+  if (hit) return hit;
+  const src = stripped(file);
+  const specs: string[] = [];
+  for (const m of src.matchAll(/^\s*(?:import|export)\s+(type\s+)?(?:[\w*${}\s,]+?\s+from\s+)?["']([^"']+)["']/gm)) {
+    if (!m[1]) specs.push(m[2]);
+  }
+  for (const m of src.matchAll(/\b(?:import|require)\(\s*["']([^"']+)["']\s*\)/g)) specs.push(m[1]);
+  const out: string[] = [];
+  for (const spec of specs) {
+    const base = spec.startsWith("@/") ? spec.slice(2) : spec.startsWith(".") ? join(dirname(file), spec).split(sep).join("/") : null;
+    if (base === null) continue;
+    const found = ["", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.tsx"].map((ext) => base + ext).find((p) => /\.(?:[cm]?[jt]sx?)$/.test(p) && existsSync(join(root, p)) && statSync(join(root, p)).isFile());
+    if (found) out.push(found);
+  }
+  importsCache.set(file, out);
+  return out;
+}
+function importClosure(entries: string[]): Set<string> {
+  const seen = new Set<string>();
+  const stack = [...entries];
+  while (stack.length) {
+    const file = stack.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const next of importsOf(file)) if (!seen.has(next)) stack.push(next);
+  }
+  return seen;
 }
 
 let failures = 0;
@@ -208,6 +269,37 @@ async function main() {
     }
     for (const p of ["/founders/marketingx", "/founders/growth", "/founders/growth/organic", "/founders"]) {
       assert.equal(foundersBannerHidden(p), false, p);
+    }
+  });
+
+  // CC, 2026-10-01: "there's still that banner at the top. It allows us to
+  // switch between finances, and I want to get rid of this." The pathname
+  // check above only hides a banner the founders layout still MOUNTED on every
+  // Content page. This proves, for every page the file system has under the
+  // Content hub (and under Finances), that nothing in its layout chain or its
+  // imports can render the banner or its section chips at all.
+  await check("no page under Content or Finances has the founders banner or its chips in its layout chain or imports; the Growth shell still does", () => {
+    const pagesUnder = (dir: string) => walkFiles(join(root, dir)).map(rel).filter((f) => /\/page\.tsx?$/.test(f));
+    const content = pagesUnder("app/founders/marketing");
+    const routes = content.map(routeOf);
+    for (const must of [CONTENT_ROOT, ...CONTENT_TABS.map((t) => t.href), `${CONTENT_ROOT}/asset/[id]`]) {
+      assert.ok(routes.includes(must), `the walk found ${must}: ${routes.join(", ")}`);
+    }
+    const finances = pagesUnder("app/founders/finances");
+    assert.ok(finances.length >= 9, `walked Finances: ${finances.length} pages`);
+    const BANNER = ["components/founders/FoundersPortalBanner.tsx", "components/founders/FoundersSectionNav.tsx"];
+    for (const page of [...content, ...finances]) {
+      const chain = layoutChain(page);
+      const reach = importClosure(chain);
+      assert.ok(reach.size > chain.length, `${page}: the import walk went past the chain itself`);
+      for (const b of BANNER) assert.equal(reach.has(b), false, `${routeOf(page)} reaches ${b} from ${chain.join(" > ")}`);
+      assert.equal(foundersBannerHidden(routeOf(page).replace(/\[[^\]]+\]/g, "a_1")), true, `${routeOf(page)}: the second wall`);
+    }
+    // Not vacuous: the same walk finds the banner where it IS still mounted.
+    const growth = pagesUnder("app/founders/growth");
+    assert.ok(growth.length >= 1, "walked the Growth preview shell");
+    for (const page of growth) {
+      assert.ok(importClosure(layoutChain(page)).has(BANNER[0]), `${routeOf(page)} still renders the banner`);
     }
   });
 

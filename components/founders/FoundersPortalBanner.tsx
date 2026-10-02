@@ -1,21 +1,23 @@
 "use client";
 
 /**
- * The "OASIS · Founders Portal" banner at the top of every founders page:
- * wordmark, tagline and the section chips (FoundersSectionNav).
+ * The "OASIS · Founders Portal" banner: wordmark, tagline and the section
+ * chips (FoundersSectionNav).
  *
- * NOT on Finances. CC, 2026-09-24: "remove the Oasis founder portal section at
- * the very top, where I can switch between marketing and finances... this is
- * unnecessary." Finances pages start with their own tab bar; Content is one
- * click away in the rail. NOT on Content either (2026-10-01): it starts with
- * its own ContentTabs (components/founders/ContentTabs.tsx), the same decision
- * CC made for Finances. Every other founders page keeps the banner - today
- * that is the inactive Growth preview shell, reachable by direct URL.
+ * MOUNTED ONLY BY THE GROWTH PREVIEW SHELL (app/founders/growth/layout.tsx),
+ * reachable by direct URL. NOT on Finances. CC, 2026-09-24: "remove the Oasis
+ * founder portal section at the very top, where I can switch between marketing
+ * and finances... this is unnecessary." NOT on Content either (2026-10-01): it
+ * starts with its own ContentTabs (components/founders/ContentTabs.tsx).
+ * Until 2026-10-01 app/founders/layout.tsx mounted this above every founders
+ * page and the pathname check below hid it on those two; now neither section
+ * has it in its layout chain (tests/content-hub.test.ts), and the check stays
+ * as a second wall in case a future layout mounts it again.
  *
- * A client component only because the founders layout is a server component
- * and cannot see the pathname. It decides nothing about access: the layout
- * still runs the founder gate, and filters the sections by audience (the
- * Finances chip only for the two owners) before passing them in.
+ * A client component because the chips and that check read the pathname. It
+ * decides nothing about access: the layout runs the founder gate, and filters
+ * the sections by audience (the Finances chip only for the two owners) before
+ * passing them in.
  */
 
 import { usePathname } from "next/navigation";

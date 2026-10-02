@@ -7,29 +7,29 @@
  * that happen to share a shell. Adon, 2026-08-03: "Those are two very separate
  * pieces of software... it's about separation."
  *
- * Everything under /founders is OASIS's OWN tooling — not a tenant of the
- * platform, not something a customer is ever sold. It must not read as one more
- * CRM tab. This wrapper gives it its own header, its own accent, and its own
- * sub-nav so the boundary is obvious the moment you look at the screen. The
- * exception is Finances, which shows its own tab bar instead of the banner
- * (CC, 2026-09-24).
+ * Everything under /founders is OASIS's OWN tooling, not a tenant of the
+ * platform, not something a customer is ever sold. Each section starts with its
+ * own tab bar inside the OS shell: Content (ContentTabs) and Finances
+ * (FinanceTabs).
  *
- * THE ACCENT IS DELIBERATE. The multi-tenant CRM uses the neutral platform blue
- * (#3b82f6, tailwind `accent`). The founders portal uses OASIS cyan #1FE3F0 —
- * the real brand colour from brain/brand-assets/oasis-ai/BRAND_SYSTEM.md. So it
- * does not merely look different, it looks MORE like OASIS, while the tenant
- * shells stay brand-neutral platform surfaces.
+ * NO PORTAL BANNER HERE (2026-10-01). This layout used to mount the cyan
+ * "OASIS - Founders Portal" banner, whose chips switch between Content and
+ * Finances, above EVERY founders page, and hid it on Content and Finances with
+ * a pathname check in the browser. CC asked twice for it to go ("I want to get
+ * rid of this", the switch to Finances included; Finances is reached from
+ * Money). A banner that every section mounts and two sections hide is one
+ * missed check away from coming back, so it is mounted by the one section that
+ * still shows it, the Growth preview shell (app/founders/growth/layout.tsx), and
+ * no Content or Finances page has it in its layout chain at all.
+ * tests/content-hub.test.ts proves that over every page under the Content hub.
  *
- * Access is gated per-page via resolveFounder(), not here: a layout cannot
- * notFound() reliably for every child, and a gate that only half-applies is
- * worse than none. Each page calls the gate itself.
+ * Access is gated per-page via resolveFounder(): a layout cannot notFound()
+ * reliably for every child, and a gate that only half-applies is worse than
+ * none. Each page calls the gate itself; this one is defence in depth.
  */
 
 import { notFound } from "next/navigation";
 import { resolveFounder } from "@/lib/founders/gate";
-import { FOUNDERS_PORTAL } from "@/lib/portals/registry";
-import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
-import { FoundersPortalBanner } from "@/components/founders/FoundersPortalBanner";
 
 export default async function FoundersLayout({
   children,
@@ -39,25 +39,7 @@ export default async function FoundersLayout({
   // Defence in depth. Every page also calls resolveFounder(); this catches a
   // future page that forgets to, so the failure mode of forgetting is a 404
   // rather than an open door.
-  const founder = await resolveFounder();
-  if (!founder) notFound();
+  if (!(await resolveFounder())) notFound();
 
-  return (
-    <div className="space-y-6">
-      {/* Portal banner (wordmark, tagline, section chips). Renders on every
-          founders page EXCEPT /founders/finances/**, which starts with its own
-          tab bar (see FoundersPortalBanner). The sections are filtered here,
-          on the server: the Finances chip only for the two owners — the
-          portal gate also admits the marketing hire. */}
-      <FoundersPortalBanner
-        label={FOUNDERS_PORTAL.label}
-        tagline={FOUNDERS_PORTAL.tagline}
-        sections={FOUNDERS_PORTAL.sections.filter(
-          (s) => s.audience !== "finance_owners" || isFinanceOwnerEmail(founder.email),
-        )}
-      />
-
-      {children}
-    </div>
-  );
+  return <div className="space-y-6">{children}</div>;
 }
