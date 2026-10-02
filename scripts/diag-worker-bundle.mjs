@@ -63,6 +63,24 @@ for (const [p, b] of inputs) {
   cat[`other:${p}`] = (cat[`other:${p}`] || 0) + b;
 }
 top(cat, 30, "categories");
+
+// Who pulls each directly-bundled package in: the metafile's import edges.
+{
+  const importers = {};
+  for (const [p, info] of Object.entries(meta.inputs)) {
+    const from = norm(p);
+    for (const imp of info.imports || []) {
+      const to = norm(imp.path || "");
+      const pkg = pkgOf(to);
+      if (!pkg) continue;
+      const fromPkg = pkgOf(from) || (from.includes(".next/server/") ? from.slice(from.indexOf(".next/server/")) : from);
+      if (fromPkg === pkg) continue;
+      (importers[pkg] ||= new Set()).add(`${fromPkg} (${imp.kind})`);
+    }
+  }
+  console.log("\n=== importers of directly-bundled packages (first 6 each) ===");
+  for (const pkg of Object.keys(importers).sort()) console.log(`${pkg} <- ${[...importers[pkg]].slice(0, 6).join(", ")}`);
+}
 top(npmDirect, 50, "npm packages bundled directly by OpenNext's esbuild (outside webpack chunks)");
 
 const diagDir = "diag-out";
