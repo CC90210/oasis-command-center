@@ -60,8 +60,16 @@ export type PerfSummary = {
     saves: number;
     follows: number;
   };
-  byPlatform: Array<{ platform: string; posts: number; views: number; engagements: number }>;
+  byPlatform: Array<{ platform: string; posts: number; views: number; impressions: number; engagements: number }>;
   lastSynced: string | null;
+  /**
+   * When each channel last posted, ALL TIME: platform -> ISO time, from a
+   * second read beside the window's (lib/founders/performance-queries.ts). The
+   * window alone cannot see a channel that went quiet before it began, which
+   * is how TikTok and YouTube vanished from this page after 2026-08-21.
+   * null = not read, or the read failed: unknown, never "no posts".
+   */
+  lastPosted: Record<string, string> | null;
   /**
    * Posts that have shipped but whose numbers have not come back yet.
    *
@@ -93,6 +101,7 @@ export const EMPTY_PERF: PerfSummary = {
   totals: { posts: 0, views: 0, impressions: 0, likes: 0, comments: 0, shares: 0, saves: 0, follows: 0 },
   byPlatform: [],
   lastSynced: null,
+  lastPosted: null,
   awaitingMetrics: 0,
   degraded: false,
   truncated: false,
@@ -206,13 +215,14 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
     { ...EMPTY_PERF.totals },
   );
 
-  const byMap = new Map<string, { platform: string; posts: number; views: number; engagements: number }>();
+  const byMap = new Map<string, { platform: string; posts: number; views: number; impressions: number; engagements: number }>();
   // `measured`, for the same reason as the totals: an unmeasured row would add a
   // post with zero views to a channel's bar and quietly understate that channel.
   for (const x of measured) {
-    const cur = byMap.get(x.platform) || { platform: x.platform, posts: 0, views: 0, engagements: 0 };
+    const cur = byMap.get(x.platform) || { platform: x.platform, posts: 0, views: 0, impressions: 0, engagements: 0 };
     cur.posts += 1;
     cur.views += num(x.views);
+    cur.impressions += num(x.impressions);
     cur.engagements += engagements(x);
     byMap.set(x.platform, cur);
   }
@@ -227,8 +237,113 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
     totals,
     byPlatform: [...byMap.values()].sort((a, b) => b.views - a.views),
     lastSynced,
+    // The window says nothing about all time; the reader adds this.
+    lastPosted: null,
     awaitingMetrics,
     degraded: false,
     truncated,
   };
+}
+
+// ───────────────────────────────────────────────────── the channel list
+
+/** A channel whose last post is older than this says so. */
+export const QUIET_AFTER_DAYS = 14;
+
+/**
+ * The number a channel's bar is drawn from. LinkedIn reports impressions, and
+ * its `views` count video plays only, so a month of text and image posts read
+ * as "0 views" beside a few hundred impressions (33 views and 257 impressions
+ * across 90 LinkedIn posts, 2026-10-02).
+ */
+export function reachMetric(platform: string): "views" | "impressions" {
+  return platform === "linkedin" ? "impressions" : "views";
+}
+
+export type ChannelRow = {
+  platform: string;
+  /** Posts in the window, with numbers back or not. */
+  posts: number;
+  /** Posts in the window whose numbers are back: the only ones summed. */
+  measured: number;
+  metric: "views" | "impressions";
+  /** The channel's reach in its own metric, over its measured posts. */
+  reach: number;
+  engagements: number;
+  /** Its share of the reach summed over every channel, 0-1: the bar. */
+  share: number;
+  /**
+   * Whole days since its last post. null: no post on record at all.
+   * undefined: unknown (the all-time read failed and none is in the window).
+   */
+  lastPostedDays: number | null | undefined;
+};
+
+/** Whole days from an ISO time to `now`; null when there is no usable time. */
+export function daysSince(iso: string | null | undefined, now: Date): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.floor((now.getTime() - t) / 86_400_000));
+}
+
+/**
+ * Every connected channel, and any other that posted in the window, with its
+ * numbers and how long ago it last posted.
+ *
+ * The page drew one bar per platform IN THE WINDOW, so a channel that stopped
+ * posting simply vanished: TikTok and YouTube have had no post since
+ * 2026-08-21 and were not on the page at all, which reads as "not connected"
+ * rather than "gone quiet". Every connected channel is now listed, the quiet
+ * ones after the active ones, in the order they are connected.
+ */
+export function channelRows(
+  perf: Pick<PerfSummary, "rows" | "byPlatform" | "lastPosted">,
+  connected: readonly string[],
+  now: Date = new Date(),
+): ChannelRow[] {
+  const measuredBy = new Map(perf.byPlatform.map((p) => [p.platform, p]));
+  const postsBy = new Map<string, number>();
+  const latestBy = new Map<string, string>();
+  for (const r of perf.rows) {
+    postsBy.set(r.platform, (postsBy.get(r.platform) || 0) + 1);
+    const prev = latestBy.get(r.platform);
+    if (r.published_at && (!prev || r.published_at > prev)) latestBy.set(r.platform, r.published_at);
+  }
+  const platforms = [...connected, ...[...postsBy.keys()].filter((p) => !connected.includes(p))];
+  const rows: ChannelRow[] = platforms.map((platform) => {
+    const m = measuredBy.get(platform);
+    const metric = reachMetric(platform);
+    // The all-time read knows every channel. When it failed, the window still
+    // knows the channels that posted in it; for the rest it is unknown.
+    const last = perf.lastPosted ? (perf.lastPosted[platform] ?? null) : latestBy.get(platform);
+    return {
+      platform,
+      posts: postsBy.get(platform) || 0,
+      measured: m?.posts || 0,
+      metric,
+      reach: m ? (metric === "impressions" ? m.impressions : m.views) : 0,
+      engagements: m?.engagements || 0,
+      share: 0,
+      lastPostedDays: last === undefined ? undefined : daysSince(last, now),
+    };
+  });
+  const total = rows.reduce((n, r) => n + r.reach, 0);
+  for (const r of rows) r.share = total > 0 ? r.reach / total : 0;
+  // Active channels by reach; the quiet ones keep their connected order (sort is stable).
+  return rows.sort((a, b) => Number(b.posts > 0) - Number(a.posts > 0) || b.reach - a.reach);
+}
+
+/**
+ * The line under a channel that is quiet or unknown, or null when there is
+ * nothing to warn about. Facts only: an unknown is "couldn't check", never a
+ * guessed number.
+ */
+export function channelNote(row: Pick<ChannelRow, "posts" | "lastPostedDays">): string | null {
+  if (row.lastPostedDays === undefined) return row.posts > 0 ? null : "Couldn't check when it last posted";
+  if (row.lastPostedDays === null) return "No post on record yet";
+  if (row.lastPostedDays > QUIET_AFTER_DAYS) {
+    return `Last posted ${row.lastPostedDays} day${row.lastPostedDays === 1 ? "" : "s"} ago`;
+  }
+  return null;
 }

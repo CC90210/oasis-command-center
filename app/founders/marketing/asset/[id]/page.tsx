@@ -35,6 +35,7 @@ import {
   isOwnBrand,
   isRenderableCarousel,
   libraryReturnPath,
+  madeByLabel,
   parsePlatforms,
   parseSlideUrls,
   authorName,
@@ -47,7 +48,8 @@ import {
 } from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
-import { PhoneFrame, PhoneTextCard } from "@/components/founders/PhoneFrame";
+import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
+import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
 import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
@@ -167,26 +169,50 @@ export default async function AssetDetailPage({
   // browser's player for scrubbing. initialOpen: this page IS the opened asset,
   // so the player is there from the start with its first frame - not a cover,
   // which for most videos (no poster on file) was a black "No cover image".
-  const mediaEl = isRenderableCarousel(asset.asset_type, slideUrls) ? (
+  const carousel = isRenderableCarousel(asset.asset_type, slideUrls);
+  const phoneMediaEl = carousel ? (
     <CarouselFrame slides={slideUrls} title={asset.title} width={w} height={h} className="h-full w-full" />
-  ) : videoUrl && !original ? (
-    <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
   ) : videoUrl ? (
-    <video
-      src={videoUrl}
-      poster={posterUrl || undefined}
-      controls
-      playsInline
-      preload="metadata"
-      className="h-full w-full bg-black object-contain"
-    />
+    <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
   ) : imageUrl ? (
     // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, not a static asset
     <img src={imageUrl} alt={asset.title} decoding="async" width={w ?? undefined} height={h ?? undefined} className="h-full w-full object-contain" />
   ) : null;
+  const mediaEl =
+    original && videoUrl && !carousel ? (
+      <video
+        src={videoUrl}
+        poster={posterUrl || undefined}
+        controls
+        playsInline
+        preload="metadata"
+        className="h-full w-full bg-black object-contain"
+      />
+    ) : (
+      phoneMediaEl
+    );
+  // What the phone's screen shows, in place and in the big phone: the media,
+  // or the asset's own copy when it has none.
+  const phoneScreen = phoneMediaEl ?? (
+    <PhoneTextCard
+      kicker={asset.format === "html" ? "HTML page" : asset.format === "video" ? "Video - no render on file yet" : "Text post"}
+      text={asset.hook || asset.body || asset.title}
+      note="No media is attached to this asset yet."
+    />
+  );
 
   // Instagram unless the asset is TikTok-first; ?chrome= switches it.
   const chrome = phoneChromeFor(sp.chrome, asset.channel);
+  // The phone's shape, for the preview and the big phone alike.
+  const phoneShape: PhoneFrameShape = {
+    mediaW: w,
+    mediaH: h,
+    aspect: asset.aspect,
+    handle: asset.brand_name || asset.brand_slug,
+    caption: phoneMediaEl ? asset.hook : null,
+    chrome,
+    guides,
+  };
   const detailHref = (next: { original?: boolean; chrome?: "instagram" | "tiktok"; guides?: boolean }) => {
     const q = new URLSearchParams();
     const nextOriginal = next.original ?? original;
@@ -220,7 +246,8 @@ export default async function AssetDetailPage({
     ["Duration", fmtDuration(asset.duration_s as unknown as number)],
     ["Size", fmtBytes(video?.bytes ?? image?.bytes)],
     ["Campaign", asset.campaign],
-    ["Made by", asset.author_agent],
+    // The role, never the agent's internal name.
+    ["Made by", madeByLabel(asset.author_agent)],
     ["Published", asset.published_at ? new Date(asset.published_at).toLocaleString() : null],
   ];
 
@@ -243,7 +270,9 @@ export default async function AssetDetailPage({
       />
 
       <div className={`grid gap-6 ${vertical || !original ? "lg:grid-cols-[minmax(0,380px)_1fr]" : "lg:grid-cols-2"}`}>
-        <div className="space-y-3">
+        {/* Enlarge opens this asset in the big phone, in either view; a video
+            playing here carries on there from the same second. */}
+        <PhoneEnlarge title={asset.title} frame={phoneShape} media={phoneScreen} className="space-y-3">
           {original ? (
             <Card noPadding>
               <div
@@ -262,24 +291,8 @@ export default async function AssetDetailPage({
             // 9:19.5 screen with the app's own chrome over it, so the caption,
             // the action column and the letterbox are judged where they will be
             // seen. An asset with no media still shows its copy on the screen.
-            <PhoneFrame
-              mediaW={w}
-              mediaH={h}
-              aspect={asset.aspect}
-              handle={asset.brand_name || asset.brand_slug}
-              caption={mediaEl ? asset.hook : null}
-              chrome={chrome}
-              guides={guides}
-              label={asset.title}
-              className="mx-auto max-w-[360px]"
-            >
-              {mediaEl ?? (
-                <PhoneTextCard
-                  kicker={asset.format === "html" ? "HTML page" : asset.format === "video" ? "Video - no render on file yet" : "Text post"}
-                  text={asset.hook || asset.body || asset.title}
-                  note="No media is attached to this asset yet."
-                />
-              )}
+            <PhoneFrame {...phoneShape} label={asset.title} className="mx-auto max-w-[360px]">
+              {phoneScreen}
             </PhoneFrame>
           )}
           <div className="flex flex-wrap items-center justify-center gap-1.5" aria-label="Preview options">
@@ -294,8 +307,10 @@ export default async function AssetDetailPage({
                 <PreviewLink href={detailHref({ guides: !guides })} active={guides} label="Safe zones" />
               </>
             )}
+            <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />
+            <EnlargeButton title={asset.title} />
           </div>
-        </div>
+        </PhoneEnlarge>
 
         <div className="space-y-6">
           <Card title="Status" subtitle="Where this sits, and what you can do about it">
@@ -347,7 +362,7 @@ export default async function AssetDetailPage({
               it applicable, and shipping the second by accident is how the first
               becomes a bug report. Caught by Codex's audit of this change. */}
           {isOwnBrand(asset.brand_slug) ? (
-            <Card title="Post to channels" subtitle="Goes out through the send gateway">
+            <Card title="Post to channels" subtitle="Posted from OASIS's connected accounts">
               <AssetPublishPanel
                 assetId={asset.id}
                 // Was `hasVideo={Boolean(videoUrl)}`. A carousel has no video and
@@ -377,7 +392,7 @@ export default async function AssetDetailPage({
             </Card>
           )}
 
-          <Card title="Copy" subtitle="What Maven wrote for this">
+          <Card title="Copy" subtitle="The words that go out with it">
             <dl className="space-y-3 text-sm">
               {[
                 ["Hook", asset.hook],

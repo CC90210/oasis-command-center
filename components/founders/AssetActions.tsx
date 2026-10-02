@@ -16,7 +16,9 @@
  * - Optimistic on the status pill, because a review pass is a rhythm and a 300ms round
  *   trip per asset breaks it. Reverts loudly on failure rather than lying.
  * - Delete asks first. It removes rows for good (the R2 object survives and is reported by
- *   the route), so it gets a confirm step rather than a one-click regret.
+ *   the route), so it gets a confirm step rather than a one-click regret. The step says it
+ *   is permanent and offers Archive instead: the screen used to promise "can be restored"
+ *   after a delete, and nothing in the app can bring a deleted asset back.
  * - `router.refresh()` after a verdict so the counts in the header and the Studio pipeline
  *   agree with the grid. Without it the tile changes and the page still says 39 in review.
  */
@@ -100,7 +102,7 @@ export function AssetActions({
   if (gone) {
     return (
       <div className="mt-2 rounded-lg border border-bg-border bg-bg-deep/60 px-3 py-2 text-[11px] text-fg-dim">
-        Deleted. The video file is kept in storage and can be restored.
+        Deleted. It is gone from the Library for good.
       </div>
     );
   }
@@ -115,24 +117,39 @@ export function AssetActions({
       )}
 
       {confirming ? (
-        <div className="flex items-center gap-2">
-          <span className="flex-1 text-[11px] text-fg-muted">Delete “{title}”?</span>
-          <button
-            type="button"
-            onClick={remove}
-            disabled={busy}
-            className="rounded-md bg-hot/15 px-2.5 py-1 text-[11px] font-semibold text-hot transition-colors hover:bg-hot/25 disabled:opacity-50"
-          >
-            Delete
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirming(false)}
-            disabled={busy}
-            className="rounded-md px-2.5 py-1 text-[11px] text-fg-dim transition-colors hover:text-fg"
-          >
-            Keep
-          </button>
+        <div className="flex flex-col gap-2">
+          <span className="text-[11px] leading-4 text-fg-muted">
+            {`Delete "${title}" for good? It cannot be undone. Archive keeps it, and it can be restored.`}
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy}
+              className="rounded-md bg-hot/15 px-2.5 py-1 text-[11px] font-semibold text-hot transition-colors hover:bg-hot/25 disabled:opacity-50"
+            >
+              Delete for good
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirming(false);
+                void verdict("archived");
+              }}
+              disabled={busy}
+              className="rounded-md bg-bg-deep px-2.5 py-1 text-[11px] font-semibold text-fg-muted transition-colors hover:text-fg disabled:opacity-40"
+            >
+              Archive instead
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+              className="ml-auto rounded-md px-2.5 py-1 text-[11px] text-fg-dim transition-colors hover:text-fg"
+            >
+              Keep
+            </button>
+          </div>
         </div>
       ) : shown === "archived" ? (
         /*

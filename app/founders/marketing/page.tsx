@@ -32,18 +32,23 @@
  * chain of round trips, so the whole Overview waited on the Library's slowest
  * read: about six round trips after the gate. Now the gate is the only wait
  * before the frame. Each section streams behind its own <Suspense>: the queue,
- * pipeline and brand tiles (the Library's numbers), the Library and Requests
- * cards (the same summary, read once per request through readSummary), and the
- * Training card with its own one-query read of the training material. The
- * Performance card needs no data and renders with the frame. A section whose
- * read fails says so in its own place. tests/content-speed.test.ts holds this.
+ * pipeline and brand tiles (the Library's numbers), the Library card (the same
+ * summary, read once per request through readSummary), and the Training card
+ * with its own one-query read of the training material. The Performance card
+ * needs no data and renders with the frame. A section whose read fails says so
+ * in its own place. tests/content-speed.test.ts holds this.
+ *
+ * NO REQUESTS CARD (D16, approved 2026-10-01). It counted jobs for the
+ * marketing agent, but nothing on any screen can file one and nothing reads
+ * them, so it was a permanent "None open." It goes, and so does its half of the
+ * "with the marketing agent" count.
  */
 
 import { Suspense, cache } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Card, PageHeader, Stat } from "@/components/Card";
-import { Library, GraduationCap, Inbox, BarChart3 } from "lucide-react";
+import { Library, GraduationCap, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder, type FounderContext } from "@/lib/founders/gate";
 import {
@@ -104,15 +109,12 @@ export default async function MarketingPage() {
         <QueueAndPipeline founder={founder} />
       </Suspense>
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Suspense fallback={<CardLoading title="Library" />}>
           <LibraryCard tenantId={tenantId} />
         </Suspense>
         <Suspense fallback={<CardLoading title="Training material" />}>
           <TrainingCard tenantId={tenantId} />
-        </Suspense>
-        <Suspense fallback={<CardLoading title="Requests" />}>
-          <RequestsCard tenantId={tenantId} />
         </Suspense>
         <PerformanceCard />
       </section>
@@ -198,9 +200,13 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
   // either table), and correct the moment Phase 3 starts writing. They are still
   // shown, as their own counts, just not summed into his queue. On screen the
   // agent is "the marketing agent": persona names are internal.
+  //
+  // Requests left the count with the Requests card (D16): nothing on any
+  // screen can file one and nothing reads them, so the number could only ever
+  // describe a queue no one works.
   const needsYou = awaitingVerdict;
   /** Queued FOR the marketing agent, not waiting on CC — shown, never summed into his queue. */
-  const withMaven = summary.open_reviews + summary.open_requests;
+  const withAgent = summary.open_reviews;
 
   // The funnel, from the counts the reader already computes. `by_status` has
   // been fetched and thrown away since Phase 1 — this is the pipeline CC asked
@@ -209,8 +215,10 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
   const stages: Array<{ key: string; label: string; hint: string }> = [
     { key: "draft", label: "Draft", hint: "not ready" },
     { key: "in_review", label: "In review", hint: "needs a verdict" },
-    { key: "approved", label: "Approved", hint: "ready to book" },
-    { key: "scheduled", label: "Scheduled", hint: "booked" },
+    // Not "ready to book" / "booked": nothing here books a post. An approved
+    // asset has simply not gone out; a scheduled one is in the poster's queue.
+    { key: "approved", label: "Approved", hint: "approved, not posted" },
+    { key: "scheduled", label: "Scheduled", hint: "queued by the poster" },
     { key: "published", label: "Published", hint: "live" },
   ];
   // ZERO ON A DEGRADED READ, which hides the whole pipeline section below.
@@ -254,14 +262,13 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
           </span>
           {/* NOT nested under `needsYou > 0`. It was, which made the comment above
               ("they are still shown, as their own counts") false: with nothing
-              awaiting a verdict, open_reviews had no surface anywhere on the page
-              — open_requests at least still has the Requests card. Each half now
-              appears whenever it is non-zero, independently. */}
-          {(needsYou > 0 || withMaven > 0) && (
+              awaiting a verdict, open_reviews had no surface anywhere on the
+              page. Each half now appears whenever it is non-zero, independently. */}
+          {(needsYou > 0 || withAgent > 0) && (
             <span className="text-xs text-fg-dim">
               {needsYou > 0 && <>{awaitingVerdict} awaiting your verdict</>}
-              {needsYou > 0 && withMaven > 0 && <> · </>}
-              {withMaven > 0 && <>{withMaven} with the marketing agent</>}
+              {needsYou > 0 && withAgent > 0 && <> · </>}
+              {withAgent > 0 && <>{withAgent} with the marketing agent</>}
             </span>
           )}
         </div>
@@ -278,7 +285,9 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
         ) : needsYou === 0 ? (
           <MarketingEmpty
             headline="Nothing waiting on you"
-            detail="When the marketing agent makes something, it lands here for your verdict. Approve it, ask for changes, or reject it; a change request with a reason is the most useful thing you can give it."
+            // Only the buttons the tiles have: there is no "ask for changes" or
+            // "reject" control anywhere, so the page no longer offers them.
+            detail="When the marketing agent makes something, it lands here for your verdict. Approve or archive each one; archived items can be restored."
             hint="Open any asset from the Library to approve or archive it."
           />
         ) : (
@@ -303,8 +312,8 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
                           className="font-semibold text-accent hover:underline">
                       {awaitingVerdict} asset{awaitingVerdict === 1 ? "" : "s"}
                     </Link>{" "}
-                    awaiting your verdict. Approve, archive or delete each one from its
-                    tile — archived stays restorable.
+                    awaiting your verdict. Approve or archive each one; archived items
+                    can be restored.
                   </>
                 ) : (
                   <>{needsYou} item{needsYou === 1 ? "" : "s"} pending.</>
@@ -372,7 +381,7 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
           channel split moved to a facet inside the Library, where it can be read
           as the rough grouping it is. The counts here are per-tab and link
           straight into that tab. */}
-      <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <section className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         {BRAND_GROUPS.map((g) => {
           const n = brandCount(g.key);
           const hint =
@@ -429,13 +438,17 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
  * final step, so this is a record of what already shipped, not a queue anything
  * draws from. A Draft -> Scheduled -> Published pipeline sitting above it
  * invites precisely the opposite reading, which is the reading CC arrived at.
+ *
+ * "What has been produced", the Library's own words, not "what shipped": the
+ * marketing agent registers its work here too, and most of it has never been
+ * posted (the Library says so above its grid).
  */
 async function LibraryCard({ tenantId }: { tenantId: string }) {
   const summary = await readSummary(tenantId);
   return (
     <Card
       title="Library"
-      subtitle="A record of what shipped — the poster writes here, never reads from here"
+      subtitle="What has been produced; the daily poster writes here, never reads from here"
       action={
         <Link
           href="/founders/marketing/library"
@@ -501,49 +514,18 @@ async function TrainingCard({ tenantId }: { tenantId: string }) {
   );
 }
 
-/**
- * A request is a job FOR the marketing agent (database/133_marketing_hub.sql:
- * "Operator -> agent work queue", claimed by an agent). CC asked what this
- * card was, so it says so; the count is the summary's, scoped to OASIS's own
- * assets like "Needs you".
- */
-async function RequestsCard({ tenantId }: { tenantId: string }) {
-  const summary = await readSummary(tenantId);
-  return (
-    <Card title="Requests" subtitle="Jobs for the marketing agent, not for you">
-      <div className="flex items-start gap-3">
-        <Inbox size={18} className="mt-0.5 shrink-0 text-accent" aria-hidden />
-        <div className="space-y-1 text-sm text-fg-muted">
-          <div>
-            {summary.degraded
-              ? "Couldn't read your requests."
-              : summary.open_requests === 0
-                ? "None open."
-                : `${summary.open_requests} open.`}
-          </div>
-          <p className="text-[11px] leading-5 text-fg-dim">
-            A request is a job for the marketing agent, such as &ldquo;make three TikTok hooks for
-            the system ad&rdquo;, so the agent acts on it, not you. None can be filed from this page
-            yet.
-          </p>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
 /*
  * This card said "No metrics connected yet. Phase 5." for hours AFTER the
  * Performance tab shipped with 79 posts of real Zernio data behind it. A stale
  * placeholder is worse than an empty state: it tells the operator a working
  * feature does not exist, so nobody opens it. It needs no data, so it renders
- * with the frame.
+ * with the frame. It names "your posting account", never the vendor behind it.
  */
 function PerformanceCard() {
   return (
     <Card
       title="Performance"
-      subtitle="Per channel, with provenance"
+      subtitle="Per channel"
       action={
         <Link
           href="/founders/marketing/performance"
@@ -556,8 +538,8 @@ function PerformanceCard() {
       <div className="flex items-center gap-3">
         <BarChart3 size={18} className="text-accent" aria-hidden />
         <div className="text-sm text-fg-muted">
-          Views, engagement and retention per channel, pulled from Zernio on a
-          schedule.
+          Views, engagement and retention for every connected channel, pulled from
+          your posting account on a schedule.
         </div>
       </div>
     </Card>
@@ -570,9 +552,10 @@ function SectionLoading({ line }: { line: string }) {
     <div className="space-y-3" aria-busy="true" aria-live="polite">
       <p className="px-1 text-sm text-fg-muted">{line}</p>
       <div className="h-24 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-24 rounded-xl border border-bg-border bg-bg-elev/60 animate-pulse-slow" />
+      {/* The brand tiles' shape: one per tab. */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+        {BRAND_GROUPS.map((g) => (
+          <div key={g.key} className="h-24 rounded-xl border border-bg-border bg-bg-elev/60 animate-pulse-slow" />
         ))}
       </div>
     </div>

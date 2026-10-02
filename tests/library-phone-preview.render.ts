@@ -36,8 +36,10 @@ type El = ReactElement<Record<string, unknown>>;
  * effects, so this stands in for the reconciler: render() is a frame, effects()
  * is the commit after it - what hydration runs once the server markup lands -
  * and what render() returns is drawn by real React. It knows useState, useRef
- * and useEffect (deps compared as React compares them) and nothing else, so a
- * new hook in the component fails loudly here instead of being faked.
+ * and useEffect (deps compared as React compares them), and useContext, which
+ * answers the context's default - no provider: these scenarios are TileVideo
+ * outside any big phone (tests/content-iphone.render.ts drives it inside one).
+ * Anything else fails loudly here instead of being faked.
  */
 function driver<P>(component: (props: P) => unknown) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
@@ -66,6 +68,9 @@ function driver<P>(component: (props: P) => unknown) {
       const changed = !(at in effectDeps) || !deps || !prev || deps.length !== prev.length || deps.some((d, i) => !Object.is(d, prev[i]));
       effectDeps[at] = deps;
       if (changed) queued.push(effect);
+    },
+    useContext(context: { _currentValue: unknown }) {
+      return context._currentValue;
     },
   };
   return {
