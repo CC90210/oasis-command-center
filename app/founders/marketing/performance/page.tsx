@@ -14,14 +14,29 @@
  * RETENTION IS COMPUTED, NOT STORED — average watch time over duration, and only
  * Instagram Reels report watch time at all, so most rows have none. The table
  * says so rather than printing a zero that would read as "nobody watched".
+ *
+ * THE FRAME FIRST, THE NUMBERS STREAMED (2026-10-01). CC: "clicking on the
+ * performance and whatnot, but it just takes a while". The page makes no
+ * third-party call: it reads the stored post_analytics snapshot, one bounded
+ * query. Its time is round trips: the founder gate (two) and that read (one),
+ * and it used to await all three before sending anything (production, the
+ * tab's own requests: 256-1,278 ms, CPU 15-28 ms). Now the title, the back link
+ * and an honest loading line are sent once the gate passes, and the numbers
+ * stream in behind <Suspense> from PerformanceNumbers, which says so in its own
+ * section if the read fails. tests/content-speed.test.ts holds this: no
+ * post_analytics read before the frame, one bounded read after it, and no
+ * fetch() at all while the page renders.
  */
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 
 import { Card, PageHeader } from "@/components/Card";
+import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import { platformLabel, postPermalink } from "@/lib/founders-marketing-core";
 import {
+  EMPTY_PERF,
   engagements,
   retention,
   type PerfRow,
@@ -47,7 +62,54 @@ export default async function PerformancePage() {
   const founder = await resolveFounder();
   if (!founder) notFound();
 
-  const perf = await getPerformance(founder.tenantId, 30);
+  return (
+    <div className="space-y-6 animate-fade-in">
+      <PageHeader
+        title="Performance"
+        subtitle="Last 30 days, per channel, from the numbers stored at the last sync"
+        action={
+          <Link
+            href="/founders/marketing"
+            className="text-xs font-semibold text-accent hover:underline"
+          >
+            Back to Content
+          </Link>
+        }
+      />
+
+      <Suspense fallback={<PerformanceLoading />}>
+        <PerformanceNumbers tenantId={founder.tenantId} />
+      </Suspense>
+    </div>
+  );
+}
+
+/**
+ * What the page shows while the numbers are on their way. Shapes and one plain
+ * line, never a number: a placeholder that looks like data would be read as
+ * data (components/os/PageSkeleton.tsx).
+ */
+function PerformanceLoading() {
+  return (
+    <div className="space-y-4" aria-busy="true" aria-live="polite">
+      <p className="px-1 text-sm text-fg-muted">Loading the numbers...</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-24 rounded-xl border border-bg-border bg-bg-elev/60 animate-pulse-slow" />
+        ))}
+      </div>
+      <div className="h-40 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
+    </div>
+  );
+}
+
+/**
+ * Everything that needs the read, streamed in after the frame. The read is the
+ * stored snapshot only (lib/founders/performance-queries.ts); a throw becomes
+ * the degraded state below rather than an error page over the whole tab.
+ */
+async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
+  const perf = await safe("founders.performance", getPerformance(tenantId, 30), { ...EMPTY_PERF, degraded: true });
   const { totals, byPlatform, rows } = perf;
 
   const topByViews = [...rows].sort((a, b) => (b.views || 0) - (a.views || 0)).slice(0, 5);
@@ -58,25 +120,14 @@ export default async function PerformancePage() {
     .slice(0, 3);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Performance"
-        subtitle={
-          perf.degraded
-            ? "Could not read the metrics — the numbers below are not a zero, they are unknown"
-            : totals.posts === 0
-              ? "Nothing published in the last 30 days"
-              : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel, with provenance`
-        }
-        action={
-          <Link
-            href="/founders/marketing"
-            className="text-xs font-semibold text-accent hover:underline"
-          >
-            Back to Content
-          </Link>
-        }
-      />
+    <div className="space-y-6">
+      <p className="px-1 text-sm text-fg-muted">
+        {perf.degraded
+          ? "Could not read the metrics — the numbers below are not a zero, they are unknown"
+          : totals.posts === 0
+            ? "Nothing published in the last 30 days"
+            : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel, with provenance`}
+      </p>
 
       {/* Posts that have shipped but have no numbers yet. Reported rather than
           hidden: silently omitting a post CC published an hour ago sends him
