@@ -43,7 +43,7 @@ export function renderOgCardModule(png: Buffer): string {
 }
 
 /** Render the card with next/og, outside Next. */
-export async function renderOgCardPngForModule(): Promise<Buffer> {
+async function renderOgCardPngForModule(): Promise<Buffer> {
   // tsx compiles the card's JSX to React.createElement (tsconfig jsx: preserve).
   (globalThis as unknown as { React: typeof React }).React = React;
   const { renderOgCardPng } = await import("../lib/marketing/og-card");

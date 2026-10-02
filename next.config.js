@@ -9,8 +9,9 @@ const path = require("path");
 process.env.NEXT_PUBLIC_SUPABASE_URL ||= process.env.BRAVO_SUPABASE_URL || "";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= process.env.BRAVO_SUPABASE_ANON_KEY || "";
 
-// The Cloudflare Worker build (OpenNext). Set by deploy-cloudflare.yml, ci.yml
-// and wrangler_tool.py builds; see the CF-only settings below.
+// The Cloudflare Worker build (OpenNext): CF_MIGRATION_BUILD=1, set by
+// deploy-cloudflare.yml, ci.yml and wrangler_tool.py builds. Every Worker-only
+// setting below reads this one value.
 const WORKER_BUILD = process.env.CF_MIGRATION_BUILD === "1";
 
 /** @type {import('next').NextConfig} */
@@ -188,7 +189,7 @@ const nextConfig = {
     // not at all. Gated on CF_MIGRATION_BUILD (set by wrangler_tool.py builds
     // only): a global include participates in VERCEL function packaging too
     // and would bloat every function there (codex audit 2026-08-30).
-    ...(process.env.CF_MIGRATION_BUILD === "1"
+    ...(WORKER_BUILD
       ? {
           "/**/*": [
             "./node_modules/@libsql/client/**/*",
@@ -267,7 +268,7 @@ const nextConfig = {
           // watermark/signature-crop would silently regress to ok:false.
           // Excluded from CF builds (unreachable there; @napi-rs store entries
           // also EPERM on the Windows OpenNext copy step).
-          ...(process.env.CF_MIGRATION_BUILD === "1"
+          ...(WORKER_BUILD
             ? []
             : [
                 "./node_modules/@napi-rs/**",
