@@ -430,6 +430,43 @@ async function main() {
     assert.equal(await comments(rec.ticket!.id), 0);
   });
 
+  await check("a second approval for an email whose record names another draft is refused, and the record still names the first", async () => {
+    const { rec, approvalId: first } = await fresh("second@client.test");
+    const other = await approvals.createApproval(
+      db,
+      {
+        tenantId: DESK_TENANT,
+        departmentKey: "client_success",
+        requestedBy: { type: "agent", id: "customer-support" },
+        actionKind: "reply_ticket",
+        title: `Reply to ${rec.ticket!.number}`,
+        targetRef: `ticket:${rec.ticket!.id}`,
+        payload: {
+          ticket_id: rec.ticket!.id,
+          ticket_number: rec.ticket!.number,
+          message_record_id: rec.message_record_id,
+          to: "second@client.test",
+          subject: `Re: Contact form on my site returns an error [${rec.ticket!.number}]`,
+          body: DRAFT,
+          critic: CRITIC,
+          model_ref: "claude-cli:opus",
+        },
+        idempotencyKey: `support-draft-other:${rec.message_record_id}`,
+      },
+      clock,
+    );
+    assert.ok(other.ok, JSON.stringify(other));
+    const before = sent.length;
+    const done = await approve(other.approval.id);
+    assert.equal(done.status, "failed");
+    assert.equal((done.execution_result as { reason: string }).reason, "draft_not_current");
+    assert.equal(sent.length, before);
+    assert.equal(await comments(rec.ticket!.id), 0);
+    const r = (await db.execute({ sql: "SELECT draft_status, draft_approval_id FROM support_email_messages WHERE id = ?", args: [rec.message_record_id] })).rows[0];
+    assert.equal(r.draft_status, "filed");
+    assert.equal(r.draft_approval_id, first);
+  });
+
   await check("an approval whose filing died before the record named it is still the email's draft: approved, it is sent, and the record names it", async () => {
     const { rec, approvalId: id } = await fresh("unnamed@client.test");
     // As if the filing request died between creating the approval and naming it on the record.
