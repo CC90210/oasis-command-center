@@ -10,7 +10,16 @@
  * without which no local session could hold CC's or Adon's role.
  *
  * Writes <seed.json>: the four viewers the crawl signs in as, and the ids that
- * fill each dynamic route ({ "/pipeline/[id]": [{ id }] ... }).
+ * fill each dynamic route ({ "/pipeline/[id]": [{ id }] ... }). Each row is the
+ * one its page reads (table, id shape, tenant scope), so the page renders a
+ * record rather than its not-found state:
+ *   /clients/[id] customers; /pipeline/[id] + /web-leads/[id] tenant_records
+ *   (entity lead); /interactions/[id] lead_interactions (uuid ids);
+ *   /projects/[id] delivery_projects; /tickets/[id] support_tickets;
+ *   /forms/[id]/edit forms (a valid step); /sequences/[id]/edit drip_sequences
+ *   (a valid step); /founders/marketing/asset/[id] marketing_asset;
+ *   /founders/finances/invoices/[id] fin_invoices (after the app's own
+ *   ensureFinanceSeed); /agents/[slug] a custom OASIS agent.
  *
  * The client workspace's manifest is built by the app's own provisioning
  * builder (lib/provisioning/manifest.ts), so the client sees what a workspace
@@ -32,6 +41,16 @@ if (!dbFile || !seedOut || /^(libsql|https?|wss?|file):/i.test(dbFile)) {
   console.error("usage: node --conditions=react-server --import tsx scripts/qa/seed.mjs <local.db> <seed.json>");
   process.exit(2);
 }
+for (const key of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "OASIS_TURSO_DATABASE_URL", "BREEZE_TURSO_DATABASE_URL"]) {
+  const v = process.env[key];
+  if (v && !v.startsWith("file:")) {
+    console.error(`refusing: ${key} names a remote database; the QA seed only writes a local file`);
+    process.exit(2);
+  }
+}
+// The app modules used below (ensureFinanceSeed) read the database through lib/turso.ts.
+process.env.TURSO_DB_PATH = path.resolve(dbFile);
+process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 globalThis.fetch = async (input) => {
   throw new Error(`network is off in the QA seed: ${String(input).slice(0, 80)}`);
 };
@@ -45,8 +64,12 @@ const IDS = {
   client: "0a515000-0000-4000-8000-0000000000c1",
   clientMember: "0a515000-0000-4000-8000-0000000000c2",
 };
+/** Deterministic uuid-shaped ids: some pages refuse an id that is not a uuid. */
+let nextId = 0;
+const uuid = () => `5eed0000-0000-4000-8000-${(++nextId).toString(16).padStart(12, "0")}`;
 const now = new Date().toISOString();
 const daysAgo = (n) => new Date(Date.now() - n * 864e5).toISOString();
+const day = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
 
 const db = createClient({ url: `file:${path.resolve(dbFile)}` });
 const columnsCache = new Map();
@@ -102,6 +125,11 @@ async function insert(table, row, { required = false } = {}) {
 const appModule = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
 
 async function main() {
+  const params = {};
+  const addParam = (pattern, values) => {
+    (params[pattern] ??= []).push(values);
+  };
+
   // Workspaces.
   await insert("tenants", { id: OASIS_TENANT, slug: "oasis-ai-cc", name: "OASIS AI", plan_tier: "enterprise", purchase_status: "active", custom_fields: "{}", created_at: daysAgo(400), updated_at: now }, { required: true });
   await insert("tenants", { id: CLIENT_TENANT, slug: "acme-plumbing", name: "Acme Plumbing", plan_tier: "starter", purchase_status: "active", custom_fields: "{}", created_at: daysAgo(30), updated_at: now }, { required: true });
@@ -115,7 +143,7 @@ async function main() {
     modules: [],
     now: daysAgo(29),
   });
-  await insert("tenant_manifests", { id: "qa-manifest-acme", tenant_id: CLIENT_TENANT, slug: "acme-plumbing", manifest: JSON.stringify(manifest), version: 1, schema_version: manifest.meta?.schema_version ?? 1, created_at: daysAgo(29), updated_at: daysAgo(29) }, { required: true });
+  await insert("tenant_manifests", { id: uuid(), tenant_id: CLIENT_TENANT, slug: "acme-plumbing", manifest: JSON.stringify(manifest), version: 1, schema_version: manifest.meta?.schema_version ?? 1, created_at: daysAgo(29), updated_at: daysAgo(29) }, { required: true });
   await insert("provisioning_runs", { id: "qaprovisionrun0001", tenant_id: CLIENT_TENANT, tenant_slug: "acme-plumbing", status: "complete", steps_json: JSON.stringify([{ title: "Workspace ready", time: daysAgo(29) }]), started_at: daysAgo(29), completed_at: daysAgo(29), created_at: daysAgo(29) });
   const clientAgents = manifest.agents.map((a) => a.slug);
 
@@ -159,20 +187,16 @@ async function main() {
   }
 
   // Business rows, a few per workspace, with the long names real data has.
-  const params = {};
-  const addParam = (pattern, values) => {
-    (params[pattern] ??= []).push(values);
-  };
-
   for (const [tenant, prefix, owner] of [
     [OASIS_TENANT, "oasis", IDS.cc],
     [CLIENT_TENANT, "acme", IDS.client],
   ]) {
+    const customerName = prefix === "oasis" ? "Northshore Renovations and Custom Millwork Inc." : "Dorval Family Dental Clinic";
     const customer = await insert("customers", {
-      id: `qa-customer-${prefix}-1`,
+      id: uuid(),
       tenant_id: tenant,
-      display_name: prefix === "oasis" ? "Northshore Renovations and Custom Millwork Inc." : "Dorval Family Dental Clinic",
-      company_name: prefix === "oasis" ? "Northshore Renovations and Custom Millwork Inc." : "Dorval Family Dental Clinic",
+      display_name: customerName,
+      company_name: customerName,
       primary_email: `office@${prefix}-customer.test`,
       primary_phone: "+15145550147",
       lifecycle: "active",
@@ -185,28 +209,38 @@ async function main() {
     });
     if (customer) addParam("/clients/[id]", { id: customer });
 
-    const record = await insert("tenant_records", {
-      id: `qa-record-${prefix}-1`,
-      tenant_id: tenant,
-      entity_type: "lead",
-      data: JSON.stringify({
-        name: "Pointe-Claire Heating, Ventilation and Air Conditioning Services",
-        business_name: "Pointe-Claire Heating, Ventilation and Air Conditioning Services",
-        contact_name: "Jordan Example",
-        email: `jordan@${prefix}-lead.test`,
-        phone: "+15145550199",
-        stage: "new",
-        status: "new",
-        source: "website",
-        assigned_to: owner,
-      }),
-      created_at: daysAgo(6),
-      updated_at: daysAgo(1),
-    });
-    if (record) addParam("/pipeline/[id]", { id: record });
+    // Pipeline leads (tenant_records, entity lead). On OASIS one is the rep's own,
+    // so the rep's view of a record is crawled too, and both feed /web-leads/[id].
+    const leadOwners = prefix === "oasis" ? [owner, IDS.rep] : [owner];
+    for (const [i, assignee] of leadOwners.entries()) {
+      const record = await insert("tenant_records", {
+        id: uuid(),
+        tenant_id: tenant,
+        entity_type: "lead",
+        data: JSON.stringify({
+          name: i === 0 ? "Pointe-Claire Heating, Ventilation and Air Conditioning Services" : "Lachine Waterfront Bakery and Catering Company",
+          business_name: i === 0 ? "Pointe-Claire Heating, Ventilation and Air Conditioning Services" : "Lachine Waterfront Bakery and Catering Company",
+          contact_name: i === 0 ? "Jordan Example" : "Morgan Example",
+          email: `contact${i}@${prefix}-lead.test`,
+          phone: "+15145550199",
+          website: `https://www.${prefix}-lead-${i}.test`,
+          city: "Montreal",
+          stage: "new",
+          status: "new",
+          source: "website",
+          assigned_to: assignee,
+        }),
+        created_at: daysAgo(6 + i),
+        updated_at: daysAgo(1),
+      });
+      if (record) {
+        addParam("/pipeline/[id]", { id: record });
+        if (prefix === "oasis") addParam("/web-leads/[id]", { id: record });
+      }
+    }
 
     const lead = await insert("leads", {
-      id: `qa-lead-${prefix}-1`,
+      id: uuid(),
       tenant_id: tenant,
       name: "Jordan Example",
       email: `jordan@${prefix}-lead.test`,
@@ -218,31 +252,30 @@ async function main() {
       created_at: daysAgo(6),
       updated_at: daysAgo(1),
     });
-    const interaction = lead
-      ? await insert("lead_interactions", {
-          id: `qa-interaction-${prefix}-1`,
-          tenant_id: tenant,
-          lead_id: lead,
-          type: "email",
-          channel: "email",
-          direction: "outbound",
-          subject: "Following up on your quote request for the furnace replacement",
-          content: "Hi Jordan, following up on the quote you asked for last week.",
-          content_preview: "Hi Jordan, following up on the quote you asked for last week.",
-          created_at: daysAgo(3),
-          sent_at: daysAgo(3),
-          actor_user_id: owner,
-        })
-      : null;
+    const interaction = await insert("lead_interactions", {
+      id: uuid(),
+      tenant_id: tenant,
+      lead_id: lead,
+      type: "email",
+      channel: "email",
+      direction: "outbound",
+      subject: "Following up on your quote request for the furnace replacement",
+      content: "Hi Jordan, following up on the quote you asked for last week.",
+      content_preview: "Hi Jordan, following up on the quote you asked for last week.",
+      created_at: daysAgo(3),
+      sent_at: daysAgo(3),
+      actor_user_id: owner,
+    });
     if (interaction) addParam("/interactions/[id]", { id: interaction });
 
+    // A form and a sequence with one valid step each: an empty definition renders "corrupt".
     const form = await insert("forms", {
-      id: `qa-form-${prefix}-1`,
+      id: uuid(),
       tenant_id: tenant,
       slug: "quote-request",
       name: "Quote request",
       description: "Synthetic form for the QA crawl",
-      steps: JSON.stringify([]),
+      steps: JSON.stringify([{ key: "contact", title: "Contact", fields: [{ name: "email", label: "Email", type: "email" }] }]),
       enabled: 1,
       created_by: owner,
       created_at: daysAgo(15),
@@ -251,22 +284,105 @@ async function main() {
     if (form) addParam("/forms/[id]/edit", { id: form });
 
     const sequence = await insert("drip_sequences", {
-      id: `qa-sequence-${prefix}-1`,
+      id: uuid(),
       tenant_id: tenant,
       name: "New quote follow-up",
       description: "Synthetic sequence for the QA crawl",
       trigger_event: "manual",
-      steps: JSON.stringify([]),
+      steps: JSON.stringify([{ channel: "email", delay_minutes: 0, subject: "Thanks for asking about a quote", body: "We will call you within one business day." }]),
       enabled: 0,
       created_by: owner,
       created_at: daysAgo(15),
       updated_at: daysAgo(15),
     });
     if (sequence) addParam("/sequences/[id]/edit", { id: sequence });
+
+    // Delivery: a project and a ticket on the workspace's own desk.
+    const project = await insert("delivery_projects", {
+      id: uuid(),
+      tenant_id: tenant,
+      title: prefix === "oasis" ? "Website rebuild and booking flow for Northshore Renovations" : "Patient reminder texts for the Dorval clinic",
+      description: "Synthetic project for the QA crawl",
+      client_name: customerName,
+      client_email: `office@${prefix}-customer.test`,
+      stage: "building",
+      priority: "high",
+      assigned_to: owner,
+      due_date: day(14),
+      started_at: daysAgo(10),
+      created_by: owner,
+      created_at: daysAgo(12),
+      updated_at: daysAgo(1),
+      customer_id: customer,
+    });
+    if (project) addParam("/projects/[id]", { id: project });
+    const ticket = await insert("support_tickets", {
+      id: uuid(),
+      tenant_id: tenant,
+      ticket_seq: 1,
+      ticket_number: prefix === "oasis" ? "OAS-0001" : "ACM-0001",
+      title: "The booking form does not send a confirmation email to the customer after they pick a time",
+      description: "Synthetic ticket for the QA crawl",
+      category: "bug",
+      severity: "high",
+      status: "open",
+      source: "internal",
+      project_id: project,
+      client_name: customerName,
+      client_email: `office@${prefix}-customer.test`,
+      sla_target: new Date(Date.now() + 864e5).toISOString(),
+      created_at: daysAgo(2),
+      updated_at: daysAgo(1),
+      customer_id: customer,
+    });
+    if (ticket) addParam("/tickets/[id]", { id: ticket });
   }
 
+  // OASIS's delivery FOR the client: what the client owner sees as OASIS's work for them.
+  const forClientProject = await insert("delivery_projects", {
+    id: uuid(),
+    tenant_id: OASIS_TENANT,
+    title: "Acme Plumbing: dispatch board and quote follow-up automation",
+    description: "Synthetic project OASIS runs for the client",
+    client_tenant_id: CLIENT_TENANT,
+    client_name: "Acme Plumbing",
+    client_email: "alex@acme-plumbing.test",
+    stage: "review",
+    priority: "medium",
+    assigned_to: IDS.cc,
+    due_date: day(7),
+    started_at: daysAgo(20),
+    created_by: IDS.cc,
+    created_at: daysAgo(21),
+    updated_at: daysAgo(1),
+  });
+  if (forClientProject) addParam("/projects/[id]", { id: forClientProject });
+  const forClientTicket = await insert("support_tickets", {
+    id: uuid(),
+    tenant_id: OASIS_TENANT,
+    ticket_seq: 2,
+    ticket_number: "OAS-0002",
+    title: "Change the quote follow-up wording on the dispatch board",
+    description: "Synthetic ticket the client opened with OASIS",
+    category: "change_request",
+    severity: "medium",
+    status: "in_progress",
+    source: "portal",
+    project_id: forClientProject,
+    client_tenant_id: CLIENT_TENANT,
+    client_name: "Alex Acme",
+    client_email: "alex@acme-plumbing.test",
+    client_company: "Acme Plumbing",
+    client_match: "session",
+    reporter_user_id: IDS.client,
+    sla_target: new Date(Date.now() + 2 * 864e5).toISOString(),
+    created_at: daysAgo(1),
+    updated_at: now,
+  });
+  if (forClientTicket) addParam("/tickets/[id]", { id: forClientTicket });
+
   const asset = await insert("marketing_asset", {
-    id: "qa-asset-oasis-1",
+    id: uuid(),
     tenant_id: OASIS_TENANT,
     title: "Spring furnace tune-up reminder for homeowners across the West Island",
     channel: "organic-instagram",
@@ -281,16 +397,64 @@ async function main() {
   });
   if (asset) addParam("/founders/marketing/asset/[id]", { id: asset });
 
-  // Workspace-addressed pages: each workspace's own /t/<slug>, and an agent from its setup.
+  // A custom AI teammate in OASIS's workspace (seed agents 404 on /agents/[slug]).
+  const agentSlug = "qa-dispatch-desk";
+  const agent = await insert("agents", {
+    id: uuid(),
+    slug: agentSlug,
+    name: "Dispatch Desk",
+    category: "operations",
+    short_description: "Answers where a crew is and when it will arrive",
+    description: "Synthetic teammate for the QA crawl.",
+    base_prompt: "You help the dispatch team answer customer questions about arrival times.",
+    is_public: 0,
+    is_oasis_managed: 0,
+    created_by: IDS.cc,
+    tenant_id: OASIS_TENANT,
+    created_at: daysAgo(9),
+    updated_at: daysAgo(9),
+  });
+  if (agent) addParam("/agents/[slug]", { slug: agentSlug });
+
+  // Finances: the app's own book setup, then one invoice to a customer.
+  try {
+    const { ensureFinanceSeed } = await appModule("lib/founders-finances/seed-io.ts");
+    await ensureFinanceSeed();
+    const contact = await insert("fin_contacts", { id: uuid(), entity_id: "fin_ent_oasis", kind: "customer", name: "Northshore Renovations and Custom Millwork Inc.", email: "billing@oasis-customer.test", company: "Northshore Renovations and Custom Millwork Inc.", archived: 0, created_at: daysAgo(30) });
+    const invoice = contact
+      ? await insert("fin_invoices", {
+          id: uuid(),
+          entity_id: "fin_ent_oasis",
+          contact_id: contact,
+          number: "INV-QA-0001",
+          status: "sent",
+          issue_date: day(-10),
+          due_date: day(20),
+          currency: "CAD",
+          subtotal_cents: 250000,
+          gst_cents: 12500,
+          qst_cents: 24938,
+          total_cents: 287438,
+          amount_paid_cents: 0,
+          sent_at: daysAgo(10),
+          sent_to: "billing@oasis-customer.test",
+          created_by: "qa-seed",
+          created_at: daysAgo(10),
+          updated_at: daysAgo(10),
+        })
+      : null;
+    if (invoice) addParam("/founders/finances/invoices/[id]", { id: invoice });
+  } catch (err) {
+    failures.push(`finance seed: ${String(err && err.message ? err.message : err).slice(0, 200)}`);
+  }
+
+  // Workspace-addressed pages: each workspace's own /t/<slug>, and a teammate.
   for (const slug of ["oasis-ai-cc", "acme-plumbing"]) {
     for (const pattern of ["/t/[slug]", "/t/[slug]/editor", "/t/[slug]/marketplace", "/t/[slug]/marketplace/new"]) addParam(pattern, { slug });
+    // "sdr" is one of the app's built-in teammates (lib/agents/library.ts), neutral in name.
+    addParam("/t/[slug]/marketplace/[agent]", { slug, agent: "sdr" });
+    addParam("/t/[slug]/agent/[agent]", { slug, agent: "sdr" });
   }
-  if (clientAgents[0]) {
-    addParam("/t/[slug]/agent/[agent]", { slug: "acme-plumbing", agent: clientAgents[0] });
-    addParam("/t/[slug]/marketplace/[agent]", { slug: "acme-plumbing", agent: clientAgents[0] });
-    addParam("/agents/[slug]", { slug: clientAgents[0] });
-  }
-  addParam("/agents/[slug]", { slug: "bravo" });
 
   const seed = {
     note: "Synthetic data for the QA crawl (scripts/qa/seed.mjs). Not production.",

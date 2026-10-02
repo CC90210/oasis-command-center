@@ -90,10 +90,36 @@ const appModule = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
 // Inputs: seed, routes, sessions
 // ---------------------------------------------------------------------------
 
+/** Every `step`-th item, so a long catalog is sampled across its whole length, not just its head. */
+function spread(list, max) {
+  if (list.length <= max) return list;
+  const step = list.length / max;
+  return Array.from({ length: max }, (_, i) => list[Math.floor(i * step)]);
+}
+
 async function catalogParams() {
   // Values that come from the app's own catalogs rather than database rows.
+  // Each module is pure (no server-only, no filesystem at import).
   const { OS_DEPARTMENTS } = await appModule("lib/os/departments.ts");
-  return { "/team/[dept]": OS_DEPARTMENTS.map((d) => ({ dept: d.slug })) };
+  const { listPlaybooks } = await appModule("lib/playbooks.ts");
+  const { CATALOG } = await appModule("lib/playbook/catalog.ts");
+  const { SECTIONS } = await appModule("lib/training/curriculum.ts");
+  const { SCENARIOS } = await appModule("lib/training/roleplay/scenarios.ts");
+  const { getSeedManifest } = await appModule("lib/manifest/seeds.ts");
+  const oasisPages = (getSeedManifest("oasis-ai-cc", "ef8d389e-3f15-43f2-ae00-3660f69a1452").pages || [])
+    .map((p) => String(p.path || "").replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean);
+  const playbooks = await listPlaybooks();
+  return {
+    "/team/[dept]": OS_DEPARTMENTS.map((d) => ({ dept: d.slug })),
+    "/playbook/[slug]": playbooks.map((p) => ({ slug: p.slug })),
+    // 41 documents share one template; a spread of 6 covers the template and both visibilities.
+    "/playbook/business/[slug]": spread(CATALOG, 6).map((d) => ({ slug: d.slug })),
+    "/training/[section]": SECTIONS.map((s) => ({ section: s.slug })),
+    "/training/[section]/drill": SECTIONS.map((s) => ({ section: s.slug })),
+    "/training/roleplay/[scenario]": SCENARIOS.map((s) => ({ scenario: s.id })),
+    "/t/[slug]/[...path]": oasisPages.map((p) => ({ slug: "oasis-ai-cc", path: p.split("/") })),
+  };
 }
 
 async function mintSessions(viewers) {
