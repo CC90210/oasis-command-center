@@ -99,9 +99,14 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   // so only they are offered (the channels API refuses the rest). Who leads a
   // department is the workspace manifest's answer, read the way the Slack job
   // and the chat route read it (the slug this workspace owns).
+  // resolveOwnedSlug answers a read that FAILED with null (it swallows both of
+  // its reads: lib/manifest/tenant-scope.ts), so a null slug is "could not
+  // check", never "no department can answer here" (W4a D1, as lib/slack/jobs.ts
+  // and the channels API treat it).
   const manifestSlug = await resolveOwnedSlug(viewer.tenantId);
+  const rosterUnread = manifestSlug === null;
   const manifest = manifestSlug ? await getManifest(manifestSlug, viewer.tenantId) : null;
-  const answering = answeringDepartments({ oasis: viewer.access.oasisWorkspace, manifest });
+  const answering = rosterUnread ? [] : answeringDepartments({ oasis: viewer.access.oasisWorkspace, manifest });
   const mappableDepartments = OS_DEPARTMENTS.filter((d) => answering.includes(d.key)).map((d) => ({ key: d.key, label: d.label }));
 
   return (
@@ -182,6 +187,12 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   <p className="text-[13px] leading-5 text-status-warm">
                     The channel map is not available on this deployment yet (its database tables are not installed), so
                     nothing is mirrored or answered.
+                  </p>
+                ) : viewer.access.canManage && rosterUnread ? (
+                  // The roster could not be read: say so and retry, never offer a
+                  // map in which no department can answer.
+                  <p role="status" className="text-[13px] leading-5 text-status-warm">
+                    OASIS couldn&apos;t check which departments can answer in Slack just now. Reload in a minute.
                   </p>
                 ) : viewer.access.canManage ? (
                   <SlackChannelMap

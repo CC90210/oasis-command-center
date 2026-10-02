@@ -62,6 +62,17 @@ stub("next/image", {
   const exports = { SafeBoundary: ({ children }: { children?: unknown }) => children };
   require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
 }
+// resolveOwnedSlug swallows both of its reads and answers a failed one with
+// null (lib/manifest/tenant-scope.ts). One check sets this to make it answer
+// that null; every other caller gets the real function (as in
+// tests/one-agent-roster.test.ts).
+let ownedSlugReadFails = false;
+{
+  const p = require.resolve("../lib/manifest/tenant-scope");
+  const real = require(p) as typeof import("../lib/manifest/tenant-scope");
+  const exports = { __esModule: true, ...real, resolveOwnedSlug: async (tenantId: string | null) => (ownedSlugReadFails ? null : real.resolveOwnedSlug(tenantId)) };
+  require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
+}
 process.env.BRAVO_FIELD_ENCRYPTION_KEY = "connections-everywhere-field-encryption-passphrase";
 process.env.PUBLIC_APP_URL = "https://oasisai.work";
 // OASIS's Slack app and Twilio account are off unless a check turns them on.
@@ -112,6 +123,15 @@ function renderClient(input: unknown): { markup: Record<string, string>; clicks:
 }
 const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 
+/** Every string a server page's tree renders as text. */
+function textOf(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join(" ");
+  if (!node || typeof node !== "object") return "";
+  const props = (node as { props?: Json }).props ?? {};
+  return Object.values(props).map(textOf).join(" ");
+}
+
 /** Every element of a server page's tree whose type is `type`, with its props. */
 function elementsOf(node: unknown, type: unknown, out: Json[] = []): Json[] {
   if (Array.isArray(node)) {
@@ -154,6 +174,8 @@ async function main() {
       PRIMARY KEY ("id"));
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  // Slack's channel map (Settings > Chat apps reads it once Slack is connected).
+  await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
 
   const { NextRequest } = await import("next/server");
   const connectors = await import("../lib/os/connectors");
@@ -292,6 +314,36 @@ async function main() {
     await login(USERS.cc);
     const oasisPage = await ChatAppsPage({ searchParams: Promise.resolve({}) });
     assert.deepEqual(elementsOf(oasisPage, RequestConnector).map((p) => p.name), ["AI teammates in Telegram"]);
+  });
+
+  // W4a D1, on this page: a workspace slug that could not be read is "could
+  // not check", never a channel map in which no department can answer.
+  await check("Settings > Chat apps: a roster that could not be read says so and asks for a reload, never offers a map no department can answer", async () => {
+    const at = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO tenant_connections (id, tenant_id, provider, auth_kind, external_account_id, external_account_label, status, connected_at, created_at, updated_at)
+            VALUES ('conn-slack-client-a', ?, 'slack', 'app_install', 'T0CLIENTA', 'Client A Slack', 'connected', ?, ?, ?)`,
+      args: [CLIENT_A, at, at, at],
+    });
+    const { default: ChatAppsPage } = await import("../app/settings/chat-apps/page");
+    const { SlackChannelMap } = await import("../components/settings/SlackChannelMap");
+    const unread = "OASIS couldn't check which departments can answer in Slack just now. Reload in a minute.";
+    try {
+      await login(USERS.clientA);
+      // A connected Slack on a deployment where installs work: the page reaches the channel map.
+      const page = () => withSlackApp(() => ChatAppsPage({ searchParams: Promise.resolve({}) }));
+      ownedSlugReadFails = true;
+      const failed = await page();
+      assert.equal(elementsOf(failed, SlackChannelMap).length, 0, "no channel map on a roster nobody could read");
+      assert.ok(textOf(failed).includes(unread), "it says so");
+      ownedSlugReadFails = false;
+      const readable = await page();
+      assert.equal(elementsOf(readable, SlackChannelMap).length, 1, "with the roster readable, the map is offered");
+      assert.ok(!textOf(readable).includes(unread));
+    } finally {
+      ownedSlugReadFails = false;
+      await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = 'conn-slack-client-a'", args: [] });
+    }
   });
 
   // -- 2. One drawer, three entry points, one loader --------------------------------
