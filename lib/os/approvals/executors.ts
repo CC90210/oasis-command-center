@@ -70,6 +70,7 @@ import { supportInboxForDesk, type OasisMailPurpose } from "@/lib/email/support-
 import { addTicketComment, deskReader, getTicket, profileContact, type Ticket } from "@/lib/delivery/store";
 import { deskUsesOasisLanes, sendTicketReplyEmail, type NotifyDeps } from "@/lib/delivery/notify";
 import { isVerifiedRecipient } from "@/lib/delivery/email-thread";
+import { SUPPORT_DRAFT_AGENT, supportDraftKey } from "@/lib/delivery/support-drafts";
 import { clientEmailMirrorStatements } from "@/lib/os/customers/message-mirror";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { isCustomerEmail, isMissingCustomersSchema } from "@/lib/os/customers/store";
@@ -502,9 +503,11 @@ function replyReadiness(tenant: ExecutorTenant): string | null {
  * An approved reply to a ticket that came in by email (support-drafts.ts
  * files it). In this order, and nothing leaves before the last check:
  *   1. the ticket is re-read on its desk; a closed ticket is refused;
- *   2. the email's record must name THIS approval as its draft, or name
- *      nothing yet (then it is named now); a record settled another way (a
- *      failure report won the race) is refused: draft_not_current;
+ *   2. the approval must be the support drafter's own for this email (its
+ *      key, requester and ticket), and the email's record must name it as its
+ *      draft, or name nothing yet (then it is named now); any other approval,
+ *      or a record settled another way (a failure report won the race), is
+ *      refused: draft_not_current;
  *   3. STALE: the client wrote again after the message the draft answers, so
  *      the draft answers a question that is no longer the last one: refused
  *      (the newer message gets its own draft);
@@ -536,9 +539,11 @@ const replyTicket: Executor = {
     }
     const answered = await readAnsweredMessage(ctx.db, tenantId, p.message_record_id, ticket.id);
     if (!answered) return failed("message_not_found", "The email this reply answers is no longer on the ticket, so nothing was sent.", EMAIL_PROVIDER);
-    // The email's record names the draft it stands behind. Anything else (a
-    // failure report settled it while this was being filed) is never sent.
-    if (!(await claimDraftRecord(ctx.db, tenantId, answered.id, ctx.approval.id))) {
+    // The email's record names the draft it stands behind, and only the
+    // drafter's own approval for this email can be it. Anything else (another
+    // reply approval with a valid payload, or a draft a failure report beat
+    // while it was being filed) is never sent.
+    if (!isOwnSupportDraft(ctx.approval, answered.id, ticket.id) || !(await claimDraftRecord(ctx.db, tenantId, answered.id, ctx.approval.id))) {
       return failed(
         "draft_not_current",
         `This reply is not the draft on record for the client's email on ${ticket.ticket_number} (the drafter reported it could not write one, or the email was settled another way), so nothing was sent.`,
@@ -650,6 +655,20 @@ async function readAnsweredMessage(db: Client, tenantId: string, recordId: strin
     })
   ).rows[0];
   return r ? { id: String(r.id), comment_id: r.comment_id == null ? null : String(r.comment_id), received_at: String(r.received_at) } : null;
+}
+
+/**
+ * Was this approval filed by the support drafter for this email on this
+ * ticket (support-drafts.ts: its key, its requester, its target)? Only such an
+ * approval may claim the email's record below.
+ */
+function isOwnSupportDraft(approval: Pick<ApprovalRow, "idempotency_key" | "requested_by_type" | "requested_by_id" | "target_ref">, recordId: string, ticketId: string): boolean {
+  return (
+    approval.idempotency_key === supportDraftKey(recordId) &&
+    approval.requested_by_type === "agent" &&
+    approval.requested_by_id === SUPPORT_DRAFT_AGENT &&
+    approval.target_ref === `ticket:${ticketId}`
+  );
 }
 
 /**

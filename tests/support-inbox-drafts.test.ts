@@ -467,6 +467,54 @@ async function main() {
     assert.equal(r.draft_approval_id, first);
   });
 
+  await check("an approval that is not the drafter's own for the email never claims a record that names nothing, and never sends: another key, requester or ticket", async () => {
+    const variants: Array<{ what: string; key: string; requestedBy: { type: "agent" | "human"; id: string }; otherTicket: boolean }> = [
+      { what: "another key", key: "imported", requestedBy: { type: "agent", id: "customer-support" }, otherTicket: false },
+      { what: "a person, not the drafter", key: "support-draft", requestedBy: { type: "human", id: "customer-support" }, otherTicket: false },
+      { what: "another agent", key: "support-draft", requestedBy: { type: "agent", id: "sdr" }, otherTicket: false },
+      { what: "another ticket", key: "support-draft", requestedBy: { type: "agent", id: "customer-support" }, otherTicket: true },
+    ];
+    for (const [i, v] of variants.entries()) {
+      // An email that wants a draft, with none filed yet: its record names nothing.
+      const address = `foreign${i}@client.test`;
+      const rec = await ingest(ingestBody({ message: { from: { address, name: "Client" } } }, clock));
+      assert.equal(rec.draft_wanted, true, v.what);
+      const made = await approvals.createApproval(
+        db,
+        {
+          tenantId: DESK_TENANT,
+          departmentKey: "client_success",
+          requestedBy: v.requestedBy,
+          actionKind: "reply_ticket",
+          title: `Reply to ${rec.ticket!.number}`,
+          targetRef: `ticket:${v.otherTicket ? main1.ticket!.id : rec.ticket!.id}`,
+          payload: {
+            ticket_id: rec.ticket!.id,
+            ticket_number: rec.ticket!.number,
+            message_record_id: rec.message_record_id,
+            to: address,
+            subject: `Re: Contact form on my site returns an error [${rec.ticket!.number}]`,
+            body: DRAFT,
+            critic: CRITIC,
+            model_ref: "claude-cli:opus",
+          },
+          idempotencyKey: `${v.key}:${rec.message_record_id}`,
+        },
+        clock,
+      );
+      assert.ok(made.ok, `${v.what}: ${JSON.stringify(made)}`);
+      const before = sent.length;
+      const done = await approve(made.approval.id);
+      assert.equal(done.status, "failed", v.what);
+      assert.equal((done.execution_result as { reason: string }).reason, "draft_not_current", v.what);
+      assert.equal(sent.length, before, `${v.what}: nothing sent`);
+      assert.equal(await comments(rec.ticket!.id), 0, `${v.what}: nothing posted`);
+      const r = (await db.execute({ sql: "SELECT draft_status, draft_approval_id FROM support_email_messages WHERE id = ?", args: [rec.message_record_id] })).rows[0];
+      assert.equal(r.draft_status, null, `${v.what}: the record still names nothing`);
+      assert.equal(r.draft_approval_id, null, v.what);
+    }
+  });
+
   await check("an approval whose filing died before the record named it is still the email's draft: approved, it is sent, and the record names it", async () => {
     const { rec, approvalId: id } = await fresh("unnamed@client.test");
     // As if the filing request died between creating the approval and naming it on the record.
