@@ -19,8 +19,11 @@
  *      whole plan in it: the disposition, the ids it will create, the notes,
  *      and the acknowledgement decision. A second post of the same message
  *      finds the claim: complete = the same answer again (same ticket number);
- *      incomplete = the same plan finished, never a second ticket. The same key
- *      with other content (sender, subject or text) is refused, 409.
+ *      incomplete = the same plan finished, never a second ticket. Replacing
+ *      the plan and completing the claim are compare-and-swaps on the stored
+ *      plan, so two attempts at once agree on one plan, one ticket and one
+ *      answer (carryOut). The same key with other content (sender, subject or
+ *      text) is refused, 409.
  *   2. THREAD (planIngest). In order: the In-Reply-To / References ids match a
  *      message on this desk (our acknowledgement or reply, or an earlier email
  *      from the client); the subject names a ticket ([T-0042], (T-0042),
@@ -135,6 +138,8 @@ export const SAME_SUBJECT_WINDOW_DAYS = 7;
 export const MAX_BACKDATE_DAYS = 14;
 /** Non-ticket mail is forgotten after this. */
 export const NON_TICKET_RETENTION_DAYS = 30;
+/** How many times one request re-reads a claim another attempt moved on under it before it gives up loudly. */
+const CLAIM_LAPS = 4;
 
 /** The facets a reply draft is written for (BEA drafter.DRAFTABLE_FACETS). */
 export const DRAFTABLE_FACETS: readonly SupportFacet[] = ["bug", "how_to", "billing", "access", "feature_request"];
@@ -867,6 +872,8 @@ export type Claim = {
   id: string;
   content_hash: string | null;
   plan: IngestPlan | null;
+  /** The plan exactly as stored: what a compare-and-swap on the claim compares. */
+  plan_json: string | null;
   ticket_id: string | null;
   disposition: string | null;
   ack_status: string | null;
@@ -893,6 +900,7 @@ async function loadClaim(db: Client, tenantId: string, hash: string): Promise<Cl
     id: String(r.id),
     content_hash: s(r.content_hash),
     plan,
+    plan_json: s(r.plan_json),
     ticket_id: s(r.ticket_id),
     disposition: s(r.disposition),
     ack_status: s(r.ack_status),
@@ -1024,16 +1032,38 @@ export type IngestResult = {
   reason: string | null;
 };
 
+type CarriedOut = { completed: true; plan: IngestPlan; ticket: Ticket | null; reopened: boolean } | { completed: false };
+
 /**
  * Write what the plan says. Every write is idempotent on an id the plan
  * holds, so running a plan twice (a retry, a concurrent duplicate) writes it
  * once. A ticket that changed since the plan (closed, or gone) is re-planned
  * on the spot and the new plan stored, so the claim cannot get stuck.
+ *
+ * COMPARE-AND-SWAP ON THE STORED PLAN. Two attempts can hold one claim (a
+ * retry while the first is still running). Replacing the plan and completing
+ * the claim each happen only while the claim is incomplete AND still holds
+ * the exact plan this attempt read (plan_json). An attempt that loses either
+ * answers `completed: false` and writes no plan of its own: the caller reads
+ * the claim again and follows the winner's plan, or its answer. So two
+ * retries whose ticket closed in between make ONE replacement ticket, and only
+ * the attempt that completed the claim tells anyone (the ledger row rides on
+ * that completion; the alerts and the acknowledgement follow its answer).
  */
-async function carryOut(db: Client, desk: SupportDesk, claimId: string, body: IngestBody, hash: string, planIn: IngestPlan, now: Date) {
+async function carryOut(
+  db: Client,
+  desk: SupportDesk,
+  claimId: string,
+  body: IngestBody,
+  hash: string,
+  planIn: IngestPlan,
+  planJsonIn: string,
+  now: Date,
+): Promise<CarriedOut> {
   const tenantId = desk.tenantId;
   const m = body.message;
   let plan = planIn;
+  let planJson = planJsonIn;
   let reopened = false;
   const clock = ticketClock(m.receivedAt, now);
 
@@ -1056,12 +1086,29 @@ async function carryOut(db: Client, desk: SupportDesk, claimId: string, body: In
       reopened = r.reopened;
     } else {
       // The ticket closed (or vanished) between the plan and now: the email
-      // opens a ticket of its own instead. Stored, so a retry does the same.
-      plan = await replanAsNewTicket(db, desk, body, plan, now);
-      await db.execute({
-        sql: "UPDATE support_email_messages SET plan_json = ?, ticket_id = ?, comment_id = ?, disposition = ?, ack_status = ?, draft_wanted = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND completed_at IS NULL",
-        args: [JSON.stringify(plan), plan.ticketId, plan.commentId, plan.disposition, plan.ack, plan.draftWanted ? 1 : 0, now.toISOString(), tenantId, claimId],
+      // opens a ticket of its own instead. Stored, so a retry does the same,
+      // and stored only over the plan this attempt read.
+      const replacement = await replanAsNewTicket(db, desk, body, plan, now);
+      const replacementJson = JSON.stringify(replacement);
+      const swapped = await db.execute({
+        sql: "UPDATE support_email_messages SET plan_json = ?, ticket_id = ?, comment_id = ?, disposition = ?, ack_status = ?, draft_wanted = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND completed_at IS NULL AND plan_json = ?",
+        args: [
+          replacementJson,
+          replacement.ticketId,
+          replacement.commentId,
+          replacement.disposition,
+          replacement.ack,
+          replacement.draftWanted ? 1 : 0,
+          now.toISOString(),
+          tenantId,
+          claimId,
+          planJson,
+        ],
       });
+      // Another attempt replaced (or finished) this plan first: follow its plan.
+      if (swapped.rowsAffected !== 1) return { completed: false };
+      plan = replacement;
+      planJson = replacementJson;
     }
   }
 
@@ -1095,11 +1142,14 @@ async function carryOut(db: Client, desk: SupportDesk, claimId: string, body: In
   const ticket = await ticketById(db, tenantId, plan.ticketId);
   const at = now.toISOString();
   const stmts: InStatement[] = plan.notes.map((n) => systemNoteStatement(tenantId, n.ticketId, { id: n.id, body: n.body, at: clock.toISOString() }));
-  stmts.push({
-    sql: `UPDATE support_email_messages SET ticket_id = ?, comment_id = ?, disposition = ?, completed_at = ?, updated_at = ?
-          WHERE tenant_id = ? AND id = ? AND completed_at IS NULL`,
-    args: [plan.ticketId, plan.commentId, plan.disposition, at, at, tenantId, claimId],
-  });
+  // The completion, over the plan carried out. The ledger row right after it
+  // is written only when it changed the claim (emitIfChanged: changes() = 1).
+  const completion =
+    stmts.push({
+      sql: `UPDATE support_email_messages SET ticket_id = ?, comment_id = ?, disposition = ?, completed_at = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND completed_at IS NULL AND plan_json = ?`,
+      args: [plan.ticketId, plan.commentId, plan.disposition, at, at, tenantId, claimId, planJson],
+    }) - 1;
   const onTicket = plan.disposition === "new_ticket" || plan.disposition === "appended" || plan.disposition === "follow_up";
   if (onTicket && ticket) stmts.push(ledgerStatement(desk, body, plan, hash, ticket.customer_id, now));
   if (plan.suppress) stmts.push(suppressionStatement(m.from.address));
@@ -1134,8 +1184,11 @@ async function carryOut(db: Client, desk: SupportDesk, claimId: string, body: In
       }),
     );
   }
-  await db.batch(stmts, "write");
-  return { plan, ticket: await ticketById(db, tenantId, plan.ticketId), reopened };
+  const results = await db.batch(stmts, "write");
+  // Another attempt completed the claim (or replaced its plan) first: its
+  // answer is the answer, and its after-response work the only one.
+  if (results[completion].rowsAffected !== 1) return { completed: false };
+  return { completed: true, plan, ticket: await ticketById(db, tenantId, plan.ticketId), reopened };
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,41 +1245,52 @@ export async function ingestSupportMessage(deps: IngestDeps, desk: SupportDesk, 
     return { status: 409, error: "message_id_conflict" };
   }
 
-  if (claim.completed_at) {
-    // The same answer again: a lost response, a retry, a concurrent duplicate.
-    const ticket = await ticketById(db, desk.tenantId, claim.ticket_id);
-    return {
-      status: 200,
-      result: {
-        claimId: claim.id,
-        disposition: (claim.disposition ?? "not_a_ticket") as Disposition,
-        ticket,
-        ack: claim.ack_status ?? "skipped:not_a_new_ticket",
-        draftWanted: claim.draft_wanted,
-        duplicate: true,
-        optOutRecorded: !!claim.plan?.suppress,
-        reopened: false,
-        reason: claim.plan?.reason ?? null,
-      },
-    };
+  // Each lap either finishes this claim or finds that another attempt moved it
+  // on (replaced its plan, or completed it) and follows that. A lap is lost
+  // only to an attempt that made progress, so a few are plenty.
+  for (let lap = 0; lap < CLAIM_LAPS; lap += 1) {
+    if (claim.completed_at) {
+      // The same answer again: a lost response, a retry, a concurrent duplicate.
+      const ticket = await ticketById(db, desk.tenantId, claim.ticket_id);
+      return {
+        status: 200,
+        result: {
+          claimId: claim.id,
+          disposition: (claim.disposition ?? "not_a_ticket") as Disposition,
+          ticket,
+          ack: claim.ack_status ?? "skipped:not_a_new_ticket",
+          draftWanted: claim.draft_wanted,
+          duplicate: true,
+          optOutRecorded: !!claim.plan?.suppress,
+          reopened: false,
+          reason: claim.plan?.reason ?? null,
+        },
+      };
+    }
+    if (!claim.plan || !claim.plan_json) throw new Error(`email-intake: claim ${claim.id} has no readable plan`);
+    // A claim another attempt planned is carried out with ITS plan.
+    const done = await carryOut(db, desk, claim.id, body, hash, claim.plan, claim.plan_json, now);
+    if (done.completed) {
+      return {
+        status: 200,
+        result: {
+          claimId: claim.id,
+          disposition: done.plan.disposition,
+          ticket: done.ticket,
+          ack: done.plan.ack,
+          draftWanted: done.plan.draftWanted,
+          duplicate: false,
+          optOutRecorded: done.plan.suppress,
+          reopened: done.reopened,
+          reason: done.plan.reason,
+        },
+      };
+    }
+    const moved = await loadClaim(db, desk.tenantId, hash);
+    if (!moved) throw new Error(`email-intake: claim ${claim.id} vanished while it was being carried out`);
+    claim = moved;
   }
-  if (!claim.plan) throw new Error(`email-intake: claim ${claim.id} has no readable plan`);
-  // A claim another attempt planned is carried out with ITS plan.
-  const done = await carryOut(db, desk, claim.id, body, hash, claim.plan, now);
-  return {
-    status: 200,
-    result: {
-      claimId: claim.id,
-      disposition: done.plan.disposition,
-      ticket: done.ticket,
-      ack: done.plan.ack,
-      draftWanted: done.plan.draftWanted,
-      duplicate: false,
-      optOutRecorded: done.plan.suppress,
-      reopened: done.reopened,
-      reason: done.plan.reason,
-    },
-  };
+  throw new Error(`email-intake: claim ${claim.id} kept changing under this attempt`);
 }
 
 /** The work after the response: who is told, and the acknowledgement. Never throws into the request. */
