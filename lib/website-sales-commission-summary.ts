@@ -42,7 +42,8 @@ export type WebsiteSalesCommissionListing<T extends { id: string }> = {
   outstandingCount: number;
 };
 
-type CommissionRow = {
+/** One complete-ledger row, as the summary reads it. */
+export type WebsiteSalesCommissionSummaryRow = {
   id: string;
   deal_id: string;
   rep_user_id: string;
@@ -50,6 +51,7 @@ type CommissionRow = {
   amount_cents: number | null;
   amount: number | null;
 };
+type CommissionRow = WebsiteSalesCommissionSummaryRow;
 
 type DealCurrencyRow = {
   id: string;
@@ -97,15 +99,7 @@ export async function loadWebsiteSalesCommissionListing<T extends { id: string }
     .eq("tenant_id", tenantId);
   if (repUserId) recentQuery = recentQuery.eq("rep_user_id", repUserId);
   if (repUserIds) recentQuery = recentQuery.in("rep_user_id", repUserIds);
-  const recentResult = await recentQuery
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(recentLimit);
-  if (recentResult.error) throw new Error(`commission_listing_recent_failed:${recentResult.error.message}`);
-  const recentRows = (recentResult.data ?? []) as unknown as T[];
-
-  const outstandingRows: T[] = [];
-  for (let from = 0; ; from += COMMISSION_PAGE_SIZE) {
+  const outstandingPage = (from: number) => {
     let outstandingQuery = db
       .from("website_sales_commissions")
       .select(columns)
@@ -114,13 +108,32 @@ export async function loadWebsiteSalesCommissionListing<T extends { id: string }
       .in("status", ["accrued", "approved"]);
     if (repUserId) outstandingQuery = outstandingQuery.eq("rep_user_id", repUserId);
     if (repUserIds) outstandingQuery = outstandingQuery.in("rep_user_id", repUserIds);
-    const result = await outstandingQuery
+    return outstandingQuery
       .order("id", { ascending: true })
       .range(from, from + COMMISSION_PAGE_SIZE - 1);
+  };
+  // The recent page and the first outstanding page do not depend on each other,
+  // so they are one round trip, not two (LOAD-02). Later outstanding pages
+  // still follow one another: each exists only if the one before was full.
+  const [recentResult, firstOutstanding] = await Promise.all([
+    recentQuery
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(recentLimit),
+    outstandingPage(0),
+  ]);
+  if (recentResult.error) throw new Error(`commission_listing_recent_failed:${recentResult.error.message}`);
+  const recentRows = (recentResult.data ?? []) as unknown as T[];
+
+  const outstandingRows: T[] = [];
+  let result = firstOutstanding;
+  for (let from = 0; ; ) {
     if (result.error) throw new Error(`commission_listing_outstanding_failed:${result.error.message}`);
     const page = (result.data ?? []) as unknown as T[];
     outstandingRows.push(...page);
     if (page.length < COMMISSION_PAGE_SIZE) break;
+    from += COMMISSION_PAGE_SIZE;
+    result = await outstandingPage(from);
   }
 
   const rowsById = new Map<string, T>();
@@ -220,15 +233,15 @@ function addRow(
 }
 
 /**
- * Reads the complete, tenant-scoped ledger in stable pages and keeps currencies
- * separate. This is the authoritative source for totals; UI row lists may be
- * intentionally recent/bounded, but a partial page must never masquerade as a
- * complete payout balance.
+ * The complete, tenant-scoped ledger rows a summary is built from, read in
+ * stable pages. Split out of loadWebsiteSalesCommissionSummary (2026-10-02) so
+ * the Commissions page can read them beside its row list and look the deals up
+ * once for both (lib/website-sales-commission-portal.ts).
  */
-export async function loadWebsiteSalesCommissionSummary(
+export async function loadWebsiteSalesCommissionSummaryRows(
   db: SupabaseClient,
   options: SummaryOptions,
-): Promise<WebsiteSalesCommissionSummary> {
+): Promise<WebsiteSalesCommissionSummaryRow[]> {
   const tenantId = options.tenantId.trim();
   if (!tenantId) throw new Error("commission_summary_tenant_required");
   if (options.repUserId !== undefined && options.repUserIds !== undefined) {
@@ -246,7 +259,7 @@ export async function loadWebsiteSalesCommissionSummary(
     ? undefined
     : Array.from(new Set(options.repUserIds.map((id) => id.trim())));
   if (repUserIds?.some((id) => !id)) throw new Error("commission_summary_rep_required");
-  if (repUserIds?.length === 0) return emptySummary();
+  if (repUserIds?.length === 0) return [];
 
   const rows: CommissionRow[] = [];
   for (let from = 0; ; from += COMMISSION_PAGE_SIZE) {
@@ -266,24 +279,24 @@ export async function loadWebsiteSalesCommissionSummary(
     rows.push(...page);
     if (page.length < COMMISSION_PAGE_SIZE) break;
   }
+  return rows;
+}
 
+/**
+ * Totals for `rows`, each row in its deal's currency. `deals` must hold every
+ * deal the rows name and may hold more (the Commissions page passes the deals
+ * it read for its row list too); a row whose deal is missing fails closed.
+ */
+export function summarizeWebsiteSalesCommissions(
+  rows: readonly WebsiteSalesCommissionSummaryRow[],
+  deals: readonly DealCurrencyRow[],
+): WebsiteSalesCommissionSummary {
   if (rows.length === 0) return emptySummary();
 
-  const dealIds = Array.from(new Set(rows.map((row) => row.deal_id)));
+  const wanted = new Set(rows.map((row) => row.deal_id));
   const currencyByDealId = new Map<string, CommissionCurrency>();
-  for (let offset = 0; offset < dealIds.length; offset += DEAL_LOOKUP_CHUNK_SIZE) {
-    const chunk = dealIds.slice(offset, offset + DEAL_LOOKUP_CHUNK_SIZE);
-    const result = await db
-      .from("website_deals")
-      .select("id,currency")
-      .eq("tenant_id", tenantId)
-      .in("id", chunk)
-      .order("id", { ascending: true })
-      .range(0, chunk.length - 1);
-    if (result.error) throw new Error(`commission_summary_deals_failed:${result.error.message}`);
-    for (const deal of (result.data ?? []) as DealCurrencyRow[]) {
-      currencyByDealId.set(deal.id, currencyFor(deal.currency, deal.id));
-    }
+  for (const deal of deals) {
+    if (wanted.has(deal.id)) currencyByDealId.set(deal.id, currencyFor(deal.currency, deal.id));
   }
 
   const totalBuckets = new Map<CommissionCurrency, CommissionCurrencyTotals>();
@@ -304,6 +317,37 @@ export async function loadWebsiteSalesCommissionSummary(
       Array.from(repBuckets.entries()).map(([userId, buckets]) => [userId, finalizedTotals(buckets)]),
     ),
   };
+}
+
+/**
+ * Reads the complete, tenant-scoped ledger in stable pages and keeps currencies
+ * separate. This is the authoritative source for totals; UI row lists may be
+ * intentionally recent/bounded, but a partial page must never masquerade as a
+ * complete payout balance.
+ */
+export async function loadWebsiteSalesCommissionSummary(
+  db: SupabaseClient,
+  options: SummaryOptions,
+): Promise<WebsiteSalesCommissionSummary> {
+  const rows = await loadWebsiteSalesCommissionSummaryRows(db, options);
+  if (rows.length === 0) return emptySummary();
+
+  const tenantId = options.tenantId.trim();
+  const dealIds = Array.from(new Set(rows.map((row) => row.deal_id)));
+  const deals: DealCurrencyRow[] = [];
+  for (let offset = 0; offset < dealIds.length; offset += DEAL_LOOKUP_CHUNK_SIZE) {
+    const chunk = dealIds.slice(offset, offset + DEAL_LOOKUP_CHUNK_SIZE);
+    const result = await db
+      .from("website_deals")
+      .select("id,currency")
+      .eq("tenant_id", tenantId)
+      .in("id", chunk)
+      .order("id", { ascending: true })
+      .range(0, chunk.length - 1);
+    if (result.error) throw new Error(`commission_summary_deals_failed:${result.error.message}`);
+    deals.push(...((result.data ?? []) as DealCurrencyRow[]));
+  }
+  return summarizeWebsiteSalesCommissions(rows, deals);
 }
 
 const STATUS_FIELD: Record<CommissionAmountStatus, keyof CommissionCurrencyTotals> = {

@@ -746,6 +746,9 @@ for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
 const managerToday = read("components/today/ManagerToday.tsx");
 const commissionPage = read("app/commissions/page.tsx");
 const commissionApi = read("app/api/website-sales/commissions/route.ts");
+// Since 2026-10-02 the page and the GET route both read through one loader
+// (the page paints the numbers itself), so the scope rules live there.
+const commissionPortal = read("lib/website-sales-commission-portal.ts");
 const managerCode = stripComments(managerToday);
 const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
 const teamPolicy = stripComments(read("lib/team.ts"));
@@ -759,7 +762,7 @@ const commissionReader = stripComments(read("lib/website-sales-commission-summar
 // tests/client-route-gating.test.ts runs the page for a client owner, an OASIS
 // closer and CC.
 assert.ok(
-  /export default async function CommissionsPage\(\) \{\s*await requireOsRoute\("\/commissions"\);/.test(commissionPage),
+  /export default async function CommissionsPage\(\) \{\s*(?:const viewer = )?await requireOsRoute\("\/commissions"\);/.test(commissionPage),
   "the Commission page must apply the same capability gate as its navigation, as its first statement",
 );
 assert.ok(
@@ -767,22 +770,25 @@ assert.ok(
   "the Commissions rail row is gated on the commission surface (audience commissions) and the commissions module",
 );
 assert.ok(
-  commissionApi.includes("resolvePersona") && commissionApi.includes("maySeeCommissionSurface"),
-  "the commission API must reject authenticated personas with no commission capability",
+  commissionApi.includes("resolvePersona") &&
+    commissionApi.includes("loadCommissionPortal(session, persona)") &&
+    commissionPage.includes("loadCommissionPortal(session, viewer.surface.persona)") &&
+    commissionPortal.includes("maySeeCommissionSurface(SURFACE_CAPABILITIES[persona])"),
+  "the commission API (and the page, through the same loader) must reject authenticated personas with no commission capability",
 );
 assert.ok(
-  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true })") &&
-    commissionApi.includes('persona === "manager"') &&
-    commissionApi.includes("repUserIds"),
+  commissionPortal.includes("getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true })") &&
+    commissionPortal.includes('persona === "manager"') &&
+    commissionPortal.includes("repUserIds"),
   "a manager commission ledger must use a server-resolved direct-report scope",
 );
 assert.equal(
-  (commissionApi.match(/\.\.\.repScope/g) ?? []).length,
+  (commissionPortal.match(/\.\.\.repScope/g) ?? []).length,
   2,
   "the same manager/rep boundary must constrain both visible ledger rows and complete totals",
 );
 assert.ok(
-  commissionApi.includes('ledgerScope = "manager_team"') &&
+  commissionPortal.includes('ledgerScope = "manager_team"') &&
     read("app/commissions/CommissionPortal.tsx").includes("My team commission ledger"),
   "the manager ledger must identify its wider scope truthfully",
 );

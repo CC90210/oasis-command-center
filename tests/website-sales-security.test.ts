@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const workflowRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
-const commissionRoute = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
+// The commission reads moved out of the route into the loader the page and the
+// route share (2026-10-02).
+const commissionRoute = readFileSync("lib/website-sales-commission-portal.ts", "utf8");
 const migration = readFileSync("database/146_website_sales_engine.sql", "utf8");
 
 assert(workflowRoute.includes("resolveSessionContext"), "workflow route authenticates through session context");

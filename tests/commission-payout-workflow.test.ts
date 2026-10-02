@@ -386,23 +386,31 @@ async function main() {
   );
 
   const route = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
+  // The GET body moved into one loader the page and the route share (2026-10-02).
+  const portalReader = readFileSync("lib/website-sales-commission-portal.ts", "utf8");
   const ledgerReader = readFileSync("lib/website-sales-commission-summary.ts", "utf8");
   const page = readFileSync("app/commissions/page.tsx", "utf8");
   const clientUi = readFileSync("app/commissions/CommissionPortal.tsx", "utf8");
   const nav = readFileSync("lib/nav-config.ts", "utf8");
   assert(
-    route.includes("tenantId: session.tenantId") && ledgerReader.includes('.eq("tenant_id", tenantId)'),
+    route.includes("loadCommissionPortal(session, persona)") && page.includes("loadCommissionPortal("),
+    "the route and the page read the portal through the same loader",
+  );
+  assert(
+    portalReader.includes("tenantId: session.tenantId") && ledgerReader.includes('.eq("tenant_id", tenantId)'),
     "every commission read stays tenant-scoped through the shared ledger reader",
   );
   assert(
-    route.includes("repUserId: session.userId") && ledgerReader.includes('.eq("rep_user_id", repUserId)'),
+    portalReader.includes("repUserId: session.userId") && ledgerReader.includes('.eq("rep_user_id", repUserId)'),
     "a rep can fetch only their own ledger rows through the shared ledger reader",
   );
   assert(route.includes("session.isTrueAdmin"), "payout mutations require a permanent founder/admin role");
   assert(route.includes('rpc("transition_commission_entry"'), "the API delegates money-state CAS to Turso");
-  assert.equal(route.includes('.from("website_sales_commissions").update'), false, "the route cannot rewrite status directly");
+  for (const source of [route, portalReader]) {
+    assert.equal(source.includes('.from("website_sales_commissions").update'), false, "the route cannot rewrite status directly");
+  }
   for (const fact of ["clientName", "paymentReference", "paymentStatus", "partyRole", "rateBps", "quotedAmountCents", "amountCents", "effectiveAt"]) {
-    assert(route.includes(fact), `live commission hydration includes ${fact}`);
+    assert(portalReader.includes(fact), `live commission hydration includes ${fact}`);
   }
   assert(page.includes("CommissionPortal") && !page.includes("ComingSoon"), "the commission page is live, not a placeholder");
   assert(
@@ -414,12 +422,12 @@ async function main() {
   }
   assert(clientUi.includes("Full quote") && clientUi.includes("Verified collection"), "the portal compares the full quote with exact collected cash");
   assert.match(
-    route,
+    portalReader,
     /const collectedAmountCents = cents\(null, commission\.collected_setup_amount\)/,
     "split-payment deals show the aggregate collection frozen in the commission ledger, not only the latest receipt",
   );
   assert.doesNotMatch(
-    route,
+    portalReader,
     /const collectedAmountCents = receipt\s*\?/,
     "the latest balance receipt cannot replace the full verified collection total",
   );

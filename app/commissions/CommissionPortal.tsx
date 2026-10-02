@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   AlertTriangle,
   BadgeCheck,
@@ -16,65 +16,26 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { errorSentence } from "@/lib/ui/error-copy";
+import {
+  COMPANY_TRACK_BPS,
+  MANAGER_OVERRIDE_BPS,
+  SELF_TRACK_BPS,
+} from "@/lib/website-sales-comp";
 import {
   commissionPartyRoleLabel,
   formatCommissionAmounts,
   type CommissionAmountStatus,
   type WebsiteSalesCommissionSummary,
 } from "@/lib/website-sales-commission-summary";
+import type {
+  CommissionPortalPage,
+  CommissionPortalPayload,
+  CommissionPortalRow,
+  CommissionPortalViewer,
+} from "@/lib/website-sales-commission-portal";
 
-type Commission = {
-  id: string;
-  dealId: string;
-  leadId: string | null;
-  clientName: string;
-  packageId: string | null;
-  currency: "CAD" | "USD";
-  repUserId: string;
-  repName: string;
-  repEmail: string | null;
-  partyRole: string;
-  paymentReference: string;
-  paymentProvider: "stripe" | "manual" | null;
-  paymentStatus: string;
-  paymentVerified: boolean;
-  paymentVerifiedAt: string | null;
-  quotedAmountCents: number;
-  collectedAmountCents: number;
-  rateBps: number;
-  amountCents: number;
-  status: "accrued" | "approved" | "paid" | "offset" | "voided";
-  entryType: "accrual" | "refund_offset" | "manual_adjustment";
-  approvedByName: string | null;
-  approvedAt: string | null;
-  paidAt: string | null;
-  payoutReference: string | null;
-  voidedAt: string | null;
-  voidReason: string | null;
-  createdAt: string;
-  effectiveAt: string;
-};
-
-type PortalResponse = {
-  ok: boolean;
-  error?: string;
-  viewer?: {
-    userId: string;
-    isAdmin: boolean;
-    canManagePayouts: boolean;
-    ledgerScope: "tenant" | "manager_team" | "self";
-  };
-  data?: Commission[];
-  summary?: WebsiteSalesCommissionSummary;
-  page?: {
-    returned: number;
-    recentLimit: number;
-    recentReturned: number;
-    outstandingCount: number;
-    completeOutstanding: boolean;
-    hasMore: boolean;
-  };
-};
+type Commission = CommissionPortalRow;
 
 type Editor = { id: string; mode: "paid" | "void" } | null;
 
@@ -108,47 +69,53 @@ function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-export function CommissionPortal() {
-  const [rows, setRows] = useState<Commission[]>([]);
-  const [viewer, setViewer] = useState<PortalResponse["viewer"]>();
-  const [summary, setSummary] = useState<WebsiteSalesCommissionSummary | null>(null);
-  const [page, setPage] = useState<PortalResponse["page"]>();
-  const [loading, setLoading] = useState(true);
+/**
+ * The Commissions portal. It starts with the data the page read on the server
+ * (`initial`, lib/website-sales-commission-portal.ts), so its first paint has
+ * the numbers and it makes no request when it mounts. It asks the GET route
+ * again only when someone presses Refresh or after a payout change.
+ *
+ * `error` holds a CODE (a route's, or one of the two below for a request that
+ * never answered); it is turned into a sentence in exactly one place, where
+ * it is drawn (lib/ui/error-copy.ts). The code itself is never on screen.
+ */
+export function CommissionPortal({ initial }: { initial: CommissionPortalPayload }) {
+  const [rows, setRows] = useState<Commission[]>(initial.ok ? initial.data : []);
+  const [viewer, setViewer] = useState<CommissionPortalViewer | undefined>(initial.ok ? initial.viewer : undefined);
+  const [summary, setSummary] = useState<WebsiteSalesCommissionSummary | null>(initial.ok ? initial.summary : null);
+  const [page, setPage] = useState<CommissionPortalPage | undefined>(initial.ok ? initial.page : undefined);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initial.ok ? null : initial.error);
   const [statusFilter, setStatusFilter] = useState<"all" | Commission["status"]>("all");
   const [editor, setEditor] = useState<Editor>(null);
   const [payoutReference, setPayoutReference] = useState("");
   const [voidReason, setVoidReason] = useState("");
   const [workingId, setWorkingId] = useState<string | null>(null);
 
-  const load = useCallback(async (quiet = false) => {
-    if (quiet) setRefreshing(true);
-    else setLoading(true);
+  const load = useCallback(async () => {
+    setRefreshing(true);
     setError(null);
     try {
       const response = await fetch("/api/website-sales/commissions", { cache: "no-store" });
-      const payload = (await response.json().catch(() => null)) as PortalResponse | null;
+      const payload = (await response.json().catch(() => null)) as CommissionPortalPayload | null;
       if (!response.ok || !payload?.ok || !payload.viewer || !payload.summary || !payload.page) {
-        throw new Error(payload?.error || "Unable to load the commission ledger.");
+        setSummary(null);
+        setPage(undefined);
+        setError((payload && !payload.ok && payload.error) || "commission_refresh_unavailable");
+        return;
       }
       setRows(payload.data ?? []);
       setViewer(payload.viewer);
       setSummary(payload.summary);
       setPage(payload.page);
-    } catch (caught) {
+    } catch {
       setSummary(null);
       setPage(undefined);
-      setError(caught instanceof Error ? caught.message : "Unable to load the commission ledger.");
+      setError("commission_refresh_unavailable");
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
   }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   const filtered = useMemo(
     () => (statusFilter === "all" ? rows : rows.filter((row) => row.status === statusFilter)),
@@ -176,25 +143,25 @@ export function CommissionPortal() {
         }),
       });
       const payload = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-      if (!response.ok || !payload?.ok) throw new Error(payload?.error || "The payout update failed.");
+      if (!response.ok || !payload?.ok) {
+        setError(payload?.error || "commission_update_failed");
+        return;
+      }
       setEditor(null);
       setPayoutReference("");
       setVoidReason("");
-      await load(true);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "The payout update failed.");
+      await load();
+    } catch {
+      setError("commission_update_failed");
     } finally {
       setWorkingId(null);
     }
   }, [load, payoutReference, voidReason]);
 
-  if (loading) {
-    return (
-      <div className="rounded-xl border border-bg-border bg-bg-panel p-12 text-center text-sm text-fg-muted">
-        <Loader2 className="mx-auto mb-3 animate-spin text-accent" size={22} />
-        Loading the live Turso commission ledger…
-      </div>
-    );
+  // Nothing has been earned yet (and nothing is listed): one explainer
+  // instead of four zero totals and an empty list.
+  if (!error && summary && summary.entryCount === 0 && rows.length === 0) {
+    return <NoCommissionYet />;
   }
 
   return (
@@ -202,7 +169,7 @@ export function CommissionPortal() {
       {error && (
         <div className="flex items-start gap-3 rounded-xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-200" role="alert">
           <AlertTriangle className="mt-0.5 shrink-0" size={16} />
-          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <span className="min-w-0 flex-1 break-words">{errorSentence(error)}</span>
           <button type="button" onClick={() => setError(null)} aria-label="Dismiss error" className="text-rose-200/70 hover:text-rose-100">
             <X size={15} />
           </button>
@@ -215,9 +182,9 @@ export function CommissionPortal() {
         <SummaryCard icon={Banknote} label="Paid" value={summaryValue(["paid"])} hint="Transfer reference recorded" />
         <SummaryCard
           icon={CircleDollarSign}
-          label="Net ledger"
+          label="Net total"
           value={summaryValue(["accrued", "approved", "paid", "offset"])}
-          hint={summary ? `${summary.entryCount} complete ledger ${summary.entryCount === 1 ? "entry" : "entries"}` : "Ledger unavailable"}
+          hint={summary ? `${summary.entryCount} ${summary.entryCount === 1 ? "entry" : "entries"}` : "Totals unavailable"}
         />
       </section>
 
@@ -257,7 +224,7 @@ export function CommissionPortal() {
             </select>
             <button
               type="button"
-              onClick={() => void load(true)}
+              onClick={() => void load()}
               disabled={refreshing}
               className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-elev px-3 py-2 text-xs font-semibold text-fg-muted transition-colors hover:text-fg disabled:opacity-50"
             >
@@ -267,7 +234,14 @@ export function CommissionPortal() {
           </div>
         </header>
 
-        {filtered.length === 0 ? (
+        {rows.length === 0 && !summary ? (
+          // The read failed: say so, never "no entries" (an unread list is not an empty one).
+          <div className="px-5 py-14 text-center">
+            <AlertTriangle className="mx-auto mb-3 text-fg-dim" size={28} />
+            <p className="text-sm font-medium text-fg">Entries couldn't be loaded</p>
+            <p className="mt-1 text-xs text-fg-muted">Press Refresh to try again.</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="px-5 py-14 text-center">
             <CircleDollarSign className="mx-auto mb-3 text-fg-dim" size={28} />
             <p className="text-sm font-medium text-fg">No commission entries in this {page?.hasMore ? "recent " : ""}view</p>
@@ -283,22 +257,27 @@ export function CommissionPortal() {
               const canVoid = viewer?.canManagePayouts && (row.status === "accrued" || row.status === "approved") && row.entryType === "accrual" && row.amountCents > 0;
               return (
                 <article key={row.id} className="px-4 py-5 transition-colors hover:bg-bg-elev/25">
-                  <div className="grid gap-5 xl:grid-cols-[minmax(220px,1.3fr)_minmax(210px,1fr)_minmax(170px,.8fr)_minmax(180px,.9fr)_minmax(220px,1fr)] xl:items-start">
+                  {/* Every track can shrink (minmax(0, ...)), so a row is never wider than
+                      the page: the old fixed minimums needed ~1,112px and a 1280px laptop
+                      leaves ~968px beside the rail, so the payout buttons were cut off.
+                      Five columns from 1440px; below that the payout controls take their
+                      own line under the row (two columns on a tablet, one on a phone). */}
+                  <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,.8fr)_minmax(0,.9fr)] min-[1440px]:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,.8fr)_minmax(0,.9fr)_minmax(0,1fr)] min-[1440px]:items-start">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         {row.leadId ? (
-                          <Link href={`/pipeline/${row.leadId}`} className="inline-flex min-w-0 items-center gap-1.5 font-semibold text-fg hover:text-accent">
-                            <span className="truncate">{row.clientName}</span>
+                          <Link href={`/pipeline/${row.leadId}`} className="inline-flex min-w-0 max-w-full items-center gap-1.5 font-semibold text-fg hover:text-accent">
+                            <span className="truncate" title={row.clientName}>{row.clientName}</span>
                             <ExternalLink size={12} className="shrink-0" />
                           </Link>
                         ) : (
-                          <span className="font-semibold text-fg">{row.clientName}</span>
+                          <span className="min-w-0 max-w-full truncate font-semibold text-fg" title={row.clientName}>{row.clientName}</span>
                         )}
                         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${STATUS_STYLE[row.status]}`}>
                           {row.status}
                         </span>
                       </div>
-                      <div className="mt-1 text-xs text-fg-muted">Deal {row.dealId.slice(0, 12)} · {titleCase(row.packageId || "custom")}</div>
+                      <div className="mt-1 text-xs text-fg-muted">{titleCase(row.packageId || "custom")} package</div>
                       {(viewer?.isAdmin || viewer?.ledgerScope === "manager_team") && (
                         <div className="mt-3 flex items-start gap-2 text-xs text-fg-muted">
                           <UserRound size={13} className="mt-0.5 shrink-0 text-accent" />
@@ -342,12 +321,12 @@ export function CommissionPortal() {
                       <div className="mt-1 text-[11px] text-fg-muted">{dateTime(row.effectiveAt)}</div>
                       {row.approvedByName && <div className="mt-1 text-[11px] text-fg-dim">Approved by {row.approvedByName}</div>}
                       {row.payoutReference && (
-                        <div className="mt-2 text-[11px] text-emerald-300">Payout: <span className="font-mono">{row.payoutReference}</span></div>
+                        <div className="mt-2 text-[11px] text-emerald-300">Payout: <span className="break-all font-mono">{row.payoutReference}</span></div>
                       )}
                       {row.voidReason && <div className="mt-2 text-[11px] text-fg-muted">Void reason: {row.voidReason}</div>}
                     </div>
 
-                    <div>
+                    <div className="md:col-span-2 xl:col-span-4 min-[1440px]:col-span-1">
                       <FieldLabel>{viewer?.canManagePayouts ? "Founder controls" : "Payout state"}</FieldLabel>
                       {!viewer?.canManagePayouts && (
                         <p className="mt-2 text-xs leading-relaxed text-fg-muted">
@@ -355,7 +334,7 @@ export function CommissionPortal() {
                         </p>
                       )}
                       {viewer?.canManagePayouts && (
-                        <div className="mt-2 space-y-2">
+                        <div className="mt-2 space-y-2 md:max-w-sm min-[1440px]:max-w-none">
                           {row.status === "accrued" && row.entryType === "accrual" && row.amountCents > 0 && (
                             <>
                               <button
@@ -452,5 +431,47 @@ function SummaryCard({
       <div className="mt-2 text-xl font-bold tabular-nums text-fg">{value}</div>
       <div className="mt-1 text-xs text-fg-dim">{hint}</div>
     </div>
+  );
+}
+
+/** A whole percent from basis points. The rates come from the comp engine, never typed here. */
+function percent(bps: number): string {
+  return `${Math.round(bps / 100)}%`;
+}
+
+/**
+ * Shown instead of four zero totals and an empty list while nothing has been
+ * earned in this view. The rates are lib/website-sales-comp.ts's own: the
+ * numbers the payout runs on and the agreements state.
+ */
+function NoCommissionYet() {
+  const rates = [
+    { role: "You open it", rate: percent(COMPANY_TRACK_BPS.opener), detail: "You book the meeting and someone else closes." },
+    { role: "You close it", rate: percent(COMPANY_TRACK_BPS.closer), detail: "You close a lead the company brought in." },
+    { role: "You find and close it", rate: percent(SELF_TRACK_BPS.open_close), detail: "You found the client yourself and closed it." },
+    { role: "You do all of it", rate: percent(SELF_TRACK_BPS.full_stack), detail: "You found it, closed it and built the website." },
+  ];
+  return (
+    <section className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card">
+      <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+        <CircleDollarSign size={16} className="text-accent" />
+        No commission yet
+      </div>
+      <p className="mt-2 text-sm text-fg-muted">
+        Commission appears here once a client&apos;s setup payment is confirmed. It is a share of that setup payment, set by the part you played:
+      </p>
+      <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {rates.map((r) => (
+          <div key={r.role} className="rounded-lg border border-bg-border bg-bg-elev/40 p-3">
+            <dt className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">{r.role}</dt>
+            <dd className="mt-1 text-xl font-bold tabular-nums text-fg">{r.rate}</dd>
+            <dd className="mt-1 text-xs text-fg-muted">{r.detail}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-3 text-xs text-fg-dim">
+        A manager also earns {percent(MANAGER_OVERRIDE_BPS)} of what OASIS keeps from their team&apos;s deals.
+      </p>
+    </section>
   );
 }
