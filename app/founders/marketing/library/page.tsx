@@ -73,6 +73,7 @@ import {
   isBrandGroupKey,
   authorName,
   isLifecycle,
+  libraryAllCount,
   libraryHref,
   libraryPageCount,
   libraryPagerItems,
@@ -169,10 +170,13 @@ export default async function MarketingLibraryPage({
       degraded: true,
     }),
   ]);
-  // EVERY asset in the tab, from the tab's own COUNT. Not the sum of the four
-  // pills: a scheduled asset sits in none of them (it is not waiting on a
-  // verdict), and summing would quietly drop it from "All".
-  const lifecycleTotal = tabCounts.degraded ? 0 : tabCounts.counts[group];
+  // Every asset the All grid shows (libraryAllCount): the tab's own COUNT, so a
+  // scheduled asset that sits in none of the four pills still counts, less the
+  // Archived pill, which the All grid hides. Null when either count is unread.
+  const lifecycleTotal = libraryAllCount(
+    tabCounts.degraded ? null : tabCounts.counts[group],
+    lc.degraded ? null : lc.counts.archived,
+  );
   const assetsOrNull = pageOrNull ? pageOrNull.tiles : null;
   const libraryDegraded = assetsOrNull === null;
   const signed = assetsOrNull ?? [];
@@ -278,7 +282,7 @@ export default async function MarketingLibraryPage({
       <div className="flex flex-wrap items-center gap-2">
         <FilterPill
           href={filterHref({ lifecycle: null })}
-          label={`All ${lifecycleTotal || ""}`.trim()}
+          label={`All ${lifecycleTotal === null ? "—" : lifecycleTotal}`}
           active={!lifecycle}
         />
         {LIFECYCLE.map((l) => {
@@ -297,7 +301,7 @@ export default async function MarketingLibraryPage({
       {/* The sentence that answers "have these been posted at all, ever?".
           Rendered from the counts rather than written as a claim, so it cannot
           go stale the way a hardcoded roadmap note does. */}
-      {!lc.degraded && lc.counts.live === 0 && lifecycleTotal > 0 && (
+      {!lc.degraded && lc.counts.live === 0 && lifecycleTotal !== null && lifecycleTotal > 0 && (
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 px-4 py-3 text-xs leading-5 text-fg-muted">
           <span className="font-semibold text-fg">
             None of these {lifecycleTotal} have been posted.

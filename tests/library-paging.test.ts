@@ -51,6 +51,7 @@ import {
   STATUSES,
   assetHref,
   libraryHref,
+  libraryAllCount,
   libraryReturnPath,
   libraryPageCount,
   libraryPagerItems,
@@ -390,12 +391,17 @@ async function main() {
     const tabs = await getBrandTabCounts(T, db);
     const pills = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
     assert.equal(tabs.counts["oasis-ai"], pills + scheduled.length, "the tab holds the bucketed assets and the scheduled ones");
+    // ...and "All N" is exactly what the All grid shows (CodeRabbit, #523): the
+    // tab's COUNT holds archived and rejected assets, which the All grid hides.
+    const archivedTruth = oasisRows.filter((r) => r.status === "archived" || r.status === "rejected").length;
+    assert.ok(archivedTruth > 0, `the seed holds archived or rejected assets (${archivedTruth}), so the subtraction is exercised`);
+    const allGrid = await getMarketingAssets(T, {}, db);
+    assert.equal(libraryAllCount(tabs.counts["oasis-ai"], lc.counts.archived), allGrid.total, "the All pill equals the All grid");
+    assert.equal(libraryAllCount(null, lc.counts.archived), null, "an unread tab count is no number, not 0");
+    assert.equal(libraryAllCount(tabs.counts["oasis-ai"], null), null, "an unread Archived count is no number, not the tab's total");
     const library = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
-    assert.match(
-      library,
-      /const lifecycleTotal = tabCounts\.degraded \? 0 : tabCounts\.counts\[group\];/,
-      "the All pill reads the tab's COUNT",
-    );
+    assert.match(library, /const lifecycleTotal = libraryAllCount\(/, "the page's All pill comes from libraryAllCount");
+    assert.match(library, /All \$\{lifecycleTotal === null \? "[^"]+" : lifecycleTotal\}/, "an unknown All reads like an unknown pill");
   });
 
   await check("the SQL lifecycle predicate matches the buckets for every status x published_at pair", async () => {
