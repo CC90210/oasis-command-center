@@ -598,7 +598,12 @@ async function main() {
     const alphaCard = findEl(await SettingsContent({ section: "ai" }), ProviderAccountsCard);
     assert.deepEqual([...((alphaCard?.props as { connectedServices: Set<string> }).connectedServices ?? [])], ["anthropic"]);
   });
-  await check("the card draws a personal key as the owner's own, never Connected (tests/ai-workspace-account.render.ts)", () => {
+  // The provider card, drawn by real React in a child process (the suite runs
+  // under react-server, where client components cannot render).
+  let html: Record<string, string> = {};
+  const plain = (s: string | undefined) => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
+  const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
+  await check("the provider card renders (tests/ai-workspace-account.render.ts)", () => {
     // The render needs whole React: drop the suite's react-server condition.
     const nodeOptions = (process.env.NODE_OPTIONS || "")
       .split(/\s+/)
@@ -608,9 +613,9 @@ async function main() {
     if (!nodeOptions) delete env.NODE_OPTIONS;
     const r = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-workspace-account.render.ts"], { encoding: "utf8", env, timeout: 120_000 });
     assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
-    const html = JSON.parse(r.stdout) as Record<string, string>;
-    const plain = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
-    const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
+    html = JSON.parse(r.stdout) as Record<string, string>;
+  });
+  await check("the card draws a personal key as the owner's own, never Connected", () => {
     const personal = plain(html.personalOnly);
     assert.match(personal, /Your personal key/);
     assert.match(personal, /This key is saved for you only\. Department chats and Slack mentions don't use it: connect it for the whole team so they can\./);
@@ -627,8 +632,9 @@ async function main() {
       assert.equal(count(after, /Your personal key/g), 1, `${key}: Google is the owner's own key`);
       assert.match(after, /Cloud: no provider connected/, `${key}: a "Just me" key turned the card Connected`);
     }
-    // A client owner's card names no vendor tool and promises no tools its
-    // department chats lack: it says what the account does.
+  });
+  await check("a client owner's card names no vendor tool and promises no tools its chats lack", () => {
+    // It says what the account does instead.
     for (const key of ["clientEmpty", "clientAnthropic"]) {
       const page = plain(html[key]);
       assert.match(page, /Paste a key once\. Your teammates answer every department chat and Slack mention with the team-wide account\./, key);
