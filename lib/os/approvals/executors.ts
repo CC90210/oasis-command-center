@@ -91,7 +91,12 @@ import {
   type ExecutionResult,
 } from "@/lib/os/approvals/rules";
 import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
-import { SLACK_CONNECTION_CHANGED_COPY, postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
+import { postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
+import { slackAppKindFor } from "@/lib/slack/own-app";
+
+/** A client's Slack reply drafted before replies were tied to the Slack connection they came through. */
+const SLACK_DRAFT_OUTDATED_COPY =
+  "This reply was drafted before OASIS tied each Slack reply to the Slack connection it came through, so it cannot be checked against yours and nothing was posted. Ask again in Slack for a new draft.";
 
 export type ExecutorTenant = { id: string; slug: string | null };
 
@@ -466,9 +471,14 @@ const sendSlackMessage: Executor = {
     }
     // Posted only through the Slack connection, and the generation of it, the
     // reply was drafted under: never after that connection was disconnected,
-    // nor through a later install of it (lib/slack/send.ts slackTokenFor).
-    if (connection_id === undefined || connection_generation === undefined) {
-      return failed("slack_connection_changed", SLACK_CONNECTION_CHANGED_COPY, SLACK_PROVIDER);
+    // nor through a later install of it (lib/slack/send.ts slackTokenFor). A
+    // reply stored before replies carried one (no Slack reply was pending in
+    // production when this shipped, 2026-10-02) is posted only for OASIS's own
+    // workspace, whose Slack is always OASIS's app, through the connection live
+    // now; a client's is never guessed onto a connection.
+    const bound = connection_id !== undefined && connection_generation !== undefined;
+    if (!bound && slackAppKindFor(ctx.tenant.id) !== "oasis") {
+      return failed("slack_draft_outdated", SLACK_DRAFT_OUTDATED_COPY, SLACK_PROVIDER);
     }
     const post = ctx.deps.postSlack ?? ((args: SlackPostArgs) => postSlackReply(ctx.db, args));
     const sent = await post({
@@ -479,7 +489,7 @@ const sendSlackMessage: Executor = {
       text,
       department: v.value.department ?? ctx.approval.department_key ?? null,
       approvalId: ctx.approval.id,
-      connection: { id: connection_id, generation: connection_generation },
+      connection: bound ? { id: connection_id as string, generation: connection_generation as number } : null,
     });
     if (sent.ok) return { ok: true, result: { outcome: "sent", provider: SLACK_PROVIDER, message_id: sent.ts } };
     return failed(sent.reason, sent.message, SLACK_PROVIDER);

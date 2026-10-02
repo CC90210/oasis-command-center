@@ -534,6 +534,81 @@ export async function setTenantIntegrationBundleWhile(
 }
 
 /**
+ * Fields under one service, read in ONE statement together with `guard`, so
+ * the value returned is the one stored while the guard held (a connection's
+ * own generation: lib/connections/store.ts liveConnectionGuard). A reinstall
+ * that moved the connection on, and replaced the token, between a check and a
+ * separate read can therefore never hand the new token to work bound to the
+ * old generation. "guard_refused": the guard did not hold; "missing": it held
+ * and no field is stored; "unreadable": a stored field will not decrypt.
+ */
+export async function readTenantCredentialsWhile(
+  db: Client,
+  input: { tenantId: string; service: string; fieldKeys: readonly string[]; guard: CredentialGuard },
+): Promise<{ ok: true; values: Record<string, string> } | { ok: false; reason: "guard_refused" | "missing" | "unreadable" | "lookup_failed" }> {
+  if (!input.tenantId || !input.service || input.fieldKeys.length === 0) throw new Error("tenant_credential_scope_missing");
+  let rows: Array<Record<string, unknown>>;
+  try {
+    const rs = await db.execute({
+      sql: `SELECT (${input.guard.sql}) AS live, k.field_key, k.encrypted_value
+            FROM (SELECT 1) one
+            LEFT JOIN tenant_integration_credentials k
+              ON k.tenant_id = ? AND k.service = ? AND k.field_key IN (${input.fieldKeys.map(() => "?").join(", ")})`,
+      args: [...input.guard.args, input.tenantId, input.service, ...input.fieldKeys],
+    });
+    rows = rs.rows as unknown as Array<Record<string, unknown>>;
+  } catch (err) {
+    console.error("[tenant-integration-store] guarded credential read failed", { tenantId: input.tenantId, service: input.service, error: (err as Error).message });
+    return { ok: false, reason: "lookup_failed" };
+  }
+  if (!rows.length || Number(rows[0].live) !== 1) return { ok: false, reason: "guard_refused" };
+  const values: Record<string, string> = {};
+  for (const r of rows) {
+    if (r.field_key === null || r.field_key === undefined || !r.encrypted_value) continue;
+    try {
+      const value = decryptField(String(r.encrypted_value));
+      if (value.trim()) values[String(r.field_key)] = value;
+    } catch (err) {
+      console.error("[tenant-integration-store] guarded credential decrypt failed", { tenantId: input.tenantId, service: input.service, field: r.field_key, err });
+      return { ok: false, reason: "unreadable" };
+    }
+  }
+  return Object.keys(values).length ? { ok: true, values } : { ok: false, reason: "missing" };
+}
+
+/**
+ * CROSS-TENANT, system only (a cron). Every service whose name starts with
+ * `prefix`, with its fields decrypted, oldest first: how the connection-health
+ * cron finds the cleanup records an abandoned Slack install left
+ * (lib/slack/install.ts). A field that will not decrypt is left out, logged.
+ */
+export async function listTenantIntegrationServicesByPrefix(
+  db: Client,
+  input: { prefix: string; limit: number },
+): Promise<Array<{ tenantId: string; service: string; values: Record<string, string> }>> {
+  if (!input.prefix || /[%_\\]/.test(input.prefix)) throw new Error("tenant_credential_prefix_invalid");
+  const rs = await db.execute({
+    sql: `SELECT tenant_id, service, field_key, encrypted_value FROM tenant_integration_credentials
+          WHERE service IN (
+            SELECT service FROM tenant_integration_credentials WHERE service LIKE ? GROUP BY service ORDER BY MIN(created_at) LIMIT ?
+          )`,
+    args: [`${input.prefix}%`, Math.max(1, Math.min(100, input.limit))],
+  });
+  const out = new Map<string, { tenantId: string; service: string; values: Record<string, string> }>();
+  for (const r of rs.rows as unknown as Array<Record<string, unknown>>) {
+    const key = `${String(r.tenant_id)}|${String(r.service)}`;
+    const entry = out.get(key) ?? { tenantId: String(r.tenant_id), service: String(r.service), values: {} };
+    try {
+      entry.values[String(r.field_key)] = decryptField(String(r.encrypted_value));
+    } catch (err) {
+      console.error("[tenant-integration-store] listed credential decrypt failed", { tenantId: entry.tenantId, service: entry.service, field: r.field_key, err });
+    }
+    out.set(key, entry);
+  }
+  return [...out.values()];
+}
+
+/**
  * The statement that deletes EVERY field under one service, while `guard`
  * holds, for the caller's own batch (a disconnect's: lib/connections/store.ts
  * finishDisconnect), so the credential goes in the same transaction as the

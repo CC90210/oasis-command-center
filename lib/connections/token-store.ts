@@ -40,6 +40,7 @@ import type { Client } from "@libsql/client";
 import {
   getTenantIntegrationBundle,
   readTenantCredentialStrict,
+  readTenantCredentialsWhile,
   setTenantIntegrationBundle,
   setTenantIntegrationBundleWhile,
 } from "@/lib/tenant-integration-store";
@@ -47,6 +48,7 @@ import { BOT_TOKEN_FIELD, REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFo
 import { alertConnectionWorsened } from "@/lib/connections/health";
 import {
   getConnection,
+  liveConnectionGuard,
   pendingClaimGuard,
   recordHealthCheck,
   releaseRefreshLease,
@@ -187,6 +189,31 @@ export type BotTokenRead =
   | { ok: true; token: string; botUserId: string | null }
   | { ok: false; reason: "missing" | "unreadable" | "lookup_failed" };
 
+/**
+ * The bot token of the connection AT `generation`, in one statement with the
+ * generation check (lib/tenant-integration-store.ts readTenantCredentialsWhile):
+ * work bound to a generation reads that generation's token or nothing, never
+ * the token a later install stored ("connection_changed"). The token is never
+ * logged.
+ */
+export async function readBotTokenAt(
+  db: Client,
+  tenantId: string,
+  connectionId: string,
+  generation: number,
+): Promise<BotTokenRead | { ok: false; reason: "connection_changed" }> {
+  const read = await readTenantCredentialsWhile(db, {
+    tenantId,
+    service: credentialServiceFor(connectionId),
+    fieldKeys: [BOT_TOKEN_FIELD, "bot_user_id"],
+    guard: liveConnectionGuard(tenantId, connectionId, generation),
+  });
+  if (!read.ok) return read.reason === "guard_refused" ? { ok: false, reason: "connection_changed" } : { ok: false, reason: read.reason };
+  const token = read.values[BOT_TOKEN_FIELD];
+  if (!token) return { ok: false, reason: "missing" };
+  return { ok: true, token, botUserId: read.values.bot_user_id ?? null };
+}
+
 /** The connection's bot token, strictly: missing, unreadable and a failed lookup stay apart. */
 export async function readBotToken(tenantId: string, connectionId: string): Promise<BotTokenRead> {
   const service = credentialServiceFor(connectionId);
@@ -309,6 +336,8 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
           detail: "The provider refused to refresh this connection. Reconnect it.",
           latencyMs: null,
           now: now(),
+          // The lease holder's own generation: never written over a reconnect.
+          generation: version,
         });
         if (recorded.worsened) {
           await alertConnectionWorsened({}, {

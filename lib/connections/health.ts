@@ -33,7 +33,7 @@ import { createHash } from "node:crypto";
 import type { Client } from "@libsql/client";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
-import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
+import { readTenantCredentialsWhile } from "@/lib/tenant-integration-store";
 import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { probeJevKey } from "@/lib/jev/client";
 import { authTest as slackAuthTest } from "@/lib/slack/client";
@@ -51,7 +51,9 @@ import {
   type ProbeErrorCode,
 } from "@/lib/connections/rules";
 import {
+  getConnection,
   listConnectionsDueForHealth,
+  liveConnectionGuard,
   pruneConnectionHistory,
   recordHealthCheck,
   type ConnectionRow,
@@ -436,6 +438,14 @@ function credentialFieldFor(provider: ProviderDef): string {
  *
  * A credential that cannot be READ (database outage) records nothing and
  * throws: that is an OASIS fault, not a fact about the connection.
+ *
+ * Bound to the generation `row` was read at (its token_version): the
+ * credential is read in one statement with that generation, and the result is
+ * written only while the row is still on it. A probe that started before a
+ * reinstall or a disconnect therefore records nothing over the newer install
+ * (never turning its pending claim "connected"). A pending claim (a connect in
+ * flight records its own first probe) and a row being disconnected are not
+ * probed at all.
  */
 export async function probeStoredConnection(
   deps: ConnectionsDeps,
@@ -443,6 +453,15 @@ export async function probeStoredConnection(
   source: HealthCheckSource,
   actor: AuditActor,
 ): Promise<HealthRecordResult> {
+  const notRecorded = async (): Promise<HealthRecordResult> => ({
+    connection: (await getConnection(deps.db, row.tenant_id, row.id)) ?? row,
+    previousStatus: row.status,
+    previousVerdict: row.last_health_verdict,
+    recorded: false,
+    flipped: false,
+    worsened: false,
+  });
+  if (row.status === "pending" || row.status === "disconnecting") return notRecorded();
   const provider = providerForEnv(row.provider, process.env);
   // Slack is checkable through the app its workspace uses, and only that
   // (lib/slack/own-app.ts slackAppFor): OASIS's app for OASIS's own workspace,
@@ -453,13 +472,21 @@ export async function probeStoredConnection(
   const probe = provider && checkable ? probeFor(provider.id) : null;
   if (!provider || !probe) throw new Error(`provider_not_probeable:${row.provider}`);
 
-  const credential = await readTenantCredentialStrict(row.tenant_id, credentialServiceFor(row.id), credentialFieldFor(provider));
+  const field = credentialFieldFor(provider);
+  const credential = await readTenantCredentialsWhile(deps.db, {
+    tenantId: row.tenant_id,
+    service: credentialServiceFor(row.id),
+    fieldKeys: [field],
+    guard: liveConnectionGuard(row.tenant_id, row.id, row.token_version),
+  });
   let outcome: Pick<ProbeResult, "verdict" | "code" | "detail" | "accountLabel" | "environment"> & { latencyMs: number | null };
   if (!credential.ok) {
+    // Moved on since `row` was read (a reinstall, a disconnect): not this probe's to judge.
+    if (credential.reason === "guard_refused") return notRecorded();
     if (credential.reason === "lookup_failed") throw new Error("credential_lookup_failed");
     outcome = { verdict: "down", ...CREDENTIAL_FAILURE[credential.reason], latencyMs: null, accountLabel: null, environment: null };
   } else {
-    const result = await probe(credential.value, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
+    const result = await probe(credential.values[field], deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
     if (result.accountId && row.external_account_id && result.accountId !== row.external_account_id) {
       // The key now answers for a different account than the one pinned: never
       // let another company's numbers flow into this workspace.
@@ -494,6 +521,7 @@ export async function probeStoredConnection(
     accountLabel: outcome.accountLabel,
     environment: outcome.environment,
     now: deps.now(),
+    generation: row.token_version,
   });
   if (recorded.flipped) {
     await auditConnection({

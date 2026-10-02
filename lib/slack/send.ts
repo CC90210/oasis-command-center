@@ -24,8 +24,8 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { findActiveConnection } from "@/lib/connections/store";
-import { readBotToken } from "@/lib/connections/token-store";
+import { findActiveConnection, isConnectionAt } from "@/lib/connections/store";
+import { readBotTokenAt } from "@/lib/connections/token-store";
 import type { DepartmentKey } from "@/lib/os/types";
 import { postEphemeral, postMessage, type SlackFetch } from "@/lib/slack/client";
 import { mirrorStatement } from "@/lib/slack/mirror";
@@ -47,22 +47,38 @@ export type SlackPostArgs = {
   text: string;
   department: DepartmentKey | null;
   approvalId: string;
-  /** The connection the approved reply was drafted under (its approval's payload). */
-  connection: SlackConnectionBinding;
+  /**
+   * The connection the approved reply was drafted under (its approval's
+   * payload). null only for a reply stored before replies carried one, which
+   * the executor lets through for OASIS's own workspace alone (its Slack is
+   * always OASIS's app): it is then bound to the connection live now.
+   */
+  connection: SlackConnectionBinding | null;
 };
 
 export type SlackPostOutcome = { ok: true; ts: string } | { ok: false; reason: string; message: string };
 
-type Token = { ok: true; token: string; botUserId: string | null } | { ok: false; reason: string; message: string };
+type Token =
+  | { ok: true; token: string; botUserId: string | null; connection: SlackConnectionBinding }
+  | { ok: false; reason: string; message: string };
 
 /** What a post bound to an earlier Slack connection (or generation of it) says, instead of posting. */
 export const SLACK_CONNECTION_CHANGED_COPY =
   "This was drafted while an earlier Slack connection was in place. Slack has since been disconnected or installed again, so nothing was posted. Ask again in Slack.";
 
+const connectionChanged = (): { ok: false; reason: string; message: string } => ({
+  ok: false,
+  reason: "slack_connection_changed",
+  message: SLACK_CONNECTION_CHANGED_COPY,
+});
+
 /**
  * The tenant's live Slack connection for `teamId`, and its bot token. A
  * connection being disconnected is not live. With `connection`, only that
- * connection on that generation will do.
+ * connection on that generation will do; without, the generation live now.
+ * Either way the token comes from ONE read fenced on that generation
+ * (lib/connections/token-store.ts readBotTokenAt), so a reinstall between the
+ * check and the read can never hand over a later install's token.
  */
 export async function slackTokenFor(db: Client, tenantId: string, teamId: string, connection?: SlackConnectionBinding): Promise<Token> {
   const conn = await findActiveConnection(db, tenantId, "slack");
@@ -72,18 +88,18 @@ export async function slackTokenFor(db: Client, tenantId: string, teamId: string
   if (conn.external_account_id !== teamId) {
     return { ok: false, reason: "slack_team_mismatch", message: "This reply is for a Slack workspace that is not the one connected here, so nothing was posted." };
   }
-  if (connection && (conn.id !== connection.id || conn.token_version !== connection.generation)) {
-    return { ok: false, reason: "slack_connection_changed", message: SLACK_CONNECTION_CHANGED_COPY };
-  }
+  if (connection && (conn.id !== connection.id || conn.token_version !== connection.generation)) return connectionChanged();
   if (conn.status === "expired" || conn.status === "revoked") {
     return { ok: false, reason: "slack_token_rejected", message: "Slack no longer accepts OASIS's token for this workspace. Install the app again in Settings > Chat apps." };
   }
-  const token = await readBotToken(tenantId, conn.id);
+  const binding = connection ?? { id: conn.id, generation: conn.token_version };
+  const token = await readBotTokenAt(db, tenantId, binding.id, binding.generation);
   if (!token.ok) {
+    if (token.reason === "connection_changed") return connectionChanged();
     if (token.reason === "lookup_failed") throw new Error("slack token lookup failed");
     return { ok: false, reason: "slack_token_missing", message: "OASIS's Slack token for this workspace is missing. Install the app again in Settings > Chat apps." };
   }
-  return token;
+  return { ok: true, token: token.token, botUserId: token.botUserId, connection: binding };
 }
 
 function slackFailureMessage(error: string): string {
@@ -108,8 +124,11 @@ function slackFailureMessage(error: string): string {
 }
 
 export async function postSlackReply(db: Client, args: SlackPostArgs, opts: { fetchImpl?: SlackFetch; now?: () => Date } = {}): Promise<SlackPostOutcome> {
-  const token = await slackTokenFor(db, args.tenantId, args.teamId, args.connection);
+  const token = await slackTokenFor(db, args.tenantId, args.teamId, args.connection ?? undefined);
   if (!token.ok) return token;
+  // Re-checked right before the post: a disconnect or a reinstall since the
+  // token was read stops the reply here.
+  if (!(await isConnectionAt(db, args.tenantId, token.connection.id, token.connection.generation))) return connectionChanged();
   // Posted as the words that were approved. Slack reads &, < and > in a
   // message as its own markup (<!channel> pings everyone, <@U..> mentions,
   // <https://..|label> hides a link behind a label), none of which the

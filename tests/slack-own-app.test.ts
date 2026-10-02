@@ -139,6 +139,15 @@ const CODES: Record<string, { app: string; team: string; name: string; token: st
   "code-a4": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-4" },
   "code-a5": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-5" },
   "code-a6": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-6" },
+  "code-a7": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-7" },
+  "code-a8": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-8" },
+  "code-a-loser-1": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-loser-1" },
+  "code-a-loser-2": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-loser-2" },
+  "code-a-loser-3": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-loser-3" },
+  "code-a-loser-4": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-loser-4" },
+  "code-a9": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-9" },
+  "code-a10": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-10" },
+  "code-a11": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-own-app-11" },
   "code-a-race-save": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-save" },
   "code-a-race-route": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-route" },
   "code-a-race-probe": { app: APP_A.client_id, team: "T0CLIENTA", name: "Client A Slack", token: "xoxb-client-a-race-probe" },
@@ -283,6 +292,7 @@ async function main() {
   const service = await import("../lib/connections/service");
   const connStore = await import("../lib/connections/store");
   const credStore = await import("../lib/tenant-integration-store");
+  const tokensLib = await import("../lib/connections/token-store");
   const health = await import("../lib/connections/health");
   const slackStatusLib = await import("../lib/slack/status");
   const testRoute = await import("../app/api/connections/[provider]/test/route");
@@ -1079,6 +1089,256 @@ async function main() {
     assert.deepEqual([again.status, again.body.disconnected], [200, true], JSON.stringify(again.body));
     assert.ok(revokedAtSlack.has(T6));
     await nothingLeft(id, "finished");
+  });
+
+  // -- 8. A health check, and a lost install's token, against a reinstall --------------
+
+  /** A's own-app install with `code`, through the library with `db` (a racing proxy, or the real one). */
+  const installThrough = async (code: string, through: typeof db) => {
+    await login(USERS.ownerA);
+    const state = landed(await authorize()).searchParams.get("state") ?? "";
+    const installEnv = await ownApp.slackInstallEnv(CLIENT_A);
+    assert.ok(installEnv.ok);
+    return installLib.completeSlackInstall(
+      { db: through, now: () => new Date() },
+      {
+        provider: registry.providerForEnv("slack", installEnv.ok ? installEnv.env : {})!,
+        state,
+        code,
+        redirectUri: "https://oasisai.work/api/connections/slack/callback",
+        session: { tenantId: CLIENT_A, userId: USERS.ownerA.id, email: USERS.ownerA.email },
+        env: installEnv.ok ? installEnv.env : {},
+      },
+    );
+  };
+  /** `db`, with `hook` run once, just before the first statement matching `pattern`. */
+  const racingOn = (pattern: RegExp, hook: () => Promise<void>) => {
+    let fired = false;
+    const proxy = new Proxy(db, {
+      get(target, prop) {
+        const fire = async (sqls: string[]) => {
+          if (!fired && sqls.some((s) => pattern.test(s))) {
+            fired = true;
+            await hook();
+          }
+        };
+        if (prop === "execute") {
+          return async (stmt: Parameters<typeof db.execute>[0]) => {
+            await fire([typeof stmt === "string" ? stmt : stmt.sql]);
+            return target.execute(stmt);
+          };
+        }
+        if (prop === "batch") {
+          return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+            await fire(stmts.map((s) => (typeof s === "string" ? s : s.sql)));
+            return target.batch(stmts, mode);
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    return { db: proxy as unknown as typeof db, fired: () => fired };
+  };
+  const cleanupRecords = () => count("SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'slack-token-cleanup:%' AND field_key = 'bot_token'", [CLIENT_A]);
+
+  const historyOf = (connectionId: string) =>
+    count("SELECT COUNT(*) AS n FROM connection_health_checks WHERE tenant_id = ? AND connection_id = ?", [CLIENT_A, connectionId]);
+
+  await check("a health check that started before a reinstall and finishes between the new token save and the route records nothing over it: the reinstall connects normally", async () => {
+    assert.equal((await installA("code-a7")).searchParams.get("slack"), "connected");
+    const stale = (await connStore.findActiveConnection(db, CLIENT_A, "slack"))!;
+    const historyBefore = await historyOf(stale.id);
+    // The check reads the row and its token and asks Slack; its write then waits for the reinstall.
+    let atWrite!: () => void;
+    const reachedWrite = new Promise<void>((resolve) => (atWrite = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const checkDb = racingOn(/INSERT INTO connection_health_checks/, async () => {
+      atWrite();
+      await released;
+    });
+    const checking = health.probeStoredConnection({ db: checkDb.db, now: () => new Date() }, stale, "cron", { userId: null, email: null });
+    await Promise.race([reachedWrite, checking]);
+    assert.ok(checkDb.fired(), "the check holds a result for the old install");
+    let probed: Awaited<typeof checking> | null = null;
+    const reinstall = racingOn(/INSERT INTO provider_webhook_routes/, async () => {
+      release();
+      probed = await checking;
+    });
+    const done = await installThrough("code-a8", reinstall.db);
+    assert.ok(reinstall.fired() && probed, "the old check's write landed between the new token save and the route");
+    assert.equal(probed!.recorded, false, "it recorded nothing over the reinstall");
+    assert.ok(done.ok, JSON.stringify(done));
+    const [row] = await connRow(CLIENT_A);
+    assert.deepEqual([row.status, row.generation], ["connected", stale.token_version + 1]);
+    assert.equal(await storedToken(row.id), CODES["code-a8"].token);
+    assert.ok(!revokedAtSlack.has(CODES["code-a8"].token), "the reinstall's token is live");
+    assert.equal(await historyOf(stale.id), historyBefore + 1, "only the reinstall's own first check was written");
+    assert.deepEqual([(await disconnect()).status, revokedAtSlack.has(CODES["code-a8"].token)], [200, true]);
+  });
+
+  await check("a health check that starts from a row read before a reinstall never uses the reinstall's token; a pending claim is neither checked nor due", async () => {
+    assert.equal((await installA("code-a10")).searchParams.get("slack"), "connected");
+    const stale = (await connStore.findActiveConnection(db, CLIENT_A, "slack"))!;
+    const historyBefore = await historyOf(stale.id);
+    let probed: Awaited<ReturnType<typeof health.probeStoredConnection>> | null = null;
+    let slackCalls: string[] = [];
+    const reinstall = racingOn(/INSERT INTO provider_webhook_routes/, async () => {
+      const callsBefore = calls.length;
+      probed = await health.probeStoredConnection({ db, now: () => new Date() }, stale, "cron", { userId: null, email: null });
+      slackCalls = calls.slice(callsBefore);
+    });
+    const done = await installThrough("code-a11", reinstall.db);
+    assert.ok(reinstall.fired() && probed, "the check ran between the new token save and the route");
+    assert.deepEqual([probed!.recorded, slackCalls], [false, []], "it never asked Slack with the reinstall's token");
+    assert.ok(done.ok, JSON.stringify(done));
+    const [row] = await connRow(CLIENT_A);
+    assert.deepEqual([row.status, row.generation], ["connected", stale.token_version + 1]);
+    assert.equal(await historyOf(stale.id), historyBefore + 1, "only the reinstall's own first check was written");
+    // A pending claim (an install in flight records its own first check): not probed, not listed for the cron.
+    const due = async () =>
+      (await connStore.listConnectionsDueForHealth(db, { providers: [], alsoForTenants: { provider: "slack", tenantIds: [CLIENT_A] }, staleBefore: new Date(Date.now() + 3_600_000), limit: 50 })).map((c) => c.id);
+    assert.ok((await due()).includes(row.id), "a connected row is due once its last check is old enough");
+    await db.execute({ sql: "UPDATE tenant_connections SET status = 'pending' WHERE id = ?", args: [row.id] });
+    try {
+      assert.ok(!(await due()).includes(row.id), "a pending claim is never due");
+      const callsBefore = calls.length;
+      const pending = await health.probeStoredConnection({ db, now: () => new Date() }, (await connStore.getConnection(db, CLIENT_A, row.id))!, "manual", { userId: null, email: null });
+      assert.deepEqual([pending.recorded, calls.slice(callsBefore)], [false, []]);
+    } finally {
+      await db.execute({ sql: "UPDATE tenant_connections SET status = 'connected' WHERE id = ?", args: [row.id] });
+    }
+    assert.deepEqual([(await disconnect()).status, revokedAtSlack.has(CODES["code-a11"].token)], [200, true]);
+  });
+
+  await check("an install that loses its Slack team to another workspace's route switches its own token off at Slack before forgetting it, unless that workspace holds the very same token (or its token cannot be read, then it is kept for the cron)", async () => {
+    for (const [variant, code, bHolds] of [
+      ["another app's token", "code-a-loser-1", "nothing"],
+      ["the same token (one Slack app shared by both workspaces)", "code-a-loser-2", "same"],
+      ["a token of B's that cannot be read", "code-a-loser-4", "unreadable"],
+    ] as const) {
+      const T = CODES[code].token;
+      let bConnection: string | null = null;
+      // Client B routes the same Slack team just before A's install does.
+      const race = racingOn(/INSERT INTO provider_webhook_routes/, async () => {
+        const claimB = await connStore.claimConnection(db, {
+          tenantId: CLIENT_B,
+          provider: "slack",
+          authKind: "app_install",
+          scopeKind: "tenant",
+          userId: null,
+          externalAccountId: "T0CLIENTA",
+          externalAccountLabel: "Client A Slack",
+          environment: null,
+          grantedScopes: [],
+          scopeSetVersion: 1,
+          connectedBy: USERS.ownerB.id,
+          now: new Date(),
+        });
+        assert.ok(claimB.ok, JSON.stringify(claimB));
+        bConnection = claimB.connection.id;
+        if (bHolds !== "nothing") await tokensLib.saveBotToken(CLIENT_B, bConnection, { bot_token: bHolds === "same" ? T : "xoxb-client-b-other", bot_user_id: "UBOT" });
+        if (bHolds === "unreadable") {
+          await db.execute({
+            sql: "UPDATE tenant_integration_credentials SET encrypted_value = 'not-a-ciphertext' WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'",
+            args: [CLIENT_B, credentialServiceFor(bConnection)],
+          });
+        }
+        assert.deepEqual(await connStore.registerWebhookRoute(db, { tenantId: CLIENT_B, provider: "slack", externalKey: "T0CLIENTA", connectionId: bConnection, now: new Date() }), { ok: true });
+      });
+      const before = revocations.length;
+      try {
+        const done = await installThrough(code, race.db);
+        assert.ok(race.fired(), variant);
+        assert.deepEqual(done, { ok: false, failure: "team_connected_elsewhere" }, `${variant}: ${JSON.stringify(done)}`);
+        if (bHolds === "nothing") {
+          assert.deepEqual(revocations.slice(before), [T], `${variant}: switched off at Slack`);
+          assert.ok(revokedAtSlack.has(T));
+        } else {
+          assert.deepEqual(revocations.slice(before), [], `${variant}: a token workspace B may be using is left alone`);
+        }
+        assert.deepEqual(await liveSlack(CLIENT_A), [], `${variant}: nothing of A's install stays`);
+        assert.equal(await cleanupRecords(), bHolds === "unreadable" ? 1 : 0, `${variant}: kept for the cron only while it cannot be settled`);
+        assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND external_key = 'T0CLIENTA'", [CLIENT_B]), 1, `${variant}: B's route stands`);
+      } finally {
+        await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'slack-token-cleanup:%'", args: [CLIENT_A] });
+        if (bConnection) {
+          await db.execute({ sql: "DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ?", args: [CLIENT_B, bConnection] });
+          await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ?", args: [CLIENT_B, credentialServiceFor(bConnection)] });
+          await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ? AND tenant_id = ?", args: [bConnection, CLIENT_B] });
+        }
+      }
+    }
+  });
+
+  await check("a given-up token Slack does not confirm switching off is kept, unusable, and the connection-health cron switches it off on a later run; one a live connection holds again is dropped untouched", async () => {
+    const T3 = CODES["code-a-loser-3"].token;
+    let bConnection: string | null = null;
+    const race = racingOn(/INSERT INTO provider_webhook_routes/, async () => {
+      const claimB = await connStore.claimConnection(db, {
+        tenantId: CLIENT_B,
+        provider: "slack",
+        authKind: "app_install",
+        scopeKind: "tenant",
+        userId: null,
+        externalAccountId: "T0CLIENTA",
+        externalAccountLabel: "Client A Slack",
+        environment: null,
+        grantedScopes: [],
+        scopeSetVersion: 1,
+        connectedBy: USERS.ownerB.id,
+        now: new Date(),
+      });
+      assert.ok(claimB.ok);
+      bConnection = claimB.connection.id;
+      await connStore.registerWebhookRoute(db, { tenantId: CLIENT_B, provider: "slack", externalKey: "T0CLIENTA", connectionId: bConnection, now: new Date() });
+    });
+    try {
+      revokeFails = "network";
+      let done: Awaited<ReturnType<typeof installThrough>>;
+      try {
+        done = await installThrough("code-a-loser-3", race.db);
+      } finally {
+        revokeFails = null;
+      }
+      assert.deepEqual(done, { ok: false, failure: "team_connected_elsewhere" });
+      assert.ok(!revokedAtSlack.has(T3), "Slack did not switch it off");
+      // Kept: encrypted, under a service no connection reads.
+      assert.equal(await cleanupRecords(), 1);
+      const [kept] = (await credStore.listTenantIntegrationServicesByPrefix(db, { prefix: installLib.SLACK_TOKEN_CLEANUP_PREFIX, limit: 10 })).filter((r) => r.tenantId === CLIENT_A);
+      assert.deepEqual([kept?.values.bot_token, kept?.values.team_id], [T3, "T0CLIENTA"]);
+      assert.notEqual(String((await db.execute({ sql: "SELECT encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ? AND field_key = 'bot_token'", args: [CLIENT_A, kept.service] })).rows[0].encrypted_value), T3, "never stored in plain text");
+      assert.deepEqual(await liveSlack(CLIENT_A), [], "no connection uses it");
+    } finally {
+      if (bConnection) {
+        await db.execute({ sql: "DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ?", args: [CLIENT_B, bConnection] });
+        await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ? AND tenant_id = ?", args: [bConnection, CLIENT_B] });
+      }
+    }
+    // The cron: Slack still failing keeps it; the next run switches it off and deletes it.
+    revokeFails = "network";
+    let first: Awaited<ReturnType<typeof installLib.retrySlackTokenCleanups>>;
+    try {
+      first = await installLib.retrySlackTokenCleanups({ db, now: () => new Date() });
+    } finally {
+      revokeFails = null;
+    }
+    assert.deepEqual([first.retried, first.kept, first.switched_off], [1, 1, 0], JSON.stringify(first));
+    const second = await installLib.retrySlackTokenCleanups({ db, now: () => new Date() });
+    assert.deepEqual([second.retried, second.switched_off, second.kept], [1, 1, 0], JSON.stringify(second));
+    assert.ok(revokedAtSlack.has(T3));
+    assert.equal(await cleanupRecords(), 0);
+    assert.match(read("app/api/cron/connection-health/route.ts"), /await retrySlackTokenCleanups\(\{ db, now/, "the connection-health cron runs it");
+    // A token a live connection holds again (the same app installed again) is dropped, never switched off.
+    assert.equal((await installA("code-a9")).searchParams.get("slack"), "connected");
+    const T9 = CODES["code-a9"].token;
+    assert.ok((await credStore.setTenantIntegrationBundle({ tenantId: CLIENT_A, service: `${installLib.SLACK_TOKEN_CLEANUP_PREFIX}held-again`, bundle: { bot_token: T9, team_id: "T0CLIENTA" } })).ok);
+    const held = await installLib.retrySlackTokenCleanups({ db, now: () => new Date() });
+    assert.deepEqual([held.retried, held.held, held.switched_off], [1, 1, 0], JSON.stringify(held));
+    assert.ok(!revokedAtSlack.has(T9), "the live connection's token is untouched");
+    assert.equal(await cleanupRecords(), 0);
+    assert.equal((await disconnect()).status, 200);
   });
 
   globalThis.fetch = realFetch;

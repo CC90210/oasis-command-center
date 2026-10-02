@@ -32,6 +32,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { runConnectionHealthPass } from "@/lib/connections/health";
+import { retrySlackTokenCleanups } from "@/lib/slack/install";
 import { purgeSlackRetention } from "@/lib/slack/retention";
 import { purgeClientErrorReports } from "@/lib/client-errors/retention";
 
@@ -68,9 +69,19 @@ async function handle(req: NextRequest) {
       clientErrorRetention = { error: "client_error_retention_failed" };
       retentionFailed = true;
     }
+    // Slack tokens an install gave up and Slack did not confirm switching off
+    // (lib/slack/install.ts abandonInstallToken) are retried here, counts only.
+    let slackTokenCleanup: Record<string, unknown>;
+    try {
+      slackTokenCleanup = { ...(await retrySlackTokenCleanups({ db, now: () => new Date() })) };
+    } catch (err) {
+      console.error("[cron.connection-health.slack-token-cleanup]", err instanceof Error ? err.stack : err);
+      slackTokenCleanup = { error: "slack_token_cleanup_failed" };
+      retentionFailed = true;
+    }
     const ok = result.errors.length === 0 && !retentionFailed;
     return NextResponse.json(
-      { ok, ...result, slack_retention: slackRetention, client_error_retention: clientErrorRetention },
+      { ok, ...result, slack_retention: slackRetention, client_error_retention: clientErrorRetention, slack_token_cleanup: slackTokenCleanup },
       { status: ok ? 200 : 500 },
     );
   } catch (err) {

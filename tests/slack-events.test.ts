@@ -67,6 +67,8 @@ const TEAM_B = "T0BRAVO";
 const BOT_A = "UBOTALPHA";
 const TOKEN_A = "xoxb-test-alpha-token";
 const TOKEN_B = "xoxb-test-bravo-token";
+/** The token a reinstall of ALPHA's Slack gets (Slack accepts it, so a post that used it would go out). */
+const TOKEN_A2 = "xoxb-test-alpha-token-reinstalled";
 const CUSTOMER_A = "cust-alpha-1";
 
 // ── Slack, mocked at the fetch boundary ─────────────────────────────────────
@@ -107,7 +109,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.hostname !== "slack.com") throw new Error(`unexpected network call in test: ${href}`);
   const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
-  if (token !== TOKEN_A && token !== TOKEN_B) return json(200, { ok: false, error: "invalid_auth" });
+  if (token !== TOKEN_A && token !== TOKEN_B && token !== TOKEN_A2) return json(200, { ok: false, error: "invalid_auth" });
   const method = url.pathname.replace("/api/", "");
   if (method === "users.info") {
     usersInfoCalls += 1;
@@ -1627,26 +1629,130 @@ async function main() {
     } finally {
       await restoreAlpha(generation);
     }
-    // A Slack reply stored with no connection binding is never posted live.
-    const created = await approvalsStore.createApproval(
-      db,
-      {
-        tenantId: ALPHA,
-        departmentKey: "client_success",
-        requestedBy: { type: "agent", id: "csm" },
-        actionKind: "send_slack_message",
-        title: "Slack reply in #clients",
-        payload: { team_id: TEAM_A, channel_id: "C0CLIENTS", thread_ts: "1727700000.000400", text: "no binding" },
-      },
-      now(),
-    );
-    assert.ok(created.ok);
+  });
+
+  await check("a Slack reply stored before replies carried their connection: a client's is refused in plain words; OASIS's own goes out through its live connection", async () => {
     const deps = { ...executors.defaultExecutorDeps(), publishEvent: async () => undefined };
     const exec = executors.EXECUTORS.send_slack_message!;
-    const row = (created as { approval: Parameters<typeof exec.run>[0]["approval"] }).approval;
-    const unbound = await exec.run({ db, approval: row, payload: approvalsStore.parsePayload(row), tenant: { id: ALPHA, slug: "alpha-co" }, approver: null, deps });
-    assert.deepEqual([unbound.ok, (unbound as { result?: { reason?: string } }).result?.reason], [false, "slack_connection_changed"], JSON.stringify(unbound));
-    assert.equal(posts.length, postsBefore);
+    // Exactly the shape an approval created before this change has: no connection_id, no generation.
+    const legacy = async (tenantId: string, teamId: string, channelId: string, text: string) => {
+      const created = await approvalsStore.createApproval(
+        db,
+        {
+          tenantId,
+          departmentKey: "client_success",
+          requestedBy: { type: "agent", id: "csm" },
+          actionKind: "send_slack_message",
+          title: "Slack reply",
+          payload: { team_id: teamId, channel_id: channelId, thread_ts: "1727700000.000400", text },
+        },
+        now(),
+      );
+      assert.ok(created.ok, JSON.stringify(created));
+      return (created as { approval: Parameters<typeof exec.run>[0]["approval"] }).approval;
+    };
+    const postsBefore = posts.length;
+    const client = await legacy(ALPHA, TEAM_A, "C0CLIENTS", "a client draft from before");
+    const refused = await exec.run({ db, approval: client, payload: approvalsStore.parsePayload(client), tenant: { id: ALPHA, slug: "alpha-co" }, approver: null, deps });
+    const result = (refused as { result?: { reason?: string; message?: string } }).result;
+    assert.deepEqual([refused.ok, result?.reason], [false, "slack_draft_outdated"], JSON.stringify(refused));
+    assert.match(String(result?.message), /nothing was posted\. Ask again in Slack for a new draft\.$/);
+    assert.equal(posts.length, postsBefore, "a client's old draft is never guessed onto a connection");
+    // OASIS's own workspace: its Slack is always OASIS's app, so the old draft goes out through the connection live now.
+    const oasis = await legacy(OASIS, "T0OASIS", "C0OASIS1", "an OASIS draft from before");
+    const sent = await exec.run({ db, approval: oasis, payload: approvalsStore.parsePayload(oasis), tenant: { id: OASIS, slug: "oasis-ai-cc" }, approver: null, deps });
+    assert.deepEqual([sent.ok, (sent as { result?: { outcome?: string } }).result?.outcome], [true, "sent"], JSON.stringify(sent));
+    assert.equal(posts.length, postsBefore + 1);
+    assert.equal(posts.at(-1)?.body.text, "an OASIS draft from before");
+  });
+
+  await check("a reply bound to generation G never posts with the token a reinstall stored at G+1: the token read is fenced on G, and the generation is checked again right before the post", async () => {
+    const generation = await alphaGeneration();
+    const { id } = await pendingSlackApproval("EvREINSTALL01");
+    const payload = approvalsStore.parsePayload((await approvalsStore.getApprovalInTenant(db, ALPHA, id))!);
+    const binding = { id: String(payload.connection_id), generation: Number(payload.connection_generation) };
+    assert.equal(binding.generation, generation);
+    /** The same Slack team installed again: its next generation, a new token stored, connected. */
+    const reinstall = async () => {
+      const claim = await connStore.claimConnection(db, {
+        tenantId: ALPHA,
+        provider: "slack",
+        authKind: "app_install",
+        scopeKind: "tenant",
+        userId: null,
+        externalAccountId: TEAM_A,
+        externalAccountLabel: `${TEAM_A} workspace`,
+        environment: null,
+        grantedScopes: [],
+        scopeSetVersion: 1,
+        connectedBy: null,
+        now: now(),
+      });
+      assert.ok(claim.ok && claim.connection.token_version === generation + 1, JSON.stringify(claim));
+      const saved = await tokens.saveBotTokenAt(db, { tenantId: ALPHA, connectionId: "conn-slack-a", generation: generation + 1, token: { bot_token: TOKEN_A2, bot_user_id: BOT_A }, now: now() });
+      assert.ok(saved.ok, JSON.stringify(saved));
+      await db.execute("UPDATE tenant_connections SET status = 'connected' WHERE id = 'conn-slack-a'");
+    };
+    /** `db`, with the reinstall landing just before the first statement matching `pattern`. */
+    const reinstallingAt = (pattern: RegExp) => {
+      let moved = false;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          if (prop === "execute") {
+            return async (stmt: Parameters<typeof db.execute>[0]) => {
+              const sql = (typeof stmt === "string" ? stmt : stmt.sql).trim();
+              if (!moved && pattern.test(sql)) {
+                moved = true;
+                await reinstall();
+              }
+              return target.execute(stmt);
+            };
+          }
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      return { db: racing as unknown as typeof db, moved: () => moved };
+    };
+    // The token read on its own: a reinstall between the generation check and the read hands over no token at all.
+    {
+      const racing = reinstallingAt(/LEFT JOIN tenant_integration_credentials/);
+      try {
+        const read = await send.slackTokenFor(racing.db, ALPHA, TEAM_A, binding);
+        assert.ok(racing.moved(), "the reinstall landed between the generation check and the token read");
+        assert.deepEqual([read.ok, (read as { reason?: string }).reason, (read as { token?: string }).token], [false, "slack_connection_changed", undefined]);
+      } finally {
+        await tokens.saveBotToken(ALPHA, "conn-slack-a", { bot_token: TOKEN_A, bot_user_id: BOT_A });
+        await restoreAlpha(generation);
+      }
+    }
+    for (const [step, pattern] of [
+      ["between the generation check and the token read", /LEFT JOIN tenant_integration_credentials/],
+      ["between the token read and the post", /^SELECT EXISTS \(SELECT 1 FROM tenant_connections/],
+    ] as const) {
+      const racing = reinstallingAt(pattern);
+      const moved = racing.moved;
+      const postsBefore = posts.length;
+      try {
+        const out = await send.postSlackReply(racing.db, {
+          tenantId: ALPHA,
+          teamId: TEAM_A,
+          channelId: "C0CLIENTS",
+          threadTs: "1727700000.000500",
+          text: "drafted under the earlier install",
+          department: "client_success",
+          approvalId: id,
+          connection: binding,
+        });
+        assert.ok(moved(), `${step}: the reinstall landed`);
+        assert.equal((await tokens.readBotToken(ALPHA, "conn-slack-a")).ok && (await tokens.readBotToken(ALPHA, "conn-slack-a") as { token: string }).token, TOKEN_A2, `${step}: the reinstall's token is the one stored now`);
+        assert.deepEqual([out.ok, (out as { reason?: string }).reason], [false, "slack_connection_changed"], `${step}: ${JSON.stringify(out)}`);
+        assert.equal(posts.length, postsBefore, `${step}: nothing posted, with either token`);
+      } finally {
+        await tokens.saveBotToken(ALPHA, "conn-slack-a", { bot_token: TOKEN_A, bot_user_id: BOT_A });
+        await restoreAlpha(generation);
+      }
+    }
   });
 
   // Anti-vacuity: the real network is still not reachable from here.

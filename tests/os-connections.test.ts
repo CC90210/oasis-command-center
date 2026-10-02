@@ -1326,6 +1326,49 @@ async function main() {
     assert.deepEqual([latest.check_source, latest.error_code], ["refresh", "refresh_failed"]);
   });
 
+  await check("a refusal that arrives after a reconnect claimed the connection records nothing over the reconnect; the caller is still told", async () => {
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    // The check above left it expired; a refresh only runs on a live connection.
+    await db.execute({ sql: "UPDATE tenant_connections SET status = 'connected' WHERE id = ? AND tenant_id = ?", args: [row.id, TENANT_A] });
+    await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "rotating-2", expires_at: Date.now() - 1000 });
+    const historyBefore = await historyCount(row.id);
+    let reconnect: Awaited<ReturnType<typeof store.claimConnection>> | null = null;
+    try {
+      await assert.rejects(
+        tokens.getAccessToken(db, {
+          tenantId: TENANT_A,
+          connectionId: row.id,
+          refresh: async () => {
+            // The owner reconnects the same account while the refresh is out.
+            reconnect = await store.claimConnection(db, {
+              tenantId: TENANT_A,
+              provider: "xero",
+              authKind: "oauth2",
+              scopeKind: "tenant",
+              userId: null,
+              externalAccountId: row.external_account_id ?? "",
+              externalAccountLabel: "Alpha books",
+              environment: null,
+              grantedScopes: ["offline_access"],
+              scopeSetVersion: 1,
+              connectedBy: USERS.ownerA.id,
+              now: new Date(),
+            });
+            throw new tokens.RefreshRefusedError({ oauthError: "invalid_grant" });
+          },
+        }),
+        (e: unknown) => (e as { code?: string }).code === "refresh_failed",
+      );
+      const claimed = reconnect as Awaited<ReturnType<typeof store.claimConnection>> | null;
+      assert.ok(claimed && claimed.ok, JSON.stringify(claimed));
+      const after = (await store.getConnection(db, TENANT_A, row.id))!;
+      assert.deepEqual([after.status, after.token_version], ["pending", claimed.connection.token_version], "the reconnect's claim stands, never expired by the older refresh");
+      assert.equal(await historyCount(row.id), historyBefore, "the older refresh wrote no health row over the reconnect");
+    } finally {
+      await db.execute({ sql: "UPDATE tenant_connections SET status = 'expired', refresh_lease_until = NULL WHERE id = ? AND tenant_id = ?", args: [row.id, TENANT_A] });
+    }
+  });
+
   // ── 12b. Review fixes (#472): budget, error hygiene, undo, races ─────────
 
   await check("[3] the health pass stops inside its budget, defers the rest (still due), and prunes first", async () => {
