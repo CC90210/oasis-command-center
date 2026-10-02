@@ -64,6 +64,23 @@ export type TwilioSenderRouteResult =
   | { ok: false; error: string };
 
 /**
+ * The sender a workspace holds NOW: its saved number and messaging service, or
+ * OASIS's deployment ones. The routing row is written from this, and the inbound
+ * resolver checks an indexed row against it before believing the row
+ * (lib/sms/twilio-inbound.ts), so the two can never disagree about ownership.
+ */
+export async function currentTwilioSender(
+  tenantId: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<{ ok: true; fromPhone: string | null; messagingServiceSid: string | null } | { ok: false; error: string }> {
+  const phone = await senderField(tenantId, "from_number", normalTwilioNumber, env);
+  if (!phone.ok) return phone;
+  const service = await senderField(tenantId, "messaging_service_sid", normalTwilioMessagingServiceSid, env);
+  if (!service.ok) return service;
+  return { ok: true, fromPhone: phone.value, messagingServiceSid: service.value };
+}
+
+/**
  * Make the workspace's routing row say what its saved sender says: active with
  * the number and/or messaging service, or inactive (and emptied) when neither
  * is saved any more.
@@ -74,15 +91,13 @@ export async function syncTwilioSenderRoute(
   opts: { now?: Date; env?: Readonly<Record<string, string | undefined>> } = {},
 ): Promise<TwilioSenderRouteResult> {
   if (!tenantId) return { ok: false, error: "tenant_missing" };
-  const env = opts.env ?? process.env;
-  const phone = await senderField(tenantId, "from_number", normalTwilioNumber, env);
-  if (!phone.ok) return phone;
-  const service = await senderField(tenantId, "messaging_service_sid", normalTwilioMessagingServiceSid, env);
-  if (!service.ok) return service;
+  const sender = await currentTwilioSender(tenantId, opts.env ?? process.env);
+  if (!sender.ok) return sender;
+  const { fromPhone, messagingServiceSid } = sender;
 
   const id = twilioSenderRouteId(tenantId);
   const at = (opts.now ?? new Date()).toISOString();
-  if (!phone.value && !service.value) {
+  if (!fromPhone && !messagingServiceSid) {
     await db.execute({
       sql: `UPDATE channel_accounts
                SET is_active = 0, from_phone = NULL, twilio_messaging_service_sid = NULL, updated_at = ?
@@ -103,10 +118,10 @@ export async function syncTwilioSenderRoute(
             is_active = 1,
             updated_at = excluded.updated_at
           WHERE channel_accounts.tenant_id = excluded.tenant_id`,
-    args: [id, tenantId, phone.value, service.value, at, at],
+    args: [id, tenantId, fromPhone, messagingServiceSid, at, at],
   });
   if (written.rowsAffected !== 1) return { ok: false, error: "route_row_not_written" };
-  return { ok: true, active: true, fromPhone: phone.value, messagingServiceSid: service.value };
+  return { ok: true, active: true, fromPhone, messagingServiceSid };
 }
 
 /**
