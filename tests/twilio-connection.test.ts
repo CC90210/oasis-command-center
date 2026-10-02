@@ -857,7 +857,7 @@ async function main() {
     }
   });
 
-  await check("the lookup is ONE index search by number or messaging service (bravo__201), reads no credential; before that migration it still routes", async () => {
+  await check("the lookup is ONE index search by number or messaging service (bravo__201), then only the owner's own sender, never the credential scan; before that migration it still routes", async () => {
     // Two copies of the routing rows written above, each on its own database
     // so a query plan never holds the shared file: one with bravo__201 applied,
     // one without it (a deploy and its migration are not atomic).
@@ -903,7 +903,9 @@ async function main() {
         assert.equal(found?.tenantId, owner, to);
         const lookups = seen.filter((s) => /channel_accounts/.test(s.sql));
         assert.equal(lookups.length, 1, `${to}: one read`);
-        assert.equal(seen.filter((s) => /tenant_integration_credentials/.test(s.sql)).length, 0, `${to}: no credential read or decrypted`);
+        // The owner's sender is confirmed through its own two reads
+        // (currentTwilioSender), never by scanning every workspace's credentials.
+        assert.equal(seen.filter((s) => /tenant_integration_credentials/.test(s.sql)).length, 0, `${to}: no credential scan`);
         const plan = (await after.execute({ sql: `EXPLAIN QUERY PLAN ${lookups[0].sql}`, args: lookups[0].args as never })).rows.map((r) => String(r.detail));
         assert.ok(plan.some((step) => /USING (COVERING )?INDEX/.test(step) && index.test(step)), `${to}: ${plan.join(" | ")}`);
         assert.ok(!plan.some((step) => /^SCAN channel_accounts\b/.test(step)), `${to}: ${plan.join(" | ")}`);
@@ -984,6 +986,41 @@ async function main() {
     assert.match(drawer, /<ServiceKeysForm[^>]*onChanged=\{onKeysChanged\}/, "the key form reports its saves through the revision");
     assert.match(drawer, /<TwilioWebhooksPanel[^>]*version=\{keysRevision\}/, "the panel reloads on the revision");
     assert.doesNotMatch(drawer, /version=\{status\?\.label\}/, "not on the status label");
+  });
+
+  // CodeRabbit on #520: a route row left active by a failed sync (the workspace
+  // removed the number, the row write failed) must not capture texts meant for
+  // the number's new owner. The row is believed only while that workspace's
+  // current sender (currentTwilioSender) agrees with it.
+  await check("a stale route row (its workspace no longer holds the number) loses to the number's current owner", async () => {
+    const shim = createTursoPostgrest(db);
+    const NUM = "+14165550199";
+    // BRAVO_CO's row claims NUM, but BRAVO_CO has no saved number: a failed sync.
+    await db.execute({
+      sql: "UPDATE channel_accounts SET is_active = 1, from_phone = ? WHERE tenant_id = ? AND provider = 'twilio'",
+      args: [NUM, BRAVO_CO],
+    });
+    // ECHO saves NUM, and its own routing row is then lost (another failed sync).
+    await login(USERS.ownerE);
+    const saved = await saveKey("from_number", NUM);
+    assert.equal(saved.status, 200, saved.text);
+    await db.execute({ sql: "DELETE FROM channel_accounts WHERE tenant_id = ? AND provider = 'twilio'", args: [ECHO] });
+    try {
+      assert.deepEqual(await routeOf(BRAVO_CO), [[NUM, null, 1]], "the stale row is the only active one");
+      assert.equal(
+        (await inbound.resolveTwilioInboundTenant(shim as never, NUM, {}))?.tenantId,
+        ECHO,
+        "the current owner, found by the credential scan, not the stale row",
+      );
+      // A row whose workspace does hold its number is still believed.
+      assert.equal((await inbound.resolveTwilioInboundTenant(shim as never, "+14165550101", {}))?.tenantId, ALPHA);
+    } finally {
+      await db.execute({
+        sql: "UPDATE channel_accounts SET is_active = 0, from_phone = NULL WHERE tenant_id = ? AND provider = 'twilio'",
+        args: [BRAVO_CO],
+      });
+      await removeKey("from_number");
+    }
   });
 
   globalThis.fetch = realFetch;
