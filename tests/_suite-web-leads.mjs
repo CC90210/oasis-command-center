@@ -137,6 +137,9 @@ const TESTS = [
   // Booking from the call screen: lapsed claims refused; do-not-call booked
   // only on the rep's "owner asked" confirmation (book-the-meet plan, Task 4).
   "tests/book-meet-route.test.ts",
+  // What the call-screen booking panel reads first; "may book" must agree
+  // with the booking route (book-the-meet plan, Task 5).
+  "tests/web-leads-booking-context-route.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
