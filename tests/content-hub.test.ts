@@ -36,8 +36,29 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import * as ReactNS from "react";
+import ts from "typescript";
 
 const root = join(__dirname, "..");
+
+/**
+ * Every piece of text a file can put on the screen: JSX text, string literals
+ * and template-literal parts, parsed (so a comment is never mistaken for copy,
+ * nor copy for a comment). A console.* call is skipped: it writes the server
+ * log, never the page.
+ */
+function screenText(file: string, src: string): string[] {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression) && n.expression.expression.text === "console") return;
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isJsxText(n)) {
+      out.push(n.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
 const code = (rel: string) => readFileSync(join(root, rel), "utf8");
 /** Code only: a comment may say what the hub used to be called, or what colour it is not. */
 const stripped = (file: string) => code(file).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
@@ -306,13 +327,27 @@ async function main() {
   });
 
   await check("no Content page puts a log tag or 'server log' on the screen; a failure says it plainly and that the cause is logged for the OASIS team", () => {
-    const files = walkFiles(join(root, "app/founders/marketing")).map(rel).filter((f) => /\.tsx?$/.test(f));
-    assert.ok(files.length >= 6, `walked the Content pages: ${files.length}`);
     const TAG = /\[(marketing|founders|safe)[:.][^\]]*\]|server log/i;
+    // The scan reads what renders, not lines: copy that starts with * or //
+    // is still copy, and a comment naming a log tag is still a comment.
+    const fixture = [
+      "// [marketing:assets] is where the server logs this",
+      "/* the server log has it */",
+      'export default function P() { console.warn("[marketing:x] server log line"); return (',
+      "  <p>",
+      "    * See the server log under [marketing:assets]",
+      "  </p>",
+      "); }",
+      "const t = `line one",
+      "// [founders:performance] in a template literal`;",
+    ].join("\n");
+    const seen = screenText("fixture.tsx", fixture).filter((s) => TAG.test(s));
+    assert.equal(seen.length, 2, `the JSX text and the template literal are caught, the comments and the console call are not: ${JSON.stringify(seen)}`);
+
+    const files = walkFiles(join(root, "app/founders/marketing")).map(rel);
+    assert.ok(files.length >= 6, `walked the Content pages: ${files.length}`);
     for (const f of files) {
-      // Code, not comments: a comment may name the tag the server logs under.
-      const lines = code(f).split(/\r?\n/).filter((l) => !/^\s*(\/\/|\/?\*)/.test(l));
-      for (const l of lines) assert.doesNotMatch(l, TAG, `${f}: ${l.trim().slice(0, 160)}`);
+      for (const s of screenText(f, code(f))) assert.doesNotMatch(s, TAG, `${f}: ${s.trim().slice(0, 160)}`);
     }
   });
 
