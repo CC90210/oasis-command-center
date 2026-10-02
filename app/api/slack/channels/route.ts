@@ -57,7 +57,8 @@ async function slackContext(tenantId: string, db: Parameters<typeof findActiveCo
  * (lib/slack/routing.ts answeringDepartments): the leads its manifest binds,
  * the same roster the web channels read. A manifest read that fails throws
  * (routeFailure answers it), never "<Department> has no AI teammate" for a
- * department that has one (W4a review R3).
+ * department that has one (W4a review R3). So does a manifest slug that did
+ * not resolve: resolveOwnedSlug answers a read that failed with null (W4a D1).
  */
 async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection>[0], tenantId: string): Promise<DepartmentKey[]> {
   const rs = await db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
@@ -65,7 +66,8 @@ async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection
   const slug = row?.slug ? String(row.slug) : "";
   if (!slug) throw new Error("api.slack.channels: the workspace's slug could not be read");
   const manifestSlug = await resolveOwnedSlug(tenantId);
-  const manifest = manifestSlug ? await getWorkspaceManifest(tenantId, manifestSlug) : null;
+  if (!manifestSlug) throw new Error("api.slack.channels: the workspace's manifest slug could not be read");
+  const manifest = await getWorkspaceManifest(tenantId, manifestSlug);
   return answeringDepartments({ oasis: isOasisSurfaceTenant(slug), manifest });
 }
 

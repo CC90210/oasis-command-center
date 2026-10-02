@@ -217,13 +217,14 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   if (!tenant?.slug) throw new Error("slack.jobs: the workspace could not be read");
   const oasis = isOasisSurfaceTenant(tenant.slug);
   // Who leads each department: the workspace's manifest, read the way the web
-  // channel reads it (config.ts departmentChannelFor). No manifest slug means
-  // no roster, so nothing answers here (and OASIS keeps its static leads). A
-  // read that fails THROWS, so the job is retried: a database that did not
-  // answer is never posted into the client's Slack as "<Department> is not
-  // set up" (W4a review R3).
+  // channel reads it (config.ts departmentChannelFor). A read that fails
+  // THROWS, so the job is retried: a database that did not answer is never
+  // posted into the client's Slack as "<Department> is not set up" (W4a
+  // review R3). The slug too: resolveOwnedSlug answers a read that failed
+  // with null, so no slug is a retry, never an empty roster (W4a D1).
   const tenantSlug = ((await resolveOwnedSlug(job.tenantId)) || "").toLowerCase();
-  const scope = { oasis, manifest: tenantSlug ? await getWorkspaceManifest(job.tenantId, tenantSlug) : null };
+  if (!tenantSlug) throw new Error("slack.jobs: the workspace has no manifest slug");
+  const scope = { oasis, manifest: await getWorkspaceManifest(job.tenantId, tenantSlug) };
 
   const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment, defaultDepartment: defaultMentionDepartment(scope) });
   const dept = OS_DEPARTMENTS.find((d) => d.key === picked.department);
@@ -242,7 +243,6 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   if (binding.kind !== "agent") {
     return notice(deps, job, "department_not_set_up", `${label} is not set up in this workspace yet, so it cannot draft a reply.`);
   }
-  if (!tenantSlug) throw new Error("slack.jobs: the workspace has no manifest slug");
 
   // The platform key bills OASIS: only when the person who @mentioned is the
   // verified platform operator (their Slack email linked to that teammate).

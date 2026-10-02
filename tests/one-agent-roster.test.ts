@@ -97,6 +97,18 @@ stub("next/link", {
   default: ({ href, children, ...rest }: { href: string; children?: unknown }) =>
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
+// resolveOwnedSlug swallows both of its reads and answers a failed one with
+// null (lib/manifest/tenant-scope.ts). Section 9 sets this to make it answer
+// that null; every other check gets the real function.
+let ownedSlugReadFails = false;
+{
+  const real = require("../lib/manifest/tenant-scope") as typeof import("../lib/manifest/tenant-scope");
+  stub("../lib/manifest/tenant-scope", {
+    __esModule: true,
+    ...real,
+    resolveOwnedSlug: async (tenantId: string | null) => (ownedSlugReadFails ? null : real.resolveOwnedSlug(tenantId)),
+  });
+}
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
@@ -751,6 +763,110 @@ async function main() {
     const client = await offered(USERS.owner);
     assert.ok(client.includes("sdr"), `the client's own lead is not offered: ${client.join(", ")}`);
     assert.ok(!client.some((k) => isHouseAgentSlug(k)), `a client is offered a house agent: ${client.join(", ")}`);
+  });
+
+  // ── 9. A workspace slug that cannot be read is a retry, never "not set up" ──
+  // Verifier D1: resolveOwnedSlug answers a read that failed with null. The
+  // Slack job and the channel map read that null as "no roster": a client's
+  // mention was told "<Department> is not set up", and a channel mapping was
+  // refused "no AI teammate", for departments that have one.
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__187_os_connections.sql"), "utf8"));
+  await db.executeMultiple(`
+    CREATE TABLE approvals (id TEXT PRIMARY KEY, tenant_id TEXT, idempotency_key TEXT);
+    CREATE TABLE "tenant_integration_credentials" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+      "tenant_id" TEXT NOT NULL, "service" TEXT NOT NULL, "field_key" TEXT NOT NULL,
+      "encrypted_value" TEXT NOT NULL, "last_tested_at" TEXT, "last_test_ok" INTEGER, "last_test_error" TEXT,
+      "created_by" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("id"));
+  `);
+  // The client's Slack is connected; no bot token is stored, so nothing can be posted.
+  await db.batch(
+    [
+      {
+        sql: `INSERT INTO tenant_connections (id, tenant_id, provider, scope_kind, auth_kind, external_account_id, external_account_label,
+                status, last_health_verdict, last_health_at, connected_at, created_at, updated_at)
+              VALUES ('conn-slack-client', ?, 'slack', 'tenant', 'app_install', 'T0CLIENT', 'Client Co', 'connected', 'healthy', ?, ?, ?, ?)`,
+        args: [CLIENT, stamp, stamp, stamp, stamp],
+      },
+      {
+        sql: `INSERT INTO provider_webhook_routes (id, tenant_id, provider, external_key, connection_id, created_at)
+              VALUES ('route-slack-client', ?, 'slack', 'T0CLIENT', 'conn-slack-client', ?)`,
+        args: [CLIENT, stamp],
+      },
+    ],
+    "write",
+  );
+  const jobs = await import("../lib/slack/jobs");
+  const channelsRoute = await import("../app/api/slack/channels/route");
+  const mention = {
+    v: 1 as const,
+    kind: "mention" as const,
+    tenantId: CLIENT,
+    teamId: "T0CLIENT",
+    channelId: "C0CLIENTS",
+    channelName: "clients",
+    threadTs: "1727700000.000100",
+    eventId: "EvSLUGREAD1",
+    slackUserId: "UCLIENT1",
+    profileId: null,
+    authorName: "Riley",
+    text: "<@UBOTCLIENT> Client Success, draft a reply to Acme",
+    channelDepartment: null,
+    customerId: null,
+  };
+  let prepared = 0;
+  const jobDeps = {
+    db,
+    now: () => new Date(),
+    prepare: (async () => {
+      prepared += 1;
+      return { ok: false, status: 500, error: "should_not_run" };
+    }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+  };
+  await check("a Slack mention whose workspace slug cannot be read is retried (the job throws): no 'not set up' notice, no model call", async () => {
+    let out: { value?: unknown; error?: unknown };
+    ownedSlugReadFails = true;
+    try {
+      out = await jobs.runSlackMentionJob(mention, jobDeps).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+    } finally {
+      ownedSlugReadFails = false;
+    }
+    assert.ok(out.error instanceof Error, `the job answered instead of being retried: ${JSON.stringify(out.value)}`);
+    assert.match(out.error.message, /no manifest slug/);
+    assert.equal(prepared, 0, "a turn was prepared on a roster nobody could read");
+    // The same mention with the slug readable reaches the Client Success lead's turn.
+    const readable = await jobs.runSlackMentionJob({ ...mention, eventId: "EvSLUGREAD2" }, jobDeps);
+    assert.equal(prepared, 1, `the readable mention never reached its lead: ${JSON.stringify(readable)}`);
+  });
+  await check("mapping a Slack channel when the workspace slug cannot be read answers 500, never 'no AI teammate'", async () => {
+    await login(USERS.owner);
+    const put = () =>
+      channelsRoute.PUT(
+        new NextRequest("http://localhost/api/slack/channels", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ channel_id: "C0SALES1", department: "sales" }),
+        }),
+      );
+    let res: Response;
+    ownedSlugReadFails = true;
+    try {
+      res = await put();
+    } finally {
+      ownedSlugReadFails = false;
+    }
+    const body = (await res.json()) as { error?: string };
+    assert.equal(res.status, 500, JSON.stringify(body));
+    assert.notEqual(body.error, "department_not_set_up");
+    // With the slug readable, Sales (the client's own lead) passes the department check.
+    const readable = (await (await put()).json()) as { error?: string };
+    assert.notEqual(readable.error, "department_not_set_up", JSON.stringify(readable));
   });
 
   if (failures > 0) {
