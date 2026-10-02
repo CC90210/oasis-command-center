@@ -17,13 +17,17 @@
  * Replaying a job is harmless anyway: one approval per Slack event
  * (lib/slack/jobs.ts), whatever runs it.
  */
+import { OAUTH_STATE_SECRET_MIN_LENGTH } from "../connections/rules";
+
 export const JOB_SIGNATURE_HEADER = "x-oasis-slack-job-signature";
 export const JOB_TIMESTAMP_HEADER = "x-oasis-slack-job-timestamp";
 export const JOB_SIGNATURE_MAX_AGE_SEC = 24 * 60 * 60;
 /** Domain label for deriving the job key; changing it invalidates queued jobs (they retry, then dead-letter). */
 const JOB_KEY_LABEL = "oasis-slack-job-key.v1";
-/** The same floor the OAuth state secret holds itself to (lib/connections/oauth.ts). */
-const MIN_ROOT_SECRET_LENGTH = 32;
+// The one floor for this root secret, shared with the OAuth state signer. A
+// relative import: this file also runs in the Worker entry, outside Next, and
+// rules.ts imports nothing.
+const MIN_ROOT_SECRET_LENGTH = OAUTH_STATE_SECRET_MIN_LENGTH;
 
 function hex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");

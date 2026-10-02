@@ -109,6 +109,12 @@ export const HEALTH_RECHECK_AFTER_MS = 50 * MIN;
 export const HEALTH_CHECK_RETENTION_MS = 30 * 24 * HOUR;
 /** How long a started OAuth consent may take before its state expires. */
 export const OAUTH_STATE_TTL_MS = 10 * MIN;
+/**
+ * The shortest CONNECTIONS_OAUTH_STATE_SECRET anything accepts: the OAuth state
+ * signer (lib/connections/oauth.ts) and the Slack job key derived from it
+ * (lib/slack/job-signature.ts) refuse a shorter one.
+ */
+export const OAUTH_STATE_SECRET_MIN_LENGTH = 32;
 /** oauth_states rows older than this are deleted by the cron. */
 export const OAUTH_STATE_RETENTION_MS = 24 * HOUR;
 /**
