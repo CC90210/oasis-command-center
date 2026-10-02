@@ -86,7 +86,21 @@ async function main() {
   const base = { bridgeOnline: true, canManageTeam: true, canInstallBridge: false };
   const card = (frame: El, provider: string) => find(frame, `the ${provider} card`, (el) => el.key === provider);
 
+  // A CLIENT owner (not the platform operator: no bridge install offered).
+  const client = { bridgeOnline: false, canManageTeam: true, canInstallBridge: false };
   const out: Record<string, string> = {
+    // A client owner with nothing connected (the no-provider notice shows too),
+    // and one whose account is on Anthropic.
+    clientEmpty: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, { ...client, connectedServices: new Set<string>(), personalServices: new Set<string>() }),
+    ),
+    clientAnthropic: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, { ...client, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() }),
+    ),
+    // The verified operator, account on Anthropic: the tool_use badge is his.
+    operatorAnthropic: renderToStaticMarkup(
+      React.createElement(ProviderAccountsCard, { ...client, canInstallBridge: true, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() }),
+    ),
     // Only the owner's own key is on Anthropic: department chats don't use it.
     personalOnly: renderToStaticMarkup(
       React.createElement(ProviderAccountsCard, { ...base, connectedServices: new Set<string>(), personalServices: new Set(["anthropic"]) }),

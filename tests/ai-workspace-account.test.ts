@@ -613,7 +613,7 @@ async function main() {
     const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
     const personal = plain(html.personalOnly);
     assert.match(personal, /Your personal key/);
-    assert.match(personal, /Only your own chats use this key\. Department chats and Slack mentions don't: connect it for the whole team so they can\./);
+    assert.match(personal, /This key is saved for you only\. Department chats and Slack mentions don't use it: connect it for the whole team so they can\./);
     assert.match(personal, /Remove my key/);
     assert.equal(count(personal, /Connected/g), 0, "a personal key read Connected");
     assert.match(personal, /Cloud: no provider connected/);
@@ -627,6 +627,18 @@ async function main() {
       assert.equal(count(after, /Your personal key/g), 1, `${key}: Google is the owner's own key`);
       assert.match(after, /Cloud: no provider connected/, `${key}: a "Just me" key turned the card Connected`);
     }
+    // A client owner's card names no vendor tool and promises no tools its
+    // department chats lack: it says what the account does.
+    for (const key of ["clientEmpty", "clientAnthropic"]) {
+      const page = plain(html[key]);
+      assert.match(page, /Paste a key once\. Your teammates answer every department chat and Slack mention with the team-wide account\./, key);
+      assert.doesNotMatch(page, /Claude[- ]?Code/i, `${key}: a vendor tool name on a client's card`);
+      assert.doesNotMatch(page, /tool_use|Claude-Code-class|http_get|record reads/i, `${key}: a tool promise on a client's card`);
+    }
+    assert.match(plain(html.clientEmpty), /No provider wired yet/, "the client's no-provider notice was drawn (and scanned)");
+    assert.match(plain(html.clientAnthropic), /Connected/, "the client's connected card was drawn (and scanned)");
+    // The operator's own chat runs the tool loop on an Anthropic key: his badge stays.
+    assert.match(plain(html.operatorAnthropic), /tool_use/);
   });
   await check("a failed key read is Couldn't check everywhere, never not connected", async () => {
     await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_offline");

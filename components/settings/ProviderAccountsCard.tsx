@@ -21,9 +21,10 @@
  * every enabled chat agent in the tenant. No per-agent paste dance, no
  * navigating to /settings#agents to do it five times.
  *
- * Anthropic gets the "Powers tool_use loop" badge — pasting an Anthropic
- * key flips the cloud-mode chat to the native tool_use protocol (real
- * Claude-Code-class capability), not just the legacy text-marker pipe.
+ * For the verified operator only, Anthropic gets the "tool_use" badge: an
+ * Anthropic key flips the operator's own cloud chat to the native tool_use
+ * protocol. A client's department chats have no tools, so a client never sees
+ * that badge or any vendor tool name on this card.
  */
 
 import { useState } from "react";
@@ -133,15 +134,12 @@ export function ProviderAccountsCard({
             <div className="text-sm font-bold text-fg">
               Connect an AI provider account
             </div>
+            {/* What the account does, in the product's words: no vendor tool
+                names (it used to promise "Claude-Code-class capability" to
+                client owners whose chats have no tools). */}
             <p className="text-xs text-fg-muted mt-1 leading-relaxed">
-              Paste a key once and choose whether it powers the whole team
-              or just your own chats. Different agents can use different
-              providers under Agents below.{" "}
-              <span className="text-accent">
-                Connecting Anthropic unlocks the native tool_use loop
-              </span>
-              {" "}— record reads/writes, http_get/post, integration lookups
-              — full Claude-Code-class capability from the cloud.
+              Paste a key once. Your teammates answer every department chat
+              and Slack mention with the team-wide account.
             </p>
           </div>
         </div>
@@ -195,7 +193,10 @@ export function ProviderAccountsCard({
                 <div className="min-w-0">
                   <div className="text-sm font-bold text-fg flex items-center gap-2">
                     {reg.label}
-                    {isAnthropic && (
+                    {/* Only the operator's own chat runs the native tool loop
+                        on an Anthropic key; a client's department chats have
+                        no tools, so the badge would promise what they lack. */}
+                    {isAnthropic && canInstallBridge && (
                       <span className="text-[9px] uppercase tracking-wider text-accent border border-accent/40 rounded-full px-1.5 py-0.5">
                         tool_use
                       </span>
@@ -238,7 +239,7 @@ export function ProviderAccountsCard({
               )}
               {personalOnly && (
                 <p className="text-[11px] text-fg-muted leading-relaxed mb-3">
-                  Only your own chats use this key. Department chats and Slack mentions don&apos;t:{" "}
+                  This key is saved for you only. Department chats and Slack mentions don&apos;t use it:{" "}
                   {canManageTeam
                     ? "connect it for the whole team so they can."
                     : "an owner or admin can connect one for the whole team."}
@@ -491,7 +492,7 @@ function ConnectProviderDialog({
             <p className="text-xs text-fg-muted mt-0.5">
               {scope === "tenant"
                 ? "Every department chat and Slack mention will use this key. We test it with one short message before saving."
-                : "Only your own chats will use this key; department chats won't. We test it with one short message before saving."}
+                : "Saved for you only: department chats and Slack mentions won't use it. We test it with one short message before saving."}
             </p>
           </div>
           <button
@@ -701,7 +702,7 @@ function DisconnectButton({
   async function go() {
     const question =
       scope === "user"
-        ? `Remove your personal ${provider} key?\n\nOnly your own chats used it. Department chats and Slack mentions are not affected.`
+        ? `Remove your personal ${provider} key?\n\nIt was saved for you only. Department chats and Slack mentions are not affected.`
         : `Disconnect ${provider}?\n\n` +
           `• The encrypted API key is wiped from every agent that uses ${provider}.\n` +
           `• Any per-agent custom system prompts on those agents are also wiped (the row is removed).\n` +
