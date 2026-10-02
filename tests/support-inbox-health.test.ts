@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
+import type { Client, InStatement } from "@libsql/client";
 import {
   DESK_TENANT,
   ENV,
@@ -91,7 +92,7 @@ async function main() {
   const db = await setupSupportDatabase();
   const health = await import("../lib/delivery/support-inbox-health");
   const intake = await import("../lib/delivery/email-intake");
-  const { runSlaCheck } = await import("../lib/delivery/sla-cron");
+  const { runSlaCheck, slaRunOk } = await import("../lib/delivery/sla-cron");
 
   const beat = async (at: Date, over: Record<string, unknown> = {}) => {
     const body = { mailbox: MAILBOX, producer: "bea", phase: "ingest", ok: true, error_code: null, at: at.toISOString(), last_ok_at: null, consecutive_failures: 0, counts: { found: 2, ingested: 2 }, ...over };
@@ -193,6 +194,35 @@ async function main() {
     const r = await runSlaCheck(db, n.deps, at(165));
     assert.deepEqual(r.support_inbox.alerted, [MAILBOX]);
     assert.equal(typeof r.support_inbox.purged, "number");
+    assert.deepEqual(r.support_inbox.errors, []);
+    assert.equal(slaRunOk(r), true);
+  });
+
+  await check("a support inbox step that throws keeps the rest of the SLA pass, lets the other step run, and fails the run", async () => {
+    const failingAt = (pattern: RegExp) =>
+      new Proxy(db, {
+        get(target, prop) {
+          if (prop === "execute") {
+            return async (stmt: InStatement | string, args?: unknown) => {
+              if (pattern.test(typeof stmt === "string" ? stmt : stmt.sql)) throw new Error("disk I/O error");
+              return args === undefined ? target.execute(stmt as InStatement) : target.execute(stmt as string, args as never);
+            };
+          }
+          const v = Reflect.get(target, prop, target);
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      }) as Client;
+    const n = fakeNotify();
+    const staleFails = await runSlaCheck(failingAt(/FROM support_mailbox_status/), n.deps, at(170));
+    assert.deepEqual(staleFails.support_inbox.errors, ["stale_check: disk I/O error"]);
+    assert.equal(typeof staleFails.support_inbox.purged, "number", "the purge still ran");
+    assert.ok(Array.isArray(staleFails.alert_failures) && staleFails.reconcile, "the breach pass and reconcile results are kept");
+    assert.equal(slaRunOk(staleFails), false);
+    const purgeFails = await runSlaCheck(failingAt(/DELETE FROM support_email_messages/), n.deps, at(171));
+    assert.deepEqual(purgeFails.support_inbox.errors, ["purge: disk I/O error"]);
+    assert.equal(purgeFails.support_inbox.purged, 0);
+    assert.equal(typeof purgeFails.support_inbox.checked, "number", "the stale check still ran");
+    assert.equal(slaRunOk(purgeFails), false);
   });
 
   await check("a replayed or late heartbeat never overwrites a newer one: answered 200 ok, recorded false, nothing changed", async () => {

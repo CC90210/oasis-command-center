@@ -48,9 +48,18 @@ export type SlaCheckResult = {
   flagged_without_lane: number;
   alert_failures: Array<{ ticket_id: string; status: string | null; error?: string }>;
   reconcile: Awaited<ReturnType<typeof reconcileSupportIntake>>;
-  /** support@: stale-read alerts this pass, and non-ticket mail forgotten. */
-  support_inbox: StaleAlertResult & { purged: number };
+  /** support@: stale-read alerts this pass, non-ticket mail forgotten, and a step that threw. */
+  support_inbox: StaleAlertResult & { purged: number; errors: string[] };
 };
+
+/** A run is green only when every breach alert went out and both support inbox steps ran. */
+export function slaRunOk(r: Pick<SlaCheckResult, "alert_failures" | "support_inbox">): boolean {
+  return r.alert_failures.length === 0 && r.support_inbox.errors.length === 0;
+}
+
+function thrown(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 200);
+}
 
 export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Promise<SlaCheckResult> {
   const desks = [OASIS_DESK, ...(await listRegisteredDesks(db))];
@@ -86,8 +95,24 @@ export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Prom
     }
   }
   const reconcile = await reconcileSupportIntake(db, deps, now);
-  const stale = await alertStaleSupportInboxes(db, deps, now);
-  const purged = await purgeOldNonTicketMessages(db, now);
+  // The support inbox steps run apart from the pass above and from each other:
+  // one that throws is logged and reported (it fails the run, slaRunOk), and
+  // never costs the breach alerts and reconcile already done, or the other step.
+  const errors: string[] = [];
+  let stale: StaleAlertResult = { checked: 0, alerted: [], failures: [] };
+  try {
+    stale = await alertStaleSupportInboxes(db, deps, now);
+  } catch (err) {
+    console.error("[delivery.sla_cron] support inbox stale check threw", err instanceof Error ? err.stack : err);
+    errors.push(`stale_check: ${thrown(err)}`);
+  }
+  let purged = 0;
+  try {
+    purged = await purgeOldNonTicketMessages(db, now);
+  } catch (err) {
+    console.error("[delivery.sla_cron] support inbox purge threw", err instanceof Error ? err.stack : err);
+    errors.push(`purge: ${thrown(err)}`);
+  }
   return {
     desks: desks.length,
     flagged,
@@ -96,6 +121,6 @@ export async function runSlaCheck(db: Client, deps: NotifyDeps, now: Date): Prom
     flagged_without_lane: flaggedWithoutLane,
     alert_failures,
     reconcile,
-    support_inbox: { ...stale, purged },
+    support_inbox: { ...stale, purged, errors },
   };
 }
