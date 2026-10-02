@@ -30,7 +30,47 @@
  * worthless unless the guard is real; that is the whole lesson here.)
  */
 
-import { getBrand, resolveBrandKeyOrNull, type BrandKey } from "./brands";
+import { ALL_BRAND_KEYS, getBrand, resolveBrandKeyOrNull, type BrandKey } from "./brands";
+import type { TenantSenderState } from "./tenant-sender";
+
+/**
+ * A client workspace's OWN sending identity (Settings > Brand, stored by
+ * lib/email/tenant-sender.ts), as a brand a send path can use.
+ *
+ * Not a BrandKey, and not in lib/email/brands.ts, deliberately. That registry
+ * is the fixed identities of OASIS and its one-time client, mirrored in
+ * Business-Empire-Agent, and it must carry no tenant
+ * (tests/brand-suppression-invariants.test.ts). A workspace's own identity is
+ * data its owner enters, bound to exactly one tenant, and it can never borrow
+ * anything from those entries. Only brandForTenant below builds one, and only
+ * after the from address passed the live mailbox check; `kind` is how a sender
+ * tells the two apart.
+ *
+ * No counterpart in scripts/lib/tenant_brand.py, on purpose: OASIS's own send
+ * pipeline never carries a client's mail, so it keeps refusing every tenant
+ * outside its maps. The maps themselves are unchanged and still compared.
+ */
+export type TenantBrand = {
+  kind: "tenant";
+  /** The one workspace this identity belongs to. A send for any other must refuse it. */
+  tenantId: string;
+  /** Shown in front of the From address. */
+  displayName: string;
+  /** The legal entity named in the footer (CASL s.6(2), CAN-SPAM). */
+  legalName: string;
+  /** Physical postal address, one line. Required (decision D11). */
+  postalAddress: string;
+  fromAddress: string;
+  replyTo: string | null;
+  /** The domain of fromAddress: the only domain this brand may send from. */
+  sendingDomain: string;
+  /** Which proof made fromAddress count: the workspace mailbox, or a member's own Google account. */
+  verifiedVia: "gws" | "gmail_oauth";
+};
+
+export function isTenantBrand(value: unknown): value is TenantBrand {
+  return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "tenant";
+}
 
 /**
  * tenant_id (UUID) -> brand. Verified against the live `tenants` table
@@ -85,11 +125,31 @@ export const BRAND_COMPANY: Readonly<Record<BrandKey, "oasis" | "sunbiz">> = {
  * null means "refuse to send commercial mail", never "use the default". A
  * caller that turns null into a brand reintroduces the defect this module
  * exists to remove.
+ *
+ * A CLIENT WORKSPACE'S OWN IDENTITY (2026-10-02). The map above names only
+ * OASIS's and SunBiz's tenants, so every other workspace was refused on every
+ * send path, with no way to fix it. A caller that also passes `sender` (what
+ * lib/email/tenant-sender.ts loadTenantSender answered for this tenant) gets
+ * that workspace's own TenantBrand, but only AFTER the map, only for a tenant
+ * id the map does not know, and only when the from address passed the live
+ * mailbox check. Anything short of that is null, exactly as before. Without
+ * `sender` this answers what it always did, so no existing caller changes.
  */
 export function brandForTenant(args: {
   tenantId?: string | null;
   tenantSlug?: string | null;
-}): BrandKey | null {
+  sender?: undefined;
+}): BrandKey | null;
+export function brandForTenant(args: {
+  tenantId?: string | null;
+  tenantSlug?: string | null;
+  sender: TenantSenderState | null | undefined;
+}): BrandKey | TenantBrand | null;
+export function brandForTenant(args: {
+  tenantId?: string | null;
+  tenantSlug?: string | null;
+  sender?: TenantSenderState | null;
+}): BrandKey | TenantBrand | null {
   const id = String(args.tenantId ?? "").trim().toLowerCase();
   const slug = String(args.tenantSlug ?? "").trim().toLowerCase();
 
@@ -116,7 +176,12 @@ export function brandForTenant(args: {
     : undefined;
 
   if (id) {
-    if (!ownId) return null;
+    if (!ownId) {
+      // A slug the map knows beside an id it does not is a disagreement, and
+      // refused; a workspace's own row cannot settle it.
+      if (slug && ownSlug) return null;
+      return args.sender ? tenantBrandFor(id, args.sender) : null;
+    }
     // If a slug was ALSO supplied and disagrees, refuse rather than pick one.
     if (slug && ownSlug && ownSlug !== ownId) return null;
     return ownId;
@@ -124,6 +189,61 @@ export function brandForTenant(args: {
 
   if (slug) return ownSlug ?? null;
   return null;
+}
+
+/**
+ * The sending domains of the fixed brands (oasisai.work, the retired client's
+ * two). A workspace's own identity may not send from one of them or a
+ * subdomain: that would put one company's name on another company's domain,
+ * the two-companies-in-one-message defect this module exists to remove.
+ */
+export function isReservedSendingDomain(domain: string | null | undefined): boolean {
+  const d = String(domain ?? "").trim().toLowerCase();
+  if (!d) return false;
+  return ALL_BRAND_KEYS.some((key) => {
+    const reserved = getBrand(key).sendingDomain.trim().toLowerCase();
+    return d === reserved || d.endsWith("." + reserved);
+  });
+}
+
+/**
+ * A workspace's own brand, from what loadTenantSender answered, or null.
+ *
+ * Every condition fails closed. The row must be THIS tenant's; the live check
+ * must have verified exactly the from address it names; the from address must
+ * be on the stored sending domain (DKIM alignment) and not on a fixed brand's
+ * domain; and the legal name and postal address must be there, because a
+ * commercial email may not go out without them (CASL s.6(2), CAN-SPAM;
+ * decision D11 made the address required).
+ */
+function tenantBrandFor(id: string, lookup: TenantSenderState): TenantBrand | null {
+  if (lookup.state !== "saved") return null;
+  const check = lookup.verification;
+  if (!check.verified) return null;
+  const row = lookup.sender;
+  if (String(row.tenant_id ?? "").trim().toLowerCase() !== id) return null;
+  const from = String(row.from_address ?? "").trim().toLowerCase();
+  const at = from.lastIndexOf("@");
+  if (at <= 0 || from.indexOf("@") !== at) return null;
+  if (String(check.mailbox ?? "").trim().toLowerCase() !== from) return null;
+  const domain = from.slice(at + 1);
+  if (!domain.includes(".") || domain !== String(row.sending_domain ?? "").trim().toLowerCase()) return null;
+  if (isReservedSendingDomain(domain)) return null;
+  const displayName = String(row.display_name ?? "").trim();
+  const legalName = String(row.legal_name ?? "").trim();
+  const postalAddress = String(row.postal_address ?? "").trim();
+  if (!displayName || !legalName || !postalAddress) return null;
+  return {
+    kind: "tenant",
+    tenantId: id,
+    displayName,
+    legalName,
+    postalAddress,
+    fromAddress: from,
+    replyTo: String(row.reply_to ?? "").trim().toLowerCase() || null,
+    sendingDomain: domain,
+    verifiedVia: check.via,
+  };
 }
 
 /**
@@ -144,9 +264,13 @@ export function brandForTenant(args: {
  *
  * A subdomain of the sending domain is legitimate (mail.oasisai.work). A
  * lookalike that merely ends with the same text (notoasisai.work) is not.
+ *
+ * A workspace's own brand (TenantBrand) is held to ITS sending domain the same
+ * way: a member's own mailbox on that domain may send under it, a mailbox on
+ * any other domain may not.
  */
-export function mailboxBrandConflict(brand: BrandKey, mailbox: string | null | undefined): string | null {
-  const expected = getBrand(brand).sendingDomain.trim().toLowerCase();
+export function mailboxBrandConflict(brand: BrandKey | TenantBrand, mailbox: string | null | undefined): string | null {
+  const expected = (isTenantBrand(brand) ? brand.sendingDomain : getBrand(brand).sendingDomain).trim().toLowerCase();
   if (!expected) return null;
 
   let addr = String(mailbox ?? "").trim().toLowerCase();
@@ -157,8 +281,9 @@ export function mailboxBrandConflict(brand: BrandKey, mailbox: string | null | u
 
   const got = addr.slice(addr.lastIndexOf("@") + 1).trim();
   if (got === expected || got.endsWith("." + expected)) return null;
+  const label = isTenantBrand(brand) ? `workspace ${brand.tenantId}` : brand;
   return (
-    `brand "${brand}" must send from ${expected}, but the authenticating mailbox ` +
+    `brand "${label}" must send from ${expected}, but the authenticating mailbox ` +
     `is ${addr} (domain ${got})`
   );
 }

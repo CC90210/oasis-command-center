@@ -27,7 +27,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ALL_BRAND_KEYS, getBrand, type BrandKey } from "../lib/email/brands";
-import { appendSignatureAndFooter } from "../lib/config/email-signature";
+import { appendSignatureAndFooter, oasisSupportFooter, SUNBIZ_LEGAL_FOOTER } from "../lib/config/email-signature";
 import { BRAND_COMPANY, TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict, mailboxBrandConflict } from "../lib/email/brand-for-tenant";
 
 // ---------------------------------------------------------------------------
@@ -383,6 +383,84 @@ assert.equal(
         "OASIS's address contains SunBiz's street",
       );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. A client workspace's OWN identity (email-sender-identity, 2026-10-02).
+//
+// brandForTenant can now answer a workspace's own registered identity (a
+// TenantBrand) for a tenant the maps above do not know. None of that may move
+// OASIS or SunBiz by a byte: their footers are pinned here exactly as they
+// read before the change, and a stored row naming one of their tenants is
+// ignored. And a workspace's brand is held to the same one-company rule.
+// ---------------------------------------------------------------------------
+{
+  const signer = { name: "Test Rep" };
+  assert.equal(
+    appendSignatureAndFooter("Hello there.", { signer, brand: "oasis" }),
+    "Hello there.\n\nTest Rep\n\n---\nOASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada\n\n" +
+      "You received this email because we reached out about your business. To stop receiving emails, reply UNSUBSCRIBE.",
+    "OASIS's sales footer changed",
+  );
+  assert.equal(
+    appendSignatureAndFooter("Hello there.", { signer, brand: "sunbiz" }),
+    `Hello there.\n\nTest Rep${SUNBIZ_LEGAL_FOOTER}`,
+    "SunBiz's footer changed",
+  );
+  assert.equal(
+    appendSignatureAndFooter("Hello there.", { signer, brand: "oasis", purpose: "support", unsubscribeUrl: "https://oasisai.work/unsubscribe?x=1" }),
+    `Hello there.\n\nTest Rep${oasisSupportFooter("https://oasisai.work/unsubscribe?x=1")}`,
+    "OASIS's support footer changed",
+  );
+
+  // What lib/email/tenant-sender.ts loadTenantSender answers for a workspace
+  // whose sending address passed the live check.
+  const T = "2026-10-02T00:00:00.000Z";
+  const saved = (tenantId: string) =>
+    ({
+      state: "saved",
+      sender: {
+        tenant_id: tenantId,
+        display_name: "Alpha Plumbing",
+        legal_name: "Alpha Plumbing Inc.",
+        postal_address: "12 King St W, Toronto, ON M5H 1A1",
+        from_address: "hello@alpha.test",
+        reply_to: null,
+        sending_domain: "alpha.test",
+        verified_via: "gws",
+        verified_at: T,
+        created_by: null,
+        created_at: T,
+        updated_at: T,
+      },
+      verification: { verified: true, via: "gws", mailbox: "hello@alpha.test" },
+    }) as const;
+
+  // A row naming one of the mapped tenants changes nothing: the map answers first.
+  for (const [id, key] of Object.entries(TENANT_ID_BRAND)) {
+    assert.equal(brandForTenant({ tenantId: id, sender: saved(id) }), key, `${id}: a stored identity overrode ${key}`);
+  }
+  for (const [slug, key] of Object.entries(TENANT_SLUG_BRAND)) {
+    assert.equal(brandForTenant({ tenantSlug: slug, sender: saved("a1000000-0000-4000-8000-0000000000a1") }), key, slug);
+  }
+
+  const client = "a1000000-0000-4000-8000-0000000000a1";
+  assert.equal(brandForTenant({ tenantId: client }), null, "without its identity a client still refuses, as before");
+  assert.equal(
+    brandForTenant({ tenantId: client, sender: { ...saved(client), verification: { verified: false, reason: "not_tested" } } }),
+    null,
+    "an unverified identity is no brand",
+  );
+  const own = brandForTenant({ tenantId: client, sender: saved(client) });
+  assert.ok(own && typeof own === "object" && own.kind === "tenant", "a verified identity is the workspace's own brand");
+  const body = appendSignatureAndFooter("Hello there.", { brand: own, unsubscribeUrl: "https://oasisai.work/unsubscribe?x=1" });
+  assert.ok(body.includes("Alpha Plumbing Inc.") && body.includes("12 King St W, Toronto, ON M5H 1A1"), "its own legal name and address");
+  for (const key of ALL_BRAND_KEYS) {
+    const b = getBrand(key);
+    assert.ok(!body.includes(b.legalName), `a workspace's email names ${b.legalName}`);
+    assert.ok(!body.includes(b.postalAddress.split(",")[0].trim()), `a workspace's email carries ${key}'s street`);
+    assert.ok(mailboxBrandConflict(own, b.fromAddress), `a workspace's brand may send from ${key}'s mailbox`);
   }
 }
 
