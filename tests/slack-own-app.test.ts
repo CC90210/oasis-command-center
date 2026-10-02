@@ -467,6 +467,29 @@ async function main() {
     assert.equal((await post(eventsRoute, String(setup.events_url), verification, APP_A.signing_secret)).status, 200);
   });
 
+  await check("where OASIS's app is not set up, a client's own-app Slack connection stays checkable (Test again, the hourly pass) and present on its AI Team; one with no app here is neither", async () => {
+    const health = await import("../lib/connections/health");
+    const status = await import("../lib/slack/status");
+    const testRoute = await import("../app/api/connections/[provider]/test/route");
+    assert.equal(process.env.SLACK_SIGNING_SECRET, undefined, "OASIS's app is not set up in this check");
+    await login(USERS.ownerA);
+    const tested = await toJson(await testRoute.POST(new Request("https://oasisai.work/api/connections/slack/test", { method: "POST" }), ctx("slack")));
+    assert.equal(tested.status, 200, JSON.stringify(tested.body));
+    // The hourly pass: both Slack connections are due; only A's (its own app) is checkable here.
+    const old = "2026-01-01T00:00:00.000Z";
+    await db.execute({ sql: "UPDATE tenant_connections SET last_health_at = ? WHERE provider = 'slack' AND revoked_at IS NULL", args: [old] });
+    const pass = await health.runConnectionHealthPass({ db, now: () => new Date() });
+    assert.deepEqual([pass.checked, pass.errors], [1, []], JSON.stringify(pass));
+    const lastCheck = async (tenantId: string) =>
+      String((await db.execute({ sql: "SELECT last_health_at FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", args: [tenantId] })).rows[0].last_health_at);
+    assert.notEqual(await lastCheck(CLIENT_A), old, "A's own-app connection was re-checked");
+    assert.equal(await lastCheck(OASIS), old, "OASIS's connection (no app set up here) was not picked, and raised no error");
+    assert.equal((await slackStatus(CLIENT_A, USERS.ownerA.id)).kind, "connected");
+    // Where each department lives in Slack (AI Team, department tab).
+    assert.equal((await status.loadSlackPresence(db, CLIENT_A)).kind, "connected");
+    assert.equal((await status.loadSlackPresence(db, OASIS)).kind, "not_configured");
+  });
+
   // -- 5. Where installs cannot run, and what the drawer shows ----------------------
 
   await check("no consent-state secret on the deployment: a saved app says installs are not switched on, and Add to Slack says why", async () => {
@@ -512,6 +535,16 @@ async function main() {
     assert.match(markup.client, /href="https:\/\/api\.slack\.com\/apps"/);
     assert.doesNotMatch(text(markup.client), /Ask OASIS for Slack/, "a built path offers no request");
     assert.doesNotMatch(text(markup.oasis), /Set up your Slack app|Your own Slack app/);
+  });
+
+  await check("a client using its own app can always disconnect Slack, even where OASIS's app is not set up", async () => {
+    const disconnectRoute = await import("../app/api/connections/[provider]/disconnect/route");
+    await login(USERS.ownerA);
+    const r = await toJson(await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack")));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.disconnected, true);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", [CLIENT_A]), 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ? AND provider = 'slack'", [CLIENT_A]), 0);
   });
 
   globalThis.fetch = realFetch;

@@ -2,7 +2,8 @@
  * lib/slack/status.ts - where each department lives in Slack, for the AI Team
  * roster and the department tab (no longer a hard-coded "Phase 2").
  *
- *   not_configured  OASIS's Slack app is not set up on this deployment
+ *   not_configured  neither OASIS's Slack app (this deployment) nor the
+ *                   workspace's own Slack app is set up, so nothing can answer
  *   not_connected   this workspace has not installed it
  *   mention_only    installed, no channel mapped to this department: it still
  *                   answers an @mention that names it
@@ -16,9 +17,9 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import { findActiveConnection } from "@/lib/connections/store";
-import { providerAvailability, providerById } from "@/lib/connections/registry";
 import type { DepartmentKey } from "@/lib/os/types";
 import { listChannelRoutes, isSlackSchemaMissing } from "@/lib/slack/routing";
+import { slackAppFor } from "@/lib/slack/own-app";
 
 export type SlackHome =
   | { kind: "not_configured" }
@@ -36,9 +37,17 @@ export async function loadSlackPresence(
   tenantId: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<SlackPresence> {
-  const slack = providerById("slack");
-  if (!slack || providerAvailability(slack, env) !== "live") return { kind: "not_configured" };
-  if (!db) return { kind: "unknown" };
+  // OASIS's app on this deployment, or the workspace's own Slack app (a client
+  // brings its own): either verifies its events, so a connection can answer.
+  let app: Awaited<ReturnType<typeof slackAppFor>>;
+  try {
+    app = await slackAppFor(tenantId, env);
+  } catch (err) {
+    console.error("[slack.status] the workspace's Slack app could not be read", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return { kind: "unknown" };
+  }
+  if (app === "none") return { kind: "not_configured" };
+  if (app === "unknown" || !db) return { kind: "unknown" };
   try {
     const conn = await findActiveConnection(db, tenantId, "slack");
     if (!conn) return { kind: "not_connected" };

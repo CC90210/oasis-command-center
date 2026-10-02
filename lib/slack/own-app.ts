@@ -24,7 +24,7 @@
  */
 import "server-only";
 import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
-import { providerById } from "@/lib/connections/registry";
+import { providerAvailability, providerById } from "@/lib/connections/registry";
 import { oauthStateSecret } from "@/lib/connections/oauth";
 import { SLACK_SIGNING_SECRET_ENV } from "@/lib/slack/verify";
 
@@ -69,6 +69,20 @@ export function slackOwnAppEnv(env: Env, app: SlackOwnApp): Env {
     [oauth.clientSecretEnv]: app.clientSecret,
     [SLACK_SIGNING_SECRET_ENV]: app.signingSecret,
   };
+}
+
+/**
+ * Which Slack app makes this workspace's Slack work here, for a connection it
+ * already has: OASIS's app (live on this deployment) or its own saved app.
+ * Either verifies its events and leaves the connection's own token to check,
+ * so the connection can be shown, re-checked and used. "none": neither, so a
+ * connection cannot work here; "unknown": its app could not be read.
+ */
+export async function slackAppFor(tenantId: string, env: Env = process.env): Promise<"oasis" | "own" | "none" | "unknown"> {
+  const slack = providerById("slack");
+  if (slack && providerAvailability(slack, env) === "live") return "oasis";
+  const own = await readSlackOwnApp(tenantId);
+  return own.state === "saved" ? "own" : own.state === "unreadable" ? "unknown" : "none";
 }
 
 /**

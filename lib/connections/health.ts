@@ -37,6 +37,7 @@ import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { probeJevKey } from "@/lib/jev/client";
 import { authTest as slackAuthTest } from "@/lib/slack/client";
+import { SLACK_APP_FIELDS, SLACK_APP_SERVICE, slackAppFor } from "@/lib/slack/own-app";
 import {
   BOT_TOKEN_FIELD,
   HEALTH_RECHECK_AFTER_MS,
@@ -443,7 +444,11 @@ export async function probeStoredConnection(
   actor: AuditActor,
 ): Promise<HealthRecordResult> {
   const provider = providerForEnv(row.provider, process.env);
-  const probe = provider && provider.availability === "live" ? probeFor(provider.id) : null;
+  // A Slack connection made with the workspace's OWN Slack app stays checkable
+  // where OASIS's app is not set up: the probe needs only its own stored token.
+  const checkable =
+    provider?.availability === "live" || (row.provider === "slack" && (await slackAppFor(row.tenant_id)) === "own");
+  const probe = provider && checkable ? probeFor(provider.id) : null;
   if (!provider || !probe) throw new Error(`provider_not_probeable:${row.provider}`);
 
   const credential = await readTenantCredentialStrict(row.tenant_id, credentialServiceFor(row.id), credentialFieldFor(provider));
@@ -686,8 +691,14 @@ export async function runConnectionHealthPass(
   const worstMs = opts.probeWorstCaseMs ?? PROBE_WORST_CASE_MS;
   const now = deps.now();
   const pruned = await pruneConnectionHistory(deps.db, now);
+  const providers = probedProviders();
   const due = await listConnectionsDueForHealth(deps.db, {
-    providers: probedProviders(),
+    providers,
+    // Where OASIS's Slack app is not set up, a workspace that saved its own
+    // Slack app still has a checkable Slack connection (probeStoredConnection).
+    alsoWhereTenantSaved: providers.includes("slack")
+      ? undefined
+      : { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS },
     staleBefore: new Date(now.getTime() - HEALTH_RECHECK_AFTER_MS),
     limit: opts.limit ?? HEALTH_PASS_LIMIT,
   });

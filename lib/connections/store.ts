@@ -754,17 +754,40 @@ export async function resolveWebhookRoute(
  */
 export async function listConnectionsDueForHealth(
   db: Client,
-  input: { providers: readonly string[]; staleBefore: Date; limit: number },
+  input: {
+    providers: readonly string[];
+    /**
+     * Also this provider's connections in workspaces that saved every one of
+     * these credential fields (Slack: a workspace's own Slack app, which keeps
+     * its connection checkable where OASIS's app is not set up). Presence only.
+     */
+    alsoWhereTenantSaved?: { provider: string; service: string; fields: readonly string[] };
+    staleBefore: Date;
+    limit: number;
+  },
 ): Promise<ConnectionRow[]> {
-  if (input.providers.length === 0) return [];
-  const marks = input.providers.map(() => "?").join(", ");
+  const also = input.alsoWhereTenantSaved && input.alsoWhereTenantSaved.fields.length > 0 ? input.alsoWhereTenantSaved : null;
+  if (input.providers.length === 0 && !also) return [];
+  const which: string[] = [];
+  const args: (string | number)[] = [];
+  if (input.providers.length > 0) {
+    which.push(`provider IN (${input.providers.map(() => "?").join(", ")})`);
+    args.push(...input.providers);
+  }
+  if (also) {
+    which.push(`(provider = ? AND tenant_id IN (
+              SELECT tenant_id FROM tenant_integration_credentials
+              WHERE service = ? AND field_key IN (${also.fields.map(() => "?").join(", ")})
+              GROUP BY tenant_id HAVING COUNT(DISTINCT field_key) = ?))`);
+    args.push(also.provider, also.service, ...also.fields, also.fields.length);
+  }
   const rs = await db.execute({
     sql: `SELECT ${CONNECTION_COLUMNS} FROM tenant_connections
-          WHERE provider IN (${marks}) AND revoked_at IS NULL
+          WHERE (${which.join(" OR ")}) AND revoked_at IS NULL
             AND (last_health_at IS NULL OR last_health_at < ?)
           ORDER BY COALESCE(last_health_at, '') ASC
           LIMIT ?`,
-    args: [...input.providers, input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
+    args: [...args, input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
   });
   return rows(rs).map(toConnection);
 }
