@@ -51,9 +51,14 @@ async function main() {
 
   const rootLayout = readFileSync(join(root, "app/layout.tsx"), "utf8");
   assert.match(rootLayout, /isFinanceOwnerEmail\(profile\?\.email\)/, "the sidebar filters the Finances row by owner email");
+  // The banner + chips live on the Growth preview shell only (2026-10-01); the
+  // founders layout above Finances and Content no longer mounts them
+  // (tests/finances-roundtrips.test.ts, tests/content-hub.test.ts).
   const foundersLayout = readFileSync(join(root, "app/founders/layout.tsx"), "utf8");
-  assert.match(foundersLayout, /FoundersPortalBanner/, "banner + chips; hidden on Finances (tests/finances-roundtrips.test.ts)");
-  assert.match(foundersLayout, /isFinanceOwnerEmail\(founder\.email\)/, "the header chip is filtered the same way");
+  assert.doesNotMatch(foundersLayout, /FoundersPortalBanner/, "no banner above Finances or Content");
+  const growthLayout = readFileSync(join(root, "app/founders/growth/layout.tsx"), "utf8");
+  assert.match(growthLayout, /FoundersPortalBanner/, "banner + chips on the Growth shell");
+  assert.match(growthLayout, /isFinanceOwnerEmail\(founder\.email\)/, "the header chip is filtered the same way");
 
   // ── gates, over the whole tree ──────────────────────────────────────────
   const walk = (dir: string, out: string[] = []): string[] => {

@@ -30,6 +30,7 @@ export type WebsiteSalesStage = (typeof WEBSITE_SALES_STAGES)[number];
 export type ProposalStatus = "not_started" | "draft" | "sent" | "accepted" | "declined";
 export type CommissionStatus = "accrued" | "approved" | "paid" | "offset" | "voided";
 
+/** `websiteProblemConfirmed` now means "operations pain named in their own words". See lib/sales-qualification.ts for why the key kept its name. */
 export type SalesQualification = {
   authorityConfirmed: boolean;
   websiteProblemConfirmed: boolean;

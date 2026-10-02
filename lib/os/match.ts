@@ -55,7 +55,7 @@ export const PATH_ALIASES: ReadonlyArray<{
     tabs: {
       "": "Overview",
       library: "Library",
-      train: "Train",
+      train: "Training",
       performance: "Performance",
       asset: "Asset",
     },
