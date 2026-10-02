@@ -236,6 +236,19 @@ async function main() {
     assert.match(String(m.text), /unsubscribe here: https?:\/\//);
   });
 
+  await check("an opt-out list that cannot be read still stops every other email (fail closed); an own-ticket reply does not read it", async () => {
+    lookupFails = true;
+    try {
+      const other = await reply({ ownTicketReply: null });
+      assert.equal(other.ok, false);
+      if (!other.ok) assert.equal(other.reason, "suppression_error");
+      const own = await reply();
+      assert.equal(own.ok, true, "the list does not apply to a reply to the client's own ticket");
+    } finally {
+      lookupFails = false;
+    }
+  });
+
   await check("the ledger key: ticket.message_received, owned by the intake, ids and codes only", async () => {
     const e = catalog.catalogEntry("ticket.message_received")!;
     assert.ok(e);
