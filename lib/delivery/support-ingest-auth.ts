@@ -59,7 +59,8 @@ export function refuse(status: number, error: string, extra: Record<string, unkn
 }
 
 export type SupportAuth =
-  | { ok: true; producer: SupportIngestProducer; body: unknown }
+  /** signedAt: the request's x-support-timestamp (unix seconds), as the signature verified it. */
+  | { ok: true; producer: SupportIngestProducer; body: unknown; signedAt: number }
   | { ok: false; response: Response };
 
 /**
@@ -119,20 +120,20 @@ export async function authenticateSupportRequest(
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { ok: false, response: refuse(422, "invalid_payload", { field: "body" }) };
   }
-  return { ok: true, producer, body };
+  return { ok: true, producer, body, signedAt: verdict.timestamp };
 }
 
 /**
  * The support inbox's tables, all present? One statement: SQLite prepares the
- * whole of it, so a missing table or the missing comment channel column fails
- * it before anything runs. False = migration bravo__200 is not applied, and
- * the route answers 503 not_installed.
+ * whole of it, so a missing table, the missing comment channel column or the
+ * missing heartbeat signed_at column fails it before anything runs. False =
+ * migration bravo__200 is not applied, and the route answers 503 not_installed.
  */
 export async function supportInboxInstalled(db: Client): Promise<boolean> {
   try {
     await db.execute(
       `SELECT (SELECT COUNT(*) FROM support_email_messages WHERE 0) AS m,
-              (SELECT COUNT(*) FROM support_mailbox_status WHERE 0) AS s,
+              (SELECT signed_at FROM support_mailbox_status WHERE 0) AS s,
               (SELECT channel FROM ticket_comments WHERE 0) AS c`,
     );
     return true;

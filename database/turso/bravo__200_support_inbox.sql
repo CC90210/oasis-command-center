@@ -27,6 +27,10 @@
 -- support_mailbox_status: the reader's heartbeat, one row per mailbox. It
 --   says when support@ was last read; the SLA cron alerts once when it has not
 --   been read for 20 minutes (lib/delivery/support-inbox-health.ts).
+--   signed_at is the reader's signed timestamp (x-support-timestamp, unix
+--   seconds, inside the HMAC) of the heartbeat the row holds: a heartbeat is
+--   kept only when its signed time is NEWER, so a replayed or late one can
+--   never overwrite a newer failure.
 --
 -- ticket_comments.channel: how a comment arrived (email, portal, form).
 --   Nullable; every existing comment keeps working.
@@ -127,6 +131,7 @@ CREATE TABLE IF NOT EXISTS support_mailbox_status (
   counts_json           TEXT NOT NULL DEFAULT '{}',
   alerted_at            TEXT,
   alert_status          TEXT,
+  signed_at             INTEGER,
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (tenant_id, mailbox)
 );

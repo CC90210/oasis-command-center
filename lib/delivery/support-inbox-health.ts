@@ -5,7 +5,8 @@
  * so it stops whenever that PC sleeps, the daemon dies or the app password is
  * revoked. It posts a heartbeat (POST /api/internal/support/heartbeat) after
  * each sweep, at least every 4 minutes; support_mailbox_status keeps the
- * latest, with the last time a sweep READ the mailbox (last_ok_at).
+ * latest by the reader's signed time (a replayed or late heartbeat changes
+ * nothing), with the last time a sweep READ the mailbox (last_ok_at).
  *
  * STALE = not read for SUPPORT_INBOX_STALE_MINUTES (20). The SLA cron
  * (lib/delivery/sla-cron.ts) then alerts ONCE per stale stretch: one Telegram
@@ -178,15 +179,24 @@ export function validateHeartbeat(raw: unknown): { ok: true; value: HeartbeatBod
 /**
  * Keep the latest heartbeat. A heartbeat that says the sweep read the mailbox
  * stamps last_ok_at with THIS server's clock and ends a stale stretch (clears
- * the alert claim, so the next stretch alerts again). Latest wins.
+ * the alert claim, so the next stretch alerts again).
+ *
+ * LATEST BY THE READER'S SIGNED TIME. `signedAt` is the request's
+ * x-support-timestamp, which the HMAC covers and the reader stamps per
+ * attempt. The row changes only for a heartbeat signed strictly later than
+ * the one it holds (a compare-and-swap in the upsert's WHERE), so a captured
+ * heartbeat replayed inside the 300 s window, or one delivered late, can never
+ * overwrite a newer one: a successful read replayed after a failed sweep does
+ * not hide the failure or end a stale stretch. False = not newer, nothing
+ * changed.
  */
-export async function recordHeartbeat(db: Client, tenantId: string, hb: HeartbeatBody, now: Date): Promise<void> {
+export async function recordHeartbeat(db: Client, tenantId: string, hb: HeartbeatBody, signedAt: number, now: Date): Promise<boolean> {
   const at = now.toISOString();
-  await db.execute({
+  const rs = await db.execute({
     sql: `INSERT INTO support_mailbox_status
             (tenant_id, mailbox, producer, phase, ok, last_error, last_sweep_at, reported_at, last_ok_at,
-             consecutive_failures, counts_json, alerted_at, alert_status, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+             consecutive_failures, counts_json, alerted_at, alert_status, signed_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
           ON CONFLICT (tenant_id, mailbox) DO UPDATE SET
             producer = excluded.producer,
             phase = excluded.phase,
@@ -199,7 +209,9 @@ export async function recordHeartbeat(db: Client, tenantId: string, hb: Heartbea
             counts_json = excluded.counts_json,
             alerted_at = CASE WHEN excluded.ok = 1 THEN NULL ELSE support_mailbox_status.alerted_at END,
             alert_status = CASE WHEN excluded.ok = 1 THEN NULL ELSE support_mailbox_status.alert_status END,
-            updated_at = excluded.updated_at`,
+            signed_at = excluded.signed_at,
+            updated_at = excluded.updated_at
+          WHERE support_mailbox_status.signed_at IS NULL OR excluded.signed_at > support_mailbox_status.signed_at`,
     args: [
       tenantId,
       hb.mailbox,
@@ -212,9 +224,11 @@ export async function recordHeartbeat(db: Client, tenantId: string, hb: Heartbea
       hb.ok ? at : null,
       hb.consecutiveFailures,
       JSON.stringify(hb.counts),
+      signedAt,
       at,
     ],
   });
+  return rs.rowsAffected === 1;
 }
 
 export type HeartbeatDeps = { db: Client; env: Record<string, string | undefined>; now: Date };
@@ -229,8 +243,15 @@ export async function handleSupportHeartbeat(req: Request, deps: HeartbeatDeps):
   // The body names who is beating; it must be who signed.
   if (v.value.producer !== (auth.producer as SupportIngestProducer)) return refuse(422, "invalid_payload", { field: "producer" });
   if (!(await supportInboxInstalled(deps.db))) return refuse(503, "not_installed", { detail: "migration bravo__200 is not applied" });
-  await recordHeartbeat(deps.db, desk.tenantId, v.value, deps.now);
-  return supportJson(200, { ok: true, stale_after_minutes: SUPPORT_INBOX_STALE_MINUTES });
+  const recorded = await recordHeartbeat(deps.db, desk.tenantId, v.value, auth.signedAt, deps.now);
+  // A heartbeat that is not newer than the one held is authentic and simply
+  // late: 200 ok, so the reader neither retries it nor reads the desk as broken.
+  return supportJson(200, {
+    ok: true,
+    recorded,
+    ...(recorded ? {} : { reason: "not_newer" }),
+    stale_after_minutes: SUPPORT_INBOX_STALE_MINUTES,
+  });
 }
 
 // ---------------------------------------------------------------------------
