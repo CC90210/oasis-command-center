@@ -13,11 +13,27 @@
  * draft. Nothing is sent from here: a person approves, and
  * lib/os/approvals/executors.ts reply_ticket posts and emails it.
  *
+ * ONLY TO A VERIFIED ADDRESS. A draft is sendable (an approval) only when a
+ * verified email on the ticket came from the address it would go to
+ * (email-thread.ts isVerifiedRecipient). A teammate's forward names the
+ * client's address from the forwarded text, so its draft becomes a private
+ * note on the ticket instead, flagged "Recipient not verified", with the
+ * address and the words: a person confirms the address and replies from the
+ * ticket. The executor applies the same rule again before it sends.
+ *
  * IDEMPOTENT. The reader may post one record twice (its answer lost, a later
  * pass redrafts): the same words are the same approval (200); other words
  * for an already filed record are refused (409, final). A repeated failure
  * report answers 200. An email listed as wanting a draft is never listed again
- * once a draft or a failure report is filed for it.
+ * once a draft, a note or a failure report is filed for it.
+ *
+ * ONE OUTCOME PER EMAIL, even when a draft and a failure report race. The
+ * record (draft_status) is the claim, and every write to it is a
+ * compare-and-swap. A failure report is recorded only while no live approval
+ * exists under the record's key; a draft's approval is named on the record
+ * only while the record is unsettled. A draft that loses withdraws its
+ * approval (cancelled, never executable) and is answered 409; a report that
+ * loses is answered 200 with what the record holds.
  *
  * The tenant comes from the message record (which the receiving mailbox
  * decided at ingest), never from the body; only a registered support inbox's
@@ -26,14 +42,14 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import type { Client, ResultSet } from "@libsql/client";
-import { createApproval } from "@/lib/os/approvals/store";
+import { cancelPendingApproval, createApproval } from "@/lib/os/approvals/store";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { supportInboxForDesk } from "@/lib/email/support-mailbox";
 import { TICKET_CATEGORY_LABELS, TICKET_SEVERITY_LABELS, safeGreetingName } from "@/lib/delivery/rules";
 import { deskReader, getTicket, listTicketComments, type Ticket } from "@/lib/delivery/store";
 import { emailThreadSubject } from "@/lib/delivery/messages";
-import { loadTicketThread } from "@/lib/delivery/email-thread";
+import { isVerifiedRecipient, loadTicketThread } from "@/lib/delivery/email-thread";
 import { defaultNotifyDeps, scheduleAfterResponse, ticketUrl, type NotifyDeps } from "@/lib/delivery/notify";
 import { deskForMailbox } from "@/lib/delivery/email-intake";
 import { authenticateSupportRequest, refuse, supportInboxInstalled, supportJson } from "@/lib/delivery/support-ingest-auth";
@@ -251,6 +267,20 @@ async function newerMessageOnTicket(db: Client, tenantId: string, ticketId: stri
   return rs.rows.length > 0;
 }
 
+/** An approval in one of these can still become a sent reply. */
+const LIVE_APPROVAL_SQL = "status IN ('pending', 'approved', 'executing', 'executed')";
+
+/** The live approval filed under this record's draft key, if any. */
+async function liveDraftApproval(db: Client, tenantId: string, key: string): Promise<string | null> {
+  const r = rows(
+    await db.execute({
+      sql: `SELECT id FROM approvals WHERE tenant_id = ? AND idempotency_key = ? AND ${LIVE_APPROVAL_SQL} LIMIT 1`,
+      args: [tenantId, key],
+    }),
+  )[0];
+  return s(r?.id);
+}
+
 /** The ticket's pending reply draft from an EARLIER message, which a newer draft replaces. */
 async function pendingDraftToReplace(db: Client, tenantId: string, ticketId: string, key: string): Promise<string | null> {
   const r = rows(
@@ -280,17 +310,23 @@ export async function fileSupportDraft(deps: SupportRouteDeps, input: DraftInput
   const tenantId = record.tenant_id;
   const at = now.toISOString();
 
+  const key = supportDraftKey(record.id);
   if (input.kind === "failure") {
     if (record.draft_status === "filed") return { status: 200, body: { ok: true, status: "already_filed", approval_id: record.draft_approval_id } };
     if (record.draft_status === "failed") return { status: 200, body: { ok: true, status: "already_reported" } };
-    // The failure is recorded once; the ticket's note is written only by the
-    // write that recorded it (changes() = 1), so a repeat adds nothing.
-    await db.batch(
+    if (record.draft_status === "noted") return { status: 200, body: { ok: true, status: "already_noted" } };
+    // The failure is recorded once, and only while no draft is filed or being
+    // filed: a live approval under the record's key is a draft that got there
+    // first (the record names it a moment later). The ticket's note is written
+    // only by the write that recorded the failure (changes() = 1), so a repeat
+    // or a lost race adds nothing.
+    const results = await db.batch(
       [
         {
           sql: `UPDATE support_email_messages SET draft_status = 'failed', draft_failure = ?, updated_at = ?
-                WHERE tenant_id = ? AND id = ? AND draft_status IS NULL`,
-          args: [`${input.reason} (${input.attempts} attempts)`.slice(0, 200), at, tenantId, record.id],
+                WHERE tenant_id = ? AND id = ? AND draft_status IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approvals WHERE tenant_id = ? AND idempotency_key = ? AND ${LIVE_APPROVAL_SQL})`,
+          args: [`${input.reason} (${input.attempts} attempts)`.slice(0, 200), at, tenantId, record.id, tenantId, key],
         },
         {
           sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
@@ -306,10 +342,20 @@ export async function fileSupportDraft(deps: SupportRouteDeps, input: DraftInput
       ],
       "write",
     );
-    return { status: 200, body: { ok: true, status: "reported" } };
+    if (results[0].rowsAffected === 1) return { status: 200, body: { ok: true, status: "reported" } };
+    // Lost: say what settled the email instead.
+    const after = await readRecord(db, record.id);
+    if (after?.draft_status === "failed") return { status: 200, body: { ok: true, status: "already_reported" } };
+    if (after?.draft_status === "noted") return { status: 200, body: { ok: true, status: "already_noted" } };
+    const filed = after?.draft_approval_id ?? (await liveDraftApproval(db, tenantId, key));
+    if (filed) return { status: 200, body: { ok: true, status: "already_filed", approval_id: filed } };
+    // Nothing settled it after all (its draft's approval ended in between):
+    // final, and the email is offered for a draft again.
+    return { status: 409, body: { ok: false, error: "draft_state_changed" } };
   }
 
   if (record.draft_status === "failed") return { status: 409, body: { ok: false, error: "draft_failure_reported" } };
+  if (record.draft_status === "noted") return { status: 200, body: { ok: true, status: "already_noted" } };
   const ticket = await getTicket(db, deskReader(tenantId), input.ticketId);
   if (!ticket) return { status: 422, body: { ok: false, error: "unknown_ticket" } };
   if (ticket.status === "closed") return { status: 409, body: { ok: false, error: "ticket_closed" } };
@@ -319,14 +365,16 @@ export async function fileSupportDraft(deps: SupportRouteDeps, input: DraftInput
   if (await newerMessageOnTicket(db, tenantId, ticket.id, record.id)) {
     return { status: 409, body: { ok: false, error: "superseded_by_newer_message" } };
   }
+  const to = ticket.client_email.trim().toLowerCase();
+  // Sendable only to an address a verified email on this ticket came from.
+  if (!(await isVerifiedRecipient(db, tenantId, ticket.id, to))) return noteUnverifiedDraft(db, tenantId, record.id, ticket.id, to, input, at);
 
   const thread = await loadTicketThread(db, tenantId, ticket.id);
-  const key = supportDraftKey(record.id);
   const payload = {
     ticket_id: ticket.id,
     ticket_number: ticket.ticket_number,
     message_record_id: record.id,
-    to: ticket.client_email.trim().toLowerCase(),
+    to,
     subject: emailThreadSubject(thread?.rootSubject ?? record.subject ?? "", ticket.ticket_number),
     body: input.body,
     critic: input.critic,
@@ -357,11 +405,22 @@ export async function fileSupportDraft(deps: SupportRouteDeps, input: DraftInput
     if (made.error === "idempotency_key_reused") return { status: 409, body: { ok: false, error: "draft_already_filed" } };
     return { status: 422, body: { ok: false, error: made.error, ...(made.field ? { field: made.field } : {}) } };
   }
-  await db.execute({
+  // The record names its approval only while nothing else settled the email
+  // (or it already names this one: a repeat).
+  const recorded = await db.execute({
     sql: `UPDATE support_email_messages SET draft_status = 'filed', draft_approval_id = ?, updated_at = ?
-          WHERE tenant_id = ? AND id = ? AND (draft_status IS NULL OR draft_status = 'filed')`,
-    args: [made.approval.id, at, tenantId, record.id],
+          WHERE tenant_id = ? AND id = ? AND (draft_status IS NULL OR (draft_status = 'filed' AND draft_approval_id = ?))`,
+    args: [made.approval.id, at, tenantId, record.id, made.approval.id],
   });
+  if (recorded.rowsAffected !== 1) {
+    // A failure report (or another filing) settled this email while the
+    // approval was being filed. Withdraw the approval, so nobody can approve
+    // words the record does not stand behind (one already decided is refused
+    // by the executor, which reads the record), and answer what it holds.
+    await cancelPendingApproval(db, tenantId, made.approval.id, { type: "system", id: null }, { reason: "draft_record_settled" }, now);
+    const after = await readRecord(db, record.id);
+    return { status: 409, body: { ok: false, error: after?.draft_status === "failed" ? "draft_failure_reported" : "draft_already_filed" } };
+  }
   if (made.created && (ticket.severity === "high" || ticket.severity === "critical")) {
     const schedule = deps.schedule ?? scheduleAfterResponse;
     schedule(async () => {
@@ -374,6 +433,63 @@ export async function fileSupportDraft(deps: SupportRouteDeps, input: DraftInput
     });
   }
   return { status: 200, body: { ok: true, status: made.created ? "filed" : "already_filed", approval_id: made.approval.id } };
+}
+
+/** The draft critic's verdict in the words the approval card uses. */
+const CRITIC_WORDS: Record<string, string> = { ship: "ready to send", revise: "needs edits", escalate: "a person should write this one" };
+
+/** The private note that carries a draft for an unverified address: the flag, the address, the critic, the words. */
+export function unverifiedDraftNote(to: string, body: string, critic: unknown): string {
+  const c = critic && typeof critic === "object" && !Array.isArray(critic) ? (critic as Record<string, unknown>) : null;
+  const verdict = c && typeof c.verdict === "string" ? CRITIC_WORDS[c.verdict] ?? null : null;
+  const score = c && typeof c.score === "number" && Number.isFinite(c.score) ? ` (${c.score}/10)` : "";
+  return [
+    "Recipient not verified: confirm the address before sending.",
+    `This AI reply draft was not sent and not filed for approval: no verified email on this ticket came from ${to} ` +
+      "(a forwarded email's address is copied from its text, so it proves nothing). Confirm the address with the client " +
+      "or with whoever forwarded the email, then reply from this ticket. The draft is below.",
+    ...(verdict ? [`Draft checker: ${verdict}${score}.`] : []),
+    "",
+    body,
+  ].join("\n");
+}
+
+/**
+ * A draft for an address that never proved itself: never an approval, so
+ * there is nothing anyone can approve and send to it. It goes on the ticket as
+ * a private note, flagged, for a person to confirm the address and reply by
+ * hand. Recorded once (a compare-and-swap on the record); the note is written
+ * only by the write that recorded it (changes() = 1).
+ */
+async function noteUnverifiedDraft(
+  db: Client,
+  tenantId: string,
+  recordId: string,
+  ticketId: string,
+  to: string,
+  input: Extract<DraftInput, { kind: "draft" }>,
+  at: string,
+): Promise<DraftOutcome> {
+  const results = await db.batch(
+    [
+      {
+        sql: `UPDATE support_email_messages SET draft_status = 'noted', updated_at = ?
+              WHERE tenant_id = ? AND id = ? AND draft_status IS NULL`,
+        args: [at, tenantId, recordId],
+      },
+      {
+        sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
+              SELECT ?, ?, ?, 'system', NULL, 'Support inbox', ?, 1, ? WHERE changes() = 1`,
+        args: [randomUUID(), ticketId, tenantId, unverifiedDraftNote(to, input.body, input.critic), at],
+      },
+    ],
+    "write",
+  );
+  if (results[0].rowsAffected === 1) return { status: 200, body: { ok: true, status: "noted" } };
+  const after = await readRecord(db, recordId);
+  if (after?.draft_status === "failed") return { status: 409, body: { ok: false, error: "draft_failure_reported" } };
+  if (after?.draft_status === "filed") return { status: 409, body: { ok: false, error: "draft_already_filed" } };
+  return { status: 200, body: { ok: true, status: "already_noted" } };
 }
 
 /** "Reply to T-0042 (Bug, High): Login page shows a 500". */

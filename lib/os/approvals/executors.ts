@@ -43,7 +43,9 @@
  *                 support lane by lib/delivery/notify.ts sendTicketReplyEmail,
  *                 the same path a teammate's reply from the ticket page takes.
  *                 OASIS's desk only; refused when stale (the client wrote
- *                 again) or the ticket closed. Dry-run first: isDryRun("email").
+ *                 again), the ticket closed, the recipient was never verified
+ *                 or the email's record does not name the approval as its
+ *                 draft. Dry-run first: isDryRun("email").
  *
  * Dependencies are injected (ExecutorDeps) so tests drive the real executors
  * with a fake mailbox and a temp database; production passes nothing.
@@ -67,6 +69,7 @@ import {
 import { supportInboxForDesk, type OasisMailPurpose } from "@/lib/email/support-mailbox";
 import { addTicketComment, deskReader, getTicket, profileContact, type Ticket } from "@/lib/delivery/store";
 import { deskUsesOasisLanes, sendTicketReplyEmail, type NotifyDeps } from "@/lib/delivery/notify";
+import { isVerifiedRecipient } from "@/lib/delivery/email-thread";
 import { clientEmailMirrorStatements } from "@/lib/os/customers/message-mirror";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { isCustomerEmail, isMissingCustomersSchema } from "@/lib/os/customers/store";
@@ -499,13 +502,17 @@ function replyReadiness(tenant: ExecutorTenant): string | null {
  * An approved reply to a ticket that came in by email (support-drafts.ts
  * files it). In this order, and nothing leaves before the last check:
  *   1. the ticket is re-read on its desk; a closed ticket is refused;
- *   2. STALE: the client wrote again after the message the draft answers, so
+ *   2. the email's record must name THIS approval as its filed draft (a
+ *      failure report that settled the email first wins: draft_not_current);
+ *   3. STALE: the client wrote again after the message the draft answers, so
  *      the draft answers a question that is no longer the last one: refused
  *      (the newer message gets its own draft);
- *   3. the recipient is still the ticket's requester;
- *   4. dry run (isDryRun("email")) sends and posts nothing;
- *   5. a support mailbox must be configured, or nothing is posted either;
- *   6. the reply is posted as the APPROVER's public team comment (stamping the
+ *   4. the recipient is still the ticket's requester, and a verified email on
+ *      the ticket came from it (a forward's address never did:
+ *      recipient_not_verified; approving reviews words, not identity);
+ *   5. dry run (isDryRun("email")) sends and posts nothing;
+ *   6. a support mailbox must be configured, or nothing is posted either;
+ *   7. the reply is posted as the APPROVER's public team comment (stamping the
  *      first response and ticket.first_response when it is the first), then
  *      emailed threaded from the support lane as a reply to the client's own
  *      ticket (notify.ts sendTicketReplyEmail: it reaches them even after a
@@ -528,6 +535,15 @@ const replyTicket: Executor = {
     }
     const answered = await readAnsweredMessage(ctx.db, tenantId, p.message_record_id, ticket.id);
     if (!answered) return failed("message_not_found", "The email this reply answers is no longer on the ticket, so nothing was sent.", EMAIL_PROVIDER);
+    // The email's record names the draft it stands behind. Anything else (a
+    // failure report settled it while this was being filed) is never sent.
+    if (answered.draft_status !== "filed" || answered.draft_approval_id !== ctx.approval.id) {
+      return failed(
+        "draft_not_current",
+        `This reply is not the draft on record for the client's email on ${ticket.ticket_number} (the drafter reported it could not write one, or another filing replaced it), so nothing was sent.`,
+        EMAIL_PROVIDER,
+      );
+    }
     if (await clientWroteSince(ctx.db, tenantId, ticket.id, answered)) {
       return failed(
         "stale_draft",
@@ -537,6 +553,17 @@ const replyTicket: Executor = {
     }
     if ((ticket.client_email || "").trim().toLowerCase() !== p.to) {
       return failed("recipient_changed", `${ticket.ticket_number}'s client address changed after this reply was drafted, so nothing was sent.`, EMAIL_PROVIDER);
+    }
+    // Approving reviews the words, not who receives them: only an address a
+    // verified email on this ticket came from is ever sent to. There is no
+    // override here; a draft for any other address is filed as a private note
+    // (support-drafts.ts), and a person who confirmed it replies from the ticket.
+    if (!(await isVerifiedRecipient(ctx.db, tenantId, ticket.id, p.to))) {
+      return failed(
+        "recipient_not_verified",
+        `Recipient not verified: no verified email on ${ticket.ticket_number} came from ${p.to} (a forwarded email's address is copied from its text), so nothing was sent. Confirm the address, then reply from the ticket.`,
+        EMAIL_PROVIDER,
+      );
     }
     if (ctx.deps.isDryRun("email")) {
       return { ok: true, result: { outcome: "dry_run", provider: EMAIL_PROVIDER, would_send: { to: p.to, subject: p.subject, ticket: ticket.ticket_number } } };
@@ -611,17 +638,33 @@ function notifyDepsFor(ctx: ExecutorContext): NotifyDeps {
   };
 }
 
-type AnsweredMessage = { id: string; comment_id: string | null; received_at: string };
+type AnsweredMessage = {
+  id: string;
+  comment_id: string | null;
+  received_at: string;
+  /** "filed" once a draft's approval is named on the record (support-drafts.ts). */
+  draft_status: string | null;
+  draft_approval_id: string | null;
+};
 
 async function readAnsweredMessage(db: Client, tenantId: string, recordId: string, ticketId: string): Promise<AnsweredMessage | null> {
   const r = (
     await db.execute({
-      sql: `SELECT id, comment_id, received_at FROM support_email_messages
+      sql: `SELECT id, comment_id, received_at, draft_status, draft_approval_id FROM support_email_messages
             WHERE tenant_id = ? AND id = ? AND ticket_id = ? AND direction = 'inbound' LIMIT 1`,
       args: [tenantId, recordId, ticketId],
     })
   ).rows[0];
-  return r ? { id: String(r.id), comment_id: r.comment_id == null ? null : String(r.comment_id), received_at: String(r.received_at) } : null;
+  const str = (v: unknown) => (v == null ? null : String(v));
+  return r
+    ? {
+        id: String(r.id),
+        comment_id: str(r.comment_id),
+        received_at: String(r.received_at),
+        draft_status: str(r.draft_status),
+        draft_approval_id: str(r.draft_approval_id),
+      }
+    : null;
 }
 
 /** Did the client write on the ticket after the message the draft answers (by email or in the portal)? */

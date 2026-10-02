@@ -257,10 +257,12 @@ const ACK_SKIP_WORDS: Record<string, string> = {
  * This re-reads that decision, so the reconcile pass that retries a lost
  * after() can only send an acknowledgement that was meant to go.
  *
- * Then: claimed once (client_ack_at, as the form's), the dashboard's send mode
- * (dry run sends nothing), the shared sender's opt-out check. It goes from
- * support@, threaded on the client's message (In-Reply-To, References), marked
- * Auto-Submitted, tagged [T-0042], and is recorded so their reply threads back.
+ * Then: claimed once (client_ack_at, as the form's), the recipient pinned to
+ * the verified address that sent the email (a ticket address changed since is
+ * refused), the dashboard's send mode (dry run sends nothing), the shared
+ * sender's opt-out check. It goes from support@, threaded on the client's
+ * message (In-Reply-To, References), marked Auto-Submitted, tagged [T-0042],
+ * and is recorded so their reply threads back.
  */
 async function acknowledgeEmailTicket(
   db: Client,
@@ -283,6 +285,16 @@ async function acknowledgeEmailTicket(
     const reason = decided.startsWith("skipped:") ? decided.slice("skipped:".length) : decided || "not_decided";
     return finish(`email: not sent (${ACK_SKIP_WORDS[reason] ?? reason})`, decided || "not_sent:not_decided", null);
   }
+  // PINNED RECIPIENT. It acknowledges the email that opened the ticket, so it
+  // goes to the address that SENT that email, and only while the record says
+  // Gmail authenticated it; never to whatever the ticket says now. A ticket
+  // address changed since (a person's edit before a late reconcile pass) is
+  // refused and recorded, not followed.
+  if (!facts.senderVerified) return finish("email: not sent (the sender could not be verified)", "not_sent:sender_not_verified", null);
+  const to = facts.fromAddress ?? "";
+  if (!to || (ticket.client_email ?? "").trim().toLowerCase() !== to) {
+    return finish("email: not sent (the ticket's client address changed after the email arrived)", "not_sent:recipient_changed", null);
+  }
   if ((deps.isDryRun ?? isDryRun)("email")) {
     return finish("email: not sent (dry run: email sending is off on this deployment)", "dry_run", null);
   }
@@ -291,7 +303,7 @@ async function acknowledgeEmailTicket(
   const references = [...facts.references, ...(facts.messageId ? [facts.messageId] : [])];
   const r = await settle(
     deps.email({
-      to: ticket.client_email as string,
+      to,
       subject: mail.subject,
       body: withSupportLink(mail.body, deps),
       idempotencyKey: key,
@@ -305,7 +317,7 @@ async function acknowledgeEmailTicket(
       origin: "ack",
       commentId: null,
       key,
-      to: ticket.client_email as string,
+      to,
       subject: mail.subject,
       now,
       inReplyTo: facts.messageId,

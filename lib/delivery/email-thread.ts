@@ -210,19 +210,24 @@ export type AckFacts = {
   messageId: string | null;
   references: string[];
   subject: string | null;
+  /** Who sent that email (lowercased at ingest): the only address its acknowledgement may go to. */
+  fromAddress: string | null;
+  /** Whether Gmail authenticated that sender (the reader's `aligned`), as recorded at ingest. */
+  senderVerified: boolean;
 };
 
 /**
  * The email that opened this ticket, as its acknowledgement needs it: whether
- * an acknowledgement was decided at ingest, and the ids it threads on. Null
- * when the table is missing or no email opened the ticket.
+ * an acknowledgement was decided at ingest, who sent it and whether that
+ * sender was verified, and the ids it threads on. Null when the table is
+ * missing or no email opened the ticket.
  */
 export async function loadAckFacts(db: Client, tenantId: string, ticketId: string): Promise<AckFacts | null> {
   let r: Row | undefined;
   try {
     r = rows(
       await db.execute({
-        sql: `SELECT id, ack_status, message_id, references_json, subject FROM support_email_messages
+        sql: `SELECT id, ack_status, message_id, references_json, subject, from_address, sender_verified FROM support_email_messages
               WHERE tenant_id = ? AND ticket_id = ? AND direction = 'inbound' AND disposition IN ('new_ticket', 'follow_up')
               ORDER BY received_at, id LIMIT 1`,
         args: [tenantId, ticketId],
@@ -239,7 +244,33 @@ export async function loadAckFacts(db: Client, tenantId: string, ticketId: strin
     messageId: s(r.message_id),
     references: parseIds(r.references_json),
     subject: s(r.subject),
+    fromAddress: s(r.from_address)?.trim().toLowerCase() ?? null,
+    senderVerified: Number(r.sender_verified) === 1,
   };
+}
+
+/**
+ * Has this address PROVEN itself on this ticket: did a verified email (Gmail
+ * authenticated its sender, the reader's `aligned`) come from it? A teammate's
+ * forward names the client's address from the forwarded text, and an
+ * unverified sender's From is only a claim; neither proves who will receive a
+ * reply. False when the table is missing: nothing is proven then.
+ */
+export async function isVerifiedRecipient(db: Client, tenantId: string, ticketId: string, address: string): Promise<boolean> {
+  const to = address.trim().toLowerCase();
+  if (!to) return false;
+  try {
+    const rs = await db.execute({
+      sql: `SELECT 1 AS ok FROM support_email_messages
+            WHERE tenant_id = ? AND ticket_id = ? AND direction = 'inbound' AND sender_verified = 1 AND from_address = ?
+            LIMIT 1`,
+      args: [tenantId, ticketId, to],
+    });
+    return rs.rows.length > 0;
+  } catch (err) {
+    if (isMissingSupportInboxSchema(err)) return false;
+    throw err;
+  }
 }
 
 /** Record what became of an acknowledgement on the message that asked for it. */
