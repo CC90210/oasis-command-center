@@ -12,9 +12,19 @@
  *      loading line (aria-busy, no digits), and they come from ONE bounded read
  *      of the stored snapshot. A failed read says so inside that section while
  *      the frame still renders.
- *   2. The budget: not one fetch() while the page renders, frame or numbers.
- *      The database here is a local libSQL file, so any fetch at all would be a
- *      third party (Zernio, Meta, a sync run inline).
+ *   2. The budget: not one fetch() while a Content page renders, frame or
+ *      numbers. The database here is a local libSQL file, so any fetch at all
+ *      would be a third party (Zernio, Meta, a sync run inline).
+ *   3. Training: the add box renders with the frame, the counts and the list
+ *      stream behind one boundary, the page says in plain words what the
+ *      material is, what is in it and how to add to it, names no persona, and
+ *      keeps a marked place for the Train tools track's Tools section above
+ *      the material. A failed read is not "nothing in it yet".
+ *   4. Overview: no card waits on another tab's data. The frame (title and the
+ *      Performance card, which needs no read) arrives after the gate alone;
+ *      the queue, the Library, Training and Requests cards each have their own
+ *      boundary; the Training card reads only the training material; Requests
+ *      says what a request is and who acts on it; no persona name.
  *
  * Real code paths: the real founder gate (a signed session checked against a
  * local libSQL file), the real readers and the real PostgREST bridge.
@@ -188,6 +198,10 @@ async function main() {
     CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL,
       label TEXT NOT NULL, title TEXT, source_url TEXT, state TEXT NOT NULL, last_error TEXT,
       contributed_by TEXT NOT NULL, created_at TEXT NOT NULL, indexed_at TEXT);
+    CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, track TEXT, status TEXT NOT NULL,
+      brand_slug TEXT NOT NULL, brand_name TEXT, author_email TEXT, published_at TEXT);
+    CREATE TABLE marketing_review (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL, acted_on_at TEXT);
+    CREATE TABLE marketing_request (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT, status TEXT NOT NULL);
   `);
   const pa = (id: string, tenant: string, platform: string, views: number, likes: number, measured: boolean, days: number) => ({
     sql: `INSERT INTO post_analytics (id, tenant_id, zernio_post_id, platform_post_id, platform, views, likes,
@@ -215,6 +229,16 @@ async function main() {
                      ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL),
                      ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?)`,
         args: [OASIS, CC.email, daysAgo(2), daysAgo(2), OASIS, CC.email, daysAgo(0), OTHER, daysAgo(1), daysAgo(1)],
+      },
+      {
+        // OASIS's own: two waiting on a verdict, one live. One client asset, one for another tenant.
+        sql: `INSERT INTO marketing_asset (id, tenant_id, track, status, brand_slug, brand_name, author_email, published_at) VALUES
+              ('m1', ?, 'organic', 'in_review', 'oasis-ai', 'OASIS AI', ?, NULL),
+              ('m2', ?, 'organic', 'draft', 'oasis-ai', 'OASIS AI', ?, NULL),
+              ('m3', ?, 'paid', 'published', 'oasis-ai', 'OASIS AI', ?, ?),
+              ('m4', ?, 'organic', 'in_review', 'warner', 'Warner', ?, NULL),
+              ('m9', ?, 'organic', 'in_review', 'oasis-ai', 'OASIS AI', 'x', NULL)`,
+        args: [OASIS, CC.email, OASIS, CC.email, OASIS, CC.email, daysAgo(1), OASIS, CC.email, OTHER],
       },
     ],
     "write",
@@ -332,12 +356,117 @@ async function main() {
     }
   });
 
+  // ── 4. Overview: no card waits on another tab's data ─────────────────────
+  const { default: MarketingPage } = await import("../app/founders/marketing/page");
+  let overview: unknown = null;
+  await check("Overview resolves after the gate with no marketing read; each section and card has its own boundary; Performance renders with the frame", async () => {
+    statements.length = 0;
+    const el = await MarketingPage();
+    overview = await resolve(el, true);
+    assert.deepEqual(statements.filter((s) => /marketing_/.test(s)), [], "the frame waits on no marketing read");
+    const boundaries = hosts(overview).filter((h) => h.type === "suspense");
+    assert.equal(boundaries.length, 5, "subtitle, the queue, and the Library, Training and Requests cards");
+    for (const b of boundaries) assert.doesNotMatch(textOf(b.props.fallback), /\d/, "no number in a placeholder");
+    const frameText = textOf(overview);
+    assert.match(frameText, /Content/);
+    assert.match(frameText, /Performance.*Per channel, with provenance.*Views, engagement and retention/s, "the Performance card needs no read");
+    assert.ok(hosts(overview).some((h) => h.type === "a" && h.props.href === "/founders/marketing/performance"), "and links to its tab");
+  });
+
+  await check("the Training card reads only the training material; the Library, Requests and queue sections read the Library's summary", async () => {
+    const boundaries = hosts(overview).filter((h) => h.type === "suspense");
+    const read = async (b: Host) => {
+      statements.length = 0;
+      const text = textOf(await resolve(b.props.pending, false));
+      const tables = [...new Set(statements.map((s) => /FROM "?(\w+)"?/.exec(s)?.[1] ?? s))].sort();
+      return { text, tables };
+    };
+    // One boundary at a time, so every statement is attributed to its boundary.
+    const out: Array<{ text: string; tables: string[] }> = [];
+    for (const b of boundaries) out.push(await read(b));
+    const training = out.find((o) => /Training material/.test(o.text));
+    assert.ok(training, `a Training card: ${out.map((o) => o.text.slice(0, 40)).join(" | ")}`);
+    assert.deepEqual(training!.tables, ["marketing_corpus"], "the Training card does not wait on the Library's asset read");
+    assert.match(training!.text, /1 learned · 1 being read/);
+    const library = out.find((o) => /A record of what shipped/.test(o.text))!;
+    assert.match(library.text, /3 assets stored\./, "OASIS's own brand, this tenant: m1-m3, not the Warner asset or another tenant's");
+    assert.ok(library.tables.includes("marketing_asset"));
+    const queue = out.find((o) => /Needs you/.test(o.text))!;
+    assert.match(queue.text, /2 assets\s*awaiting your verdict/, "draft + in review on the OASIS tab, this tenant only");
+    assert.doesNotMatch(queue.text, /Couldn't load your queue/);
+  });
+
+  await check("the summary's three counts run together after the asset read, not one after another", async () => {
+    const { getMarketingSummary } = await import("../lib/founders/marketing-queries");
+    let requestAsked!: () => void;
+    const requestSeen = new Promise<void>((r) => (requestAsked = r));
+    const fake = {
+      from(table: string) {
+        let head = false;
+        const api: Record<string, unknown> = {
+          select(_c: string, o?: { head?: boolean }) { head = Boolean(o?.head); return api; },
+          eq: () => api, is: () => api, in: () => api, order: () => api, range: () => api,
+          then(done: (v: unknown) => void) {
+            if (table === "marketing_asset") return done({ error: null, data: [{ id: "a1", track: "organic", status: "draft" }] });
+            if (table === "marketing_request") { requestAsked(); return done({ error: null, count: 0 }); }
+            // The review count answers only once a request count has been asked
+            // for: run one after the other, the summary would never resolve.
+            if (table === "marketing_review") { void requestSeen.then(() => done({ error: null, count: 1 })); return; }
+            return done(head ? { error: null, count: 0 } : { error: null, data: [] });
+          },
+        };
+        return api;
+      },
+    } as unknown as Parameters<typeof getMarketingSummary>[1];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const summary = await Promise.race([
+        getMarketingSummary("t", fake),
+        new Promise<never>((_, fail) => {
+          timer = setTimeout(() => fail(new Error("the request count waited for the review count")), 2000);
+        }),
+      ]);
+      assert.equal(summary.open_reviews, 1);
+      assert.equal(summary.degraded, false);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  await check("Requests says what a request is and who acts on it; nothing on the Overview names a persona", async () => {
+    const text = textOf(await resolve(await MarketingPage(), false));
+    assert.match(text, /Requests/);
+    assert.match(text, /Jobs for the marketing agent, not for you/);
+    assert.match(text, /A request is a job for the marketing agent, such as .make three TikTok hooks for\s+the system ad., so the agent acts on it, not you\./);
+    assert.match(text, /None open\./);
+    assert.match(text, /Training material.*What the marketing agent learns from/s);
+    assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the Overview: ${text.match(PERSONA)?.[0]}`);
+  });
+
+  await check("a failed training-material read stays in the Training card; the rest of the Overview renders", async () => {
+    await raw.execute("ALTER TABLE marketing_corpus RENAME TO marketing_corpus_away");
+    await raw.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT)");
+    try {
+      const text = textOf(await resolve(await MarketingPage(), false));
+      assert.match(text, /Couldn't read the training material\./);
+      assert.doesNotMatch(text, /Nothing yet\. Add links on the Training tab\./);
+      // The Library's numbers do not depend on the training material at all.
+      assert.doesNotMatch(text, /Couldn't load your queue|Couldn't read the library/, "the queue and the Library are unaffected");
+      assert.match(text, /2 assets\s*awaiting your verdict/);
+      assert.match(text, /3 assets stored\./);
+    } finally {
+      await raw.execute("DROP TABLE marketing_corpus");
+      await raw.execute("ALTER TABLE marketing_corpus_away RENAME TO marketing_corpus");
+    }
+  });
+
   // ── 2. the budget ────────────────────────────────────────────────────────
   // `fetches` has counted since the process started, so this covers every
-  // render above (frame, numbers, the failure paths) and one more full one.
-  await check("no fetch() at all while Performance or Training renders: frames, numbers and the failure paths", async () => {
+  // render above (frames, numbers, the failure paths) and one more full one.
+  await check("no fetch() at all while Performance, Training or the Overview renders: frames, numbers and the failure paths", async () => {
     await resolve(await PerformancePage(), false);
     await resolve(await TrainPage(), false);
+    await resolve(await MarketingPage(), false);
     assert.deepEqual(fetches, [], "a page render reached the network outside its database");
   });
 
