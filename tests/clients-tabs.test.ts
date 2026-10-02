@@ -184,6 +184,22 @@ async function main() {
     assert.deepEqual(status.rowsForStatus(l, "active"), { current: [0, 3], past: [] });
     assert.deepEqual(status.rowsForStatus(l, "onboarding"), { current: [], past: [] });
   });
+  await check("the status view: a click is shown at once and stays shown until the address bar catches up; a change in the bar is followed", () => {
+    const start = { shown: "" as const, seen: "" as const };
+    const clicked = status.clickStatus(start, "active");
+    assert.deepEqual(clicked, { shown: "active", seen: "" });
+    // The click's own render: Next applies the address-bar write in a
+    // transition, after it. The bar's old value must not pull the list back.
+    assert.equal(status.followAddressBar(clicked, ""), clicked);
+    // The write lands: nothing moves.
+    assert.deepEqual(status.followAddressBar(clicked, "active"), { shown: "active", seen: "active" });
+    // Back, Clear or the rail change the bar from outside: followed.
+    assert.deepEqual(status.followAddressBar({ shown: "active", seen: "active" }, ""), { shown: "", seen: "" });
+    assert.deepEqual(status.followAddressBar({ shown: "paused", seen: "active" }, "churned"), { shown: "churned", seen: "churned" });
+    const src = stripped("components/os/landings/clients-status.tsx");
+    assert.match(src, /const followed = followAddressBar\(view, inUrl\);\s*if \(followed !== view\) setView\(followed\);/, "every render follows the bar");
+    assert.match(src, /setView\(\(v\) => clickStatus\(v, clientStatusOf\(key\)\)\);/, "a click goes through clickStatus");
+  });
   await check("a record's tabs: no Money outside OASIS's books, no Usage outside OASIS; Overview first; ?tab= resolves to an offered tab", () => {
     const keys = (v: { tenantId: string; oasis: boolean }) => records.clientTabsFor(v).map((t) => t.key);
     const all = ["overview", "conversations", "tickets", "projects", "money", "usage", "activity", "health", "files"];

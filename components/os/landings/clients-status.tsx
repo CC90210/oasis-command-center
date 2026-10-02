@@ -10,8 +10,10 @@
  * status into the address bar with history.replaceState, which Next keeps in
  * step with useSearchParams without a server round trip. A refresh, Back or a
  * shared link opens the same status, because the address bar is the source of
- * truth: this list follows it whenever it changes from outside (the rail,
- * Clear, Back).
+ * truth: this list follows it whenever it changes (the rail, Clear, Back). The
+ * click's own write reaches useSearchParams in a transition, a moment after
+ * the click's render, so a click is shown at once and the bar catches up
+ * (clickStatus, followAddressBar).
  *
  * A LIST CUT AT ITS PAGE SIZE (`fromServer`) cannot be filtered from the rows
  * at hand, so there a tab is a link: the server reads that status, the tab bar
@@ -56,6 +58,29 @@ function useStatusInUrl(): ClientStatus {
   return clientStatusOf(useSearchParams().get("lifecycle"));
 }
 
+/** What the list shows, and the address bar's status as this list last saw it. */
+export type StatusView = { shown: ClientStatus; seen: ClientStatus };
+
+/**
+ * A tab click: its rows are shown at once. The click also writes the address
+ * bar, but Next applies that write in a transition, a moment AFTER this
+ * render, so `seen` waits for it; were it moved now, the bar's old value would
+ * read as a change from outside and pull the list back to the tab just left.
+ * PURE.
+ */
+export function clickStatus(view: StatusView, status: ClientStatus): StatusView {
+  return { shown: status, seen: view.seen };
+}
+
+/**
+ * Every render: a status the address bar did not hold before (Back, Clear,
+ * the rail, or a click's own write landing) is followed; an unchanged bar
+ * leaves the clicked tab shown. Returns `view` itself when nothing changed. PURE.
+ */
+export function followAddressBar(view: StatusView, inUrl: ClientStatus): StatusView {
+  return inUrl === view.seen ? view : { shown: inUrl, seen: inUrl };
+}
+
 function Table({ head, rows }: { head: ReactNode; rows: ReactNode[] }) {
   return (
     <Card noPadding>
@@ -97,21 +122,15 @@ export function ClientsByStatus({
   filterForm: ReactNode;
 }) {
   const inUrl = useStatusInUrl();
-  const [picked, setPicked] = useState<ClientStatus>(inUrl);
-  // The status the address bar holds, as far as this list knows: what it last
-  // wrote there itself, or last read. When the bar changes without a click
-  // here (the rail, Clear, Back), the list follows it.
-  const [known, setKnown] = useState<ClientStatus>(inUrl);
-  if (inUrl !== known) {
-    setKnown(inUrl);
-    setPicked(inUrl);
-  }
+  const [view, setView] = useState<StatusView>({ shown: inUrl, seen: inUrl });
+  // When the address bar changes (the rail, Clear, Back, or a click's own
+  // write landing), the list follows it.
+  const followed = followAddressBar(view, inUrl);
+  if (followed !== view) setView(followed);
   // A cut list holds one status's rows, from the server: it shows the address bar's.
-  const status = fromServer ? inUrl : picked;
+  const status = fromServer ? inUrl : followed.shown;
   const pick = (key: string, href: string) => {
-    const next = clientStatusOf(key);
-    setPicked(next);
-    setKnown(next);
+    setView((v) => clickStatus(v, clientStatusOf(key)));
     // No server round trip: the rows are already here.
     window.history.replaceState(null, "", href);
   };
