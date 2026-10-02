@@ -75,7 +75,8 @@ const MESSAGES: Record<string, string> = {
   forbidden: "You do not have access to this.",
   not_found: "Not found.",
   database_not_configured: "The database is not configured on this deployment.",
-  customers_not_set_up: "Client records are not set up in this database yet (migration bravo__188).",
+  // The cause (the client records table is missing) is logged by customersServerError, never shown.
+  customers_not_set_up: "Client records aren't available right now. Nothing was changed; the error has been logged.",
   email_taken: "A client with that email already exists.",
   stripe_customer_taken: "Another client already has that Stripe customer.",
   source_lead_taken: "That deal is already a client.",
@@ -118,8 +119,8 @@ const MESSAGES: Record<string, string> = {
   client_tenant_is_this_workspace: "A client cannot be linked to your own workspace.",
   client_tenant_taken: "That workspace is already linked to another client record.",
   link_confirmation_required: "Confirm the link first. Nothing was changed.",
-  client_workspace_link_not_set_up:
-    "Linking a client's workspace needs migration bravo__195, which is not applied to this database yet. Nothing was changed.",
+  // The cause (the link column is missing) is logged by the route, never shown.
+  client_workspace_link_not_set_up: "Linking a client's workspace isn't available right now. Nothing was changed; the error has been logged.",
   // Importing Stripe customers (POST /api/clients/import-stripe).
   finance_owners_only: "Importing from the books is for OASIS's founders (the same people who can open Money).",
   privacy_confirmation_required:
@@ -147,9 +148,11 @@ export function customersError(status: number, error: string, extra?: Record<str
 }
 
 /**
- * Log the cause, answer with a sentence. A missing customers table is named as
- * such (503), because "set up the migration" is an actionable answer and "500"
- * is not; every other failure is a 500 whose driver text stays in the log.
+ * Log the cause, answer with a sentence. A missing customers table is a 503
+ * with its own code (customers_not_set_up), so the operator can tell it from a
+ * crash in the log; the person on screen gets a plain sentence, never the
+ * migration's name. Every other failure is a 500 whose driver text stays in
+ * the log.
  */
 export function customersServerError(label: string, err: unknown) {
   const message = err instanceof Error ? err.message : String(err);

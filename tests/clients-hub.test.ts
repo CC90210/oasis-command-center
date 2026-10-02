@@ -286,10 +286,16 @@ async function main() {
     assert.deepEqual(other.messages.map((m) => m.preview), ["A-TENANT-EMAIL"], "workspace A at the same address sees only its own");
   });
   const ClientRecordPage = (await import("../app/clients/[id]/page")).default;
+  const ClientRecordLayout = (await import("../app/clients/[id]/layout")).default;
   const ClientsPage = (await import("../app/clients/page")).default;
   const clientsStatus = await import("../components/os/landings/clients-status");
-  const record = (id: string, tab?: string) =>
-    ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+  // The record as Next draws it: the layout (header, tab bar) around the open
+  // tab. The tab renders first: a tab switch renders it alone, so it must
+  // refuse on its own.
+  const record = async (id: string, tab?: string) => {
+    const body = await ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+    return ClientRecordLayout({ params: Promise.resolve({ id }), children: body as never });
+  };
   const page = async (el: Promise<unknown>) => textOf(await el).join("\n");
   const is404 = async (el: Promise<unknown>) => {
     try {
@@ -1379,7 +1385,7 @@ async function main() {
     }
   });
 
-  await check("before bravo__195 is applied: records read as 'Not linked', Link workspace answers 503 naming it, as its header says", async () => {
+  await check("before bravo__195 is applied: records read as 'Not linked', Link workspace answers 503 with its own code, as its header says, and a sentence with no migration name", async () => {
     const header = MIG("bravo__195_customers_links.sql");
     const ordering = header.slice(header.indexOf("-- ORDERING."), header.indexOf("-- NOT RE-RUNNABLE"));
     assert.match(ordering, /Not linked to the client's workspace yet/);
@@ -1399,7 +1405,9 @@ async function main() {
       const r = await call(linkRoute.POST(req("POST", `/api/clients/${Y.id}/link-workspace`, { client_tenant_id: CLIENT_B, confirmed: true }), params({ id: Y.id })));
       assert.equal(r.status, 503, JSON.stringify(r.body));
       assert.equal(r.body.error, "client_workspace_link_not_set_up");
-      assert.match(String(r.body.message), /bravo__195/);
+      // The operator reads the cause in the log; the screen never names a migration (CS-16).
+      assert.match(String(r.body.message), /isn't available right now\. Nothing was changed/);
+      assert.doesNotMatch(String(r.body.message), /migration|bravo__/i);
     } finally {
       await db.execute("ALTER TABLE customers RENAME COLUMN client_tenant_id_unapplied TO client_tenant_id");
     }

@@ -208,10 +208,10 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     <PageFrame title="Clients" subtitle="The customers your business serves." actions={actions}>
       <div className="space-y-6">
         {records.state === "not_set_up" && (
-          // The reason (migration bravo__188 missing) is in the log
-          // (clients-records-data.ts attempt), not on the screen.
+          // The reason (the client records table is missing) is in the log
+          // (clients-records-data.ts attempt), not on the screen (CS-16).
           <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
-            Client records aren&rsquo;t available right now. We&rsquo;ve been notified.
+            Client records aren&rsquo;t available right now. The error has been logged.
           </p>
         )}
         {records.state === "error" && (

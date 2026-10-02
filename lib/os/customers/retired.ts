@@ -1,5 +1,5 @@
 /**
- * lib/os/customers/retired.ts — a retired business is never a client.
+ * lib/os/customers/retired.ts: a retired business is never a client.
  *
  * lib/tenant/retired.ts lists the offboarded businesses (SunBiz, retired
  * 2026-09-28) for every AUTOMATED producer. Clients reaches a retired business

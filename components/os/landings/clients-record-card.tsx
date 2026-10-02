@@ -49,8 +49,11 @@ export async function ClientRecordCard({
       const customer = await getCustomerBySourceLead(db, viewer.tenantId, leadId);
       found = customer ? { state: "record", customer } : { state: "none" };
     } catch (err) {
-      if (isMissingCustomersSchema(err)) found = { state: "not_set_up" };
-      else {
+      if (isMissingCustomersSchema(err)) {
+        // The card says only that client records aren't available; the reason is here.
+        console.error("[os.clients.record_card] client records are not set up: the customers table is missing", err);
+        found = { state: "not_set_up" };
+      } else {
         console.error("[os.clients.record_card]", err);
         found = { state: "error" };
       }
@@ -67,7 +70,7 @@ export async function ClientRecordCard({
             : found.state === "none"
               ? "This deal is won. As a client it carries its tickets, projects, files and activity in one place."
               : found.state === "not_set_up"
-                ? "Client records are not set up in this database yet (migration bravo__188)."
+                ? "Client records aren't available right now. The error has been logged."
                 : "Couldn't check for a client record. The error has been logged."}
         </p>
       </div>

@@ -16,7 +16,8 @@
  * not be OASIS's own and may not be a retired business (409 retired_business,
  * lib/os/customers/retired.ts), and one workspace belongs to one client record
  * (unique index; the holder is named in the 409). Without migration
- * bravo__195 the write is refused with a 503 naming the migration.
+ * bravo__195 the write is refused with a 503 (client_workspace_link_not_set_up):
+ * the migration is named in the log, and the person on screen gets a sentence.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";

@@ -1,62 +1,71 @@
 /**
- * tests/clients-tabs.test.ts — the Clients tabs answer a click (CLI-1, CLI-2).
+ * tests/clients-tabs.test.ts: the Clients tabs answer a click (CLI-1, CLI-2,
+ * CS-03, CS-06).
  *
- * WHY. CC, 2026-10-02: "when I go into clients and try to click from all to
+ * WHY. CC, 2026-10-01: "when I go into clients and try to click from all to
  * prospect, or onboarding, active, paused, or past, they're not clickable" and
  * "I'm still unable to click the actual subbed things inside the clients
  * portal". Both tab bars were server links that change only the query string:
  * Next keeps the old page up during the server render and shows no loading
- * boundary for a query-only change, so nothing moved until the render landed.
+ * boundary for a query-only change, so nothing moved until the render landed
+ * (Workers Logs, 10-01 22:33-22:37 UTC: every click reached the server and
+ * answered 200 in 0.5 to 2.1 s; CC clicked five tabs in four seconds).
  *
  * Pins:
- *   1. OsTabBar (components/os/OsTabBar.tsx): today's look; the clicked tab is
- *      drawn current at once and until the page catches up; a tab that
- *      navigates warms its route on hover and focus and shows its pending
- *      state through useLinkStatus; prefetch is off; a tab that selects
- *      cancels the navigation. No new colour or animation.
- *   2. The status view (components/os/landings/clients-status.tsx): which rows
- *      each status shows; a click writes the address bar with
- *      history.replaceState and never goes to the server; a list cut at its
- *      page size navigates instead and shows the server's rows.
- *   3. Every tab bar under app/clients is OsTabBar, and both pages have a
- *      loading boundary (the list's KPI row and sections are pinned in
- *      tests/clients-hub.test.ts, against a real database).
- *   4. What the components draw and do with a click or a hover, rendered where
- *      React is whole (tests/clients-tabs.render.ts).
+ *   1. OsTabBar (components/os/OsTabBar.tsx): a tab named by the address bar
+ *      (a bar in a layout) or by the page; the clicked tab is drawn current at
+ *      once and only until the page moves on (Back must not leave the
+ *      underline on the tab you left); today's look; prefetch off, warm on
+ *      intent, pending from useLinkStatus.
+ *   2. The Clients list, rendered against a real database: every status is
+ *      read once, whatever ?lifecycle= says, and each tab's count is the
+ *      number of records with that status; the KPI row and "Not yet client
+ *      records" stay under a status; a list cut at its page size reads the
+ *      status on the server and its tabs navigate.
+ *   3. A client record: the tab bar is the layout's and reads ?tab=; a client
+ *      workspace's record has no Money and no Usage tab, and ?tab=usage or
+ *      ?tab=money there opens Overview; OASIS's record keeps both (control).
+ *   4. Every tab bar under app/clients is OsTabBar, and both pages have a
+ *      loading boundary.
+ *   5. What the browser components draw and do with a click or a hover,
+ *      rendered where React is whole (tests/clients-tabs.render.ts): a status
+ *      click cancels the navigation, writes the address bar and asks the
+ *      server nothing, and the list then shows that status's rows.
  *
  * Run: node --conditions=react-server --import tsx tests/clients-tabs.test.ts
  */
+import "./_delivery-harness";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import * as ReactNS from "react";
+import { createElement, type ReactNode } from "react";
+import { CLIENT_A, OASIS, USERS, check, finish, login, setupDatabase, splitSql } from "./_delivery-harness";
 
-// next/link and next/navigation pull the client router context, which does not
-// exist under the react-server condition (the same stand-ins as
-// tests/content-hub.test.ts). This half only imports the pure helpers; the
-// components are rendered in tests/clients-tabs.render.ts.
-function stubModule(id: string, exports: Record<string, unknown>) {
-  const path = require.resolve(id);
-  require.cache[path] = { id: path, filename: path, path: dirname(path), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
-}
-stubModule("next/navigation", { useRouter: () => null, useSearchParams: () => new URLSearchParams() });
-stubModule("next/link", { __esModule: true, default: () => null, useLinkStatus: () => ({ pending: false }) });
+// next/link pulls the client router context, which does not exist under the
+// react-server condition: a plain anchor stands in, as in tests/clients-hub.test.ts.
+(globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
+const linkPath = require.resolve("next/link");
+require.cache[linkPath] = {
+  id: linkPath,
+  filename: linkPath,
+  path: dirname(linkPath),
+  loaded: true,
+  children: [],
+  paths: [],
+  exports: {
+    __esModule: true,
+    default: ({ href, children, ...rest }: { href: string; children?: ReactNode }) => createElement("a", { href, ...rest }, children),
+    useLinkStatus: () => ({ pending: false }),
+  },
+} as unknown as NodeModule;
 
 const root = join(__dirname, "..");
 const code = (rel: string) => readFileSync(join(root, rel), "utf8");
 /** Code only: comments may say what the tabs used to be. */
 const stripped = (rel: string) => code(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
-
-let failures = 0;
-async function check(name: string, fn: () => Promise<void> | void) {
-  try {
-    await fn();
-    console.log(`  ok    ${name}`);
-  } catch (e) {
-    failures += 1;
-    console.log(`  FAIL  ${name}\n        ${((e as Error).stack || (e as Error).message).split("\n").slice(0, 6).join("\n        ")}`);
-  }
-}
+const MIG = (f: string) => code(join("database", "turso", f));
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -67,23 +76,93 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** The text a server-rendered tree shows: server components rendered, a client component's props walked. */
+function textOf(node: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
+  if (node === null || node === undefined || typeof node === "boolean") return out;
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
+    return out;
+  }
+  if (typeof node !== "object" || seen.has(node)) return out;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const v of node) textOf(v, out, seen);
+    return out;
+  }
+  const el = node as { $$typeof?: symbol; type?: unknown; props?: Record<string, unknown> };
+  if (el.$$typeof && el.props) {
+    if (typeof el.type === "function") {
+      try {
+        const rendered = (el.type as (p: unknown) => unknown)(el.props);
+        if (!(rendered instanceof Promise)) textOf(rendered, out, seen);
+      } catch {
+        /* a client component: its props below are what ships */
+      }
+    }
+    textOf(el.props, out, seen);
+    return out;
+  }
+  for (const v of Object.values(node as Record<string, unknown>)) textOf(v, out, seen);
+  return out;
+}
+
+/** Every element of `type` anywhere in a tree (props and children), without rendering anything. */
+function findAll(node: unknown, type: unknown, out: Array<{ props: Record<string, unknown> }> = [], seen = new Set<unknown>()) {
+  if (node === null || typeof node !== "object" || seen.has(node)) return out;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const v of node) findAll(v, type, out, seen);
+    return out;
+  }
+  const el = node as { $$typeof?: symbol; type?: unknown; props?: Record<string, unknown> };
+  if (!el.$$typeof) {
+    for (const v of Object.values(node as object)) findAll(v, type, out, seen);
+    return out;
+  }
+  if (el.type === type && el.props) out.push(el as { props: Record<string, unknown> });
+  if (el.props) findAll(Object.values(el.props), type, out, seen);
+  return out;
+}
+
+type Tab = { key: string; label: string; href: string; count?: number };
+
 async function main() {
   console.log("clients-tabs:");
   const bar = await import("../components/os/OsTabBar");
   const status = await import("../components/os/landings/clients-status");
+  const records = await import("../components/os/landings/clients-records-data");
 
-  // ── 1. OsTabBar ────────────────────────────────────────────────────────────
-  await check("OsTabBar: the clicked tab is drawn current at once, until the page it opens names a tab", () => {
+  // -- 1. OsTabBar ----------------------------------------------------------
+  await check("OsTabBar: the address bar names the tab (a bar in a layout); missing or unknown is the first tab", () => {
+    const tabs = [{ key: "overview" }, { key: "tickets" }, { key: "health" }];
+    assert.equal(bar.tabFromParam("tickets", tabs), "tickets");
+    for (const v of [null, undefined, "", "money", "Tickets"]) assert.equal(bar.tabFromParam(v, tabs), "overview", String(v));
+  });
+  await check("OsTabBar: the clicked tab is drawn current at once, and only until the page moves on from where it was clicked", () => {
+    const click = { key: "money", from: "overview" };
     assert.equal(bar.shownTab("overview", null), "overview", "nothing clicked: the page's tab");
-    assert.equal(bar.shownTab("overview", { key: "money", from: "overview" }), "money", "clicked: Money, before the server answers");
-    assert.equal(bar.shownTab("money", { key: "money", from: "overview" }), "money", "landed");
-    assert.equal(bar.shownTab("tickets", { key: "money", from: "overview" }), "tickets", "the page moved on: the page's tab wins");
+    assert.equal(bar.shownTab("overview", click), "money", "clicked: Money, before the server answers");
+    assert.equal(bar.shownTab("money", click), "money", "landed");
+    assert.equal(bar.pendingClick(click, "money"), null, "landed: the click is answered and forgotten");
+    // Back (or the rail) took the page somewhere else: the page's tab wins,
+    // never the tab clicked earlier.
+    assert.equal(bar.shownTab("tickets", click), "tickets");
+    assert.equal(bar.pendingClick(click, "overview"), click, "still on the page it was clicked from: still waiting");
+    const src = stripped("components/os/OsTabBar.tsx");
+    assert.match(src, /if \(clicked && !pendingClick\(clicked, current\)\) setClicked\(null\);/, "the bar forgets an answered click");
+    assert.match(src, /setClicked\(\{ key: t\.key, from: current \}\)/, "a click remembers the tab it was made from");
   });
-  await check("OsTabBar: today's tab look, unchanged (-mb-px border-b-2, a foreground underline on the current tab)", () => {
-    assert.equal(bar.osTabClass(true), "-mb-px border-b-2 px-3 py-2 text-[13px] border-fg font-medium text-fg");
-    assert.equal(bar.osTabClass(false), "-mb-px border-b-2 px-3 py-2 text-[13px] border-transparent text-fg-muted hover:text-fg");
+  await check("OsTabBar: today's tab look (-mb-px border-b-2, a foreground underline on the current tab, the rail's focus ring)", () => {
+    assert.equal(
+      bar.osTabClass(true),
+      "relative -mb-px border-b-2 px-3 py-2 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/60 border-fg font-medium text-fg",
+    );
+    assert.equal(
+      bar.osTabClass(false),
+      "relative -mb-px border-b-2 px-3 py-2 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/60 border-transparent text-fg-muted hover:text-fg",
+    );
   });
-  await check("OsTabBar: prefetch off, warm on hover and focus with the rail's hook, pending from useLinkStatus, a select cancels the navigation", () => {
+  await check("OsTabBar: prefetch off, warm on hover and focus with the rail's hook, pending from useLinkStatus, no new visual language", () => {
     const src = code("components/os/OsTabBar.tsx");
     const body = stripped("components/os/OsTabBar.tsx");
     assert.match(src, /^"use client";/, "a client component");
@@ -92,52 +171,243 @@ async function main() {
     assert.equal((body.match(/prefetch=\{false\}/g) || []).length, links, "every Link keeps prefetch off (tests/os-nav.test.ts)");
     assert.doesNotMatch(body, /prefetch=\{true\}|router\.push|router\.replace/);
     assert.match(body, /import \{ useWarmOnIntent \} from "@\/components\/os\/RailRow";/, "the rail's own warm-on-intent hook, not a second one");
-    assert.match(body, /onMouseEnter=\{navigates \? warm : undefined\}/);
-    assert.match(body, /onFocus=\{navigates \? warm : undefined\}/);
-    assert.match(body, /import Link, \{ useLinkStatus \} from "next\/link";/);
     assert.match(body, /function OsTabLabel[\s\S]*useLinkStatus\(\)/, "the pending state is read inside the Link, where useLinkStatus sees it");
-    assert.match(body, /if \(onSelect\) \{\s*e\.preventDefault\(\);\s*onSelect\(t\.key, t\.href\);/, "a selecting tab cancels Next's navigation");
-  });
-  await check("OsTabBar: no new visual language (no gradient, glow, animation or literal colour)", () => {
-    const body = stripped("components/os/OsTabBar.tsx");
     assert.doesNotMatch(body, /bg-gradient|from-accent|blur-|shadow-glow|animate-|drop-shadow|#[0-9a-f]{3,8}\b|rgba?\(/i);
   });
 
-  // ── 2. The status view ─────────────────────────────────────────────────────
-  await check("the status view: a lifecycle param names its tab; anything else is All", () => {
+  // -- pure helpers of the list and the record --------------------------------
+  await check("the status view: a lifecycle param names its tab; anything else is All; All splits current from Past", () => {
     for (const l of ["prospect", "onboarding", "active", "paused", "churned"]) assert.equal(status.clientStatusOf(l), l);
     for (const v of ["", "vip", "Active", null, undefined]) assert.equal(status.clientStatusOf(v), "");
-  });
-  await check("the status view: All splits current from Past; a status shows only its own rows, in the server's order", () => {
     const l = ["active", "churned", "prospect", "active", "paused"] as const;
     assert.deepEqual(status.rowsForStatus(l, ""), { current: [0, 2, 3, 4], past: [1] });
     assert.deepEqual(status.rowsForStatus(l, "active"), { current: [0, 3], past: [] });
-    assert.deepEqual(status.rowsForStatus(l, "churned"), { current: [1], past: [] });
     assert.deepEqual(status.rowsForStatus(l, "onboarding"), { current: [], past: [] });
   });
-  await check("the status view: a click writes the address bar with replaceState and asks the server nothing; a cut list navigates", () => {
-    const body = stripped("components/os/landings/clients-status.tsx");
-    assert.match(body, /window\.history\.replaceState\(null, "", href\);/);
-    assert.doesNotMatch(body, /router\.(push|replace|refresh)|useRouter/, "no server round trip on a status click");
-    assert.match(body, /onSelect=\{fromServer \? undefined : pick\}/, "a list cut at its page size lets the tabs navigate");
-    assert.match(body, /useSearchParams\(\)\.get\("lifecycle"\)/, "the address bar is the source of truth");
+  await check("a record's tabs: no Money outside OASIS's books, no Usage outside OASIS; Overview first; ?tab= resolves to an offered tab", () => {
+    const keys = (v: { tenantId: string; oasis: boolean }) => records.clientTabsFor(v).map((t) => t.key);
+    const all = ["overview", "conversations", "tickets", "projects", "money", "usage", "activity", "health", "files"];
+    assert.deepEqual(keys({ tenantId: OASIS, oasis: true }), all, "OASIS: every tab");
+    assert.deepEqual(keys({ tenantId: CLIENT_A, oasis: false }), all.filter((k) => k !== "money" && k !== "usage"), "a client workspace");
+    const clientTabs = records.clientTabsFor({ tenantId: CLIENT_A, oasis: false });
+    assert.equal(records.resolveClientTab("usage", clientTabs), "overview");
+    assert.equal(records.resolveClientTab("money", clientTabs), "overview");
+    assert.equal(records.resolveClientTab("tickets", clientTabs), "tickets");
+    assert.equal(records.resolveClientTab(null, clientTabs), "overview");
+    // The browser bar and the server page land on the same tab for every value.
+    for (const v of ["usage", "money", "tickets", "health", "", null, "x"]) {
+      assert.equal(bar.tabFromParam(v, clientTabs), records.resolveClientTab(v, clientTabs), String(v));
+    }
   });
 
-  // ── 3. The pages ───────────────────────────────────────────────────────────
-  await check("every tab bar under app/clients is OsTabBar: none is hand-rolled", () => {
+  // -- 2 and 3. The pages, against a real database ------------------------------
+  const db = await setupDatabase();
+  for (const f of ["bravo__188_os_customers.sql", "bravo__195_customers_links.sql"]) {
+    for (const stmt of splitSql(MIG(f))) await db.execute(stmt);
+  }
+  await db.executeMultiple(MIG("bravo__186_os_approvals.sql"));
+  // Production shapes (schema export) of the other tables the pages read.
+  await db.executeMultiple(`
+    CREATE TABLE conversation_events (
+      id TEXT NOT NULL PRIMARY KEY, tenant_id TEXT NOT NULL, thread_id TEXT, lead_id TEXT, event_type TEXT NOT NULL,
+      actor_user_id TEXT, metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
+      version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
+  `);
+  const { parseManifest } = await import("../lib/manifest/schema");
+  const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
+  for (const [id, tenant, slug] of [["m-o", OASIS, "oasis-ai-cc"], ["m-a", CLIENT_A, "client-a"]] as const) {
+    await db.execute({
+      sql: "INSERT INTO tenant_manifests VALUES (?, ?, ?, ?, 1, 1, '2026-01-01', '2026-01-01')",
+      args: [id, tenant, slug, JSON.stringify(parseManifest(finalizeManifestFromWizard({ template: "custom", slug, answers: {} })))],
+    });
+  }
+  const store = await import("../lib/os/customers/store");
+  const T0 = new Date("2026-10-02T12:00:00.000Z");
+  const make = async (tenant: string, display_name: string, lifecycle: "prospect" | "onboarding" | "active" | "paused" | "churned", actor: string) => {
+    const r = await store.createCustomer(
+      db,
+      tenant,
+      { display_name, primary_email: null, company_name: null, primary_phone: null, lifecycle, owner_user_id: null, stripe_customer_id: null, tags: [], custom_fields: {} },
+      actor,
+      T0,
+    );
+    assert.ok(r.ok, JSON.stringify(r));
+    return r.customer;
+  };
+  // OASIS's book: 1 prospect, 1 onboarding, 2 active, 0 paused, 1 past.
+  await make(OASIS, "Pia Prospect", "prospect", USERS.cc.id);
+  await make(OASIS, "Otto Onboarding", "onboarding", USERS.cc.id);
+  const alma = await make(OASIS, "Alma Active", "active", USERS.cc.id);
+  await make(OASIS, "Abe Active", "active", USERS.cc.id);
+  await make(OASIS, "Pete Past", "churned", USERS.cc.id);
+  // A won deal not yet converted, so "Not yet client records" has a row.
+  await db.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-won-tabs', ?, 'lead', ?)",
+    args: [OASIS, JSON.stringify({ stage: "won", company: "Wendy Won Deal Co", name: "Wendy" })],
+  });
+  const acme = await make(CLIENT_A, "Acme Home", "active", USERS.clientA.id);
+  const EXPECTED = { "": 5, prospect: 1, onboarding: 1, active: 2, paused: 0, churned: 1 } as Record<string, number>;
+
+  const ClientsPage = (await import("../app/clients/page")).default;
+  const ClientRecordPage = (await import("../app/clients/[id]/page")).default;
+  const ClientRecordLayout = (await import("../app/clients/[id]/layout")).default;
+  const { KpiTile } = await import("../components/os/KpiTile");
+  const listView = async (sp: Record<string, string>) => {
+    const tree = await ClientsPage({ searchParams: Promise.resolve(sp) });
+    const [view] = findAll(tree, status.ClientsByStatus);
+    assert.ok(view, "the list is rendered through ClientsByStatus");
+    return { tree, props: view.props as { tabs: Tab[]; lifecycles: string[]; rows: unknown[]; fromServer: boolean } };
+  };
+  const countsOf = (tabs: Tab[]) => Object.fromEntries(tabs.map((t) => [t.key, t.count]));
+  const byStatus = (lifecycles: string[]) => {
+    const n: Record<string, number> = { "": lifecycles.length };
+    for (const l of lifecycles) n[l] = (n[l] ?? 0) + 1;
+    return n;
+  };
+
+  await login(USERS.cc);
+  await check("/clients?lifecycle=active: every status is read once, and each tab's count is the records with that status", async () => {
+    const { tree, props } = await listView({ lifecycle: "active" });
+    assert.equal(props.fromServer, false, "500 or fewer records: the tabs filter in the browser");
+    assert.deepEqual(countsOf(props.tabs), EXPECTED, "a tab's count is its records, whichever tab the address bar names");
+    // The rows the browser filters are every status's, not only the URL's.
+    const read = byStatus(props.lifecycles);
+    for (const k of Object.keys(EXPECTED)) assert.equal(read[k] ?? 0, EXPECTED[k], `rows with status '${k || "all"}'`);
+    assert.equal(props.rows.length, props.lifecycles.length, "one rendered row per record");
+    // The KPI row and the deals not yet records stay on the page under a status.
+    const active = findAll(tree, KpiTile).find((k) => k.props.label === "Active");
+    assert.equal(active?.props.value, 2, "the Active tile is drawn under the Active tab, with every record counted");
+    assert.match(textOf(tree).join("\n"), /Not yet client records[\s\S]*Wendy Won Deal Co/);
+  });
+  await check("/clients: each tab's link is its status plus the form's filters, so the address bar, Back and a shared link agree", async () => {
+    const { props } = await listView({ lifecycle: "paused", q: "Active" });
+    const href = Object.fromEntries(props.tabs.map((t) => [t.key, t.href]));
+    assert.equal(href[""], "/clients?q=Active");
+    assert.equal(href.active, "/clients?lifecycle=active&q=Active");
+    assert.equal(href.churned, "/clients?lifecycle=churned&q=Active");
+    // The search narrows the read; the counts follow it.
+    assert.deepEqual(countsOf(props.tabs), { "": 2, prospect: 0, onboarding: 0, active: 2, paused: 0, churned: 0 });
+  });
+  await check("/clients cut at its page size: the server reads the status in the address bar and the tabs navigate, with no counts", async () => {
+    const bulk = Array.from({ length: 501 }, (_, i) => ({
+      sql: `INSERT INTO customers (id, tenant_id, display_name, lifecycle, tags, custom_fields, created_at, updated_at)
+            VALUES (?, ?, ?, 'prospect', '[]', '{}', ?, ?)`,
+      args: [`bulk-tabs-${i}`, OASIS, `Bulk ${i}`, T0.toISOString(), T0.toISOString()],
+    }));
+    await db.batch(bulk, "write");
+    try {
+      const { tree, props } = await listView({ lifecycle: "active" });
+      assert.equal(props.fromServer, true, "a cut list cannot be filtered from the rows at hand");
+      assert.deepEqual([...new Set(props.lifecycles)], ["active"], "the server read the Active records");
+      assert.equal(props.lifecycles.length, 2);
+      assert.ok(props.tabs.every((t) => t.count === undefined), "no count from a cut list: it would be a floor");
+      assert.equal(findAll(tree, KpiTile).length, 0, "no KPI row from a cut list");
+    } finally {
+      await db.execute("DELETE FROM customers WHERE id LIKE 'bulk-tabs-%'");
+    }
+  });
+
+  const record = async (id: string, tab?: string) => {
+    const body = await ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+    const layout = await ClientRecordLayout({ params: Promise.resolve({ id }), children: body as never });
+    const [tabBar] = findAll(layout, bar.OsTabBar);
+    assert.ok(tabBar, "the record's tab bar is drawn by its layout");
+    return { body: textOf(body).join("\n"), tabBar: tabBar.props as { param?: string; active?: string; tabs: Tab[] } };
+  };
+  await login(USERS.clientA);
+  await check("a client workspace's record: no Money and no Usage tab; ?tab=usage and ?tab=money open Overview", async () => {
+    for (const tab of ["usage", "money"]) {
+      const r = await record(acme.id, tab);
+      assert.equal(r.tabBar.param, "tab", "the bar reads ?tab= from the address bar");
+      assert.deepEqual(
+        r.tabBar.tabs.map((t) => t.key),
+        ["overview", "conversations", "tickets", "projects", "activity", "health", "files"],
+      );
+      assert.match(r.body, /Details[\s\S]*Record added/, `?tab=${tab} renders Overview`);
+      assert.doesNotMatch(r.body, /Usage is how OASIS sees|payments and invoices are not kept in the app/, `?tab=${tab} renders no dead tab`);
+    }
+    assert.equal((await record(acme.id, "tickets")).tabBar.tabs.find((t) => t.key === "tickets")?.href, `/clients/${acme.id}?tab=tickets`);
+  });
+  await login(USERS.cc);
+  await check("control: OASIS's record keeps Money and Usage, and ?tab=usage opens Usage", async () => {
+    const r = await record(alma.id, "usage");
+    assert.deepEqual(
+      r.tabBar.tabs.map((t) => t.key),
+      ["overview", "conversations", "tickets", "projects", "money", "usage", "activity", "health", "files"],
+    );
+    assert.match(r.body, /Not linked to the client/);
+    assert.doesNotMatch(r.body, /Record added/, "not Overview");
+  });
+
+  await check("a tab switch renders the page alone, and the page reads only the open tab: no header, health or contact reads on Tickets", async () => {
+    // lib/perf/server-timing.ts logs each statement's SQL text (never its
+    // values) when PERF_DB_VERBOSE=1: the reads a tab click costs.
+    const sql: string[] = [];
+    const realLog = console.log;
+    process.env.PERF_DB_VERBOSE = "1";
+    console.log = (...a: unknown[]) => {
+      const line = a.map(String).join(" ");
+      if (line.startsWith("[perf.db] ")) sql.push((JSON.parse(line.slice("[perf.db] ".length)) as { sql: string }).sql);
+    };
+    try {
+      const body = textOf(await ClientRecordPage({ params: Promise.resolve({ id: alma.id }), searchParams: Promise.resolve({ tab: "tickets" }) })).join("\n");
+      assert.match(body, /No tickets from this client/, "the Tickets tab rendered");
+    } finally {
+      console.log = realLog;
+      delete process.env.PERF_DB_VERBOSE;
+    }
+    // The tickets list (lib/delivery/store.ts ticketSelect), as its SQL text starts.
+    assert.ok(sql.some((s) => /^SELECT t\.\*, p\.title AS project_title/.test(s)), `control: the tab's own read was seen in ${JSON.stringify(sql)}`);
+    // The header's reads (projects, health signals, contacts, the team list,
+    // the desk roster) belong to the layout, which a tab click does not render.
+    for (const table of ["outcome_events", "approvals", "conversation_events", "customer_contacts", "fin_payments", "fin_subscriptions"]) {
+      assert.ok(!sql.some((s) => new RegExp(`FROM ${table}\\b`).test(s)), `the Tickets tab read ${table}`);
+    }
+    // The projects list (lib/delivery/store.ts projectSelect), as its SQL text starts.
+    assert.ok(!sql.some((s) => /^SELECT p\.\*, tn\.name AS client_tenant_name/.test(s)), "the Tickets tab read the projects list");
+  });
+
+  await check("a database without client records: the list, a record, the deal card and the API say so in plain words, never a migration's name (CS-16)", async () => {
+    const { ClientRecordCard } = await import("../components/os/landings/clients-record-card");
+    const { customersServerError } = await import("../lib/os/customers/session");
+    await db.execute("ALTER TABLE customers RENAME TO customers_unapplied");
+    // The detail goes to the log: captured here, so it can be checked and does not flood the run.
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map((x) => (x instanceof Error ? x.message : String(x))).join(" "));
+    try {
+      const said = [
+        textOf(await ClientsPage({ searchParams: Promise.resolve({}) })).join("\n"),
+        textOf(await ClientRecordLayout({ params: Promise.resolve({ id: alma.id }), children: null as never })).join("\n"),
+        textOf(await ClientRecordPage({ params: Promise.resolve({ id: alma.id }), searchParams: Promise.resolve({}) })).join("\n"),
+        textOf(await ClientRecordCard({ tenantId: OASIS, leadId: "lead-won-tabs", stage: "won" })).join("\n"),
+      ];
+      for (const t of said) assert.match(t, /Client records aren.t available right now\. The error has been logged\./);
+      const api = customersServerError("tabs_test", new Error("no such table: customers"));
+      const body = (await api.json()) as { error: string; message: string };
+      assert.deepEqual([api.status, body.error], [503, "customers_not_set_up"], "the code still names the cause for the log and the operator");
+      for (const t of [...said, body.message]) assert.doesNotMatch(t, /migration|bravo__/i);
+      for (const where of ["[os.clients.customers]", "[os.clients.record]", "[os.clients.record_card]", "[customers:tabs_test]"]) {
+        assert.ok(logged.some((l) => l.startsWith(where) && /no such table: customers/.test(l)), `${where}: the cause is in the log`);
+      }
+    } finally {
+      console.error = realError;
+      await db.execute("ALTER TABLE customers_unapplied RENAME TO customers");
+    }
+  });
+
+  // -- 4. The pages' structure -------------------------------------------------
+  await check("every tab bar under app/clients is OsTabBar: none is hand-rolled; the record's bar is its layout's", () => {
     for (const f of walk(join(root, "app", "clients"))) {
       assert.doesNotMatch(stripped(f), /-mb-px border-b-2/, `${f} draws its own tab bar`);
       assert.doesNotMatch(stripped(f), /<nav aria-label=/, `${f} draws its own tab bar`);
     }
     assert.match(stripped("app/clients/page.tsx"), /<ClientsByStatus\b/);
-    assert.match(stripped("app/clients/[id]/page.tsx"), /<OsTabBar\s+label="Client record"/);
     assert.match(stripped("components/os/landings/clients-status.tsx"), /<OsTabBar label="Client status"/);
-  });
-  await check("the list reads every status once; only a list cut at its page size reads the status on the server", () => {
-    const page = stripped("app/clients/page.tsx");
-    assert.match(page, /const filters = \{\s*lifecycle: null,/, "the status is not a read filter");
-    assert.match(page, /const statusFromServer = everyStatus\.state === "ok" && everyStatus\.value\.truncated;/);
-    assert.match(page, /statusFromServer && status \? await loadCustomerRecords\(cv, \{ \.\.\.filters, lifecycle: status \}\) : everyStatus/);
+    assert.match(stripped("app/clients/[id]/layout.tsx"), /<OsTabBar\s+label="Client record"\s+param="tab"/);
+    assert.doesNotMatch(stripped("app/clients/[id]/page.tsx"), /OsTabBar|loadClientHeader|loadAssignmentRoster/, "the page draws the open tab only");
   });
   await check("both Clients pages have a loading boundary that paints at once", () => {
     for (const [f, variant] of [["app/clients/loading.tsx", "page"], ["app/clients/[id]/loading.tsx", "section"]] as const) {
@@ -146,7 +416,7 @@ async function main() {
     }
   });
 
-  // ── 4. Rendered where React is whole ───────────────────────────────────────
+  // -- 5. Rendered where React is whole -----------------------------------------
   await check("rendered: what the tabs draw, and what a click and a hover do (tests/clients-tabs.render.ts)", () => {
     const nodeOptions = (process.env.NODE_OPTIONS || "")
       .split(/\s+/)
@@ -160,19 +430,22 @@ async function main() {
     const html = (k: string) => String(r[k]);
     const current = (markup: string) => [...markup.matchAll(/<a href="([^"]+)"[^>]*aria-current="page"/g)].map((m) => m[1]);
 
-    // A record's tabs navigate: the page's tab is current, hover and focus warm, a click is not cancelled.
+    // A record's tabs: the address bar names the current one; hover and focus warm; a click is not cancelled.
     assert.match(html("record"), /<nav aria-label="Client record"/);
     assert.deepEqual(current(html("record")), ["/clients/c1?tab=money"]);
+    assert.deepEqual(current(html("recordNoTab")), ["/clients/c1"], "no ?tab=: Overview");
+    assert.deepEqual(current(html("recordUnknownTab")), ["/clients/c1"], "a tab this record does not offer: Overview, as the page renders");
     assert.deepEqual(r.recordPrefetch, [false, false, false, false]);
     assert.deepEqual(r.recordWarm, ["prefetch /clients/c1?tab=tickets", "prefetch /clients/c1?tab=conversations"]);
     assert.deepEqual(r.recordClick, { cancelled: false, href: "/clients/c1?tab=tickets" });
     assert.doesNotMatch(html("record"), /aria-busy/);
-    assert.match(html("recordPending"), /<span aria-busy="true" class="text-fg-muted">Money<\/span>/, "a pending tab says so, in today's muted tone");
+    assert.match(html("recordPending"), /<span aria-busy="true">Money<span aria-hidden="true" class="absolute inset-x-0 -bottom-0\.5 h-0\.5 bg-accent"><\/span><\/span>/, "a pending tab shows the slim accent bar");
 
-    // The list, on ?lifecycle=active: only the Active rows, no Past heading.
+    // The list, on ?lifecycle=active: only the Active rows, no Past heading; counts beside the labels.
     assert.deepEqual(current(html("listActive")), ["/clients?lifecycle=active"]);
     assert.match(html("listActive"), /Alpha Active[\s\S]*Delta Active/);
     assert.doesNotMatch(html("listActive"), /Bravo Past|Charlie Prospect|Past clients/);
+    assert.match(html("listActive"), />Active<span class="ml-1\.5 tabular-nums text-fg-dim">2<\/span>/);
     // All: current rows in the server's order, then Past under its heading.
     assert.deepEqual(current(html("listAll")), ["/clients"]);
     assert.match(html("listAll"), /Alpha Active[\s\S]*Charlie Prospect[\s\S]*Delta Active[\s\S]*Past clients[\s\S]*Bravo Past/);
@@ -181,12 +454,15 @@ async function main() {
     assert.match(html("listPausedFiltered"), /No clients match these filters\./);
     assert.match(html("listNone"), /<p>EMPTY-STATE<\/p>/, "no records at all: the page's own empty state");
 
-    // A status click: cancelled navigation, the address bar written, no server and no warming.
+    // A status click: cancelled navigation, the address bar written, no server and no warming; then Past's rows.
     assert.deepEqual(r.localPrefetch, [false, false, false, false, false, false]);
     assert.deepEqual(r.localWarmHandlers, [false, false, false, false, false, false], "nothing to warm: the rows are already here");
     assert.deepEqual(r.localClick, { cancelled: true, href: "/clients?lifecycle=churned" });
     assert.deepEqual(r.localHistory, ["/clients?lifecycle=churned"]);
     assert.deepEqual(r.localRouter, [], "a status click asks the server nothing");
+    assert.deepEqual(current(html("listAfterClick")), ["/clients?lifecycle=churned"]);
+    assert.match(html("listAfterClick"), /Bravo Past/);
+    assert.doesNotMatch(html("listAfterClick"), /Alpha Active|Charlie Prospect|Delta Active/);
 
     // A list cut at its page size: the server's rows, and the tabs navigate (warmed on hover).
     assert.match(html("server"), /Charlie Prospect/);
@@ -201,14 +477,13 @@ async function main() {
     assert.equal(html("clearNone"), "");
     assert.match(html("clearStatus"), /<a href="\/clients"[^>]*>Clear<\/a>/);
     assert.match(html("clearForm"), /<a href="\/clients"[^>]*>Clear<\/a>/);
+
+    // The record header's Write to client: everywhere but the tab it opens.
+    assert.match(html("writeOnOverview"), /<a href="\/clients\/c1\?tab=conversations"[^>]*>Write to client<\/a>/);
+    assert.equal(html("writeOnConversations"), "");
   });
 
-  if (failures) {
-    console.log(`clients-tabs: ${failures} FAILED`);
-    process.exit(1);
-  }
-  console.log("clients-tabs: ok");
-  process.exit(0);
+  finish("clients-tabs");
 }
 
 void main().catch((err) => {

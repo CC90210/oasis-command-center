@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * clients-status — the Clients list's status tabs (All, Prospect, Onboarding,
+ * clients-status: the Clients list's status tabs (All, Prospect, Onboarding,
  * Active, Paused, Past) and the records under them.
  *
  * A TAB FILTERS WHAT THE PAGE ALREADY HAS. The server reads every status once

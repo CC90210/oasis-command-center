@@ -1,18 +1,20 @@
 /**
- * The server-render half of tests/clients-tabs.test.ts.
+ * The browser-component half of tests/clients-tabs.test.ts.
  *
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * under which `react-dom/server` does not resolve and `react` exports no
- * hooks. OsTabBar and the Clients list's status view are client components, so
- * the only way to see what they draw is to render them where React is whole.
- * The test spawns THIS file with plain `node --import tsx` and asserts against
- * the markup and the recorded events printed here.
+ * hooks. OsTabBar, the Clients list's status view and the record header's
+ * "Write to client" are client components, so the only way to see what they
+ * draw is to render them where React is whole. The test spawns THIS file with
+ * plain `node --import tsx` and asserts against the markup and the recorded
+ * events printed here.
  *
  * next/link and next/navigation are stand-ins (the App Router is not mounted
- * here): the Link records the props each tab was given, so the test can fire a
- * tab's onNavigate / onMouseEnter exactly as Next would on a click or a hover,
- * and see what the component does with it: cancel the navigation and write the
- * address bar (a status tab), or let it go and warm the route (a record tab).
+ * here): the address bar is `searchParams`, and the Link records the props
+ * each tab was given, so the test can fire a tab's onNavigate / onMouseEnter
+ * exactly as Next would on a click or a hover, and see what the component does
+ * with it: cancel the navigation and write the address bar (a status tab), or
+ * let it go and warm the route (a record tab).
  *
  * It asserts nothing: every assertion lives in the .test.ts.
  */
@@ -78,6 +80,7 @@ async function main() {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { OsTabBar } = await import("../components/os/OsTabBar");
   const { ClientsByStatus, ClientStatusField, ClearClientFilters } = await import("../components/os/landings/clients-status");
+  const { WriteToClientLink } = await import("../components/os/landings/client-conversations");
   const h = React.createElement;
   const render = (el: React.ReactElement, url = "") => {
     searchParams = new URLSearchParams(url);
@@ -86,30 +89,34 @@ async function main() {
   };
   const out: Record<string, unknown> = {};
 
-  // ── A client record's tabs: they navigate ────────────────────────────────
+  // -- A client record's tabs: drawn by the record's layout, they navigate --
   const recordTabs = ["overview", "conversations", "tickets", "money"].map((k) => ({
     key: k,
     label: k[0].toUpperCase() + k.slice(1),
     href: k === "overview" ? "/clients/c1" : `/clients/c1?tab=${k}`,
   }));
-  out.record = render(h(OsTabBar, { label: "Client record", tabs: recordTabs, active: "money" }));
+  const recordBar = () => h(OsTabBar, { label: "Client record", tabs: recordTabs, param: "tab" });
+  out.record = render(recordBar(), "tab=money");
   out.recordPrefetch = links.map((l) => l.prefetch);
   links.find((l) => l.href === "/clients/c1?tab=tickets")?.onMouseEnter?.();
   links.find((l) => l.href === "/clients/c1?tab=conversations")?.onFocus?.();
   out.recordWarm = [...routerCalls];
   out.recordClick = click("/clients/c1?tab=tickets");
+  out.recordNoTab = render(recordBar(), "");
+  out.recordUnknownTab = render(recordBar(), "tab=usage");
   pending = true;
-  out.recordPending = render(h(OsTabBar, { label: "Client record", tabs: recordTabs, active: "money" }));
+  out.recordPending = render(recordBar(), "tab=money");
   pending = false;
 
-  // ── The Clients list: status tabs filter what the page holds ─────────────
+  // -- The Clients list: status tabs filter what the page holds -------------
   const lifecycles = ["active", "churned", "prospect", "active"];
   const row = (name: string) => h("tr", { key: name }, h("td", null, name));
   const rows = [row("Alpha Active"), row("Bravo Past"), row("Charlie Prospect"), row("Delta Active")];
   const tabs = ["", "prospect", "onboarding", "active", "paused", "churned"].map((k) => ({
     key: k,
-    label: k ? { churned: "Past" }[k] ?? k[0].toUpperCase() + k.slice(1) : "All",
+    label: k ? ({ churned: "Past" } as Record<string, string>)[k] ?? k[0].toUpperCase() + k.slice(1) : "All",
     href: `/clients${k ? `?lifecycle=${k}` : ""}`,
+    count: k ? lifecycles.filter((l) => l === k).length : lifecycles.length,
   }));
   const list = (over: Record<string, unknown> = {}) =>
     h(ClientsByStatus, {
@@ -138,11 +145,14 @@ async function main() {
   out.localClick = click("/clients?lifecycle=churned");
   out.localHistory = [...historyCalls];
   out.localRouter = [...routerCalls];
+  // What the list shows once the address bar holds what the click wrote.
+  out.listAfterClick = render(list(), new URL(historyCalls[0] ?? "/clients", "http://x").search.slice(1));
 
   // A list cut at its page size: the rows are the server's, for the URL's status, and the tabs navigate.
   historyCalls.length = 0;
+  const serverTabs = tabs.map((t) => ({ key: t.key, label: t.label, href: t.href }));
   out.server = render(
-    list({ fromServer: true, lifecycles: ["prospect"], rows: [row("Charlie Prospect")] }),
+    list({ fromServer: true, tabs: serverTabs, lifecycles: ["prospect"], rows: [row("Charlie Prospect")] }),
     "lifecycle=prospect",
   );
   out.serverClick = click("/clients?lifecycle=active");
@@ -150,12 +160,16 @@ async function main() {
   links.find((l) => l.href === "/clients?lifecycle=active")?.onMouseEnter?.();
   out.serverWarm = [...routerCalls];
 
-  // ── The filter form's status, and Clear ──────────────────────────────────
+  // -- The filter form's status, and Clear ----------------------------------
   out.fieldActive = render(h(ClientStatusField), "lifecycle=active");
   out.fieldAll = render(h(ClientStatusField), "");
   out.clearNone = render(h(ClearClientFilters, { formFiltered: false }), "");
   out.clearStatus = render(h(ClearClientFilters, { formFiltered: false }), "lifecycle=paused");
   out.clearForm = render(h(ClearClientFilters, { formFiltered: true }), "");
+
+  // -- The record header's "Write to client": not on the tab it opens -------
+  out.writeOnOverview = render(h(WriteToClientLink, { customerId: "c1" }), "");
+  out.writeOnConversations = render(h(WriteToClientLink, { customerId: "c1" }), "tab=conversations");
 
   process.stdout.write(JSON.stringify(out));
 }
