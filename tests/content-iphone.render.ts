@@ -17,7 +17,7 @@
  * body's overflow.
  */
 import { dirname } from "node:path";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 function stub(request: string, exports: Record<string, unknown>) {
   const p = require.resolve(request);
@@ -357,6 +357,32 @@ async function main() {
   const openAfterCloseButton = portalOf(frame) !== null;
   pe.effects();
 
+  // -- 3b. a carousel and a single image open big too ------------------------
+  // The tile's own media element, as AssetTile hands it over: Enlarge opens the
+  // big phone with the deck at its real 4:5 shape (one slide loaded, the rest
+  // on demand) and the 1:1 card letterboxed.
+  const { CarouselFrame } = await import("../components/founders/CarouselFrame");
+  const openBig = (media: ReactNode, shapeOver: Partial<typeof shape>) => {
+    const d = driver(PhoneEnlarge);
+    const props = { ...enlargeProps, frame: { ...shape, ...shapeOver }, media };
+    const first = d.render(props);
+    (must(first, "the tile slot's provider", (el) => el.type === Slot).props.value as typeof tileSlot).enlarge({ play: false, at: 0 }, trigger);
+    const open = portalOf(d.render(props));
+    if (!open) throw new Error("render: Enlarge did not open the big phone");
+    return draw(open.children);
+  };
+  const carouselBig = openBig(
+    React.createElement(CarouselFrame, {
+      slides: ["https://media.test/slide_1.png", "https://media.test/slide_2.png", "https://media.test/slide_3.png"],
+      title: "Asset title", width: 1080, height: 1350, className: "h-full w-full",
+    }),
+    { mediaW: 1080, mediaH: 1350, aspect: "4:5" },
+  );
+  const imageBig = openBig(
+    React.createElement("img", { src: "https://media.test/card.png", alt: "", loading: "lazy", decoding: "async", width: 1080, height: 1080, className: "h-full w-full object-contain" }),
+    { mediaW: 1080, mediaH: 1080, aspect: "1:1" },
+  );
+
   // -- 4. a video playing in place carries on in the big phone ---------------
   const inlineCalls: string[] = [];
   const playingInPlace = fakeMedia("inline-video", inlineCalls, true, 12.5);
@@ -452,6 +478,8 @@ async function main() {
       openAfterBackdropClick,
       openAfterCloseButton,
       bigPhoneWidth: BIG_PHONE_WIDTH,
+      carouselBig,
+      imageBig,
     },
     handover: {
       start: handoverStart,

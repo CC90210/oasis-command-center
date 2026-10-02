@@ -148,6 +148,8 @@ type Drawn = {
     openAfterBackdropClick: boolean;
     openAfterCloseButton: boolean;
     bigPhoneWidth: string;
+    carouselBig: string;
+    imageBig: string;
   };
   handover: { start: unknown; inlineCalls: string[]; pausedStart: unknown; pausedCalls: string[] };
   player: {
@@ -328,6 +330,23 @@ async function main() {
     assert.equal(e.afterClose.focused, "enlarge-button");
     assert.equal(e.afterClose.bodyOverflow, "", "the page scrolls again");
     assert.equal(e.afterClose.keydownListeners, 0, "and its key listener is gone");
+  });
+
+  await check("a carousel and a single image open big too: the deck pages in the big phone at 4:5, one slide loaded; the card letterboxed", () => {
+    const deck = d.enlarge.carouselBig;
+    assert.match(deck, /role="dialog"/);
+    assert.match(deck, /data-fit="letterbox"/, "a 4:5 deck is letterboxed in the 9:16 reel area, never cropped");
+    assert.match(deck, /aria-roledescription="carousel"/, "and still pages, in the big phone");
+    const slides = tags(deck, "img");
+    assert.equal(slides.length, 1, "one slide on screen; the others load when reached");
+    assert.equal(attr(slides[0], "src"), "https://media.test/slide_1.png");
+    assert.equal(attr(slides[0], "loading"), "lazy");
+    assert.match(deck, /aria-label="Next slide"/);
+    assert.equal(tags(deck, "video").length, 0);
+    const card = d.enlarge.imageBig;
+    assert.match(card, /data-fit="letterbox"/);
+    assert.equal(tags(card, "img").length, 1);
+    assert.match(card, /width:100%;height:56\.25%/, "a 1:1 card at its real shape");
   });
 
   await check("a click outside the phone or on Close closes it; a click on the phone does not", () => {
