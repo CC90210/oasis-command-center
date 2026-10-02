@@ -185,6 +185,17 @@ check("a visit yields one defect per finding, and persona names only for the vie
   assert.equal(broken.filter((d) => d.type === "error_page").length, 2, "a 500 and the boundary it rendered");
 });
 
+check("one bar measured at the top and again after scrolling is not two bars overlapping", () => {
+  const topBar = { id: 1, selector: "div.fixed.top-0", x: 0, y: 0, width: 390, height: 56, at: "at the top" };
+  const sameBarScrolled = { ...topBar, id: 100000, at: "after scrolling" };
+  const stickyScrolled = { id: 100001, selector: "header.sticky.top-0", x: 0, y: 0, width: 390, height: 44, at: "after scrolling" };
+  const quiet = visitDefects({ ...visit, bars: [topBar, sameBarScrolled], mainReadyMs: 100, hscroll: null, consoleErrors: [], failedRequests: [], personaHits: [], clipCandidates: [] }, {});
+  assert.deepEqual(quiet, [], "the same bar at two scroll positions is not an overlap");
+  const slid = visitDefects({ ...visit, bars: [topBar, sameBarScrolled, stickyScrolled], mainReadyMs: 100, hscroll: null, consoleErrors: [], failedRequests: [], personaHits: [], clipCandidates: [] }, {});
+  assert.equal(slid.length, 1, "a sticky header that slid under the top bar after scrolling is one overlap");
+  assert.equal(slid[0].type, "overlapping_bars");
+});
+
 check("defects rank: error page, failed request, persona leak, console error, clipped text, bars, sideways scroll, slow", () => {
   assert.deepEqual([...DEFECT_TYPES], ["error_page", "failed_request", "persona_leak", "console_error", "clipped_text", "overlapping_bars", "horizontal_scroll", "slow"]);
   const shuffled = ["slow", "horizontal_scroll", "clipped_text", "persona_leak", "failed_request", "error_page"].map((type) => ({ type, severity: severityOf(type), route: "/x", viewer: "v", viewport: "1440x900", selector: "" }));

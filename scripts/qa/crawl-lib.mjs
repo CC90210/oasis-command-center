@@ -346,8 +346,17 @@ export function visitDefects(visit, { slowMs = 3000, checkPersona = false } = {}
     push("clipped_text", c.selector, c.text, `${c.kind}, ${c.axis === "x" ? "width" : c.axis === "y" ? "height" : "width and height"}, ${c.overflowPx}px hidden`, { region: c.region });
   }
 
+  // Bars are measured twice (at the top, after scrolling). Compare each
+  // measurement with itself: one bar at two scroll positions is not two bars.
   const size = visit.viewportSize || {};
-  for (const o of findOverlappingBars(visit.bars, { viewportWidth: size.width, viewportHeight: size.height })) {
+  const byMoment = new Map();
+  for (const b of visit.bars || []) {
+    const key = b.at || "";
+    if (!byMoment.has(key)) byMoment.set(key, []);
+    byMoment.get(key).push(b);
+  }
+  const overlaps = [...byMoment.values()].flatMap((bars) => findOverlappingBars(bars, { viewportWidth: size.width, viewportHeight: size.height }));
+  for (const o of overlaps) {
     push(
       "overlapping_bars",
       `${o.a.selector}  x  ${o.b.selector}`,
@@ -596,6 +605,7 @@ export function renderMarkdown(report, { maxDefects = Infinity } = {}) {
   const browserHosts = Object.entries(egress.browserHosts || {});
   lines.push(`- Outbound calls the egress guard blocked from the server: ${hosts.map(([h, n]) => `${h} (${n})`).join(", ") || "none"}.`);
   lines.push(`- Outbound requests blocked in the browser: ${browserHosts.map(([h, n]) => `${h} (${n})`).join(", ") || "none"}.`);
+  for (const s of (egress.browserSamples || []).slice(0, 20)) lines.push(`  - \`${cell(s, 160)}\``);
   lines.push(
     `- Persona names (${PERSONA_NAMES.join(", ")}) are checked for: ${(m.viewers || []).filter((v) => v.checkPersona).map((v) => `\`${v.key}\` (${v.label})`).join(", ") || "nobody"}.`,
   );

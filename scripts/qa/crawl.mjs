@@ -526,6 +526,7 @@ async function main() {
   const defects = [];
   const rails = Object.fromEntries(viewers.map((v) => [v.key, new Set()]));
   const browserEgress = {};
+  const browserSamples = [];
   const notes = [];
   try {
     for (const viewer of viewers) {
@@ -541,12 +542,23 @@ async function main() {
         });
         await ctx.addCookies([{ name: "oasis_session", value: sessions[viewer.key].cookie, url: opts.base }]);
         await ctx.addInitScript(READY_PROBE);
-        // Nothing leaves the machine from the browser either.
+        // Nothing leaves the machine from the browser either. Each blocked
+        // request is counted by host, and the first few are kept with the page
+        // that made them, so the report can say which feature reached out.
         await ctx.route(
           (url) => url.host !== baseUrl.host && /^(https?|wss?):$/.test(url.protocol),
           (route) => {
-            const host = new URL(route.request().url()).host;
-            browserEgress[host] = (browserEgress[host] ?? 0) + 1;
+            const req = route.request();
+            const target = new URL(req.url());
+            browserEgress[target.host] = (browserEgress[target.host] ?? 0) + 1;
+            let from = "";
+            try {
+              from = new URL(req.frame().url()).pathname;
+            } catch {
+              from = "";
+            }
+            const sample = `${target.origin}${target.pathname} <- ${from || "?"} (${viewer.key})`;
+            if (browserSamples.length < 60 && !browserSamples.includes(sample)) browserSamples.push(sample);
             return route.abort("blockedbyclient");
           },
         );
@@ -646,7 +658,7 @@ async function main() {
       skippedPublic: derived.skippedPublic,
       unexpanded: derived.unexpanded,
       personaNames: PERSONA_NAMES,
-      egress: { serverHosts, browserHosts: browserEgress },
+      egress: { serverHosts, browserHosts: browserEgress, browserSamples },
       rails: Object.fromEntries(Object.entries(rails).map(([k, s]) => [k, [...s].sort()])),
       notes,
     },

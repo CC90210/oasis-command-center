@@ -100,7 +100,7 @@ export QA_DIR="$PWD/.qa"; mkdir -p "$QA_DIR/report" "$QA_DIR/logs"
 export TURSO_DB_PATH="$QA_DIR/occ-qa.db" TURSO_DATABASE_URL="file:$QA_DIR/occ-qa.db" TURSO_AUTH_TOKEN=local-qa-placeholder
 export EMPIRE_DATA_BACKEND=turso_cloud EMPIRE_AUTH_BACKEND=turso NEXT_TELEMETRY_DISABLED=1
 export FOUNDERS_TENANT_IDS=ef8d389e-3f15-43f2-ae00-3660f69a1452 OPERATOR_EMAIL=conaugh@oasisai.work BRAVO_FORCE_DRY_RUN=1
-export OPERATOR_TIMEZONE=America/Toronto NEXT_PUBLIC_OPERATOR_TIMEZONE=America/Toronto PUBLIC_APP_URL=http://127.0.0.1:3100
+export OPERATOR_TIMEZONE=America/Toronto NEXT_PUBLIC_OPERATOR_TIMEZONE=America/Toronto PUBLIC_APP_URL=http://localhost:3100
 export DEPLOY_ENV=qa-crawl DEPLOY_PLATFORM=local DEPLOY_SURFACE=oasis
 export AUTH_SESSION_SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64url'))")"
 export BRAVO_FIELD_ENCRYPTION_KEY="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))")"
@@ -110,8 +110,12 @@ node scripts/qa/build-db.mjs "$TURSO_DB_PATH"
 NODE_OPTIONS="$GUARD --conditions=react-server" node --import tsx scripts/qa/seed.mjs "$TURSO_DB_PATH" "$QA_DIR/seed.json"
 NODE_OPTIONS="$GUARD --max-old-space-size=4096" npm run build
 NODE_OPTIONS="$GUARD" npx next start --port 3100 --hostname 127.0.0.1 > "$QA_DIR/logs/server.log" 2>&1 &
-npm run qa:crawl -- --base http://127.0.0.1:3100 --db "$TURSO_DB_PATH" --seed "$QA_DIR/seed.json" --out "$QA_DIR/report" --egress-log "$EGRESS_LOG"
+npm run qa:crawl -- --base http://localhost:3100 --db "$TURSO_DB_PATH" --seed "$QA_DIR/seed.json" --out "$QA_DIR/report" --egress-log "$EGRESS_LOG"
 ```
+
+Crawl through `localhost`, not `127.0.0.1`: `next start` writes `localhost`
+into the absolute URLs of its own redirects, and a redirect to another origin
+drops the session cookie, so every redirected page would land on sign-in.
 
 Never put a `.env*` file in the checkout for this: Next would load it, and the
 point is that no production value is anywhere near the run. Add

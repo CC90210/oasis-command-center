@@ -100,7 +100,7 @@ jobs:
             echo "TURSO_DATABASE_URL=file:$QA_DIR/occ-qa.db"
             echo "AUTH_SESSION_SECRET=$SESSION_SECRET"
             echo "BRAVO_FIELD_ENCRYPTION_KEY=$FIELD_KEY"
-            echo "PUBLIC_APP_URL=http://127.0.0.1:$QA_PORT"
+            echo "PUBLIC_APP_URL=http://localhost:$QA_PORT"
             echo "EGRESS_LOG=$QA_DIR/logs/egress.log"
             echo "QA_GUARD=$GITHUB_WORKSPACE/scripts/qa/egress-guard.cjs"
           } >> "$GITHUB_ENV"
@@ -129,6 +129,9 @@ jobs:
           tail -n 80 "$QA_DIR/logs/server.log"
           exit 1
 
+      # The browser uses "localhost", not 127.0.0.1: next start writes
+      # localhost into the absolute URLs of its own redirects, and a redirect
+      # to another origin would drop the session cookie and land on sign-in.
       - name: Crawl
         env:
           QA_VIEWERS: ${{ inputs.viewers }}
@@ -137,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run qa:crawl -- \
-            --base "http://127.0.0.1:$QA_PORT" \
+            --base "http://localhost:$QA_PORT" \
             --db "$QA_DB" \
             --seed "$QA_DIR/seed.json" \
             --out "$QA_DIR/report" \
