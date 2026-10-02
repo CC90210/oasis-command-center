@@ -131,6 +131,9 @@ const TESTS = [
   // The four qualification gates: new wording, unchanged stored keys, legacy
   // records still read as qualified (book-the-meet plan, Task 2).
   "tests/sales-qualification.test.ts",
+  // Meeting times in the prospect's own zone; DST gaps refused, not shifted
+  // (book-the-meet plan, Task 3).
+  "tests/meeting-time-zones.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
