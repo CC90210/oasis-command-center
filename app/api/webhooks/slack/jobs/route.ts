@@ -2,8 +2,9 @@
  * POST /api/webhooks/slack/jobs - where the SLACK_AGENT_JOBS queue consumer
  * (worker-entry.ts) hands each @mention job to the app.
  *
- * Only a job signed by the consumer (lib/slack/job-signature.ts, the Slack
- * signing secret over a job-only message) is run; anything else is 401. The
+ * Only a job signed by the consumer (lib/slack/job-signature.ts: an internal
+ * job key, never a Slack app's signing secret, over a job-only message) is
+ * run; anything else is 401. The
  * job itself is lib/slack/jobs.ts runSlackMentionJob: one approval per Slack
  * event, so a queue retry never drafts twice.
  *
@@ -12,8 +13,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { slackSigningSecret } from "@/lib/slack/verify";
-import { JOB_SIGNATURE_HEADER, JOB_TIMESTAMP_HEADER, verifySlackJob } from "@/lib/slack/job-signature";
+import { JOB_SIGNATURE_HEADER, JOB_TIMESTAMP_HEADER, slackJobSecret, verifySlackJob } from "@/lib/slack/job-signature";
 import { isSlackMentionJob, runSlackMentionJob } from "@/lib/slack/jobs";
 
 export const runtime = "nodejs";
@@ -23,7 +23,7 @@ export const maxDuration = 300;
 export async function POST(req: NextRequest) {
   const body = await req.text();
   const signed = await verifySlackJob({
-    secret: slackSigningSecret(),
+    secret: await slackJobSecret(process.env),
     timestamp: req.headers.get(JOB_TIMESTAMP_HEADER),
     signature: req.headers.get(JOB_SIGNATURE_HEADER),
     body,

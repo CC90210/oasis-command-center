@@ -6,14 +6,15 @@
  * and handed to the app's own /api/webhooks/slack/jobs route IN-PROCESS (the
  * OpenNext handler's fetch, not the network), which runs it with the queue
  * consumer's 15-minute budget. A 2xx acks the message; anything else retries
- * it (Cloudflare's retry and dead-letter settings apply). No signing secret on
- * the Worker means no job can be proven, so every message is retried and the
- * reason is logged once per batch.
+ * it (Cloudflare's retry and dead-letter settings apply). No job key on the
+ * Worker (CONNECTIONS_OAUTH_STATE_SECRET, see job-signature.ts) means no job
+ * can be proven, so every message is retried and the reason is logged once per
+ * batch.
  *
  * No "server-only" and no Next import: this runs in the Worker entry, outside
  * Next's bundle.
  */
-import { JOB_SIGNATURE_HEADER, JOB_TIMESTAMP_HEADER, signSlackJob } from "./job-signature";
+import { JOB_SIGNATURE_HEADER, JOB_TIMESTAMP_HEADER, signSlackJob, slackJobSecret } from "./job-signature";
 
 export const SLACK_JOBS_PATH = "/api/webhooks/slack/jobs";
 /** When PUBLIC_APP_URL is unset: the request never leaves the Worker (handler.fetch is called directly). */
@@ -24,11 +25,11 @@ export type QueueBatch = { messages: readonly QueueMessage[] };
 
 export async function consumeSlackJobs(
   batch: QueueBatch,
-  env: { SLACK_SIGNING_SECRET?: string; PUBLIC_APP_URL?: string },
+  env: { CONNECTIONS_OAUTH_STATE_SECRET?: string; PUBLIC_APP_URL?: string },
   appFetch: (request: Request) => Promise<Response>,
   nowMs: () => number = Date.now,
 ): Promise<{ acked: number; retried: number }> {
-  const secret = (env.SLACK_SIGNING_SECRET || "").trim();
+  const secret = await slackJobSecret(env);
   let acked = 0;
   let retried = 0;
   // The app's own origin, so host-aware middleware treats the request as the
@@ -40,7 +41,7 @@ export async function consumeSlackJobs(
     console.error("[slack.queue] PUBLIC_APP_URL is not a URL; using the internal origin");
   }
   if (!secret) {
-    console.error("[slack.queue] SLACK_SIGNING_SECRET is not set on the Worker; every job is retried");
+    console.error("[slack.queue] CONNECTIONS_OAUTH_STATE_SECRET is not set on the Worker (it keys the job signature); every job is retried");
     for (const m of batch.messages) {
       m.retry();
       retried += 1;

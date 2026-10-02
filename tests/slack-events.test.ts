@@ -1181,19 +1181,26 @@ async function main() {
 
   // ── 5. The queue consumer and the internal jobs route ─────────────────────
 
-  await check("the queue consumer signs each job for the app, acks a 2xx and retries anything else", async () => {
+  await check("the queue consumer signs each job with the internal job key (no Slack app secret needed), acks a 2xx and retries anything else", async () => {
     const acked: string[] = [];
     const retried: string[] = [];
     const msg = (id: string) => ({ body: { id }, ack: () => acked.push(id), retry: () => retried.push(id) });
     const seen: Request[] = [];
+    // Only OASIS's internal Connections secret: a workspace on its own Slack app
+    // gets its mentions run even where OASIS's Slack app is not set up.
+    const root = { CONNECTIONS_OAUTH_STATE_SECRET: process.env.CONNECTIONS_OAUTH_STATE_SECRET! };
+    const jobKey = await jobSig.slackJobSecret(root);
+    assert.ok(jobKey && jobKey !== SECRET, "the job key is derived, and is not the Slack signing secret");
+    assert.notEqual(jobKey, root.CONNECTIONS_OAUTH_STATE_SECRET, "nor the Connections secret itself: one key per purpose");
+    assert.equal(await jobSig.slackJobSecret({ CONNECTIONS_OAUTH_STATE_SECRET: "too-short" }), null, "a short root secret gives no job key");
     const res = await consumer.consumeSlackJobs(
       { messages: [msg("a"), msg("b")] },
-      { SLACK_SIGNING_SECRET: SECRET, PUBLIC_APP_URL: "https://oasisai.work" },
+      { ...root, PUBLIC_APP_URL: "https://oasisai.work" },
       async (request) => {
         seen.push(request);
         const body = await request.clone().text();
         const okSig = await jobSig.verifySlackJob({
-          secret: SECRET,
+          secret: jobKey,
           timestamp: request.headers.get(jobSig.JOB_TIMESTAMP_HEADER),
           signature: request.headers.get(jobSig.JOB_SIGNATURE_HEADER),
           body,
@@ -1208,22 +1215,28 @@ async function main() {
     assert.deepEqual(retried, ["b"]);
     assert.equal(new URL(seen[0].url).pathname, "/api/webhooks/slack/jobs");
     const none = await consumer.consumeSlackJobs({ messages: [msg("c")] }, {}, async () => new Response("{}"));
-    assert.deepEqual(none, { acked: 0, retried: 1 }, "no secret: nothing can be proven, so everything is retried");
+    assert.deepEqual(none, { acked: 0, retried: 1 }, "no job key: nothing can be proven, so everything is retried");
+    const slackOnly = await consumer.consumeSlackJobs({ messages: [msg("d")] }, { SLACK_SIGNING_SECRET: SECRET } as never, async () => new Response("{}"));
+    assert.deepEqual(slackOnly, { acked: 0, retried: 1 }, "a Slack signing secret alone is not a job key");
   });
 
-  await check("the jobs route refuses an unsigned or Slack-signed body (a Slack signature is not a job signature)", async () => {
+  await check("the jobs route takes only the internal job key: unsigned, Slack-signed, and a job signed with the Slack app secret are all refused", async () => {
     const body = JSON.stringify(dispatched[0]);
     const unsigned = await jobsRoute.POST(new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", { method: "POST", body }));
     assert.equal(unsigned.status, 401);
     const ts = String(Math.floor(Date.now() / 1000));
-    const slackSigned = await jobsRoute.POST(
-      new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", {
-        method: "POST",
-        body,
-        headers: { [jobSig.JOB_TIMESTAMP_HEADER]: ts, [jobSig.JOB_SIGNATURE_HEADER]: verify.slackSignature(SECRET, ts, body) },
-      }),
-    );
-    assert.equal(slackSigned.status, 401);
+    const post = (signature: string) =>
+      jobsRoute.POST(
+        new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", {
+          method: "POST",
+          body,
+          headers: { [jobSig.JOB_TIMESTAMP_HEADER]: ts, [jobSig.JOB_SIGNATURE_HEADER]: signature },
+        }),
+      );
+    assert.equal((await post(verify.slackSignature(SECRET, ts, body))).status, 401, "a Slack request signature is not a job signature");
+    assert.equal((await post(await jobSig.signSlackJob(SECRET, ts, body))).status, 401, "OASIS's Slack app secret cannot mint a job for any workspace");
+    const jobKey = await jobSig.slackJobSecret({ CONNECTIONS_OAUTH_STATE_SECRET: process.env.CONNECTIONS_OAUTH_STATE_SECRET! });
+    assert.notEqual((await post(await jobSig.signSlackJob(jobKey!, ts, body))).status, 401, "the internal job key is accepted");
   });
 
   // ── 6. Retention ────────────────────────────────────────────────────────
