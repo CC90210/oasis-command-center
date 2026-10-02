@@ -1223,7 +1223,7 @@ async function main() {
     assert.deepEqual(slackOnly, { acked: 0, retried: 1 }, "a Slack signing secret alone is not a job key");
   });
 
-  await check("the jobs route takes only the internal job key: unsigned, Slack-signed, and a job signed with the Slack app secret are all refused", async () => {
+  await check("the jobs route takes only the internal job key: unsigned, Slack-signed, and a job signed with the Slack app secret are all refused; a job signed with the internal key runs (200)", async () => {
     const body = JSON.stringify(dispatched[0]);
     const unsigned = await jobsRoute.POST(new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", { method: "POST", body }));
     assert.equal(unsigned.status, 401);
@@ -1239,7 +1239,12 @@ async function main() {
     assert.equal((await post(verify.slackSignature(SECRET, ts, body))).status, 401, "a Slack request signature is not a job signature");
     assert.equal((await post(await jobSig.signSlackJob(SECRET, ts, body))).status, 401, "OASIS's Slack app secret cannot mint a job for any workspace");
     const jobKey = await jobSig.slackJobSecret({ CONNECTIONS_OAUTH_STATE_SECRET: process.env.CONNECTIONS_OAUTH_STATE_SECRET! });
-    assert.notEqual((await post(await jobSig.signSlackJob(jobKey!, ts, body))).status, 401, "the internal job key is accepted");
+    assert.ok(jobKey, "a job key is derived from the Connections secret");
+    // Accepted, and the job ran: this mention already has its approval, so the
+    // route answers 200 with that approval as a duplicate (never a second draft).
+    // A 500 (the job failed) or a 503 is not "accepted".
+    const accepted = await post(await jobSig.signSlackJob(jobKey, ts, body));
+    assert.deepEqual([accepted.status, await accepted.json()], [200, { ok: true, outcome: "duplicate", approvalId }], "the internal job key is accepted and the job runs");
   });
 
   // ── 6. Retention ────────────────────────────────────────────────────────
