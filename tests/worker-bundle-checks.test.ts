@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkOneByteSource, checkWorkerSize } from "../scripts/check-worker-bundle";
@@ -139,6 +140,90 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
   assert.ok(concurrency, "ci.yml has a top-level concurrency block");
   assert.match(concurrency[1], /^ {2}group: ci-\$\{\{ github\.ref \}\}$/m, "one group per ref");
   assert.match(concurrency[1], /^ {2}cancel-in-progress: true$/m, "a newer push cancels the run in progress");
+}
+
+// -- next.config.js: one copy of each server module in the Worker ----------
+// Next splits the Node server compile with { chunks: "all", minChunks: 2 } on
+// top of webpack's browser-tuned defaults (minSize 20 KB, at most 30 chunks per
+// entry), so modules shared by many routes were copied into each route entry,
+// and OpenNext packs every entry into the one Worker. next.config.js lifts the
+// two limits for the Worker build only. This pins that override, that nothing
+// else is touched, and the two facts it relies on.
+{
+  const requireHere = createRequire(__filename);
+  const configPath = path.join(root, "next.config.js");
+  const loadConfig = (cfBuild: boolean) => {
+    const saved = process.env.CF_MIGRATION_BUILD;
+    if (cfBuild) process.env.CF_MIGRATION_BUILD = "1";
+    else delete process.env.CF_MIGRATION_BUILD;
+    delete requireHere.cache[configPath];
+    try {
+      return requireHere(configPath) as {
+        experimental: { webpackBuildWorker?: boolean };
+        webpack: (config: WebpackConfig, ctx: Record<string, unknown>) => WebpackConfig;
+      };
+    } finally {
+      if (saved === undefined) delete process.env.CF_MIGRATION_BUILD;
+      else process.env.CF_MIGRATION_BUILD = saved;
+    }
+  };
+  type WebpackConfig = { plugins: unknown[]; optimization: { splitChunks: Record<string, unknown> } };
+  // What Next hands the webpack function for a production server compile.
+  const nextServerSplit = () => ({ filename: "[name].js", chunks: "all", minChunks: 2 });
+  const fresh = (): WebpackConfig => ({ plugins: [], optimization: { splitChunks: nextServerSplit() } });
+  const NODE_SERVER = { dev: false, isServer: true, nextRuntime: "nodejs" };
+
+  const cf = loadConfig(true);
+  assert.equal(
+    cf.experimental.webpackBuildWorker,
+    true,
+    "with a webpack function in the config, Next turns the build worker off unless this is set",
+  );
+  const server = cf.webpack(fresh(), NODE_SERVER).optimization.splitChunks;
+  assert.deepEqual(
+    server,
+    { ...nextServerSplit(), minSize: 0, maxInitialRequests: Infinity, maxAsyncRequests: Infinity },
+    "the Worker's server compile keeps Next's split and lifts only the size and request limits",
+  );
+  assert.equal(
+    server.cacheGroups,
+    undefined,
+    "no cache group: a named chunk is not a numeric file, OpenNext's runtime patch skips it, and it fails as 'Unknown chunk'",
+  );
+  for (const ctx of [
+    { dev: false, isServer: true, nextRuntime: "edge" },
+    { dev: false, isServer: false },
+    { dev: true, isServer: true, nextRuntime: "nodejs" },
+  ]) {
+    assert.deepEqual(
+      cf.webpack(fresh(), ctx).optimization.splitChunks,
+      nextServerSplit(),
+      `only the production Node server compile changes, not ${JSON.stringify(ctx)}`,
+    );
+  }
+  assert.deepEqual(
+    loadConfig(false).webpack(fresh(), NODE_SERVER).optimization.splitChunks,
+    nextServerSplit(),
+    "a build without CF_MIGRATION_BUILD=1 (not the Worker) is unchanged",
+  );
+
+  // Fact 1: this extends Next's own production server split. If a Next
+  // upgrade changes it, re-check the override before updating this pattern.
+  const nextWebpackConfig = readFileSync(requireHere.resolve("next/dist/build/webpack-config.js"), "utf8");
+  assert.match(
+    nextWebpackConfig,
+    /if \(isNodeServer \|\| isEdgeServer\) \{\s*return \{\s*filename: `\$\{isEdgeServer \? `edge-chunks\/` : ''\}\[name\]\.js`,\s*chunks: 'all',\s*minChunks: 2\s*\};/,
+    "Next's production server splitChunks is no longer { filename, chunks: 'all', minChunks: 2 }",
+  );
+  // Fact 2: OpenNext inlines only numerically named chunk files into the Worker.
+  const openNextRuntimePatch = readFileSync(
+    path.join(root, "node_modules/@opennextjs/cloudflare/dist/cli/build/patches/ast/webpack-runtime.js"),
+    "utf8",
+  );
+  assert.ok(
+    openNextRuntimePatch.includes(String.raw`.filter((chunk) => /^\d+\.js$/.test(chunk))`),
+    "OpenNext's webpack-runtime patch no longer selects chunks by numeric file name; re-check the server split",
+  );
 }
 
 console.log("worker-bundle-checks: all passed");

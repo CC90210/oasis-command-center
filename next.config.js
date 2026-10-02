@@ -9,6 +9,10 @@ const path = require("path");
 process.env.NEXT_PUBLIC_SUPABASE_URL ||= process.env.BRAVO_SUPABASE_URL || "";
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||= process.env.BRAVO_SUPABASE_ANON_KEY || "";
 
+// The Cloudflare Worker build (OpenNext). Set by deploy-cloudflare.yml, ci.yml
+// and wrangler_tool.py builds; see the CF-only settings below.
+const WORKER_BUILD = process.env.CF_MIGRATION_BUILD === "1";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -132,6 +136,45 @@ const nextConfig = {
     // back would show the page as it was BEFORE the save. Wrong data is worse
     // than a slow tab. Speed comes from loading.tsx boundaries, warm-on-intent
     // prefetch and faster server renders instead.
+    //
+    // Stated explicitly because of the `webpack` function below: when a config
+    // has a webpack function and this flag is unset, Next turns the build
+    // worker OFF (next/dist/build/index.js, useBuildWorker). The build has
+    // always run in the build worker; this keeps it there.
+    webpackBuildWorker: true,
+  },
+  // ONE COPY OF EACH SERVER MODULE IN THE WORKER (2026-10-02).
+  //
+  // Next splits the Node server compile with webpack's production defaults
+  // plus { chunks: "all", minChunks: 2 } (next/dist/build/webpack-config.js).
+  // Two of those defaults are tuned for browser downloads: a shared chunk is
+  // only made when it holds at least 20 KB (minSize), and one entry may be
+  // split into at most 30 chunks (maxInitialRequests, maxAsyncRequests). The
+  // server has ~700 route entries, so every module that a set of routes shares
+  // and that misses either limit was COPIED into each of those routes instead
+  // of shared. OpenNext puts every entry and chunk into the one Cloudflare
+  // Worker, and those copies counted against its 64 MiB upload limit.
+  //
+  // For the Worker build only, lift both limits: webpack then emits each
+  // shared module once, in a chunk the routes that use it load. The modules
+  // and their code are unchanged, and each still runs once per isolate, as
+  // before: webpack's module cache is keyed by module id, so a copied factory
+  // never ran twice. The split chunks stay unnamed, so their files keep the
+  // numeric names that OpenNext's webpack-runtime patch inlines (/^\d+\.js$/,
+  // @opennextjs/cloudflare patches/ast/webpack-runtime.js). A named cache
+  // group would be skipped by that patch and fail at runtime with
+  // "Unknown chunk", so do not add one here.
+  webpack(config, { dev, isServer, nextRuntime }) {
+    const split = config.optimization && config.optimization.splitChunks;
+    if (!dev && isServer && nextRuntime === "nodejs" && WORKER_BUILD && split) {
+      config.optimization.splitChunks = {
+        ...split,
+        minSize: 0,
+        maxInitialRequests: Infinity,
+        maxAsyncRequests: Infinity,
+      };
+    }
+    return config;
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
