@@ -1449,11 +1449,19 @@ export type CommentChannel = (typeof COMMENT_CHANNELS)[number];
  * retried email is filed once). `channel` is written only when given, so a
  * database without migration bravo__200 keeps taking every other comment.
  *
- * A `guard` (an SQL condition and its arguments) is checked in the insert
- * itself, so nothing can change between the check and the write. When it no
- * longer holds, nothing is written (the ticket is touched only when the
- * comment is on it) and the answer is `superseded`. The support inbox guards a
- * client's email on its claim still holding the plan that chose this ticket.
+ * ONE TRANSACTION, EACH STEP ON THE ONE BEFORE. The ticket's state is checked
+ * in the insert itself, not only in the read above it: a client's comment is
+ * inserted only while the ticket is not closed. The ticket is then touched
+ * (updated_at) only if THIS call inserted the comment, reopened only if that
+ * happened and it is waiting on the client or resolved at that moment, and
+ * ticket.reopened / ticket.first_response are recorded only by the write that
+ * made that change. So a ticket closed, resolved or answered between the read
+ * and the write is never moved by a comment that did not land.
+ *
+ * A `guard` (an SQL condition and its arguments) is checked in the insert the
+ * same way. When it no longer holds, nothing is written and the answer is
+ * `superseded`. The support inbox guards a client's email on its claim still
+ * holding the plan that chose this ticket.
  */
 export async function addTicketComment(
   db: Client,
@@ -1506,34 +1514,44 @@ export async function addTicketComment(
     at,
     ...(input.channel ? [input.channel] : []),
   ];
+  const isClient = input.author_type === "client";
+  // The insert's own conditions: the ticket is here (and, for a client, not
+  // closed) at the moment of the write, and the caller's guard holds.
+  const conditions = [
+    `EXISTS (SELECT 1 FROM support_tickets WHERE tenant_id = ? AND id = ?${isClient ? " AND status <> 'closed'" : ""})`,
+    ...(input.guard ? [input.guard.sql] : []),
+  ];
   const stmts: InStatement[] = [
     {
       // ON CONFLICT (id): a concurrent call with the same supplied id inserted
-      // first; this one changes nothing, and the guarded ledger rows below
-      // (changes() = 1) are not written twice.
-      sql: input.guard
-        ? `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
-            SELECT ${values.map(() => "?").join(", ")} WHERE ${input.guard.sql}
-            ON CONFLICT (id) DO NOTHING`
-        : `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${input.channel ? ", ?" : ""})
+      // first; this one changes nothing, and nothing after it is written.
+      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
+            SELECT ${values.map(() => "?").join(", ")} WHERE ${conditions.join(" AND ")}
             ON CONFLICT (id) DO NOTHING`,
-      args: input.guard ? [...values, ...input.guard.args] : values,
+      args: [...values, tenantId, ticketId, ...(input.guard ? input.guard.args : [])],
+    },
+    // Touched only by the call that inserted the comment.
+    {
+      sql: "UPDATE support_tickets SET updated_at = ? WHERE tenant_id = ? AND id = ? AND changes() = 1",
+      args: [at, tenantId, ticketId],
     },
   ];
-  // The ticket moves only when the comment is on it: a guarded insert that
-  // wrote nothing leaves the ticket as it was.
-  const commentIsOn = "EXISTS (SELECT 1 FROM ticket_comments WHERE tenant_id = ? AND id = ?)";
-  const firstResponse = input.author_type === "team" && !isInternal && !cur.first_response_at;
-  const reopened = input.author_type === "client" && (status === "waiting_on_client" || status === "resolved");
-  if (reopened) {
-    // The n-th reopening of this ticket, recorded only by the write whose
-    // comment insert changed a row (it immediately follows that insert).
+  let reopenAt = -1;
+  let firstResponseAt = -1;
+  if (isClient) {
+    // A client writing on a ticket waiting on them, or resolved AT THIS
+    // MOMENT, reopens it; the n-th reopening is recorded only by that write.
     const prior = await db.execute({
       sql: `SELECT COUNT(*) AS n FROM outcome_events
             WHERE tenant_id = ? AND subject_type = 'ticket' AND subject_id = ? AND event_key = ?`,
       args: [tenantId, ticketId, TICKET_EVENT_KEYS.reopened],
     });
+    reopenAt =
+      stmts.push({
+        sql: `UPDATE support_tickets SET status = 'open', resolved_at = NULL, closed_at = NULL
+              WHERE tenant_id = ? AND id = ? AND status IN ('waiting_on_client', 'resolved') AND changes() = 1`,
+        args: [tenantId, ticketId],
+      }) - 1;
     stmts.push(
       ticketEvent(
         "reopened",
@@ -1549,23 +1567,14 @@ export async function addTicketComment(
         now,
       ),
     );
-  }
-  const sets = ["updated_at = ?"];
-  const args: Array<string | null> = [at];
-  if (reopened) {
-    sets.push("status = 'open'", "resolved_at = NULL", "closed_at = NULL");
-  }
-  stmts.push({
-    sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND ${commentIsOn}`,
-    args: [...args, tenantId, ticketId, tenantId, id],
-  });
-  if (firstResponse) {
-    // Set once: only the reply that finds it still empty sets it, even if two
-    // public replies race, and only that reply records ticket.first_response.
-    stmts.push({
-      sql: `UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL AND ${commentIsOn}`,
-      args: [at, tenantId, ticketId, tenantId, id],
-    });
+  } else if (!isInternal) {
+    // Set once: only the public reply that finds it still empty sets it, even
+    // if two race, and only that reply records ticket.first_response.
+    firstResponseAt =
+      stmts.push({
+        sql: "UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL AND changes() = 1",
+        args: [at, tenantId, ticketId],
+      }) - 1;
     const opened = Date.parse(String(cur.created_at ?? ""));
     stmts.push(
       ticketEvent(
@@ -1584,9 +1593,10 @@ export async function addTicketComment(
     );
   }
   const results = await db.batch(stmts, "write");
-  if (input.guard && results[0].rowsAffected !== 1) {
-    // Nothing written: a concurrent call with this id wrote it first (then it
-    // is this comment, already on the ticket), or the guard no longer held.
+  if (results[0].rowsAffected !== 1) {
+    // Nothing written. A concurrent call with this id wrote it first (then it
+    // is this comment, already on the ticket); or, since the read above, the
+    // ticket closed or went, or the caller's guard stopped holding.
     const written = rows(
       await db.execute({
         sql: "SELECT * FROM ticket_comments WHERE tenant_id = ? AND ticket_id = ? AND id = ? LIMIT 1",
@@ -1594,8 +1604,16 @@ export async function addTicketComment(
       }),
     )[0];
     if (written) return { ok: true, comment: mapComment(written), firstResponse: false, reopened: false, existing: true };
-    return { ok: false, status: 409, error: "superseded" };
+    const now2 = rows(
+      await db.execute({ sql: "SELECT status FROM support_tickets WHERE tenant_id = ? AND id = ?", args: [tenantId, ticketId] }),
+    )[0];
+    if (!now2) return { ok: false, status: 404, error: "not_found" };
+    if (isClient && String(now2.status) === "closed") return { ok: false, status: 409, error: "ticket_closed" };
+    if (input.guard) return { ok: false, status: 409, error: "superseded" };
+    throw new Error(`addTicketComment: comment ${id} was not written on ticket ${ticketId} and nothing explains why`);
   }
+  const firstResponse = firstResponseAt >= 0 && results[firstResponseAt].rowsAffected === 1;
+  const reopened = reopenAt >= 0 && results[reopenAt].rowsAffected === 1;
   return {
     ok: true,
     comment: {

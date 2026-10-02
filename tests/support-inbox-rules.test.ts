@@ -344,6 +344,39 @@ async function main() {
     assert.equal((await db.execute({ sql: "SELECT status FROM support_tickets WHERE id = ?", args: [t.id] })).rows[0].status, "open");
   });
 
+  await check("a client comment on an open ticket neither reports nor records a reopening", async () => {
+    const t = (await store.createTicket(db, OASIS, { ...base, id: "88888888-8888-4888-8888-888888888888" }, now)).ticket;
+    const r = await store.addTicketComment(db, OASIS, t.id, { body: "One more detail", is_internal: false, author_type: "client", author: { userId: null, name: "Jane" } }, now);
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.reopened, false);
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM outcome_events WHERE subject_id = ? AND event_key = 'ticket.reopened'", args: [t.id] })).rows[0].n), 0);
+  });
+
+  await check("a ticket closed between the read and the write refuses a client's comment (ticket_closed) and keeps nothing", async () => {
+    const t = (await store.createTicket(db, OASIS, { ...base, id: "99999999-9999-4999-8999-999999999999" }, now)).ticket;
+    // The ticket is open when read; a person closes it just before the write.
+    let closed = false;
+    const closing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+            if (!closed && stmts.some((x) => /INSERT INTO ticket_comments/.test(typeof x === "string" ? x : x.sql))) {
+              closed = true;
+              await target.execute({ sql: "UPDATE support_tickets SET status = 'closed' WHERE id = ?", args: [t.id] });
+            }
+            return target.batch(stmts, mode);
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as typeof db;
+    const r = await store.addTicketComment(closing, OASIS, t.id, { body: "Late", is_internal: false, author_type: "client", author: { userId: null, name: "Jane" } }, now);
+    assert.deepEqual(r, { ok: false, status: 409, error: "ticket_closed" });
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client'", args: [t.id] })).rows[0].n), 0);
+    assert.equal((await db.execute({ sql: "SELECT status FROM support_tickets WHERE id = ?", args: [t.id] })).rows[0].status, "closed");
+  });
+
   await check("the comment channel is written only when given: a database without migration bravo__200 takes every other comment", async () => {
     const t = (await store.createTicket(db, OASIS, { ...base, id: "44444444-4444-4444-8444-444444444444" }, now)).ticket;
     const plain = await store.addTicketComment(db, OASIS, t.id, { body: "note", is_internal: true, author_type: "team", author: { userId: "u", name: "CC" } }, now);

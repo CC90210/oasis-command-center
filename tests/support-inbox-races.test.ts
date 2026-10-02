@@ -324,7 +324,7 @@ async function main() {
     assert.match(String(await scalar(db, "SELECT description FROM support_tickets WHERE id = ?", [replacementId])), /Same again today\./);
   });
 
-  await check("an email another attempt put on its ticket stays there when the ticket closes before a retry replans: no second ticket", async () => {
+  await check("an email whose ticket closes while two retries file it lands on ONE new ticket, never on the closed one", async () => {
     const from = { address: "kept@client.test", name: "Kept" };
     const opened = await ingestWith(db, ingestBody({ message: { from, subject: "Report totals" } }, clock), tick());
     await notify.drain();
@@ -332,9 +332,10 @@ async function main() {
     const reply = ingestBody({ message: { from, subject: `Re: [${first.number}] Report totals`, body_text: "Totals are off by one." } }, clock);
     await assert.rejects(ingestWith(crashAt(db, /INSERT INTO ticket_comments/), reply, tick()), /simulated crash/);
     const key = createHash("sha256").update(String(reply.message.message_id), "utf8").digest("hex");
-    // Retry A reads the open ticket and reaches its write. Retry B then reads
-    // the ticket a person has just closed, finds no comment yet, and plans a
-    // new ticket. A's write lands first, then B's replacement of the plan.
+    // Retry A reads the open ticket and reaches its write. A person closes the
+    // ticket; retry B reads it closed, finds no comment, and plans a new
+    // ticket. A's write comes first: the ticket is closed by then, so it lands
+    // nowhere, and the email goes to the new ticket, once.
     let aAtWrite!: () => void;
     const aReady = new Promise<void>((resolve) => (aAtWrite = resolve));
     const gate = turnstile(["a", "b"]);
@@ -353,16 +354,114 @@ async function main() {
     await notify.drain();
     assert.equal(a.status, 200, JSON.stringify(a.body));
     assert.equal(b.status, 200, JSON.stringify(b.body));
+    const fresh = (a.body.ticket as { id: string }).id;
+    assert.notEqual(fresh, first.id, "not the closed ticket");
+    assert.equal((b.body.ticket as { id: string }).id, fresh, "both answers name the same ticket");
+    const others = (await db.execute({ sql: "SELECT id FROM support_tickets WHERE tenant_id = ? AND client_email = ? AND id <> ?", args: [DESK_TENANT, from.address, first.id] })).rows.map((r) => String(r.id));
+    assert.deepEqual(others, [fresh], "ONE new ticket");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client' AND body LIKE '%Totals are off by one.%'", [first.id])), 0, "no copy on the closed ticket");
+    assert.equal(String(await scalar(db, "SELECT status FROM support_tickets WHERE id = ?", [first.id])), "closed", "the closed ticket stays closed");
+    assert.match(String(await scalar(db, "SELECT description FROM support_tickets WHERE id = ?", [fresh])), /Totals are off by one\./);
+    const claim = (await db.execute({ sql: "SELECT ticket_id, disposition, completed_at FROM support_email_messages WHERE message_id_hash = ?", args: [key] })).rows[0];
+    assert.ok(claim.completed_at);
+    assert.equal(claim.ticket_id, fresh);
+    assert.equal(claim.disposition, "new_ticket");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM outcome_events WHERE idempotency_key = ?", [`tktmsg:${key}`])), 1);
+  });
+
+  await check("a ticket that closes between the read and the write sends the email to a new ticket, even with one attempt", async () => {
+    const from = { address: "single@client.test", name: "Single" };
+    const opened = await ingestWith(db, ingestBody({ message: { from, subject: "Invoice PDF" } }, clock), tick());
+    await notify.drain();
+    const first = opened.body.ticket as { id: string; number: string };
+    const reply = ingestBody({ message: { from, subject: `Re: [${first.number}] Invoice PDF`, body_text: "Still blank." } }, clock);
+    // The attempt reads the open ticket; a person closes it just before the write.
+    const now = tick();
+    const closing = pausedAt(db, /INSERT INTO ticket_comments/, async () => {
+      await store.updateTicket(db, DESK_TENANT, first.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, now);
+    });
+    const a = await ingestWith(closing, reply, now);
+    await notify.drain();
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    const fresh = (a.body.ticket as { id: string }).id;
+    assert.notEqual(fresh, first.id);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND body LIKE '%Still blank.%'", [first.id])), 0);
+    assert.match(String(await scalar(db, "SELECT description FROM support_tickets WHERE id = ?", [fresh])), /Still blank\./);
+  });
+
+  await check("a replacement planned while the ticket was closed is dropped when the ticket reopened and the email landed on it: ONE copy, on that ticket", async () => {
+    const from = { address: "reopen@client.test", name: "Reopen" };
+    const opened = await ingestWith(db, ingestBody({ message: { from, subject: "Calendar sync" } }, clock), tick());
+    await notify.drain();
+    const first = opened.body.ticket as { id: string; number: string };
+    const reply = ingestBody({ message: { from, subject: `Re: [${first.number}] Calendar sync`, body_text: "Missed two events." } }, clock);
+    await assert.rejects(ingestWith(crashAt(db, /INSERT INTO ticket_comments/), reply, tick()), /simulated crash/);
+    const key = createHash("sha256").update(String(reply.message.message_id), "utf8").digest("hex");
+    // A reads the open ticket and waits at its write. A person closes the
+    // ticket; B reads it closed and plans a new one. Before B stores that plan
+    // the person reopens the ticket, A's write lands on it, and B's
+    // replacement must then be refused.
+    let aAtWrite!: () => void;
+    const aReady = new Promise<void>((resolve) => (aAtWrite = resolve));
+    const gate = turnstile(["a", "b"]);
+    const now = tick();
+    const retryA = pausedAt(gated(db, "a", gate, /INSERT INTO ticket_comments/), /INSERT INTO ticket_comments/, async () => aAtWrite());
+    const retryB = pausedAt(
+      gated(
+        pausedAt(db, /^SELECT \* FROM support_tickets WHERE tenant_id = \? AND id = \?$/, async () => {
+          await aReady;
+          await store.updateTicket(db, DESK_TENANT, first.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, now);
+        }),
+        "b",
+        gate,
+        /^\s*UPDATE support_email_messages SET plan_json/,
+      ),
+      /^\s*UPDATE support_email_messages SET plan_json/,
+      async () => {
+        await store.updateTicket(db, DESK_TENANT, first.id, { status: "open" }, { userId: "u-cc", name: "CC" }, now);
+      },
+    );
+    const [a, b] = await Promise.all([ingestWith(retryA, reply, now), ingestWith(retryB, reply, now)]);
+    await notify.drain();
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.equal(b.status, 200, JSON.stringify(b.body));
     assert.equal((a.body.ticket as { id: string }).id, first.id);
     assert.equal((b.body.ticket as { id: string }).id, first.id);
     const others = (await db.execute({ sql: "SELECT id FROM support_tickets WHERE tenant_id = ? AND client_email = ? AND id <> ?", args: [DESK_TENANT, from.address, first.id] })).rows;
     assert.equal(others.length, 0, "no second ticket");
-    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client' AND body = ?", [first.id, "Totals are off by one."])), 1, "ONE copy, on its ticket");
-    const claim = (await db.execute({ sql: "SELECT ticket_id, disposition, completed_at FROM support_email_messages WHERE message_id_hash = ?", args: [key] })).rows[0];
-    assert.ok(claim.completed_at);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client' AND body = ?", [first.id, "Missed two events."])), 1);
+    const claim = (await db.execute({ sql: "SELECT ticket_id, disposition FROM support_email_messages WHERE message_id_hash = ?", args: [key] })).rows[0];
     assert.equal(claim.ticket_id, first.id);
     assert.equal(claim.disposition, "appended");
-    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM outcome_events WHERE idempotency_key = ?", [`tktmsg:${key}`])), 1);
+  });
+
+  await check("an attempt that lost never moves the ticket: a resolved ticket another attempt reopened, then a person resolved again, stays resolved", async () => {
+    const from = { address: "loser@client.test", name: "Loser" };
+    const opened = await ingestWith(db, ingestBody({ message: { from, subject: "Sync stalls" } }, clock), tick());
+    await notify.drain();
+    const first = opened.body.ticket as { id: string; number: string };
+    await store.updateTicket(db, DESK_TENANT, first.id, { status: "resolved" }, { userId: "u-cc", name: "CC" }, tick());
+    const reply = ingestBody({ message: { from, subject: `Re: [${first.number}] Sync stalls`, body_text: "It stalled again." } }, clock);
+    await assert.rejects(ingestWith(crashAt(db, /INSERT INTO ticket_comments/), reply, tick()), /simulated crash/);
+    const reopenedEvents = () => scalar(db, "SELECT COUNT(*) FROM outcome_events WHERE subject_id = ? AND event_key = 'ticket.reopened'", [first.id]).then(Number);
+    // Attempt A read the RESOLVED ticket and reached its write. Meanwhile
+    // attempt B files the email (the ticket reopens) and a person resolves it
+    // again. A's write then lands nowhere and must not reopen the ticket.
+    const now = tick();
+    const seen: { b?: Awaited<ReturnType<typeof ingestWith>> } = {};
+    const retryA = pausedAt(db, /INSERT INTO ticket_comments/, async () => {
+      seen.b = await ingestWith(db, reply, now);
+      assert.equal(String(await scalar(db, "SELECT status FROM support_tickets WHERE id = ?", [first.id])), "open", "B reopened it");
+      await store.updateTicket(db, DESK_TENANT, first.id, { status: "resolved" }, { userId: "u-cc", name: "CC" }, now);
+    });
+    const a = await ingestWith(retryA, reply, now);
+    await notify.drain();
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.equal(seen.b?.status, 200);
+    assert.equal((a.body.ticket as { id: string }).id, first.id);
+    assert.equal(String(await scalar(db, "SELECT status FROM support_tickets WHERE id = ?", [first.id])), "resolved", "the person's resolution stands");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client' AND body = ?", [first.id, "It stalled again."])), 1, "ONE copy");
+    assert.equal(await reopenedEvents(), 1, "ONE ticket.reopened, from B");
   });
 
   // -- A draft and a failure report for one email --
