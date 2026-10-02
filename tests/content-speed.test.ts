@@ -11,7 +11,7 @@
  *      its numbers sit behind one Suspense boundary whose fallback is an honest
  *      loading line (aria-busy, no digits), and they come from ONE bounded read
  *      of the stored snapshot. A failed read says so inside that section while
- *      the frame still renders.
+ *      the frame still renders, whether the read returns an error or throws.
  *   2. The budget: not one fetch() while a Content page renders, frame or
  *      numbers. The database here is a local libSQL file, so any fetch at all
  *      would be a third party (Zernio, Meta, a sync run inline).
@@ -19,12 +19,17 @@
  *      stream behind one boundary, the page says in plain words what the
  *      material is, what is in it and how to add to it, names no persona, and
  *      keeps a marked place for the Train tools track's Tools section above
- *      the material. A failed read is not "nothing in it yet".
+ *      the material. A failed read, returned or thrown, is not "nothing in it
+ *      yet".
  *   4. Overview: no card waits on another tab's data. The frame (title and the
  *      Performance card, which needs no read) arrives after the gate alone;
  *      the queue, the Library, Training and Requests cards each have their own
- *      boundary; the Training card reads only the training material; Requests
- *      says what a request is and who acts on it; no persona name.
+ *      boundary; the Training card reads only the training material and opens
+ *      the Training tab, and a failed or thrown read of it stays in that card;
+ *      one request reads the Library's summary once (React cache(), under
+ *      React's own server renderer); Requests says what a request is and who
+ *      acts on it; no persona name on any branch of the copy (work queued for
+ *      the agent, nothing awaiting a verdict, a failed read).
  *
  * Real code paths: the real founder gate (a signed session checked against a
  * local libSQL file), the real readers and the real PostgREST bridge.
@@ -37,6 +42,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import * as ReactNS from "react";
 import { createClient } from "@libsql/client";
 
@@ -123,6 +129,49 @@ stub("next/link", {
     exports: { TrainDropzone: () => ReactNS.createElement("train-dropzone") },
   } as unknown as NodeModule;
 }
+
+/**
+ * A page module loaded afresh with some of its readers replaced, so a check can
+ * make a reader THROW rather than return an error: safe() is all that stands
+ * between a throw and an error page over the whole tab. Every other check keeps
+ * the real modules; the cache entries are put back before this returns.
+ */
+function freshPage(page: string, readers: Record<string, Record<string, unknown>>): () => Promise<unknown> {
+  const pagePath = require.resolve(page);
+  const saved = new Map<string, NodeModule | undefined>([[pagePath, require.cache[pagePath]]]);
+  for (const [request, overrides] of Object.entries(readers)) {
+    const p = require.resolve(request);
+    saved.set(p, require.cache[p]);
+    stub(request, { __esModule: true, ...require(request), ...overrides });
+  }
+  delete require.cache[pagePath];
+  try {
+    return require(pagePath).default;
+  } finally {
+    for (const [p, m] of saved) {
+      if (m) require.cache[p] = m;
+      else delete require.cache[p];
+    }
+  }
+}
+
+/** What console.error and console.warn printed while fn ran: the server log. */
+async function serverLog(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const { error, warn } = console;
+  console.error = console.warn = (...args: unknown[]) => {
+    lines.push(args.map((a) => (a instanceof Error ? a.message : String(a))).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = error;
+    console.warn = warn;
+  }
+  return lines;
+}
+
+const THROWN = "socket hang up (a reader that throws, content-speed)";
 
 /** Internal persona names, never on a page a founder or client reads (build rules). */
 const PERSONA = /\b(?:Bravo|Maven|Atlas|Aura|Hermes|Lex|Conaugh)\b|\b(?:she|her)\b/i;
@@ -300,6 +349,31 @@ async function main() {
     }
   });
 
+  // -- 1d. ...and so does a read that THROWS --
+  // getPerformance turns a query error into the degraded state itself, but has
+  // no try/catch: a dropped connection or a client that cannot be built
+  // rejects. safe() gives that the same state as 1c, inside the section, and
+  // logs the reason; without it the throw escapes the boundary and an error
+  // page replaces the whole tab.
+  await check("a read that THROWS gets the same failure state inside the numbers section, with the reason in the server log", async () => {
+    const Page = freshPage("../app/founders/marketing/performance/page", {
+      "../lib/founders/performance-queries": {
+        getPerformance: async () => {
+          throw new Error(THROWN);
+        },
+      },
+    });
+    let text = "";
+    const log = await serverLog(async () => {
+      text = textOf(await resolve(await Page(), false));
+    });
+    assert.match(text, /Back to Content/, "the frame");
+    assert.match(text, /The analytics read failed/);
+    assert.match(text, /Could not read the metrics/);
+    assert.doesNotMatch(text, /Nothing published in the last 30 days/, "a failure is not an empty month");
+    assert.ok(log.some((l) => l.includes(THROWN)), `the reason is in the server log: ${log.join(" | ")}`);
+  });
+
   // ── 3. Training: the add box with the frame, the contents streamed ───────
   const { default: TrainPage } = await import("../app/founders/marketing/train/page");
   await check("Training renders its frame and the add box with no corpus read; the counts and the list stream behind one boundary", async () => {
@@ -377,17 +451,23 @@ async function main() {
     const boundaries = hosts(overview).filter((h) => h.type === "suspense");
     const read = async (b: Host) => {
       statements.length = 0;
-      const text = textOf(await resolve(b.props.pending, false));
+      const tree = await resolve(b.props.pending, false);
+      const text = textOf(tree);
       const tables = [...new Set(statements.map((s) => /FROM "?(\w+)"?/.exec(s)?.[1] ?? s))].sort();
-      return { text, tables };
+      return { tree, text, tables };
     };
     // One boundary at a time, so every statement is attributed to its boundary.
-    const out: Array<{ text: string; tables: string[] }> = [];
+    const out: Array<{ tree: unknown; text: string; tables: string[] }> = [];
     for (const b of boundaries) out.push(await read(b));
     const training = out.find((o) => /Training material/.test(o.text));
     assert.ok(training, `a Training card: ${out.map((o) => o.text.slice(0, 40)).join(" | ")}`);
     assert.deepEqual(training!.tables, ["marketing_corpus"], "the Training card does not wait on the Library's asset read");
     assert.match(training!.text, /1 learned · 1 being read/);
+    assert.deepEqual(
+      hosts(training!.tree).filter((h) => h.type === "a").map((h) => h.props.href),
+      ["/founders/marketing/train"],
+      "the card opens the Training tab, whose words it uses",
+    );
     const library = out.find((o) => /A record of what shipped/.test(o.text))!;
     assert.match(library.text, /3 assets stored\./, "OASIS's own brand, this tenant: m1-m3, not the Warner asset or another tenant's");
     assert.ok(library.tables.includes("marketing_asset"));
@@ -443,6 +523,55 @@ async function main() {
     assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the Overview: ${text.match(PERSONA)?.[0]}`);
   });
 
+  // The seed has work awaiting CC's verdict and nothing queued for the agent,
+  // so two branches of the queue's copy never render above: work handed to the
+  // agent ("N with the marketing agent") and nothing awaiting a verdict. A
+  // failed Library read has copy of its own as well.
+  await check("no persona on the Overview's other branches: work queued for the agent, nothing awaiting your verdict, a failed read", async () => {
+    // An open review on OASIS's own asset and an open request for the agent;
+    // the two that awaited a verdict approved, so nothing awaits CC.
+    await raw.batch(
+      [
+        { sql: `INSERT INTO marketing_review (id, tenant_id, asset_id, acted_on_at) VALUES ('r1', ?, 'm1', NULL)`, args: [OASIS] },
+        { sql: `INSERT INTO marketing_request (id, tenant_id, asset_id, status) VALUES ('q1', ?, NULL, 'open')`, args: [OASIS] },
+        `UPDATE marketing_asset SET status = 'approved' WHERE id IN ('m1', 'm2')`,
+      ],
+      "write",
+    );
+    try {
+      const text = textOf(await resolve(await MarketingPage(), false));
+      assert.match(text, /2 with the marketing agent/, "the review and the request, queued for the agent");
+      assert.match(text, /Nothing waiting on you/);
+      assert.match(text, /the most useful thing you can give it\./);
+      assert.match(text, /1 open\./, "the Requests card counts the open request");
+      assert.doesNotMatch(text, PERSONA, `a persona name or pronoun: ${text.match(PERSONA)?.[0]}`);
+    } finally {
+      await raw.batch(
+        [
+          `DELETE FROM marketing_review WHERE id = 'r1'`,
+          `DELETE FROM marketing_request WHERE id = 'q1'`,
+          `UPDATE marketing_asset SET status = 'in_review' WHERE id = 'm1'`,
+          `UPDATE marketing_asset SET status = 'draft' WHERE id = 'm2'`,
+        ],
+        "write",
+      );
+    }
+    // A broken Library read (a table of that name without the columns the
+    // readers select): the queue, the Library and Requests each say so.
+    await raw.execute("ALTER TABLE marketing_asset RENAME TO marketing_asset_away");
+    await raw.execute("CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT)");
+    try {
+      const text = textOf(await resolve(await MarketingPage(), false));
+      assert.match(text, /Couldn't load your queue/);
+      assert.match(text, /Couldn't read the library\./);
+      assert.match(text, /Couldn't read your requests\./);
+      assert.doesNotMatch(text, PERSONA, `a persona name or pronoun: ${text.match(PERSONA)?.[0]}`);
+    } finally {
+      await raw.execute("DROP TABLE marketing_asset");
+      await raw.execute("ALTER TABLE marketing_asset_away RENAME TO marketing_asset");
+    }
+  });
+
   await check("a failed training-material read stays in the Training card; the rest of the Overview renders", async () => {
     await raw.execute("ALTER TABLE marketing_corpus RENAME TO marketing_corpus_away");
     await raw.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT)");
@@ -458,6 +587,67 @@ async function main() {
       await raw.execute("DROP TABLE marketing_corpus");
       await raw.execute("ALTER TABLE marketing_corpus_away RENAME TO marketing_corpus");
     }
+  });
+
+  // getCorpusStats builds its client in a default parameter, outside its own
+  // try/catch, so a client that cannot be built REJECTS rather than returning
+  // degraded. The Training tab and the Overview's card each wrap the read in
+  // safe(); this holds both.
+  await check("a training-material read that THROWS says so on the Training tab and in the Overview's card; the rest renders", async () => {
+    const throwing = {
+      "../lib/founders/marketing-queries": {
+        getCorpusStats: async () => {
+          throw new Error(THROWN);
+        },
+      },
+    };
+    const Train = freshPage("../app/founders/marketing/train/page", throwing);
+    const Overview = freshPage("../app/founders/marketing/page", throwing);
+    let train = "";
+    let overviewText = "";
+    const log = await serverLog(async () => {
+      train = textOf(await resolve(await Train(), false));
+      overviewText = textOf(await resolve(await Overview(), false));
+    });
+    assert.match(train, /Couldn't read the training material/);
+    assert.doesNotMatch(train, /Nothing in it yet/);
+    assert.match(train, /Add examples/, "the add box still renders");
+    assert.match(overviewText, /Couldn't read the training material\./);
+    assert.doesNotMatch(overviewText, /Nothing yet\. Add links on the Training tab\./);
+    assert.match(overviewText, /3 assets stored\./, "the Library card is unaffected");
+    assert.match(overviewText, /2 assets\s*awaiting your verdict/, "and so is the queue");
+    assert.ok(log.some((l) => l.includes(THROWN)), `the reason is in the server log: ${log.join(" | ")}`);
+  });
+
+  // The subtitle, the queue, and the Library and Requests cards all show the
+  // Library's summary; readSummary is React cache()d, so one request reads it
+  // once. The small renderer above has no request scope (cache() passes
+  // straight through outside one), so this renders the Overview with React's
+  // own server renderer, the one Next streams pages with.
+  await check("one request reads the Library's summary once, however many sections show it", async () => {
+    const { renderToPipeableStream } = require("next/dist/compiled/react-server-dom-webpack/server.node") as {
+      renderToPipeableStream: (
+        model: unknown,
+        clientManifest: unknown,
+        options: { onError: (e: unknown) => void },
+      ) => { pipe: (to: Writable) => Writable };
+    };
+    statements.length = 0;
+    let payload = "";
+    await new Promise<void>((done, fail) => {
+      const sink = new Writable({
+        write(chunk, _encoding, next) {
+          payload += String(chunk);
+          next();
+        },
+      });
+      sink.on("finish", () => done());
+      sink.on("error", fail);
+      renderToPipeableStream(ReactNS.createElement(MarketingPage), {}, { onError: fail }).pipe(sink);
+    });
+    assert.match(payload, /3 assets stored\./, "the render finished, every boundary included");
+    const reviews = statements.filter((s) => /FROM "?marketing_review"?/.test(s));
+    assert.equal(reviews.length, 1, `the summary ran ${reviews.length} times in one request`);
   });
 
   // ── 2. the budget ────────────────────────────────────────────────────────
