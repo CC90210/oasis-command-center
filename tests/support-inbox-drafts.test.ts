@@ -9,11 +9,14 @@
  * Pins: wanted, unfiled, unfailed and newest-on-the-ticket only, with every
  * field the drafter reads; one approval per message record, repeats absorbed
  * (same words 200, other words 409, a repeated failure report 200); a newer
- * message's draft supersedes the pending one; the executor posts the reply as
+ * message's draft supersedes the pending one; a draft for an address no
+ * verified email came from (a teammate's forward) is a private note flagged
+ * "Recipient not verified", never an approval; the executor posts the reply as
  * the approver's public comment (first response, ticket.first_response),
  * emails it threaded on the client's latest message from the support lane with
  * no approver Cc, as a reply to their own ticket; it refuses a stale draft, a
- * closed ticket, a changed recipient and a missing mailbox before anything is
+ * closed ticket, a changed recipient, an unverified recipient, an approval the
+ * record does not name as its draft and a missing mailbox before anything is
  * posted, and a dry run posts and sends nothing.
  *
  * Run: node --conditions=react-server --import tsx tests/support-inbox-drafts.test.ts
@@ -257,6 +260,34 @@ async function main() {
     assert.equal(late.body.error, "superseded_by_newer_message");
   });
 
+  await check("a teammate's forward is drafted for, but its draft is never an approval: a private note, 'Recipient not verified', naming the address", async () => {
+    const fwd = await ingest(
+      ingestBody({ message: { from: { address: "client@forwarded.test", name: null }, auth: { spf: null, dkim: null, dmarc: null, aligned: false }, forwarded_by: "teammate@oasisai.work" } }, clock),
+    );
+    assert.equal(fwd.disposition, "new_ticket");
+    assert.equal(fwd.draft_wanted, true, "the drafter still writes one");
+    assert.ok((await pending()).some((d) => d.message_record_id === fwd.message_record_id));
+    const a = await file(draftFor(fwd));
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.equal(a.body.status, "noted");
+    assert.equal(a.body.approval_id, undefined);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM approvals WHERE idempotency_key = ?", [`support-draft:${fwd.message_record_id}`])), 0, "nothing anyone could approve");
+    assert.equal(await scalar(db, "SELECT draft_status FROM support_email_messages WHERE id = ?", [fwd.message_record_id]), "noted");
+    const notes = (
+      await db.execute({ sql: "SELECT body, is_internal FROM ticket_comments WHERE ticket_id = ? AND body LIKE 'Recipient not verified%'", args: [fwd.ticket!.id] })
+    ).rows;
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].is_internal, 1, "a private note, never shown to the client");
+    assert.match(String(notes[0].body), /^Recipient not verified: confirm the address before sending\./);
+    assert.match(String(notes[0].body), /client@forwarded\.test/);
+    assert.ok(String(notes[0].body).includes(DRAFT), "the draft is on the note, to copy into a reply");
+    assert.ok(!(await pending()).some((d) => d.message_record_id === fwd.message_record_id), "never offered again");
+    const again = await file(draftFor(fwd, `${DRAFT}\n\nP.S. A second pass.`));
+    assert.equal(again.status, 200);
+    assert.equal(again.body.status, "already_noted");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND body LIKE 'Recipient not verified%'", [fwd.ticket!.id])), 1);
+  });
+
   // ── The executor ─────────────────────────────────────────────────────────
   await check("approved: the reply is posted as the approver's public comment and emailed threaded, from the support lane, as an own-ticket reply", async () => {
     const before = sent.length;
@@ -344,6 +375,58 @@ async function main() {
     assert.equal(done.status, "failed");
     assert.equal((done.execution_result as { reason: string }).reason, "send_failed");
     assert.match(String(await scalar(db, "SELECT email_status FROM ticket_comments WHERE ticket_id = ? AND author_type = 'team'", [a.rec.ticket!.id])), /FAILED/);
+  });
+
+  await check("an approved reply to an address no verified email on the ticket came from is refused: nothing posted, nothing sent", async () => {
+    // As if a forward's draft had been filed as an approval (the filing above
+    // never does): its record names it, so only the recipient rule stands.
+    const fwd = await ingest(
+      ingestBody({ message: { from: { address: "other@forwarded.test", name: null }, auth: { spf: null, dkim: null, dmarc: null, aligned: false }, forwarded_by: "teammate@oasisai.work" } }, clock),
+    );
+    const made = await approvals.createApproval(
+      db,
+      {
+        tenantId: DESK_TENANT,
+        departmentKey: "client_success",
+        requestedBy: { type: "agent", id: "customer-support" },
+        actionKind: "reply_ticket",
+        title: `Reply to ${fwd.ticket!.number}`,
+        targetRef: `ticket:${fwd.ticket!.id}`,
+        payload: {
+          ticket_id: fwd.ticket!.id,
+          ticket_number: fwd.ticket!.number,
+          message_record_id: fwd.message_record_id,
+          to: "other@forwarded.test",
+          subject: `Re: Contact form on my site returns an error [${fwd.ticket!.number}]`,
+          body: DRAFT,
+          critic: CRITIC,
+          model_ref: "claude-cli:opus",
+        },
+        idempotencyKey: `support-draft:${fwd.message_record_id}`,
+      },
+      clock,
+    );
+    assert.ok(made.ok, JSON.stringify(made));
+    await db.execute({ sql: "UPDATE support_email_messages SET draft_status = 'filed', draft_approval_id = ? WHERE id = ?", args: [made.approval.id, fwd.message_record_id] });
+    const before = sent.length;
+    const done = await approve(made.approval.id);
+    assert.equal(done.status, "failed");
+    const r = done.execution_result as { reason: string; message: string };
+    assert.equal(r.reason, "recipient_not_verified");
+    assert.match(r.message, /other@forwarded\.test/);
+    assert.equal(sent.length, before);
+    assert.equal(await comments(fwd.ticket!.id), 0);
+  });
+
+  await check("an approval its email's record does not name as the filed draft (a failure report won) is refused: nothing posted, nothing sent", async () => {
+    const { rec, approvalId: id } = await fresh("orphan@client.test");
+    await db.execute({ sql: "UPDATE support_email_messages SET draft_status = 'failed', draft_approval_id = NULL WHERE id = ?", args: [rec.message_record_id] });
+    const before = sent.length;
+    const done = await approve(id);
+    assert.equal(done.status, "failed");
+    assert.equal((done.execution_result as { reason: string }).reason, "draft_not_current");
+    assert.equal(sent.length, before);
+    assert.equal(await comments(rec.ticket!.id), 0);
   });
 
   await check("only OASIS's desk can carry out a ticket reply", async () => {

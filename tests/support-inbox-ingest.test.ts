@@ -13,8 +13,9 @@
  * a bounce of our own email is a note; a loop is nothing; an opt-out files the
  * ticket, sends nothing and records the sender on OASIS's list; the instant
  * acknowledgement goes only with the reader's permission AND this side's
- * checks, threaded, from the support lane, and the reconcile pass can only
- * send one that was decided; the per-sender limits; the client's
+ * checks, threaded, from the support lane, only to the verified address that
+ * sent the email (never to a ticket address changed since), and the reconcile
+ * pass can only send one that was decided; the per-sender limits; the client's
  * Conversations mirror for a linked client only; the SLA clock from arrival.
  *
  * Run: node --conditions=react-server --import tsx tests/support-inbox-ingest.test.ts
@@ -354,6 +355,32 @@ async function main() {
     assert.equal(notify.emails.filter((m) => m.to === "spoof@client.test").length, 0, "the refused one never does");
     assert.match(String(await scalar(db, "SELECT client_ack_status FROM support_tickets WHERE id = ?", [ticketOf(refused)!.id])), /not sent/);
     assert.equal(ticketOf(meant)!.status, "open");
+  });
+
+  await check("a late acknowledgement goes only to the address that sent and authenticated the email: a ticket address changed since is refused, and says so", async () => {
+    const a = await post(ingestBody({ message: { from: { address: "pinned@client.test", name: "Pinned" } } }, clock), { drop: true });
+    assert.equal(a.body.ack, "scheduled");
+    const t = ticketOf(a)!;
+    // Someone changes the ticket's address before the reconcile pass sends the lost acknowledgement.
+    await store.updateTicket(db, DESK_TENANT, t.id, { client_email: "someone-else@client.test" }, { userId: "u-cc", name: "CC" }, tick());
+    await reconcileSupportIntake(db, notify.deps, tick(5));
+    assert.equal(notify.emails.filter((m) => m.to === "someone-else@client.test").length, 0, "never to an address that did not send the email");
+    assert.equal(notify.emails.filter((m) => m.to === "pinned@client.test").length, 0, "nor to the ticket's former address");
+    assert.equal(
+      await scalar(db, "SELECT client_ack_status FROM support_tickets WHERE id = ?", [t.id]),
+      "email: not sent (the ticket's client address changed after the email arrived)",
+    );
+    assert.equal(await scalar(db, "SELECT ack_status FROM support_email_messages WHERE id = ?", [String(a.body.message_record_id)]), "not_sent:recipient_changed");
+  });
+
+  await check("an acknowledgement goes only while the email's record says its sender was verified", async () => {
+    const a = await post(ingestBody({ message: { from: { address: "recheck@client.test", name: "Recheck" } } }, clock), { drop: true });
+    assert.equal(a.body.ack, "scheduled");
+    await db.execute({ sql: "UPDATE support_email_messages SET sender_verified = 0 WHERE id = ?", args: [String(a.body.message_record_id)] });
+    await reconcileSupportIntake(db, notify.deps, tick(5));
+    assert.equal(notify.emails.filter((m) => m.to === "recheck@client.test").length, 0);
+    assert.equal(await scalar(db, "SELECT ack_status FROM support_email_messages WHERE id = ?", [String(a.body.message_record_id)]), "not_sent:sender_not_verified");
+    assert.match(String(await scalar(db, "SELECT client_ack_status FROM support_tickets WHERE id = ?", [ticketOf(a)!.id])), /^email: not sent \(the sender could not be verified\)$/);
   });
 
   await check("a retry after a crash finishes the SAME plan: one ticket, the planned id", async () => {

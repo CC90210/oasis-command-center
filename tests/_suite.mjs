@@ -460,6 +460,8 @@ const TESTS = [
   "tests/support-inbox-drafts.test.ts",
   "tests/support-inbox-health.test.ts",
   "tests/support-inbox-rules.test.ts",
+  // Two requests for one message or one draft, released together: one state.
+  "tests/support-inbox-races.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

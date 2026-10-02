@@ -6,7 +6,9 @@
  * days (lib/delivery/email-intake.ts purgeOldNonTicketMessages).
  *
  * Pins: the heartbeat is kept (latest wins; a read stamps last_ok_at with this
- * server's clock; a failed sweep keeps the last good read); the wording the
+ * server's clock; a failed sweep keeps the last good read); a heartbeat whose
+ * signed time is not newer than the stored one (a replay, a late delivery) is
+ * answered 200 and changes nothing; the wording the
  * desk and /operations show ("not read for N minutes"); one Telegram and one
  * error event per stale stretch, a recovery re-arms it, a failed Telegram is
  * retried without a second event; a mailbox that never beat is not stale; the
@@ -16,6 +18,7 @@
  */
 import "./_support-inbox-harness";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
@@ -23,9 +26,11 @@ import {
   DESK_TENANT,
   ENV,
   MAILBOX,
+  SUPPORT_MIGRATION_PATH,
   USERS,
   answerOf,
   check,
+  emptyDatabase,
   fakeNotify,
   finish,
   ingestBody,
@@ -188,6 +193,58 @@ async function main() {
     const r = await runSlaCheck(db, n.deps, at(165));
     assert.deepEqual(r.support_inbox.alerted, [MAILBOX]);
     assert.equal(typeof r.support_inbox.purged, "number");
+  });
+
+  await check("a replayed or late heartbeat never overwrites a newer one: answered 200 ok, recorded false, nothing changed", async () => {
+    const send = async (body: Record<string, unknown>, signedAt: Date, now: Date) =>
+      answerOf(await health.handleSupportHeartbeat(signedRequest("/api/internal/support/heartbeat", body, signedAt), { db, env: ENV, now }));
+    const read = { mailbox: MAILBOX, producer: "bea", phase: "ingest", ok: true, error_code: null, at: at(200).toISOString(), last_ok_at: null, consecutive_failures: 0, counts: { found: 1 } };
+    const failed = { ...read, ok: false, error_code: "imap_unavailable", consecutive_failures: 1, at: at(201).toISOString() };
+    const first = await send(read, at(200), at(200));
+    assert.equal(first.body.recorded, true);
+    const second = await send(failed, at(201), at(201));
+    assert.equal(second.body.recorded, true);
+    // A stale stretch's alert claim, which only a NEWER successful read may end.
+    await db.execute({ sql: "UPDATE support_mailbox_status SET alerted_at = ?, alert_status = ? WHERE mailbox = ?", args: [at(201).toISOString(), "telegram: sent (test)", MAILBOX] });
+    const before = await status();
+    // The captured successful heartbeat, sent again byte for byte inside the 300 s window.
+    const replay = await send(read, at(200), at(203));
+    assert.equal(replay.status, 200, "never an error the reader would retry or read as a broken desk");
+    assert.equal(replay.body.ok, true);
+    assert.equal(replay.body.recorded, false);
+    assert.equal(replay.body.reason, "not_newer");
+    // An older heartbeat delivered late, and the newest one sent twice.
+    assert.equal((await send({ ...read, counts: { found: 7 } }, new Date(at(200).getTime() + 30_000), at(204))).body.recorded, false);
+    assert.equal((await send(failed, at(201), at(204))).body.recorded, false);
+    assert.deepEqual(await status(), before, "the failure stands: still failing, last read and alert claim untouched");
+    assert.equal(before.ok, false);
+    // A newer heartbeat is recorded as always.
+    const newer = await send({ ...read, at: at(206).toISOString() }, at(206), at(206));
+    assert.equal(newer.body.recorded, true);
+    const after = await status();
+    assert.equal(after.ok, true);
+    assert.equal(after.last_ok_at, at(206).toISOString());
+    assert.equal(after.alerted_at, null, "a newer read ends the stretch");
+  });
+
+  await check("a database whose heartbeat table lacks the signed-time column answers 503 not_installed, like a missing table", async () => {
+    // Just what the heartbeat route reads: the migration under test on a bare
+    // ticket_comments. As written it takes the heartbeat; without the column
+    // (an earlier copy of the migration) it is not installed.
+    const installed = async (renameColumn: boolean) => {
+      const bare = emptyDatabase();
+      await bare.execute("CREATE TABLE ticket_comments (id TEXT PRIMARY KEY)");
+      await bare.executeMultiple(readFileSync(SUPPORT_MIGRATION_PATH, "utf8"));
+      if (renameColumn) await bare.execute("ALTER TABLE support_mailbox_status RENAME COLUMN signed_at TO signed_at_renamed");
+      const body = { mailbox: MAILBOX, producer: "bea", phase: "ingest", ok: true, error_code: null, at: at(0).toISOString(), last_ok_at: null, consecutive_failures: 0, counts: {} };
+      return answerOf(await health.handleSupportHeartbeat(signedRequest("/api/internal/support/heartbeat", body, at(0)), { db: bare, env: ENV, now: at(0) }));
+    };
+    const whole = await installed(false);
+    assert.equal(whole.status, 200, JSON.stringify(whole.body));
+    assert.equal(whole.body.recorded, true);
+    const older = await installed(true);
+    assert.equal(older.status, 503);
+    assert.equal(older.body.error, "not_installed");
   });
 
   await check("non-ticket mail is forgotten after 30 days; a ticket's messages are kept", async () => {
