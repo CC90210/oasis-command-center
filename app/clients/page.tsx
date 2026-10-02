@@ -20,7 +20,10 @@
  * clients-model.ts): deals won in Pipeline, delivery projects and open support
  * tickets. Those are still shown, honestly labelled, until each is converted:
  * a won deal that already has a record links to it; the rest offer "Convert to
- * client" (owners and admins). Nothing here is typed in or sampled.
+ * client" (owners and admins). Nothing here is typed in or sampled. A deal
+ * about a retired business is never listed (lib/os/customers/retired.ts), and
+ * the section is drawn only when it has something to show, so a blank start
+ * is a clean empty state.
  *
  * GATE, first statement: requireOsRoute("/clients") — the rail's own rule
  * (capabilities.canSeeClientIdentities). Each source then applies its own rule
@@ -162,6 +165,17 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     converted?.state === "error" ? "which deals are already client records" : null,
   ].filter(Boolean);
   const deliveryHidden = sources.projects.state === "not_allowed";
+  // A blank start is a clean empty state: the section is drawn only when it has
+  // something to show (a deal, a past deal, unlinked tickets), a failure to
+  // report, or the reason this role sees none of it.
+  const derivedShown =
+    derivedApplies &&
+    !filtered &&
+    (sources.wonDeals.state === "not_allowed" ||
+      derivedFailed.length > 0 ||
+      derivedRows.length > 0 ||
+      pastDerivedRows.length > 0 ||
+      (built?.unlinkedTickets ?? 0) > 0);
 
   return (
     <PageFrame title="Clients" subtitle="The customers your business serves." actions={actions}>
@@ -289,7 +303,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
           </>
         )}
 
-        {derivedApplies && !filtered && (
+        {derivedShown && (
           <section className="space-y-3">
             <div>
               <h2 className="text-sm font-semibold text-fg">Not yet client records</h2>

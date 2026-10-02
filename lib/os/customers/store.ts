@@ -40,6 +40,8 @@ import {
   type ContactInput,
   type CustomerLifecycle,
 } from "@/lib/os/customers/rules";
+import { isRetiredClientRef, notRetiredTenantSql } from "@/lib/os/customers/retired";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /** A page of rows never exceeds this; one more is read to detect truncation. */
 export const CUSTOMER_LIST_LIMIT = 500;
@@ -181,7 +183,9 @@ export type CustomerFilters = {
  * The workspace's clients. `withDelivery` adds each client's open tickets,
  * active projects and latest ticket from the workspace's OWN desk (same
  * tenant_id): pass it only for a viewer who may read that desk, so a count
- * they may not see is null (an em dash), never a 0.
+ * they may not see is null (an em dash), never a 0. Archived records, and
+ * records linked to a retired business's workspace, are listed only with
+ * `includeArchived`.
  */
 export async function listCustomers(
   db: Client,
@@ -192,7 +196,14 @@ export async function listCustomers(
   requireTenant(tenantId);
   const where = ["c.tenant_id = ?"];
   const args: Array<string> = [tenantId];
-  if (!filters.includeArchived) where.push("c.archived_at IS NULL");
+  if (!filters.includeArchived) {
+    where.push("c.archived_at IS NULL");
+    // A record linked to a retired business's workspace is history, not a
+    // client: listed only with Include archived (lib/os/customers/retired.ts).
+    const live = notRetiredTenantSql("c.client_tenant_id");
+    where.push(live.sql);
+    args.push(...live.args);
+  }
   if (filters.lifecycle && isOneOf(CUSTOMER_LIFECYCLES, filters.lifecycle)) {
     where.push("c.lifecycle = ?");
     args.push(filters.lifecycle);
@@ -789,7 +800,12 @@ export async function linkWorkToCustomer(
 
 export type ConvertResult =
   | { ok: true; customer: Customer; created: boolean; linkedBy: "source_lead" | "email" | null }
-  | { ok: false; status: 404 | 409; error: "lead_not_found" | "lead_not_won" | "email_belongs_to_another_client"; existingId?: string | null };
+  | {
+      ok: false;
+      status: 404 | 409;
+      error: "lead_not_found" | "lead_not_won" | "email_belongs_to_another_client" | "retired_business";
+      existingId?: string | null;
+    };
 
 /**
  * "Convert to client": a won lead in THIS workspace's pipeline becomes a client
@@ -804,6 +820,10 @@ export type ConvertResult =
  * deal was marked won is the same client: it is linked to the lead (its
  * source_lead_id set) rather than duplicated. One that already came from a
  * DIFFERENT lead is refused with its id, so the team decides.
+ *
+ * A RETIRED BUSINESS. A deal whose data.client_tenant_id is a retired tenant
+ * (lib/os/customers/retired.ts) is refused, 409 retired_business, before its
+ * stage is looked at: nothing is created, merged or linked for it.
  */
 export async function convertLeadToCustomer(
   db: Client,
@@ -824,6 +844,7 @@ export async function convertLeadToCustomer(
   )[0];
   if (!lead) return { ok: false, status: 404, error: "lead_not_found" };
   const data = parseJson<Record<string, unknown>>(lead.data, {}, "tenant_records.data");
+  if (isRetiredClientRef(data)) return { ok: false, status: 409, error: "retired_business" };
   if (!isConvertibleLeadStage(data.stage)) return { ok: false, status: 409, error: "lead_not_won" };
 
   const from = customerFromLead(data);
@@ -932,14 +953,20 @@ export async function endEngagement(
 
 export type LinkWorkspaceResult =
   | { ok: true; customer: Customer; changed: boolean }
-  | { ok: false; error: "not_found" | "client_tenant_not_found" | "client_tenant_is_this_workspace" | "client_tenant_taken"; existingId?: string | null };
+  | {
+      ok: false;
+      error: "not_found" | "client_tenant_not_found" | "client_tenant_is_this_workspace" | "client_tenant_taken" | "retired_business";
+      existingId?: string | null;
+    };
 
 /**
  * Link a client record to the client's own workspace (customers.client_tenant_id,
  * migration bravo__195), or unlink it with null. The CALLER decides who may:
- * the route allows the platform operator only. The tenant must exist and may
- * not be the business's own workspace; one workspace belongs to one client
- * record per business (a unique index, not a pre-check).
+ * the route allows the platform operator only. The tenant must exist, may not
+ * be the business's own workspace and may not be a retired business
+ * (retired_business, lib/os/customers/retired.ts); one workspace belongs to
+ * one client record per business (a unique index, not a pre-check). Unlinking
+ * is always allowed.
  */
 export async function setClientWorkspace(
   db: Client,
@@ -953,6 +980,7 @@ export async function setClientWorkspace(
   if (!cur) return { ok: false, error: "not_found" };
   if (clientTenantId !== null) {
     if (clientTenantId === tenantId) return { ok: false, error: "client_tenant_is_this_workspace" };
+    if (isRetiredTenant(clientTenantId)) return { ok: false, error: "retired_business" };
     const t = await db.execute({ sql: "SELECT id FROM tenants WHERE id = ? LIMIT 1", args: [clientTenantId] });
     if (t.rows.length === 0) return { ok: false, error: "client_tenant_not_found" };
   }
@@ -975,16 +1003,18 @@ export async function setClientWorkspace(
 
 /**
  * The workspaces a record may be linked to: every tenant except the business's
- * own, by name. Operator-only surface (the caller gates it).
+ * own and the retired ones (lib/os/customers/retired.ts), by name.
+ * Operator-only surface (the caller gates it).
  */
 export async function listLinkableWorkspaces(
   db: Client,
   tenantId: string,
 ): Promise<Array<{ id: string; name: string; slug: string | null }>> {
   requireTenant(tenantId);
+  const live = notRetiredTenantSql("id");
   const rs = await db.execute({
-    sql: "SELECT id, name, slug FROM tenants WHERE id <> ? ORDER BY name COLLATE NOCASE, id LIMIT 1000",
-    args: [tenantId],
+    sql: `SELECT id, name, slug FROM tenants WHERE id <> ? AND ${live.sql} ORDER BY name COLLATE NOCASE, id LIMIT 1000`,
+    args: [tenantId, ...live.args],
   });
   return rows(rs).map((r) => ({ id: String(r.id), name: String(r.name ?? ""), slug: s(r.slug) }));
 }

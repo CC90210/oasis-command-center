@@ -12,8 +12,9 @@
  * platform operator (lib/platform-operator.ts, verified by auth user id) is
  * the one person who may make it. Everyone else gets a 403 that says so.
  *
- * The record must be OASIS's (404 otherwise), the workspace must exist and
- * may not be OASIS's own, and one workspace belongs to one client record
+ * The record must be OASIS's (404 otherwise), the workspace must exist, may
+ * not be OASIS's own and may not be a retired business (409 retired_business,
+ * lib/os/customers/retired.ts), and one workspace belongs to one client record
  * (unique index; the holder is named in the 409). Without migration
  * bravo__195 the write is refused with a 503 naming the migration.
  */

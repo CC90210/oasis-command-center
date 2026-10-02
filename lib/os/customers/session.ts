@@ -82,6 +82,8 @@ const MESSAGES: Record<string, string> = {
   email_belongs_to_another_client: "A client with this email already exists and came from a different deal. Open it instead.",
   lead_not_found: "That deal is not in this workspace's pipeline.",
   lead_not_won: "Only a won deal can become a client. Mark it won in Pipeline first.",
+  // A retired business (lib/os/customers/retired.ts): convert and link-workspace.
+  retired_business: "That business is retired, so it cannot become a client record or be linked to one. Nothing was changed.",
   owner_invalid: "The owner value is not valid.",
   owner_not_on_team: "That person is not an active member of this workspace.",
   contact_empty: "Give the contact a name, an email or a phone number.",
