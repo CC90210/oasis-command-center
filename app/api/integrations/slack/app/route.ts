@@ -11,12 +11,15 @@
  * deployment at all. No credential value is ever in the response.
  *
  * Owner/admin only (the Connections gate); the workspace is the session's.
+ * OASIS's own workspace is refused (409): it uses OASIS's Slack app and has no
+ * app of its own (lib/slack/own-app.ts slackAppKindFor), so Request URLs made
+ * for it here would never be accepted.
  */
 import { NextResponse } from "next/server";
 import { resolveConnectionsActor, routeFailure } from "@/lib/connections/route-helpers";
 import { appOrigin } from "@/lib/connections/popup";
 import { slackOwnAppSetup } from "@/lib/slack/own-app-setup";
-import { readSlackOwnApp, slackInstallsPossible } from "@/lib/slack/own-app";
+import { readSlackOwnApp, slackAppKindFor, slackInstallsPossible } from "@/lib/slack/own-app";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +31,13 @@ export async function GET() {
   try {
     const resolved = await resolveConnectionsActor();
     if (!resolved.ok) return resolved.response;
+    if (slackAppKindFor(resolved.actor.tenantId) === "oasis") {
+      return json(409, {
+        ok: false,
+        error: "oasis_workspace_uses_oasis_app",
+        message: "This workspace uses the OASIS Slack app, so it has no Slack app of its own to set up.",
+      });
+    }
     let origin: string;
     try {
       origin = appOrigin();

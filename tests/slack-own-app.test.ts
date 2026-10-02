@@ -493,9 +493,13 @@ async function main() {
     const off = await loadSlackSettings(db, OASIS, { nowMs: Date.now() });
     assert.deepEqual([off.appConfigured, off.installApp], [false, null]);
     assert.deepEqual((await loadConnectorFacts({ tenantId: OASIS, userId: USERS.oasisOwner.id })).appNotConfigured, ["slack"]);
-    // And a request signed with the saved app's secret has no URL to arrive at.
+    // And a request signed with the saved app's secret has no URL to arrive at,
+    // so none is handed out: the own-app setup is a client's only.
     const r = await toJson(await post(eventsRoute, eventsUrl(OASIS), verification, APP_O.signing_secret));
     assert.deepEqual([r.status, r.body.error], [404, "workspace_app_not_found"]);
+    const setupForOasis = await toJson(await appRoute.GET());
+    assert.deepEqual([setupForOasis.status, setupForOasis.body.error], [409, "oasis_workspace_uses_oasis_app"]);
+    assert.equal(setupForOasis.body.events_url, undefined, "no Request URL handed out");
   });
 
   // -- 4. The workspace's own Request URLs ------------------------------------------
