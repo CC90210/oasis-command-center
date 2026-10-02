@@ -51,7 +51,28 @@ function CopyRow({ label, value, hint }: { label: string; value: string; hint: s
   );
 }
 
-export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean; version?: string }) {
+/**
+ * What the panel says after "Set them". Twilio is updated BEFORE the server
+ * answers, so a failure without the server's own explanation (a lost response,
+ * an unreachable server) is an UNKNOWN outcome: the old setting may or may not
+ * still be live. Only the server's message may say that nothing changed (it
+ * refuses before calling Twilio when no Auth Token or sender is saved).
+ */
+export function applyResultNotice(
+  res: { ok: boolean; status: number } | null,
+  data: { ok?: boolean; message?: string; error?: string } | null,
+): NoticeValue {
+  if (res === null) {
+    return { tone: "err", text: "OASIS did not answer, so the update could not be confirmed. Check the webhook settings in Twilio." };
+  }
+  if (res.ok && data?.ok) return { tone: "ok", text: data.message || "Twilio now calls OASIS." };
+  return {
+    tone: "err",
+    text: data?.message || `The update could not be confirmed (${data?.error || `HTTP ${res.status}`}). Check the webhook settings in Twilio.`,
+  };
+}
+
+export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean; version?: number }) {
   const [info, setInfo] = useState<Info | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -73,7 +94,8 @@ export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean
     }
   }, []);
 
-  // Re-read when the card's status changes (a sender saved, a test run).
+  // Re-read after every saved or removed key (the drawer's revision), so the
+  // confirmation names the sender the POST will actually configure.
   useEffect(() => {
     void load();
   }, [load, version]);
@@ -84,14 +106,10 @@ export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean
     try {
       const res = await fetch(ENDPOINT, { method: "POST", credentials: "include", cache: "no-store" });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; message?: string; error?: string } | null;
-      setNotice(
-        res.ok && data?.ok
-          ? { tone: "ok", text: data.message || "Twilio now calls OASIS." }
-          : { tone: "err", text: data?.message || `Twilio was not changed (${data?.error || `HTTP ${res.status}`}).` },
-      );
+      setNotice(applyResultNotice(res, data));
     } catch (err) {
       console.error("[connections.twilio.webhooks]", err);
-      setNotice({ tone: "err", text: "Could not reach OASIS. Twilio was not changed." });
+      setNotice(applyResultNotice(null, null));
     } finally {
       setBusy(false);
       setConfirming(false);

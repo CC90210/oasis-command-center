@@ -38,23 +38,40 @@ const shared = read(SHARED);
 // above the FRAME map (which necessarily contains the words "object-cover") does not
 // trip the check. A test that cannot survive its own documentation is a test people
 // delete.
-const codeLines = shared
-  .split("\n")
-  .filter((l) => !l.trim().startsWith("*") && !l.trim().startsWith("//") && !l.trim().startsWith("/*"));
-
+//
+// EVERY media element a tile can draw, in every file that draws one. Since the Library
+// became lazy (W8a) a tile's <video> mounts on play inside TileVideo and a carousel's
+// slide is drawn by CarouselFrame; checking the first element in one file would have
+// let either of them crop unseen.
+const MEDIA_FILES = [
+  SHARED,
+  "components/founders/TileVideo.tsx",
+  "components/founders/CarouselFrame.tsx",
+];
+const seen = { "<video": 0, "<img": 0 };
+for (const file of MEDIA_FILES) {
+  const codeLines = read(file)
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("*") && !l.trim().startsWith("//") && !l.trim().startsWith("/*") && !l.trim().startsWith("{/*"));
+  codeLines.forEach((line, idx) => {
+    for (const el of ["<video", "<img"] as const) {
+      if (!line.includes(el)) continue;
+      seen[el] += 1;
+      const block = codeLines.slice(idx, idx + 12).join("\n");
+      assert.ok(
+        !/object-cover/.test(block),
+        `${file}: ${el} uses object-cover — that crops a vertical asset to a zoomed middle band. ` +
+          `Use object-contain: a library exists to show the whole frame.`,
+      );
+      assert.ok(
+        /object-contain/.test(block),
+        `${file}: ${el} must declare object-contain so a non-16:9 asset is letterboxed, not cropped.`,
+      );
+    }
+  });
+}
 for (const el of ["<video", "<img"] as const) {
-  const idx = codeLines.findIndex((l) => l.includes(el));
-  assert.ok(idx >= 0, `${SHARED}: expected a ${el} element rendering asset media`);
-  const block = codeLines.slice(idx, idx + 12).join("\n");
-  assert.ok(
-    !/object-cover/.test(block),
-    `${SHARED}: ${el} uses object-cover — that crops a vertical asset to a zoomed middle band. ` +
-      `Use object-contain: a library exists to show the whole frame.`,
-  );
-  assert.ok(
-    /object-contain/.test(block),
-    `${SHARED}: ${el} must declare object-contain so a non-16:9 asset is letterboxed, not cropped.`,
-  );
+  assert.ok(seen[el] > 0, `expected a ${el} element rendering asset media in ${MEDIA_FILES.join(", ")}`);
 }
 
 // ── 2. the frame follows the asset, not the grid ─────────────────────────────
@@ -85,7 +102,9 @@ const SURFACES = [
   "app/founders/marketing/library/page.tsx",
   "app/founders/marketing/page.tsx",
   "app/founders/marketing/train/page.tsx",
+  "app/founders/marketing/asset/[id]/page.tsx",
   "components/founders/TrainDropzone.tsx",
+  "components/founders/PhoneFrame.tsx",
 ];
 for (const f of SURFACES) {
   if (!existsSync(join(ROOT, f))) continue;
