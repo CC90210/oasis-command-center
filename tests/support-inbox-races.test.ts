@@ -319,6 +319,50 @@ async function main() {
     assert.equal(claim.disposition, "new_ticket");
     assert.equal(JSON.parse(String(claim.plan_json)).ticketId, claim.ticket_id, "the claim records the plan it holds");
     assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM outcome_events WHERE idempotency_key = ? AND subject_id = ?", [`tktmsg:${key}`, replacementId])), 1, "the ledger names that ticket");
+    // The email is on ONE ticket: the attempt that held the old plan wrote nothing on the old ticket.
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND body LIKE '%Same again today.%'", [first.id])), 0, "no copy on the old ticket");
+    assert.match(String(await scalar(db, "SELECT description FROM support_tickets WHERE id = ?", [replacementId])), /Same again today\./);
+  });
+
+  await check("an email another attempt put on its ticket stays there when the ticket closes before a retry replans: no second ticket", async () => {
+    const from = { address: "kept@client.test", name: "Kept" };
+    const opened = await ingestWith(db, ingestBody({ message: { from, subject: "Report totals" } }, clock), tick());
+    await notify.drain();
+    const first = opened.body.ticket as { id: string; number: string };
+    const reply = ingestBody({ message: { from, subject: `Re: [${first.number}] Report totals`, body_text: "Totals are off by one." } }, clock);
+    await assert.rejects(ingestWith(crashAt(db, /INSERT INTO ticket_comments/), reply, tick()), /simulated crash/);
+    const key = createHash("sha256").update(String(reply.message.message_id), "utf8").digest("hex");
+    // Retry A reads the open ticket and reaches its write. Retry B then reads
+    // the ticket a person has just closed, finds no comment yet, and plans a
+    // new ticket. A's write lands first, then B's replacement of the plan.
+    let aAtWrite!: () => void;
+    const aReady = new Promise<void>((resolve) => (aAtWrite = resolve));
+    const gate = turnstile(["a", "b"]);
+    const retryA = pausedAt(gated(db, "a", gate, /INSERT INTO ticket_comments/), /INSERT INTO ticket_comments/, async () => aAtWrite());
+    const retryB = gated(
+      pausedAt(db, /^SELECT \* FROM support_tickets WHERE tenant_id = \? AND id = \?$/, async () => {
+        await aReady;
+        await store.updateTicket(db, DESK_TENANT, first.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, clock);
+      }),
+      "b",
+      gate,
+      /^\s*UPDATE support_email_messages SET plan_json/,
+    );
+    const now = tick();
+    const [a, b] = await Promise.all([ingestWith(retryA, reply, now), ingestWith(retryB, reply, now)]);
+    await notify.drain();
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.equal(b.status, 200, JSON.stringify(b.body));
+    assert.equal((a.body.ticket as { id: string }).id, first.id);
+    assert.equal((b.body.ticket as { id: string }).id, first.id);
+    const others = (await db.execute({ sql: "SELECT id FROM support_tickets WHERE tenant_id = ? AND client_email = ? AND id <> ?", args: [DESK_TENANT, from.address, first.id] })).rows;
+    assert.equal(others.length, 0, "no second ticket");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND author_type = 'client' AND body = ?", [first.id, "Totals are off by one."])), 1, "ONE copy, on its ticket");
+    const claim = (await db.execute({ sql: "SELECT ticket_id, disposition, completed_at FROM support_email_messages WHERE message_id_hash = ?", args: [key] })).rows[0];
+    assert.ok(claim.completed_at);
+    assert.equal(claim.ticket_id, first.id);
+    assert.equal(claim.disposition, "appended");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM outcome_events WHERE idempotency_key = ?", [`tktmsg:${key}`])), 1);
   });
 
   // -- A draft and a failure report for one email --

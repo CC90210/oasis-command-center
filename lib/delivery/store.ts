@@ -34,7 +34,7 @@
  * fails loudly rather than landing unrecorded.
  */
 import { randomUUID } from "node:crypto";
-import type { Client, InStatement, ResultSet } from "@libsql/client";
+import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
@@ -1424,7 +1424,7 @@ export async function updateTicket(
 
 export type CommentResult =
   | { ok: true; comment: TicketComment; firstResponse: boolean; reopened: boolean; existing?: true }
-  | { ok: false; status: 404 | 409; error: "not_found" | "ticket_closed" };
+  | { ok: false; status: 404 | 409; error: "not_found" | "ticket_closed" | "superseded" };
 
 /** How a comment reached the desk (ticket_comments.channel, migration bravo__200). */
 export const COMMENT_CHANNELS = ["email", "portal", "form"] as const;
@@ -1448,6 +1448,12 @@ export type CommentChannel = (typeof COMMENT_CHANNELS)[number];
  * existing:true (the support inbox plans its ids before it writes, so a
  * retried email is filed once). `channel` is written only when given, so a
  * database without migration bravo__200 keeps taking every other comment.
+ *
+ * A `guard` (an SQL condition and its arguments) is checked in the insert
+ * itself, so nothing can change between the check and the write. When it no
+ * longer holds, nothing is written (the ticket is touched only when the
+ * comment is on it) and the answer is `superseded`. The support inbox guards a
+ * client's email on its claim still holding the plan that chose this ticket.
  */
 export async function addTicketComment(
   db: Client,
@@ -1460,6 +1466,7 @@ export async function addTicketComment(
     author: Author;
     id?: string;
     channel?: CommentChannel;
+    guard?: { sql: string; args: InValue[] };
   },
   now: Date,
 ): Promise<CommentResult> {
@@ -1487,28 +1494,36 @@ export async function addTicketComment(
   const id = input.id ?? randomUUID();
   const isInternal = input.author_type === "client" ? false : input.is_internal;
   const channelCol = input.channel ? ", channel" : "";
+  const values: InValue[] = [
+    id,
+    ticketId,
+    tenantId,
+    input.author_type,
+    input.author.userId,
+    input.author.name,
+    input.body,
+    isInternal ? 1 : 0,
+    at,
+    ...(input.channel ? [input.channel] : []),
+  ];
   const stmts: InStatement[] = [
     {
       // ON CONFLICT (id): a concurrent call with the same supplied id inserted
       // first; this one changes nothing, and the guarded ledger rows below
       // (changes() = 1) are not written twice.
-      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
+      sql: input.guard
+        ? `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
+            SELECT ${values.map(() => "?").join(", ")} WHERE ${input.guard.sql}
+            ON CONFLICT (id) DO NOTHING`
+        : `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at${channelCol})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${input.channel ? ", ?" : ""})
             ON CONFLICT (id) DO NOTHING`,
-      args: [
-        id,
-        ticketId,
-        tenantId,
-        input.author_type,
-        input.author.userId,
-        input.author.name,
-        input.body,
-        isInternal ? 1 : 0,
-        at,
-        ...(input.channel ? [input.channel] : []),
-      ],
+      args: input.guard ? [...values, ...input.guard.args] : values,
     },
   ];
+  // The ticket moves only when the comment is on it: a guarded insert that
+  // wrote nothing leaves the ticket as it was.
+  const commentIsOn = "EXISTS (SELECT 1 FROM ticket_comments WHERE tenant_id = ? AND id = ?)";
   const firstResponse = input.author_type === "team" && !isInternal && !cur.first_response_at;
   const reopened = input.author_type === "client" && (status === "waiting_on_client" || status === "resolved");
   if (reopened) {
@@ -1541,15 +1556,15 @@ export async function addTicketComment(
     sets.push("status = 'open'", "resolved_at = NULL", "closed_at = NULL");
   }
   stmts.push({
-    sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
-    args: [...args, tenantId, ticketId],
+    sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND ${commentIsOn}`,
+    args: [...args, tenantId, ticketId, tenantId, id],
   });
   if (firstResponse) {
     // Set once: only the reply that finds it still empty sets it, even if two
     // public replies race, and only that reply records ticket.first_response.
     stmts.push({
-      sql: "UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL",
-      args: [at, tenantId, ticketId],
+      sql: `UPDATE support_tickets SET first_response_at = ? WHERE tenant_id = ? AND id = ? AND first_response_at IS NULL AND ${commentIsOn}`,
+      args: [at, tenantId, ticketId, tenantId, id],
     });
     const opened = Date.parse(String(cur.created_at ?? ""));
     stmts.push(
@@ -1568,7 +1583,19 @@ export async function addTicketComment(
       ),
     );
   }
-  await db.batch(stmts, "write");
+  const results = await db.batch(stmts, "write");
+  if (input.guard && results[0].rowsAffected !== 1) {
+    // Nothing written: a concurrent call with this id wrote it first (then it
+    // is this comment, already on the ticket), or the guard no longer held.
+    const written = rows(
+      await db.execute({
+        sql: "SELECT * FROM ticket_comments WHERE tenant_id = ? AND ticket_id = ? AND id = ? LIMIT 1",
+        args: [tenantId, ticketId, id],
+      }),
+    )[0];
+    if (written) return { ok: true, comment: mapComment(written), firstResponse: false, reopened: false, existing: true };
+    return { ok: false, status: 409, error: "superseded" };
+  }
   return {
     ok: true,
     comment: {

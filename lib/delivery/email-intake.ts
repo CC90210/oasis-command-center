@@ -1045,7 +1045,10 @@ type CarriedOut = { completed: true; plan: IngestPlan; ticket: Ticket | null; re
  * the claim each happen only while the claim is incomplete AND still holds
  * the exact plan this attempt read (plan_json). An attempt that loses either
  * answers `completed: false` and writes no plan of its own: the caller reads
- * the claim again and follows the winner's plan, or its answer. So two
+ * the claim again and follows the winner's plan, or its answer. The client's
+ * comment is written only while the claim holds the plan that chose its
+ * ticket, and a plan is replaced only while the email is not on its planned
+ * ticket, so one email is never on two tickets. So two
  * retries whose ticket closed in between make ONE replacement ticket, and only
  * the attempt that completed the claim tells anyone (the ledger row rides on
  * that completion; the alerts and the acknowledgement follow its answer).
@@ -1079,19 +1082,34 @@ async function carryOut(
         author_type: "client",
         author: { userId: null, name: clip(m.from.name || m.from.address, LIMITS.clientName) },
         channel: "email",
+        // Written only while the claim still holds the plan that chose this
+        // ticket, in the same statement: an attempt paused before this write
+        // never adds the email to a ticket after another attempt moved it.
+        guard: {
+          sql: "EXISTS (SELECT 1 FROM support_email_messages WHERE tenant_id = ? AND id = ? AND completed_at IS NULL AND plan_json = ?)",
+          args: [tenantId, claimId, planJson],
+        },
       },
       clock,
     );
     if (r.ok) {
       reopened = r.reopened;
+    } else if (r.error === "superseded") {
+      // Another attempt replaced (or finished) this plan first: follow its plan.
+      return { completed: false };
     } else {
       // The ticket closed (or vanished) between the plan and now: the email
       // opens a ticket of its own instead. Stored, so a retry does the same,
-      // and stored only over the plan this attempt read.
+      // and stored only over the plan this attempt read, and only while the
+      // email is not on the planned ticket: another attempt that added it
+      // there before the ticket closed keeps this plan, and it completes.
       const replacement = await replanAsNewTicket(db, desk, body, plan, now);
       const replacementJson = JSON.stringify(replacement);
       const swapped = await db.execute({
-        sql: "UPDATE support_email_messages SET plan_json = ?, ticket_id = ?, comment_id = ?, disposition = ?, ack_status = ?, draft_wanted = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND completed_at IS NULL AND plan_json = ?",
+        sql: `UPDATE support_email_messages SET plan_json = ?, ticket_id = ?, comment_id = ?, disposition = ?, ack_status = ?, draft_wanted = ?, updated_at = ?
+              WHERE tenant_id = ? AND id = ? AND completed_at IS NULL AND plan_json = ?
+                AND NOT EXISTS (SELECT 1 FROM ticket_comments c JOIN support_tickets t ON t.tenant_id = c.tenant_id AND t.id = c.ticket_id
+                                WHERE c.tenant_id = ? AND c.id = ?)`,
         args: [
           replacementJson,
           replacement.ticketId,
@@ -1103,9 +1121,12 @@ async function carryOut(
           tenantId,
           claimId,
           planJson,
+          tenantId,
+          plan.commentId,
         ],
       });
-      // Another attempt replaced (or finished) this plan first: follow its plan.
+      // Another attempt replaced (or finished) this plan first, or put the
+      // email on the planned ticket: follow the stored plan.
       if (swapped.rowsAffected !== 1) return { completed: false };
       plan = replacement;
       planJson = replacementJson;

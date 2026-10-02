@@ -315,6 +315,35 @@ async function main() {
     assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM outcome_events WHERE subject_id = ? AND event_key = 'ticket.reopened'", args: [t.id] })).rows[0].n), 1);
   });
 
+  await check("a guarded comment whose guard no longer holds writes nothing: no comment, no reopening, no first response, answered superseded", async () => {
+    const t = (await store.createTicket(db, OASIS, { ...base, id: "55555555-5555-4555-8555-555555555555" }, now)).ticket;
+    await store.updateTicket(db, OASIS, t.id, { status: "resolved" }, { userId: "u", name: "CC" }, now);
+    const later = new Date(now.getTime() + 60_000);
+    const client = { id: "66666666-6666-4666-8666-666666666666", body: "Late", is_internal: false, author_type: "client" as const, author: { userId: null, name: "Jane" } };
+    const refused = await store.addTicketComment(db, OASIS, t.id, { ...client, guard: { sql: "1 = ?", args: [0] } }, later);
+    assert.deepEqual(refused, { ok: false, status: 409, error: "superseded" });
+    const team = await store.addTicketComment(
+      db,
+      OASIS,
+      t.id,
+      { id: "77777777-7777-4777-8777-777777777777", body: "Hello", is_internal: false, author_type: "team", author: { userId: "u", name: "CC" }, guard: { sql: "1 = ?", args: [0] } },
+      later,
+    );
+    assert.deepEqual(team, { ok: false, status: 409, error: "superseded" });
+    const row = (await db.execute({ sql: "SELECT status, first_response_at FROM support_tickets WHERE id = ?", args: [t.id] })).rows[0];
+    assert.equal(row.status, "resolved", "not reopened");
+    assert.equal(row.first_response_at, null, "no first response");
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ticket_comments WHERE ticket_id = ? AND author_type IN ('client', 'team')", args: [t.id] })).rows[0].n), 0);
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM outcome_events WHERE subject_id = ? AND event_key IN ('ticket.reopened', 'ticket.first_response')", args: [t.id] })).rows[0].n),
+      0,
+    );
+    // The same comment with a guard that holds is written, and reopens the ticket.
+    const held = await store.addTicketComment(db, OASIS, t.id, { ...client, guard: { sql: "1 = ?", args: [1] } }, later);
+    assert.ok(held.ok && held.reopened, JSON.stringify(held));
+    assert.equal((await db.execute({ sql: "SELECT status FROM support_tickets WHERE id = ?", args: [t.id] })).rows[0].status, "open");
+  });
+
   await check("the comment channel is written only when given: a database without migration bravo__200 takes every other comment", async () => {
     const t = (await store.createTicket(db, OASIS, { ...base, id: "44444444-4444-4444-8444-444444444444" }, now)).ticket;
     const plain = await store.addTicketComment(db, OASIS, t.id, { body: "note", is_internal: true, author_type: "team", author: { userId: "u", name: "CC" } }, now);
