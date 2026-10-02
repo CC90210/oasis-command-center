@@ -12,7 +12,10 @@
  * lives in the .test.ts.
  *
  * Run by tests/commissions-portal.test.ts with plain `node --import tsx`
- * (input on stdin: { initial, afterPayout, paidRowId }).
+ * (input on stdin: { initial, afterPayout, paidRowId, order }). `order` says
+ * which of the two reads answers first: "newer-first" is the review's race;
+ * "older-first" checks the older read cannot end the busy state while the
+ * newer one is still out.
  */
 
 // A module, not a global script: its `main` must not collide with other
@@ -123,7 +126,12 @@ async function main() {
     default: (props: Props) => React.createElement("a", props),
   });
   const { CommissionPortal } = await import("../app/commissions/CommissionPortal");
-  const input = JSON.parse(await readStdin()) as { initial: unknown; afterPayout: unknown; paidRowId: string };
+  const input = JSON.parse(await readStdin()) as {
+    initial: unknown;
+    afterPayout: unknown;
+    paidRowId: string;
+    order: "newer-first" | "older-first";
+  };
 
   const render = (): El => {
     cursor = 0;
@@ -173,14 +181,26 @@ async function main() {
   calls[0].respond(200, { ok: true, data: { ok: true } });
   await flush();
   look("payout saved, its re-read in flight");
-  // 5. The re-read after the payout answers first.
-  calls[2].respond(200, input.afterPayout);
-  await flush();
-  look("re-read after the payout answered");
-  // 6. The Refresh from before the payout answers LAST.
-  calls[1].respond(200, input.initial);
-  await flush();
-  look("older refresh answered last");
+  if (input.order === "newer-first") {
+    // 5. The re-read after the payout answers first.
+    calls[2].respond(200, input.afterPayout);
+    await flush();
+    look("re-read after the payout answered");
+    // 6. The Refresh from before the payout answers LAST.
+    calls[1].respond(200, input.initial);
+    await flush();
+    look("older refresh answered last");
+  } else {
+    // 5. The Refresh from before the payout answers first, while the re-read
+    // after the payout is still out.
+    calls[1].respond(200, input.initial);
+    await flush();
+    look("older refresh answered first");
+    // 6. Then the re-read after the payout.
+    calls[2].respond(200, input.afterPayout);
+    await flush();
+    look("re-read after the payout answered");
+  }
 
   process.stdout.write(JSON.stringify({ methods: calls.map((call) => call.method), steps }));
 }

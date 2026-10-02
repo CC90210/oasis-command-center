@@ -448,8 +448,9 @@ async function readCommissionPortal(
   // Wave 1: the complete ledger in scope, read ONCE, with the rep boundary.
   // The rows on screen and the totals both come from it, so a row is never
   // shown without being counted, or counted with another status or amount.
-  // Each wave first checks that the load has not already answered.
-  signal.throwIfAborted();
+  // Once the load is cancelled nothing more starts: each ledger page checks
+  // the signal, and every read of the later waves goes through `limit`,
+  // which refuses work once cancelled.
   let ledger: CommissionRow[];
   try {
     ledger = await loadWebsiteSalesCommissionSummaryRows<CommissionRow>(db, {
@@ -476,7 +477,6 @@ async function readCommissionPortal(
         .filter((id): id is string => !!id),
     ),
   ];
-  signal.throwIfAborted();
   const second = await runWave([
     {
       tag: "deals",
@@ -518,7 +518,6 @@ async function readCommissionPortal(
     .filter((deal): deal is DealRow => Boolean(deal));
   const leadIds = [...new Set(listedDeals.map((deal) => deal.lead_id).filter(Boolean))];
   const receiptIds = [...new Set(listedDeals.map((deal) => deal.verified_payment_id).filter((id): id is string => !!id))];
-  signal.throwIfAborted();
   const third = await runWave([
     {
       tag: "leads",

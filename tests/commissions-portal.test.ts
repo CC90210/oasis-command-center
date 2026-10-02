@@ -764,20 +764,35 @@ async function main() {
     });
     return { until, open };
   };
+  /**
+   * Load, then let the held reads go and wait: what the load answered, the
+   * statements it still started after answering, and every log line from
+   * start to end (a read dropped by the cancel must never be logged as a
+   * failure).
+   */
+  const loadThenRelease = (deadlineMs: number, held: { open: () => void }) =>
+    errorsDuring(async () => {
+      const before = begun.length;
+      const answer = await within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs }), 5_000);
+      const byAnswer = begun.length;
+      faults = {};
+      held.open();
+      await settle(400);
+      return { answer, beforeAnswer: begun.slice(before, byAnswer), afterAnswer: begun.slice(byAnswer) };
+    });
+  const DEADLINE_LINE = /^\[website-sales\.commissions\.portal\] ReadDeadlineError: Read did not answer in time/;
+
   await check("cancel: once the deadline has answered, a ledger page that answers late starts no next page and no later wave", async () => {
     // 700 entries are two ledger pages. Hold the first; the deadline answers;
     // then let it go.
     const held = gate();
     faults = { hold: { match: /FROM "website_sales_commissions"[\s\S]*OFFSET 0\b/, until: held.until } };
     try {
-      const { value } = await errorsDuring(() =>
-        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 150 }), 3_000));
-      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
-      const startedByAnswer = begun.length;
-      faults = {};
-      held.open();
-      await settle(400);
-      assert.deepEqual(begun.slice(startedByAnswer), [], "a read started after the page already had its answer");
+      const { value, lines } = await loadThenRelease(150, held);
+      assert.deepEqual(value.answer, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
+      assert.deepEqual(value.afterAnswer, [], "a read started after the page already had its answer");
+      assert.equal(lines.length, 1, `only the deadline is logged: ${lines.join(" | ")}`);
+      assert.match(lines[0], DEADLINE_LINE);
     } finally {
       faults = {};
       held.open();
@@ -791,17 +806,12 @@ async function main() {
     const lastWave = /FROM "(tenant_records|website_sales_payment_receipts)"/;
     faults = { hold: { match: lastWave, until: held.until } };
     try {
-      const before = begun.length;
-      const { value } = await errorsDuring(() =>
-        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 1_500 }), 5_000));
-      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
-      const started = begun.slice(before);
-      assert.equal(started.filter((sql) => lastWave.test(sql)).length, 4, `4 of the 6 last-wave reads started:\n${started.join("\n")}`);
-      const startedByAnswer = begun.length;
-      faults = {};
-      held.open();
-      await settle(400);
-      assert.deepEqual(begun.slice(startedByAnswer), [], "a queued read started after the page already had its answer");
+      const { value, lines } = await loadThenRelease(1_500, held);
+      assert.deepEqual(value.answer, { status: 500, body: { ok: false, error: "commission_portal_unavailable" } });
+      assert.equal(value.beforeAnswer.filter((sql) => lastWave.test(sql)).length, 4, "4 of the 6 last-wave reads had started");
+      assert.deepEqual(value.afterAnswer, [], "a queued read started after the page already had its answer");
+      assert.equal(lines.length, 1, `only the deadline is logged: ${lines.join(" | ")}`);
+      assert.match(lines[0], DEADLINE_LINE);
     } finally {
       faults = {};
       held.open();
@@ -818,15 +828,12 @@ async function main() {
       hold: { match: /FROM "website_sales_payment_receipts"/, until: held.until },
     };
     try {
-      const before = begun.length;
-      const { value } = await errorsDuring(() =>
-        within(portal.loadCommissionPortal(bigSession, "founder", { deadlineMs: 5_000 }), 4_000));
-      assert.deepEqual(value, { status: 500, body: { ok: false, error: "commission_leads_unavailable" } });
-      faults = {};
-      held.open();
-      await settle(400);
-      const payments = begun.slice(before).filter((sql) => /FROM "website_sales_payment_receipts"/.test(sql));
+      const { value, lines } = await loadThenRelease(5_000, held);
+      assert.deepEqual(value.answer, { status: 500, body: { ok: false, error: "commission_leads_unavailable" } });
+      const payments = [...value.beforeAnswer, ...value.afterAnswer].filter((sql) => /FROM "website_sales_payment_receipts"/.test(sql));
       assert.equal(payments.length, 1, `only the payments read that had a slot started (${payments.length} did)`);
+      assert.equal(lines.length, 1, `only the failed read is logged: ${lines.join(" | ")}`);
+      assert.match(lines[0], /^\[website-sales\.commissions\.leads\] Error: commission_leads_failed:injected read failure/);
     } finally {
       faults = {};
       held.open();
@@ -1024,34 +1031,50 @@ async function main() {
     cad.approvedCents -= paid.amountCents;
     cad.paidCents += paid.amountCents;
 
-    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/commissions-portal.client.ts"], {
-      cwd: ROOT,
-      encoding: "utf8",
-      env: plainEnv(),
-      input: JSON.stringify({ initial, afterPayout, paidRowId }),
-    });
-    assert.equal(r.status, 0, `the interaction helper exited ${r.status}:\n${r.stderr}`);
     type Step = { label: string; paidRowStatus: string | null; refreshDisabled: boolean; payoutControls: Array<{ text: string; disabled: boolean }>; screen: string };
-    const out = JSON.parse(r.stdout) as { methods: string[]; steps: Step[] };
-    const step = (label: string): Step => {
-      const found = out.steps.find((s) => s.label === label);
-      assert.ok(found, `no step "${label}"`);
-      return found;
+    const race = (order: "newer-first" | "older-first") => {
+      const r = spawnSync(process.execPath, ["--import", "tsx", "tests/commissions-portal.client.ts"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        env: plainEnv(),
+        input: JSON.stringify({ initial, afterPayout, paidRowId, order }),
+      });
+      assert.equal(r.status, 0, `the interaction helper exited ${r.status}:\n${r.stderr}`);
+      const out = JSON.parse(r.stdout) as { methods: string[]; steps: Step[] };
+      assert.deepEqual(out.methods, ["PATCH", "GET", "GET"], "the save, the Refresh, then the save's own re-read");
+      return (label: string): Step => {
+        const found = out.steps.find((s) => s.label === label);
+        assert.ok(found, `${order}: no step "${label}"`);
+        return found;
+      };
     };
-    assert.deepEqual(out.methods, ["PATCH", "GET", "GET"], "the save, the Refresh, then the save's own re-read");
-    assert.equal(step("opened").paidRowStatus, "approved");
-    assert.ok(step("opened").payoutControls.some((control) => !control.disabled), "with no read in flight the payout buttons work");
-    for (const label of ["refresh in flight", "payout saved, its re-read in flight"]) {
-      const s = step(label);
+    const busy = (s: Step, label: string) => {
       assert.ok(s.payoutControls.length >= 3, `${label}: payout buttons on screen`);
       assert.deepEqual(s.payoutControls.filter((control) => !control.disabled), [], `${label}: a payout button is usable while a read is in flight`);
-    }
-    const saved = step("re-read after the payout answered");
+    };
+
+    // The review's race: the Refresh from before the payout answers LAST.
+    const newer = race("newer-first");
+    assert.equal(newer("opened").paidRowStatus, "approved");
+    assert.ok(newer("opened").payoutControls.some((control) => !control.disabled), "with no read in flight the payout buttons work");
+    busy(newer("refresh in flight"), "refresh in flight");
+    busy(newer("payout saved, its re-read in flight"), "payout saved, its re-read in flight");
+    const saved = newer("re-read after the payout answered");
     assert.equal(saved.paidRowStatus, "paid");
-    const last = step("older refresh answered last");
+    const last = newer("older refresh answered last");
     assert.equal(last.paidRowStatus, "paid", "the older Refresh put the paid entry back");
     assert.equal(last.screen, saved.screen, "the older Refresh changed what is on screen");
     assert.equal(last.refreshDisabled, false, "the screen is not left waiting");
+
+    // The other order: the older Refresh answers first. It is not drawn, and
+    // it cannot end the busy state while the newer read is still out.
+    const older = race("older-first");
+    const first = older("older refresh answered first");
+    busy(first, "older refresh answered first, newer still out");
+    assert.equal(first.refreshDisabled, true, "still reading");
+    const done = older("re-read after the payout answered");
+    assert.equal(done.paidRowStatus, "paid");
+    assert.ok(done.payoutControls.some((control) => !control.disabled), "the buttons work again once the latest read is in");
   });
 
   // -- 3. error sentences --------------------------------------------------
