@@ -113,6 +113,51 @@ function SlackPreview({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
+const VERDICT_LABEL: Record<string, string> = { ship: "ready to send", revise: "needs edits", escalate: "a person should write this one" };
+
+/**
+ * An AI-drafted reply to a support ticket (reply_ticket): who it goes to, on
+ * which ticket, what the draft critic thought of it, and the whole reply. On
+ * approve it is posted on the ticket under the approver's name and emailed
+ * from support@ in the client's own thread.
+ */
+function TicketReplyPreview({ payload, clamp }: { payload: Record<string, unknown>; clamp: boolean }) {
+  const critic = payload.critic && typeof payload.critic === "object" ? (payload.critic as Record<string, unknown>) : null;
+  const verdict = critic ? str(critic.verdict) : "";
+  const score = critic && typeof critic.score === "number" ? critic.score : null;
+  const issues = critic && Array.isArray(critic.issues) ? (critic.issues as Array<Record<string, unknown>>) : [];
+  return (
+    <div className="rounded-lg border border-hairline bg-bg-deep/40 px-3 py-2.5 text-[13px] leading-5">
+      <dl className="grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5">
+        <dt className="text-fg-dim">Ticket</dt>
+        <dd className="text-fg">{str(payload.ticket_number)}</dd>
+        <dt className="text-fg-dim">To</dt>
+        <dd className="break-all text-fg">{str(payload.to)}</dd>
+        <dt className="text-fg-dim">Subject</dt>
+        <dd className="font-medium text-fg">{str(payload.subject)}</dd>
+        {critic && (
+          <>
+            <dt className="text-fg-dim">Critic</dt>
+            <dd className={verdict === "ship" ? "text-fg-muted" : "text-status-warm"}>
+              {VERDICT_LABEL[verdict] ?? verdict}
+              {score !== null ? ` (${score}/10)` : ""}
+              {str(critic.notes) ? `: ${str(critic.notes)}` : ""}
+            </dd>
+          </>
+        )}
+      </dl>
+      {issues.length > 0 && (
+        <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-xs leading-4 text-status-warm">
+          {issues.map((i, n) => (
+            <li key={n}>{[str(i.reason), str(i.excerpt) ? `"${str(i.excerpt)}"` : ""].filter(Boolean).join(" ")}</li>
+          ))}
+        </ul>
+      )}
+      <p className={`mt-2 whitespace-pre-wrap break-words text-fg-muted ${clamp ? "line-clamp-4" : ""}`}>{str(payload.body)}</p>
+    </div>
+  );
+}
+
 /** A kind with no dedicated preview still shows everything it would act on. */
 function GenericPreview({ payload }: { payload: Record<string, unknown> }) {
   const entries = Object.entries(payload);
@@ -158,7 +203,7 @@ export function ApprovalCard({
   const pending = approval.status === "pending";
   const kind = approval.action_kind;
   const body = str(approval.payload.body);
-  const clampable = density === "compact" && kind === "send_email" && body.length > 240;
+  const clampable = density === "compact" && (kind === "send_email" || kind === "reply_ticket") && body.length > 240;
 
   async function call(action: "approve" | "send-back" | "comment", payload: Record<string, unknown>, which: Busy) {
     if (busy) return;
@@ -233,6 +278,8 @@ export function ApprovalCard({
           <PostPreview payload={approval.payload} />
         ) : kind === "send_slack_message" ? (
           <SlackPreview payload={approval.payload} />
+        ) : kind === "reply_ticket" ? (
+          <TicketReplyPreview payload={approval.payload} clamp={clampable && !expanded} />
         ) : (
           <GenericPreview payload={approval.payload} />
         )}

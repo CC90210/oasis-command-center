@@ -16,19 +16,71 @@
  */
 import "./_support-inbox-harness";
 import assert from "node:assert/strict";
+import { dirname } from "node:path";
+import * as ReactNS from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import {
   DESK_TENANT,
   ENV,
   MAILBOX,
+  USERS,
   answerOf,
   check,
   fakeNotify,
   finish,
   ingestBody,
+  login,
   scalar,
   setupSupportDatabase,
   signedRequest,
 } from "./_support-inbox-harness";
+
+// The desk page is rendered as tests/delivery-pages.test.ts renders it: the
+// classic JSX runtime wants a global React, and next/link is only an anchor here.
+(globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
+const linkPath = require.resolve("next/link");
+require.cache[linkPath] = {
+  id: linkPath,
+  filename: linkPath,
+  path: dirname(linkPath),
+  loaded: true,
+  children: [],
+  paths: [],
+  exports: { __esModule: true, default: ({ href, children, ...rest }: { href: string; children?: ReactNode }) => createElement("a", { href, ...rest }, children) },
+} as unknown as NodeModule;
+
+/** Every string reachable in an element tree (server function components rendered, client ones by their props). */
+function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (depth > 60 || node === null || node === undefined || typeof node === "boolean") return out;
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const n of node) textOf(n, out, depth + 1);
+    return out;
+  }
+  if (isValidElement(node)) {
+    const props = (node.props ?? {}) as Record<string, unknown>;
+    if (typeof node.type === "function") {
+      try {
+        const rendered = (node.type as (p: unknown) => unknown)(props);
+        if (!(rendered instanceof Promise)) {
+          textOf(rendered, out, depth + 1);
+          return out;
+        }
+      } catch {
+        /* a client component: its props below */
+      }
+    }
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "children") textOf(v as ReactNode, out, depth + 1);
+      else if (typeof v === "string") out.push(v);
+    }
+    return out;
+  }
+  return out;
+}
 
 async function main() {
   const db = await setupSupportDatabase();
@@ -152,6 +204,17 @@ async function main() {
     assert.equal(await intake.purgeOldNonTicketMessages(db, new Date(now.getTime() + 31 * 86_400_000)), 1);
     assert.equal(await scalar(db, "SELECT COUNT(*) FROM support_email_messages WHERE id = ?", [String(spam.body.message_record_id)]), 0);
     assert.equal(await scalar(db, "SELECT COUNT(*) FROM support_email_messages WHERE id = ?", [String(real.body.message_record_id)]), 1);
+  });
+
+  await check("OASIS's Support desk says when support@ was last read, and warns when it has not been for 20 minutes", async () => {
+    const tickets = (await import("../app/tickets/page")).default;
+    await login(USERS.cc);
+    const text = async () => textOf(await tickets({ searchParams: Promise.resolve({}) })).join("\n");
+    await beat(new Date(Date.now() - 3 * 60_000));
+    assert.match(await text(), /support@oasisai\.work last read 3 minutes ago\./);
+    await beat(new Date(Date.now() - 45 * 60_000));
+    await db.execute({ sql: "UPDATE support_mailbox_status SET last_ok_at = ? WHERE mailbox = ?", args: [new Date(Date.now() - 45 * 60_000).toISOString(), MAILBOX] });
+    assert.match(await text(), /support@oasisai\.work not read for 45 minutes\. The reader runs on CC's PC/);
   });
 
   finish("support-inbox-health");
