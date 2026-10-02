@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -413,6 +413,17 @@ async function main() {
     assert.equal(again.status, 200, JSON.stringify(again.body));
     assert.equal(again.body.idempotent, true);
     assert.equal((await stored(L_IDEMPOTENT)).stage, "founder_meeting_booked");
+  });
+
+  await check("Pipeline's booking screen can actually send the do-not-call confirmation (Codex P2, 74b5f2ce)", async () => {
+    // Without this, merging the server rule alone turned "allow" into "block":
+    // the only live booking screen never sent ownerRequestedMeeting.
+    const wizard = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
+    assert.match(wizard, /leadDoNotCall \? \{ ownerRequestedMeeting \} : \{\}/, "booking payload must carry the confirmation for do-not-call leads");
+    assert.match(wizard, /\{leadDoNotCall \? \(\s*<ConfirmationCheckCard\s+checked=\{ownerRequestedMeeting\}/, "the checkbox renders only for do-not-call leads");
+    assert.match(wizard, /handoffComplete &&\s*doNotCallConfirmed &&/, "Book stays disabled until it is ticked");
+    const page = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
+    assert.match(page, /leadDoNotCall=\{factsFrom\(activeRecord\.data\)\.dnc\}/, "the page must read dnc with the server's strict rule");
   });
 
   if (failures > 0) {
