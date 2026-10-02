@@ -530,6 +530,7 @@ async function main() {
   const browserEgress = {};
   const browserSamples = [];
   const notes = [];
+  let contextsDone = 0;
   try {
     for (const viewer of viewers) {
       for (const vp of viewports) {
@@ -602,91 +603,101 @@ async function main() {
         };
         await Promise.all(Array.from({ length: opts.concurrency }, worker));
         await ctx.close();
+        // A partial report after every viewer x viewport: a run that is cut
+        // short (a cancel, the job's time limit) still leaves what it saw.
+        contextsDone += 1;
+        writeReport(false);
       }
     }
   } finally {
     await browser.close();
   }
 
-  defects.push(...deadTabDefects(visits, rails));
-  const viewerKeys = viewers.map((v) => v.key);
-  const ranked = rankDefects(defects, viewerKeys);
-  const groups = groupDefects(ranked);
-  const counts = countDefects(ranked, viewerKeys);
-
-  // Server-side egress the guard refused (scripts/qa/egress-guard.cjs writes one JSON line each).
-  const serverHosts = {};
-  if (opts.egressLog && existsSync(opts.egressLog)) {
-    for (const line of readFileSync(opts.egressLog, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const e = JSON.parse(line);
-        serverHosts[e.host] = (serverHosts[e.host] ?? 0) + 1;
-      } catch {
-        // a torn last line while the server was still writing; ignore it
-      }
-    }
-  }
-
-  const desktop = viewports[0].key;
-  const access = routes.map((r) => {
-    const cells = {};
-    for (const v of viewers) {
-      const visit = visits.find((x) => x.route === r.path && x.viewer === v.key && x.viewport === desktop);
-      if (!visit) continue;
-      const mark = rails[v.key].has(r.path) ? "*" : "";
-      cells[v.key] = visit.navigationError
-        ? `ERR${mark}`
-        : visit.finalPath !== r.path
-          ? `${visit.status ?? ""} -> ${visit.finalPath}${mark}`
-          : `${visit.notFound && visit.status === 200 ? "404 (page)" : visit.status}${mark}`;
-    }
-    return { route: r.path, cells };
-  });
-
-  const report = {
-    meta: {
-      generatedAt: new Date().toISOString(),
-      baseUrl: opts.base,
-      server: process.env.QA_SERVER_LABEL || "next start",
-      commit: process.env.GITHUB_SHA || process.env.QA_COMMIT || "",
-      runUrl: process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : "",
-      viewers: viewers.map((v) => ({ key: v.key, label: v.label, checkPersona: v.checkPersona === true, onboardingClaim: sessions[v.key].claim ?? null })),
-      viewports: viewports.map((v) => v.key),
-      routes: routes.length,
-      visits: visits.length,
-      durationMs: Date.now() - t0,
-      slowMs: opts.slowMs,
-      skippedPublic: derived.skippedPublic,
-      unexpanded: derived.unexpanded,
-      personaNames: PERSONA_NAMES,
-      egress: { serverHosts, browserHosts: browserEgress, browserSamples },
-      rails: Object.fromEntries(Object.entries(rails).map(([k, s]) => [k, [...s].sort()])),
-      notes,
-    },
-    counts,
-    groups: groups.map((g) => ({ ...g, sample: g.sample })),
-    defects: ranked,
-    access,
-    visits: visits.map((v) => ({
-      route: v.route,
-      pattern: v.pattern,
-      viewer: v.viewer,
-      viewport: v.viewport,
-      status: v.status,
-      finalPath: v.finalPath,
-      notFound: v.notFound,
-      mainReadyMs: v.mainReadyMs,
-      navigationError: v.navigationError || null,
-      errorBoundary: v.errorBoundary ? v.errorBoundary.text : null,
-      title: v.title,
-      h1: v.h1,
-    })),
-  };
-  writeFileSync(path.join(opts.out, "qa-crawl.json"), JSON.stringify(report, null, 1));
-  writeFileSync(path.join(opts.out, "qa-crawl.md"), renderMarkdown(report));
+  const { ranked, counts } = writeReport(true);
   console.log(`qa:crawl: ${visits.length} visits, ${ranked.length} defects in ${Math.round((Date.now() - t0) / 1000)}s -> ${opts.out}`);
   for (const [type, n] of Object.entries(counts.byType)) console.log(`  ${type.padEnd(18)} ${n}`);
+
+  function writeReport(final) {
+    const viewerKeys = viewers.map((v) => v.key);
+    const ranked = rankDefects([...defects, ...deadTabDefects(visits, rails)], viewerKeys);
+    const groups = groupDefects(ranked);
+    const counts = countDefects(ranked, viewerKeys);
+
+    // Server-side egress the guard refused (scripts/qa/egress-guard.cjs writes one JSON line each).
+    const serverHosts = {};
+    if (opts.egressLog && existsSync(opts.egressLog)) {
+      for (const line of readFileSync(opts.egressLog, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          serverHosts[e.host] = (serverHosts[e.host] ?? 0) + 1;
+        } catch {
+          // a torn last line while the server was still writing; ignore it
+        }
+      }
+    }
+
+    const desktop = viewports[0].key;
+    const access = routes.map((r) => {
+      const cells = {};
+      for (const v of viewers) {
+        const visit = visits.find((x) => x.route === r.path && x.viewer === v.key && x.viewport === desktop);
+        if (!visit) continue;
+        const mark = rails[v.key].has(r.path) ? "*" : "";
+        cells[v.key] = visit.navigationError
+          ? `ERR${mark}`
+          : visit.finalPath !== r.path
+            ? `${visit.status ?? ""} -> ${visit.finalPath}${mark}`
+            : `${visit.notFound && visit.status === 200 ? "404 (page)" : visit.status}${mark}`;
+      }
+      return { route: r.path, cells };
+    });
+
+    const report = {
+      meta: {
+        partial: !final,
+        contextsDone: `${contextsDone} of ${viewers.length * viewports.length}`,
+        generatedAt: new Date().toISOString(),
+        baseUrl: opts.base,
+        server: process.env.QA_SERVER_LABEL || "next start",
+        commit: process.env.GITHUB_SHA || process.env.QA_COMMIT || "",
+        runUrl: process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : "",
+        viewers: viewers.map((v) => ({ key: v.key, label: v.label, checkPersona: v.checkPersona === true, onboardingClaim: sessions[v.key].claim ?? null })),
+        viewports: viewports.map((v) => v.key),
+        routes: routes.length,
+        visits: visits.length,
+        durationMs: Date.now() - t0,
+        slowMs: opts.slowMs,
+        skippedPublic: derived.skippedPublic,
+        unexpanded: derived.unexpanded,
+        personaNames: PERSONA_NAMES,
+        egress: { serverHosts, browserHosts: browserEgress, browserSamples },
+        rails: Object.fromEntries(Object.entries(rails).map(([k, s]) => [k, [...s].sort()])),
+        notes,
+      },
+      counts,
+      groups,
+      defects: ranked,
+      access,
+      visits: visits.map((v) => ({
+        route: v.route,
+        pattern: v.pattern,
+        viewer: v.viewer,
+        viewport: v.viewport,
+        status: v.status,
+        finalPath: v.finalPath,
+        notFound: v.notFound,
+        mainReadyMs: v.mainReadyMs,
+        navigationError: v.navigationError || null,
+        errorBoundary: v.errorBoundary ? v.errorBoundary.text : null,
+        title: v.title,
+        h1: v.h1,
+      })),
+    };
+    writeFileSync(path.join(opts.out, "qa-crawl.json"), JSON.stringify(report, null, 1));
+    writeFileSync(path.join(opts.out, "qa-crawl.md"), renderMarkdown(report));
+    return { ranked, counts };
+  }
 }
 
 function withTimeout(promise, ms, message) {
@@ -777,7 +788,10 @@ async function visitRoute(ctx, viewer, vp, route, probeOnly) {
     if (probeOnly || rec.navigationError) return rec;
     rec.signedOut = rec.finalPath.startsWith("/login");
     await page.waitForFunction(() => window.__qaMainReadyAt != null, null, { timeout: opts.readyTimeoutMs, polling: 100 }).catch(() => {});
-    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    // Let late requests land before measuring, but never more than 3s: on one
+    // runner the network never went idle and a 5s cap made the crawl 4x slower
+    // (actions run 36948074836) for the same findings.
+    await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(250);
     // A page whose main thread is stuck would hold evaluate() forever; that page is the finding.
     const m = await withTimeout(

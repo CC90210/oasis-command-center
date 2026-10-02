@@ -540,6 +540,7 @@ export function renderMarkdown(report, { maxDefects = Infinity } = {}) {
       (m.generatedAt ? `, ${m.generatedAt}` : "") +
       ".",
   );
+  if (m.partial) lines.push(`**Partial report:** ${m.contextsDone} viewer x viewport passes finished when this was written.`);
   if (m.runUrl) lines.push(`Run: ${m.runUrl}`);
   lines.push(`Server: ${m.server || "next start"} against a local database built from the production schema and seeded with synthetic rows; every outbound call blocked.`);
   lines.push("");
