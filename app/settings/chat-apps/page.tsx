@@ -140,7 +140,10 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </div>
                 ))}
               </div>
-            ) : !slackSettings.appConfigured ? (
+            ) : !conn && !slackSettings.appConfigured ? (
+              // Nothing to install with yet. A workspace that IS connected always
+              // sees its connection, channel map and Disconnect below, whatever
+              // its app's saved state (it may have removed a value since).
               <div className="space-y-1.5">
                 {slackSettings.oasisWorkspace || slackSettings.ownApp === "saved" ? (
                   <p className="text-[13px] leading-5 text-fg-muted">
