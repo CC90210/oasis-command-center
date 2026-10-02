@@ -325,6 +325,8 @@ const EXEMPT_HOSTS: Record<string, string> = {
   "api.transferwise.com": "OASIS's own business bank account (founders' finances); sends no customer data",
   "api.typesafe.ai":
     "Jev (TypeSafe): only the key check runs (list models, no data) while lib/jev/mode.ts JEV_TEXT_PROCESSING_APPROVED is false; flipping it needs TypeSafe on /privacy (asserted below)",
+  "api.slack.com":
+    "a link, not a call: the Slack drawer sends a client to Slack's app dashboard to create its own Slack app (components/os/connections/SlackOwnAppPanel.tsx); OASIS requests nothing there (its Slack Web API calls go to slack.com/api)",
 };
 
 // Jev may classify workspace text only in the same change that lists TypeSafe
