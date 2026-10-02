@@ -24,12 +24,20 @@
  * and an honest loading line are sent once the gate passes, and the numbers
  * stream in behind <Suspense> from PerformanceNumbers, which says so in its own
  * section if the read fails. tests/content-speed.test.ts holds this: no
- * post_analytics read before the frame, one bounded read after it, and no
- * fetch() at all while the page renders.
+ * post_analytics read before the frame, two reads side by side after it (the
+ * window, and each channel's last post), and no fetch() at all while the page
+ * renders.
+ *
+ * EVERY CONNECTED CHANNEL (2026-10-02). The channel card drew one bar per
+ * platform that posted in the window, so TikTok and YouTube, quiet since
+ * 2026-08-21, were not on the page at all, and LinkedIn read "0 views" beside
+ * the impressions it does report. Now every connected channel is listed, a
+ * quiet one says how long ago it last posted, and LinkedIn is measured in
+ * impressions (channelRows in lib/founders-performance-core.ts). On screen the
+ * numbers come from "your posting account"; the vendor's name stays internal.
  */
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
-import Link from "next/link";
 
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
@@ -37,11 +45,17 @@ import { resolveFounder } from "@/lib/founders/gate";
 import { platformLabel, postPermalink } from "@/lib/founders-marketing-core";
 import {
   EMPTY_PERF,
+  channelNote,
+  channelRows,
   engagements,
   retention,
   type PerfRow,
 } from "@/lib/founders-performance-core";
 import { getPerformance } from "@/lib/founders/performance-queries";
+import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
+
+/** The window the page reads, in days. */
+const WINDOW_DAYS = 30;
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Performance · OASIS" };
@@ -64,17 +78,10 @@ export default async function PerformancePage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      {/* No "Back to Content" link: the Content tabs above already lead back. */}
       <PageHeader
         title="Performance"
         subtitle="Last 30 days, per channel, from the numbers stored at the last sync"
-        action={
-          <Link
-            href="/founders/marketing"
-            className="text-xs font-semibold text-accent hover:underline"
-          >
-            Back to Content
-          </Link>
-        }
       />
 
       <Suspense fallback={<PerformanceLoading />}>
@@ -109,8 +116,10 @@ function PerformanceLoading() {
  * the degraded state below rather than an error page over the whole tab.
  */
 async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
-  const perf = await safe("founders.performance", getPerformance(tenantId, 30), { ...EMPTY_PERF, degraded: true });
-  const { totals, byPlatform, rows } = perf;
+  const perf = await safe("founders.performance", getPerformance(tenantId, WINDOW_DAYS), { ...EMPTY_PERF, degraded: true });
+  const { totals, rows } = perf;
+  // Every connected channel, quiet ones included, then any other that posted.
+  const channels = channelRows(perf, PUBLISH_CHANNELS.map((c) => c.id));
 
   const topByViews = [...rows].sort((a, b) => (b.views || 0) - (a.views || 0)).slice(0, 5);
   const withRetention = rows
@@ -126,7 +135,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
           ? "Could not read the metrics — the numbers below are not a zero, they are unknown"
           : totals.posts === 0
             ? "Nothing published in the last 30 days"
-            : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel, with provenance`}
+            : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel`}
       </p>
 
       {/* Posts that have shipped but have no numbers yet. Reported rather than
@@ -139,7 +148,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
             {perf.awaitingMetrics} post{perf.awaitingMetrics === 1 ? "" : "s"} published
             recently{perf.awaitingMetrics === 1 ? " has" : " have"} no numbers yet — they are
             excluded from the totals above rather than counted as zero. Figures are pulled from
-            Zernio on a schedule, not pushed, so they land within the hour.
+            your posting account on a schedule, not pushed, so they land within the hour.
           </p>
         </Card>
       )}
@@ -166,7 +175,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
         <Card>
           <p className="text-sm text-fg-muted">
             No posts in the window yet. Numbers appear here within a few minutes of publishing —
-            they are pulled from Zernio on a schedule, not pushed.
+            they are pulled from your posting account on a schedule, not pushed.
           </p>
         </Card>
       )}
@@ -187,34 +196,58 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
               hint="attributed to a post"
             />
           </div>
+        </>
+      )}
 
-          <Card title="By channel" subtitle="Same asset, six networks, six different answers">
-            <div className="space-y-2">
-              {byPlatform.map((p) => {
-                const share = totals.views ? (p.views / totals.views) * 100 : 0;
-                return (
-                  <div key={p.platform} className="flex items-center gap-3">
+      {/* EVERY connected channel, whether or not it posted in the window: a
+          channel that went quiet is listed with how long ago it last posted,
+          not dropped. Shown even when nothing posted this month, which is when
+          it matters most. Not on a failed read: the card above says so. */}
+      {!perf.degraded && channels.length > 0 && (
+        <Card
+          title="By channel"
+          subtitle="Every connected channel. LinkedIn is counted in impressions, the rest in views."
+        >
+          <div className="space-y-3">
+            {channels.map((c) => {
+              const note = channelNote(c);
+              return (
+                <div key={c.platform} data-channel={c.platform}>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="w-20 shrink-0 text-xs font-medium text-fg-muted">
-                      {platformLabel(p.platform)}
+                      {platformLabel(c.platform)}
                     </span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-bg-deep">
+                    <div className="h-2 min-w-[6rem] flex-1 overflow-hidden rounded-full bg-bg-deep">
                       <div
                         className="h-full rounded-full bg-accent/70"
-                        style={{ width: `${Math.max(share, share > 0 ? 2 : 0)}%` }}
+                        style={{ width: `${Math.max(c.share * 100, c.share > 0 ? 2 : 0)}%` }}
                       />
                     </div>
-                    <span className="w-28 shrink-0 text-right text-xs tabular-nums text-fg-muted">
-                      {nf.format(p.views)} views
-                    </span>
-                    <span className="w-24 shrink-0 text-right text-xs tabular-nums text-fg-dim">
-                      {nf.format(p.engagements)} eng
-                    </span>
+                    {c.measured > 0 ? (
+                      <>
+                        <span className="w-32 shrink-0 text-right text-xs tabular-nums text-fg-muted">
+                          {nf.format(c.reach)} {c.metric}
+                        </span>
+                        <span className="w-24 shrink-0 text-right text-xs tabular-nums text-fg-dim">
+                          {nf.format(c.engagements)} eng
+                        </span>
+                      </>
+                    ) : (
+                      <span className="shrink-0 text-right text-xs text-fg-dim">
+                        {c.posts > 0 ? "Numbers not in yet" : `No posts in the last ${WINDOW_DAYS} days`}
+                      </span>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          </Card>
+                  {note && <p className="mt-1 pl-[5.75rem] text-[11px] text-status-warm">{note}</p>}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
+      {totals.posts > 0 && (
+        <>
           <Card
             title="Held attention longest"
             subtitle="Average watch time over duration — only Reels report it"
@@ -232,7 +265,8 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
                       {i + 1}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm text-fg-muted">
+                      {/* Cut to one line; the title carries the whole caption. */}
+                      <div title={r.content_excerpt || undefined} className="truncate text-sm text-fg-muted">
                         <PostLink r={r}>{r.content_excerpt || "(no caption)"}</PostLink>
                       </div>
                       <div className="mt-0.5 text-[11px] text-fg-dim">
@@ -274,7 +308,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
                             renders as plain text — a dead link on an accounting
                             page is worse than none, because it looks like the
                             accounting works. */}
-                        <td className="max-w-[22rem] truncate py-2 pr-3 text-fg-muted">
+                        <td title={r.content_excerpt || undefined} className="max-w-[22rem] truncate py-2 pr-3 text-fg-muted">
                           <span className="mr-2 text-[10px] uppercase tracking-wider text-fg-dim">
                             {platformLabel(r.platform)}
                           </span>
@@ -299,7 +333,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
 
           {perf.lastSynced && (
             <p className="text-[11px] text-fg-dim">
-              Pulled from Zernio{" "}
+              Last pulled from your posting account{" "}
               <time dateTime={perf.lastSynced}>
                 {perf.lastSynced.replace("T", " ").slice(0, 16)} UTC
               </time>
@@ -328,13 +362,16 @@ function PostLink({
 }) {
   const href = postPermalink(r.platform, r.platform_post_id, r.account_username);
   if (!href) return <>{children}</>;
+  // The link's own title is what shows on hover, so it carries the whole
+  // caption too: the line it sits in is cut to one line.
+  const where = `Open on ${platformLabel(r.platform)}`;
   return (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
       className="underline decoration-fg-dim/40 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent"
-      title={`Open on ${r.platform}`}
+      title={typeof children === "string" ? `${children} (${where})` : where}
     >
       {children}
     </a>

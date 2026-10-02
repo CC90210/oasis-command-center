@@ -81,8 +81,13 @@ export const FOUNDERS_OWN_BRAND = "oasis-ai";
  * either two brands or one phrase; his call on 2026-08-16 was that Adon co-works
  * the Library rather than owning a brand, so he belongs in an author facet and
  * not a tab. See the author note in lib/founders/marketing-queries.ts.
+ *
+ * MUSIC IS NOT A TAB (D16, approved 2026-10-01). Its tab and Overview tile had
+ * been empty since they shipped: no asset has ever carried its slug. Its slug
+ * now sits in Personal - it is CC's own music brand - so the day one is
+ * registered it shows there, and never falls into Clients by accident.
  */
-export type BrandGroupKey = "oasis-ai" | "conaugh" | "music" | "clients";
+export type BrandGroupKey = "oasis-ai" | "conaugh" | "clients";
 
 export type BrandGroup = {
   key: BrandGroupKey;
@@ -110,14 +115,9 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     // because it is a stored value and renaming it would orphan every row.
     key: "conaugh",
     label: "Personal",
-    slugs: ["conaugh"],
-    empty: "Nothing under the personal brand yet — Maven registers here with brand_slug='conaugh'.",
-  },
-  {
-    key: "music",
-    label: "Music",
-    slugs: ["nostalgic-requests"],
-    empty: "Nothing under the music brand yet — Maven registers here with brand_slug='nostalgic-requests'.",
+    slugs: ["conaugh", "nostalgic-requests"],
+    // Plain words: no agent name and no stored value on the screen.
+    empty: "Nothing under the personal brand yet. What the marketing agent makes for CC's own channels lands here.",
   },
   {
     key: "clients",
@@ -326,6 +326,20 @@ export function authorName(email: string | null | undefined): string {
   const e = (email || "").trim().toLowerCase();
   if (!e) return "unknown";
   return FOUNDER_NAMES[e] || e.split("@")[0] || e;
+}
+
+/**
+ * What made an asset, as the role it plays - for the asset page's "Made by".
+ *
+ * `author_agent` holds the agent's internal id ("maven", "maven-codex") or
+ * "human", and the page printed it raw. An agent's internal name never goes on
+ * a screen (build rules), so every agent reads as its role. A person's asset
+ * returns null: "Added by" already names who, and "Made by: human" says less.
+ */
+export function madeByLabel(agent: string | null | undefined): string | null {
+  const a = (agent || "").trim().toLowerCase();
+  if (!a || a === "human") return null;
+  return a.startsWith("maven") ? "Marketing agent" : "An AI agent";
 }
 
 /** Display label for a platform key. Falls back to the key rather than hiding it. */

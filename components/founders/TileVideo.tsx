@@ -27,10 +27,20 @@
  * opened: the player is there from the start (most videos have no poster on
  * file, so a cover would be a black box) and loads its first frame, but nothing
  * plays until the viewer presses play. Library tiles never pass it.
+ *
+ * THE BIG PHONE (components/founders/PhoneEnlarge.tsx). Inside a tile that can
+ * be enlarged, pressing the cover opens the asset in the big phone and plays it
+ * THERE - CC: "when I click on it and make it big screen, it turns into a big
+ * iPhone" - so the tile itself still never mounts a <video>. In the big phone
+ * the player starts the way that press asked: playing from the second the
+ * viewer was at, or as a cover (a player, on the asset page) that waits for
+ * play. Outside both, it behaves exactly as above.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { Play, Volume2, VolumeX } from "lucide-react";
+
+import { enlargeSlotContext } from "@/components/founders/PhoneEnlarge";
 
 export function TileVideo({
   src,
@@ -50,7 +60,13 @@ export function TileVideo({
   /** The asset page only: the player is open from the start and waits for play. */
   initialOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(initialOpen);
+  const slot = useContext(enlargeSlotContext());
+  // In the big phone: whether the press that opened it was a play press (or a
+  // video was already playing in place), and the second to carry on from.
+  const start = slot?.place === "big" ? slot.start : null;
+  const autoplay = start?.play === true;
+  const startAt = start?.at ?? 0;
+  const [open, setOpen] = useState(initialOpen || autoplay);
   const [paused, setPaused] = useState(true);
   const [muted, setMuted] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -59,9 +75,13 @@ export function TileVideo({
 
   useEffect(() => {
     const v = ref.current;
-    // Plays only when the viewer opened it from the cover. A player that starts
-    // open (the asset page) waits for its play button: nothing autoplays.
-    if (!open || initialOpen || !v) return;
+    if (!open || !v) return;
+    // Where the viewer was when they enlarged it.
+    if (startAt > 0) v.currentTime = startAt;
+    // Plays only when the viewer opened it from the cover, or opened the big
+    // phone by pressing play. A player that starts open (the asset page) waits
+    // for its play button: nothing autoplays.
+    if (initialOpen && !autoplay) return;
     // Sound on first, since the viewer just asked for it. A browser that refuses
     // unmuted playback (Safari outside the click's own task) gets muted
     // playback instead; if even that is refused, the play button stays on
@@ -70,7 +90,7 @@ export function TileVideo({
       v.muted = true;
       v.play().catch(() => setPaused(true));
     });
-  }, [open, initialOpen]);
+  }, [open, initialOpen, autoplay, startAt]);
 
   const togglePlay = () => {
     const v = ref.current;
@@ -141,11 +161,18 @@ export function TileVideo({
     );
   }
 
+  // In a tile that can be enlarged, the cover opens the big phone and plays it
+  // there; nothing mounts here.
+  const enlargesOnPlay = slot?.place === "tile";
   return (
     <button
       type="button"
-      onClick={() => setOpen(true)}
+      onClick={(e) => {
+        if (slot?.place === "tile") slot.enlarge({ play: true, at: 0 }, e.currentTarget);
+        else setOpen(true);
+      }}
       aria-label={`Play ${title}`}
+      aria-haspopup={enlargesOnPlay ? "dialog" : undefined}
       className="group/play relative flex h-full w-full items-center justify-center bg-black"
     >
       {posterUrl ? (

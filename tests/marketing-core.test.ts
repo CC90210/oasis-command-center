@@ -321,20 +321,26 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     "?group=oasis-ai&brand=warner must NOT put a client's ad on the OASIS tab");
   assert.equal(brandFilterAllowed("oasis-ai", "clients"), false,
     "and the reverse must not pull our own work onto the Clients tab");
-  assert.equal(brandFilterAllowed("conaugh", "music"), false);
+  assert.equal(brandFilterAllowed("conaugh", "clients"), false);
 
   // TAB LABELS NAME A ROLE, NOT A PERSON. CC: "we should just do like personal
   // ... so it should be Oasis AI personal music and then clients." A tab named
   // after a human sits oddly beside a company and a genre; naming the role puts
-  // all four on one axis. The SLUG stays `conaugh` — it is a stored value and
+  // them on one axis. The SLUG stays `conaugh` — it is a stored value and
   // renaming it would orphan every row that carries it.
   assert.equal(brandGroup("conaugh").label, "Personal");
-  assert.deepEqual(brandGroup("conaugh").slugs, ["conaugh"],
+  assert.equal(brandGroup("conaugh").slugs?.[0], "conaugh",
     "the label may be renamed freely; the slug is data and must not move");
+  // MUSIC IS NOT A TAB (D16, approved 2026-10-01): its tab was empty from the
+  // day it shipped. Its slug files under Personal (CC's own music brand), so a
+  // music asset registered tomorrow is never misfiled under Clients.
+  assert.deepEqual(brandGroup("conaugh").slugs, ["conaugh", "nostalgic-requests"]);
+  assert.equal(brandGroupFor("nostalgic-requests"), "conaugh");
+  assert.ok(!isBrandGroupKey("music"), "no Music tab to land on");
   assert.deepEqual(
     BRAND_GROUPS.map((g) => g.label),
-    ["OASIS AI", "Personal", "Music", "Clients"],
-    "the four tabs CC asked for, in order",
+    ["OASIS AI", "Personal", "Clients"],
+    "the tabs, in order: OASIS's own, CC's personal brands, then clients",
   );
 
   // ── provenance reads as a person ──────────────────────────────────────────

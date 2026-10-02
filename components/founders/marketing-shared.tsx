@@ -11,7 +11,8 @@ import Link from "next/link";
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
-import { PhoneFrame, PhoneTextCard } from "@/components/founders/PhoneFrame";
+import { EnlargeButton, PhoneEnlarge } from "@/components/founders/PhoneEnlarge";
+import { PhoneFrame, PhoneTextCard, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
 import { TileVideo } from "@/components/founders/TileVideo";
 import {
   assetHref,
@@ -252,6 +253,10 @@ function TileMedia({
  * `presentation="phone"` (the Library's default) draws the asset inside a
  * PhoneFrame the way it lands on Instagram or TikTok; `"grid"` is the plain
  * card. Both use the same media switch and the same verdict controls.
+ *
+ * Both open the asset in the big phone (PhoneEnlarge): tapping a video plays it
+ * there, and Enlarge opens any asset there without playing it. The big phone
+ * always draws the phone's media, so in the grid view it is handed its own.
  */
 export function AssetTile({
   id,
@@ -303,20 +308,19 @@ export function AssetTile({
   const slides = slideUrls ?? [];
   const phone = presentation === "phone";
   const hasVisual = isRenderableCarousel(assetType, slides) || Boolean(posterUrl) || Boolean(playbackUrl && format === "video");
-  const media = (
-    <TileMedia
-      format={format}
-      assetType={assetType}
-      slides={slides}
-      playbackUrl={playbackUrl}
-      posterUrl={posterUrl}
-      mediaW={mediaW}
-      mediaH={mediaH}
-      title={title}
-      hook={hook}
-      phone={phone}
-    />
-  );
+  const mediaProps = { format, assetType, slides, playbackUrl, posterUrl, mediaW, mediaH, title, hook };
+  const media = <TileMedia {...mediaProps} phone={phone} />;
+  // The big phone draws the phone's media: the tile's own in the phone view,
+  // its phone twin in the plain grid.
+  const bigMedia = phone ? media : <TileMedia {...mediaProps} phone />;
+  const frameShape: PhoneFrameShape = {
+    mediaW,
+    mediaH,
+    aspect,
+    handle: brandName,
+    caption: hasVisual ? hook : null,
+    chrome: phoneChromeFor(null, channel),
+  };
 
   const details = (
     <div className={phone ? "flex flex-col gap-1.5 pt-3" : "flex flex-col gap-2 p-4"}>
@@ -334,14 +338,20 @@ export function AssetTile({
           404 — the link was removed to stop it lying. The page imports
           mediaFrame() from this file rather than restating it, which was the
           condition attached to restoring this. */}
+      {/* Clamped to two lines; the title attribute carries the whole of it. */}
       <Link
         href={assetHref(id, returnTo)}
+        title={title}
         className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
       >
         {title}
       </Link>
       {/* On the phone the hook is already the caption on screen. */}
-      {hook && !phone && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
+      {hook && !phone && (
+        <p title={hook} className="text-xs text-fg-muted line-clamp-2 italic">
+          {hook}
+        </p>
+      )}
       <div className="mt-auto flex items-center justify-between gap-2 pt-1">
         <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
           {/* The real distribution when we have it, the primary channel when we
@@ -353,10 +363,13 @@ export function AssetTile({
         </span>
         <StatusTag status={status} publishedAt={publishedAt} />
       </div>
-      {phone && (aspect || duration) && (
-        <span className="text-[10px] tabular-nums text-fg-dim">
-          {[aspect, duration].filter(Boolean).join(" · ")}
-        </span>
+      {phone && (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] tabular-nums text-fg-dim">
+            {[aspect, duration].filter(Boolean).join(" · ")}
+          </span>
+          <EnlargeButton title={title} />
+        </div>
       )}
       {/* The verdict lives on the tile. Sending the operator somewhere else to approve
           something they are already looking at is how 39 assets ended up sitting in
@@ -368,19 +381,12 @@ export function AssetTile({
   if (phone) {
     return (
       <article className="group flex flex-col rounded-xl border border-bg-border bg-bg-panel p-3 shadow-card transition-all hover:border-accent/40">
-        <PhoneFrame
-          mediaW={mediaW}
-          mediaH={mediaH}
-          aspect={aspect}
-          handle={brandName}
-          caption={hasVisual ? hook : null}
-          chrome={phoneChromeFor(null, channel)}
-          label={title}
-          className="mx-auto max-w-[320px]"
-        >
-          {media}
-        </PhoneFrame>
-        {details}
+        <PhoneEnlarge title={title} frame={frameShape} media={bigMedia} className="flex flex-1 flex-col">
+          <PhoneFrame {...frameShape} label={title} className="mx-auto max-w-[320px]">
+            {media}
+          </PhoneFrame>
+          {details}
+        </PhoneEnlarge>
       </article>
     );
   }
@@ -388,29 +394,32 @@ export function AssetTile({
   const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   return (
     <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-raised group">
-      <div
-        className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
-        style={frameStyle}
-      >
-        {media}
-        {aspect && (
-          <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tracking-wider text-fg-muted">
-            {aspect}
-          </span>
-        )}
-        {duration && (
-          <span className="pointer-events-none absolute bottom-2 right-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tabular-nums text-fg-muted">
-            {duration}
-          </span>
-        )}
-        {openReviews > 0 && (
-          <span
-            className="absolute right-2 top-2 h-2 w-2 rounded-full bg-accent shadow-glow"
-            aria-label={`${openReviews} unread review${openReviews === 1 ? "" : "s"}`}
-          />
-        )}
-      </div>
-      {details}
+      <PhoneEnlarge title={title} frame={frameShape} media={bigMedia}>
+        <div
+          className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
+          style={frameStyle}
+        >
+          {media}
+          {aspect && (
+            <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tracking-wider text-fg-muted">
+              {aspect}
+            </span>
+          )}
+          {duration && (
+            <span className="pointer-events-none absolute bottom-2 right-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tabular-nums text-fg-muted">
+              {duration}
+            </span>
+          )}
+          {openReviews > 0 && (
+            <span
+              className="absolute right-2 top-2 h-2 w-2 rounded-full bg-accent shadow-glow"
+              aria-label={`${openReviews} unread review${openReviews === 1 ? "" : "s"}`}
+            />
+          )}
+          <EnlargeButton title={title} corner />
+        </div>
+        {details}
+      </PhoneEnlarge>
     </article>
   );
 }
