@@ -46,6 +46,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readServerTree, requestedChunks } from "./check-worker-chunks";
 
 /** What a chunk or module that cannot be loaded looks like, in a body or the log. */
 export const CHUNK_FAILURE =
@@ -385,9 +386,19 @@ async function main(): Promise<number> {
         const probe: Probe = { name: "POST /api/bridge/exec-tool, chunk removed", method: "POST", path: "/api/bridge/exec-tool", signedIn: true, json: { tool_name: "Read", input: {} } };
         const out = await runGroup({ name: `self-test without chunk ${ids.join(", ")}`, probes: [probe] }, all.length, secret, found);
         console.log(out.lines.join("\n"));
-        const caught = out.problems.some((p) => /Unknown chunk/.test(p));
+        const caught = out.problems.find((p) => /Unknown chunk/.test(p));
         if (caught) {
-          console.log(`  self-test: the gate reported the request that needed chunk ${ids.join(", ")} ("Unknown chunk"), as it must`);
+          // How the probed route reaches that chunk: at startup, or only
+          // through a dynamic import (the path a warm isolate can hide).
+          const tree = readServerTree(SERVER_DIR);
+          const entry = tree.sources.find((s) => s.file === "app/api/bridge/exec-tool/route.js");
+          const atStartup = entry ? requestedChunks(entry.source).startup.some((id) => ids.includes(id)) : undefined;
+          const asyncSites = tree.sources.reduce((n, s) => n + requestedChunks(s.source).async.filter((id) => ids.includes(id)).length, 0);
+          console.log(`  self-test: caught, as it must: ${caught}`);
+          console.log(
+            `  self-test: chunk ${ids.join(", ")} is ${atStartup === false ? "NOT" : atStartup ? "" : "(unknown whether)"} in the probed route's startup list; ` +
+              `${asyncSites} dynamic import site(s) load it`,
+          );
         } else {
           problems.push(`self-test: with chunk ${ids.join(", ")} removed the gate reported nothing it could tie to it (${out.problems.join("; ") || "no problems"}); it cannot see a missing chunk`);
           console.log(`--- log of the self-test after Ready ---\n${afterReady(out.log).split("\n").slice(0, 120).join("\n")}`);
