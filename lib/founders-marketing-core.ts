@@ -1028,20 +1028,6 @@ export function libraryReturnPath(raw: unknown): string {
 }
 
 /**
- * The Library's "All" number: every asset the All grid shows.
- *
- * The tab's COUNT covers every status, so a scheduled asset that sits in none
- * of the four lifecycle pills still counts. The All grid hides archived and
- * rejected assets (the Archived pill), so they come off; otherwise the pill
- * read 103 over a grid of 100. Either count unread: no number at all, never a
- * guess.
- */
-export function libraryAllCount(tabCount: number | null, archivedCount: number | null): number | null {
-  if (tabCount === null || archivedCount === null) return null;
-  return Math.max(0, tabCount - archivedCount);
-}
-
-/**
  * A tile's link to its asset page, carrying the Library view it sits in so the
  * asset page can link straight back to it. The front page needs no `from`.
  */

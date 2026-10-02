@@ -73,7 +73,6 @@ import {
   isBrandGroupKey,
   authorName,
   isLifecycle,
-  libraryAllCount,
   libraryHref,
   libraryPageCount,
   libraryPagerItems,
@@ -170,13 +169,12 @@ export default async function MarketingLibraryPage({
       degraded: true,
     }),
   ]);
-  // Every asset the All grid shows (libraryAllCount): the tab's own COUNT, so a
-  // scheduled asset that sits in none of the four pills still counts, less the
-  // Archived pill, which the All grid hides. Null when either count is unread.
-  const lifecycleTotal = libraryAllCount(
-    tabCounts.degraded ? null : tabCounts.counts[group],
-    lc.degraded ? null : lc.counts.archived,
-  );
+  // "All N" is the tab's own number (getBrandTabCounts counts what each tab's
+  // grid shows: archived and rejected sit behind the Archived pill), so the tab,
+  // the All pill and the grid read the same number. Not the sum of the four
+  // pills: a scheduled asset sits in none of them and would drop out. Null when
+  // the count is unread.
+  const lifecycleTotal = tabCounts.degraded ? null : tabCounts.counts[group];
   const assetsOrNull = pageOrNull ? pageOrNull.tiles : null;
   const libraryDegraded = assetsOrNull === null;
   const signed = assetsOrNull ?? [];
@@ -186,7 +184,7 @@ export default async function MarketingLibraryPage({
   const firstShown = signed.length ? (currentPage - 1) * (pageOrNull?.pageSize ?? 0) + 1 : 0;
   const lastShown = firstShown ? firstShown + signed.length - 1 : 0;
 
-  // Tab counts: one COUNT per tab, every status, across every brand.
+  // Tab counts: one COUNT per tab of what its grid shows, across every brand.
   // A tab with no rows still renders — it is navigation, not a measurement, and
   // an absent tab is how CC ends up not knowing a brand exists. What it must NOT
   // do is print a confident 0 when the count simply failed to load.

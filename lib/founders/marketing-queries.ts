@@ -93,13 +93,25 @@ type LifecycleFilterable = {
   not: (column: string, op: string, value: unknown) => LifecycleFilterable;
 };
 
+/** The statuses the working grid hides; the Archived pill is where they live. */
+const ARCHIVED_STATUSES = ["archived", "rejected"];
+
+/**
+ * The working grid's rule: archived and rejected assets are hidden. ONE
+ * definition, used by the All grid, the Live bucket and the tab counts, so a
+ * tab's number is always what clicking it shows.
+ */
+function hideArchived<T>(q: T): T {
+  return (q as unknown as LifecycleFilterable).not("status", "in", `(${ARCHIVED_STATUSES.join(",")})`) as unknown as T;
+}
+
 function scopeToLifecycle<T>(q: T, lifecycle: Lifecycle): T {
   const f = q as unknown as LifecycleFilterable;
   switch (lifecycle) {
     case "archived":
-      return f.in("status", ["archived", "rejected"]) as unknown as T;
+      return f.in("status", ARCHIVED_STATUSES) as unknown as T;
     case "live":
-      return f.not("status", "in", "(archived,rejected)").not("published_at", "is", null) as unknown as T;
+      return hideArchived(f).not("published_at", "is", null) as unknown as T;
     case "approved":
       return f.eq("status", "approved").is("published_at", null) as unknown as T;
     case "needs_review":
@@ -603,7 +615,7 @@ export async function getMarketingAssets(
         // stay reachable, which is what the Archived pill is for. Skipped when an
         // explicit ?status= is set so Studio's pipeline tiles still deep-link to
         // any single stage.
-        q = q.not("status", "in", "(archived,rejected)");
+        q = hideArchived(q);
       }
 
       // The brand boundary. The tab is ALWAYS applied — there is no code path
@@ -1067,11 +1079,14 @@ export async function getLifecycleCounts(
 }
 
 /**
- * How many assets each brand TAB holds, one COUNT per tab, every status.
+ * How many assets each brand TAB shows when you click it: one COUNT per tab of
+ * its default (All) grid, so archived and rejected assets are left out
+ * (hideArchived; the Archived pill holds them). It used to count every status,
+ * so the OASIS tab read 103 above an "All 100" grid.
  *
  * DELIBERATELY SPANS EVERY TAB, like getMarketingFacets: "Clients 4" has to read
  * before you click it. COUNTS ONLY, through scopeToBrandGroup, so the numbers
- * are exactly the rows each tab's grid can reach.
+ * are exactly the rows each tab's grid shows.
  */
 export async function getBrandTabCounts(
   tenantId: string,
@@ -1083,10 +1098,12 @@ export async function getBrandTabCounts(
   try {
     const r = await headCounts("brand_tabs", keys, (group) =>
       scopeToBrandGroup(
-        db
-          .from("marketing_asset")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+        hideArchived(
+          db
+            .from("marketing_asset")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId),
+        ) as unknown as BrandFilterable,
         group,
       ) as unknown as HeadCount,
     );

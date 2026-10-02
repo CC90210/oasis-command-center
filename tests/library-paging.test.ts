@@ -51,7 +51,6 @@ import {
   STATUSES,
   assetHref,
   libraryHref,
-  libraryAllCount,
   libraryReturnPath,
   libraryPageCount,
   libraryPagerItems,
@@ -344,13 +343,21 @@ async function main() {
     assert.equal(copy!.posterUrl, null, "no media, nothing signed - the tile draws its copy instead");
   });
 
-  await check("tab counts are COUNT queries over every status, one per tab (the SQL that ran)", async () => {
+  await check("tab counts are COUNT queries, one per tab, of exactly what each tab's grid shows (the SQL that ran)", async () => {
     const rec = recorded(raw);
     const tabs = await getBrandTabCounts(T, rec.db);
     assert.equal(tabs.degraded, false);
-    assert.deepEqual(tabs.counts, { "oasis-ai": 103, conaugh: 1, music: 0, clients: 4 });
     assert.equal(rec.statements.length, BRAND_GROUPS.length, `one statement per tab, ran:\n${rec.statements.join("\n")}`);
     for (const sql of rec.statements) assert.match(sql, COUNT_SQL, `a row read where a COUNT belongs: ${sql}`);
+    // A tab's number is what clicking it shows: its default (All) grid.
+    for (const g of BRAND_GROUPS) {
+      const grid = await getMarketingAssets(T, { group: g.key }, db);
+      assert.equal(tabs.counts[g.key], grid.total, `tab ${g.key} reads ${tabs.counts[g.key]} over a grid of ${grid.total}`);
+    }
+    const oasisRows = rows.filter((r) => (r.tenant ?? T) === T && (r.brand ?? "oasis-ai") === "oasis-ai");
+    const working = oasisRows.filter((r) => !["archived", "rejected"].includes(r.status ?? "in_review")).length;
+    assert.ok(working < oasisRows.length, "the OASIS seed holds archived or rejected rows");
+    assert.equal(tabs.counts["oasis-ai"], working, "archived and rejected assets are not in the tab's number");
   });
 
   await check("lifecycle pills are COUNT queries and agree with the grid and with the buckets", async () => {
@@ -385,22 +392,24 @@ async function main() {
     for (const id of scheduled) assert.ok(inAll.has(id), `${id} is in the All view`);
     const stage = await getMarketingAssets(T, { status: "scheduled", pageSize: 200 }, db);
     for (const id of scheduled) assert.ok(stage.assets.some((a) => a.id === id), `${id} is on the Scheduled stage`);
-    // "All N" is every asset in the tab - the tab's own COUNT - not the sum of
-    // the four pills, which leaves the scheduled assets out.
+    // "All N" is the tab's own COUNT: every asset its grid shows, the scheduled
+    // ones included (they sit in none of the four pills, so summing the pills
+    // would drop them) and the archived and rejected ones left out (the All grid
+    // hides them behind the Archived pill; counting them made the OASIS tab read
+    // 103 over a grid of 100, CodeRabbit on #523).
     const lc = await getLifecycleCounts(T, "oasis-ai", db);
     const tabs = await getBrandTabCounts(T, db);
     const pills = LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
-    assert.equal(tabs.counts["oasis-ai"], pills + scheduled.length, "the tab holds the bucketed assets and the scheduled ones");
-    // ...and "All N" is exactly what the All grid shows (CodeRabbit, #523): the
-    // tab's COUNT holds archived and rejected assets, which the All grid hides.
-    const archivedTruth = oasisRows.filter((r) => r.status === "archived" || r.status === "rejected").length;
-    assert.ok(archivedTruth > 0, `the seed holds archived or rejected assets (${archivedTruth}), so the subtraction is exercised`);
+    assert.ok(lc.counts.archived > 0, `the seed holds archived or rejected assets (${lc.counts.archived}), so leaving them out is exercised`);
+    assert.equal(tabs.counts["oasis-ai"], pills - lc.counts.archived + scheduled.length, "the tab holds the working buckets and the scheduled ones, not the archived");
     const allGrid = await getMarketingAssets(T, {}, db);
-    assert.equal(libraryAllCount(tabs.counts["oasis-ai"], lc.counts.archived), allGrid.total, "the All pill equals the All grid");
-    assert.equal(libraryAllCount(null, lc.counts.archived), null, "an unread tab count is no number, not 0");
-    assert.equal(libraryAllCount(tabs.counts["oasis-ai"], null), null, "an unread Archived count is no number, not the tab's total");
+    assert.equal(tabs.counts["oasis-ai"], allGrid.total, "the tab, its All pill and its grid read one number");
     const library = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
-    assert.match(library, /const lifecycleTotal = libraryAllCount\(/, "the page's All pill comes from libraryAllCount");
+    assert.match(
+      library,
+      /const lifecycleTotal = tabCounts\.degraded \? null : tabCounts\.counts\[group\];/,
+      "the All pill reads the tab's COUNT, and no number when it is unread",
+    );
     assert.match(library, /All \$\{lifecycleTotal === null \? "[^"]+" : lifecycleTotal\}/, "an unknown All reads like an unknown pill");
   });
 
