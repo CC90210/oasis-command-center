@@ -5,8 +5,16 @@
  *  1. A durable `agent_alerts` row — rendered in the dashboard System Health
  *     panel and resolvable via POST /api/agent-alerts/[id]/resolve. This is the
  *     record the operator sees and dismisses.
- *  2. For warn/urgent, a Telegram push (via lib/notify/telegram) so a live
- *     failure pages someone instead of waiting to be noticed.
+ *  2. For warn/urgent, a Telegram push so a live failure pages someone instead
+ *     of waiting to be noticed. WHOSE Telegram depends on whose alert it is:
+ *     an OASIS workspace's alert goes on the lane its caller names
+ *     (lib/notify/telegram); any other workspace's alert goes only to the bot
+ *     that workspace saved (lib/notify/workspace-telegram), and the lane is
+ *     ignored. Every lane is an OASIS credential, so before 2026-10-02 a
+ *     client's alerts (its customers' texts, escalated by the SMS reply agent)
+ *     reached CC's phone and the client heard nothing. What the push did
+ *     ("sent", "not connected", "failed: ...") is recorded on the row's
+ *     payload as `telegram`.
  *
  * The `agent_alerts` schema is owned by the VPS SunBiz-Agent repo (migration
  * 069/health-check convention): columns tenant_id, alert_type, severity
@@ -24,9 +32,26 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
+import { escapeTelegramHtml, sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
+import { sendWorkspaceTelegram, workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 
 export type AlertSeverity = "info" | "warn" | "urgent";
+
+/** The outcome an earlier push recorded on an open card, carried across a refresh. */
+function recordedPush(payload: unknown): string | null {
+  let value = payload;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const push = (value as Record<string, unknown>).telegram;
+  return typeof push === "string" ? push : null;
+}
 
 export async function writeAgentAlert(input: {
   tenantId: string;
@@ -35,14 +60,16 @@ export async function writeAgentAlert(input: {
   title: string;
   body?: string;
   /**
-   * Who gets paged. Required, and deliberately not defaulted.
+   * Who gets paged for an OASIS workspace's alert. Required, and deliberately
+   * not defaulted.
    *
-   * This app is multi-tenant and its alerts have two different audiences: CC for
-   * OASIS matters, Adon/APEX for SunBiz operations. A default here would decide
-   * that on the author's behalf and be silently wrong for half the callers —
-   * which is exactly how SunBiz scraper alerts ended up in CC's DM on
-   * 2026-08-02. The dashboard row is tenant-scoped already; this makes the push
-   * scoped too.
+   * OASIS's alerts have two audiences: CC for OASIS matters, Adon/APEX for
+   * SunBiz operations. A default here would decide that on the author's behalf
+   * and be silently wrong for half the callers — which is exactly how SunBiz
+   * scraper alerts ended up in CC's DM on 2026-08-02.
+   *
+   * Ignored for any other workspace: its alert goes to its own saved bot or
+   * nowhere outside the app, never to a lane (see the header).
    */
   lane: TelegramLane;
   subjectType?: string;
@@ -56,23 +83,36 @@ export async function writeAgentAlert(input: {
    *  notification storm (codex review 2026-07-23). Default false = legacy
    *  behavior (page on every call). */
   telegramOncePerOpen?: boolean;
-}): Promise<void> {
+}): Promise<{ telegram: string | null }> {
   const nowIso = new Date().toISOString();
+  // OASIS's own workspaces, by id (the same rule that lets them, and only
+  // them, use OASIS's env credentials). Everyone else is a client.
+  const oasisWorkspace = tenantMayUseEnvFallback(input.tenantId);
+  // agent_alerts.payload is NOT NULL DEFAULT '{}': an explicit null failed the
+  // insert of every alert written without a payload, and the result was never
+  // read, so those alerts had no card at all.
+  const payload: Record<string, unknown> = input.payload ?? {};
   let refreshedExisting = false;
+  let rowId: string | null = null;
+  let db: ReturnType<typeof getServiceSupabase> | null = null;
   try {
-    const db = getServiceSupabase();
+    db = getServiceSupabase();
 
     // De-dup against an existing OPEN row for the same signal + subject.
     let q = db
       .from("agent_alerts")
-      .select("id")
+      .select("id, payload")
       .eq("tenant_id", input.tenantId)
       .eq("alert_type", input.alertType)
       .is("resolved_at", null)
       .limit(1);
     q = input.subjectId ? q.eq("subject_id", input.subjectId) : q.is("subject_id", null);
     const existing = await q.maybeSingle();
-    const existingId = (existing.data as { id: string } | null)?.id;
+    const open = existing.data as { id: string; payload?: unknown } | null;
+    const existingId = open?.id;
+    // A refresh rewrites the payload; keep what the last push did until a new
+    // push replaces it.
+    const earlierPush = open ? recordedPush(open.payload) : null;
 
     const row: Record<string, unknown> = {
       tenant_id: input.tenantId,
@@ -82,7 +122,7 @@ export async function writeAgentAlert(input: {
       body: input.body ?? null,
       subject_type: input.subjectType ?? null,
       subject_id: input.subjectId ?? null,
-      payload: input.payload ?? null,
+      payload: earlierPush ? { ...payload, telegram: earlierPush } : payload,
     };
 
     if (existingId) {
@@ -93,9 +133,20 @@ export async function writeAgentAlert(input: {
         .from("agent_alerts")
         .update({ ...row, created_at: nowIso })
         .eq("id", existingId);
-      if (!upd.error) refreshedExisting = true;
+      if (!upd.error) {
+        refreshedExisting = true;
+        rowId = existingId;
+      } else {
+        console.error("[agent-alert] refresh failed:", upd.error.message);
+      }
     } else {
-      await db.from("agent_alerts").insert({ ...row, created_at: nowIso });
+      const ins = await db
+        .from("agent_alerts")
+        .insert({ ...row, created_at: nowIso })
+        .select("id")
+        .maybeSingle();
+      if (ins.error) console.error("[agent-alert] insert failed:", ins.error.message);
+      else rowId = (ins.data as { id?: string } | null)?.id ?? null;
     }
   } catch (err) {
     // Write failed → we can't know if a card was open; err toward LOUD
@@ -106,9 +157,35 @@ export async function writeAgentAlert(input: {
   const wantTelegram =
     (input.telegram ?? input.severity !== "info") &&
     !(input.telegramOncePerOpen && refreshedExisting);
-  if (wantTelegram) {
-    const tag = input.severity === "urgent" ? "🚨" : "⚠️";
-    const text = `${tag} ${input.title}${input.body ? `\n${input.body}` : ""}`;
-    await sendTelegram(text, { lane: input.lane }).catch(() => {});
+  if (!wantTelegram) return { telegram: null };
+
+  const tag = input.severity === "urgent" ? "🚨" : "⚠️";
+  // Telegram HTML mode: a title or body holding "&" or "<" (a sequence or
+  // business name) would otherwise be refused as unparseable.
+  const text =
+    `${tag} ${escapeTelegramHtml(input.title)}` + (input.body ? `\n${escapeTelegramHtml(input.body)}` : "");
+  let telegram: string;
+  if (oasisWorkspace) {
+    const sent = await sendTelegram(text, { lane: input.lane }).catch((err: unknown) => ({
+      ok: false,
+      reason: err instanceof Error ? err.message : "telegram_error",
+    }));
+    telegram = sent.ok ? "sent" : `failed: ${sent.reason || "telegram_error"}`;
+  } else {
+    telegram = workspaceTelegramOutcome(await sendWorkspaceTelegram(input.tenantId, text));
   }
+
+  if (db && rowId) {
+    try {
+      const recorded = await db
+        .from("agent_alerts")
+        .update({ payload: { ...payload, telegram } })
+        .eq("tenant_id", input.tenantId)
+        .eq("id", rowId);
+      if (recorded.error) console.error("[agent-alert] push outcome not recorded:", recorded.error.message);
+    } catch (err) {
+      console.error("[agent-alert] push outcome not recorded:", err instanceof Error ? err.message : err);
+    }
+  }
+  return { telegram };
 }
