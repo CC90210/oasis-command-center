@@ -277,6 +277,10 @@ async function main() {
     assert.match(BOOK_MEET_COPY.do_not_call, /owner asked/i);
   }
 
+  // An organiser mismatch can follow a created Google event that is then
+  // cancelled: the copy must not let a rep tell the client nothing was sent.
+  assert.match(BOOK_MEET_COPY.calendar_organizer_mismatch, /cancelled automatically within 15 minutes/);
+
   console.log("book-meet-flow: OK");
 }
 main().catch((error) => { console.error(error); process.exit(1); });
