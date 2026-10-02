@@ -125,6 +125,8 @@ export async function POST(req: NextRequest) {
       provider,
       model,
       apiKey,
+      // A local model answers for the verified operator only (lib/chat-auth.ts).
+      allowLocalModel: ctxResult.isOperator,
       system: COMPACT_SYSTEM,
       messages: compactionMessages,
       maxTokens: 1024,

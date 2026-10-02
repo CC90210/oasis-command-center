@@ -20,6 +20,7 @@ import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { LOCAL_MODEL_PROVIDER, LOCAL_MODEL_REFUSAL, mayUseLocalModel } from "@/lib/ai/workspace-account";
 import { redactAll } from "@/lib/secret-redaction";
 import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
@@ -147,6 +148,13 @@ export async function POST(
       agentKey: "bravo",
     });
   }
+  // A saved local model server answers for the verified operator only: its
+  // "key" is a web address this server would call (lib/ai/workspace-account.ts).
+  const localModelAllowed =
+    cfg?.encrypted_api_key && cfg.provider === LOCAL_MODEL_PROVIDER ? await mayUseLocalModel(sess.userId, sess.email) : false;
+  if (cfg?.encrypted_api_key && cfg.provider === LOCAL_MODEL_PROVIDER && !localModelAllowed) {
+    return NextResponse.json({ ok: false, error: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL }, { status: 403 });
+  }
   let provider: Provider;
   let model: string;
   let apiKey = "";
@@ -198,6 +206,7 @@ export async function POST(
       model,
       apiKey: isOllama ? "" : apiKey,
       baseUrl: isOllama ? apiKey : undefined,
+      allowLocalModel: localModelAllowed,
       system: SYSTEM_PROMPT,
       messages,
       maxTokens: 1500,

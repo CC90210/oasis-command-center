@@ -8,8 +8,10 @@
  *   - at the month's cap the answer is an HTTP 402 BEFORE any stream opens or
  *     any provider is asked, and its `error` is the plain sentence the widget
  *     shows (components/ChatWidget.tsx renders `error`, not `message`);
- *   - a local model (Ollama) in that same capped workspace still runs: it costs
- *     nothing per call, so no cap applies to it;
+ *   - a local model (Ollama) still runs at the month's cap: it costs nothing per
+ *     call, so no cap applies to it. It runs for the verified platform operator
+ *     only (its "key" is an address the server calls): a client teammate's
+ *     saved local model is refused before anything is asked (PR #535);
  *   - a budget table that exists but cannot be read answers 503 in the same
  *     shape, never a stream that runs uncapped;
  *   - chat_sessions keeps a turn's tokens and cost TOGETHER: a turn whose cost is
@@ -97,6 +99,9 @@ const USERS = {
   cappedLocal: u(12, "local@capped.test"), // a teammate there whose own override is a local Ollama server
   openOwner: u(13, "owner@open.test"),
   oasisOwner: u(14, "owner@oasis.test"),
+  // The verified platform operator (the built-in operator alias, an owner in
+  // OASIS by auth id): the only person a saved local model may answer for.
+  operator: u(15, "conaugh@oasisai.work"),
 } as const;
 const SENTENCE = "This month's AI budget is used. The owner can raise it.";
 const UNAVAILABLE = "We could not check this workspace's AI budget just now. Try again in a moment.";
@@ -270,9 +275,12 @@ async function main() {
       profile("p-capped-local", USERS.cappedLocal, CAPPED, "owner", 0),
       profile("p-open-owner", USERS.openOwner, OPEN, "owner", 1),
       profile("p-oasis-owner", USERS.oasisOwner, OASIS, "owner", 1),
+      profile("p-operator", USERS.operator, OASIS, "owner", 1),
       config("c-capped", CAPPED, null, "anthropic", "claude-sonnet-4-6", "sk-ant-capped-0001"),
-      // Ollama: the "key" is the local server's URL.
+      // Ollama: the "key" is the local server's URL. A client teammate's (refused)
+      // and the operator's own (answers).
       config("c-capped-local", CAPPED, USERS.cappedLocal.id, "ollama", "llama3.3", "http://127.0.0.1:11434/v1"),
+      config("c-operator-local", OASIS, USERS.operator.id, "ollama", "llama3.3", "http://127.0.0.1:11434/v1"),
       config("c-open", OPEN, null, "anthropic", "claude-sonnet-4-6", "sk-ant-open-0001"),
       config("c-oasis", OASIS, null, "anthropic", "claude-sonnet-4-6", "sk-ant-oasis-0001"),
       // OASIS's paired machine is online, so its chat is offered the bridge tools (send_email among them).
@@ -343,26 +351,57 @@ async function main() {
     assert.equal(sent.length, 0);
   });
 
-  await check("a local model in the same capped workspace still runs: it costs nothing per call, so no cap applies", async () => {
+  await check("a client teammate's saved local model is refused before anything is asked (its key is an address the server would call)", async () => {
     await login(USERS.cappedLocal);
     sent = [];
-    provider = (s) =>
-      s.url.startsWith("http://127.0.0.1:11434")
-        ? sse([
-            [null, { choices: [{ delta: { content: "local reply" } }] }],
-            [null, { choices: [{ delta: {}, finish_reason: "stop" }] }],
-            [null, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }],
-            [null, "[DONE]"],
-          ])
-        : new Response("unexpected", { status: 599 });
+    provider = () => new Response("unexpected", { status: 599 });
+    const rowsBefore = (await usageRows(CAPPED)).length;
     const res = await turn("Summarise my notes");
-    assert.equal(res.status, 200);
-    const events = parseSse(await res.text());
-    assert.ok(events.some((e) => e.event === "delta" && e.data.text === "local reply"), JSON.stringify(events));
-    assert.ok(!events.some((e) => e.event === "error"), JSON.stringify(events));
-    assert.ok(sent.some((s) => s.url.startsWith("http://127.0.0.1:11434")), "the local server was asked");
-    const rows = await usageRows(CAPPED);
-    assert.deepEqual(rows.map((r) => [r.billing_mode, r.outcome, r.cost_micro_usd, r.reserved_micro_usd]), [["local", "ok", null, null]]);
+    assert.equal(res.status, 403);
+    const body = (await res.json()) as { error: string; code: string };
+    assert.equal(body.code, "local_model_not_allowed");
+    assert.equal(body.error, "Local AI models can't be connected here. Connect a cloud AI account instead.");
+    assert.equal(sent.length, 0, `the server called ${sent.map((s) => s.url).join(", ")}`);
+    assert.equal((await usageRows(CAPPED)).length, rowsBefore, "a refused turn wrote a usage row");
+  });
+
+  await check("a local model still runs at the month's cap for the verified operator: it costs nothing per call, so no cap applies", async () => {
+    // OASIS at its cap for this check only.
+    await db.execute({
+      sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
+            VALUES (?, ?, 1000, 0, 1000, ?, ?)`,
+      args: [OASIS, period, stamp, stamp],
+    });
+    try {
+      await login(USERS.operator);
+      sent = [];
+      provider = (s) =>
+        s.url.startsWith("http://127.0.0.1:11434")
+          ? sse([
+              [null, { choices: [{ delta: { content: "local reply" } }] }],
+              [null, { choices: [{ delta: {}, finish_reason: "stop" }] }],
+              [null, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }],
+              [null, "[DONE]"],
+            ])
+          : new Response("unexpected", { status: 599 });
+      const rowsBefore = (await usageRows(OASIS)).length;
+      const res = await turn("Summarise my notes");
+      assert.equal(res.status, 200);
+      const events = parseSse(await res.text());
+      assert.ok(events.some((e) => e.event === "delta" && e.data.text === "local reply"), JSON.stringify(events));
+      assert.ok(!events.some((e) => e.event === "error"), JSON.stringify(events));
+      assert.ok(sent.some((s) => s.url.startsWith("http://127.0.0.1:11434")), "the local server was asked");
+      // The route records the call after it closes the stream: wait for the row.
+      const deadline = Date.now() + 5000;
+      let rows = (await usageRows(OASIS)).slice(rowsBefore);
+      while (rows.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+        rows = (await usageRows(OASIS)).slice(rowsBefore);
+      }
+      assert.deepEqual(rows.map((r) => [r.billing_mode, r.outcome, r.cost_micro_usd, r.reserved_micro_usd]), [["local", "ok", null, null]]);
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
+    }
   });
 
   console.log("chat_sessions totals");
@@ -671,7 +710,8 @@ async function main() {
   });
 
   await check("a local model's turn records its tokens: a local call's cost is a known $0, not an unknown", async () => {
-    await login(USERS.cappedLocal);
+    // The verified operator: the only person a saved local model answers for.
+    await login(USERS.operator);
     provider = (s) =>
       s.url.startsWith("http://127.0.0.1:11434")
         ? sse([
@@ -681,7 +721,7 @@ async function main() {
             [null, "[DONE]"],
           ])
         : new Response("unexpected", { status: 599 });
-    const { res, events } = await settledTurn("c-capped-local", "Summarise my notes again");
+    const { res, events } = await settledTurn("c-operator-local", "Summarise my notes again");
     assert.equal(res.status, 200);
     const id = String(events.find((e) => e.event === "session")?.data.session_id || "");
     assert.ok(id, JSON.stringify(events));
