@@ -128,6 +128,9 @@ const TESTS = [
   // returned 400 next_action_required since #488; this runs the client's date
   // through the server's own validator.
   "tests/web-leads-callmode-next-action.test.ts",
+  // The four qualification gates: new wording, unchanged stored keys, legacy
+  // records still read as qualified (book-the-meet plan, Task 2).
+  "tests/sales-qualification.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
