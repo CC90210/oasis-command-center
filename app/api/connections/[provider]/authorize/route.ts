@@ -16,6 +16,12 @@
  *
  * A browser navigation lands back on the provider's settings page with a
  * reason code (?slack=error&reason=...), never on a JSON error page.
+ *
+ * WHOSE SLACK APP. A workspace that saved its own Slack app (Settings >
+ * Connections > Slack) installs THAT app: its client ID goes to Slack and its
+ * secret finishes the install (lib/slack/own-app.ts slackInstallEnv). With
+ * nothing saved, OASIS's app, exactly as before. A half-saved or unreadable
+ * app is refused, never swapped for OASIS's.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveProvider } from "@/lib/connections/service";
@@ -24,6 +30,7 @@ import { OAuthFlowError, startAuthorize } from "@/lib/connections/oauth";
 import { scopesForDepartments } from "@/lib/connections/registry";
 import { appOrigin } from "@/lib/connections/popup";
 import { installReturnPath, INSTALL_PROVIDERS } from "@/lib/slack/routing";
+import { slackInstallEnv, slackInstallsPossible } from "@/lib/slack/own-app";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,7 +57,16 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ provider: 
     const resolved = await resolveConnectionsActor();
     if (!resolved.ok) return resolved.response;
     if (!origin) return back(null, providerId, "error", "app_url_missing");
-    const provider = resolveProvider(providerId);
+    let env: Readonly<Record<string, string | undefined>> = process.env;
+    if (providerId === "slack") {
+      const install = await slackInstallEnv(resolved.actor.tenantId);
+      if (!install.ok) return back(origin, providerId, "error", install.reason);
+      // The workspace's own app is saved, but no install can run here (no
+      // consent-state secret): say that, not that OASIS's app is missing.
+      if (install.app === "own" && !slackInstallsPossible(install.env)) return back(origin, providerId, "error", "installs_unavailable");
+      env = install.env;
+    }
+    const provider = resolveProvider(providerId, env);
     if (!provider.ok) {
       return back(origin, providerId, "error", provider.result.body.error === "coming_soon" ? "not_configured" : "unknown_provider");
     }
@@ -65,6 +81,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ provider: 
         scopes: scopesForDepartments(provider.provider, []),
         redirectUri,
         now: resolved.deps.now(),
+        env,
       });
       return NextResponse.redirect(started.url, { status: 303, headers: { "cache-control": "no-store" } });
     } catch (err) {

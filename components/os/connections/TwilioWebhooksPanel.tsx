@@ -24,7 +24,8 @@ type Info = {
 
 const ENDPOINT = "/api/integrations/twilio/webhooks";
 
-function CopyRow({ label, value, hint }: { label: string; value: string; hint: string }) {
+/** One address with a copy button (also the Slack drawer's Request URLs). */
+export function CopyRow({ label, value, hint }: { label: string; value: string; hint: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {

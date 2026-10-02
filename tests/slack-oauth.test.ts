@@ -363,12 +363,12 @@ async function main() {
     assert.equal(alpha.account, "Alpha Slack");
     const bravo = (await loadConnectorStatuses({ tenantId: BRAVO_CO, userId: USERS.ownerB.id })).slack;
     assert.notEqual(bravo.kind, "connected", "another workspace's card is untouched");
-    // CC's model (W10a R1): a client connects its own Slack app, which is not
-    // built yet; OASIS's own workspace uses the OASIS app.
-    assert.deepEqual([bravo.kind, bravo.label], ["coming_soon", "Not built yet"]);
-    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not built yet"]]);
+    // CC's model (W10a R1): a client connects its own Slack app
+    // (tests/slack-own-app.test.ts); OASIS's own workspace uses the OASIS app.
+    assert.deepEqual([bravo.kind, bravo.label], ["not_connected", "Not connected"]);
+    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not set up yet"]]);
     const paths = connectors.connectorBySlug("slack")!.paths ?? [];
-    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", false]]);
+    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", true]]);
     assert.ok(paths.every((p) => !/OASIS's own included|every workspace/i.test(p.body)), "no path claims to be every workspace's way in");
   });
 

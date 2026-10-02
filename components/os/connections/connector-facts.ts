@@ -30,6 +30,7 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { listUserIntegrationStatus } from "@/lib/user-integration-store";
 import { listActiveConnections } from "@/lib/connections/store";
 import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
+import { SLACK_APP_FIELDS, SLACK_APP_SERVICE, slackInstallsPossible } from "@/lib/slack/own-app";
 import {
   CONNECTOR_CATALOG,
   resolveConnectorStatus,
@@ -129,16 +130,30 @@ export async function loadConnectorFacts(input: {
     loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
   ]);
+  // A workspace's own Slack app is read from the same key rows (presence only):
+  // saved (every value), incomplete, or none; unknown when they could not be read.
+  const ownApps = keyRows ? { slack: ownAppState(keyRows, SLACK_APP_SERVICE, SLACK_APP_FIELDS) } : null;
+  const installUnavailable = slackInstallsPossible() ? [] : ["slack"];
   return {
     keyRows,
     heartbeats,
     personalGoogleLinked,
     connections,
-    appNotConfigured: appNotConfiguredProviders(),
+    // A workspace whose own app is saved, where installs can run, has its app.
+    appNotConfigured: appNotConfiguredProviders().filter(
+      (p) => !(ownApps?.[p as keyof typeof ownApps] === "saved" && !installUnavailable.includes(p)),
+    ),
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
     // OASIS's apps; every other workspace is a client and is shown its own path.
     oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
+    ownApps,
+    installUnavailable,
   };
+}
+
+function ownAppState(rows: readonly KeyRowFact[], service: string, fields: readonly string[]): "saved" | "incomplete" | "none" {
+  const saved = fields.filter((f) => rows.some((r) => r.service === service && r.field_key === f && r.has_value));
+  return saved.length === fields.length ? "saved" : saved.length > 0 ? "incomplete" : "none";
 }
 
 /**

@@ -175,6 +175,10 @@ export type ConnectorPath = {
   built: boolean;
   /** It needs OASIS's own app on this deployment (Worker secrets), so appNotConfigured decides its state. */
   needsOasisApp: boolean;
+  /** It is the workspace's own app (Slack: client ID, secret, signing secret saved here), so its saved state decides. */
+  ownApp?: boolean;
+  /** The setup the drawer shows under this path (Slack's own-app steps, manifest and form). */
+  setup?: "slack_own_app";
 };
 
 /** Settings › Connections with this app's drawer open. */
@@ -395,9 +399,11 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       {
         audience: "client",
         title: "Your own Slack app",
-        body: "Your Slack admin creates a Slack app in your Slack and gives OASIS its client ID, client secret and signing secret.",
-        built: false,
+        body: "Your Slack admin creates a Slack app in your own Slack from the steps below and saves its client ID, client secret and signing secret here. Add to Slack, under Chat apps, then installs your app.",
+        built: true,
         needsOasisApp: false,
+        ownApp: true,
+        setup: "slack_own_app",
       },
     ],
   },
@@ -626,10 +632,12 @@ export type ConnectorStatus = {
 export type ConnectorPathStatus = {
   title: string;
   body: string;
-  /** "Available", "Not set up on this deployment" or "Not built yet". */
+  /** "Available", "Not set up on this deployment", "Not built yet", or a workspace app's saved state. */
   state: string;
   /** Not built: the drawer offers "Ask OASIS for it". */
   requestable: boolean;
+  /** The setup the drawer shows under it (ConnectorPath.setup). */
+  setup?: "slack_own_app";
 };
 
 /**
@@ -690,6 +698,13 @@ export type ConnectorFacts = {
    * Unknown (absent): no per-workspace path is shown.
    */
   oasisWorkspace?: boolean | null;
+  /**
+   * The workspace's own app per provider (Slack: "slack_app" in the key store):
+   * every value saved, some, or none. Null when the key store could not be read.
+   */
+  ownApps?: Readonly<Record<string, "saved" | "incomplete" | "none">> | null;
+  /** Providers no install can run for on this deployment (Slack: no consent-state secret). */
+  installUnavailable?: readonly string[] | null;
 };
 
 /** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
@@ -921,10 +936,26 @@ function viewerPaths(def: ConnectorDef, facts: ConnectorFacts): readonly Connect
  * `built` flag alone: a built path that needs OASIS's app, where that app is
  * not set up, is not "Available".
  */
-function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathStatus {
-  const state = !p.built ? "Not built yet" : p.needsOasisApp && oasisAppMissing ? "Not set up on this deployment" : "Available";
-  return { title: p.title, body: p.body, state, requestable: !p.built };
+function pathStatus(p: ConnectorPath, oasisAppMissing: boolean, own: OwnAppState | undefined, installsOff: boolean): ConnectorPathStatus {
+  const state = !p.built
+    ? "Not built yet"
+    : p.ownApp
+      ? OWN_APP_STATE[own ?? "unknown"] + (own === "saved" && installsOff ? " · installs not switched on here yet" : "")
+      : p.needsOasisApp && oasisAppMissing
+        ? "Not set up on this deployment"
+        : "Available";
+  return { title: p.title, body: p.body, state, requestable: !p.built, ...(p.setup ? { setup: p.setup } : {}) };
 }
+
+type OwnAppState = "saved" | "incomplete" | "none" | "unknown";
+
+/** A workspace's own app as its path states it. */
+const OWN_APP_STATE: Record<OwnAppState, string> = {
+  saved: "Saved",
+  incomplete: "Some details missing",
+  none: "Not set up yet",
+  unknown: "Status unavailable",
+};
 
 /**
  * The status a card shows. Pure: the same facts and `nowMs` always give the
@@ -953,7 +984,11 @@ export function resolveConnectorStatus(
     // OASIS app, a client its own app), each with its state here.
     const mine = viewerPaths(def, facts);
     const oasisAppMissing = !!facts.appNotConfigured?.includes(source.provider);
-    const paths = mine.length > 0 ? mine.map((p) => pathStatus(p, oasisAppMissing)) : undefined;
+    // The workspace's own app (Slack's client path): its saved state, and
+    // whether this deployment can run an install at all.
+    const own: OwnAppState = facts.ownApps === null ? "unknown" : facts.ownApps?.[source.provider] ?? "none";
+    const installsOff = !!facts.installUnavailable?.includes(source.provider);
+    const paths = mine.length > 0 ? mine.map((p) => pathStatus(p, oasisAppMissing, own, installsOff)) : undefined;
     const withPaths = (s: ConnectorStatus): ConnectorStatus => (paths ? { ...s, paths } : s);
     // An app OASIS itself has not been given on this deployment cannot be
     // connected, whatever the facts say: say so rather than offer a dead button.
@@ -972,6 +1007,26 @@ export function resolveConnectorStatus(
     if (!connected && mine.length > 0 && mine.every((p) => !p.built)) {
       const how = mine[0].title.charAt(0).toLowerCase() + mine[0].title.slice(1);
       return withPaths({ kind: "coming_soon", label: "Not built yet", detail: `Connecting ${def.name} with ${how} is not built yet.` });
+    }
+    // A workspace that connects with its own app (a client's Slack app): what
+    // stands between it and Add to Slack, in its own words.
+    if (!connected && mine.some((p) => p.ownApp && p.built)) {
+      if (own === "unknown") return withPaths(UNKNOWN);
+      if (own === "saved" && installsOff) {
+        return withPaths({
+          kind: "coming_soon",
+          label: `${def.name} installs not switched on yet`,
+          detail: `Your ${def.name} app is saved, but ${def.name} installs are not switched on here yet, so it cannot be installed. Nothing is wrong on your side.`,
+        });
+      }
+      return withPaths({
+        kind: "not_connected",
+        label: "Not connected",
+        detail:
+          own === "saved"
+            ? `Your ${def.name} app is saved. Press Add to ${def.name} under Chat apps to install it.`
+            : `Create your ${def.name} app from the steps here and save its details, then press Add to ${def.name} under Chat apps.`,
+      });
     }
     return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }

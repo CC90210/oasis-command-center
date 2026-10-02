@@ -51,6 +51,12 @@ export type InteractivityDeps = {
   db: Client;
   now: () => Date;
   env?: Env;
+  /**
+   * Set when the press came to a workspace's OWN Interactivity URL
+   * (?workspace=<id>, checked with that workspace's signing secret): the press
+   * may then decide only for the Slack team routed to that workspace.
+   */
+  expectTenantId?: string;
   fetchImpl?: SlackFetch;
   executorDeps?: ExecutorDeps;
 };
@@ -128,6 +134,10 @@ async function decidePress(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", press.teamId);
   if (!routed) return { status: 200, body: { ok: true, ignored: "unknown_team" } };
+  if (deps.expectTenantId !== undefined && routed.tenantId !== deps.expectTenantId) {
+    console.error("[slack.interactivity] a workspace's own app sent a press for a team routed elsewhere; ignored", { workspace: deps.expectTenantId });
+    return { status: 200, body: { ok: true, ignored: "team_not_this_workspace" } };
+  }
   const tenantId = routed.tenantId;
 
   const token = await slackTokenFor(deps.db, tenantId, press.teamId);

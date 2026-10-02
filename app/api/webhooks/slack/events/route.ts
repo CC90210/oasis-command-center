@@ -11,11 +11,19 @@
  * Answers inside Slack's 3-second window. The agent turn itself runs after the
  * response: on the SLACK_AGENT_JOBS Cloudflare Queue when the Worker has that
  * binding, otherwise in after() (lib/slack/jobs.ts dispatchSlackMentionJob).
+ *
+ * TWO KINDS OF CALLER. With no query string, OASIS's own Slack app (checked
+ * with SLACK_SIGNING_SECRET, unchanged). With ?workspace=<id>, a workspace's
+ * own Slack app: checked with that workspace's signing secret only, and its
+ * events count only for the Slack team routed to that workspace
+ * (lib/slack/own-app.ts slackRequestScope).
  */
 import { NextResponse, after, type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { handleSlackEvents } from "@/lib/slack/events";
 import { slackSigningHeaders } from "@/lib/slack/verify";
+import { slackRequestScope } from "@/lib/slack/own-app";
+import { SLACK_WORKSPACE_PARAM } from "@/lib/slack/own-app-setup";
 import { dispatchSlackMentionJob, runSlackMentionJob, slackJobQueueBinding } from "@/lib/slack/jobs";
 import { shadowGeneralChannelRouting } from "@/lib/jev/mode";
 
@@ -31,11 +39,15 @@ export async function POST(req: NextRequest) {
   const db = getTursoClient();
   const now = () => new Date();
   try {
+    const scope = await slackRequestScope(req.nextUrl.searchParams.get(SLACK_WORKSPACE_PARAM));
+    if (!scope.ok) return NextResponse.json(scope.body, { status: scope.status, headers: { "cache-control": "no-store" } });
     const result = await handleSlackEvents(
       { rawBody, timestamp, signature, retryNum: req.headers.get("x-slack-retry-num") },
       {
         db,
         now,
+        env: scope.env,
+        expectTenantId: scope.expectTenantId,
         dispatchMention: async (job) =>
           dispatchSlackMentionJob(job, {
             queue: await slackJobQueueBinding(),

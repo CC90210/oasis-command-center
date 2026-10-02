@@ -47,6 +47,13 @@ export type SlackEventsDeps = {
   db: Client;
   now: () => Date;
   env?: Env;
+  /**
+   * Set when the request came to a workspace's OWN Request URL
+   * (?workspace=<id>, checked with that workspace's signing secret: lib/slack/
+   * own-app.ts). The event may then speak only for the Slack team routed to
+   * that workspace: a workspace's secret can never sign for another's team.
+   */
+  expectTenantId?: string;
   fetchImpl?: SlackFetch;
   /** Hand an @mention to the agent job (queue or after the response). Throws when it could not. */
   dispatchMention: (job: SlackMentionJob) => Promise<unknown>;
@@ -102,6 +109,10 @@ export async function handleSlackEvents(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", teamId);
   if (!routed) return ok({ dropped: "unknown_team" });
+  if (deps.expectTenantId !== undefined && routed.tenantId !== deps.expectTenantId) {
+    console.error("[slack.events] a workspace's own app sent an event for a team routed elsewhere; dropped", { workspace: deps.expectTenantId });
+    return ok({ dropped: "team_not_this_workspace" });
+  }
   const tenantId = routed.tenantId;
 
   if (body.is_ext_shared_channel === true) return ok({ dropped: "shared_channel" });

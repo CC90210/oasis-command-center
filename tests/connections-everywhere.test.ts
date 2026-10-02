@@ -271,7 +271,7 @@ async function main() {
   });
 
   // W10a R5: Settings > Chat apps has no dead chip either.
-  await check("Settings > Chat apps: each not-built app opens the shared drawer with its reason, and Telegram teammates and a client's own Slack app have the request button", async () => {
+  await check("Settings > Chat apps: each not-built app opens the shared drawer with its reason, and Telegram teammates have the request button", async () => {
     const { default: ChatAppsPage } = await import("../app/settings/chat-apps/page");
     await login(USERS.clientA);
     const page = await ChatAppsPage({ searchParams: Promise.resolve({}) });
@@ -283,11 +283,10 @@ async function main() {
       assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", "Not built yet", def.pendingNote], def.slug);
       assert.equal(c.requestFrom, "Settings > Chat apps");
     }
+    // A client's own Slack app is built (tests/slack-own-app.test.ts), so it is
+    // set up, not requested; Telegram teammates are not built.
     const asks = elementsOf(page, RequestConnector).map((p) => [p.name, p.from]);
-    assert.deepEqual(asks, [
-      ["Slack (Your own Slack app)", "Settings > Chat apps"],
-      ["AI teammates in Telegram", "Settings > Chat apps"],
-    ]);
+    assert.deepEqual(asks, [["AI teammates in Telegram", "Settings > Chat apps"]]);
     // OASIS's own workspace: its Slack path is the OASIS app, so no request for it.
     await login(USERS.cc);
     const oasisPage = await ChatAppsPage({ searchParams: Promise.resolve({}) });
@@ -373,10 +372,11 @@ async function main() {
 
   // -- 3. Slack: each workspace is shown its own path (W10a R1) ---------------------
 
-  await check("Slack, per CC: a client is shown its own Slack app (not built yet, with the request); OASIS the OASIS app, whose state follows this deployment", async () => {
+  await check("Slack, per CC: a client is shown its own Slack app (to set up here); OASIS the OASIS app, whose state follows this deployment", async () => {
     const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).slack;
-    assert.deepEqual([client.kind, client.label, client.detail], ["coming_soon", "Not built yet", "Connecting Slack with your own Slack app is not built yet."]);
-    assert.deepEqual(client.paths?.map((p) => [p.title, p.state, p.requestable]), [["Your own Slack app", "Not built yet", true]]);
+    assert.deepEqual([client.kind, client.label], ["not_connected", "Not connected"]);
+    assert.match(String(client.detail), /^Create your Slack app from the steps here and save its details, then press Add to Slack under Chat apps\.$/);
+    assert.deepEqual(client.paths?.map((p) => [p.title, p.state, p.requestable]), [["Your own Slack app", "Not set up yet", false]]);
     assert.match(client.paths![0].body, /client ID, client secret and signing secret/);
     // Without OASIS's Slack app on the deployment, OASIS's path is not "Available".
     const oasisOff = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).slack;
@@ -386,7 +386,7 @@ async function main() {
     assert.deepEqual([oasisOn.kind, oasisOn.paths?.[0].state], ["not_connected", "Available"]);
     // A client's own path does not change with OASIS's app.
     const clientOn = (await withSlackApp(() => loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id }))).slack;
-    assert.deepEqual([clientOn.kind, clientOn.label], ["coming_soon", "Not built yet"]);
+    assert.deepEqual([clientOn.kind, clientOn.label, clientOn.paths?.[0].state], ["not_connected", "Not connected", "Not set up yet"]);
 
     const { markup } = renderClient({
       cases: [
@@ -397,9 +397,9 @@ async function main() {
       clicks: [],
     });
     const c = text(markup.client);
-    assert.match(c, /How your workspace connects Slack Your own Slack app Not built yet/);
-    assert.match(c, /Ask OASIS for Slack \(Your own Slack app\)/);
-    assert.doesNotMatch(c, /The OASIS Slack app|OASIS's own workspace|Available|Set up in Chat apps/, "a client is never told OASIS's model, or offered a dead connect");
+    assert.match(c, /How your workspace connects Slack Your own Slack app Not set up yet/);
+    assert.match(c, /Set up your Slack app/, "the steps and the form, under the client's own path");
+    assert.doesNotMatch(c, /The OASIS Slack app|OASIS's own workspace|Available|Ask OASIS for Slack/, "a client is never told OASIS's model");
     const off = text(markup.oasisOff);
     assert.match(off, /The OASIS Slack app Not set up on this deployment/);
     assert.doesNotMatch(off, /Available|Your own Slack app|Ask OASIS for Slack/);

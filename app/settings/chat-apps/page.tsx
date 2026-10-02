@@ -131,10 +131,27 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
               </div>
             ) : !slackSettings.appConfigured ? (
               <div className="space-y-1.5">
-                <p className="text-[13px] leading-5 text-fg-muted">
-                  OASIS&apos;s Slack app is not set up on this deployment yet, so Slack cannot be installed here. Nothing is
-                  broken on your side.
-                </p>
+                {slackSettings.oasisWorkspace || slackSettings.ownApp === "saved" ? (
+                  <p className="text-[13px] leading-5 text-fg-muted">
+                    {slackSettings.ownApp === "saved"
+                      ? "Your Slack app is saved, but Slack installs are not switched on here yet, so it cannot be installed. Nothing is broken on your side."
+                      : "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here. Nothing is broken on your side."}
+                  </p>
+                ) : (
+                  // A client brings its own Slack app (CC, 2026-10-01): the steps,
+                  // the manifest and the form are in the Slack drawer.
+                  <p className="text-[13px] leading-5 text-fg-muted">
+                    {slackSettings.ownApp === "unreadable"
+                      ? "Your Slack app's saved details could not be read. Save them again, "
+                      : slackSettings.ownApp === "incomplete"
+                        ? "Your Slack app is only partly saved. Add the rest of its details, "
+                        : "Your workspace connects its own Slack app. Create it in your Slack and save its details, "}
+                    <Link href={connectorHref("slack")} prefetch={false} className="text-accent hover:underline">
+                      in Settings &gt; Connections &gt; Slack
+                    </Link>
+                    , then install it here.
+                  </p>
+                )}
                 {viewer.access.isOperator && slackSettings.missingSecrets.length > 0 && (
                   <p className="text-[12px] leading-4 text-fg-dim">
                     Missing Worker secrets: {slackSettings.missingSecrets.join(", ")}.
@@ -149,8 +166,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </p>
                 )}
                 <p className="text-[13px] leading-5 text-fg-muted">
-                  Install the OASIS app in your Slack workspace, then pick a department for each channel. An @mention gets
-                  a draft reply from that department. {SLACK_APPROVAL_RULE}
+                  {slackSettings.installApp === "own" ? "Install your Slack app" : "Install the OASIS app"} in your Slack
+                  workspace, then pick a department for each channel. An @mention gets a draft reply from that department.{" "}
+                  {SLACK_APPROVAL_RULE}
                 </p>
                 {viewer.access.canManage ? (
                   <a href="/api/connections/slack/authorize" className="btn-primary inline-flex">
