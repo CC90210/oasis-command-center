@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # TEMPORARY (was 30) for the diagnostic smoke test, restored before merge
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # SAME TOOLCHAIN AS THE DEPLOY (2026-09-29, F0 release gate).
@@ -198,7 +198,6 @@ jobs:
           BRAVO_SUPABASE_URL: https://placeholder.supabase.co
           BRAVO_SUPABASE_SERVICE_ROLE_KEY: placeholder
           BRAVO_SUPABASE_ANON_KEY: placeholder
-          BUNDLE_DIAG: "1" # TEMPORARY diagnostic, removed before merge
         run: npx opennextjs-cloudflare build
       # Hand the OpenNext output to wrangler the way the deploy's
       # `wrangler deploy` does, without uploading: it bundles .open-next/worker.js
@@ -229,10 +228,3 @@ jobs:
           set -o pipefail
           npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
           node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run
-      - name: Worker bundle composition (TEMPORARY diagnostic, removed before merge)
-        if: always()
-        run: node scripts/diag-worker-bundle.mjs
-      - name: Worker smoke test under wrangler dev (TEMPORARY diagnostic, removed before merge)
-        if: always()
-        timeout-minutes: 16
-        run: node scripts/diag-worker-smoke.mjs

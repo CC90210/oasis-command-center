@@ -150,7 +150,7 @@ const nextConfig = {
   // Two of those defaults are tuned for browser downloads: a shared chunk is
   // only made when it holds at least 20 KB (minSize), and one entry may be
   // split into at most 30 chunks (maxInitialRequests, maxAsyncRequests). The
-  // server has ~700 route entries, so every module that a set of routes shares
+  // server has ~540 route entries, so every module that a set of routes shares
   // and that misses either limit was COPIED into each of those routes instead
   // of shared. OpenNext puts every entry and chunk into the one Cloudflare
   // Worker, and those copies counted against its 64 MiB upload limit.
@@ -361,8 +361,5 @@ const nextConfig = {
     ];
   },
 };
-
-// TEMPORARY (perf/worker-bundle-diet): bundle-composition diagnostic, removed before merge.
-if (process.env.BUNDLE_DIAG === "1") require("./scripts/diag-webpack-plugin.cjs")(nextConfig);
 
 module.exports = nextConfig;
