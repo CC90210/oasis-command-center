@@ -24,6 +24,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { parseManifest, type TenantManifest } from "./schema";
 import type { DiffEntry } from "./diff";
+import { isSeedOverlay, resolveStoredManifest } from "./seed-overlay";
 
 export type ManifestRow = {
   id: string;
@@ -58,7 +59,11 @@ function client(): SupabaseClient {
   return getServiceSupabase();
 }
 
-/** Read a manifest row by slug. Returns null when no row exists. */
+/**
+ * Read a manifest row by slug. Returns null when no row exists. A seed
+ * overlay row (lib/manifest/seed-overlay.ts) comes back as the manifest the
+ * loader serves: the current seed with the workspace's own bindings.
+ */
 export async function getManifestRow(slug: string): Promise<ManifestRow | null> {
   const db = client();
   const result = await db
@@ -69,6 +74,11 @@ export async function getManifestRow(slug: string): Promise<ManifestRow | null> 
   if (result.error) throw new ManifestPersistenceError("db", result.error.message);
   if (!result.data) return null;
   const row = result.data as Omit<ManifestRow, "manifest"> & { manifest: unknown };
+  if (isSeedOverlay(row.manifest)) {
+    const served = resolveStoredManifest(row.manifest, row.slug, row.tenant_id);
+    if (served.ok) return { ...row, manifest: served.manifest };
+    throw new ManifestPersistenceError("validation", served.error.message);
+  }
   return { ...row, manifest: parseManifest(row.manifest) };
 }
 

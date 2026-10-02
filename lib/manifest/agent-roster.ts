@@ -19,6 +19,16 @@ function normalizeAgentSlugs(values: readonly string[]): string[] {
 }
 
 /**
+ * Whether one binding is switched on. Core bindings count as on: the mutation
+ * API forbids disabling them. The department channels (components/os/
+ * department/config.ts) and the AI Team roster (lib/os/teammates.ts) ask this
+ * same question, so "On" means one thing everywhere.
+ */
+export function isBindingOn(agent: Pick<AgentRosterBinding, "enabled" | "core">): boolean {
+  return agent.core === true || agent.enabled === true;
+}
+
+/**
  * Resolve the one enabled-agent roster used throughout a tenant.
  *
  * A resolved tenant manifest is authoritative even when it enables zero
@@ -35,7 +45,7 @@ export function resolveEnabledAgentSlugs(args: {
   if (args.manifestAgents !== null) {
     return normalizeAgentSlugs(
       args.manifestAgents
-        .filter((agent) => agent.core === true || agent.enabled === true)
+        .filter(isBindingOn)
         .map((agent) => agent.slug),
     );
   }

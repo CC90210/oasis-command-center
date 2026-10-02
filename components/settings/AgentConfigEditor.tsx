@@ -15,7 +15,6 @@
 
 import { useEffect, useState } from "react";
 import { Save, Eye, EyeOff, Check, AlertCircle, ExternalLink, Sparkles, ChevronDown, ChevronUp, Cpu, Cloud, KeyRound } from "lucide-react";
-import { getAgentInfo } from "@/lib/agents";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE } from "@/lib/providers";
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
@@ -118,9 +117,11 @@ type Props = {
    */
   canInstallBridge?: boolean;
   /**
-   * What each row is called: the department the agent leads, never its
-   * persona name (lib/os/teammate-names.ts, computed by SettingsContent). A
-   * slug with no entry keeps its slug and registry role, as before.
+   * What each row is called: its name on the workspace's roster, never its
+   * persona name (lib/os/teammate-names.ts, computed by SettingsContent, which
+   * passes only roster teammates as agentKeys). A slug with no entry reads
+   * "AI teammate", never its slug or a registry persona's role line (W4a
+   * review R1).
    */
   agentLabels?: Record<string, { name: string; summary: string }>;
 };
@@ -466,10 +467,10 @@ export function AgentConfigEditor({
               <div className="flex items-center gap-3">
                 <div className={`agent-pill`}>
                   <span className="agent-pill-dot" />
-                  {agentLabels[key]?.name ?? key}
+                  {agentLabels[key]?.name ?? "AI teammate"}
                 </div>
                 <div className="text-xs text-fg-muted">
-                  {agentLabels[key]?.summary ?? getAgentInfo(key).role}
+                  {agentLabels[key]?.summary ?? ""}
                 </div>
               </div>
               <div className="flex items-center gap-3">

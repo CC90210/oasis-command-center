@@ -85,7 +85,7 @@ export default async function DepartmentPage({
   const rawQ = typeof q === "string" ? q.trim() : "";
   const prefill = rawQ ? rawQ.slice(0, MAX_PREFILL_CHARS) : null;
 
-  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis });
+  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis, manifest: viewer.manifest });
   const tenantId = viewer.surface.tenantId;
   const profile = departmentProfile(dept.key);
   // Connections are workspace configuration: owners and admins, the same rule

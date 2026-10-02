@@ -23,7 +23,7 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
-import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getTenantAwareEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
@@ -76,10 +76,14 @@ export default async function OperationsPage({
   // This is a workspace surface, including for the OASIS operator. Resolve the
   // current tenant's enabled roster with no empire-wide operator bypass; an
   // operator debugging another workspace must first switch into that tenant.
-  const agentNamesForOps = await getTenantAwareEnabledAgents({
-    userTenantId: profile?.tenant_id ?? null,
-    profileAgentsEnabled: profile?.agents_enabled || [],
-  });
+  // OASIS's own workspace lists the agents its bridge runs, which since W4a is
+  // not its business roster of department leads (review R4).
+  const agentNamesForOps =
+    oasisOperatorAgents(profile?.tenant_id) ??
+    (await getTenantAwareEnabledAgents({
+      userTenantId: profile?.tenant_id ?? null,
+      profileAgentsEnabled: profile?.agents_enabled || [],
+    }));
 
   // The tiles at the top: lib/admin/attention.ts, the one definition of
   // "needs you" (/health draws the same numbers with their lists).

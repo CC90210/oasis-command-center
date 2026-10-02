@@ -17,10 +17,11 @@
  *
  * `?edit=<slug>` edits one of this workspace's own custom teammates (the
  * teammate's Configure panel links here). `?template=<key>` is carried from a
- * template tile; the builder does not read it yet, which the tile says
- * (components/os/aiteam/TemplatePicker.tsx). A save opens the teammate's chat
- * here (/agents/<slug>) and a delete returns to the AI team, never the
- * marketplace (the builder's `home`).
+ * template tile (components/os/aiteam/TemplatePicker.tsx); the builder reads it
+ * itself and opens a new teammate prefilled from that template
+ * (components/os/aiteam/templates.ts templateDraft). A save opens the
+ * teammate's chat here (/agents/<slug>) and a delete returns to the AI team,
+ * never the marketplace (the builder's `home`).
  */
 
 import Link from "next/link";

@@ -706,7 +706,7 @@ async function main() {
     const { loadAiTeam } = await import("../components/os/aiteam/roster");
     const viewer = await resolveOsViewer();
     assert.ok(viewer.ok, "viewer");
-    const team = await loadAiTeam(viewer as Extract<typeof viewer, { ok: true }>, []);
+    const team = await loadAiTeam(viewer as Extract<typeof viewer, { ok: true }>);
     assert.equal(team.builderHref, "/agents/new");
     assert.ok(team.custom.ok, "custom teammates read");
     const mine = team.custom.ok ? team.custom.value.find((c) => c.slug === OASIS_TEAMMATE) : undefined;

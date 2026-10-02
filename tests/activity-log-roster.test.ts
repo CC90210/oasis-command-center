@@ -9,8 +9,9 @@
  *   S1-C3           thirty "stage_changed · web_leads_claim" rows from one
  *                   bulk claim fold into one row that names the leads.
  *   S1-C4           PageFrame and the OS table, not components/Card.tsx.
- *   S5 verifier     agent chips go through lib/os/teammate-names, so a client
- *                   workspace never prints a persona slug.
+ *   S5 verifier     agent chips go through the workspace roster
+ *                   (lib/os/teammates.ts, W4a), so a client workspace never
+ *                   prints a persona slug.
  *
  * Run: node --conditions=react-server --import tsx tests/activity-log-roster.test.ts
  */
@@ -248,13 +249,21 @@ async function main() {
   assert.equal(groupActivityRows([{ ...base, id: "1", time: "not a time" }, { ...base, id: "2", time: "not a time" }]).length, 2, "an unparseable time never folds");
 
   // ── 3. Agents are named for this workspace, never by persona slug ──────────
-  assert.equal(activityAgentLabel("bravo", { slug: "bravo", display_name: "Bravo" }, true), "Chief of Staff · Operations");
-  assert.equal(activityAgentLabel("bravo", { slug: "bravo", display_name: "Bravo" }, false), "General assistant");
-  assert.equal(activityAgentLabel("maven", { slug: "maven", display_name: "Maven" }, false), "Content assistant");
-  assert.equal(activityAgentLabel("renewals-desk", { slug: "renewals-desk", display_name: "Renewals Desk" }, false), "Renewals Desk", "a custom teammate keeps its own name");
+  // By the workspace's roster (lib/os/teammates.ts, W4a): the binding's
+  // display_name; an OASIS lead still on the static table (a binding with no
+  // `departments`) by its departments; a house agent off the roster as "AI teammate".
+  const only = (slug: string, display_name: string, departments?: Array<"sales">) => ({
+    agents: [{ slug, display_name, enabled: true, ...(departments ? { departments } : {}) }],
+  });
+  assert.equal(activityAgentLabel("bravo", only("bravo", "Bravo"), true), "Chief of Staff · Operations");
+  assert.equal(activityAgentLabel("bravo", only("bravo", "Bravo"), false), "AI teammate", "an OASIS persona in a client's history");
+  assert.equal(activityAgentLabel("maven", only("maven", "Maven"), false), "AI teammate");
+  assert.equal(activityAgentLabel("aura", only("aura", "Aura"), true), "AI teammate", "CC's own agent is not an OASIS business teammate");
+  assert.equal(activityAgentLabel("sdr", only("sdr", "Sales lead", ["sales"]), false), "Sales lead", "a lead is named by its binding");
+  assert.equal(activityAgentLabel("renewals-desk", only("renewals-desk", "Renewals Desk"), false), "Renewals Desk", "a custom teammate keeps its own name");
   assert.equal(activityAgentLabel("renewals-desk", undefined, false), "renewals-desk", "no binding at all: the slug, which is the workspace's own");
   for (const persona of ["bravo", "atlas", "maven", "aura", "hermes", "solara", "helios", "lex"]) {
-    const label = activityAgentLabel(persona, { slug: persona, display_name: persona[0].toUpperCase() + persona.slice(1) }, false);
+    const label = activityAgentLabel(persona, only(persona, persona[0].toUpperCase() + persona.slice(1)), false);
     assert.doesNotMatch(label.toLowerCase(), new RegExp(`\\b${persona}\\b`), `${persona}: a client never sees the persona`);
   }
 

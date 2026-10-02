@@ -11,6 +11,11 @@
  *              is_public? }
  *      Auth: requires session + tenant_id. Custom agents start as
  *      private (is_public=false) unless explicitly opted public.
+ *      The new teammate joins the workspace's roster at once (W4a, audit
+ *      S2-06): its manifest binding is added, switched on, by the same lineup
+ *      write the AI Team's On/Off uses (lib/manifest/agent-bindings.ts). It used
+ *      to get an `agents` row only and sat "Off" on the AI Team with no
+ *      control. Returns `bound: false`, with a sentence, when that write fails.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -22,6 +27,8 @@ import {
   createCustomAgent,
   type CreateAgentInput,
 } from "@/lib/agents/persistence";
+import { resolveAgentKey } from "@/lib/agents";
+import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,7 +116,23 @@ export async function POST(req: NextRequest) {
       created_by: user.id,
       tenant_id: profile.tenant_id,
     });
-    return NextResponse.json({ ok: true, agent: created });
+    const bound = await changeAgentLineup({
+      tenantId: profile.tenant_id,
+      action: "add",
+      slug: resolveAgentKey(created.slug.trim().toLowerCase()),
+    });
+    if (!bound.ok) {
+      // The agent exists; only its switch failed. The AI Team lists it Off with
+      // an On control, so the owner is told where to finish, not to rebuild it.
+      console.error("[api.agents.bind]", { tenantId: profile.tenant_id, slug: created.slug, error: bound.error });
+      return NextResponse.json({
+        ok: true,
+        agent: created,
+        bound: false,
+        message: "Created, but it could not be switched on. Turn it on from the AI Team page.",
+      });
+    }
+    return NextResponse.json({ ok: true, agent: created, bound: true });
   } catch (err) {
     if (err instanceof AgentPersistenceError) {
       const status = err.code === "duplicate_slug" ? 409 : err.code === "validation" ? 422 : 500;
