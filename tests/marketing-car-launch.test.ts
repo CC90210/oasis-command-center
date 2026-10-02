@@ -70,7 +70,7 @@ assert.match(
   "the three.js import is unguarded again — a 404 chunk strands the page silently",
 );
 
-// ── three.js stays out of the server bundle ────────────────────────────────
+// -- three.js stays out of the server bundle --------------------------------
 
 // `typeof window` is "undefined" when the server compiles this client
 // component for SSR, so webpack drops loadThree's import branch unread and the

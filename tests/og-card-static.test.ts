@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   assert.ok(/^[\x00-\x7f]*$/.test(committed), `${OG_CARD_MODULE} must stay ASCII (one-byte Worker source)`);
 
   // 2. Same metadata exports as before, and a real 1200x630 PNG.
-  assert.equal(route.alt, "OASIS AI — Operational Agentic Systems Increasing Scalability");
+  assert.equal(route.alt, "OASIS AI \u2014 Operational Agentic Systems Increasing Scalability");
   assert.deepEqual(route.size, { width: 1200, height: 630 });
   assert.deepEqual(OG_CARD_SIZE, route.size, "the design renders at the size the route declares");
   assert.equal(route.contentType, "image/png");

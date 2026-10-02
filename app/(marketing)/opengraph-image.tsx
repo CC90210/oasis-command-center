@@ -21,7 +21,7 @@ import { OG_CARD_PNG_BASE64 } from "@/lib/marketing/og-card.generated";
  * the same as before, byte for byte.
  */
 
-export const alt = "OASIS AI — Operational Agentic Systems Increasing Scalability";
+export const alt = "OASIS AI \u2014 Operational Agentic Systems Increasing Scalability";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
