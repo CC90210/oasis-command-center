@@ -18,6 +18,9 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkOneByteSource, checkWorkerSize } from "../scripts/check-worker-bundle";
+import { checkServerTree, requestedChunks, scanRuntime, type ServerTree } from "../scripts/check-worker-chunks";
+import { CHUNK_FAILURE, REACHED_DATABASE, chunkFailureLines, mintSession, removeChunkCase } from "../scripts/check-worker-runtime";
+import { verifySessionEdge } from "../lib/turso-auth-edge";
 
 const root = path.resolve(__dirname, "..");
 
@@ -226,4 +229,166 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
   );
 }
 
-console.log("worker-bundle-checks: all passed");
+// -- scripts/check-worker-chunks.ts: every chunk the code can ask for is inlined --
+// OpenNext turns webpack's require("./chunks/" + id) into a switch over the
+// numeric files in chunks/, ending in `default: throw new Error("Unknown
+// chunk ...")`. These fixtures use the exact shapes measured on a real build:
+// the patched switch, an entry's X(0,[...]) startup list, and the
+// Promise.all([c.e(id)]) / c.e(id).then(...) a dynamic import compiles to.
+const UNKNOWN_DEFAULT = "       default: throw new Error(`Unknown chunk ${d}`);\n";
+const patchedRuntime = (ids: number[], self = 900) =>
+  "c.f.require=(d, _) => {\n  if (!a[d]) {\n    switch (d) {\n" +
+  ids.map((id) => `       case ${id}: b(require("./chunks/${id}.js")); break;\n`).join("") +
+  `       case ${self}: a[d] = 1; break;\n` +
+  UNKNOWN_DEFAULT +
+  "    }\n  }\n}";
+const fixtureTree = (over: Partial<ServerTree> = {}): ServerTree => ({
+  runtimes: [{ file: "webpack-runtime.js", source: patchedRuntime([1, 2, 3]) }],
+  chunkFiles: ["1.js", "2.js", "3.js"],
+  sources: [
+    { file: "app/page.js", source: 'var t=require("../webpack-runtime.js");t.C(e);var s=t.X(0,[1,2],()=>a(10));module.exports=s' },
+    { file: "chunks/2.js", source: "exports.modules={5:(e,t,c)=>{async function f(){return Promise.all([c.e(3)]).then(c.bind(c,7))}}}" },
+  ],
+  ...over,
+});
+const problemsOf = (tree: ServerTree) => checkServerTree(tree).problems.join("\n");
+{
+  assert.deepEqual(requestedChunks("b.X(0,[95873,10641],()=>b(b.s=96203))"), { startup: [95873, 10641], async: [] });
+  assert.deepEqual(
+    requestedChunks("await Promise.all([c.e(4410),c.e(86802)]).then(c.bind(c,36927));await c.e(46041).then(c.bind(c,46041))"),
+    { startup: [], async: [4410, 86802, 46041] },
+  );
+  assert.deepEqual(requestedChunks("x.e(5)+1;Math.e(2)*3"), { startup: [], async: [] }, "a .e(n) that is not a chunk load is ignored");
+  const scan = scanRuntime("webpack-runtime.js", patchedRuntime([1, 2, 3]));
+  assert.equal(scan.patched, true);
+  assert.deepEqual([...scan.cases.keys()], [1, 2, 3]);
+  assert.deepEqual(scan.selfIds, [900]);
+
+  const good = checkServerTree(fixtureTree());
+  assert.equal(good.ok, true, good.problems.join("\n"));
+  assert.match(good.summary, /3 chunk files.*3 chunk ids requested by 1 entry startup lists and 1 async loads/);
+
+  // Mutation: a chunk dropped from the switch is named, as a file and as a request.
+  const dropped = problemsOf(fixtureTree({ runtimes: [{ file: "webpack-runtime.js", source: patchedRuntime([1, 2]) }] }));
+  assert.match(dropped, /chunk 3: chunks\/3\.js is not inlined in webpack-runtime\.js/);
+  assert.match(dropped, /chunk 3: requested by chunks\/2\.js \(async\) but not inlined in webpack-runtime\.js/);
+  // Mutation: a fake async chunk id is named, with no case and no file.
+  const fake = problemsOf(
+    fixtureTree({ sources: [...fixtureTree().sources, { file: "chunks/1.js", source: "await c.e(42).then(c.bind(c,8))" }] }),
+  );
+  assert.match(fake, /chunk 42: requested by chunks\/1\.js \(async\) but not inlined/);
+  assert.match(fake, /chunk 42: requested by chunks\/1\.js \(async\) but chunks\/42\.js does not exist/);
+  // Mutation: a startup chunk with no case breaks a route on its first request.
+  const startupGap = problemsOf(
+    fixtureTree({ sources: [{ file: "app/x/page.js", source: "t.X(0,[1,77],()=>a(1))" }, fixtureTree().sources[1]] }),
+  );
+  assert.match(startupGap, /chunk 77: requested by app\/x\/page\.js \(startup\) but not inlined/);
+  // Mutation: a named chunk file is skipped by OpenNext's /^\d+\.js$/ patch.
+  assert.match(problemsOf(fixtureTree({ chunkFiles: ["1.js", "2.js", "3.js", "shared.js"] })), /chunks\/shared\.js: not a numeric chunk name/);
+  // Mutation: an unpatched runtime still holds the dynamic require workerd cannot run.
+  const unpatched = problemsOf(
+    fixtureTree({ runtimes: [{ file: "webpack-runtime.js", source: 'c.f.require=(d,e)=>{a[d]||(900!=d?b(require("./chunks/"+c.u(d))):a[d]=1)}' }] }),
+  );
+  assert.match(unpatched, /no Unknown-chunk switch/);
+  assert.match(unpatched, /still loads chunks with require\("\.\/chunks\/" \+ \.\.\.\)/);
+  // An empty scan is a failure, not a pass.
+  const empty = problemsOf(fixtureTree({ sources: [] }));
+  assert.match(empty, /found no entry startup list/);
+  assert.match(empty, /found no async chunk load/);
+
+  // The script's exit codes on a real directory tree.
+  const scratch = mkdtempSync(path.join(tmpdir(), "worker-chunks-"));
+  try {
+    const server = path.join(scratch, "server");
+    mkdirSync(path.join(server, "chunks"), { recursive: true });
+    mkdirSync(path.join(server, "app"), { recursive: true });
+    writeFileSync(path.join(server, "webpack-runtime.js"), patchedRuntime([1, 2, 3]));
+    for (const id of [1, 2, 3]) writeFileSync(path.join(server, "chunks", `${id}.js`), id === 2 ? fixtureTree().sources[1].source : "exports.modules={}");
+    writeFileSync(path.join(server, "app", "page.js"), fixtureTree().sources[0].source);
+    writeFileSync(path.join(server, "app", "page_client-reference-manifest.js"), "c.e(999).then(x)"); // manifests are not scanned
+    const run = () =>
+      spawnSync(process.execPath, ["--import", "tsx", "scripts/check-worker-chunks.ts", server], { cwd: root, encoding: "utf8" });
+    const pass = run();
+    assert.equal(pass.status, 0, pass.stderr);
+    assert.match(pass.stdout, /every one is inlined/);
+    writeFileSync(path.join(server, "webpack-runtime.js"), patchedRuntime([1, 2]));
+    const fail = run();
+    assert.equal(fail.status, 1, "a chunk missing from the switch exits 1");
+    assert.match(fail.stderr, /chunk 3: chunks\/3\.js is not inlined/);
+    assert.equal(
+      spawnSync(process.execPath, ["--import", "tsx", "scripts/check-worker-chunks.ts", path.join(scratch, "missing")], { cwd: root }).status,
+      1,
+      "a missing server tree exits 1",
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+// -- scripts/check-worker-runtime.ts: the pieces that decide pass or fail --
+{
+  for (const line of [
+    "Error: Unknown chunk 29147",
+    "Error: Cannot find module './chunks/1.js'",
+    "TypeError: Cannot read properties of undefined (reading 'call')",
+    "TypeError: (0 , n.getSessionUser) is not a function",
+    "ChunkLoadError: Loading chunk 123 failed.",
+    'Error: No such module "node:foo"',
+    'Error: Dynamic require of "x" is not supported',
+  ]) {
+    assert.ok(CHUNK_FAILURE.test(line), `a load failure is caught: ${line}`);
+  }
+  for (const line of [
+    "Error: Turso misconfigured: set TURSO_DB_PATH (local file) or TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN).",
+    "[wrangler:info] POST /api/chat 500 Internal Server Error (12ms)",
+    "TypeError: fetch failed",
+  ]) {
+    assert.ok(!CHUNK_FAILURE.test(line), `an expected no-database failure is not a load failure: ${line}`);
+  }
+  assert.deepEqual(chunkFailureLines("ok\nError: Unknown chunk 7\nfine"), ["Error: Unknown chunk 7"]);
+  // REACHED_DATABASE must match what lib/turso.ts actually throws with no database configured.
+  const tursoSource = readFileSync(path.join(root, "lib/turso.ts"), "utf8");
+  const thrown = /throw new Error\(\s*"([^"]+)"/.exec(tursoSource);
+  assert.ok(thrown && REACHED_DATABASE.test(thrown[1]), "the database-step marker no longer matches getTursoClient()'s error");
+
+  // The self-test's mutation, on the shape esbuild writes into handler.mjs.
+  const handler = "switch(d2){case 10641:b2(require__());break;case 10784:b2(require__2());break;case 77311:a2[d2]=1;break;default:throw new Error(`Unknown chunk ${d2}`)}";
+  const cut = removeChunkCase(handler, 10784);
+  assert.equal(cut.removed, 1);
+  assert.ok(cut.source.includes("case -10784:b2(require__2());"), "the case is moved out of reach");
+  assert.ok(cut.source.includes("case 10641:b2(require__());") && cut.source.includes("case 77311:a2[d2]=1;"), "nothing else changes");
+  assert.equal(removeChunkCase(handler, 999).removed, 0, "an id with no inlined case reports 0, so the self-test fails loudly");
+}
+
+// -- ci.yml runs both gates on the built Worker --
+{
+  const ci = readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8").replace(/\r\n/g, "\n");
+  const steps = ci.split(/\n      - /);
+  const stepRunning = (command: string) => steps.find((s) => s.split("\n").some((l) => l.trim() === `run: ${command}`));
+  const chunks = stepRunning("node --import tsx scripts/check-worker-chunks.ts .open-next/server-functions/default/.next/server");
+  const runtime = stepRunning("node --import tsx scripts/check-worker-runtime.ts");
+  assert.ok(chunks, "ci.yml runs the chunk check on the server tree OpenNext bundled");
+  assert.ok(runtime, "ci.yml runs the built Worker under workerd");
+  assert.match(runtime!, /timeout-minutes: \d+/, "the runtime gate has its own timeout");
+  const build = ci.indexOf("run: npx opennextjs-cloudflare build");
+  assert.ok(build > 0 && ci.indexOf(chunks!) > build && ci.indexOf(runtime!) > build, "both gates run after the OpenNext build");
+  assert.ok(!/continue-on-error/.test(chunks!) && !/continue-on-error/.test(runtime!), "neither gate is allowed to fail softly");
+}
+
+// -- the gate's session cookie is one the app's own middleware accepts --
+async function sessionChecks(): Promise<void> {
+  const secret = "s".repeat(64);
+  const cookie = mintSession(secret);
+  const edge = await verifySessionEdge(cookie, secret);
+  assert.ok(edge && edge.email === "worker-runtime-gate@example.invalid" && edge.onb === "done", "middleware's check accepts the gate's cookie");
+  assert.equal(await verifySessionEdge(cookie, "t".repeat(64)), null, "and refuses it under another secret");
+  assert.equal(await verifySessionEdge(mintSession(secret, Date.now() - 2 * 3600_000), secret), null, "an expired cookie is refused");
+}
+
+sessionChecks().then(
+  () => console.log("worker-bundle-checks: all passed"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);
