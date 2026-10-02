@@ -355,7 +355,7 @@ export type CorpusLabel = (typeof CORPUS_LABELS)[number];
 export const CORPUS_LABEL_COPY: Record<CorpusLabel, { title: string; help: string }> = {
   exemplar: {
     title: "Do more of this",
-    help: "Maven should treat this as a model to work toward.",
+    help: "The marketing agent treats this as a model to work toward.",
   },
   counter_example: {
     title: "Never do this",

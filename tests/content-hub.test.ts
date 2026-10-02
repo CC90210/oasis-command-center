@@ -3,7 +3,7 @@
  * OS shell (2026-10-01): ContentTabs, its layout, the breadcrumb alias, the
  * hidden founders banner, and one name for the hub.
  *
- *   1. ContentTabs lists Overview · Library · Train · Performance in that
+ *   1. ContentTabs lists Overview · Library · Training · Performance in that
  *      order, each a founders page that gates itself; the active tab is the
  *      longest matching one, Overview only on its exact path (an asset page
  *      lights no tab); every tab is a Link with aria-current on the active one;
@@ -156,9 +156,11 @@ async function main() {
   const { foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
 
   // ── 1. the tabs ──────────────────────────────────────────────────────────
-  await check("ContentTabs: Overview · Library · Train · Performance, each a founders page that gates itself", () => {
+  await check("ContentTabs: Overview · Library · Training · Performance, each a founders page that gates itself", () => {
     assert.equal(CONTENT_ROOT, "/founders/marketing");
-    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Train", "Performance"]);
+    // "Training", a noun, since 2026-10-01 ("Train" left CC asking what it did);
+    // the route stays /train so no link or bookmark breaks.
+    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Training", "Performance"]);
     assert.deepEqual(
       CONTENT_TABS.map((t) => t.href),
       [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/train`, `${CONTENT_ROOT}/performance`],
@@ -310,7 +312,7 @@ async function main() {
     assert.match(overview, /title: "Content · OASIS"/, "the Overview's <title>");
     assert.match(overview, /<PageHeader\s+title="Content"/, "the Overview's <h1>");
     assert.match(code("app/founders/marketing/library/page.tsx"), /title: "Library · Content · OASIS"/);
-    assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Train · Content · OASIS"/);
+    assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Training · Content · OASIS"/);
     for (const page of ["app/founders/marketing/library/page.tsx", "app/founders/marketing/performance/page.tsx"]) {
       assert.match(code(page), /href="\/founders\/marketing"[^>]*>\s*Back to Content\s*<\/Link>/, `${page}: the back link says Content`);
     }

@@ -105,6 +105,17 @@ stub("next/link", {
   default: ({ href, children, ...rest }: { href: string; children?: unknown }) =>
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
+// The add box is a client component (useState): mounted, never rendered here.
+{
+  const p = join(__dirname, "..", "components/founders/TrainDropzone.tsx");
+  require.cache[p] = {
+    id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [],
+    exports: { TrainDropzone: () => ReactNS.createElement("train-dropzone") },
+  } as unknown as NodeModule;
+}
+
+/** Internal persona names, never on a page a founder or client reads (build rules). */
+const PERSONA = /\b(?:Bravo|Maven|Atlas|Aura|Hermes|Lex|Conaugh)\b|\b(?:she|her)\b/i;
 
 // ── a tiny server renderer ────────────────────────────────────────────────
 // Resolves function and async components. With `stopAtSuspense`, a boundary is
@@ -174,6 +185,9 @@ async function main() {
       engagement_rate REAL NOT NULL DEFAULT 0, avg_watch_s REAL, duration_s REAL,
       content_excerpt TEXT, published_at TEXT, last_synced_at TEXT NOT NULL, measured_at TEXT);
     CREATE INDEX idx_post_analytics_published ON post_analytics (tenant_id, published_at DESC);
+    CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL,
+      label TEXT NOT NULL, title TEXT, source_url TEXT, state TEXT NOT NULL, last_error TEXT,
+      contributed_by TEXT NOT NULL, created_at TEXT NOT NULL, indexed_at TEXT);
   `);
   const pa = (id: string, tenant: string, platform: string, views: number, likes: number, measured: boolean, days: number) => ({
     sql: `INSERT INTO post_analytics (id, tenant_id, zernio_post_id, platform_post_id, platform, views, likes,
@@ -195,6 +209,13 @@ async function main() {
       pa("a3", OASIS, "youtube", 0, 0, false, 0), // dispatched, not measured yet
       pa("a4", OASIS, "instagram", 50_000, 9, true, 45), // outside the 30-day window
       pa("b1", OTHER, "instagram", 99_999, 99, true, 1), // another tenant
+      {
+        sql: `INSERT INTO marketing_corpus (id, tenant_id, kind, label, title, source_url, state, contributed_by, created_at, indexed_at)
+              VALUES ('c1', ?, 'link', 'exemplar', 'A reel that works', 'https://www.instagram.com/reel/abc/', 'indexed', ?, ?, ?),
+                     ('c2', ?, 'link', 'counter_example', NULL, 'https://example.com/bad-ad', 'queued', ?, ?, NULL),
+                     ('c9', ?, 'link', 'exemplar', 'Not ours', 'https://example.com/x', 'indexed', 'x', ?, ?)`,
+        args: [OASIS, CC.email, daysAgo(2), daysAgo(2), OASIS, CC.email, daysAgo(0), OTHER, daysAgo(1), daysAgo(1)],
+      },
     ],
     "write",
   );
@@ -255,11 +276,68 @@ async function main() {
     }
   });
 
+  // ── 3. Training: the add box with the frame, the contents streamed ───────
+  const { default: TrainPage } = await import("../app/founders/marketing/train/page");
+  await check("Training renders its frame and the add box with no corpus read; the counts and the list stream behind one boundary", async () => {
+    statements.length = 0;
+    const frame = await resolve(await TrainPage(), true);
+    assert.deepEqual(statements.filter((s) => /marketing_corpus/.test(s)), [], "nothing waits on the corpus read");
+    assert.ok(hosts(frame).some((h) => h.type === "train-dropzone"), "the add box is in the frame");
+    const boundaries = hosts(frame).filter((h) => h.type === "suspense");
+    assert.equal(boundaries.length, 1);
+    assert.doesNotMatch(textOf(boundaries[0].props.fallback), /\d/, "no number in a placeholder");
+    statements.length = 0;
+    const contents = textOf(await resolve(boundaries[0].props.pending, false));
+    assert.ok(statements.some((s) => /marketing_corpus/.test(s)), "the boundary does the reading");
+    assert.match(contents, /Learned1/, "one learned, this tenant only");
+    assert.match(contents, /Being read1/);
+    assert.match(contents, /Never do this1/);
+    assert.match(contents, /What is in it/);
+    assert.match(contents, /A reel that works/);
+    assert.doesNotMatch(contents, /Not ours/, "another tenant's material");
+  });
+
+  await check("Training says, in plain words, what it is, what is in it and how to add to it; no persona name; Tools has its place above it", async () => {
+    const text = textOf(await resolve(await TrainPage(), false));
+    assert.match(text, /what the marketing agent learns from/i, "what it is");
+    assert.match(text, /reels, TikToks, YouTube\s+videos, GitHub repos and articles/, "what goes in it");
+    assert.match(text, /Every five minutes a background job reads each new link/, "what happens to it (the Training Corpus Ingest job's schedule)");
+    assert.match(text, /Add examples/);
+    assert.match(text, /Paste or drop links/, "how to add to it");
+    assert.match(text, /Do more of this, Never do this, or Just context/);
+    assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the page: ${text.match(PERSONA)?.[0]}`);
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(join(__dirname, "..", "app/founders/marketing/train/page.tsx"), "utf8");
+    const tools = src.indexOf("TOOLS: the Train tools track");
+    const material = src.indexOf('aria-labelledby="training-material"');
+    assert.ok(tools > 0 && material > tools, "the Tools place is marked, above the training material section");
+    const { CORPUS_LABEL_COPY } = await import("../lib/founders/ingest-core");
+    for (const [k, v] of Object.entries(CORPUS_LABEL_COPY)) {
+      assert.doesNotMatch(`${v.title} ${v.help}`, PERSONA, `label ${k} names a persona`);
+    }
+  });
+
+  await check("a failed corpus read says it could not read the material, never 'nothing in it yet'", async () => {
+    // A broken read, not a missing table (that one is the honest pre-migration
+    // empty): a table of the same name without the columns the read selects.
+    await raw.execute("ALTER TABLE marketing_corpus RENAME TO marketing_corpus_away");
+    await raw.execute("CREATE TABLE marketing_corpus (id TEXT PRIMARY KEY, tenant_id TEXT)");
+    try {
+      const text = textOf(await resolve(await TrainPage(), false));
+      assert.match(text, /Couldn't read the training material/);
+      assert.doesNotMatch(text, /Nothing in it yet/);
+    } finally {
+      await raw.execute("DROP TABLE marketing_corpus");
+      await raw.execute("ALTER TABLE marketing_corpus_away RENAME TO marketing_corpus");
+    }
+  });
+
   // ── 2. the budget ────────────────────────────────────────────────────────
   // `fetches` has counted since the process started, so this covers every
-  // render above (frame, numbers, the failure path) and one more full one.
-  await check("no fetch() at all while Performance renders: frame, numbers and the failure path", async () => {
+  // render above (frame, numbers, the failure paths) and one more full one.
+  await check("no fetch() at all while Performance or Training renders: frames, numbers and the failure paths", async () => {
     await resolve(await PerformancePage(), false);
+    await resolve(await TrainPage(), false);
     assert.deepEqual(fetches, [], "a page render reached the network outside its database");
   });
 

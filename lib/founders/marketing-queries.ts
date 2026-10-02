@@ -1215,23 +1215,31 @@ export type CorpusStats = {
   failed: number;
   exemplars: number;
   counter_examples: number;
+  /**
+   * True when the read FAILED, as opposed to the corpus being empty: the
+   * Training tab and the Content overview's Training card then say they could
+   * not read it instead of "nothing yet". Same reason as MarketingSummary.degraded.
+   */
+  degraded: boolean;
 };
 
 export const EMPTY_CORPUS_STATS: CorpusStats = {
   total: 0, queued: 0, extracting: 0, indexed: 0, failed: 0,
-  exemplars: 0, counter_examples: 0,
+  exemplars: 0, counter_examples: 0, degraded: false,
 };
 
-/** Counts for the Train screen. Never throws; pre-migration returns zeroes. */
+/**
+ * Counts for the Training tab and the overview's Training card. Never throws;
+ * pre-migration (no table) returns honest zeroes, any other failure is degraded.
+ */
 export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
   if (!tenantId) return EMPTY_CORPUS_STATS;
   try {
     const db = getServiceSupabase();
     const r = await db.from("marketing_corpus").select("state, label").eq("tenant_id", tenantId);
-    if (r.error) {
-      quiet("corpus.stats", r.error);
-      return EMPTY_CORPUS_STATS;
-    }
+    const verdict = classify("corpus.stats", r.error);
+    if (verdict === "absent") return EMPTY_CORPUS_STATS;
+    if (verdict === "broken") return { ...EMPTY_CORPUS_STATS, degraded: true };
     const rows = (r.data || []) as Array<{ state: string; label: string }>;
     return {
       total: rows.length,
@@ -1241,10 +1249,11 @@ export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
       failed: rows.filter((x) => x.state === "failed").length,
       exemplars: rows.filter((x) => x.label === "exemplar").length,
       counter_examples: rows.filter((x) => x.label === "counter_example").length,
+      degraded: false,
     };
   } catch (e) {
     console.warn("[marketing:corpus.stats] unexpected", e);
-    return EMPTY_CORPUS_STATS;
+    return { ...EMPTY_CORPUS_STATS, degraded: true };
   }
 }
 
