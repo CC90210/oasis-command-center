@@ -2,7 +2,8 @@
 
 /**
  * Settings > Brand: the form where a workspace's owner or admin registers the
- * identity its email goes out under (POST /api/settings/sender).
+ * identity its email goes out under (saveSenderIdentity, the Brand page's
+ * server action in app/settings/brand/actions.ts).
  *
  * The status line is what the server found, never a guess made here: the page
  * renders it from the live mailbox check, and a save replaces it with the
@@ -18,6 +19,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { saveSenderIdentity } from "@/app/settings/brand/actions";
 
 export type SenderFormValues = {
   display_name: string;
@@ -66,22 +68,12 @@ export function TenantSenderForm({
     setSaved(null);
     setError(null);
     try {
-      const r = await fetch("/api/settings/sender", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
-      });
-      const body = (await r.json().catch(() => ({}))) as {
-        ok?: boolean;
-        message?: string;
-        field?: Field | null;
-        status?: SenderFormStatus;
-      };
-      if (!r.ok || !body.ok) {
-        setError({ message: body.message || "The sending identity couldn't be saved. Try again.", field: body.field ?? null });
+      const result = await saveSenderIdentity(values);
+      if (!result.ok) {
+        setError({ message: result.message, field: result.field ?? null });
         return;
       }
-      if (body.status) setStatus(body.status);
+      setStatus(result.status);
       setSaved("Saved.");
       router.refresh();
     } catch {

@@ -8,7 +8,7 @@
  *
  * Every other workspace registers its OWN identity here (2026-10-02): the
  * business name, legal name, postal address and sending address its email goes
- * out under (lib/email/tenant-sender.ts, POST /api/settings/sender). The status
+ * out under (lib/email/tenant-sender.ts, saved by ./actions.ts). The status
  * line is the live check of the sending address against this workspace's own
  * connected mailboxes, and says exactly what is missing until it passes. It is
  * never somebody else's name, and never a placeholder that looks configured.

@@ -18,9 +18,10 @@
  *     override them);
  *   - the footer names the workspace's legal name, postal address, an address
  *     that reaches it, and the reader's opt-out link, and nothing of OASIS's;
- *   - POST /api/settings/sender writes for the session's workspace only (a
- *     tenant in the body is ignored), refuses members below owner/admin and
- *     OASIS's fixed workspaces, and writes its audit row in the same batch;
+ *   - the Brand page's save (a server action, app/settings/brand/actions.ts)
+ *     writes for the session's workspace only (a tenant in the input is
+ *     ignored), refuses members below owner/admin and OASIS's fixed
+ *     workspaces, and writes its audit row in the same batch;
  *   - before bravo__202 is applied: "not set up yet", and a save changes nothing;
  *   - Settings > Brand shows the form and the live status for a client, and the
  *     read-only identity for OASIS.
@@ -176,19 +177,13 @@ async function main() {
   const { brandForTenant, mailboxBrandConflict, isReservedSendingDomain } = await import("../lib/email/brand-for-tenant");
   const { ALL_BRAND_KEYS, getBrand } = await import("../lib/email/brands");
   const { appendSignatureAndFooter, tenantSenderFooter } = await import("../lib/config/email-signature");
-  const route = await import("../app/api/settings/sender/route");
+  const { saveSenderIdentity } = await import("../app/settings/brand/actions");
   const { default: SettingsBrandPage } = await import("../app/settings/brand/page");
 
   const count = async (sql: string, args: unknown[] = []) =>
     Number((await db.execute({ sql, args: args as never })).rows[0]?.[0] ?? 0);
-  const post = async (body: unknown) => {
-    const res = await route.POST(new Request("https://oasisai.work/api/settings/sender", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: typeof body === "string" ? body : JSON.stringify(body),
-    }) as never);
-    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
-  };
+  /** The Brand page's save, exactly as the form calls it. */
+  const save = async (input: unknown) => (await saveSenderIdentity(input)) as Record<string, unknown>;
 
   // Stored keys exactly as the Connections drawer and its Test write them.
   const T = "2026-10-02T12:00:00.000Z";
@@ -403,11 +398,11 @@ async function main() {
     assert.equal(sender.describeSender({ state: "not_set_up" }).label, "Not set up yet");
     await workspaceMailbox(A, "hello@alpha.test", { at: T, ok: 1 });
     signIn(A, "alpha", true);
-    const r = await post(good);
-    assert.equal(r.status, 503, JSON.stringify(r.body));
-    assert.equal(r.body.error, "not_set_up");
-    assert.match(String(r.body.message), /can't be saved yet/);
-    assert.doesNotMatch(String(r.body.message), /tenant_sender|bravo__|Turso|migration/i, "no internal names on screen");
+    const r = await save(good);
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.equal(r.error, "not_set_up");
+    assert.match(String(r.message), /can't be saved yet/);
+    assert.doesNotMatch(String(r.message), /tenant_sender|bravo__|Turso|migration/i, "no internal names on screen");
     assert.equal(await count("SELECT COUNT(*) FROM tenant_audit_log"), 0, "the audit row went with the failed batch");
   });
 
@@ -488,28 +483,29 @@ async function main() {
     assert.equal(sender.describeSender(lookup(row(), { verified: false, reason: "check_failed" })).label, "Couldn't check");
   });
 
-  // -- 7. POST /api/settings/sender -----------------------------------------
+  // -- 7. The Brand page's save (app/settings/brand/actions.ts) -------------
   await check("a member below owner/admin cannot save, and nothing is written", async () => {
     signIn(A, "alpha", false);
-    const r = await post(good);
-    assert.equal(r.status, 403);
-    assert.equal(r.body.error, "forbidden");
+    const r = await save(good);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "forbidden");
     assert.equal(await count("SELECT COUNT(*) FROM tenant_sender"), 0);
     viewer = { ok: false };
-    assert.equal((await post(good)).status, 401);
+    assert.equal((await save(good)).error, "not_signed_in");
+    assert.equal(await count("SELECT COUNT(*) FROM tenant_audit_log"), 0);
   });
-  await check("the owner saves for the session's workspace only: a tenant in the body is ignored", async () => {
+  await check("the owner saves for the session's workspace only: a tenant in the input is ignored", async () => {
     signIn(A, "alpha", true, "user-a-owner");
-    const r = await post({ ...good, tenant_id: E });
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(r.body.verified, true);
-    assert.deepEqual(r.body.status, {
+    const r = await save({ ...good, tenant_id: E });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.verified, true);
+    assert.deepEqual(r.status, {
       kind: "connected",
       label: "Verified through hello@alpha.test",
       detail: "hello@alpha.test is this workspace's Google Workspace mailbox, and its last test passed.",
     });
     assert.equal(await count("SELECT COUNT(*) FROM tenant_sender"), 1);
-    assert.equal(await count("SELECT COUNT(*) FROM tenant_sender WHERE tenant_id = ?", [E]), 0, "nothing for the tenant named in the body");
+    assert.equal(await count("SELECT COUNT(*) FROM tenant_sender WHERE tenant_id = ?", [E]), 0, "nothing for the tenant named in the input");
     const saved = (await db.execute({ sql: "SELECT * FROM tenant_sender WHERE tenant_id = ?", args: [A] })).rows[0] as unknown as Record<string, unknown>;
     assert.equal(saved.postal_address, "12 King St W, Suite 300, Toronto, ON M5H 1A1");
     assert.equal(saved.from_address, "hello@alpha.test");
@@ -528,8 +524,8 @@ async function main() {
   await check("a second save updates the row, keeps who created it, and audits the before and after", async () => {
     signIn(A, "alpha", true, "user-a-admin");
     const created = (await db.execute({ sql: "SELECT created_at, created_by FROM tenant_sender WHERE tenant_id = ?", args: [A] })).rows[0] as unknown as Record<string, unknown>;
-    const r = await post({ ...good, display_name: "Alpha Plumbing & Heating", reply_to: "Office@Alpha.test" });
-    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const r = await save({ ...good, display_name: "Alpha Plumbing & Heating", reply_to: "Office@Alpha.test" });
+    assert.equal(r.ok, true, JSON.stringify(r));
     const now = (await db.execute({ sql: "SELECT * FROM tenant_sender WHERE tenant_id = ?", args: [A] })).rows[0] as unknown as Record<string, unknown>;
     assert.equal(now.display_name, "Alpha Plumbing & Heating");
     assert.equal(now.reply_to, "office@alpha.test");
@@ -542,33 +538,37 @@ async function main() {
   });
   await check("an invalid save is refused with the field, and changes nothing", async () => {
     const audits = await count("SELECT COUNT(*) FROM tenant_audit_log");
-    const r = await post({ ...good, postal_address: "" });
-    assert.equal(r.status, 400);
-    assert.equal(r.body.field, "postal_address");
+    const r = await save({ ...good, postal_address: "" });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "invalid_field");
+    assert.equal(r.field, "postal_address");
     assert.equal(await count("SELECT COUNT(*) FROM tenant_audit_log"), audits);
-    assert.equal((await post("{not json")).status, 400);
+    const notAForm = await save("{not a form");
+    assert.equal(notAForm.ok, false);
+    assert.equal(notAForm.error, "invalid_field");
+    assert.equal(await count("SELECT COUNT(*) FROM tenant_audit_log"), audits);
   });
-  await check("OASIS's own workspace keeps its fixed identity: the route refuses to store one", async () => {
+  await check("OASIS's own workspace keeps its fixed identity: the save refuses to store one", async () => {
     signIn(OASIS, "oasis-ai-cc", true);
-    const r = await post({ ...good, from_address: "hello@alpha.test" });
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error, "identity_fixed");
+    const r = await save({ ...good, from_address: "hello@alpha.test" });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "identity_fixed");
     assert.equal(await count("SELECT COUNT(*) FROM tenant_sender WHERE tenant_id = ?", [OASIS]), 0);
   });
   await check("an unverified identity saves, and says exactly what is missing", async () => {
     signIn(E, "echo", true);
-    const r = await post({ ...good, from_address: "hello@echo.test" });
-    assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.equal(r.body.verified, false);
-    assert.deepEqual(r.body.status, {
+    const r = await save({ ...good, from_address: "hello@echo.test" });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.verified, false);
+    assert.deepEqual(r.status, {
       kind: "attention",
       label: "Not verified yet",
       detail: "Connect hello@echo.test in Settings > Connections > Google Workspace and press Test. Until then no email goes out under this identity.",
     });
     signIn(B, "bravo", true, "user-b-owner");
-    const viaGoogle = await post({ ...good, from_address: "owner@bravo.test" });
-    assert.equal(viaGoogle.body.verified, true);
-    assert.equal((viaGoogle.body.status as Record<string, unknown>).label, "Verified through owner@bravo.test");
+    const viaGoogle = await save({ ...good, from_address: "owner@bravo.test" });
+    assert.equal(viaGoogle.verified, true);
+    assert.equal((viaGoogle.status as Record<string, unknown>).label, "Verified through owner@bravo.test");
   });
 
   // -- 8. Read back: the brand every send path will use --------------------
@@ -627,6 +627,16 @@ async function main() {
   await check("a member below owner/admin never reaches the page", async () => {
     signIn(A, "alpha", false);
     await assert.rejects(SettingsBrandPage(), /404/);
+  });
+  await check("the save stays on the server: the action file is 'use server' and the form calls it, not a URL", () => {
+    // Without the directive, Next would bundle the save, and with it the
+    // database and decryption code, into the browser.
+    const action = readFileSync(join(ROOT, "app", "settings", "brand", "actions.ts"), "utf8");
+    assert.match(action, /^"use server";\r?\n/, "the directive must be the file's first statement");
+    const form = readFileSync(join(ROOT, "components", "settings", "TenantSenderForm.tsx"), "utf8");
+    assert.match(form, /^"use client";/);
+    assert.match(form, /import \{ saveSenderIdentity \} from "@\/app\/settings\/brand\/actions";/);
+    assert.doesNotMatch(form, /fetch\(/, "no second write path");
   });
 
   console.log(`\ntenant-sender.test.ts: ${passed} passed, ${failures} failed`);

@@ -34,8 +34,8 @@
  * TENANT ISOLATION. Every statement names the tenant in its WHERE clause, and
  * callers pass the tenant from the signed-in session, never from a request
  * body. OASIS's own workspaces and the retired client keep their fixed brands
- * (lib/email/brands.ts); app/api/settings/sender refuses to store a row for
- * them, and brandForTenant ignores one if it exists.
+ * (lib/email/brands.ts); the Brand page's save (app/settings/brand/actions.ts)
+ * refuses to store a row for them, and brandForTenant ignores one if it exists.
  *
  * Not to be confused with lib/email/sending-identity.ts, the environment-set
  * identity of OASIS's own drip mail.
@@ -470,6 +470,11 @@ export async function saveTenantSender(
 // --- what the owner reads ---------------------------------------------------
 
 export type SenderStatus = { kind: "connected" | "attention" | "not_connected" | "unknown"; label: string; detail: string };
+
+/** What the Brand page's save (app/settings/brand/actions.ts) answers the form. */
+export type SaveSenderResult =
+  | { ok: true; verified: boolean; status: SenderStatus }
+  | { ok: false; error: string; message: string; field?: SenderField | null };
 
 const CONNECT_PATH = "Settings > Connections > Google Workspace";
 

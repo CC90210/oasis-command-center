@@ -13,12 +13,12 @@
 -- address is REQUIRED, so it is NOT NULL and non-blank here as well as in the
 -- app.
 --
--- ONE ROW PER WORKSPACE (tenant_id is the key). Written only by
--- POST /api/settings/sender for the signed-in owner's or admin's own workspace
--- (lib/email/tenant-sender.ts saveTenantSender), in one batch with its
--- tenant_audit_log row. OASIS's own workspaces and the retired client keep the
--- fixed identities in lib/email/brands.ts; the route refuses to write a row
--- for them, so there is never a second source of truth for those.
+-- ONE ROW PER WORKSPACE (tenant_id is the key). Written only by the Settings >
+-- Brand save (app/settings/brand/actions.ts) for the signed-in owner's or
+-- admin's own workspace (lib/email/tenant-sender.ts saveTenantSender), in one
+-- batch with its tenant_audit_log row. OASIS's own workspaces and the retired
+-- client keep the fixed identities in lib/email/brands.ts; the save refuses to
+-- write a row for them, so there is never a second source of truth for those.
 --
 -- VERIFIED IS DECIDED LIVE, NOT STORED. from_address counts only while it is a
 -- mailbox this workspace proved it controls: its Google Workspace mailbox
