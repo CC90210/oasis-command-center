@@ -44,6 +44,7 @@ import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { getWorkspaceManifest } from "@/lib/manifest/loader";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
 import { departmentChannelFor } from "@/components/os/department/config";
@@ -215,8 +216,17 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   const tenant = await getTenant(job.tenantId);
   if (!tenant?.slug) throw new Error("slack.jobs: the workspace could not be read");
   const oasis = isOasisSurfaceTenant(tenant.slug);
+  // Who leads each department: the workspace's manifest, read the way the web
+  // channel reads it (config.ts departmentChannelFor). A read that fails
+  // THROWS, so the job is retried: a database that did not answer is never
+  // posted into the client's Slack as "<Department> is not set up" (W4a
+  // review R3). The slug too: resolveOwnedSlug answers a read that failed
+  // with null, so no slug is a retry, never an empty roster (W4a D1).
+  const tenantSlug = ((await resolveOwnedSlug(job.tenantId)) || "").toLowerCase();
+  if (!tenantSlug) throw new Error("slack.jobs: the workspace has no manifest slug");
+  const scope = { oasis, manifest: await getWorkspaceManifest(job.tenantId, tenantSlug) };
 
-  const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment, defaultDepartment: defaultMentionDepartment({ oasis }) });
+  const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment, defaultDepartment: defaultMentionDepartment(scope) });
   const dept = OS_DEPARTMENTS.find((d) => d.key === picked.department);
   if (!dept) return { outcome: "dropped", reason: "unknown_department" };
   const label = departmentLabelOf(dept.key);
@@ -229,12 +239,10 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
     return notice(deps, job, "empty_question", `Ask ${label} a question after the mention, in the same message.`);
   }
 
-  const binding = departmentChannelFor(dept.key, { oasis });
+  const binding = departmentChannelFor(dept.key, scope);
   if (binding.kind !== "agent") {
     return notice(deps, job, "department_not_set_up", `${label} is not set up in this workspace yet, so it cannot draft a reply.`);
   }
-  const tenantSlug = ((await resolveOwnedSlug(job.tenantId)) || "").toLowerCase();
-  if (!tenantSlug) throw new Error("slack.jobs: the workspace has no manifest slug");
 
   // The platform key bills OASIS: only when the person who @mentioned is the
   // verified platform operator (their Slack email linked to that teammate).

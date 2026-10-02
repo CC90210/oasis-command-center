@@ -11,9 +11,10 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { canonicalizeTenantMembers, getTenantMembers, isActiveMember, type MemberRow } from "@/lib/team";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
-import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
+import { AGENT_REGISTRY, isHouseAgentSlug, resolveAgentKey } from "@/lib/agents";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
-import { teammateNameFor } from "@/lib/os/teammate-names";
+import type { TenantManifest } from "@/lib/manifest/schema";
+import { teammateFor } from "@/lib/os/teammates";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export type ActivityActor = {
@@ -234,36 +235,36 @@ export function groupActivityRows(rows: ActivityRow[], windowMs = GROUP_WINDOW_M
 }
 
 /**
- * What the feed calls an agent: the department or job it has in THIS kind of
- * workspace (lib/os/teammate-names), never the persona slug behind it. A slug
- * that file does not know is one the workspace built itself, so it keeps the
- * name its owner gave it.
+ * What the feed calls an agent: its name on THIS workspace's roster (lib/os/
+ * teammates.ts: the manifest binding's display_name; a lead OASIS still runs
+ * on its static table is named for its departments), never the persona slug
+ * behind it. A house agent that is not on the roster (CC's own agents, an OASIS
+ * persona in another workspace's history) is "AI teammate". Any other slug is
+ * one the workspace built, so it keeps the name its owner gave it.
  */
 export function activityAgentLabel(
   slug: string,
-  binding: { display_name?: string | null; slug?: string } | undefined,
+  manifest: Pick<TenantManifest, "agents"> | null | undefined,
   oasis: boolean,
 ): string {
-  return teammateNameFor(slug, { oasis })?.name || binding?.display_name || binding?.slug || slug;
+  const teammate = teammateFor(slug, { oasis, manifest });
+  if (teammate) return teammate.name;
+  if (isHouseAgentSlug(slug)) return "AI teammate";
+  const key = slug.toLowerCase();
+  return manifest?.agents.find((a) => a.slug.toLowerCase() === key)?.display_name || slug;
 }
 
 async function loadTenantAgents(tenantId: string, oasis?: boolean): Promise<ActivityActor[]> {
   const manifest = await getTenantManifestForUser(tenantId).catch(() => null);
-  const bindings = manifest?.agents || [];
   const enabledSlugs = resolveEnabledAgentSlugs({
-    manifestAgents: manifest ? bindings : null,
+    manifestAgents: manifest ? manifest.agents || [] : null,
   });
   const scope = oasis ?? isOasisSurfaceTenant(manifest?.tenant_slug);
-  return enabledSlugs.map((slug) => {
-    const binding = bindings.find(
-      (agent) => resolveAgentKey(agent.slug.toLowerCase()) === slug,
-    );
-    return {
-      key: `agent:${slug}`,
-      label: activityAgentLabel(slug, binding, scope),
-      type: "agent" as const,
-    };
-  });
+  return enabledSlugs.map((slug) => ({
+    key: `agent:${slug}`,
+    label: activityAgentLabel(slug, manifest, scope),
+    type: "agent" as const,
+  }));
 }
 
 /** The lead's name as the pipeline shows it (lib/web-leads/data.ts), or null. */

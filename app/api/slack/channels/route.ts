@@ -26,6 +26,8 @@ import { findActiveConnection } from "@/lib/connections/store";
 import { readBotToken } from "@/lib/connections/token-store";
 import { channelInfo, listPublicChannels } from "@/lib/slack/client";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { getWorkspaceManifest } from "@/lib/manifest/loader";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import type { DepartmentKey } from "@/lib/os/types";
 import {
   answeringDepartments,
@@ -50,13 +52,23 @@ async function slackContext(tenantId: string, db: Parameters<typeof findActiveCo
   return conn;
 }
 
-/** The departments with an AI teammate in the session's workspace (lib/slack/routing.ts answeringDepartments). */
+/**
+ * The departments with an AI teammate in the session's workspace
+ * (lib/slack/routing.ts answeringDepartments): the leads its manifest binds,
+ * the same roster the web channels read. A manifest read that fails throws
+ * (routeFailure answers it), never "<Department> has no AI teammate" for a
+ * department that has one (W4a review R3). So does a manifest slug that did
+ * not resolve: resolveOwnedSlug answers a read that failed with null (W4a D1).
+ */
 async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection>[0], tenantId: string): Promise<DepartmentKey[]> {
   const rs = await db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   const row = rs.rows[0] as unknown as Record<string, unknown> | undefined;
   const slug = row?.slug ? String(row.slug) : "";
   if (!slug) throw new Error("api.slack.channels: the workspace's slug could not be read");
-  return answeringDepartments({ oasis: isOasisSurfaceTenant(slug) });
+  const manifestSlug = await resolveOwnedSlug(tenantId);
+  if (!manifestSlug) throw new Error("api.slack.channels: the workspace's manifest slug could not be read");
+  const manifest = await getWorkspaceManifest(tenantId, manifestSlug);
+  return answeringDepartments({ oasis: isOasisSurfaceTenant(slug), manifest });
 }
 
 export async function GET() {
