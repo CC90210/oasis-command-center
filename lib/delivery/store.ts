@@ -1605,11 +1605,11 @@ export async function addTicketComment(
       }),
     )[0];
     if (written) return { ok: true, comment: mapComment(written), firstResponse: false, reopened: false, existing: true };
-    const now2 = rows(
+    const ticketNow = rows(
       await db.execute({ sql: "SELECT status FROM support_tickets WHERE tenant_id = ? AND id = ?", args: [tenantId, ticketId] }),
     )[0];
-    if (!now2) return { ok: false, status: 404, error: "not_found" };
-    if (isClient && String(now2.status) === "closed") return { ok: false, status: 409, error: "ticket_closed" };
+    if (!ticketNow) return { ok: false, status: 404, error: "not_found" };
+    if (isClient && String(ticketNow.status) === "closed") return { ok: false, status: 409, error: "ticket_closed" };
     if (input.guard) return { ok: false, status: 409, error: "superseded" };
     throw new Error(`addTicketComment: comment ${id} was not written on ticket ${ticketId} and nothing explains why`);
   }
