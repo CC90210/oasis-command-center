@@ -101,13 +101,34 @@ function renderedTitles(node: unknown, out: string[] = [], seen = new Set<unknow
       const rendered = (el.type as (p: unknown) => unknown)(el.props);
       if (!(rendered instanceof Promise)) renderedTitles(rendered, out, seen);
     } catch {
-      /* a client component: it renders in the browser */
+      // A client component renders in the browser. The server-rendered
+      // ELEMENTS it is handed (the Clients list's rows, which it shows by
+      // status) reach the page as rendered here, so those are walked; plain
+      // data among its props is not an element and is skipped below.
+      for (const v of Object.values(el.props)) renderedTitles(v, out, seen);
     }
     return out;
   }
   if (typeof el.props.title === "string") out.push(el.props.title);
   renderedTitles(el.props.children, out, seen);
   return out;
+}
+
+/** The first element of `type` anywhere in a page's element tree (props and children), not rendering anything. */
+function findElement(node: unknown, type: unknown, seen = new Set<unknown>()): { props: Record<string, unknown> } | null {
+  if (node === null || typeof node !== "object" || seen.has(node)) return null;
+  seen.add(node);
+  const kids = Array.isArray(node) ? node : (node as { $$typeof?: symbol }).$$typeof ? null : Object.values(node as object);
+  if (kids) {
+    for (const v of kids) {
+      const found = findElement(v, type, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+  const el = node as { type?: unknown; props?: Record<string, unknown> };
+  if (el.type === type && el.props) return el as { props: Record<string, unknown> };
+  return el.props ? findElement(Object.values(el.props), type, seen) : null;
 }
 
 const MIG = (f: string) => readFileSync(join(__dirname, "..", "database", "turso", f), "utf8");
@@ -266,6 +287,7 @@ async function main() {
   });
   const ClientRecordPage = (await import("../app/clients/[id]/page")).default;
   const ClientsPage = (await import("../app/clients/page")).default;
+  const clientsStatus = await import("../components/os/landings/clients-status");
   const record = (id: string, tab?: string) =>
     ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
   const page = async (el: Promise<unknown>) => textOf(await el).join("\n");
@@ -898,9 +920,17 @@ async function main() {
     assert.equal(r2.body.changed, false);
     assert.equal((await store.getCustomer(db, OASIS, Y.id))!.lifecycle, "churned");
     assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'customer.churned' AND customer_id = ?", [Y.id]), 1);
-    const list = await page(ClientsPage({ searchParams: Promise.resolve({}) }));
-    const past = list.indexOf("Past clients");
-    assert.ok(past > 0 && list.indexOf("Other Client") > past, "Y is listed under Past clients");
+    // The list splits Past from current clients in the browser, from the rows
+    // the page hands it (components/os/landings/clients-status.tsx): grouped
+    // by the same rowsForStatus, Y is under Past clients and not above it.
+    const listed = findElement(await ClientsPage({ searchParams: Promise.resolve({}) }), clientsStatus.ClientsByStatus);
+    assert.ok(listed, "the list is rendered through ClientsByStatus");
+    const lifecycles = listed.props.lifecycles as Parameters<typeof clientsStatus.rowsForStatus>[0];
+    const rowEls = listed.props.rows as unknown[];
+    const { current, past } = clientsStatus.rowsForStatus(lifecycles, "");
+    const said = (idx: number[]) => idx.map((i) => textOf(rowEls[i]).join("\n")).join("\n");
+    assert.match(said(past), /Other Client/, "Y is listed under Past clients");
+    assert.doesNotMatch(said(current), /Other Client/, "and not among the current clients");
     assert.equal((await call(endRoute.POST(req("POST", `/api/clients/${A.id}/end-engagement`), params({ id: A.id })))).status, 404, "not OASIS's");
   });
   await check("a Status edit into Past records customer.churned, and back out customer.reactivated, each naming the person who made it", async () => {
@@ -1359,6 +1389,12 @@ async function main() {
     try {
       await login(USERS.cc);
       assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, null);
+      // The list's retired-business guard reads client_tenant_id; without the
+      // column no record can name a workspace, and the list still reads.
+      assert.ok((await store.listCustomers(db, OASIS, {})).rows.some((r) => r.display_name === "Quiet Co"), "the list reads without bravo__195");
+      const list = await page(ClientsPage({ searchParams: Promise.resolve({}) }));
+      assert.doesNotMatch(list, /Couldn.t load your client records/);
+      assert.match(list, /Quiet Co/);
       assert.match(await page(record(X.id, "usage")), /Not linked to the client/);
       const r = await call(linkRoute.POST(req("POST", `/api/clients/${Y.id}/link-workspace`, { client_tenant_id: CLIENT_B, confirmed: true }), params({ id: Y.id })));
       assert.equal(r.status, 503, JSON.stringify(r.body));

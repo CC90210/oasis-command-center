@@ -64,7 +64,12 @@ async function attempt<T>(label: string, fn: () => Promise<T>): Promise<Loaded<T
   try {
     return { state: "ok", value: await fn() };
   } catch (err) {
-    if (isMissingCustomersSchema(err)) return { state: "not_set_up" };
+    if (isMissingCustomersSchema(err)) {
+      // The pages say only "Client records aren't available right now"; the
+      // reason is here, for whoever reads the log.
+      console.error(`[os.clients.${label}] client records are not set up: migration bravo__188 is not applied`, err);
+      return { state: "not_set_up" };
+    }
     console.error(`[os.clients.${label}]`, err);
     return { state: "error" };
   }
@@ -213,6 +218,77 @@ export const CLIENT_TABS: ReadonlyArray<{ key: ClientTab; label: string }> = [
   { key: "health", label: "Health" },
   { key: "files", label: "Files" },
 ];
+
+/**
+ * The tabs this viewer's record can ever show something on. Money is OASIS's
+ * books: in any other workspace moneyAccessFor answers "not_tracked", so the
+ * tab could only say so, and it is left out. Usage is how OASIS sees a
+ * client's own workspace, so it exists only in OASIS's workspace. PURE.
+ */
+export function clientTabsFor(viewer: Pick<ClientsViewer, "tenantId" | "oasis">): ReadonlyArray<{ key: ClientTab; label: string }> {
+  return CLIENT_TABS.filter((t) => {
+    if (t.key === "money") return viewer.tenantId === DELIVERY_TENANT_ID;
+    if (t.key === "usage") return viewer.oasis;
+    return true;
+  });
+}
+
+/** The tab a ?tab= value opens: one of `tabs`, else Overview (a ?tab=money link in a client workspace included). PURE. */
+export function resolveClientTab(param: string | null | undefined, tabs: ReadonlyArray<{ key: ClientTab }>): ClientTab {
+  return tabs.find((t) => t.key === param)?.key ?? "overview";
+}
+
+/** What the record's header shows on every tab: the record, the projects its New ticket form links, its health. */
+export type ClientHeaderData = {
+  customer: Customer;
+  projects: Loaded<{ rows: Project[]; truncated: boolean }>;
+  health: Health;
+};
+
+/**
+ * The record's header (app/clients/[id]/layout.tsx), read once per record
+ * rather than once per tab: a tab switch re-renders only the tab below it.
+ * Null when the id is not a client of THIS workspace.
+ */
+export async function loadClientHeader(
+  viewer: ClientsViewer,
+  id: string,
+  opts: { now?: Date } = {},
+): Promise<Loaded<ClientHeaderData | null>> {
+  if (!viewer.canRead) return { state: "not_allowed" };
+  const now = opts.now ?? new Date();
+  const head = await attempt("record", async () => getCustomer(dbOrThrow(), viewer.tenantId, id));
+  if (head.state !== "ok") return head;
+  const customer = head.value;
+  if (!customer) return { state: "ok", value: null };
+  const db = dbOrThrow();
+  const desk = viewer.desk;
+  const deskOnly = <T,>(label: string, fn: () => Promise<T>): Promise<Loaded<T>> =>
+    desk ? attempt(label, fn) : Promise.resolve({ state: "not_allowed" });
+  const moneyAccess = await moneyAccessFor(viewer);
+  const [projects, lastTouch, deskSignals, moneySignals] = await Promise.all([
+    deskOnly("projects", () => listProjects(db, desk!, { customer_id: customer.id, includeArchived: true })),
+    deskOnly("last_touch", async () => (await lastTouchFor(db, viewer.tenantId, [customer])).get(customer.id) ?? null),
+    deskOnly("desk_signals", async () => (await deskSignalsFor(db, viewer.tenantId, [customer.id], now)).get(customer.id)!),
+    moneyAccess === "read" ? attempt("money_signals", () => moneySignalsFor(db, [customer], torontoDay(now))) : Promise.resolve(null),
+  ]);
+  return {
+    state: "ok",
+    value: {
+      customer,
+      projects,
+      health: health({
+        lifecycle: customer.lifecycle,
+        createdAt: customer.created_at,
+        now,
+        lastTouch: lastTouch.state === "ok" ? lastTouch.value : undefined,
+        slaBreaches30d: deskSignals.state === "ok" ? deskSignals.value.slaBreaches30d : null,
+        projectsPastDue: deskSignals.state === "ok" ? deskSignals.value.projectsPastDue : null,
+        money: moneyInput(moneyAccess, moneySignals, customer.id),
+      }),
+    },
+  };
+}
 
 /** Money: Loaded, or "not_tracked" in a workspace whose books are not in the app. */
 export type MoneyState = Loaded<ClientMoney | null> | { state: "not_tracked" };

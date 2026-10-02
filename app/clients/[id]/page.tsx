@@ -22,6 +22,12 @@
  * Every tab but Overview and Money is the desk team's (owners and admins):
  * they hold every message, document and datum of the client.
  *
+ * The tab bar is components/os/OsTabBar.tsx: a tab is a server render, so the
+ * bar moves its underline on the click and shows the wait until the tab lands
+ * (CC, 2026-10-02: "I'm still unable to click the actual subbed things inside
+ * the clients portal"). Opening a record paints app/clients/[id]/loading.tsx
+ * at once.
+ *
  * GATE, first statement: requireOsRoute("/clients") — the same rule as the
  * list. A client of another workspace is a 404, the same as no client at all.
  */
@@ -31,6 +37,7 @@ import { notFound } from "next/navigation";
 import { Card, EmptyState, Tag } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
+import { OsTabBar } from "@/components/os/OsTabBar";
 import { floorCount } from "@/lib/os/count";
 import { Field, LoadError, SeverityTag, SlaBadge, StageTag, TicketStatusTag } from "@/components/delivery/badges";
 import { TicketCreateForm } from "@/components/delivery/TicketForms";
@@ -187,22 +194,17 @@ export default async function ClientRecordPage({
             {roster.notice}
           </p>
         )}
-        <nav aria-label="Client record" className="flex flex-wrap gap-1 border-b border-hairline">
-          {CLIENT_TABS.map((t) => {
-            const active = t.key === tab;
-            return (
-              <Link
-                key={t.key}
-                href={t.key === "overview" ? `/clients/${c.id}` : `/clients/${c.id}?tab=${t.key}`}
-                prefetch={false}
-                aria-current={active ? "page" : undefined}
-                className={`-mb-px border-b-2 px-3 py-2 text-[13px] ${active ? "border-fg font-medium text-fg" : "border-transparent text-fg-muted hover:text-fg"}`}
-              >
-                {t.label}
-              </Link>
-            );
-          })}
-        </nav>
+        {/* Each tab is a server render; the bar answers the click at once and
+            shows the wait (components/os/OsTabBar.tsx). */}
+        <OsTabBar
+          label="Client record"
+          tabs={CLIENT_TABS.map((t) => ({
+            key: t.key,
+            label: t.label,
+            href: t.key === "overview" ? `/clients/${c.id}` : `/clients/${c.id}?tab=${t.key}`,
+          }))}
+          active={tab}
+        />
 
         {tab === "overview" && <OverviewTab data={data} viewer={cv} owners={ownerOptions(directory)} dealHref={dealHref} />}
         {tab === "conversations" && <ConversationsTab data={data} viewer={cv} />}
