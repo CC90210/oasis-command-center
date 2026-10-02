@@ -19,16 +19,17 @@
  * AI never persists directly — proposals require explicit human consent.
  *
  * This endpoint is auth-gated and admin-gated (same as /api/manifest/<slug>
- * POST). It reads the caller's encrypted Anthropic / OpenRouter / OpenAI /
- * Google / Ollama key from agent_model_config (agent_key="bravo") just like
- * /api/chat does, so manifest editing uses the tenant's own provider quota.
+ * POST). It answers on the caller's own saved key, else the workspace's AI
+ * account (lib/ai/workspace-account.ts readPersonAiAccount, the account every
+ * department chat uses), so manifest editing uses the tenant's own provider
+ * quota.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
-import { getAgentModelForUser } from "@/lib/agent-resolver";
+import { readPersonAiAccount, type UsableAiAccount } from "@/lib/ai/workspace-account";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
@@ -107,24 +108,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Provider resolution — borrow the operator's bravo config so manifest
-  // editing uses the tenant's own LLM quota and configured persona.
-  const cfg = await getAgentModelForUser({
-    tenantId: profile.tenant_id,
-    userId: user.id,
-    agentKey: "bravo",
-  });
+  // Provider resolution: the caller's own key first, then the workspace's AI
+  // account (lib/ai/workspace-account.ts), so manifest editing uses the
+  // tenant's own LLM quota.
+  let cfg: UsableAiAccount | null;
+  try {
+    cfg = await readPersonAiAccount(profile.tenant_id, user.id);
+  } catch (err) {
+    // A failed read is not "no account": the owner would be sent to connect one
+    // that may well be connected.
+    console.error("[manifest.chat.ai_account]", { tenantId: profile.tenant_id, error: err instanceof Error ? err.message : String(err) });
+    return NextResponse.json(
+      { ok: false, error: "config_unavailable", message: "We could not read this workspace's AI settings just now. Try again in a moment." },
+      { status: 503 },
+    );
+  }
 
   let provider: Provider;
   let model: string;
   let apiKey = "";
   let keySource: "tenant" | "platform" = "tenant";
 
-  if (cfg && cfg.encrypted_api_key) {
-    provider = cfg.provider as Provider;
+  if (cfg) {
+    provider = cfg.provider;
     model = cfg.model;
     try {
-      apiKey = decryptField(cfg.encrypted_api_key);
+      apiKey = decryptField(cfg.encryptedApiKey);
     } catch {
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
@@ -133,7 +142,12 @@ export async function POST(req: NextRequest) {
     const fallback = (await isPlatformOperatorForAuthUser(user.id, user.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
-        { ok: false, error: "agent_not_configured", hint: "Configure your Bravo provider key in Settings before using the manifest editor." },
+        {
+          ok: false,
+          error: "agent_not_configured",
+          hint: "Connect an AI account in Settings > AI brain.",
+          message: "Connect an AI account in Settings > AI brain.",
+        },
         { status: 412 }
       );
     }

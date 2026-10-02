@@ -6,15 +6,20 @@
  * Lives at the top of /settings so the first thing the operator sees is
  * which provider accounts they've connected. Each provider that powers
  * dashboard chat shows:
- *   - Connection status (any agent has a key for this provider → Connected)
+ *   - Connection status: Connected means the workspace's AI account is on
+ *     this provider (lib/ai/workspace-account.ts), the key every department
+ *     chat and Slack mention uses. A key the viewer saved for their own chats
+ *     only reads "Your personal key": department chats don't use it.
  *   - Tagline + which models it unlocks
  *   - "Connect" button → inline dialog with single API-key paste
  *   - "Get API key ↗" deep-link to the provider's console (new tab)
  *
- * Single-click connect: paste the key once, the route POSTs to
- * /api/agent-config/bulk-provider which stamps (provider, model, key)
- * across every enabled chat agent in the tenant. No per-agent paste
- * dance, no navigating to /settings#agents to do it five times.
+ * Single-click connect: paste the key once. The dialog first sends ONE real
+ * message with it (/api/agent-config/test-connection) and saves only when the
+ * provider answers (connectProviderKey); then /api/agent-config/bulk-provider
+ * saves the workspace's AI account and stamps (provider, model, key) across
+ * every enabled chat agent in the tenant. No per-agent paste dance, no
+ * navigating to /settings#agents to do it five times.
  *
  * Anthropic gets the "Powers tool_use loop" badge — pasting an Anthropic
  * key flips the cloud-mode chat to the native tool_use protocol (real
@@ -41,10 +46,15 @@ import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/pro
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Props = {
-  /** Set of services-with-key resolved server-side via aiServicesWithKey().
+  /** Set of services-with-key resolved server-side via aiServicesWithKey():
+   *  the workspace's AI account, the key every department chat uses.
    *  null = that read failed: a card with no key known says "Couldn't check",
    *  never "Not connected". */
   connectedServices: Set<string> | null;
+  /** Services the viewer saved a key for, for their own chats only
+   *  (personalAiServicesWithKey). Shown apart from Connected because
+   *  department chats don't use them. Omitted or null: none shown. */
+  personalServices?: Set<string> | null;
   /** null = the bridge heartbeat could not be read. */
   bridgeOnline: boolean | null;
   canManageTeam: boolean;
@@ -59,6 +69,7 @@ const CARD_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai", "google
 
 export function ProviderAccountsCard({
   connectedServices: initialServices,
+  personalServices,
   bridgeOnline,
   canManageTeam,
   canInstallBridge,
@@ -80,11 +91,21 @@ export function ProviderAccountsCard({
     else services.delete(svc);
   }
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
+  // The viewer's own keys (department chats never use them), with this page's
+  // own personal connects and removals laid over the server's answer.
+  const [personalHere, setPersonalHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const personal = new Set(personalServices ?? []);
+  for (const [svc, savedNow] of personalHere) {
+    if (savedNow) personal.add(svc);
+    else personal.delete(svc);
+  }
 
-  function markConnected(p: Provider) {
+  function markConnected(p: Provider, scope: "tenant" | "user" = "tenant") {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
-    setChangedHere((prev) => new Map(prev).set(svc, true));
+    // A key saved "Just me" is the viewer's own: it never reads Connected.
+    if (scope === "user") setPersonalHere((prev) => new Map(prev).set(svc, true));
+    else setChangedHere((prev) => new Map(prev).set(svc, true));
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -157,6 +178,9 @@ export function ProviderAccountsCard({
           const reg = PROVIDER_REGISTRY.find((r) => r.value === p);
           if (!reg) return null;
           const connected = services.has(PROVIDER_TO_SERVICE[p]);
+          // Only the viewer's own key is on this provider: department chats
+          // and Slack mentions don't use it, so it is never "Connected".
+          const personalOnly = !connected && personal.has(PROVIDER_TO_SERVICE[p]);
           const isAnthropic = p === "anthropic";
           return (
             <div
@@ -190,6 +214,10 @@ export function ProviderAccountsCard({
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-status-engaged shrink-0">
                     <Check className="w-3 h-3" /> Connected
                   </span>
+                ) : personalOnly ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-accent shrink-0">
+                    <KeyRound className="w-3 h-3" /> Your personal key
+                  </span>
                 ) : !keysKnown ? (
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-muted shrink-0">
                     <AlertCircle className="w-3 h-3" /> Couldn&apos;t check
@@ -203,6 +231,19 @@ export function ProviderAccountsCard({
               <div className="text-[11px] text-fg-dim leading-relaxed mb-3 line-clamp-3">
                 {reg.hint}
               </div>
+              {connected && (
+                <p className="text-[11px] text-fg-muted leading-relaxed mb-3">
+                  Every department chat and Slack mention uses this key.
+                </p>
+              )}
+              {personalOnly && (
+                <p className="text-[11px] text-fg-muted leading-relaxed mb-3">
+                  Only your own chats use this key. Department chats and Slack mentions don&apos;t:{" "}
+                  {canManageTeam
+                    ? "connect it for the whole team so they can."
+                    : "an owner or admin can connect one for the whole team."}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -257,6 +298,22 @@ export function ProviderAccountsCard({
                     )}
                   </>
                 )}
+                {personalOnly && (
+                  <>
+                    <span className="text-fg-dim text-[10px]">·</span>
+                    <DisconnectButton
+                      provider={p}
+                      scope="user"
+                      onDisconnected={() => {
+                        setPersonalHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
+                        if (typeof window !== "undefined") {
+                          window.dispatchEvent(new CustomEvent("oasis:agent-configs-changed"));
+                        }
+                        router.refresh();
+                      }}
+                    />
+                  </>
+                )}
               </div>
             </div>
           );
@@ -272,14 +329,103 @@ export function ProviderAccountsCard({
           provider={activeProvider}
           canManageTeam={canManageTeam}
           onClose={() => setActiveProvider(null)}
-          onConnected={(p) => {
-            markConnected(p);
+          onConnected={(p, scope) => {
+            markConnected(p, scope);
             setActiveProvider(null);
           }}
         />
       )}
     </div>
   );
+}
+
+// ============================================================================
+// Connect: test the pasted key with one real message, then save it
+// ============================================================================
+
+/** How a connect attempt ended. Every message is one plain sentence. */
+export type ConnectResult =
+  | { kind: "saved" }
+  /** The test refused the key (nothing was saved). */
+  | { kind: "refused"; message: string; canSaveAnyway: boolean }
+  /** The key passed (or was saved anyway) but the save did not go through. */
+  | { kind: "failed"; message: string };
+
+type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+/**
+ * A refusal that says nothing about the key: the provider was down or slow.
+ * Only these may be saved anyway.
+ */
+const SAVE_ANYWAY_CODES: ReadonlySet<string> = new Set(["provider_5xx", "timeout"]);
+const COULD_NOT_TEST = "The key couldn't be tested just now, so it was not saved. Try again in a moment.";
+const COULD_NOT_SAVE = "The key couldn't be saved just now. Try again in a moment.";
+
+/** The save route's refusal, as one sentence: never an agent name or an error code. */
+function saveFailureSentence(body: Record<string, unknown>): string {
+  if (typeof body.message === "string" && body.message.trim()) return body.message;
+  if (body.error === "invalid_key_length") return "That doesn't look like a valid API key. Check what you pasted and try again.";
+  if (body.error === "admin_required") return "Only an owner or admin can connect an AI account for the whole team.";
+  if (body.error === "unauthorized") return "Your session ended. Sign in again, then connect the key.";
+  return COULD_NOT_SAVE;
+}
+
+/**
+ * Connect a pasted key: first ONE real message with it, on the model it will
+ * be saved with (/api/agent-config/test-connection), and only when the
+ * provider answers, save it (/api/agent-config/bulk-provider). A refused key
+ * saves nothing and says why in the test's own plain sentence, so a wrong or
+ * empty-balance key is caught on the spot instead of reading "Connected"
+ * (AIP-05, AIP-07). `skipTest` is "Save anyway", offered only when the
+ * provider was down or slow.
+ */
+export async function connectProviderKey(
+  input: { provider: Provider; apiKey: string; model: string; scope: "tenant" | "user"; skipTest?: boolean },
+  fetchImpl: FetchLike = (url, init) => fetch(url, init),
+): Promise<ConnectResult> {
+  const post = async (url: string, body: Record<string, unknown>) => {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  };
+  if (!input.skipTest) {
+    let tested: Record<string, unknown>;
+    try {
+      tested = await post("/api/agent-config/test-connection", {
+        provider: input.provider,
+        api_key: input.apiKey,
+        model: input.model,
+      });
+    } catch {
+      return { kind: "refused", message: COULD_NOT_TEST, canSaveAnyway: false };
+    }
+    if (tested.ok !== true) {
+      const code = typeof tested.code === "string" ? tested.code : "";
+      const message = typeof tested.message === "string" && tested.message.trim() ? tested.message : COULD_NOT_TEST;
+      return { kind: "refused", message, canSaveAnyway: SAVE_ANYWAY_CODES.has(code) };
+    }
+  }
+  let saved: Record<string, unknown>;
+  try {
+    saved = await post("/api/agent-config/bulk-provider", {
+      provider: input.provider,
+      api_key: input.apiKey,
+      model: input.model,
+      scope: input.scope,
+    });
+  } catch {
+    return { kind: "failed", message: COULD_NOT_SAVE };
+  }
+  if (saved.ok !== true) return { kind: "failed", message: saveFailureSentence(saved) };
+  // A teammate row that did not update is logged, not shown: the chats run on
+  // the workspace's AI account, which saved.
+  if (Array.isArray(saved.failed) && saved.failed.length > 0) {
+    console.warn("[bulk-provider] some teammate rows were not updated", saved.failed);
+  }
+  return { kind: "saved" };
 }
 
 // ============================================================================
@@ -295,67 +441,37 @@ function ConnectProviderDialog({
   provider: Provider;
   canManageTeam: boolean;
   onClose: () => void;
-  onConnected: (p: Provider) => void;
+  onConnected: (p: Provider, scope: "tenant" | "user") => void;
 }) {
   const reg = PROVIDER_REGISTRY.find((r) => r.value === provider);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canSaveAnyway, setCanSaveAnyway] = useState(false);
   const [model, setModel] = useState(reg?.models[0]?.id || "");
   const [scope, setScope] = useState<"tenant" | "user">(canManageTeam ? "tenant" : "user");
 
   if (!reg) return null;
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function connect(skipTest: boolean) {
     if (!apiKey.trim() || saving) return;
     setSaving(true);
     setError(null);
-    try {
-      const r = await fetch("/api/agent-config/bulk-provider", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider, api_key: apiKey, model, scope }),
-      });
-      const j = await r.json();
-      if (!j.ok) {
-        setError(j.error || `http_${r.status}`);
-        setSaving(false);
-        return;
-      }
-      // Partial-failure handling. The route returns ok=true even when
-      // SOME agents fail as long as ONE row saved — the operator IS
-      // partially connected. Previous bug: even when count===0 (every
-      // agent failed) we still flipped the card green, then a refresh
-      // showed the real "not connected" state and the operator saw it
-      // as the key "spontaneously disconnecting." Now we gate the
-      // optimistic flip on count > 0 so the card only goes green when
-      // at least one row actually persisted.
-      const failed = Array.isArray(j.failed) ? (j.failed as Array<{ agent_key: string; error: string }>) : [];
-      const savedCount: number = typeof j.count === "number" ? j.count : 0;
-      if (savedCount === 0) {
-        const detail = failed.length > 0
-          ? failed.map((f) => `${f.agent_key}: ${f.error}`).join("; ")
-          : "no agents accepted the key (check tenant scope / admin permission)";
-        console.error("[bulk-provider] total failure", { failed, count: savedCount });
-        setError(`Couldn't save the key: ${detail}`);
-        setSaving(false);
-        return;
-      }
-      if (failed.length > 0) {
-        const list = failed.map((f) => `${f.agent_key} (${f.error})`).join(", ");
-        console.warn("[bulk-provider] partial failure", failed);
-        setError(`Saved on ${savedCount} agent${savedCount === 1 ? "" : "s"}. Failed: ${list}`);
-        setSaving(false);
-        onConnected(provider);
-        return;
-      }
-      onConnected(provider);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "save_failed");
-      setSaving(false);
+    setCanSaveAnyway(false);
+    const result = await connectProviderKey({ provider, apiKey: apiKey.trim(), model, scope, skipTest });
+    if (result.kind === "saved") {
+      onConnected(provider, scope);
+      return;
     }
+    setError(result.message);
+    setCanSaveAnyway(result.kind === "refused" && result.canSaveAnyway);
+    setSaving(false);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    await connect(false);
   }
 
   if (typeof document === "undefined") return null;
@@ -374,8 +490,8 @@ function ConnectProviderDialog({
             <h2 className="text-base font-bold text-fg">Connect {reg.label}</h2>
             <p className="text-xs text-fg-muted mt-0.5">
               {scope === "tenant"
-                ? "This key applies to every enabled chat agent for the whole team."
-                : "This key applies only to your own agent chats."}
+                ? "Every department chat and Slack mention will use this key. We test it with one short message before saving."
+                : "Only your own chats will use this key; department chats won't. We test it with one short message before saving."}
             </p>
           </div>
           <button
@@ -509,14 +625,12 @@ function ConnectProviderDialog({
             )}
           </div>
 
+          {/* One plain sentence: the test's own words for a refused key, or
+              why the save did not go through (connectProviderKey). */}
           {error && (
-            <div className="rounded-md border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-status-warm flex items-start gap-2">
+            <div role="alert" className="rounded-md border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-status-warm flex items-start gap-2">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>
-                {error === "invalid_key_length"
-                  ? "That doesn't look like a valid API key. Double-check what you pasted — most keys are 40–80 characters."
-                  : error}
-              </span>
+              <span>{error}</span>
             </div>
           )}
 
@@ -529,6 +643,17 @@ function ConnectProviderDialog({
             >
               Cancel
             </button>
+            {/* The provider was down or slow, which says nothing about the key. */}
+            {canSaveAnyway && (
+              <button
+                type="button"
+                onClick={() => void connect(true)}
+                className="btn-secondary"
+                disabled={!apiKey.trim() || saving}
+              >
+                Save anyway
+              </button>
+            )}
             <button
               type="submit"
               className="btn-primary inline-flex items-center gap-2"
@@ -537,7 +662,7 @@ function ConnectProviderDialog({
               {saving ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Saving…
+                  Connecting...
                 </>
               ) : (
                 <>
@@ -558,35 +683,38 @@ function ConnectProviderDialog({
  * Disconnect a provider across the whole tenant. Confirms before firing —
  * disconnect can't be undone (the encrypted key is wiped from the DB; the
  * operator has to paste it again from the provider's console). Soft-fails
- * are surfaced inline.
+ * are surfaced inline. scope="user" is "Remove my key": only the viewer's
+ * own key for that provider, which department chats never used.
  */
 function DisconnectButton({
   provider,
+  scope = "tenant",
   onDisconnected,
 }: {
   provider: Provider;
+  scope?: "tenant" | "user";
   onDisconnected: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function go() {
-    if (
-      !confirm(
-        `Disconnect ${provider}?\n\n` +
+    const question =
+      scope === "user"
+        ? `Remove your personal ${provider} key?\n\nOnly your own chats used it. Department chats and Slack mentions are not affected.`
+        : `Disconnect ${provider}?\n\n` +
           `• The encrypted API key is wiped from every agent that uses ${provider}.\n` +
           `• Any per-agent custom system prompts on those agents are also wiped (the row is removed).\n` +
           `• You'll need to paste the key again to reconnect.\n\n` +
-          `If you only want to swap keys, use "Replace key" instead — that preserves custom prompts.`,
-      )
-    ) {
+          `If you only want to swap keys, use "Replace key" instead — that preserves custom prompts.`;
+    if (!confirm(question)) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
       const res = await fetch(
-        `/api/agent-config/bulk-provider?provider=${encodeURIComponent(provider)}&scope=tenant`,
+        `/api/agent-config/bulk-provider?provider=${encodeURIComponent(provider)}&scope=${scope}`,
         { method: "DELETE" },
       );
       const data = (await res.json().catch(() => ({}))) as {
@@ -618,7 +746,7 @@ function DisconnectButton({
         ) : (
           <X className="w-3 h-3" />
         )}
-        Disconnect
+        {scope === "user" ? "Remove my key" : "Disconnect"}
       </button>
       {error && (
         <span className="text-[10px] text-rose-400" title={error}>

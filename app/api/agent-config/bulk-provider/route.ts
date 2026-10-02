@@ -7,9 +7,15 @@
  *
  * Behavior:
  *   - Validates the provider + key format (light — server-side string
- *     length sanity check, NOT a live provider ping; ping happens on
- *     first chat turn so we don't leak a key by accident in error
- *     responses here).
+ *     length sanity check, NOT a live provider ping; the Settings card asks
+ *     /api/agent-config/test-connection for one real message BEFORE it saves,
+ *     and saves anyway only when the provider was down or slow).
+ *   - scope=tenant ALWAYS saves the workspace's AI account first (lib/ai/
+ *     workspace-account.ts, agent_key "__workspace__"): the account every
+ *     department chat and Slack mention answers on, whatever teammates the
+ *     workspace has. Before this, a client whose teammates are neutral leads
+ *     got rows nobody read, and every chat said "No AI account is connected"
+ *     (AIP-01). If that save fails, nothing else is written.
  *   - Resolves the agent set: explicit `agent_keys[]` if supplied,
  *     otherwise the tenant's enabled chat-eligible agents.
  *   - Upserts (provider, model, encrypted_api_key) for each agent.
@@ -17,6 +23,8 @@
  *     are preserved — only the provider/model/key triple is replaced.
  *   - Defaults model to the provider's first registry entry (the
  *     recommended one) unless the caller passed a specific model.
+ *   - Provider "ollama" (a local model server, whose "key" is a web address
+ *     the server calls) is the verified platform operator's only (403).
  *
  * Body shape:
  *   {
@@ -26,16 +34,19 @@
  *     agent_keys?: string[]               // optional, default = enabled agents
  *   }
  *
- * Returns: { ok, applied_to: [agent_key,...], count }
+ * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed, count }
+ *   ok is the workspace account saved (scope=tenant), or at least one personal
+ *   row saved (scope=user).
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
+import { getAuthedSupabase, getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { PROVIDER_MODELS, PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
+import { LOCAL_MODEL_REFUSAL, mayUseLocalModel, saveWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -92,6 +103,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "no_user" }, { status: 401 });
   }
   const effectiveUserId = scope === "user" ? userId : null;
+  // A local model server's "key" is a web address the server calls: the
+  // verified platform operator's only (lib/ai/workspace-account.ts, AIP-11).
+  if (provider === "ollama") {
+    const user = await getSessionUser();
+    if (!(await mayUseLocalModel(user?.id, user?.email))) {
+      return NextResponse.json({ ok: false, error: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL }, { status: 403 });
+    }
+  }
 
   const apiKeyPlain =
     typeof body?.api_key === "string" && body.api_key.trim() ? body.api_key.trim() : null;
@@ -143,7 +162,9 @@ export async function POST(req: NextRequest) {
   const targetAgents = Array.from(
     new Set((requestedAgents || fallbackAgents).map((k) => resolveAgentKey(k))),
   ).filter((k) => chatAllowed.has(k));
-  if (targetAgents.length === 0) {
+  // A team-wide connect always has its target: the workspace's AI account
+  // below. A personal one has nothing to save without an agent row.
+  if (scope === "user" && targetAgents.length === 0) {
     return NextResponse.json({ ok: false, error: "no_target_agents" }, { status: 400 });
   }
 
@@ -157,6 +178,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // The workspace's AI account (lib/ai/workspace-account.ts), written first and
+  // never filtered by the teammate list: it is the row every department chat
+  // and Slack mention answers on. If it cannot be saved, nothing else is.
+  if (scope === "tenant") {
+    const saved = await saveWorkspaceAiAccount(tenantId, {
+      provider: provider as Provider,
+      model,
+      encryptedApiKey: encryptedKey,
+    });
+    if (!saved.ok) {
+      console.error("[bulk-provider.workspace_account]", { tenantId, provider, error: saved.error });
+      return NextResponse.json(
+        { ok: false, error: "save_failed", message: "The key could not be saved just now. Nothing was changed. Try again in a moment." },
+        { status: 500 },
+      );
+    }
+  }
+
   const service = getServiceSupabase();
   const applied: string[] = [];
   const failed: Array<{ agent_key: string; error: string }> = [];
@@ -166,10 +205,10 @@ export async function POST(req: NextRequest) {
   // — N is bounded by chat-eligible agent count (5-ish today).
   //
   // Partial-failure semantics: if any agent fails to save, the response
-  // surfaces the failing agents + their error codes so the client can
-  // show "saved on 3 of 5, see errors" instead of silently dropping the
-  // bad ones. ok is true iff at least one save succeeded — caller is
-  // expected to inspect `failed[]` when count < targetAgents.length.
+  // surfaces the failing agents + their error codes (logged by the card,
+  // never shown as slugs). For a team-wide connect the workspace account above
+  // is what makes the chats work, so ok is true once it saved; for a personal
+  // one, ok is true iff at least one row saved.
   for (const agentKey of targetAgents) {
     let lookupQ = service
       .from("agent_model_config")
@@ -218,9 +257,10 @@ export async function POST(req: NextRequest) {
         provider,
         model,
         scope,
+        workspace_account: scope === "tenant",
         applied_to: applied,
         failed,
-        has_key: applied.length > 0,
+        has_key: scope === "tenant" || applied.length > 0,
       },
     });
   } catch {
@@ -228,8 +268,9 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({
-    ok: applied.length > 0,
+    ok: scope === "tenant" || applied.length > 0,
     scope,
+    workspace_account: scope === "tenant",
     applied_to: applied,
     failed,
     count: applied.length,
@@ -243,7 +284,9 @@ export async function POST(req: NextRequest) {
  * (or just the caller's per-user override row when scope=user). Operators
  * use this to revoke a connected provider before re-pasting a new key or
  * switching providers entirely. Without this they could only paste a new
- * key on top, leaving the old one encrypted-at-rest forever.
+ * key on top, leaving the old one encrypted-at-rest forever. scope=tenant
+ * removes every workspace row (user_id IS NULL) on that provider, the
+ * workspace's AI account row among them.
  *
  * Query: provider=<provider>&scope=tenant|user
  * Returns: { ok, scope, provider, count }

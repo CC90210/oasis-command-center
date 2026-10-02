@@ -43,9 +43,9 @@
  * lib/os/department-agent.ts prepareAgentTurn, the same session-less function a
  * Slack mention runs, so the web channel and Slack follow one set of rules.
  *
- * Provider: the WORKSPACE's own key (the agent_model_config `bravo` row with
- * user_id IS NULL — a teammate's personal key never answers a shared channel),
- * or the platform key for the verified operator only.
+ * Provider: the WORKSPACE's own AI account (lib/ai/workspace-account.ts; a
+ * teammate's personal key never answers a shared channel), or the platform key
+ * for the verified operator only.
  *
  * Every turn that reaches a key has its outcome (ok, or a failure code from
  * lib/os/channel/outcome.ts) recorded as its channel's last turn
