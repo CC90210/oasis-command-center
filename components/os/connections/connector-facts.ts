@@ -26,11 +26,19 @@ import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
-import { listTenantIntegrationStatus } from "@/lib/tenant-integration-store";
+import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import { listUserIntegrationStatus } from "@/lib/user-integration-store";
 import { listActiveConnections } from "@/lib/connections/store";
 import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
-import type { ConnectionFact, ConnectorFacts, HeartbeatFact, KeyRowFact } from "@/lib/os/connectors";
+import {
+  CONNECTOR_CATALOG,
+  resolveConnectorStatus,
+  type ConnectionFact,
+  type ConnectorFacts,
+  type ConnectorStatus,
+  type HeartbeatFact,
+  type KeyRowFact,
+} from "@/lib/os/connectors";
 
 const HEARTBEAT_SERVICES = ["gws", "telegram"] as const;
 
@@ -43,6 +51,10 @@ async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
       has_value: r.has_value,
       last_tested_at: r.last_tested_at,
       last_test_ok: r.last_test_ok,
+      // A test's code (Twilio's plain states) and whether the value is OASIS's
+      // own deployment value; still never the value itself.
+      last_test_error: r.last_test_error,
+      source: r.source,
     }));
   } catch (error) {
     console.error("[connections.facts.key_rows]", error);
@@ -117,7 +129,31 @@ export async function loadConnectorFacts(input: {
     loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
   ]);
-  return { keyRows, heartbeats, personalGoogleLinked, connections, appNotConfigured: appNotConfiguredProviders() };
+  return {
+    keyRows,
+    heartbeats,
+    personalGoogleLinked,
+    connections,
+    appNotConfigured: appNotConfiguredProviders(),
+    // OASIS's own workspaces, by id (the env-credential tenants): they connect
+    // OASIS's apps; every other workspace is a client and is shown its own path.
+    oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
+  };
+}
+
+/**
+ * Every card's status for one workspace, from one read of its facts: what
+ * Settings > Connections, the onboarding connections step and AI brain all
+ * render, so a connection set up in any of them reads the same in the others.
+ */
+export async function loadConnectorStatuses(input: {
+  tenantId: string;
+  userId: string;
+  nowMs?: number;
+}): Promise<Record<string, ConnectorStatus>> {
+  const facts = await loadConnectorFacts({ tenantId: input.tenantId, userId: input.userId });
+  const now = input.nowMs ?? Date.now();
+  return Object.fromEntries(CONNECTOR_CATALOG.map((def) => [def.slug, resolveConnectorStatus(def, facts, now)]));
 }
 
 /**

@@ -171,6 +171,13 @@ jobs:
           npm run test:legal
           npm run test:media
           npm run test:onboarding
+          # ADDED 2026-10-01 (W10a). Every connection a workspace can see works
+          # or says it does not: Twilio end to end per workspace (keys, the
+          # read-only test's plain states, webhook addresses, each workspace's
+          # own signature token, live-send gate) against a mocked Twilio, and
+          # the not-built apps' requests, the setup step and AI brain on the
+          # same drawer and statuses as Settings > Connections.
+          npm run test:connections
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
       # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:

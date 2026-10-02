@@ -19,6 +19,8 @@ import {
   type WizardQuestion,
 } from "@/lib/manifest/templates";
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
+import { ConnectionsHub } from "@/components/os/connections/ConnectionsHub";
+import type { ConnectorStatus } from "@/lib/os/connectors";
 
 type Answers = Record<string, string | string[]>;
 
@@ -36,6 +38,11 @@ type Answers = Record<string, string | string[]>;
  *     new steps, saved to manifest.integrations.chat_apps / .jev.
  *   - No URL slug field: the workspace keeps its own address.
  *   - No invented prices or taglines, and nothing defaults to "OASIS AI".
+ *
+ * "Connect your tools" (2026-10-01, W10a) is the Connections hub itself
+ * (ConnectionsHub, `embedded`): the same cards, the same drawer, the same
+ * saves and checks as Settings > Connections, with statuses from the same
+ * loader. Nothing is a copy, so an app connected here is connected there.
  */
 
 type Step =
@@ -44,6 +51,7 @@ type Step =
   | "departments"
   | "chat_apps"
   | "jev"
+  | "connections"
   | "brand"
   | "confirm"
   | "submitting"
@@ -76,21 +84,26 @@ const CHAT_APPS: Array<{ key: string; label: string; note: string }> = [
   { key: "email", label: "Email only", note: "Your team works over email." },
 ];
 
-const STEP_ORDER: Step[] = ["industry", "questions", "departments", "chat_apps", "jev", "brand", "confirm"];
+const STEP_ORDER: Step[] = ["industry", "questions", "departments", "chat_apps", "jev", "connections", "brand", "confirm"];
 
 /**
  * canInstallBridge: the server's verified platform-operator verdict
  * (app/onboarding/wizard/page.tsx). Only the operator is offered the bridge
  * install at the end; see OnboardingDoneChoices.
+ *
+ * connections: every app's status for this workspace, from the server
+ * (connector-facts.ts loadConnectorStatuses), for the connections step.
  */
 export function OnboardingWizardClient({
   userEmail,
   canInstallBridge,
   options,
+  connections,
 }: {
   userEmail?: string;
   canInstallBridge: boolean;
   options: WizardOptions;
+  connections?: { statuses: Record<string, ConnectorStatus>; supportHref: string | null };
 }) {
   const [step, setStep] = useState<Step>("industry");
   const [template, setTemplate] = useState<TemplateKey | null>(null);
@@ -311,7 +324,30 @@ export function OnboardingWizardClient({
                 </label>
               ))}
             </div>
-            <Nav onBack={() => setStep("chat_apps")} onNext={() => setStep("brand")} />
+            <Nav onBack={() => setStep("chat_apps")} onNext={() => setStep("connections")} />
+          </Panel>
+        )}
+
+        {step === "connections" && (
+          <Panel
+            title="Connect your tools (optional)"
+            intro="Connect the apps your business already runs on, with your own accounts and keys. Everything here is also in Settings > Connections, so skip anything and finish it there later."
+          >
+            {connections ? (
+              <ConnectionsHub
+                statuses={connections.statuses}
+                supportHref={connections.supportHref}
+                initialApp={null}
+                personalGoogle={false}
+                embedded
+              />
+            ) : (
+              <p className="text-sm text-fg-muted">
+                The apps could not be loaded just now. You can connect them in Settings &gt; Connections once your
+                workspace is set up.
+              </p>
+            )}
+            <Nav onBack={() => setStep("jev")} onNext={() => setStep("brand")} />
           </Panel>
         )}
 
@@ -334,7 +370,7 @@ export function OnboardingWizardClient({
                 className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
               />
             </FieldRow>
-            <Nav onBack={() => setStep("jev")} onNext={() => setStep("confirm")} nextDisabled={!brandName.trim()} nextLabel="Review" />
+            <Nav onBack={() => setStep("connections")} onNext={() => setStep("confirm")} nextDisabled={!brandName.trim()} nextLabel="Review" />
           </Panel>
         )}
 

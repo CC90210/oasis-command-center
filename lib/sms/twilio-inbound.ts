@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { getServiceSupabase } from "@/lib/supabase-server";
 import { classifyOptOut } from "@/lib/sms-opt-out";
+import { normalTwilioMessagingServiceSid, normalTwilioNumber } from "@/lib/twilio/shared";
+import { currentTwilioSender } from "@/lib/twilio/sender-route";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 type TenantResolution = { tenantId: string; ownerUserId: string | null };
@@ -92,6 +94,40 @@ export function normalizedTwilioPhone(value: string): string {
   return value.replace(/\D/g, "");
 }
 
+/**
+ * Does `tenantId` hold this sender NOW? Asked of currentTwilioSender, the same
+ * rule the routing row is written from (a saved number or messaging service, or
+ * OASIS's deployment ones).
+ *
+ * The indexed route row is a copy of the sender, written when it is saved or
+ * removed (lib/twilio/sender-route.ts). If that write failed when a workspace
+ * removed the sender, its row stays active, and a callback for the number's new
+ * owner would resolve to the old workspace: rejected under the old Auth Token,
+ * or delivered there if both use one Twilio account. So the row is believed
+ * only while the workspace's current sender agrees with it.
+ *
+ * `null` = could not be read: the caller keeps the row (the old behaviour; the
+ * signature check still gates the request) rather than refuse a real text.
+ */
+async function holdsSenderNow(
+  tenantId: string,
+  routeNumber: string | null,
+  routeService: string | null,
+  env: Record<string, string | undefined>,
+  onDbOperation?: () => void,
+): Promise<boolean | null> {
+  // Two credential reads: the number and the messaging service.
+  onDbOperation?.();
+  onDbOperation?.();
+  const now = await currentTwilioSender(tenantId, env);
+  if (!now.ok) {
+    console.warn("[webhooks.twilio.sms-inbound] sender ownership unreadable; keeping the route row", now.error);
+    return null;
+  }
+  return (routeNumber !== null && now.fromPhone === routeNumber) ||
+    (routeService !== null && now.messagingServiceSid === routeService);
+}
+
 export async function resolveTwilioInboundTenant(
   db: Db,
   toNumber: string,
@@ -100,25 +136,48 @@ export async function resolveTwilioInboundTenant(
   messagingServiceSid = "",
 ): Promise<TenantResolution | null> {
   if (toNumber) {
-    onDbOperation?.();
-    const account = await db.from("channel_accounts")
-      .select("tenant_id,owner_user_id")
-      .eq("provider", "twilio")
-      .eq("is_active", true)
-      .eq("from_phone", toNumber)
-      .order("tenant_id", { ascending: true })
-      .limit(2)
-      .maybeSingle();
-    if (!account.error && account.data) {
-      const row = account.data as { tenant_id?: unknown; owner_user_id?: unknown };
-      if (typeof row.tenant_id === "string" && row.tenant_id) {
-        return {
-          tenantId: row.tenant_id,
-          ownerUserId: typeof row.owner_user_id === "string" ? row.owner_user_id : null,
-        };
+    // The indexed path (W10a R6): each workspace's saved sender is a
+    // channel_accounts row (lib/twilio/sender-route.ts), found by the number OR
+    // the messaging service in one read (indexes from bravo__201). Both values
+    // are checked against Twilio's own formats first, so neither can carry
+    // anything into the filter but a number or an MG SID.
+    const routeNumber = normalTwilioNumber(toNumber);
+    const routeService = normalTwilioMessagingServiceSid(messagingServiceSid);
+    const arms = [
+      ...(routeNumber ? [`from_phone.eq.${routeNumber}`] : []),
+      ...(routeService ? [`twilio_messaging_service_sid.eq.${routeService}`] : []),
+    ];
+    if (arms.length > 0) {
+      onDbOperation?.();
+      const account = await db.from("channel_accounts")
+        .select("tenant_id,owner_user_id")
+        .eq("provider", "twilio")
+        .eq("is_active", true)
+        .or(arms.join(","))
+        .order("tenant_id", { ascending: true })
+        .limit(2)
+        .maybeSingle();
+      if (!account.error && account.data) {
+        const row = account.data as { tenant_id?: unknown; owner_user_id?: unknown };
+        if (typeof row.tenant_id === "string" && row.tenant_id) {
+          const holds = await holdsSenderNow(row.tenant_id, routeNumber, routeService, env, onDbOperation);
+          if (holds !== false) {
+            return {
+              tenantId: row.tenant_id,
+              ownerUserId: typeof row.owner_user_id === "string" ? row.owner_user_id : null,
+            };
+          }
+          // A stale row (that workspace no longer holds the sender): the scan
+          // below finds the current owner.
+          console.warn("[webhooks.twilio.sms-inbound] stale sender route; checking current ownership", {
+            destination_last4: normalizedTwilioPhone(toNumber).slice(-4),
+          });
+        }
+      } else if (account.error) {
+        // Two workspaces claim this sender (or the read failed): the scan below
+        // decides, and refuses an ambiguous one.
+        console.warn("[webhooks.twilio.sms-inbound] channel account lookup degraded", account.error.message);
       }
-    } else if (account.error) {
-      console.warn("[webhooks.twilio.sms-inbound] channel account lookup degraded", account.error.message);
     }
 
     onDbOperation?.();

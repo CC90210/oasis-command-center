@@ -233,6 +233,8 @@ const failingDb = {
     return {
       select() { return this; },
       eq() { return this; },
+      // The routing lookup reads the number OR the messaging service (W10a R6).
+      or() { return this; },
       in() { return this; },
       order() { return this; },
       limit() { return this; },
@@ -274,6 +276,7 @@ const messagingServiceCredentialDb = {
     return {
       select() { return this; },
       eq() { return this; },
+      or() { return this; },
       in() { return this; },
       order() { return this; },
       limit() { return this; },

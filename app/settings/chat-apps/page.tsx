@@ -13,8 +13,9 @@
  *     rendered by SettingsContent's chat-apps section), and owners see the
  *     shared team-alerts bot's measured status. Two-way AI teammates in
  *     Telegram chats are not built, and the card says exactly that: a state,
- *     never a release promise.
- *   - Discord, Microsoft Teams, WhatsApp: not built, nothing more.
+ *     never a release promise, with a button that asks OASIS for it.
+ *   - Discord, Microsoft Teams, WhatsApp: not built. Each opens the shared
+ *     Connections drawer, which says why and files the request (no dead chip).
  *
  * OASIS's own Telegram bridges on CC's machine are not this and never appear
  * here; they are CC's personal channel (plan decision 3).
@@ -29,6 +30,8 @@ import { requireSettingsSection } from "@/components/settings/settings-viewer";
 import { PageFrame } from "@/components/os/PageFrame";
 import { ConnectorIcon } from "@/components/os/connections/ConnectorIcon";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { ConnectorDrawerButton } from "@/components/os/connections/ConnectorDrawerButton";
+import { RequestConnector } from "@/components/os/connections/RequestConnector";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import {
   connectorBySlug,
@@ -51,6 +54,11 @@ export const dynamic = "force-dynamic";
 /** An app nothing is built for yet: the state, with no date or phase attached. */
 const NOT_BUILT: ConnectorStatus = { kind: "coming_soon", label: "Not built yet" };
 
+/** The not-built Telegram capability, as its request names it on OASIS's desk. */
+const TELEGRAM_TEAMMATES = "AI teammates in Telegram";
+const TELEGRAM_TEAMMATES_REASON =
+  "Today Telegram carries alerts only. A teammate you could message directly, or add to a group chat and link to a department, is not built.";
+
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
 export default async function SettingsChatAppsPage({ searchParams }: { searchParams: SearchParams }) {
@@ -67,6 +75,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   // built here. The shared team-alerts bot is owners and admins only.
   const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId });
   const slackCardStatus = slack ? resolveConnectorStatus(slack, facts, nowMs) : null;
+  // This workspace's ways into Slack that are not built yet, as the
+  // Connections drawer states them (resolved for its kind of workspace).
+  const slackPending = (slackCardStatus?.paths ?? []).filter((p) => p.requestable);
   let telegramTeamStatus: ConnectorStatus | null = null;
   if (viewer.access.canManage && telegram) {
     telegramTeamStatus = resolveConnectorStatus(telegram, facts, nowMs);
@@ -88,9 +99,14 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   // so only they are offered (the channels API refuses the rest). Who leads a
   // department is the workspace manifest's answer, read the way the Slack job
   // and the chat route read it (the slug this workspace owns).
+  // resolveOwnedSlug answers a read that FAILED with null (it swallows both of
+  // its reads: lib/manifest/tenant-scope.ts), so a null slug is "could not
+  // check", never "no department can answer here" (W4a D1, as lib/slack/jobs.ts
+  // and the channels API treat it).
   const manifestSlug = await resolveOwnedSlug(viewer.tenantId);
+  const rosterUnread = manifestSlug === null;
   const manifest = manifestSlug ? await getManifest(manifestSlug, viewer.tenantId) : null;
-  const answering = answeringDepartments({ oasis: viewer.access.oasisWorkspace, manifest });
+  const answering = rosterUnread ? [] : answeringDepartments({ oasis: viewer.access.oasisWorkspace, manifest });
   const mappableDepartments = OS_DEPARTMENTS.filter((d) => answering.includes(d.key)).map((d) => ({ key: d.key, label: d.label }));
 
   return (
@@ -111,6 +127,19 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
               <p className="text-[13px] leading-5 text-fg-muted">
                 OASIS could not read this workspace&apos;s Slack connection just now. Refresh to try again.
               </p>
+            ) : !conn && slackPending.length > 0 ? (
+              // This workspace's own way into Slack is not built yet: the same
+              // state and request as the Connections drawer, never a dead card.
+              <div className="space-y-3">
+                {slackPending.map((p) => (
+                  <div key={p.title} className="space-y-2">
+                    <p className="text-[13px] leading-5 text-fg-muted">
+                      <span className="font-medium text-fg">{p.title}</span> ({p.state.toLowerCase()}). {p.body}
+                    </p>
+                    <RequestConnector name={`Slack (${p.title})`} reason={p.body} from="Settings > Chat apps" buttonClassName="btn-secondary" />
+                  </div>
+                ))}
+              </div>
             ) : !slackSettings.appConfigured ? (
               <div className="space-y-1.5">
                 <p className="text-[13px] leading-5 text-fg-muted">
@@ -158,6 +187,12 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   <p className="text-[13px] leading-5 text-status-warm">
                     The channel map is not available on this deployment yet (its database tables are not installed), so
                     nothing is mirrored or answered.
+                  </p>
+                ) : viewer.access.canManage && rosterUnread ? (
+                  // The roster could not be read: say so and retry, never offer a
+                  // map in which no department can answer.
+                  <p role="status" className="text-[13px] leading-5 text-status-warm">
+                    OASIS couldn&apos;t check which departments can answer in Slack just now. Reload in a minute.
                   </p>
                 ) : viewer.access.canManage ? (
                   <SlackChannelMap
@@ -210,6 +245,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                 Today Telegram carries alerts only. A teammate you could message directly, or add to a group chat and
                 link to a department, is not built.
               </p>
+              <div className="mt-2">
+                <RequestConnector name={TELEGRAM_TEAMMATES} reason={TELEGRAM_TEAMMATES_REASON} from="Settings > Chat apps" buttonClassName="btn-secondary" />
+              </div>
             </div>
           </ChatAppCard>
         )}
@@ -222,16 +260,28 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
           <section className="rounded-xl border border-hairline bg-bg-panel px-4 py-4">
             <h2 className="text-sm font-semibold text-fg">Not built</h2>
             <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-              Nothing exists for these yet, so there is nothing to set up.
+              Nothing exists for these yet, so there is nothing to set up. Open one to see why, and ask OASIS for it.
             </p>
             <ul className="mt-3 grid gap-2 sm:grid-cols-3">
               {later.map((d) => (
-                <li key={d.slug} className="flex items-center gap-2.5 rounded-lg border border-hairline bg-bg-raised/40 px-3 py-2">
-                  <ConnectorIcon def={d} size="sm" />
-                  <div className="min-w-0">
-                    <div className="truncate text-[13px] font-medium text-fg">{d.name}</div>
-                    <StatusLine status={NOT_BUILT} />
-                  </div>
+                <li key={d.slug}>
+                  {/* The same drawer as Settings > Connections: why, and the request (no dead chip). */}
+                  <ConnectorDrawerButton
+                    slug={d.slug}
+                    status={resolveConnectorStatus(d, facts, nowMs)}
+                    requestFrom="Settings > Chat apps"
+                    ariaLabel={`${d.name}: not built yet. Open to see why and ask OASIS for it`}
+                    className="flex w-full items-center gap-2.5 rounded-lg border border-hairline bg-bg-raised/40 px-3 py-2 text-left transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
+                    label={
+                      <>
+                        <ConnectorIcon def={d} size="sm" />
+                        <span className="min-w-0">
+                          <span className="block truncate text-[13px] font-medium text-fg">{d.name}</span>
+                          <StatusLine status={NOT_BUILT} />
+                        </span>
+                      </>
+                    }
+                  />
                 </li>
               ))}
             </ul>
