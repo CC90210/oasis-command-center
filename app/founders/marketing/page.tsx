@@ -45,7 +45,7 @@ import Link from "next/link";
 import { Card, PageHeader, Stat } from "@/components/Card";
 import { Library, GraduationCap, Inbox, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
-import { resolveFounder } from "@/lib/founders/gate";
+import { resolveFounder, type FounderContext } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_FACETS,
   DEGRADED_MARKETING_SUMMARY,
@@ -101,7 +101,7 @@ export default async function MarketingPage() {
       />
 
       <Suspense fallback={<SectionLoading line="Loading what needs you..." />}>
-        <QueueAndPipeline tenantId={tenantId} />
+        <QueueAndPipeline founder={founder} />
       </Suspense>
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -134,15 +134,15 @@ async function OverviewSubtitle({ tenantId }: { tenantId: string }) {
 }
 
 /** Needs you, the pipeline, the brand tiles and the channel line: the Library's numbers. */
-async function QueueAndPipeline({ tenantId }: { tenantId: string }) {
+async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
   // `facets` deliberately spans every brand, because the whole point of the
   // tab counts is to show what is behind the tabs he is NOT on.
   const [summary, facets, lifecycle] = await Promise.all([
-    readSummary(tenantId),
-    safe("marketing.facets", getMarketingFacets(tenantId), DEGRADED_MARKETING_FACETS),
+    readSummary(founder.tenantId),
+    safe("marketing.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
     // The Library's lifecycle pills for the OASIS tab: the SAME call, the same
     // COUNT, that draws "Needs review N" on the page the line below links to.
-    safe("marketing.lifecycle", getLifecycleCounts(tenantId, DEFAULT_BRAND_GROUP), {
+    safe("marketing.lifecycle", getLifecycleCounts(founder.tenantId, DEFAULT_BRAND_GROUP), {
       counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
       degraded: true,
     }),
