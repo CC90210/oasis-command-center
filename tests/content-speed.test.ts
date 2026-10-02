@@ -345,7 +345,7 @@ async function main() {
     assert.doesNotMatch(text, /Zernio|provenance/, "the posting account, not its vendor; no jargon");
   });
 
-  // ── 1b'. every connected channel, the quiet ones included ─────────────────
+  // -- 1b'. every connected channel, the quiet ones included -----------------
   // CC's own account: TikTok and YouTube have not posted since 2026-08-21, and
   // the page used to drop them, while LinkedIn read "0 views" beside the
   // impressions it reports. Rows added here, removed after.

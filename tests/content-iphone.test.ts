@@ -130,7 +130,7 @@ const CONTENT_FILES = [
   ].map((f) => `components/founders/${f}`),
 ];
 
-// ── the render process ──────────────────────────────────────────────────────
+// -- the render process ------------------------------------------------------
 type Drawn = {
   tiles: Record<string, string>;
   enlarge: {
@@ -180,7 +180,7 @@ function drawn(): Drawn {
   return JSON.parse(r.stdout) as Drawn;
 }
 
-// ── the asset page, server-rendered ─────────────────────────────────────────
+// -- the asset page, server-rendered -----------------------------------------
 (globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
 let sessionCookie: string | undefined;
 function stub(request: string, exports: Record<string, unknown>) {
@@ -267,7 +267,7 @@ async function main() {
   const d = drawn();
   const BIG_PHONE_WIDTH = d.enlarge.bigPhoneWidth;
 
-  // ── 1. every tile opens the big phone ─────────────────────────────────────
+  // -- 1. every tile opens the big phone -------------------------------------
   await check("every Library tile, both views, every kind, has an Enlarge control named for it; a video's play press opens the big phone too", () => {
     const names = Object.keys(d.tiles);
     assert.equal(names.length, 10, `five kinds in two views: ${names.join(", ")}`);
@@ -290,7 +290,7 @@ async function main() {
     assert.match(d.tiles["videoPoster:grid"], /<button[^>]*class="absolute bottom-2 left-2[^"]*"[^>]*aria-label="Enlarge Asset title"|<button[^>]*aria-label="Enlarge Asset title"[^>]*class="absolute bottom-2 left-2/);
   });
 
-  // ── 2. the big phone ──────────────────────────────────────────────────────
+  // -- 2. the big phone ------------------------------------------------------
   await check("Enlarge opens a modal big phone: a named dialog in a portal on <body>, Close, the asset in its phone frame, motion only without reduced motion", () => {
     const e = d.enlarge;
     assert.equal(e.closedPortal, false, "closed: no big phone in the page");
@@ -366,7 +366,7 @@ async function main() {
     assert.ok(small.w <= 360 - 32 && small.h <= 640 - 7 * 16 + 1, `a small phone: ${JSON.stringify(small)}`);
   });
 
-  // ── 3. nothing loads until play ───────────────────────────────────────────
+  // -- 3. nothing loads until play -------------------------------------------
   await check("in a tile the play press opens the big phone and mounts nothing in place; there it mounts preload=none and plays once", () => {
     const p = d.player;
     assert.equal(tags(p.tileMount, "video").length, 0);
@@ -413,7 +413,7 @@ async function main() {
     assert.match(enlarge, /if \(!slotContext\) slotContext = createContext/, "the context is made on first use, not at import (react-server has no createContext)");
   });
 
-  // ── 4. Performance: every connected channel ───────────────────────────────
+  // -- 4. Performance: every connected channel -------------------------------
   const core = await import("../lib/founders-performance-core");
   const { PUBLISH_CHANNELS } = await import("../lib/founders/publish-targets");
   const connected = PUBLISH_CHANNELS.map((c) => c.id);
@@ -510,7 +510,7 @@ async function main() {
     assert.match(queries, /GROUP BY platform/, "one row per channel");
   });
 
-  // ── 5. the copy says what is true ─────────────────────────────────────────
+  // -- 5. the copy says what is true -----------------------------------------
   await check("no persona, plumbing or vendor name in any string a Content page can show", () => {
     assert.ok(CONTENT_FILES.length >= 18, `walked ${CONTENT_FILES.length} files`);
     const hits: string[] = [];
@@ -575,7 +575,7 @@ async function main() {
     assert.match(perf, /<div title=\{r\.content_excerpt \|\| undefined\} className="truncate/);
   });
 
-  // ── 6. the asset page, rendered ───────────────────────────────────────────
+  // -- 6. the asset page, rendered -------------------------------------------
   await check("the asset page, through the real gate: 'Made by: Marketing agent', no agent name, and the preview in PhoneEnlarge", async () => {
     const raw = createClient({ url: `file:${dbFile}` });
     await raw.executeMultiple(`

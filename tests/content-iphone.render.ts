@@ -139,7 +139,7 @@ function portalOf(node: unknown): { children: unknown; containerInfo: unknown } 
   return portalOf((node as El).props.children);
 }
 
-// ── a small DOM ────────────────────────────────────────────────────────────
+// -- a small DOM ------------------------------------------------------------
 const listeners = new Map<string, Array<(e: unknown) => void>>();
 const fakeDocument: { activeElement: unknown; body: unknown } = { activeElement: null, body: null };
 
@@ -211,7 +211,7 @@ async function main() {
   const draw = (node: unknown) => renderToStaticMarkup(node as El);
   const Slot = enlargeSlotContext();
 
-  // ── 1. the tiles, both presentations, every kind ──────────────────────────
+  // -- 1. the tiles, both presentations, every kind --------------------------
   const base = {
     id: "a1",
     title: "Asset title",
@@ -261,7 +261,7 @@ async function main() {
     },
   });
 
-  // ── 2. Enlarge, by keyboard: open, trap, Esc, focus back ──────────────────
+  // -- 2. Enlarge, by keyboard: open, trap, Esc, focus back ------------------
   const reel = React.createElement(TileVideo, {
     src: "https://media.test/reel.mp4", posterUrl: null, width: 1080, height: 1920, title: "Asset title", variant: "phone",
   });
@@ -333,7 +333,7 @@ async function main() {
     keydownListeners: (listeners.get("keydown") ?? []).length,
   };
 
-  // ── 3. a click outside the phone closes it; a click on it does not ────────
+  // -- 3. a click outside the phone closes it; a click on it does not --------
   tileSlot.enlarge({ play: false, at: 0 }, trigger);
   frame = pe.render(enlargeProps);
   pe.effects();
@@ -357,7 +357,7 @@ async function main() {
   const openAfterCloseButton = portalOf(frame) !== null;
   pe.effects();
 
-  // ── 4. a video playing in place carries on in the big phone ───────────────
+  // -- 4. a video playing in place carries on in the big phone ---------------
   const inlineCalls: string[] = [];
   const playingInPlace = fakeMedia("inline-video", inlineCalls, true, 12.5);
   const handover = driver(PhoneEnlarge);
@@ -380,7 +380,7 @@ async function main() {
   h2 = handover2.render(enlargeProps);
   const pausedStart = (must(portalOf(h2)!.children, "the big phone's provider", (el) => el.type === Slot).props.value as { start: unknown }).start;
 
-  // ── 5. TileVideo in each slot ─────────────────────────────────────────────
+  // -- 5. TileVideo in each slot ---------------------------------------------
   const tileProps = { src: "https://media.test/reel.mp4", posterUrl: null, width: 1080, height: 1920, title: "Asset title", variant: "phone" as const };
   // In a tile: pressing the cover opens the big phone, playing; nothing mounts here.
   const asked: Array<{ start: unknown; opener: string | null }> = [];

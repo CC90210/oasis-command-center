@@ -245,7 +245,7 @@ export function summarize(result: { data?: unknown[] | null; error?: { message?:
   };
 }
 
-// ───────────────────────────────────────────────────── the channel list
+// ----------------------------------------------------- the channel list
 
 /** A channel whose last post is older than this says so. */
 export const QUIET_AFTER_DAYS = 14;
