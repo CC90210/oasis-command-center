@@ -177,7 +177,8 @@ export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey):
 }
 
 export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer): Promise<ChannelState> {
-  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis });
+  // Who leads it: the workspace's manifest (config.ts departmentChannelFor).
+  const binding = departmentChannelFor(dept.key, { oasis: viewer.oasis, manifest: viewer.manifest });
   if (binding.kind === "unavailable") {
     return { kind: "not_connected", reason: binding.reason, action: null };
   }

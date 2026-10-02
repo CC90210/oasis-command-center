@@ -3,18 +3,19 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { UserProfile } from "@/lib/supabase";
-import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
+import { resolveAgentKey } from "@/lib/agents";
 
 /**
  * `tenantAgents` — slugs of agents the tenant manifest enables. When
  * provided, the primary-agent picker renders THIS list. Workspace agent
  * membership is managed once in the tenant manifest, not independently on
- * every user's profile.
+ * every user's profile. SettingsContent passes only teammates on the
+ * workspace's roster (W4a review R1).
  *
- * `agentNames` — what each agent is called on screen, keyed by slug: the
- * department it leads (lib/os/teammate-names.ts), never its persona name. A
- * slug with no entry (an agent the workspace built) falls back to the registry
- * label, then the slug.
+ * `agentNames` — what each agent is called on screen, keyed by slug: its name
+ * on the workspace's roster (lib/os/teammate-names.ts), never its persona
+ * name. A slug with no entry reads "AI teammate", never a registry persona
+ * label.
  */
 export function ProfileEditor({
   profile,
@@ -122,7 +123,7 @@ export function ProfileEditor({
                 {availableAgentKeys.length === 0 ? (
                   <option value="">No workspace agents enabled</option>
                 ) : availableAgentKeys.map((k) => (
-                  <option key={k} value={k}>{agentNames?.[k]?.name || AGENT_REGISTRY[k]?.label || k}</option>
+                  <option key={k} value={k}>{agentNames?.[k]?.name || "AI teammate"}</option>
                 ))}
               </select>
               <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">

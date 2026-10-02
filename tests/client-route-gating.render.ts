@@ -22,8 +22,6 @@ type Input = {
   marketplace: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
   profileEditor: Record<string, unknown> | null;
-  /** The same card after one agent was removed: where does it come back? */
-  marketplaceAfterRemove?: Record<string, unknown> | null;
 };
 
 /** What usePathname answers; the error boundaries read it. */
@@ -87,9 +85,6 @@ async function main() {
   }
   if (input.profileEditor) {
     render("profileEditor", React.createElement(ProfileEditor, input.profileEditor as never));
-  }
-  if (input.marketplaceAfterRemove) {
-    render("marketplaceAfterRemove", React.createElement(AgentMarketplaceCard, input.marketplaceAfterRemove as never));
   }
   const crash = Object.assign(new Error("boom"), { digest: "digest-4471" });
   const noop = () => undefined;

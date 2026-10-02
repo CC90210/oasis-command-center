@@ -595,9 +595,11 @@ export type Distribution = "live" | "never_posted";
  *     fire — code that reads as live logic and is unreachable, which is how a
  *     future change "fixes" something that was never running.
  *
- *  2. IT WOULD HAVE DESYNCED THE PAGE. getLifecycleCounts buckets in JS through
- *     this function, while getMarketingAssets filters in SQL on `published_at`
- *     alone. A second signal here that SQL cannot see makes the pills and the
+ *  2. IT WOULD HAVE DESYNCED THE PAGE. The Library's pills and grid both filter
+ *     in SQL (scopeToLifecycle in lib/founders/marketing-queries.ts, which
+ *     mirrors this function and is tested against it; a scheduled asset is in no
+ *     SQL bucket and keeps its own place), on `published_at` alone.
+ *     A second signal here that SQL cannot see makes the pills and the
  *     grid disagree — "Posted 3" over an empty grid — and they agreed only
  *     because the field was always undefined. Two code paths deciding one
  *     question have to consult the same column.
@@ -841,4 +843,266 @@ export function buildMediaPath(
   const safe = sanitizeStorageFilename(filename);
   const mid = uuid ? `${uuid}_` : "";
   return `${tenantId}/${assetId}/${now}_${mid}${safe}`;
+}
+
+// ──────────────────────────────────────────── library paging + phone preview
+
+/**
+ * How many assets one Library page shows, and so how many it SIGNS.
+ *
+ * CC, 2026-10-01: "clicking on the library takes way too long". The server
+ * answered in about a second; the minutes were in the browser, because the page
+ * rendered and signed all 100 assets at once and every tile then fetched its
+ * media: a full-size PNG per carousel and preload="metadata" per video, which for
+ * an MP4 without faststart reads deep into the file before it finds the moov box.
+ * A page is now 24 assets, and nothing outside it is read, signed or rendered.
+ */
+export const LIBRARY_PAGE_SIZE = 24;
+
+/** `?page=` as a 1-based page number. Anything else is page 1, never an error. */
+export function parseLibraryPage(raw: unknown): number {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!/^\d{1,6}$/.test(s)) return 1;
+  return Math.max(1, Number(s));
+}
+
+/** Pages needed for `total` rows. Always at least 1, so "Page 1 of 1" on an empty tab. */
+export function libraryPageCount(total: number, pageSize = LIBRARY_PAGE_SIZE): number {
+  const n = Number.isFinite(total) && total > 0 ? total : 0;
+  return Math.max(1, Math.ceil(n / Math.max(1, pageSize)));
+}
+
+/**
+ * The page links to draw: the first, the last, and two either side of the
+ * current page, with a gap marker where pages are skipped. Five pages today;
+ * this keeps a 40-page library from drawing 40 links.
+ */
+export function libraryPagerItems(current: number, count: number): Array<number | "gap"> {
+  const keep = new Set<number>([1, count]);
+  for (let n = current - 2; n <= current + 2; n++) if (n >= 1 && n <= count) keep.add(n);
+  const out: Array<number | "gap"> = [];
+  let prev = 0;
+  for (const n of [...keep].sort((a, b) => a - b)) {
+    // A gap of ONE page is drawn as that page: "1 2 3 ... 5" hides a page
+    // behind a marker that takes the same room as its number.
+    if (n - prev === 2) out.push(n - 1);
+    else if (n - prev > 2) out.push("gap");
+    out.push(n);
+    prev = n;
+  }
+  return out;
+}
+
+/**
+ * How the Library lays out its tiles. `phone` is the default: CC asked three
+ * times to see every asset the way it lands on a phone ("iPhone-frame preview
+ * like Instagram/TikTok"). `grid` is the plain card grid, one toggle away.
+ */
+export const LIBRARY_VIEWS = ["phone", "grid"] as const;
+export type LibraryView = (typeof LIBRARY_VIEWS)[number];
+export const DEFAULT_LIBRARY_VIEW: LibraryView = "phone";
+
+export function parseLibraryView(raw: unknown): LibraryView {
+  return raw === "grid" ? "grid" : DEFAULT_LIBRARY_VIEW;
+}
+
+/** What the Library URL says about the view on screen. */
+export type LibraryState = {
+  group: BrandGroupKey;
+  track?: Track;
+  channel?: Channel;
+  brand?: string;
+  author?: string;
+  status?: AssetStatus;
+  lifecycle?: Lifecycle;
+  view: LibraryView;
+};
+
+/** One link's change to that view. `null` clears a filter; absent keeps it. */
+export type LibraryHrefChange = {
+  group?: BrandGroupKey;
+  track?: Track | null;
+  channel?: Channel | null;
+  brand?: string | null;
+  author?: string | null;
+  status?: AssetStatus | null;
+  lifecycle?: Lifecycle | null;
+  page?: number;
+  view?: LibraryView;
+};
+
+/**
+ * Every Library link: tabs, pills, the pager and the Phone / Grid toggle.
+ *
+ * Every dimension is preserved unless explicitly overridden. `status` was
+ * omitted here once while Studio's pipeline tiles link in WITH it, so arriving
+ * on "In review" and then touching any pill — including "All" — silently
+ * widened the view to every status while the page gave no sign it had. You
+ * were reviewing, then you were not, and nothing said so.
+ *
+ * PAGE AND VIEW. The page number is dropped by every filter change - page 3 of
+ * one filter is not page 3 of another, and a stale ?page= would clamp to an
+ * unrelated page - and kept only when asked for (the pager, the view toggle).
+ * The view is kept everywhere: switching to Grid and then picking a pill must
+ * not snap back to phones. Pure, so tests/library-paging.test.ts can hold the
+ * pager to "the filters survive a page turn".
+ */
+export function libraryHref(state: LibraryState, next: LibraryHrefChange): string {
+  const params = new URLSearchParams();
+  const nextGroup = next.group ?? state.group;
+  // Switching tabs CLEARS the brand sub-filter. `warner` is meaningless on the
+  // OASIS tab — the reader would drop it anyway (brandFilterAllowed), but a URL
+  // that still carries it describes a view the page is not showing, and the
+  // next click would propagate the lie.
+  const groupChanged = next.group !== undefined && next.group !== state.group;
+  const nextTrack = next.track === undefined ? state.track : next.track || undefined;
+  const nextChannel = next.channel === undefined ? state.channel : next.channel || undefined;
+  const nextBrand = groupChanged
+    ? undefined
+    : next.brand === undefined ? state.brand : next.brand || undefined;
+  const nextAuthor = next.author === undefined ? state.author : next.author || undefined;
+  // ONE OR THE OTHER, NEVER BOTH. They filter the same column with different
+  // vocabularies, so carrying both produces `status = 'draft' AND status IN
+  // ('archived',...)` — an empty grid under pills that promise rows. Setting
+  // either one drops the other, which is also what the operator means: picking
+  // "Archived" is a request to see archived, not to intersect it with the
+  // stage they arrived from.
+  const settingLifecycle = next.lifecycle !== undefined;
+  const settingStatus = next.status !== undefined;
+  const nextStatus = settingLifecycle
+    ? undefined
+    : next.status === undefined ? state.status : next.status || undefined;
+  const nextLifecycle = settingStatus
+    ? undefined
+    : next.lifecycle === undefined ? state.lifecycle : next.lifecycle || undefined;
+  if (nextGroup !== DEFAULT_BRAND_GROUP) params.set("group", nextGroup);
+  if (nextTrack) params.set("track", nextTrack);
+  if (nextChannel) params.set("channel", nextChannel);
+  if (nextBrand) params.set("brand", nextBrand);
+  if (nextAuthor) params.set("author", nextAuthor);
+  if (nextStatus) params.set("status", nextStatus);
+  if (nextLifecycle) params.set("lifecycle", nextLifecycle);
+  const nextView = next.view ?? state.view;
+  if (nextView !== DEFAULT_LIBRARY_VIEW) params.set("view", nextView);
+  if (next.page && next.page > 1) params.set("page", String(Math.floor(next.page)));
+  const query = params.toString();
+  return `/founders/marketing/library${query ? `?${query}` : ""}`;
+}
+
+const LIBRARY_PATH = "/founders/marketing/library";
+/**
+ * Every query parameter the Library page reads, in the order libraryHref writes
+ * them (so a Library URL comes back unchanged); nothing else survives.
+ */
+const LIBRARY_PARAMS = ["group", "track", "channel", "brand", "author", "status", "lifecycle", "view", "page"] as const;
+
+/**
+ * Where the asset page's "Library" link goes: the Library view the asset was
+ * opened from, carried as ?from=, or the Library's front page.
+ *
+ * The link used to be the bare Library URL, so opening an asset from page 3 of
+ * the Clients tab in Grid view and pressing "Library" landed on page 1 of the
+ * OASIS tab in Phone view. `from` is a URL the browser hands back, so it is
+ * validated rather than trusted: it must resolve to this origin's Library page
+ * itself - another host, another path or a protocol trick falls back to the
+ * front page - and only the Library's own parameters are kept. The result is
+ * always a relative path, so the link cannot become an open redirect.
+ */
+export function libraryReturnPath(raw: unknown): string {
+  if (typeof raw !== "string" || !raw || raw.length > 2048) return LIBRARY_PATH;
+  const base = "https://library.invalid";
+  let url: URL;
+  try {
+    url = new URL(raw, base);
+  } catch {
+    return LIBRARY_PATH;
+  }
+  if (url.origin !== base || url.pathname !== LIBRARY_PATH) return LIBRARY_PATH;
+  const params = new URLSearchParams();
+  for (const key of LIBRARY_PARAMS) {
+    const value = url.searchParams.get(key);
+    if (value) params.set(key, value);
+  }
+  const query = params.toString();
+  return query ? `${LIBRARY_PATH}?${query}` : LIBRARY_PATH;
+}
+
+/**
+ * A tile's link to its asset page, carrying the Library view it sits in so the
+ * asset page can link straight back to it. The front page needs no `from`.
+ */
+export function assetHref(id: string, from?: string | null): string {
+  const back = libraryReturnPath(from);
+  return back === LIBRARY_PATH
+    ? `/founders/marketing/asset/${id}`
+    : `/founders/marketing/asset/${id}?from=${encodeURIComponent(back)}`;
+}
+
+/** Which app the phone preview imitates. */
+export type PhoneChrome = "instagram" | "tiktok";
+
+/**
+ * `?chrome=` if it names one, otherwise the asset's own primary channel: a
+ * TikTok-first asset previews as TikTok, everything else as Instagram.
+ */
+export function phoneChromeFor(raw: unknown, channel?: string | null): PhoneChrome {
+  if (raw === "instagram" || raw === "tiktok") return raw;
+  return channel === "organic-tiktok" ? "tiktok" : "instagram";
+}
+
+/** The phone screen is an iPhone's 9:19.5; a Reel or TikTok occupies 9:16 of it. */
+export const PHONE_SCREEN_RATIO = 9 / 19.5;
+export const PHONE_REEL_RATIO = 9 / 16;
+
+const LABEL_RATIO: Record<string, number> = {
+  "9:16": 9 / 16,
+  "4:5": 4 / 5,
+  "1:1": 1,
+  "16:9": 16 / 9,
+};
+
+export type PhoneFit = {
+  /**
+   * fill      - the asset is 9:16 and occupies the whole reel area;
+   * letterbox - wider than 9:16 (4:5, 1:1, 16:9): full width, bars above and below;
+   * pillarbox - taller than 9:16: full height, bars at the sides.
+   */
+  mode: "fill" | "letterbox" | "pillarbox";
+  /** width / height of the asset. */
+  ratio: number;
+  /** The media box as a share of the 9:16 reel area. */
+  widthPct: number;
+  heightPct: number;
+};
+
+/**
+ * Where an asset sits inside the phone's 9:16 reel area, from its REAL shape.
+ *
+ * Same rule as mediaFrame(): measured pixels beat the declared label, and a
+ * ratio outside 1:5..5:1 is a corrupt row rather than a shape. Unknown shapes
+ * (text-only assets, rows with no media) take the full reel area.
+ *
+ * Within 2% of 9:16 counts as 9:16, so a 1080x1916 export still fills rather
+ * than showing a one-pixel bar. Nothing is ever cropped: a 4:5 card is shown
+ * whole with bars, exactly as a Reels viewer sees a non-vertical upload.
+ */
+export function phoneMediaFit(
+  mediaW?: number | null,
+  mediaH?: number | null,
+  aspect?: string | null,
+): PhoneFit {
+  const measured =
+    mediaW && mediaH && mediaW > 0 && mediaH > 0 ? Number(mediaW) / Number(mediaH) : null;
+  const r =
+    measured && measured >= 0.2 && measured <= 5
+      ? measured
+      : LABEL_RATIO[aspect || ""] ?? PHONE_REEL_RATIO;
+  const pct = (x: number) => Math.round(x * 1_000_000) / 10_000;
+  if (Math.abs(r - PHONE_REEL_RATIO) / PHONE_REEL_RATIO <= 0.02) {
+    return { mode: "fill", ratio: r, widthPct: 100, heightPct: 100 };
+  }
+  if (r > PHONE_REEL_RATIO) {
+    return { mode: "letterbox", ratio: r, widthPct: 100, heightPct: pct(PHONE_REEL_RATIO / r) };
+  }
+  return { mode: "pillarbox", ratio: r, widthPct: pct(r / PHONE_REEL_RATIO), heightPct: 100 };
 }

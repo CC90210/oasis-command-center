@@ -1,16 +1,19 @@
 /**
  * /agents — the AI Team (plan D4, CC's "Agents" tab).
  *
- * WHAT IT SHOWS
- *   Department leads   the agent behind each department channel the viewer
+ * WHAT IT SHOWS (one roster, W4a 2026-10-01: the workspace manifest, read
+ * through components/os/aiteam/roster.ts; Settings > AI brain lists the same)
+ *   Department leads   the teammate leading each department channel the viewer
  *                      can open, with where it lives (Web; Slack as the
  *                      workspace's real state, lib/slack/status.ts; Telegram
  *                      is Phase 2 and says so).
  *   Custom teammates   agents this workspace built in the builder, On/Off as
  *                      the workspace manifest has them.
+ *   On / Off           owners and admins switch any teammate that is not core
+ *                      (POST /api/tenant/agents/toggle); everyone else reads it.
  *   New teammate       owners/admins: the existing builder, plus six starting
  *                      templates (Setter, Support rep, Bookkeeper, Media buyer,
- *                      Content producer, Project manager).
+ *                      Content producer, Project manager) it opens prefilled.
  *
  * WHAT MOVED OUT. This page used to be the operator fleet: the ChatWidget
  * power chat on the CLI bridge, provider-key nudges and every agent's
@@ -24,12 +27,13 @@
  *      /operations, /automations and /health carry (tests/role-surfaces
  *      pins it). It 404s an outside contractor before anything is fetched.
  *   2. mayOpenOsHref(viewer.navInput, "/agents") — the rail's row (lib/os/nav.ts
- *      "ai-team": system surfaces, OASIS's own workspace only), so the page
- *      opens exactly when the rail draws it. An unprovisioned workspace 404s
- *      too, as its rail shows Today only.
- * The roster itself is built for any workspace (it is why the leads and the
- * templates are neutral outside OASIS). Opening it to clients and reps is a
- * catalog change (audience + the persona allowlists), not a change here.
+ *      "ai-team": owners and admins, audience "manage", in ANY provisioned
+ *      workspace; decision 22 opened it to client owners, whose only agent
+ *      surface was a Settings card), so the page opens exactly when the rail
+ *      draws it. An unprovisioned workspace 404s too, as its rail shows Today
+ *      only.
+ * The roster is built for any workspace: outside OASIS it lists only the
+ * neutral leads and the workspace's own teammates, never an OASIS persona.
  *
  * Inside the page, a department lead is listed only if the viewer can open its
  * tab (components/os/department/gate.ts, the rail's own predicate), and a
@@ -44,9 +48,9 @@ import { Card, EmptyState } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { loadAiTeam } from "@/components/os/aiteam/roster";
 import { TeammateRow } from "@/components/os/aiteam/TeammateRow";
+import { TeammateToggle } from "@/components/os/aiteam/TeammateToggle";
 import { TemplatePicker } from "@/components/os/aiteam/TemplatePicker";
 import { resolveOsViewer } from "@/components/os/department/viewer";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { requireSystemSurface } from "@/lib/role-surfaces-session";
 
@@ -79,11 +83,10 @@ export default async function AiTeamPage() {
   if (!viewer.provisioned) notFound();
   if (!mayOpenOsHref(viewer.navInput, AI_TEAM_HREF)) notFound();
 
-  // Which of this workspace's agents are switched on: the manifest-first
-  // roster every other agent surface uses (lib/manifest/agent-roster.ts), so
-  // "On" here means the same thing it means in Settings and the chat picker.
-  const enabledSlugs = resolveEnabledAgentSlugs({ manifestAgents: viewer.manifest.agents ?? [] });
-  const team = await loadAiTeam(viewer, enabledSlugs);
+  // The workspace's own roster (its manifest, lib/os/teammates.ts): "On" here
+  // is lib/manifest/agent-roster.ts's rule, the one Settings and the chat
+  // picker use.
+  const team = await loadAiTeam(viewer);
 
   return (
     <PageFrame
@@ -117,6 +120,7 @@ export default async function AiTeamPage() {
                 webReason={lead.webReason}
                 slack={lead.slack}
                 href={lead.departments[0]?.href ?? null}
+                control={lead.toggle ? <TeammateToggle {...lead.toggle} name={lead.name} /> : undefined}
               />
             ))}
           </ul>
@@ -154,6 +158,7 @@ export default async function AiTeamPage() {
                 webReason={c.webReason}
                 href={c.webHref}
                 badge={c.enabled ? "On" : "Off"}
+                control={c.toggle ? <TeammateToggle {...c.toggle} name={c.name} /> : undefined}
               />
             ))}
           </ul>

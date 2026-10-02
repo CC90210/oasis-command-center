@@ -21,6 +21,7 @@ import "server-only";
 
 import { OASIS_SEED_TENANT_IDS } from "@/lib/manifest/seeds";
 import { parseManifest, type ManifestChatApp, type ManifestJevMode } from "@/lib/manifest/schema";
+import { isSeedOverlay } from "@/lib/manifest/seed-overlay";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { getTursoClient } from "@/lib/turso";
 
@@ -68,9 +69,14 @@ function maxIso(...values: unknown[]): string | null {
  * The stored manifest's setup choices. A manifest that does not parse is
  * reported as "unreadable" (and logged): provisioning refuses to replace such a
  * setup, so the console must not offer defaults as if it were empty.
+ *
+ * A seed overlay is not a setup: a workspace that runs on an in-code seed
+ * (OASIS's own) stores only its agent lineup changes there
+ * (lib/manifest/seed-overlay.ts), so it has no stored setup (null), and is
+ * never logged as one that does not parse (W4a verifier D2).
  */
 export function currentSetupOf(raw: unknown, tenantId: string): CurrentSetup | "unreadable" | null {
-  if (raw == null) return null;
+  if (raw == null || isSeedOverlay(raw)) return null;
   try {
     const m = parseManifest(typeof raw === "string" ? JSON.parse(raw) : raw);
     return {
