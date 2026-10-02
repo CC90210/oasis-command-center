@@ -502,8 +502,9 @@ function replyReadiness(tenant: ExecutorTenant): string | null {
  * An approved reply to a ticket that came in by email (support-drafts.ts
  * files it). In this order, and nothing leaves before the last check:
  *   1. the ticket is re-read on its desk; a closed ticket is refused;
- *   2. the email's record must name THIS approval as its filed draft (a
- *      failure report that settled the email first wins: draft_not_current);
+ *   2. the email's record must name THIS approval as its draft, or name
+ *      nothing yet (then it is named now); a record settled another way (a
+ *      failure report won the race) is refused: draft_not_current;
  *   3. STALE: the client wrote again after the message the draft answers, so
  *      the draft answers a question that is no longer the last one: refused
  *      (the newer message gets its own draft);
@@ -537,10 +538,10 @@ const replyTicket: Executor = {
     if (!answered) return failed("message_not_found", "The email this reply answers is no longer on the ticket, so nothing was sent.", EMAIL_PROVIDER);
     // The email's record names the draft it stands behind. Anything else (a
     // failure report settled it while this was being filed) is never sent.
-    if (answered.draft_status !== "filed" || answered.draft_approval_id !== ctx.approval.id) {
+    if (!(await claimDraftRecord(ctx.db, tenantId, answered.id, ctx.approval.id))) {
       return failed(
         "draft_not_current",
-        `This reply is not the draft on record for the client's email on ${ticket.ticket_number} (the drafter reported it could not write one, or another filing replaced it), so nothing was sent.`,
+        `This reply is not the draft on record for the client's email on ${ticket.ticket_number} (the drafter reported it could not write one, or the email was settled another way), so nothing was sent.`,
         EMAIL_PROVIDER,
       );
     }
@@ -638,33 +639,36 @@ function notifyDepsFor(ctx: ExecutorContext): NotifyDeps {
   };
 }
 
-type AnsweredMessage = {
-  id: string;
-  comment_id: string | null;
-  received_at: string;
-  /** "filed" once a draft's approval is named on the record (support-drafts.ts). */
-  draft_status: string | null;
-  draft_approval_id: string | null;
-};
+type AnsweredMessage = { id: string; comment_id: string | null; received_at: string };
 
 async function readAnsweredMessage(db: Client, tenantId: string, recordId: string, ticketId: string): Promise<AnsweredMessage | null> {
   const r = (
     await db.execute({
-      sql: `SELECT id, comment_id, received_at, draft_status, draft_approval_id FROM support_email_messages
+      sql: `SELECT id, comment_id, received_at FROM support_email_messages
             WHERE tenant_id = ? AND id = ? AND ticket_id = ? AND direction = 'inbound' LIMIT 1`,
       args: [tenantId, recordId, ticketId],
     })
   ).rows[0];
-  const str = (v: unknown) => (v == null ? null : String(v));
-  return r
-    ? {
-        id: String(r.id),
-        comment_id: str(r.comment_id),
-        received_at: String(r.received_at),
-        draft_status: str(r.draft_status),
-        draft_approval_id: str(r.draft_approval_id),
-      }
-    : null;
+  return r ? { id: String(r.id), comment_id: r.comment_id == null ? null : String(r.comment_id), received_at: String(r.received_at) } : null;
+}
+
+/**
+ * Is this approval the email's draft? A compare-and-swap on the email's
+ * record (support-drafts.ts files it there): true when the record already
+ * names this approval, or names nothing yet (the filing request died between
+ * creating the approval and naming it), which it then does, so a late failure
+ * report cannot land under a reply being sent. False when the record was
+ * settled another way: a failure report won the race, or the draft was filed
+ * as a note.
+ */
+async function claimDraftRecord(db: Client, tenantId: string, recordId: string, approvalId: string): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `UPDATE support_email_messages SET draft_status = 'filed', draft_approval_id = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND direction = 'inbound'
+            AND (draft_status IS NULL OR (draft_status = 'filed' AND draft_approval_id = ?))`,
+    args: [approvalId, new Date().toISOString(), tenantId, recordId, approvalId],
+  });
+  return rs.rowsAffected === 1;
 }
 
 /** Did the client write on the ticket after the message the draft answers (by email or in the portal)? */

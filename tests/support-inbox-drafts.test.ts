@@ -17,7 +17,8 @@
  * no approver Cc, as a reply to their own ticket; it refuses a stale draft, a
  * closed ticket, a changed recipient, an unverified recipient, an approval the
  * record does not name as its draft and a missing mailbox before anything is
- * posted, and a dry run posts and sends nothing.
+ * posted (an approval whose filing died before the record named it is named
+ * then, and sent), and a dry run posts and sends nothing.
  *
  * Run: node --conditions=react-server --import tsx tests/support-inbox-drafts.test.ts
  */
@@ -427,6 +428,24 @@ async function main() {
     assert.equal((done.execution_result as { reason: string }).reason, "draft_not_current");
     assert.equal(sent.length, before);
     assert.equal(await comments(rec.ticket!.id), 0);
+  });
+
+  await check("an approval whose filing died before the record named it is still the email's draft: approved, it is sent, and the record names it", async () => {
+    const { rec, approvalId: id } = await fresh("unnamed@client.test");
+    // As if the filing request died between creating the approval and naming it on the record.
+    await db.execute({ sql: "UPDATE support_email_messages SET draft_status = NULL, draft_approval_id = NULL WHERE id = ?", args: [rec.message_record_id] });
+    const before = sent.length;
+    const done = await approve(id);
+    assert.equal(done.status, "executed", JSON.stringify(done.execution_result));
+    assert.equal(sent.length, before + 1);
+    const r = (await db.execute({ sql: "SELECT draft_status, draft_approval_id FROM support_email_messages WHERE id = ?", args: [rec.message_record_id] })).rows[0];
+    assert.equal(r.draft_status, "filed");
+    assert.equal(r.draft_approval_id, id);
+    // A failure report that arrives afterwards finds the draft, and leaves no note.
+    const report = await file({ message_record_id: rec.message_record_id, ticket_id: rec.ticket!.id, model_ref: "claude-cli:opus", body: null, critic: null, failure: "draft_failed", reason: "model_unavailable", attempts: 3 });
+    assert.equal(report.status, 200);
+    assert.equal(report.body.status, "already_filed");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ? AND body LIKE '%Reply by hand%'", [rec.ticket!.id])), 0);
   });
 
   await check("only OASIS's desk can carry out a ticket reply", async () => {
