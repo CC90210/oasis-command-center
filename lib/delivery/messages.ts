@@ -153,24 +153,80 @@ export function clientAckEmail(t: MessageTicket): Email {
   };
 }
 
-/** A team member's public reply, emailed to the client. The reply is trusted text. */
-export function clientReplyEmail(
-  t: Pick<MessageTicket, "ticket_number" | "client_name" | "status">,
-  reply: { body: string; authorName: string },
+/**
+ * The subject every desk email on an EMAIL ticket carries: the client's own
+ * subject, once, with "Re:" and the ticket tag, and kept identical for the
+ * life of the ticket so their mail client keeps one conversation. The tag
+ * also survives a mail client that drops the threading headers
+ * (rules.findTicketRefInSubject reads it back). An empty subject reads as
+ * "Your request".
+ */
+export function emailThreadSubject(clientSubject: string | null | undefined, ticketNumber: string): string {
+  let base = String(clientSubject ?? "").replace(/[\r\n]+/g, " ");
+  base = base.replace(/[[(]\s*T-\d{4,9}\s*[\])]/gi, " ");
+  for (;;) {
+    const next = base.replace(/^\s*(?:re|fwd?|tr|aw|sv)\s*(?:\[\d+\])?\s*:\s*/i, "");
+    if (next === base) break;
+    base = next;
+  }
+  base = base.replace(/\s+/g, " ").trim() || "Your request";
+  const tag = ` [${ticketNumber}]`;
+  const max = 200 - "Re: ".length - tag.length;
+  const clipped = base.length > max ? `${base.slice(0, max - 3).trimEnd()}...` : base;
+  return `Re: ${clipped}${tag}`;
+}
+
+/**
+ * The instant acknowledgement of an EMAIL, sent from support@ to a verified
+ * sender (lib/delivery/notify.ts acknowledgeClient). Like the form's, it
+ * echoes nothing the sender wrote except a sanitised first name: no title, no
+ * text, no subject in the body. The subject is the client's own (it has to
+ * be, to thread), tagged with the ticket number.
+ */
+export function clientEmailAckEmail(
+  t: Pick<MessageTicket, "ticket_number" | "client_name" | "category" | "severity">,
+  clientSubject: string | null,
 ): Email {
   const name = safeGreetingName(t.client_name);
   return {
-    subject: `Re: your OASIS support request (${t.ticket_number})`,
+    subject: emailThreadSubject(clientSubject, t.ticket_number),
     body: [
       `Hi ${name},`,
       "",
-      reply.body,
+      `We have your email as ticket ${t.ticket_number} (${TICKET_CATEGORY_LABELS[t.category]}, ${TICKET_SEVERITY_LABELS[t.severity]}).`,
+      `A person on the OASIS team will reply within ${slaTargetPhrase(t.severity)}.`,
       "",
-      `${reply.authorName}, OASIS`,
+      `Reply to this email to add anything. Keep ${t.ticket_number} in the subject line.`,
       "",
-      `Ticket ${t.ticket_number} · Status: ${TICKET_STATUS_LABELS[t.status] ?? t.status}`,
-      `Reply to this email and keep ${t.ticket_number} in the subject line.`,
+      "The OASIS team",
     ].join("\n"),
+  };
+}
+
+/**
+ * A team member's public reply, emailed to the client. The reply is trusted text.
+ *
+ * `threadSubject` (an email ticket): the client's own subject, tagged
+ * (emailThreadSubject), so the reply lands in their conversation.
+ * `preSigned`: the body already greets and signs off as the team (an approved
+ * reply draft, signed "The OASIS team"), so nothing is added around it but the
+ * ticket line.
+ */
+export function clientReplyEmail(
+  t: Pick<MessageTicket, "ticket_number" | "client_name" | "status">,
+  reply: { body: string; authorName: string; preSigned?: boolean },
+  threadSubject: string | null = null,
+): Email {
+  const name = safeGreetingName(t.client_name);
+  const ticketLines = [
+    `Ticket ${t.ticket_number} · Status: ${TICKET_STATUS_LABELS[t.status] ?? t.status}`,
+    `Reply to this email and keep ${t.ticket_number} in the subject line.`,
+  ];
+  return {
+    subject: threadSubject !== null ? emailThreadSubject(threadSubject, t.ticket_number) : `Re: your OASIS support request (${t.ticket_number})`,
+    body: reply.preSigned
+      ? [reply.body.trim(), "", ...ticketLines].join("\n")
+      : [`Hi ${name},`, "", reply.body, "", `${reply.authorName}, OASIS`, "", ...ticketLines].join("\n"),
   };
 }
 

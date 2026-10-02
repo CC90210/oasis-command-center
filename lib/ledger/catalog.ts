@@ -403,7 +403,16 @@ const DEFS: readonly CatalogEntry[] = [
   ev({ key: "ticket.resolved", department: "client_success", owningModule: "lib/delivery/store.ts", subjectTypes: ["ticket"], requiredJoinKeys: [],
     payload: {}, idempotency: "tkt:{ticket_id}:resolved:{n}", description: "A ticket was resolved." }),
   ev({ key: "ticket.reopened", department: "client_success", owningModule: "lib/delivery/store.ts", subjectTypes: ["ticket"], requiredJoinKeys: [],
-    payload: {}, idempotency: "tkt:{ticket_id}:reopened:{n}", description: "A resolved ticket was reopened." }),
+    payload: {}, idempotency: "tkt:{ticket_id}:reopened:{comment_id}", description: "A resolved ticket was reopened (keyed by the client comment that reopened it)." }),
+  ev({ key: "ticket.message_received", department: "client_success", owningModule: "lib/delivery/email-intake.ts", subjectTypes: ["ticket"], requiredJoinKeys: [],
+    payload: {
+      facet: code(["bug", "how_to", "billing", "access", "feature_request", "other"]),
+      urgency: code(["critical", "high", "normal", "low"]),
+      disposition: code(["new_ticket", "appended", "follow_up"]),
+      sender: code(["verified", "unverified", "forwarded"]),
+    },
+    idempotency: "tktmsg:{message_id_hash}",
+    description: "An email to the support inbox landed on a ticket (opened it, added to it, or followed up a closed one)." }),
   ev({ key: "csat.recorded", department: "client_success", owningModule: "lib/delivery/store.ts", subjectTypes: ["ticket"], requiredJoinKeys: [],
     payload: { score: int(1, 5) }, idempotency: "csat:{ticket_id}", description: "A satisfaction score was recorded." }),
 

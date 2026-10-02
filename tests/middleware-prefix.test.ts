@@ -161,6 +161,22 @@ for (const notPublic of ["/api/ledger", "/api/ledger/events", "/api/ledger/inges
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only the ingest path is public`);
 }
 
+// The support@ reader (BEA, on CC's PC) posts to four routes under
+// /api/internal/support/, each HMAC-gated inside (lib/delivery/support-ingest-auth.ts).
+// A 401 from middleware would read to the reader as a bad signature and stop
+// the desk, so the prefix is public, and only that prefix.
+for (const support of [
+  "/api/internal/support/ingest",
+  "/api/internal/support/heartbeat",
+  "/api/internal/support/pending-drafts",
+  "/api/internal/support/draft",
+]) {
+  assert.equal(isPublic(support), true, `${support} is HMAC-gated inside its route and MUST bypass session middleware`);
+}
+for (const notPublic of ["/api/internal/supportx", "/api/internal/support-admin", "/api/internal/supported/ingest"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only /api/internal/support/* is public`);
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.
