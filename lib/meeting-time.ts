@@ -107,7 +107,15 @@ export function meetingIsoInZone(date: string, time: string, timeZone: string): 
   const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   const t = /^(\d{2}):(\d{2})$/.exec(time);
   if (!d || !t) return null;
-  const target = Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]), Number(t[1]), Number(t[2]));
+  const [year, month, day, hour, minute] = [d[1], d[2], d[3], t[1], t[2]].map(Number);
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  // Date.UTC rolls impossible values over (Feb 30 becomes Mar 2, 24:00 the
+  // next day). Refuse them instead of booking an instant nobody asked for.
+  const check = new Date(target);
+  if (
+    check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day ||
+    check.getUTCHours() !== hour || check.getUTCMinutes() !== minute
+  ) return null;
   let instant = target;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const p = partsIn(timeZone, instant);

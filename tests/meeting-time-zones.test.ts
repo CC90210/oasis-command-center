@@ -39,6 +39,16 @@ assert.equal(meetingIsoInZone("2027-03-14", "02:30", "America/Toronto"), null);
 // Garbage in, null out.
 assert.equal(meetingIsoInZone("2026-10-06", "", "America/Toronto"), null);
 assert.equal(meetingIsoInZone("06/10/2026", "14:00", "America/Toronto"), null);
+// Impossible calendar or clock values are refused, never rolled over into a
+// real but unintended instant (Feb 30 must not become Mar 2).
+assert.equal(meetingIsoInZone("2026-02-30", "14:00", "America/Toronto"), null);
+assert.equal(meetingIsoInZone("2026-13-01", "14:00", "America/Toronto"), null);
+assert.equal(meetingIsoInZone("2026-10-00", "14:00", "America/Toronto"), null);
+assert.equal(meetingIsoInZone("2026-10-06", "24:00", "America/Toronto"), null);
+assert.equal(meetingIsoInZone("2026-10-06", "14:60", "America/Toronto"), null);
+// Leap day exists in 2028 only.
+assert.equal(meetingIsoInZone("2027-02-29", "14:00", "America/Toronto"), null);
+assert.equal(meetingIsoInZone("2028-02-29", "14:00", "America/Toronto"), "2028-02-29T19:00:00.000Z");
 
 // Slots: 07:00 to 20:45 in 15-minute steps, labelled for a Canadian reader.
 assert.equal(MEETING_TIME_OPTIONS[0].value, "07:00");
