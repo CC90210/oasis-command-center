@@ -63,6 +63,13 @@ async function main() {
     if (r.ok) assert.deepEqual(r.body, { mailbox: "support@oasisai.work", note: `caf${String.fromCharCode(0xe9)}` });
   });
 
+  await check("the signature is compared timing-safe (the ledger's verifier), never with string equality", async () => {
+    const src = readFileSync(join(ROOT, "lib", "delivery", "support-ingest-auth.ts"), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    assert.match(src, /verifyStripeSignature\(\{/);
+    assert.doesNotMatch(src, /\bsig\s*[!=]==?|[!=]==?\s*sig\b|\.equals\(/);
+    assert.match(readFileSync(join(ROOT, "lib", "founders-finances", "stripe-signature.ts"), "utf8"), /timingSafeEqual\(given, expected\)/);
+  });
+
   await check("a bad signature is 401 unauthorized and the body is never parsed (not 422, though it is not JSON)", async () => {
     const res = await intake.handleSupportIngest(signedRequest("/api/internal/support/ingest", null, now, { raw: "this is not json", signature: "a".repeat(64) }), deps);
     const a = await answerOf(res);
