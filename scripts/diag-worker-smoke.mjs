@@ -13,7 +13,7 @@ import fs from "node:fs";
 const PORT = 8787;
 const BASE = `http://127.0.0.1:${PORT}`;
 const LOG = "/tmp/wrangler-dev.log";
-const BUDGET_MS = 7 * 60 * 1000;
+const BUDGET_MS = 9 * 60 * 1000;
 const started = Date.now();
 
 const CHUNK_ERRORS = /Unknown chunk|Cannot find module|reading 'call'|__webpack_modules__|is not a function|No such module|Dynamic require of/i;
@@ -68,14 +68,26 @@ console.log(`routes to request: ${all.length}`);
 
 const results = {};
 if (ready) {
+  // The routes these checks name first, one at a time, before any load.
+  for (const p of ["/opengraph-image-pwu6ef", "/robots.txt", "/", "/login", "/api/health"]) results[p] = await get(p, 40000);
+  const queue = all.filter((p) => !(p in results));
   let next = 0;
   const worker = async () => {
-    while (next < all.length && Date.now() - started < BUDGET_MS) {
-      const p = all[next++];
-      results[p] = await get(p);
+    while (next < queue.length && Date.now() - started < BUDGET_MS) {
+      const p = queue[next++];
+      results[p] = await get(p, 25000);
     }
   };
-  await Promise.all(Array.from({ length: 8 }, worker));
+  await Promise.all(Array.from({ length: 4 }, worker));
+  // A timeout says the dev server was busy (pages here wait on hosts that do
+  // not answer without credentials), not what the route does. Retry each one
+  // alone.
+  const retry = Object.keys(results).filter((p) => results[p].status === "timeout");
+  console.log(`retrying ${retry.length} timeout(s) one at a time`);
+  for (const p of retry) {
+    if (Date.now() - started > BUDGET_MS + 3 * 60 * 1000) break;
+    results[p] = await get(p, 40000);
+  }
 }
 
 const byStatus = {};

@@ -234,5 +234,5 @@ jobs:
         run: node scripts/diag-worker-bundle.mjs
       - name: Worker smoke test under wrangler dev (TEMPORARY diagnostic, removed before merge)
         if: always()
-        timeout-minutes: 12
+        timeout-minutes: 16
         run: node scripts/diag-worker-smoke.mjs

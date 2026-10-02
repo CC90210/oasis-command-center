@@ -143,6 +143,24 @@ for (const [rel, bytes] of nextServer) {
   chunkTops.push([rel, bytes, inChunk.slice(0, 4).map(([k, s]) => `${k}=${(s / 1024).toFixed(0)}K`).join(" ")]);
 }
 console.log(`\nwebpack inputs without a module map: ${kib(unattributed)} KiB`);
+{
+  const kinds = {};
+  for (const [rel, b] of nextServer) {
+    const kind = /_client-reference-manifest\.js$/.test(rel)
+      ? rel.match(/(page|route)_client-reference-manifest\.js$/)?.[0] || "other_client-reference-manifest.js"
+      : chunkMap[rel]
+        ? "webpack chunk or entry"
+        : "other (no module map)";
+    kinds[kind] ||= { n: 0, b: 0, max: 0, maxRel: "" };
+    kinds[kind].n++;
+    kinds[kind].b += b;
+    if (b > kinds[kind].max) Object.assign(kinds[kind], { max: b, maxRel: rel });
+  }
+  console.log("=== .next/server inputs by kind ===");
+  for (const [k, v] of Object.entries(kinds)) console.log(`${kib(v.b)} KiB  ${String(v.n).padStart(4)} x ${k}  (largest ${kib(v.max)} KiB ${v.maxRel})`);
+  const sizes = nextServer.filter(([r]) => /route_client-reference-manifest\.js$/.test(r)).map(([, b]) => b).sort((a, b) => a - b);
+  if (sizes.length) console.log(`route manifests: min ${kib(sizes[0])} median ${kib(sizes[Math.floor(sizes.length / 2)])} max ${kib(sizes[sizes.length - 1])} KiB`);
+}
 
 // Duplication: the same module (same source, same layer) emitted into more
 // than one chunk. Each copy is a full copy of its code.
