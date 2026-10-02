@@ -329,6 +329,20 @@ async function main() {
     const text = textOf(el).join(" | ");
     assert.doesNotMatch(text, FORBIDDEN, text);
     assert.match(text, /Chief of Staff/);
+    // W4a: the labels are the workspace roster's (each binding's display_name,
+    // lib/os/teammates.ts), not a page-local map; CC's own agents are not on it.
+    const teammates = propValues(el, "teammates")[0] as Array<{ slug: string; label: string }>;
+    assert.deepEqual(
+      teammates.map((t) => [t.slug, t.label]),
+      [
+        ["bravo", "Chief of Staff · Operations"],
+        ["sdr", "Sales"],
+        ["maven", "Marketing"],
+        ["customer-support", "Client Success"],
+        ["atlas", "Finance"],
+      ],
+    );
+    assert.doesNotMatch(readFileSync("app/onboarding/welcome/page.tsx", "utf8"), /HOUSE_AGENT_LABELS|Personal assistant/);
   });
 
   await check("a failed teammate read says so; it is never shown as 'not set up yet'", async () => {

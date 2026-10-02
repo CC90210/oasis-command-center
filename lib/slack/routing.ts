@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
-import { departmentChannelFor } from "@/components/os/department/config";
+import { departmentChannelFor, type DepartmentScope } from "@/components/os/department/config";
 
 /** Providers whose install flow OASIS can finish (the generic authorize route starts only these). */
 export const INSTALL_PROVIDERS: readonly string[] = ["slack"];
@@ -100,20 +100,21 @@ export function departmentFromMention(text: string): { department: DepartmentKey
 }
 
 /**
- * The departments that have an AI teammate in a workspace, so they can answer
- * in Slack (components/os/department/config.ts): every department in OASIS's
- * own workspace; in a client workspace only the neutral ones (today Sales and
- * Client Success). The channel map offers only these, and the map's API
- * refuses the rest: a channel mapped to a department that cannot answer would
- * only ever get "not set up" notices.
+ * The departments that have an AI teammate answering in a workspace, so they
+ * can answer in Slack: the leads its manifest binds (components/os/department/
+ * config.ts departmentChannelFor, the same reader as the web channels). Every
+ * department in OASIS's own workspace; in a client workspace the ones OASIS set
+ * up for it (today Sales and Client Success). The channel map offers only
+ * these, and the map's API refuses the rest: a channel mapped to a department
+ * that cannot answer would only ever get "not set up" notices.
  */
-export function answeringDepartments(opts: { oasis: boolean }): DepartmentKey[] {
-  return DEPARTMENT_KEYS.filter((k) => departmentChannelFor(k, opts).kind === "agent");
+export function answeringDepartments(scope: DepartmentScope): DepartmentKey[] {
+  return DEPARTMENT_KEYS.filter((k) => departmentChannelFor(k, scope).kind === "agent");
 }
 
 /** Who takes a mention that names no department in a channel with none: Chief of Staff where it has a teammate, else the first department that does. */
-export function defaultMentionDepartment(opts: { oasis: boolean }): DepartmentKey {
-  const answering = answeringDepartments(opts);
+export function defaultMentionDepartment(scope: DepartmentScope): DepartmentKey {
+  const answering = answeringDepartments(scope);
   return answering.includes("chief_of_staff") ? "chief_of_staff" : (answering[0] ?? "chief_of_staff");
 }
 

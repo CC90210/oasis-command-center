@@ -479,6 +479,35 @@ async function main() {
     assert.equal(listed.installs.find((i) => i.tenantId === BROKEN)?.currentSetup, "unreadable");
   });
 
+  // W4a verifier D2: OASIS runs on its in-code seed, so its first lineup change
+  // stores a seed overlay (lib/manifest/seed-overlay.ts), not a setup. The
+  // console parsed it as one and logged "does not parse" on every load.
+  await check("OASIS's seed overlay is not a stored setup: the console lists none and logs nothing", async () => {
+    const { overlaySeedFor, seedOverlayBody } = await import("../lib/manifest/seed-overlay");
+    const seed = overlaySeedFor("oasis-ai-cc", OASIS);
+    assert.ok(seed, "OASIS's in-code seed");
+    const body = seedOverlayBody(seed, [...seed.agents, { slug: "renewal-chaser", display_name: "Renewal chaser", enabled: true, core: false }]);
+    await db.execute({ sql: `INSERT INTO tenant_manifests (tenant_id, slug, manifest, version) VALUES (?, 'oasis-ai-cc', ?, 1)`, args: [OASIS, JSON.stringify(body)] });
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+      realError(...args);
+    };
+    try {
+      await as(CC);
+      const listed = (await (await list.GET()).json()) as { installs: Array<{ tenantId: string; manifestSlug: unknown; currentSetup: unknown }> };
+      const oasis = listed.installs.find((i) => i.tenantId === OASIS);
+      assert.equal(oasis?.manifestSlug, "oasis-ai-cc", "the overlay row is listed");
+      assert.equal(oasis?.currentSetup, null, `OASIS's lineup changes were read as a setup: ${JSON.stringify(oasis?.currentSetup)}`);
+    } finally {
+      console.error = realError;
+      await db.execute({ sql: `DELETE FROM tenant_manifests WHERE tenant_id = ?`, args: [OASIS] });
+    }
+    // (The broken workspace above is still logged on every load, as it should be.)
+    assert.ok(!logged.some((l) => l.includes("stored setup does not parse") && l.includes(OASIS)), `logged:\n${logged.join("\n")}`);
+  });
+
   await check("'Create and set up' refuses a reserved or taken address BEFORE creating anything", async () => {
     await as(CC);
     await db.execute({ sql: `INSERT INTO tenant_manifests (tenant_id, slug, manifest) VALUES (?, 'nodeops-control-center', '{}')`, args: [TYPO] });

@@ -17,7 +17,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
   daemonBackedCronForName,
@@ -306,8 +306,9 @@ export async function POST(req: NextRequest) {
   // Same privilege-escalation class as action_payload.root: the bridge
   // maps agent_key → repo root via SIBLING_ROOT_BY_AGENT_KEY, so an
   // unfiltered agent_key lets a tenant operator pick which sibling
-  // repo runs.
-  const allowedAgents = await getTenantEnabledAgents(tenantId);
+  // repo runs. OASIS's own workspace: the agents its bridge runs, not its
+  // business roster of department leads (W4a review R4).
+  const allowedAgents = oasisOperatorAgents(tenantId) ?? (await getTenantEnabledAgents(tenantId));
   if (allowedAgents.length > 0 && !allowedAgents.includes(agentKey)) {
     return NextResponse.json(
       {

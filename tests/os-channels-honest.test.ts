@@ -574,7 +574,7 @@ async function main() {
   });
   // A custom teammate's Web state, by slug.
   const customWeb = async (user: U) => {
-    const team = await loadAiTeam(await viewerFor(user), []);
+    const team = await loadAiTeam(await viewerFor(user));
     assert.ok(team.custom.ok, "the custom teammates read");
     const row = team.custom.ok ? team.custom.value.find((c) => c.slug === CUSTOM_SLUG) : undefined;
     assert.ok(row, `no ${CUSTOM_SLUG} on the roster`);
@@ -582,7 +582,7 @@ async function main() {
   };
   await check("the AI Team roster says 'App channel · not working: <reason>' where the header says Not working, custom teammates included", async () => {
     const viewer = await viewerFor(USERS.partner);
-    const team = await loadAiTeam(viewer, []);
+    const team = await loadAiTeam(viewer);
     const agentLeads = team.leads.filter((l) => !l.id.startsWith("dept:"));
     assert.ok(agentLeads.length >= 2, JSON.stringify(team.leads.map((l) => l.id)));
     for (const lead of agentLeads) assert.equal(lead.web, "not_working", lead.name);
@@ -709,7 +709,7 @@ async function main() {
       assert.equal(res.status, 503);
       assert.equal(((await res.json()) as { error: string }).error, "config_unavailable");
       // So does the AI Team roster, and so does Test on a saved key.
-      const team = await loadAiTeam(viewer, []);
+      const team = await loadAiTeam(viewer);
       for (const lead of team.leads.filter((l) => !l.id.startsWith("dept:"))) assert.equal(lead.web, "unknown", lead.name);
       assert.equal((await customWeb(USERS.partner)).web, "unknown", "a custom teammate over an unchecked AI account");
       const test = await testConnection.POST(
@@ -959,12 +959,45 @@ async function main() {
   // ── 6. Names: departments only, everywhere a client (or CC) looks ───────
   await check("the AI Team roster names department leads for their departments", async () => {
     const viewer = await viewerFor(USERS.cc);
-    const team = await loadAiTeam(viewer, []);
+    const team = await loadAiTeam(viewer);
     const byId = new Map(team.leads.map((l) => [l.id, l]));
     assert.equal(byId.get("bravo")?.name, "Chief of Staff · Operations");
+    assert.equal(byId.get("sdr")?.name, "Sales");
     assert.equal(byId.get("maven")?.name, "Marketing");
+    assert.equal(byId.get("customer-support")?.name, "Client Success");
     assert.equal(byId.get("atlas")?.name, "Finance");
     for (const lead of team.leads) rendered.push(lead.name, lead.summary, ...lead.departments.map((d) => d.label));
+  });
+  // W4a: ONE roster. The AI Team and Settings > AI brain read the workspace
+  // manifest through the same loader, in OASIS's workspace and a client's.
+  await check("the AI Team and Settings list the same teammates, by binding name, in OASIS's workspace and a client's", async () => {
+    const { loadWorkspaceRoster } = await import("../components/os/aiteam/roster");
+    for (const user of [USERS.partner, USERS.client]) {
+      const viewer = await viewerFor(user);
+      const team = await loadAiTeam(viewer);
+      const roster = await loadWorkspaceRoster({ tenantId: viewer.surface.tenantId, scope: { oasis: viewer.oasis, manifest: viewer.manifest } });
+      assert.deepEqual(
+        roster.leads.map((l) => [l.slug, l.name]),
+        team.leads.filter((l) => !l.id.startsWith("dept:")).map((l) => [l.id, l.name]),
+        `${user.email}: Settings and the AI Team list different leads`,
+      );
+      for (const lead of team.leads) rendered.push(lead.name, lead.summary, ...lead.departments.map((d) => d.label));
+      for (const l of roster.leads) rendered.push(l.name, l.summary);
+      if (team.custom.ok) for (const c of team.custom.value) rendered.push(c.name, c.summary, c.category);
+      if (roster.custom.ok) for (const c of roster.custom.value) rendered.push(c.name, c.summary, c.category);
+    }
+    // A client owner's AI Team: the neutral leads its manifest binds, and an
+    // honest placeholder for every other department it can open.
+    const client = await loadAiTeam(await viewerFor(USERS.client));
+    assert.deepEqual(client.leads.map((l) => l.name), ["Sales lead", "Client Success lead", "Chief of Staff lead", "Marketing lead", "Operations lead"]);
+    assert.deepEqual(client.leads.filter((l) => l.id.startsWith("dept:")).map((l) => l.web), ["not_set_up", "not_set_up", "not_set_up"]);
+    // Its owner switches its non-core leads; OASIS's core leads have no switch.
+    assert.deepEqual(client.leads.filter((l) => !l.id.startsWith("dept:")).map((l) => l.toggle), [
+      { slug: "sdr", enabled: true, bound: true },
+      { slug: "customer-support", enabled: true, bound: true },
+    ]);
+    const oasis = await loadAiTeam(await viewerFor(USERS.partner));
+    assert.ok(oasis.leads.every((l) => l.toggle === null), "a core lead got an On/Off switch");
   });
   await check("every OASIS department channel's stream names its department", async () => {
     await login(USERS.partner);
@@ -980,7 +1013,20 @@ async function main() {
   // Department surfaces only. The direct /t/<slug>/agent/<agent> chat still
   // answers AS the library agent (its own name and IDENTITY_LOCK_OVERLAY) for
   // any public seed, OASIS's house agents included; that is plan F0, not here.
-  await check("no department-channel, AI Team or failure-copy string names Bravo, Maven, Atlas or Conaugh", async () => {
+  await check("no department-channel, AI Team, Settings roster or failure-copy string names any OASIS persona or Conaugh", async () => {
+    // Settings > AI brain's Workspace agents card, as SettingsContent builds it
+    // (lib/os/teammate-names.ts over the same roster), for both workspaces.
+    const { teammateNamesFor, workspaceAgentsSubtitle } = await import("../lib/os/teammate-names");
+    const { getSeedManifest } = await import("../lib/manifest/seeds");
+    const { AGENT_REGISTRY } = await import("../lib/agents");
+    for (const [oasis, manifest] of [[true, getSeedManifest("oasis-ai-cc")], [false, getSeedManifest("suga")]] as const) {
+      const scope = { oasis, manifest };
+      rendered.push(workspaceAgentsSubtitle(scope));
+      // Every slug the card could be asked about, house agents included: a
+      // persona is never handed a name, it is left out.
+      const names = teammateNamesFor([...manifest.agents.map((a) => a.slug), ...Object.keys(AGENT_REGISTRY)], scope);
+      for (const n of Object.values(names)) rendered.push(n.name, n.summary);
+    }
     for (const oasis of [true, false]) {
       for (const d of OS_DEPARTMENTS) {
         const binding = departmentChannelFor(d.key, { oasis });
@@ -1001,9 +1047,16 @@ async function main() {
     assert.ok(rendered.length > 80, `only ${rendered.length} strings scanned: the scan is not reaching the surfaces`);
     const hits = rendered.filter((s) => identity.namesPersona(s));
     assert.deepEqual(hits, [], `persona names reached a client surface: ${hits.join(" | ")}`);
-    // Anti-vacuity: the pattern does catch what it is for.
+    // Anti-vacuity: the pattern does catch what it is for, every persona in the
+    // registry (W4a: it used to know only bravo|maven|atlas|conaugh).
     assert.ok(identity.namesPersona(getSeedAgent("bravo")!.base_prompt));
     assert.ok(identity.namesPersona("ask Conaugh") && identity.namesPersona("MAVEN") && !identity.namesPersona("Atlassian"));
+    for (const name of ["Hermes", "Lex", "Solara", "Helios", "Lumen", "Aura", "life-preservation"]) {
+      assert.ok(identity.namesPersona(`ask ${name} about it`), `${name} is a persona the scan must catch`);
+    }
+    assert.ok(!identity.namesPersona("a flexible auralike lexicon"), "only whole words");
+    // The scan saw the Settings roster for both workspaces, not just the channels.
+    assert.ok(rendered.includes("Sales lead") && rendered.includes("Chief of Staff · Operations"), "the roster names were not scanned");
   });
 
   // ── 6b. The /t/<slug>/agent preview never offers a chat the route refuses ─

@@ -28,31 +28,10 @@ import { findActiveConnection } from "@/lib/connections/store";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import type { ManifestAgentBinding } from "@/lib/manifest/schema";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { workspaceTeammates } from "@/lib/os/teammates";
 import { WelcomeWizardClient, type WelcomeTeammate } from "./WelcomeWizardClient";
-
-/**
- * A teammate's label on this page: what it does, never an OASIS house persona
- * or a SunBiz agent name. The house agents are OASIS's own department leads
- * (components/os/department/config.ts binds Chief of Staff and Operations to
- * one, Marketing and Finance to the others); any other agent keeps its
- * workspace display name.
- */
-const HOUSE_AGENT_LABELS: Readonly<Record<string, string>> = {
-  bravo: "Chief of Staff",
-  maven: "Marketing",
-  atlas: "Finance",
-  aura: "Personal assistant",
-  sdr: "Sales lead",
-  "customer-support": "Client Success lead",
-};
-const RETIRED_AGENT_SLUGS: ReadonlySet<string> = new Set(["solara", "helios"]);
-
-function teammateLabel(slug: string, displayName: string | undefined): string {
-  const key = slug.toLowerCase();
-  if (HOUSE_AGENT_LABELS[key]) return HOUSE_AGENT_LABELS[key];
-  if (RETIRED_AGENT_SLUGS.has(key)) return "Operations teammate";
-  return (displayName || "").trim() || "Teammate";
-}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -124,7 +103,7 @@ export default async function WelcomePage({
   // says it could not load the teammates (2026-09-30 fix pass; it used to fall
   // through to the seed and tell a member of a set-up workspace that its
   // teammates "appear once it is set up").
-  let manifestAgents: Array<{ slug: string; display_name?: string; enabled?: boolean }> = [];
+  let manifestAgents: ManifestAgentBinding[] = [];
   let teammatesUnknown = false;
   if (profile.tenant_id) {
     let stored: Awaited<ReturnType<typeof getManifestByTenantId>> = null;
@@ -140,9 +119,16 @@ export default async function WelcomePage({
       if (!isUnprovisionedManifest(seed)) manifestAgents = seed.agents;
     }
   }
-  const teammates: WelcomeTeammate[] = manifestAgents
-    .filter((a) => a.enabled !== false)
-    .map((a) => ({ slug: a.slug, label: teammateLabel(a.slug, a.display_name) }));
+  // The workspace's roster (lib/os/teammates.ts), the one the AI Team page and
+  // Settings list: each switched-on teammate under its binding's display_name.
+  // It used to rename agents through its own label map, and a house agent that
+  // leads nothing here (CC's own agents) is not on the roster at all.
+  const teammates: WelcomeTeammate[] = workspaceTeammates({
+    oasis: isOasisSurfaceTenant(tenant?.slug ?? null),
+    manifest: { agents: manifestAgents },
+  })
+    .filter((t) => t.enabled)
+    .map((t) => ({ slug: t.slug, label: t.name }));
 
   // Slack is offered as a briefing channel only once the workspace has a live
   // Slack connection. A failed read hides it (and is logged).
