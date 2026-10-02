@@ -307,12 +307,12 @@ function OperatorStatus({
         nullText={known ? "couldn't check" : "—"}
         title={
           !known
-            ? "Checking the local bridge"
+            ? "Checking your computer connection"
             : bridgeOnline === null
-              ? "Couldn't check the local bridge: its pairings could not be read"
+              ? "Couldn't check your computer connection"
               : bridgeOnline
-                ? "Local bridge daemon pinged within last 5 min"
-                : "Local bridge offline — pair a machine from Settings → Devices"
+                ? "Computer connected in the last 5 minutes"
+                : "No computer connected in the last 5 minutes. Connect one in Settings > Devices."
         }
       />
     </div>

@@ -15,7 +15,7 @@ import {
   mayUseDirectAdvance,
   mayWorkWebsiteSalesLifecycle,
   mayCreditAdminVerifiedCloser,
-  mayRepRunWebsiteSalesDeal,
+  websiteSalesLeadSeat,
   matchesWebsiteSalesPaymentReplay,
   nextOasisLifecycleStage,
   resolveWebsiteSalesCloseParties,
@@ -42,11 +42,6 @@ import {
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
 import { normalizeCollaborators } from "@/lib/lead-scope";
-import {
-  mayOperateOasisDeliveryStage,
-  ownsOasisDeliveryRecord,
-  ownsOasisSalesRecord,
-} from "@/lib/oasis-sales-pipeline-policy";
 import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
@@ -266,46 +261,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   }
   const currentStage = typeof current.stage === "string" ? current.stage : "";
   const leadSourceTrack = resolveWebsiteSalesLeadSourceTrack(current.lead_source_track);
-  const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
-  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
-  const actorOwnsSalesLead = ownsOasisSalesRecord({ id: row.id, data: current }, session.userId);
-  const actorHoldsDealSeat = mayRepRunWebsiteSalesDeal({
-    actorUserId:session.userId,
-    assignedTo:current.assigned_to,
-    auditHostUserId:current.audit_host_user_id,
+  // Ownership half of the gate, shared with the call screen's booking read
+  // (GET /api/web-leads/[id]?view=booking) so the two cannot drift apart.
+  const seat = websiteSalesLeadSeat({
+    teamRole:session.teamRole,
+    isAdmin:session.isAdmin,
+    userId:session.userId,
+    row:{ id:row.id, data:current },
   });
-  // A manager's frozen attribution survives a handoff for reporting, but it is
-  // not continuing write authority. Managers operate their own assigned lead
-  // normally and coach every other roster lead read-only. The explicit
-  // admin_access toggle retains its existing tenant-wide semantics via
-  // session.isAdmin.
-  if (
-    session.teamRole.trim().toLowerCase() === "manager" &&
-    !session.isAdmin &&
-    !assignedToUser &&
-    !actorHoldsDealSeat
-  ) {
-    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
-  }
-  const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
-  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(
-    { id:row.id, data:current },
-    session.userId,
-  );
-  // CC, 2026-08-25: a builder working HIS OWN sales lead (assigned, or frozen
-  // attribution) walks the normal rep path through this route. The delivery
-  // lane below exists for his BUILD work; letting it intercept the selling
-  // half 403'd every structured sales action a selling builder clicked.
-  const builderOnOwnSalesLead = mayBeDeliveryOperator && (assignedToUser || attributedToUser);
-  if (mayBeDeliveryOperator && !builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)) {
-    return NextResponse.json({
-      ok:false,
-      error:builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only",
-    },{status:403});
-  }
-  if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
-    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
-  }
+  if (!seat.ok) return NextResponse.json({ok:false,error:seat.error},{status:403});
+  const { actorHoldsDealSeat, builderMayRunDelivery, builderOwnsDelivery, builderOnOwnSalesLead } = seat;
   // Role and current deal-seat ownership are both load-bearing. Frozen opener
   // attribution remains read access and 15% credit after handoff; it is not
   // permission to quote, record payment, or take the closer's commission.

@@ -5,8 +5,8 @@
  *
  * Each row in bridge_pairings is a local install (`oasis bridge start`
  * pinging /api/bridge/ping every 60s). Revoking sets revoked_at; the daemon
- * sees 403 on its next ping, exits, and the operator must re-pair via
- * `bravo setup` to bring it back online.
+ * sees 403 on its next ping, exits, and the computer must be connected again
+ * from this section to bring it back online.
  */
 
 import { useEffect, useState } from "react";
@@ -86,8 +86,7 @@ function PairCodeBlock({
         </button>
       </div>
       <div className="text-xs text-fg-muted leading-relaxed">
-        Open the installer on the new machine — click <strong className="text-fg">Install Claude Code CLI bridge</strong> below
-        and paste this code when it asks for one. Single-use; expires in {code.ttl_minutes} minutes.
+        Enter this code in the OASIS installer on the other computer. Single-use; expires in {code.ttl_minutes} minutes.
       </div>
       <button
         type="button"
@@ -181,7 +180,7 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
   }
 
   async function revoke(id: string) {
-    if (!confirm("Revoke this device? The bridge daemon on that machine will stop pinging within 60 seconds. Re-pair via `bravo setup`.")) return;
+    if (!confirm("Revoke this computer? Its bridge stops working within 60 seconds. To use it again, connect it from this page.")) return;
     setBusy(id);
     setError(null);
     try {
@@ -216,8 +215,8 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
           </div>
         )}
         <div className="text-fg-muted text-sm">
-          No devices paired yet. Pair your first machine to give your agents
-          read/write access to its file system and your local Claude Code subscription.
+          No computers connected yet. Connect one so your agents can use its
+          files, tools and scheduled jobs. Chat works without one.
         </div>
         {pairCode ? (
           <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
@@ -229,17 +228,17 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
               className="btn-primary inline-flex items-center gap-2"
             >
               <Download className="w-4 h-4" />
-              Install Claude Code CLI bridge on this machine
+              Connect this computer
             </button>
             <button
               type="button"
               onClick={generatePairCode}
               disabled={generating}
               className="btn-secondary inline-flex items-center gap-2"
-              title="For pairing a different machine — generates a code you paste during `bravo setup`"
+              title="Makes a one-time code to enter in the OASIS installer on another computer"
             >
               {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              Generate code (pair another machine)
+              Connect another computer
             </button>
           </div>
         )}
@@ -269,20 +268,20 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
                 type="button"
                 onClick={() => setInstallerOpen(true)}
                 className="btn-primary text-xs inline-flex items-center gap-1"
-                title="Install the bridge on this machine via guided one-liner"
+                title="Install the OASIS bridge on this computer with one guided command"
               >
                 <Download className="w-3 h-3" />
-                Install on this machine
+                Connect this computer
               </button>
               <button
                 type="button"
                 onClick={generatePairCode}
                 disabled={generating}
                 className="btn-secondary text-xs inline-flex items-center gap-1"
-                title="Generate a one-time pair code for a different machine"
+                title="Makes a one-time code to enter in the OASIS installer on another computer"
               >
                 {generating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                Add another
+                Connect another computer
               </button>
             </>
           )}
@@ -304,12 +303,12 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
                 <Monitor className={`w-4 h-4 mt-0.5 ${fresh ? "text-accent" : "text-fg-dim"}`} />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm text-fg truncate">{d.label}</span>
+                    <span className="text-sm text-fg truncate" title={d.label}>{d.label}</span>
                     <span className={`text-[10px] uppercase tracking-wider font-bold ${fresh ? "text-accent" : "text-fg-dim"}`}>
                       {fresh ? "online" : "offline"}
                     </span>
                   </div>
-                  <div className="text-[10px] text-fg-dim font-mono mt-0.5 truncate">
+                  <div className="text-[10px] text-fg-dim font-mono mt-0.5 truncate" title={d.machine_fingerprint || undefined}>
                     {d.machine_fingerprint || "no fingerprint"}
                   </div>
                   <div className="text-[10px] text-fg-muted font-mono mt-1">
