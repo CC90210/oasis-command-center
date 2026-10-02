@@ -34,6 +34,7 @@ import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/Conne
 import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
 import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
+import { SlackOwnAppPanel } from "@/components/os/connections/SlackOwnAppPanel";
 import { RequestConnector } from "@/components/os/connections/RequestConnector";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
@@ -290,6 +291,11 @@ export function ConnectorDrawer({
                 ))}
               </ul>
             </section>
+          )}
+
+          {status?.paths?.some((p) => p.setup === "slack_own_app") && (
+            // A client's own Slack app: what to create in Slack, and its form.
+            <SlackOwnAppPanel key={`${def.slug}:own-app`} onChanged={onChanged} embedded={embedded} />
           )}
 
           {def.yourAccount === "google" && personalGoogle && (

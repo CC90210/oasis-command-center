@@ -25,7 +25,7 @@
 import handler from "./.open-next/worker.js";
 import { consumeSlackJobs, type QueueBatch } from "./lib/slack/queue-consumer";
 
-type Env = { SLACK_SIGNING_SECRET?: string; PUBLIC_APP_URL?: string } & Record<string, unknown>;
+type Env = { CONNECTIONS_OAUTH_STATE_SECRET?: string; PUBLIC_APP_URL?: string } & Record<string, unknown>;
 type Ctx = { waitUntil(p: Promise<unknown>): void; passThroughOnException?(): void };
 
 const worker = {

@@ -54,11 +54,18 @@ export function ServiceKeysForm({
   appName,
   canManage,
   onChanged,
+  canTest = true,
 }: {
   service: string;
   appName: string;
   canManage: boolean;
   onChanged: () => void;
+  /**
+   * False where OASIS has no read-only check for these values (a workspace's
+   * own Slack app: Slack itself checks them at install and Request URL time),
+   * so no Test button promises one.
+   */
+  canTest?: boolean;
 }) {
   const schema = findTenantManuallyEditableIntegrationSchema(service);
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -98,7 +105,7 @@ export function ServiceKeysForm({
       ? twilioCredential && (has("from_number") || has("messaging_service_sid"))
       : schema.fields.every((f) => has(f.key));
   // Twilio's test runs before a sender is saved: "needs a number" is its answer.
-  const testable = service === "twilio" ? twilioCredential : allSet;
+  const testable = canTest && (service === "twilio" ? twilioCredential : allSet);
   const tested = (rows ?? []).filter((r) => r.last_tested_at);
   const lastFail = tested.find((r) => r.last_test_ok === false) ?? null;
   const lastOk = tested.find((r) => r.last_test_ok === true) ?? null;

@@ -16,7 +16,7 @@
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { InStatement } from "@libsql/client";
+import type { InStatement, InValue } from "@libsql/client";
 import type { DepartmentKey } from "@/lib/os/types";
 import { slackThreadKey, slackTsToIso } from "@/lib/slack/routing";
 
@@ -42,7 +42,12 @@ export type MirrorInput = {
   receivedAt: Date;
 };
 
-export function mirrorStatement(m: MirrorInput): InStatement {
+/**
+ * `guard` (lib/connections/store.ts liveConnectionGuard): the row is written
+ * only while the Slack connection the message came through is still live on
+ * the same generation, checked in the same statement.
+ */
+export function mirrorStatement(m: MirrorInput, guard?: { sql: string; args: InValue[] }): InStatement {
   if (!m.tenantId) throw new Error("slack.mirror: a tenant id is required");
   const threadTs = m.threadTs || m.ts;
   const metadata = {
@@ -63,7 +68,7 @@ export function mirrorStatement(m: MirrorInput): InStatement {
   };
   return {
     sql: `INSERT INTO conversation_events (id, tenant_id, thread_id, lead_id, event_type, actor_user_id, metadata, created_at)
-          VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)`,
+          SELECT ?, ?, NULL, NULL, ?, ?, ?, ? WHERE ${guard ? guard.sql : "1"}`,
     args: [
       randomUUID(),
       m.tenantId,
@@ -71,6 +76,7 @@ export function mirrorStatement(m: MirrorInput): InStatement {
       m.actorUserId,
       JSON.stringify(metadata),
       slackTsToIso(m.ts) ?? m.receivedAt.toISOString(),
+      ...(guard ? guard.args : []),
     ],
   };
 }

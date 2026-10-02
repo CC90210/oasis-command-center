@@ -2,7 +2,9 @@
 
 /**
  * SlackDisconnect - remove the Slack connection from this OASIS workspace, with
- * a confirmation step. The bot token is deleted first, then the connection, its
+ * a confirmation step. The bot token is switched off at Slack (auth.revoke; if
+ * Slack does not confirm it, nothing is deleted and the error says so), then
+ * deleted, then the connection, its
  * team route, the channel map and the Slack people OASIS looked up, in one batch
  * (lib/connections/service.ts disconnectConnection): after this, events from
  * that Slack workspace find no workspace and are dropped. Mirrored messages

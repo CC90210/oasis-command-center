@@ -22,6 +22,7 @@
  */
 
 import "server-only";
+import type { Client, InStatement, InValue } from "@libsql/client";
 import { getServiceSupabase } from "./supabase-server";
 import { encryptField, decryptField } from "./field-encryption";
 import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integration-schemas";
@@ -476,6 +477,151 @@ export async function setTenantIntegrationBundle(input: {
   return { ok: true, written: entries.map(([k]) => k) };
 }
 
+/** A SQL condition and its arguments (lib/connections/store.ts SqlGuard). */
+type CredentialGuard = { sql: string; args: InValue[] };
+
+/**
+ * A connection's credential bundle, written ONLY while `guard` holds, in one
+ * atomic batch on the raw libSQL client: the same database and table the
+ * PostgREST adapter writes (lib/supabase-server.ts wraps getTursoClient()).
+ * The guard is the connection's own claim (lib/connections/store.ts
+ * pendingClaimGuard), so a write that lost a race with a disconnect, or with a
+ * newer install of the same connection, writes nothing at all: never a token
+ * stored under a row that has moved on, never a newer install's token
+ * overwritten. Encrypted here, exactly as setTenantIntegrationBundle does.
+ */
+export async function setTenantIntegrationBundleWhile(
+  db: Client,
+  input: { tenantId: string; service: string; bundle: Record<string, string>; createdBy?: string | null; guard: CredentialGuard; now: Date },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const entries = Object.entries(input.bundle);
+  if (!input.tenantId || !input.service || entries.length === 0) return { ok: false, error: "missing_required_field" };
+  const nowIso = input.now.toISOString();
+  const statements: InStatement[] = [];
+  for (const [fieldKey, raw] of entries) {
+    const value = (raw || "").trim();
+    if (!fieldKey || !value) return { ok: false, error: `empty_value:${fieldKey}` };
+    let encrypted: string;
+    try {
+      encrypted = encryptField(value);
+    } catch (err) {
+      return { ok: false, error: `encrypt_failed: ${(err as Error).message}` };
+    }
+    statements.push({
+      sql: `INSERT INTO tenant_integration_credentials
+              (tenant_id, service, field_key, encrypted_value, created_by, last_tested_at, last_test_ok, last_test_error, updated_at)
+            SELECT ?, ?, ?, ?, ?, NULL, NULL, NULL, ? WHERE ${input.guard.sql}
+            ON CONFLICT (tenant_id, service, field_key) DO UPDATE SET
+              encrypted_value = excluded.encrypted_value,
+              created_by = excluded.created_by,
+              last_tested_at = NULL,
+              last_test_ok = NULL,
+              last_test_error = NULL,
+              updated_at = excluded.updated_at`,
+      args: [input.tenantId, input.service, fieldKey, encrypted, input.createdBy ?? null, nowIso, ...input.guard.args],
+    });
+  }
+  let written: number[];
+  try {
+    written = (await db.batch(statements, "write")).map((r) => r.rowsAffected);
+  } catch (err) {
+    return { ok: false, error: (err as Error).message || "upsert_failed" };
+  }
+  if (written.every((n) => n === 1)) return { ok: true };
+  if (written.every((n) => n === 0)) return { ok: false, error: "guard_refused" };
+  // One guard for every statement in one transaction: a split result is impossible.
+  throw new Error("tenant_integration_store: a guarded bundle was written in part");
+}
+
+/**
+ * Fields under one service, read in ONE statement together with `guard`, so
+ * the value returned is the one stored while the guard held (a connection's
+ * own generation: lib/connections/store.ts liveConnectionGuard). A reinstall
+ * that moved the connection on, and replaced the token, between a check and a
+ * separate read can therefore never hand the new token to work bound to the
+ * old generation. "guard_refused": the guard did not hold; "missing": it held
+ * and no field is stored; "unreadable": a stored field will not decrypt.
+ */
+export async function readTenantCredentialsWhile(
+  db: Client,
+  input: { tenantId: string; service: string; fieldKeys: readonly string[]; guard: CredentialGuard },
+): Promise<{ ok: true; values: Record<string, string> } | { ok: false; reason: "guard_refused" | "missing" | "unreadable" | "lookup_failed" }> {
+  if (!input.tenantId || !input.service || input.fieldKeys.length === 0) throw new Error("tenant_credential_scope_missing");
+  let rows: Array<Record<string, unknown>>;
+  try {
+    const rs = await db.execute({
+      sql: `SELECT (${input.guard.sql}) AS live, k.field_key, k.encrypted_value
+            FROM (SELECT 1) one
+            LEFT JOIN tenant_integration_credentials k
+              ON k.tenant_id = ? AND k.service = ? AND k.field_key IN (${input.fieldKeys.map(() => "?").join(", ")})`,
+      args: [...input.guard.args, input.tenantId, input.service, ...input.fieldKeys],
+    });
+    rows = rs.rows as unknown as Array<Record<string, unknown>>;
+  } catch (err) {
+    console.error("[tenant-integration-store] guarded credential read failed", { tenantId: input.tenantId, service: input.service, error: (err as Error).message });
+    return { ok: false, reason: "lookup_failed" };
+  }
+  if (!rows.length || Number(rows[0].live) !== 1) return { ok: false, reason: "guard_refused" };
+  const values: Record<string, string> = {};
+  for (const r of rows) {
+    if (r.field_key === null || r.field_key === undefined || !r.encrypted_value) continue;
+    try {
+      const value = decryptField(String(r.encrypted_value));
+      if (value.trim()) values[String(r.field_key)] = value;
+    } catch (err) {
+      console.error("[tenant-integration-store] guarded credential decrypt failed", { tenantId: input.tenantId, service: input.service, field: r.field_key, err });
+      return { ok: false, reason: "unreadable" };
+    }
+  }
+  return Object.keys(values).length ? { ok: true, values } : { ok: false, reason: "missing" };
+}
+
+/**
+ * CROSS-TENANT, system only (a cron). Every service whose name starts with
+ * `prefix`, with its fields decrypted, oldest first: how the connection-health
+ * cron finds the cleanup records an abandoned Slack install left
+ * (lib/slack/install.ts). A field that will not decrypt is left out, logged.
+ */
+export async function listTenantIntegrationServicesByPrefix(
+  db: Client,
+  input: { prefix: string; limit: number },
+): Promise<Array<{ tenantId: string; service: string; values: Record<string, string> }>> {
+  if (!input.prefix || /[%_\\]/.test(input.prefix)) throw new Error("tenant_credential_prefix_invalid");
+  const rs = await db.execute({
+    sql: `SELECT tenant_id, service, field_key, encrypted_value FROM tenant_integration_credentials
+          WHERE service IN (
+            SELECT service FROM tenant_integration_credentials WHERE service LIKE ? GROUP BY service ORDER BY MIN(created_at) LIMIT ?
+          )`,
+    args: [`${input.prefix}%`, Math.max(1, Math.min(100, input.limit))],
+  });
+  const out = new Map<string, { tenantId: string; service: string; values: Record<string, string> }>();
+  for (const r of rs.rows as unknown as Array<Record<string, unknown>>) {
+    const key = `${String(r.tenant_id)}|${String(r.service)}`;
+    const entry = out.get(key) ?? { tenantId: String(r.tenant_id), service: String(r.service), values: {} };
+    try {
+      entry.values[String(r.field_key)] = decryptField(String(r.encrypted_value));
+    } catch (err) {
+      console.error("[tenant-integration-store] listed credential decrypt failed", { tenantId: entry.tenantId, service: entry.service, field: r.field_key, err });
+    }
+    out.set(key, entry);
+  }
+  return [...out.values()];
+}
+
+/**
+ * The statement that deletes EVERY field under one service, while `guard`
+ * holds, for the caller's own batch (a disconnect's: lib/connections/store.ts
+ * finishDisconnect), so the credential goes in the same transaction as the
+ * connection it belongs to.
+ */
+export function deleteTenantIntegrationServiceWhile(input: { tenantId: string; service: string; guard: CredentialGuard }): InStatement {
+  if (!input.tenantId || !input.service) throw new Error("tenant_credential_scope_missing");
+  return {
+    sql: `DELETE FROM tenant_integration_credentials WHERE tenant_id = ? AND service = ? AND ${input.guard.sql}`,
+    args: [input.tenantId, input.service, ...input.guard.args],
+  };
+}
+
 /**
  * A stored credential, read with no env fallback of any kind and with its
  * failure modes kept apart: "missing" (no row), "unreadable" (a row that will
@@ -519,27 +665,6 @@ export async function readTenantCredentialStrict(
     console.error("[tenant-integration-store] strict credential decrypt failed", { tenantId, service, fieldKey, err });
     return { ok: false, reason: "unreadable" };
   }
-}
-
-/**
- * Delete EVERY field stored under one service for one tenant — how a
- * connection's credential is destroyed on disconnect. Returns how many rows
- * went; a query error is returned, never swallowed.
- */
-export async function deleteTenantIntegrationService(input: {
-  tenantId: string;
-  service: string;
-}): Promise<{ ok: true; deleted: number } | { ok: false; error: string }> {
-  if (!input.tenantId || !input.service) return { ok: false, error: "missing_required_field" };
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_integration_credentials")
-    .delete()
-    .eq("tenant_id", input.tenantId)
-    .eq("service", input.service)
-    .select("id");
-  if (r.error) return { ok: false, error: r.error.message };
-  return { ok: true, deleted: ((r.data as unknown[] | null) || []).length };
 }
 
 export async function deleteTenantIntegrationValue(input: {

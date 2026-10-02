@@ -2,10 +2,15 @@
  * lib/slack/settings.ts - what Settings > Chat apps shows about Slack for one
  * workspace, read in one place so the page and its API say the same thing.
  *
- *   app        whether OASIS's Slack app is set up on this deployment (the
- *              Worker secrets, registry.providerAvailability). When it is not,
- *              the card says "Slack app not configured yet" and offers no
- *              button: an Install that cannot finish is a dead button.
+ *   app        which Slack app this workspace installs (CC, 2026-10-01): a
+ *              client its OWN app, once saved (lib/slack/own-app.ts); OASIS's
+ *              own workspace the OASIS app (the Worker secrets,
+ *              registry.providerAvailability). Either counts as configured
+ *              only where installs can run (slackInstallsPossible: the
+ *              consent-state secret at OAUTH_STATE_SECRET_MIN_LENGTH, the rule
+ *              the state signer and the Slack job key use). With no app to
+ *              install, the page says why and offers no button: an Install
+ *              that cannot finish is a dead button.
  *   connection the workspace's live Slack connection (team, status, verified).
  *   routes     the channel map (slack_channel_routes); null when migration
  *              bravo__197 is not applied (said as such, never as "no channels").
@@ -21,9 +26,19 @@ import { findActiveConnection, toPublicConnection, type PublicConnection } from 
 import { missingProviderEnv, providerAvailability, providerById } from "@/lib/connections/registry";
 import { chatAppsFrom, readManifestIntegrations } from "@/lib/jev/mode";
 import { isSlackSchemaMissing, listChannelRoutes, type ChannelRoute } from "@/lib/slack/routing";
+import { readSlackOwnApp, slackAppKindFor, slackInstallsPossible, type SlackOwnAppRead } from "@/lib/slack/own-app";
 
 export type SlackSettings = {
+  /** There is an app this workspace can install here (`installApp` is not null). */
   appConfigured: boolean;
+  /** The app Add to Slack installs for this workspace: its own, OASIS's, or none yet. */
+  installApp: "own" | "oasis" | null;
+  /** A client's own Slack app: saved, partly saved, not saved, or unreadable. Always "none" for OASIS's own workspace. */
+  ownApp: SlackOwnAppRead["state"];
+  /** OASIS's own workspace (it installs the OASIS app); every other is a client. */
+  oasisWorkspace: boolean;
+  /** No install of any app can run on this deployment (no consent-state secret, or one too short to sign with). */
+  installsUnavailable: boolean;
   /** Worker secret NAMES still missing (never values); shown to the platform operator only. */
   missingSecrets: string[];
   connection: PublicConnection | null;
@@ -40,7 +55,21 @@ export async function loadSlackSettings(
 ): Promise<SlackSettings> {
   const env = opts.env ?? process.env;
   const slack = providerById("slack");
-  const appConfigured = !!slack && providerAvailability(slack, env) === "live";
+  const oasisAppReady = !!slack && providerAvailability(slack, env) === "live";
+  // The one rule (lib/slack/own-app.ts slackAppKindFor): OASIS's own workspace
+  // installs the OASIS app, and a Slack app it saved plays no part (read as
+  // "none"); a client installs its own saved app, never OASIS's (CC: the
+  // client brings its own Slack app).
+  const oasisWorkspace = slackAppKindFor(tenantId) === "oasis";
+  const own: SlackOwnAppRead = oasisWorkspace ? { state: "none" } : await readSlackOwnApp(tenantId);
+  const installsPossible = slackInstallsPossible(env);
+  const installApp: SlackSettings["installApp"] = oasisWorkspace
+    ? oasisAppReady && installsPossible
+      ? "oasis"
+      : null
+    : own.state === "saved" && installsPossible
+      ? "own"
+      : null;
   const conn = await findActiveConnection(db, tenantId, "slack");
   let routes: ChannelRoute[] | null = null;
   let routesNotInstalled = false;
@@ -58,7 +87,11 @@ export async function loadSlackSettings(
     console.error("[slack.settings] manifest integrations unreadable", { tenantId, error: err instanceof Error ? err.message : String(err) });
   }
   return {
-    appConfigured,
+    appConfigured: installApp !== null,
+    installApp,
+    ownApp: own.state,
+    oasisWorkspace,
+    installsUnavailable: !installsPossible,
     missingSecrets: slack ? missingProviderEnv(slack, env) : [],
     connection: conn ? toPublicConnection(conn, opts.nowMs) : null,
     routes,

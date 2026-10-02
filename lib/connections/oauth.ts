@@ -33,10 +33,10 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import type { Client } from "@libsql/client";
 import { decryptField, encryptField } from "@/lib/field-encryption";
 import type { ProviderDef } from "@/lib/connections/registry";
-import { OAUTH_STATE_TTL_MS } from "@/lib/connections/rules";
+import { OAUTH_STATE_SECRET_MIN_LENGTH, OAUTH_STATE_TTL_MS } from "@/lib/connections/rules";
 
 export const OAUTH_STATE_SECRET_ENV = "CONNECTIONS_OAUTH_STATE_SECRET";
-const MIN_SECRET_LENGTH = 32;
+const MIN_SECRET_LENGTH = OAUTH_STATE_SECRET_MIN_LENGTH;
 
 export class OAuthFlowError extends Error {
   code:

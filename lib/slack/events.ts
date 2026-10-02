@@ -9,7 +9,9 @@
  *   2. url_verification: answer Slack's challenge (it is signed too).
  *   3. The TEAM decides the workspace: provider_webhook_routes (written by the
  *      install). An unknown team is acknowledged and dropped; a team is never
- *      guessed into a workspace.
+ *      guessed into a workspace. That workspace must use the app whose secret
+ *      checked the request (lib/slack/own-app.ts slackAppMaySpeakFor), or the
+ *      event is dropped.
  *   4. DROPPED, acknowledged, never answered or mirrored:
  *        - a channel shared with another company (is_ext_shared_channel);
  *        - anything a bot wrote (OASIS's own replies come back this way);
@@ -18,7 +20,10 @@
  *          another Slack organisation (lib/slack/identity.ts).
  *   5. EXACTLY ONCE per event_id: the receipt row (slack_event_receipts) is
  *      written in the SAME transaction as what the event does, so a Slack retry
- *      (x-slack-retry-num), or two deliveries racing, do it once.
+ *      (x-slack-retry-num), or two deliveries racing, do it once. Both are
+ *      fenced on the connection the team was routed to and its generation, so
+ *      an event read before a disconnect (or a reinstall) writes nothing after
+ *      it, and the mention job carries the same binding (lib/slack/jobs.ts).
  *        message in a MAPPED channel  -> one conversation_events row (lib/slack/mirror.ts)
  *        app_mention                  -> the receipt, then the agent job
  *                                        (lib/slack/jobs.ts); a failed hand-off
@@ -32,9 +37,10 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
-import { resolveWebhookRoute } from "@/lib/connections/store";
+import { liveConnectionGuard, resolveWebhookRoute } from "@/lib/connections/store";
 import type { SlackFetch } from "@/lib/slack/client";
 import { verifySlackRequest } from "@/lib/slack/verify";
+import { slackAppMaySpeakFor, type SlackRequestApp } from "@/lib/slack/own-app";
 import { resolveSlackIdentity } from "@/lib/slack/identity";
 import { mirrorStatement } from "@/lib/slack/mirror";
 import { slackTokenFor } from "@/lib/slack/send";
@@ -47,6 +53,14 @@ export type SlackEventsDeps = {
   db: Client;
   now: () => Date;
   env?: Env;
+  /**
+   * The app whose signing secret `env` holds (lib/slack/own-app.ts
+   * slackRequestScope gives both): OASIS's when absent, as `env` is then the
+   * Worker's own. On EVERY event, the workspace its team is routed to must use
+   * that app (slackAppMaySpeakFor): OASIS's app speaks only for OASIS's own
+   * workspaces, a client's own app only for that client.
+   */
+  app?: SlackRequestApp;
   fetchImpl?: SlackFetch;
   /** Hand an @mention to the agent job (queue or after the response). Throws when it could not. */
   dispatchMention: (job: SlackMentionJob) => Promise<unknown>;
@@ -102,6 +116,15 @@ export async function handleSlackEvents(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", teamId);
   if (!routed) return ok({ dropped: "unknown_team" });
+  const app: SlackRequestApp = deps.app ?? { kind: "oasis" };
+  if (!slackAppMaySpeakFor(app, routed.tenantId)) {
+    console.error("[slack.events] an event named a Slack team whose workspace does not use the app that signed it; dropped", {
+      app: app.kind,
+      ...(app.kind === "own" ? { workspace: app.tenantId } : {}),
+      routedTenantId: routed.tenantId,
+    });
+    return ok({ dropped: "team_not_this_workspace" });
+  }
   const tenantId = routed.tenantId;
 
   if (body.is_ext_shared_channel === true) return ok({ dropped: "shared_channel" });
@@ -137,7 +160,8 @@ export async function handleSlackEvents(
 
   // Who wrote it: guests and other companies' users are dropped. A lookup that
   // fails is not "not a guest": 503, and Slack retries.
-  const token = await slackTokenFor(deps.db, tenantId, teamId);
+  const connection = { id: routed.connectionId, generation: routed.generation };
+  const token = await slackTokenFor(deps.db, tenantId, teamId, connection);
   if (!token.ok) {
     console.error("[slack.events] no usable token for a routed team", { tenantId, reason: token.reason });
     return ok({ dropped: token.reason });
@@ -153,40 +177,56 @@ export async function handleSlackEvents(
   if (identity.isExternal) return ok({ dropped: "external_user" });
   if (identity.isBot) return ok({ ignored: "bot" });
 
+  // Everything above was read once; the connection may have been disconnected
+  // (or installed again) since. The receipt and the mirrored text are written
+  // only while it is still live on the generation the event was routed to,
+  // checked in the same statements (lib/connections/store.ts).
+  const live = liveConnectionGuard(tenantId, connection.id, connection.generation);
   const receipt = {
-    sql: "INSERT INTO slack_event_receipts (event_id, tenant_id, team_id, event_type, received_at) VALUES (?, ?, ?, ?, ?)",
-    args: [eventId, tenantId, teamId, String(type), now.toISOString()],
+    sql: `INSERT INTO slack_event_receipts (event_id, tenant_id, team_id, event_type, received_at)
+          SELECT ?, ?, ?, ?, ? WHERE ${live.sql}`,
+    args: [eventId, tenantId, teamId, String(type), now.toISOString(), ...live.args],
+  };
+  const connectionGone = () => {
+    console.error("[slack.events] the Slack connection was disconnected or reinstalled while the event was read; dropped", { tenantId, eventId });
+    return ok({ dropped: "connection_changed" });
   };
 
   if (type === "message") {
     const r = route as ChannelRoute;
+    let written: number;
     try {
-      await deps.db.batch(
+      const [receipted] = await deps.db.batch(
         [
           receipt,
-          mirrorStatement({
-            tenantId,
-            teamId,
-            channelId,
-            channelName: r.channel_name,
-            ts,
-            threadTs,
-            text,
-            authorName: identity.displayName,
-            direction: "inbound",
-            slackUserId: userId,
-            department: r.department,
-            customerId: r.customer_id,
-            actorUserId: null,
-            receivedAt: now,
-          }),
+          mirrorStatement(
+            {
+              tenantId,
+              teamId,
+              channelId,
+              channelName: r.channel_name,
+              ts,
+              threadTs,
+              text,
+              authorName: identity.displayName,
+              direction: "inbound",
+              slackUserId: userId,
+              department: r.department,
+              customerId: r.customer_id,
+              actorUserId: null,
+              receivedAt: now,
+            },
+            live,
+          ),
         ],
         "write",
       );
+      written = receipted.rowsAffected;
     } catch (err) {
       if (isUniqueViolationError(err as { message?: string })) return ok({ duplicate: true });
       throw err;
     }
+    if (written !== 1) return connectionGone();
     const mentionsBot = token.botUserId ? String(event.text ?? "").includes(`<@${token.botUserId}>`) : false;
     if (r.department === null && !mentionsBot && deps.onGeneralMessage) deps.onGeneralMessage({ tenantId, text, route: r });
     return ok({ mirrored: true });
@@ -194,7 +234,7 @@ export async function handleSlackEvents(
 
   // app_mention
   try {
-    await deps.db.execute(receipt);
+    if ((await deps.db.execute(receipt)).rowsAffected !== 1) return connectionGone();
   } catch (err) {
     if (isUniqueViolationError(err as { message?: string })) return ok({ duplicate: true });
     throw err;
@@ -203,6 +243,8 @@ export async function handleSlackEvents(
     v: 1,
     kind: "mention",
     tenantId,
+    connectionId: connection.id,
+    generation: connection.generation,
     teamId,
     channelId,
     channelName: route?.channel_name ?? null,

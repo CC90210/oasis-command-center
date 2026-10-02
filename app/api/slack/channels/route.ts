@@ -48,7 +48,8 @@ const json = (status: number, body: Record<string, unknown>) =>
 
 async function slackContext(tenantId: string, db: Parameters<typeof findActiveConnection>[0]) {
   const conn = await findActiveConnection(db, tenantId, "slack");
-  if (!conn || !conn.external_account_id) return null;
+  // A connection being disconnected has no channel map to change.
+  if (!conn || !conn.external_account_id || conn.status === "disconnecting") return null;
   return conn;
 }
 

@@ -36,9 +36,14 @@ const REASONS: Readonly<Record<string, string>> = {
   team_connected_elsewhere: "That Slack workspace is already connected to another OASIS workspace. Disconnect it there first.",
   another_team_connected: "A different Slack workspace is already connected here. Disconnect it first.",
   token_save_failed: "OASIS could not save Slack's token, so nothing was connected. Try again.",
+  connection_busy: "Slack was being disconnected or installed here at the same moment, so nothing was installed. Wait a moment, then press Add to Slack again.",
   missing_code: "Slack sent the browser back without an install code. Start again from this page.",
   no_install_flow: "That app cannot be installed from here.",
   app_url_missing: "This deployment does not know its own address, so Slack cannot send the browser back. Tell OASIS support.",
+  own_app_missing: "Your workspace connects its own Slack app. Save its client ID, client secret and signing secret in Settings > Connections > Slack, then try again.",
+  own_app_incomplete: "Your Slack app is only partly saved. Add its client ID, client secret and signing secret in Settings > Connections > Slack, then try again.",
+  own_app_unreadable: "Your Slack app's saved details could not be read. Save them again in Settings > Connections > Slack, then try again.",
+  installs_unavailable: "Your Slack app is saved, but Slack installs are not switched on here yet, so it cannot be installed. Nothing is wrong on your side.",
 };
 
 export function slackInstallBanner(status: unknown, reason: unknown): { ok: boolean; text: string } | null {

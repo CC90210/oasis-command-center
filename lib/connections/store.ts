@@ -23,7 +23,7 @@
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { Client, InStatement, ResultSet } from "@libsql/client";
+import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import {
   HEALTH_CHECK_RETENTION_MS,
@@ -187,6 +187,63 @@ export function toPublicConnection(row: ConnectionRow, nowMs: number): PublicCon
   };
 }
 
+// -- Generation fences -------------------------------------------------------
+//
+// A connection's GENERATION is its token_version (bravo__187; for an app
+// install it was otherwise unused): every claim (connect, reconnect) and every
+// disconnect moves it on by one. Work done on a connection's behalf is bound
+// to the generation it was accepted under, and its writes carry one of these
+// fences, spliced into the SAME statement (INSERT ... SELECT ... WHERE, or an
+// UPDATE's WHERE), so the check and the write cannot be split by a disconnect
+// or a reinstall.
+
+/** A SQL condition and its arguments, for the WHERE of a fenced write. */
+export type SqlGuard = { sql: string; args: InValue[] };
+
+/** The connection is this tenant's, live, not being disconnected, and still on `generation`. */
+export function liveConnectionGuard(tenantId: string, connectionId: string, generation: number): SqlGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND token_version = ?
+            AND revoked_at IS NULL AND status <> 'disconnecting')`,
+    args: [connectionId, tenantId, generation],
+  };
+}
+
+/** Is the connection still this tenant's, live and on `generation`? The re-check right before an outward call. */
+export async function isConnectionAt(db: Client, tenantId: string, connectionId: string, generation: number): Promise<boolean> {
+  const guard = liveConnectionGuard(tenantId, connectionId, generation);
+  const rs = await db.execute({ sql: `SELECT ${guard.sql} AS live`, args: guard.args });
+  return Number((rs.rows[0] as unknown as { live: unknown } | undefined)?.live) === 1;
+}
+
+/**
+ * CROSS-TENANT, system only. The connections that hold an external account
+ * now (not revoked, not being disconnected; a pending claim counts), in any
+ * tenant: who may be using a credential an abandoned install also received
+ * (Slack hands the SAME bot token to every install of one app in one workspace).
+ */
+export async function listLiveConnectionsForAccount(
+  db: Client,
+  provider: string,
+  externalAccountId: string,
+): Promise<Array<{ id: string; tenantId: string }>> {
+  const rs = await db.execute({
+    sql: `SELECT id, tenant_id FROM tenant_connections
+          WHERE provider = ? AND external_account_id = ? AND revoked_at IS NULL AND status <> 'disconnecting'`,
+    args: [provider, externalAccountId],
+  });
+  return rows(rs).map((r) => ({ id: String(r.id), tenantId: String(r.tenant_id) }));
+}
+
+/** The connection is still the pending claim a connect made at `generation` (nothing has moved it on). */
+export function pendingClaimGuard(tenantId: string, connectionId: string, generation: number): SqlGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND token_version = ?
+            AND status = 'pending' AND revoked_at IS NULL)`,
+    args: [connectionId, tenantId, generation],
+  };
+}
+
 // ── Tenant-scoped reads ───────────────────────────────────────────────────
 
 export async function getConnection(db: Client, tenantId: string, connectionId: string): Promise<ConnectionRow | null> {
@@ -292,7 +349,9 @@ export type ClaimResult =
       previous: ConnectionRow | null;
     }
   | { ok: false; error: "account_connected_elsewhere" }
-  | { ok: false; error: "provider_already_connected"; current: ConnectionRow };
+  | { ok: false; error: "provider_already_connected"; current: ConnectionRow }
+  /** The row is being disconnected, or moved on while this claim ran: nothing was claimed. */
+  | { ok: false; error: "connection_busy" };
 
 /**
  * Claim an external account for a tenant, leaving the row `pending` until a
@@ -304,6 +363,12 @@ export type ClaimResult =
  *     explicit disconnect, never a silent swap of the books' source.
  *   - The same account again (a rotated key, or a reconnect after disconnect)
  *     reuses its row, so its history stays in one place.
+ *   - Every claim is a NEW GENERATION (token_version + 1 on a reused row; 0 on
+ *     a new one), taken by compare-and-set on the generation it read: a row
+ *     being disconnected, or one another claim or a disconnect moved on in
+ *     between, is refused (connection_busy), never claimed over. The returned
+ *     row's token_version is the generation the connect's later writes are
+ *     fenced on (pendingClaimGuard).
  *
  * The exclusive unique index is the real guarantee: two tenants racing for one
  * account both pass the read above, and the second write fails on the index.
@@ -330,15 +395,20 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
 
   try {
     if (existing) {
+      // A disconnect owns this row until it finishes: never claim over it.
+      if (existing.revoked_at === null && existing.status === "disconnecting") return { ok: false, error: "connection_busy" };
       // Reconnect / new key for the same account. A revoked row comes back as a
       // fresh connection: new connected_at, cleared health, cleared failures.
+      // Compare-and-set on the generation and revoked state read above, moving
+      // the generation on: a disconnect or another claim in between wins.
       const reactivating = existing.revoked_at !== null;
-      await db.execute({
+      const claimed = await db.execute({
         sql: `UPDATE tenant_connections SET
                 status = 'pending',
                 revoked_at = NULL,
                 revoked_by = NULL,
                 refresh_lease_until = NULL,
+                token_version = token_version + 1,
                 auth_kind = ?,
                 external_account_label = ?,
                 environment = ?,
@@ -352,7 +422,8 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
                 last_health_detail = CASE WHEN ? THEN NULL ELSE last_health_detail END,
                 consecutive_failures = CASE WHEN ? THEN 0 ELSE consecutive_failures END,
                 updated_at = ?
-              WHERE id = ? AND tenant_id = ?`,
+              WHERE id = ? AND tenant_id = ? AND token_version = ? AND status <> 'disconnecting'
+                AND (revoked_at IS NULL) = ?`,
         args: [
           input.authKind,
           input.externalAccountLabel,
@@ -369,8 +440,11 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
           nowIso,
           existing.id,
           input.tenantId,
+          existing.token_version,
+          reactivating ? 0 : 1,
         ],
       });
+      if (claimed.rowsAffected !== 1) return { ok: false, error: "connection_busy" };
       const updated = await getConnection(db, input.tenantId, existing.id);
       if (!updated) throw new Error("connection_claim_vanished");
       return { ok: true, connection: updated, created: false, previous: existing };
@@ -421,15 +495,19 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
  * REACTIVATED revoked row looks brand-new on its own columns (the claim cleared
  * connected_at and last_health_at), which is why the history is checked too —
  * and why such a row is put back with restoreRevokedClaim instead.
+ *
+ * `generation` (the claim's): only while the row is still that claim, so an
+ * undo can never touch a row a disconnect or a newer claim has taken.
  */
-export async function deleteUnprovenClaim(db: Client, tenantId: string, connectionId: string): Promise<boolean> {
+export async function deleteUnprovenClaim(db: Client, tenantId: string, connectionId: string, generation?: number): Promise<boolean> {
   const rs = await db.execute({
     sql: `DELETE FROM tenant_connections
           WHERE id = ? AND tenant_id = ? AND status = 'pending' AND connected_at IS NULL AND last_health_at IS NULL
+            ${generation === undefined ? "" : "AND token_version = ?"}
             AND NOT EXISTS (
               SELECT 1 FROM connection_health_checks h WHERE h.tenant_id = ? AND h.connection_id = ?
             )`,
-    args: [connectionId, tenantId, tenantId, connectionId],
+    args: [connectionId, tenantId, ...(generation === undefined ? [] : [generation]), tenantId, connectionId],
   });
   return rs.rowsAffected === 1;
 }
@@ -438,12 +516,13 @@ export async function deleteUnprovenClaim(db: Client, tenantId: string, connecti
  * Undo a claim that REACTIVATED a revoked row and never got its credential:
  * put back every column the claim changed, so the row is revoked again exactly
  * as the disconnect left it and its history stays attached. Only while the row
- * is still that unproven claim (pending, live, not probed since); returns false
- * otherwise.
+ * is still that unproven claim (pending, live, not probed since, and on the
+ * claim's `generation` when given); returns false otherwise. The generation is
+ * never put back: it only ever moves on.
  */
 export async function restoreRevokedClaim(
   db: Client,
-  input: { tenantId: string; previous: ConnectionRow; now: Date },
+  input: { tenantId: string; previous: ConnectionRow; now: Date; generation?: number },
 ): Promise<boolean> {
   const p = input.previous;
   if (!p.revoked_at) throw new Error("restore_needs_a_revoked_row");
@@ -466,7 +545,8 @@ export async function restoreRevokedClaim(
             last_health_detail = ?,
             consecutive_failures = ?,
             updated_at = ?
-          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND revoked_at IS NULL AND last_health_at IS NULL`,
+          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND revoked_at IS NULL AND last_health_at IS NULL
+            ${input.generation === undefined ? "" : "AND token_version = ?"}`,
     args: [
       p.status,
       p.revoked_at,
@@ -487,20 +567,33 @@ export async function restoreRevokedClaim(
       input.now.toISOString(),
       p.id,
       input.tenantId,
+      ...(input.generation === undefined ? [] : [input.generation]),
     ],
   });
   return rs.rowsAffected === 1;
 }
 
-/** A write around the connection failed (e.g. the credential could not be saved). */
+/**
+ * A write around the connection failed (e.g. the credential could not be
+ * saved). Never over a disconnect in progress, and, given the claim's
+ * `generation`, only while the row is still that claim.
+ */
 export async function markConnectionError(
   db: Client,
-  input: { tenantId: string; connectionId: string; code: ProbeErrorCode; detail: string; now: Date },
+  input: { tenantId: string; connectionId: string; code: ProbeErrorCode; detail: string; now: Date; generation?: number },
 ): Promise<boolean> {
   const rs = await db.execute({
     sql: `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, updated_at = ?
-          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
-    args: [input.code, input.detail.slice(0, 500), input.now.toISOString(), input.connectionId, input.tenantId],
+          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL AND status <> 'disconnecting'
+            ${input.generation === undefined ? "" : "AND token_version = ?"}`,
+    args: [
+      input.code,
+      input.detail.slice(0, 500),
+      input.now.toISOString(),
+      input.connectionId,
+      input.tenantId,
+      ...(input.generation === undefined ? [] : [input.generation]),
+    ],
   });
   return rs.rowsAffected === 1;
 }
@@ -519,6 +612,8 @@ export type HealthRecordInput = {
   /** Facts the probe learned (a fresher account name, the key's mode). */
   accountLabel?: string | null;
   environment?: ConnectionEnvironment | null;
+  /** A connect's own first probe: written only while the row is still on this generation. */
+  generation?: number;
 };
 
 export type HealthRecordResult = {
@@ -543,10 +638,12 @@ export type HealthRecordResult = {
  *
  * Both statements are pinned to the tenant: the UPDATE by its WHERE, the
  * INSERT by an EXISTS on the same (id, tenant_id), so a connection id from
- * another tenant writes nothing at all. A connection revoked while the probe
- * was in flight writes nothing either: both statements require revoked_at IS
- * NULL inside the same batch, and a probe that changed no row reports no flip
- * (the disconnect changed the status, not the probe).
+ * another tenant writes nothing at all. A connection revoked, or being
+ * disconnected, while the probe was in flight writes nothing either: both
+ * statements require revoked_at IS NULL and status <> 'disconnecting' (and the
+ * caller's `generation`, when given) inside the same batch, and a probe that
+ * changed no row reports no flip (the disconnect changed the status, not the
+ * probe).
  */
 export async function recordHealthCheck(db: Client, input: HealthRecordInput): Promise<HealthRecordResult> {
   const before = await getConnection(db, input.tenantId, input.connectionId);
@@ -554,6 +651,8 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
   const next = statusAfterProbe(before.status, { verdict: input.verdict, code: input.code }, before.consecutive_failures);
   const nowIso = input.now.toISOString();
   const detail = input.detail ? input.detail.slice(0, 500) : null;
+  const live = `revoked_at IS NULL AND status <> 'disconnecting'${input.generation === undefined ? "" : " AND token_version = ?"}`;
+  const liveArgs: InValue[] = input.generation === undefined ? [] : [input.generation];
 
   const statements: InStatement[] = [
     {
@@ -568,7 +667,7 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
               external_account_label = COALESCE(?, external_account_label),
               environment = COALESCE(?, environment),
               updated_at = ?
-            WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
+            WHERE id = ? AND tenant_id = ? AND ${live}`,
       args: [
         next.status,
         next.consecutiveFailures,
@@ -583,13 +682,14 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
         nowIso,
         input.connectionId,
         input.tenantId,
+        ...liveArgs,
       ],
     },
     {
       sql: `INSERT INTO connection_health_checks
               (id, tenant_id, connection_id, provider, check_source, checked_at, verdict, latency_ms, error_code, detail)
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            WHERE EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL)`,
+            WHERE EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND ${live})`,
       args: [
         randomUUID(),
         input.tenantId,
@@ -603,6 +703,7 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
         detail,
         input.connectionId,
         input.tenantId,
+        ...liveArgs,
       ],
     },
   ];
@@ -629,37 +730,72 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
 // ── Disconnect ────────────────────────────────────────────────────────────
 
 /**
- * Mark a connection revoked and drop its webhook routes, in one batch. The
- * credential is deleted BEFORE this by the caller (lib/connections/service.ts),
- * so a revoked row never sits next to a stored secret. Returns false when
- * there was nothing live to revoke in THIS tenant.
- *
- * `alsoDelete` is the provider's own data that must not outlive the
- * connection (Slack: its channel map and looked-up people), deleted in the
- * SAME batch, so a disconnect never half-happens.
+ * Start a disconnect: claim the connection's NEXT generation and mark it
+ * disconnecting, in one compare-and-set on the generation the caller read.
+ * From here nothing uses the connection: every reader refuses a disconnecting
+ * row (resolveWebhookRoute, the Slack token, the health pass), every fenced
+ * write bound to an older generation writes nothing, and no claim may install
+ * over it. A claim that got in first moved the generation, so this refuses
+ * (null). A failed disconnect leaves the row disconnecting, durably, and the
+ * next one takes the next generation and finishes it.
  */
-export async function revokeConnection(
+export async function beginDisconnect(
   db: Client,
-  input: { tenantId: string; connectionId: string; revokedBy: string | null; now: Date; alsoDelete?: readonly InStatement[] },
-): Promise<boolean> {
+  input: { tenantId: string; connectionId: string; generation: number; now: Date },
+): Promise<number | null> {
+  const rs = await db.execute({
+    sql: `UPDATE tenant_connections SET status = 'disconnecting', token_version = token_version + 1,
+            refresh_lease_until = NULL, updated_at = ?
+          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL AND token_version = ?`,
+    args: [input.now.toISOString(), input.connectionId, input.tenantId, input.generation],
+  });
+  return rs.rowsAffected === 1 ? input.generation + 1 : null;
+}
+
+/**
+ * Finish a disconnect this caller began at `generation`, in ONE batch: the row
+ * revoked (compare-and-set on that generation, still disconnecting), its
+ * webhook routes dropped, and `alsoDelete` (the credential, the provider's own
+ * data) gone with it. Every statement after the first is fenced on this exact
+ * revocation, so a lost compare-and-set deletes nothing, and a batch that
+ * fails changes nothing: the row stays disconnecting for the next try.
+ * `deleted` is each `alsoDelete` statement's row count, in order.
+ */
+export async function finishDisconnect(
+  db: Client,
+  input: {
+    tenantId: string;
+    connectionId: string;
+    generation: number;
+    revokedBy: string | null;
+    now: Date;
+    alsoDelete?: (revoked: SqlGuard) => InStatement[] | Promise<InStatement[]>;
+  },
+): Promise<{ revoked: boolean; deleted: number[] }> {
   const nowIso = input.now.toISOString();
-  const [revoked] = await db.batch(
+  const revoked: SqlGuard = {
+    sql: `EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND token_version = ?
+            AND status = 'revoked' AND revoked_at = ?)`,
+    args: [input.connectionId, input.tenantId, input.generation, nowIso],
+  };
+  const also = input.alsoDelete ? await input.alsoDelete(revoked) : [];
+  const results = await db.batch(
     [
       {
         sql: `UPDATE tenant_connections SET status = 'revoked', revoked_at = ?, revoked_by = ?,
                 refresh_lease_until = NULL, updated_at = ?
-              WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
-        args: [nowIso, input.revokedBy, nowIso, input.connectionId, input.tenantId],
+              WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL AND status = 'disconnecting' AND token_version = ?`,
+        args: [nowIso, input.revokedBy, nowIso, input.connectionId, input.tenantId, input.generation],
       },
       {
-        sql: `DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ?`,
-        args: [input.tenantId, input.connectionId],
+        sql: `DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ? AND ${revoked.sql}`,
+        args: [input.tenantId, input.connectionId, ...revoked.args],
       },
-      ...(input.alsoDelete ?? []),
+      ...also,
     ],
     "write",
   );
-  return revoked.rowsAffected === 1;
+  return { revoked: results[0].rowsAffected === 1, deleted: results.slice(2).map((r) => r.rowsAffected) };
 }
 
 // ── Token refresh lease (lib/connections/token-store.ts) ──────────────────
@@ -700,19 +836,35 @@ export async function releaseRefreshLease(
 
 // ── Webhook routes ────────────────────────────────────────────────────────
 
+/**
+ * Route an external key to this tenant's live connection. With `generation`
+ * (a connect's own claim), the insert is fenced on that pending claim in the
+ * same statement: a disconnect or a newer claim in between writes no route
+ * (connection_changed).
+ */
 export async function registerWebhookRoute(
   db: Client,
-  input: { tenantId: string; provider: string; externalKey: string; connectionId: string; now: Date },
-): Promise<{ ok: true } | { ok: false; error: "route_taken" | "connection_not_found" }> {
+  input: { tenantId: string; provider: string; externalKey: string; connectionId: string; now: Date; generation?: number },
+): Promise<{ ok: true } | { ok: false; error: "route_taken" | "connection_not_found" | "connection_changed" }> {
   // The connection must be this tenant's own, live one.
   const conn = await getConnection(db, input.tenantId, input.connectionId);
   if (!conn || conn.revoked_at) return { ok: false, error: "connection_not_found" };
+  const fence = input.generation === undefined ? null : pendingClaimGuard(input.tenantId, input.connectionId, input.generation);
   try {
-    await db.execute({
+    const rs = await db.execute({
       sql: `INSERT INTO provider_webhook_routes (id, tenant_id, provider, external_key, connection_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [randomUUID(), input.tenantId, input.provider, input.externalKey, input.connectionId, input.now.toISOString()],
+            SELECT ?, ?, ?, ?, ?, ? WHERE ${fence ? fence.sql : "1"}`,
+      args: [
+        randomUUID(),
+        input.tenantId,
+        input.provider,
+        input.externalKey,
+        input.connectionId,
+        input.now.toISOString(),
+        ...(fence ? fence.args : []),
+      ],
     });
+    if (rs.rowsAffected !== 1) return { ok: false, error: "connection_changed" };
     return { ok: true };
   } catch (err) {
     if (!isUniqueViolationError(err as { message?: string })) throw err;
@@ -727,44 +879,82 @@ export async function registerWebhookRoute(
 
 /**
  * CROSS-TENANT by nature: a webhook arrives with no session, and this is how
- * it finds its tenant. Only a live connection answers.
+ * it finds its tenant. Only a live connection answers (not revoked, not being
+ * disconnected), with the generation it is on: work accepted for it is bound
+ * to that generation (liveConnectionGuard).
  */
 export async function resolveWebhookRoute(
   db: Client,
   provider: string,
   externalKey: string,
-): Promise<{ tenantId: string; connectionId: string } | null> {
+): Promise<{ tenantId: string; connectionId: string; generation: number } | null> {
   const rs = await db.execute({
-    sql: `SELECT r.tenant_id, r.connection_id FROM provider_webhook_routes r
+    sql: `SELECT r.tenant_id, r.connection_id, c.token_version FROM provider_webhook_routes r
           JOIN tenant_connections c ON c.id = r.connection_id AND c.tenant_id = r.tenant_id
-          WHERE r.provider = ? AND r.external_key = ? AND c.revoked_at IS NULL
+          WHERE r.provider = ? AND r.external_key = ? AND c.revoked_at IS NULL AND c.status <> 'disconnecting'
           LIMIT 1`,
     args: [provider, externalKey],
   });
   const r = rows(rs)[0];
-  return r ? { tenantId: String(r.tenant_id), connectionId: String(r.connection_id) } : null;
+  return r ? { tenantId: String(r.tenant_id), connectionId: String(r.connection_id), generation: num(r.token_version) } : null;
 }
 
 // ── Health cron (system) ──────────────────────────────────────────────────
 
 /**
  * CROSS-TENANT (cron only). Live connections of the given providers whose last
- * check is older than `staleBefore`, never-checked first. Revoked rows are
- * never probed.
+ * check is older than `staleBefore`, never-checked first. Revoked rows, rows
+ * being disconnected, and pending claims (a connect in flight, which records
+ * its own first probe) are never probed.
  */
 export async function listConnectionsDueForHealth(
   db: Client,
-  input: { providers: readonly string[]; staleBefore: Date; limit: number },
+  input: {
+    providers: readonly string[];
+    /**
+     * Also this provider's connections in workspaces that saved every one of
+     * these credential fields (Slack: a client's own Slack app, which keeps
+     * its connection checkable where OASIS's app is not set up), except the
+     * workspaces in `exceptTenantIds` (Slack: OASIS's own, whose saved app
+     * plays no part). Presence only.
+     */
+    alsoWhereTenantSaved?: { provider: string; service: string; fields: readonly string[]; exceptTenantIds?: readonly string[] };
+    /** Also this provider's connections in exactly these workspaces (Slack: OASIS's own, on OASIS's app). */
+    alsoForTenants?: { provider: string; tenantIds: readonly string[] };
+    staleBefore: Date;
+    limit: number;
+  },
 ): Promise<ConnectionRow[]> {
-  if (input.providers.length === 0) return [];
-  const marks = input.providers.map(() => "?").join(", ");
+  const also = input.alsoWhereTenantSaved && input.alsoWhereTenantSaved.fields.length > 0 ? input.alsoWhereTenantSaved : null;
+  const only = input.alsoForTenants && input.alsoForTenants.tenantIds.length > 0 ? input.alsoForTenants : null;
+  if (input.providers.length === 0 && !also && !only) return [];
+  const which: string[] = [];
+  const args: (string | number)[] = [];
+  if (input.providers.length > 0) {
+    which.push(`provider IN (${input.providers.map(() => "?").join(", ")})`);
+    args.push(...input.providers);
+  }
+  if (only) {
+    which.push(`(provider = ? AND tenant_id IN (${only.tenantIds.map(() => "?").join(", ")}))`);
+    args.push(only.provider, ...only.tenantIds);
+  }
+  if (also) {
+    const except = also.exceptTenantIds ?? [];
+    which.push(`(provider = ? AND tenant_id IN (
+              SELECT tenant_id FROM tenant_integration_credentials
+              WHERE service = ? AND field_key IN (${also.fields.map(() => "?").join(", ")})
+              GROUP BY tenant_id HAVING COUNT(DISTINCT field_key) = ?)${
+                except.length > 0 ? ` AND tenant_id NOT IN (${except.map(() => "?").join(", ")})` : ""
+              })`);
+    args.push(also.provider, also.service, ...also.fields, also.fields.length, ...except);
+  }
   const rs = await db.execute({
     sql: `SELECT ${CONNECTION_COLUMNS} FROM tenant_connections
-          WHERE provider IN (${marks}) AND revoked_at IS NULL
+          WHERE (${which.join(" OR ")}) AND revoked_at IS NULL AND status NOT IN ('disconnecting', 'pending')
             AND (last_health_at IS NULL OR last_health_at < ?)
           ORDER BY COALESCE(last_health_at, '') ASC
           LIMIT ?`,
-    args: [...input.providers, input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
+    args: [...args, input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
   });
   return rows(rs).map(toConnection);
 }

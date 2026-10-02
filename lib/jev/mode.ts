@@ -114,7 +114,7 @@ export async function readJevMode(db: Client, tenantId: string): Promise<Resolve
 /** The workspace's own TypeSafe key, from its live Jev connection, or null (not connected / refused). */
 export async function jevKeyFor(db: Client, tenantId: string): Promise<string | null> {
   const conn = await findActiveConnection(db, tenantId, "jev");
-  if (!conn || conn.status === "expired" || conn.status === "error") return null;
+  if (!conn || conn.status === "expired" || conn.status === "error" || conn.status === "disconnecting") return null;
   const key = await readTenantCredentialStrict(tenantId, credentialServiceFor(conn.id), "api_key");
   if (!key.ok) {
     if (key.reason === "lookup_failed") throw new Error("jev key lookup failed");

@@ -22,6 +22,11 @@ export const CONNECTION_STATUSES = [
   "revoked",
   "error",
   "pending_review",
+  // A disconnect has claimed the connection's next generation (token_version)
+  // and not finished yet: nothing uses it, nothing may install over it, and a
+  // later Disconnect finishes it (lib/connections/service.ts
+  // disconnectConnection). Durable, so a failure part-way says so.
+  "disconnecting",
 ] as const;
 export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 
@@ -109,6 +114,12 @@ export const HEALTH_RECHECK_AFTER_MS = 50 * MIN;
 export const HEALTH_CHECK_RETENTION_MS = 30 * 24 * HOUR;
 /** How long a started OAuth consent may take before its state expires. */
 export const OAUTH_STATE_TTL_MS = 10 * MIN;
+/**
+ * The shortest CONNECTIONS_OAUTH_STATE_SECRET anything accepts: the OAuth state
+ * signer (lib/connections/oauth.ts) and the Slack job key derived from it
+ * (lib/slack/job-signature.ts) refuse a shorter one.
+ */
+export const OAUTH_STATE_SECRET_MIN_LENGTH = 32;
 /** oauth_states rows older than this are deleted by the cron. */
 export const OAUTH_STATE_RETENTION_MS = 24 * HOUR;
 /**
@@ -257,6 +268,7 @@ export type ProbeOutcome = { verdict: HealthVerdict; code: ProbeErrorCode | null
  *   down: anything else     → error
  *   revoked                 → stays revoked, whatever a probe says. Only a new
  *                             connect brings a connection back.
+ *   disconnecting           -> stays disconnecting: only the disconnect moves it.
  */
 export function statusAfterProbe(
   current: ConnectionStatus,
@@ -264,7 +276,7 @@ export function statusAfterProbe(
   consecutiveFailures: number,
 ): { status: ConnectionStatus; consecutiveFailures: number } {
   const failures = Math.max(0, Math.trunc(consecutiveFailures) || 0);
-  if (current === "revoked") return { status: "revoked", consecutiveFailures: failures };
+  if (current === "revoked" || current === "disconnecting") return { status: current, consecutiveFailures: failures };
   switch (outcome.verdict) {
     case "healthy":
       return { status: "connected", consecutiveFailures: 0 };

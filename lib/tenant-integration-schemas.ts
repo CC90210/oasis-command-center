@@ -16,7 +16,7 @@ export type IntegrationFieldDef = {
   /** Render as a password input (masked). */
   sensitive: boolean;
   /** Server-side pattern check applied at upsert. */
-  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase" | "twilio_sid";
+  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase" | "twilio_sid" | "slack_client_id" | "slack_secret";
   /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
   sidPrefix?: "AC" | "SK" | "MG";
 };
@@ -74,6 +74,23 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
       { key: "api_key_secret", label: "API key secret (optional)", sensitive: true, hint: "Shown once when the key is created in Twilio (API keys & tokens)." },
       { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "A number on this Twilio account that can text. E.164 format, e.g. +14165551212" },
       { key: "messaging_service_sid", label: "Messaging Service SID", sensitive: false, validation: "twilio_sid", sidPrefix: "MG", hint: "Optional MG... SID. When set, it replaces From Number for outbound sends." },
+    ],
+  },
+  {
+    // A client workspace's OWN Slack app (CC, 2026-10-01: "the client is
+    // responsible for obtaining the API key"). OASIS installs it with the
+    // client ID and secret, and checks Slack's signature on every event and
+    // button press sent to the workspace's own Request URLs with its signing
+    // secret (lib/slack/own-app.ts). No env fallback: OASIS's own Slack app
+    // (the Worker secrets) is never this workspace's app.
+    service: "slack_app",
+    label: "Your Slack app",
+    description:
+      "The Slack app your workspace created in its own Slack. Slack checks these values itself: the client ID and secret when you press Add to Slack, the signing secret when it verifies your Request URL.",
+    fields: [
+      { key: "client_id", label: "Client ID", sensitive: false, validation: "slack_client_id", hint: "In your Slack app: Basic Information, App Credentials. Two numbers joined by a dot." },
+      { key: "client_secret", label: "Client Secret", sensitive: true, validation: "slack_secret", hint: "Basic Information, App Credentials. Press Show, then copy it." },
+      { key: "signing_secret", label: "Signing Secret", sensitive: true, validation: "slack_secret", hint: "Basic Information, App Credentials. Every event Slack sends is signed with it." },
     ],
   },
   {
@@ -253,6 +270,10 @@ export function validateIntegrationValue(
         ? null
         : `expected a Twilio SID: ${prefix || "two letters"} followed by 32 letters and digits (0-9, a-f)`;
     }
+    case "slack_client_id":
+      return /^\d{4,20}\.\d{4,20}$/.test(value.trim()) ? null : "expected a Slack client ID: two numbers joined by a dot";
+    case "slack_secret":
+      return /^[A-Za-z0-9]{16,128}$/.test(value.trim()) ? null : "expected the secret exactly as Slack shows it: letters and digits only";
     default:
       return null;
   }

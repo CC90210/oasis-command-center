@@ -13,7 +13,10 @@
  *     turn fits.
  *
  * WHAT THE JOB DOES, IN ORDER
- *   1. The Slack team must still route to the job's workspace.
+ *   1. The Slack team must still route to the job's workspace, through the
+ *      same connection on the same generation the mention arrived on (a
+ *      disconnect or a reinstall in between drops the job; the approval in 5
+ *      is fenced on it again, after the turn).
  *   2. The department: named in the text, else the channel's, else the
  *      workspace's default (Chief of Staff; in a client workspace without a
  *      Chief of Staff teammate, the first department that has one:
@@ -35,7 +38,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { resolveWebhookRoute } from "@/lib/connections/store";
+import { liveConnectionGuard, resolveWebhookRoute } from "@/lib/connections/store";
 import { appOrigin } from "@/lib/connections/popup";
 import { getTenant } from "@/lib/queries";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
@@ -72,6 +75,14 @@ export type SlackMentionJob = {
   v: 1;
   kind: "mention";
   tenantId: string;
+  /**
+   * The Slack connection the mention came through, and its generation
+   * (lib/connections/store.ts): the approval is created only while that
+   * connection is still live on that generation, and carries both, so its
+   * reply is never posted after a disconnect or through a later install.
+   */
+  connectionId: string;
+  generation: number;
   teamId: string;
   channelId: string;
   channelName: string | null;
@@ -95,6 +106,11 @@ export function isSlackMentionJob(v: unknown): v is SlackMentionJob {
     j.kind === "mention" &&
     typeof j.tenantId === "string" &&
     j.tenantId.length > 0 &&
+    typeof j.connectionId === "string" &&
+    j.connectionId.length > 0 &&
+    typeof j.generation === "number" &&
+    Number.isInteger(j.generation) &&
+    j.generation >= 0 &&
     isSlackTeamId(j.teamId) &&
     isSlackChannelId(j.channelId) &&
     isSlackTs(j.threadTs) &&
@@ -135,10 +151,13 @@ async function existingApproval(db: Client, tenantId: string, key: string): Prom
   return rs.rows[0] ? String((rs.rows[0] as unknown as Record<string, unknown>).id) : null;
 }
 
+/** The connection (and generation) the job's mention came through. */
+const bindingOf = (job: SlackMentionJob) => ({ id: job.connectionId, generation: job.generation });
+
 async function notice(deps: SlackJobDeps, job: SlackMentionJob, reason: string, text: string): Promise<JobOutcome> {
   const posted = await postNotice(
     deps.db,
-    { tenantId: job.tenantId, teamId: job.teamId, channelId: job.channelId, threadTs: job.threadTs, text },
+    { tenantId: job.tenantId, teamId: job.teamId, channelId: job.channelId, threadTs: job.threadTs, text, connection: bindingOf(job) },
     { fetchImpl: deps.fetchImpl },
   );
   if (!posted.ok) console.error("[slack.jobs] notice not posted", { tenantId: job.tenantId, reason, error: posted.reason });
@@ -212,6 +231,8 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   const db = deps.db;
   const route = await resolveWebhookRoute(db, "slack", job.teamId);
   if (!route || route.tenantId !== job.tenantId) return { outcome: "dropped", reason: "team_not_routed_here" };
+  // Disconnected, or installed again, since the mention arrived: not this connection's work any more.
+  if (route.connectionId !== job.connectionId || route.generation !== job.generation) return { outcome: "dropped", reason: "connection_changed" };
 
   const tenant = await getTenant(job.tenantId);
   if (!tenant?.slug) throw new Error("slack.jobs: the workspace could not be read");
@@ -294,11 +315,20 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
         text: drafted.text.slice(0, 4000),
         ...(job.channelName ? { channel_name: job.channelName } : {}),
         department: dept.key,
+        connection_id: job.connectionId,
+        connection_generation: job.generation,
       },
       idempotencyKey: key,
     },
     deps.now(),
+    // The turn can take a while: the approval goes in only while the
+    // connection is still live on the generation the mention came through.
+    { guard: liveConnectionGuard(job.tenantId, job.connectionId, job.generation) },
   );
+  if (!created.ok && created.error === "guard_refused") {
+    console.error("[slack.jobs] the Slack connection was disconnected or reinstalled during the turn; no approval", { tenantId: job.tenantId, eventId: job.eventId });
+    return { outcome: "dropped", reason: "connection_changed" };
+  }
   if (!created.ok) {
     console.error("[slack.jobs] approval not created", { tenantId: job.tenantId, error: created.error });
     throw new Error(`slack.jobs: the approval could not be created (${created.error})`);
@@ -329,6 +359,7 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
       payloadHash: created.approval.payload_hash,
       openUrl,
       reviewer: approver ? job.slackUserId : null,
+      connection: bindingOf(job),
     },
     { fetchImpl: deps.fetchImpl },
   );

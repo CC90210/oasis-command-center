@@ -41,6 +41,7 @@ import { executeApproval } from "@/lib/os/approvals/execute";
 import type { ExecutorDeps } from "@/lib/os/approvals/executors";
 import { isSlackResponseUrl, respondToAction, type SlackFetch } from "@/lib/slack/client";
 import { verifySlackRequest } from "@/lib/slack/verify";
+import { slackAppMaySpeakFor, type SlackRequestApp } from "@/lib/slack/own-app";
 import { resolveSlackIdentity, slackApproverProfile } from "@/lib/slack/identity";
 import { APPROVE_ACTION_ID, parseApproveButtonValue, slackTokenFor } from "@/lib/slack/send";
 import { isSlackTeamId, isSlackUserId } from "@/lib/slack/routing";
@@ -51,6 +52,13 @@ export type InteractivityDeps = {
   db: Client;
   now: () => Date;
   env?: Env;
+  /**
+   * The app whose signing secret `env` holds (lib/slack/own-app.ts
+   * slackRequestScope gives both): OASIS's when absent, as `env` is then the
+   * Worker's own. On EVERY press, the workspace its team is routed to must use
+   * that app (slackAppMaySpeakFor) before anything is decided.
+   */
+  app?: SlackRequestApp;
   fetchImpl?: SlackFetch;
   executorDeps?: ExecutorDeps;
 };
@@ -128,9 +136,18 @@ async function decidePress(
 
   const routed = await resolveWebhookRoute(deps.db, "slack", press.teamId);
   if (!routed) return { status: 200, body: { ok: true, ignored: "unknown_team" } };
+  const app: SlackRequestApp = deps.app ?? { kind: "oasis" };
+  if (!slackAppMaySpeakFor(app, routed.tenantId)) {
+    console.error("[slack.interactivity] a press named a Slack team whose workspace does not use the app that signed it; ignored", {
+      app: app.kind,
+      ...(app.kind === "own" ? { workspace: app.tenantId } : {}),
+      routedTenantId: routed.tenantId,
+    });
+    return { status: 200, body: { ok: true, ignored: "team_not_this_workspace" } };
+  }
   const tenantId = routed.tenantId;
 
-  const token = await slackTokenFor(deps.db, tenantId, press.teamId);
+  const token = await slackTokenFor(deps.db, tenantId, press.teamId, { id: routed.connectionId, generation: routed.generation });
   if (!token.ok) return reply("OASIS cannot check who you are in this Slack workspace right now. Decide this approval in OASIS.", false);
   const who = await resolveSlackIdentity(deps.db, { tenantId, teamId: press.teamId, slackUserId: press.slackUserId, token: token.token, now, fetchImpl: deps.fetchImpl });
   if (!who.ok) return reply("OASIS could not check who you are in Slack just now. Try again, or decide this approval in OASIS.", false);

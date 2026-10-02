@@ -16,7 +16,7 @@
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { Client, InStatement } from "@libsql/client";
+import type { Client, InStatement, InValue } from "@libsql/client";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
 import { departmentChannelFor, type DepartmentScope } from "@/components/os/department/config";
@@ -257,20 +257,30 @@ export async function saveChannelRoute(db: Client, input: SaveRouteInput): Promi
  * behind to block the next workspace that installs it or to outlive the
  * connection. Empty when migration bravo__197 is not applied (nothing to
  * delete, and a statement on a missing table would fail the disconnect).
+ *
+ * `guard` (lib/connections/store.ts finishDisconnect's own revocation): each
+ * delete runs only when that revocation happened in the same batch.
  */
-export async function slackDisconnectStatements(db: Client, tenantId: string, teamId: string | null): Promise<InStatement[]> {
+export async function slackDisconnectStatements(
+  db: Client,
+  tenantId: string,
+  teamId: string | null,
+  guard?: { sql: string; args: InValue[] },
+): Promise<InStatement[]> {
   const t = requireTenant(tenantId);
   const rs = await db.execute({
     sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('slack_channel_routes', 'external_identities')",
     args: [],
   });
   const present = new Set(rs.rows.map((r) => String((r as unknown as Row).name)));
+  const fence = guard ? ` AND ${guard.sql}` : "";
+  const fenceArgs = guard ? guard.args : [];
   const out: InStatement[] = [];
   if (present.has("slack_channel_routes") && teamId) {
-    out.push({ sql: "DELETE FROM slack_channel_routes WHERE tenant_id = ? AND team_id = ?", args: [t, teamId] });
+    out.push({ sql: `DELETE FROM slack_channel_routes WHERE tenant_id = ? AND team_id = ?${fence}`, args: [t, teamId, ...fenceArgs] });
   }
   if (present.has("external_identities")) {
-    out.push({ sql: "DELETE FROM external_identities WHERE tenant_id = ? AND provider = 'slack'", args: [t] });
+    out.push({ sql: `DELETE FROM external_identities WHERE tenant_id = ? AND provider = 'slack'${fence}`, args: [t, ...fenceArgs] });
   }
   return out;
 }

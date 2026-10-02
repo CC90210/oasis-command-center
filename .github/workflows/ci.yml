@@ -176,7 +176,9 @@ jobs:
           # read-only test's plain states, webhook addresses, each workspace's
           # own signature token, live-send gate) against a mocked Twilio, and
           # the not-built apps' requests, the setup step and AI brain on the
-          # same drawer and statuses as Settings > Connections.
+          # same drawer and statuses as Settings > Connections. A client's own
+          # Slack app: install with its credentials, its Request URLs checked
+          # with its own signing secret and only for its own Slack team.
           npm run test:connections
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS

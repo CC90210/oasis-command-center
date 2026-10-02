@@ -3,7 +3,11 @@
  * the "Approve and post" button on a review card.
  *
  * Public by path, authenticated INSIDE with Slack's v0 signature over the raw
- * form body (lib/slack/verify.ts). Slack wants the press acknowledged within
+ * form body (lib/slack/verify.ts): OASIS's app's secret with no query string,
+ * for OASIS's own workspaces only, or, with ?workspace=<id>, that client's own
+ * app's secret only, for the Slack team routed to that client
+ * (lib/slack/own-app.ts slackRequestScope and slackAppMaySpeakFor).
+ * Slack wants the press acknowledged within
  * 3 seconds, so this answers as soon as the signature and the press are read
  * (acceptSlackInteraction) and runs the press's work after the answer, in
  * after(): who may approve, execute-once and the card update are
@@ -14,6 +18,8 @@ import { NextResponse, after, type NextRequest } from "next/server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { acceptSlackInteraction, reportPressFailure } from "@/lib/slack/interactivity";
 import { slackSigningHeaders } from "@/lib/slack/verify";
+import { slackRequestScope } from "@/lib/slack/own-app";
+import { SLACK_WORKSPACE_PARAM } from "@/lib/slack/own-app-setup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +32,12 @@ export async function POST(req: NextRequest) {
   const { timestamp, signature } = slackSigningHeaders(req.headers);
   if (!tursoConfigured()) return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   try {
-    const accepted = await acceptSlackInteraction({ rawBody, timestamp, signature }, { db: getTursoClient(), now: () => new Date() });
+    const scope = await slackRequestScope(req.nextUrl.searchParams.get(SLACK_WORKSPACE_PARAM));
+    if (!scope.ok) return NextResponse.json(scope.body, { status: scope.status, headers: NO_STORE });
+    const accepted = await acceptSlackInteraction(
+      { rawBody, timestamp, signature },
+      { db: getTursoClient(), now: () => new Date(), env: scope.env, app: scope.app },
+    );
     const work = accepted.work;
     if (work) {
       after(async () => {

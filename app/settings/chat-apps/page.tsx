@@ -140,12 +140,32 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </div>
                 ))}
               </div>
-            ) : !slackSettings.appConfigured ? (
+            ) : !conn && !slackSettings.appConfigured ? (
+              // Nothing to install with yet. A workspace that IS connected always
+              // sees its connection, channel map and Disconnect below, whatever
+              // its app's saved state (it may have removed a value since).
               <div className="space-y-1.5">
-                <p className="text-[13px] leading-5 text-fg-muted">
-                  OASIS&apos;s Slack app is not set up on this deployment yet, so Slack cannot be installed here. Nothing is
-                  broken on your side.
-                </p>
+                {slackSettings.oasisWorkspace || slackSettings.ownApp === "saved" ? (
+                  <p className="text-[13px] leading-5 text-fg-muted">
+                    {slackSettings.ownApp === "saved"
+                      ? "Your Slack app is saved, but Slack installs are not switched on here yet, so it cannot be installed. Nothing is broken on your side."
+                      : "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here. Nothing is broken on your side."}
+                  </p>
+                ) : (
+                  // A client brings its own Slack app (CC, 2026-10-01): the steps,
+                  // the manifest and the form are in the Slack drawer.
+                  <p className="text-[13px] leading-5 text-fg-muted">
+                    {slackSettings.ownApp === "unreadable"
+                      ? "Your Slack app's saved details could not be read. Save them again, "
+                      : slackSettings.ownApp === "incomplete"
+                        ? "Your Slack app is only partly saved. Add the rest of its details, "
+                        : "Your workspace connects its own Slack app. Create it in your Slack and save its details, "}
+                    <Link href={connectorHref("slack")} prefetch={false} className="text-accent hover:underline">
+                      in Settings &gt; Connections &gt; Slack
+                    </Link>
+                    , then install it here.
+                  </p>
+                )}
                 {viewer.access.isOperator && slackSettings.missingSecrets.length > 0 && (
                   <p className="text-[12px] leading-4 text-fg-dim">
                     Missing Worker secrets: {slackSettings.missingSecrets.join(", ")}.
@@ -160,8 +180,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </p>
                 )}
                 <p className="text-[13px] leading-5 text-fg-muted">
-                  Install the OASIS app in your Slack workspace, then pick a department for each channel. An @mention gets
-                  a draft reply from that department. {SLACK_APPROVAL_RULE}
+                  {slackSettings.installApp === "own" ? "Install your Slack app" : "Install the OASIS app"} in your Slack
+                  workspace, then pick a department for each channel. An @mention gets a draft reply from that department.{" "}
+                  {SLACK_APPROVAL_RULE}
                 </p>
                 {viewer.access.canManage ? (
                   <a href="/api/connections/slack/authorize" className="btn-primary inline-flex">
@@ -177,13 +198,15 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   <div className="min-w-0 text-[13px] leading-5">
                     <div className="font-medium text-fg">{conn.account_label ?? conn.account_id ?? "Slack workspace"}</div>
                     <div className="text-fg-muted">
-                      {conn.last_health_detail ??
-                        `Mirrored messages are deleted after ${SLACK_RETENTION_DAYS} days. Replies wait for approval in the Feed or in Slack.`}
+                      {conn.status === "disconnecting"
+                        ? "The disconnect did not finish. OASIS has stopped reading and answering in this Slack workspace. Press Disconnect to finish it."
+                        : (conn.last_health_detail ??
+                          `Mirrored messages are deleted after ${SLACK_RETENTION_DAYS} days. Replies wait for approval in the Feed or in Slack.`)}
                     </div>
                   </div>
                   {viewer.access.canManage && <SlackDisconnect teamName={conn.account_label} retentionDays={SLACK_RETENTION_DAYS} />}
                 </div>
-                {slackSettings.routesNotInstalled ? (
+                {conn.status === "disconnecting" ? null : slackSettings.routesNotInstalled ? (
                   <p className="text-[13px] leading-5 text-status-warm">
                     The channel map is not available on this deployment yet (its database tables are not installed), so
                     nothing is mirrored or answered.

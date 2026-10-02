@@ -67,6 +67,8 @@ const TEAM_B = "T0BRAVO";
 const BOT_A = "UBOTALPHA";
 const TOKEN_A = "xoxb-test-alpha-token";
 const TOKEN_B = "xoxb-test-bravo-token";
+/** The token a reinstall of ALPHA's Slack gets (Slack accepts it, so a post that used it would go out). */
+const TOKEN_A2 = "xoxb-test-alpha-token-reinstalled";
 const CUSTOMER_A = "cust-alpha-1";
 
 // ── Slack, mocked at the fetch boundary ─────────────────────────────────────
@@ -107,7 +109,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.hostname !== "slack.com") throw new Error(`unexpected network call in test: ${href}`);
   const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
-  if (token !== TOKEN_A && token !== TOKEN_B) return json(200, { ok: false, error: "invalid_auth" });
+  if (token !== TOKEN_A && token !== TOKEN_B && token !== TOKEN_A2) return json(200, { ok: false, error: "invalid_auth" });
   const method = url.pathname.replace("/api/", "");
   if (method === "users.info") {
     usersInfoCalls += 1;
@@ -280,6 +282,7 @@ async function main() {
   const jobSig = await import("../lib/slack/job-signature");
   const jobsRoute = await import("../app/api/webhooks/slack/jobs/route");
   const tokens = await import("../lib/connections/token-store");
+  const connStore = await import("../lib/connections/store");
   const approvalsStore = await import("../lib/os/approvals/store");
   const executors = await import("../lib/os/approvals/executors");
   const rules = await import("../lib/os/approvals/rules");
@@ -305,6 +308,18 @@ async function main() {
   };
   await connect(ALPHA, TEAM_A, "conn-slack-a", TOKEN_A, BOT_A);
   await connect(BRAVO_CO, TEAM_B, "conn-slack-b", TOKEN_B, "UBOTBRAVO");
+  // ALPHA is a client, so it uses its OWN Slack app (lib/slack/own-app.ts
+  // slackAppKindFor): saved here, its signing secret is the one this suite
+  // signs with. BRAVO_CO saved none.
+  const { setTenantIntegrationBundle } = await import("../lib/tenant-integration-store");
+  const alphaApp = await setTenantIntegrationBundle({
+    tenantId: ALPHA,
+    service: "slack_app",
+    bundle: { client_id: "1234.5678", client_secret: "alphaownappclientsecret00000001", signing_secret: process.env.SLACK_SIGNING_SECRET! },
+  });
+  if (!alphaApp.ok) throw new Error(`fixture: ALPHA's Slack app was not saved: ${alphaApp.error}`);
+  /** ALPHA's own app: what slackRequestScope gives a request at ALPHA's own Request URLs. */
+  const ALPHA_APP = { kind: "own", tenantId: ALPHA } as const;
   const now = () => new Date();
   await routing.saveChannelRoute(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0CLIENTS", channelName: "clients", department: "client_success", customerId: CUSTOMER_A, createdBy: null, now: now() });
   await routing.saveChannelRoute(db, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0GENERAL", channelName: "general", department: null, customerId: null, createdBy: null, now: now() });
@@ -344,9 +359,12 @@ async function main() {
   });
   const dispatched: Array<Parameters<typeof jobs.runSlackMentionJob>[0]> = [];
   let dispatchThrows = false;
+  // Events checked as ALPHA's own app (its Request URL carries ?workspace=ALPHA);
+  // they may act only for ALPHA. A check about another workspace says so.
   const deps = () => ({
     db,
     now,
+    app: ALPHA_APP as { kind: "own"; tenantId: string },
     dispatchMention: async (job: Parameters<typeof jobs.runSlackMentionJob>[0]) => {
       if (dispatchThrows) throw new Error("queue down");
       dispatched.push(job);
@@ -448,7 +466,11 @@ async function main() {
 
   await check("the same channel id under ANOTHER team does not mirror into the first workspace", async () => {
     const before = (await slackRows()).length;
-    const r = await events.handleSlackEvents(signed(eventBody(message("UBMEMBER", "C0CLIENTS", "bravo side"), { team: TEAM_B })), deps());
+    // At Bravo's own Request URL (its own app), where team B's events arrive.
+    const r = await events.handleSlackEvents(signed(eventBody(message("UBMEMBER", "C0CLIENTS", "bravo side"), { team: TEAM_B })), {
+      ...deps(),
+      app: { kind: "own", tenantId: BRAVO_CO },
+    });
     assert.equal(r.status, 200);
     assert.equal(r.body.ignored, "channel_not_mapped", "Bravo never mapped C0CLIENTS");
     assert.equal((await slackRows()).length, before);
@@ -616,7 +638,7 @@ async function main() {
       actions: [{ action_id: send.APPROVE_ACTION_ID, value }],
     };
     const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
-    return interactivity.handleSlackInteractivity(signed(body), { db, now });
+    return interactivity.handleSlackInteractivity(signed(body), { db, now, app: ALPHA_APP });
   };
 
   await check("a teammate who is not an owner or admin cannot approve from Slack; nothing is posted", async () => {
@@ -854,7 +876,11 @@ async function main() {
     assert.deepEqual(status.slackHomeFor(alpha, ["client_success"]), { kind: "channels", names: ["clients"] });
     assert.deepEqual(status.slackHomeFor(alpha, ["sales"]), { kind: "mention_only" });
     assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, OASIS, env), ["sales"]), { kind: "not_connected" });
-    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, ALPHA, {}), ["sales"]), { kind: "not_configured" });
+    // OASIS's own workspace with OASIS's app not on the deployment: nothing can answer.
+    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, OASIS, {}), ["sales"]), { kind: "not_configured" });
+    // A client is never served by OASIS's app: connected, but with no Slack app
+    // of its own, nothing can answer, even with OASIS's app on the deployment.
+    assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(db, BRAVO_CO, env), ["sales"]), { kind: "not_configured" });
     assert.deepEqual(status.slackHomeFor(await status.loadSlackPresence(null, ALPHA, env), ["sales"]), { kind: "unknown" });
 
     const React = await import("react");
@@ -1124,9 +1150,10 @@ async function main() {
       actions: [{ action_id: send.APPROVE_ACTION_ID, value: `${id}|${hash}` }],
     };
     const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
+    // ALPHA is a client: its presses arrive at its own Interactivity URL.
     const req = (b: string, sig?: string) => {
       const s = signed(b);
-      return new NextRequest("https://oasisai.work/api/webhooks/slack/interactivity", {
+      return new NextRequest(`https://oasisai.work/api/webhooks/slack/interactivity?workspace=${ALPHA}`, {
         method: "POST",
         body: b,
         headers: { "content-type": "application/x-www-form-urlencoded", "x-slack-request-timestamp": s.timestamp, "x-slack-signature": sig ?? s.signature },
@@ -1157,19 +1184,26 @@ async function main() {
 
   // ── 5. The queue consumer and the internal jobs route ─────────────────────
 
-  await check("the queue consumer signs each job for the app, acks a 2xx and retries anything else", async () => {
+  await check("the queue consumer signs each job with the internal job key (no Slack app secret needed), acks a 2xx and retries anything else", async () => {
     const acked: string[] = [];
     const retried: string[] = [];
     const msg = (id: string) => ({ body: { id }, ack: () => acked.push(id), retry: () => retried.push(id) });
     const seen: Request[] = [];
+    // Only OASIS's internal Connections secret: a workspace on its own Slack app
+    // gets its mentions run even where OASIS's Slack app is not set up.
+    const root = { CONNECTIONS_OAUTH_STATE_SECRET: process.env.CONNECTIONS_OAUTH_STATE_SECRET! };
+    const jobKey = await jobSig.slackJobSecret(root);
+    assert.ok(jobKey && jobKey !== SECRET, "the job key is derived, and is not the Slack signing secret");
+    assert.notEqual(jobKey, root.CONNECTIONS_OAUTH_STATE_SECRET, "nor the Connections secret itself: one key per purpose");
+    assert.equal(await jobSig.slackJobSecret({ CONNECTIONS_OAUTH_STATE_SECRET: "too-short" }), null, "a short root secret gives no job key");
     const res = await consumer.consumeSlackJobs(
       { messages: [msg("a"), msg("b")] },
-      { SLACK_SIGNING_SECRET: SECRET, PUBLIC_APP_URL: "https://oasisai.work" },
+      { ...root, PUBLIC_APP_URL: "https://oasisai.work" },
       async (request) => {
         seen.push(request);
         const body = await request.clone().text();
         const okSig = await jobSig.verifySlackJob({
-          secret: SECRET,
+          secret: jobKey,
           timestamp: request.headers.get(jobSig.JOB_TIMESTAMP_HEADER),
           signature: request.headers.get(jobSig.JOB_SIGNATURE_HEADER),
           body,
@@ -1184,22 +1218,33 @@ async function main() {
     assert.deepEqual(retried, ["b"]);
     assert.equal(new URL(seen[0].url).pathname, "/api/webhooks/slack/jobs");
     const none = await consumer.consumeSlackJobs({ messages: [msg("c")] }, {}, async () => new Response("{}"));
-    assert.deepEqual(none, { acked: 0, retried: 1 }, "no secret: nothing can be proven, so everything is retried");
+    assert.deepEqual(none, { acked: 0, retried: 1 }, "no job key: nothing can be proven, so everything is retried");
+    const slackOnly = await consumer.consumeSlackJobs({ messages: [msg("d")] }, { SLACK_SIGNING_SECRET: SECRET } as never, async () => new Response("{}"));
+    assert.deepEqual(slackOnly, { acked: 0, retried: 1 }, "a Slack signing secret alone is not a job key");
   });
 
-  await check("the jobs route refuses an unsigned or Slack-signed body (a Slack signature is not a job signature)", async () => {
+  await check("the jobs route takes only the internal job key: unsigned, Slack-signed, and a job signed with the Slack app secret are all refused; a job signed with the internal key runs (200)", async () => {
     const body = JSON.stringify(dispatched[0]);
     const unsigned = await jobsRoute.POST(new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", { method: "POST", body }));
     assert.equal(unsigned.status, 401);
     const ts = String(Math.floor(Date.now() / 1000));
-    const slackSigned = await jobsRoute.POST(
-      new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", {
-        method: "POST",
-        body,
-        headers: { [jobSig.JOB_TIMESTAMP_HEADER]: ts, [jobSig.JOB_SIGNATURE_HEADER]: verify.slackSignature(SECRET, ts, body) },
-      }),
-    );
-    assert.equal(slackSigned.status, 401);
+    const post = (signature: string) =>
+      jobsRoute.POST(
+        new NextRequest("https://oasisai.work/api/webhooks/slack/jobs", {
+          method: "POST",
+          body,
+          headers: { [jobSig.JOB_TIMESTAMP_HEADER]: ts, [jobSig.JOB_SIGNATURE_HEADER]: signature },
+        }),
+      );
+    assert.equal((await post(verify.slackSignature(SECRET, ts, body))).status, 401, "a Slack request signature is not a job signature");
+    assert.equal((await post(await jobSig.signSlackJob(SECRET, ts, body))).status, 401, "OASIS's Slack app secret cannot mint a job for any workspace");
+    const jobKey = await jobSig.slackJobSecret({ CONNECTIONS_OAUTH_STATE_SECRET: process.env.CONNECTIONS_OAUTH_STATE_SECRET! });
+    assert.ok(jobKey, "a job key is derived from the Connections secret");
+    // Accepted, and the job ran: this mention already has its approval, so the
+    // route answers 200 with that approval as a duplicate (never a second draft).
+    // A 500 (the job failed) or a 503 is not "accepted".
+    const accepted = await post(await jobSig.signSlackJob(jobKey, ts, body));
+    assert.deepEqual([accepted.status, await accepted.json()], [200, { ok: true, outcome: "duplicate", approvalId }], "the internal job key is accepted and the job runs");
   });
 
   // ── 6. Retention ────────────────────────────────────────────────────────
@@ -1459,7 +1504,8 @@ async function main() {
     try {
       const fallbackFor = async (profileId: string, eventId: string) => {
         let seen: unknown = "not called";
-        const job = { ...dispatched[0], tenantId: OASIS, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
+        // OASIS's own connection (connected above at generation 0).
+        const job = { ...dispatched[0], tenantId: OASIS, connectionId: "conn-slack-oasis", generation: 0, teamId: "T0OASIS", channelId: "C0OASIS1", channelName: null, eventId, profileId, text: `<@${BOT_A}> Client Success hi`, channelDepartment: null, customerId: null };
         await jobs.runSlackMentionJob(job, {
           db,
           now,
@@ -1477,6 +1523,240 @@ async function main() {
       console.error = realError;
       if (savedKey === undefined) delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
       else process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY = savedKey;
+    }
+  });
+
+  // -- 3b. Work is bound to the connection generation it was accepted on -------
+  // (lib/connections/store.ts liveConnectionGuard). A check that moves ALPHA's
+  // connection on (a disconnect starting, a reinstall) puts it back after, so
+  // the checks below keep their fixture.
+
+  const alphaGeneration = async () => Number((await db.execute("SELECT token_version FROM tenant_connections WHERE id = 'conn-slack-a'")).rows[0].token_version);
+  const restoreAlpha = (generation: number) =>
+    db.execute({ sql: "UPDATE tenant_connections SET status = 'connected', token_version = ?, revoked_at = NULL WHERE id = 'conn-slack-a'", args: [generation] });
+  /** The real disconnect's first step, on ALPHA's connection at the generation it is on now. */
+  const startDisconnectOfAlpha = async () =>
+    connStore.beginDisconnect(db, { tenantId: ALPHA, connectionId: "conn-slack-a", generation: await alphaGeneration(), now: now() });
+
+  await check("an event read before a disconnect started writes nothing after it: no receipt, no mirrored text, no job", async () => {
+    const generation = await alphaGeneration();
+    const mirroredBefore = (await slackRows(ALPHA)).length;
+    const receiptsBefore = await count("SELECT COUNT(*) AS n FROM slack_event_receipts");
+    const jobsBefore = dispatched.length;
+    for (const [kind, ev] of [
+      ["message", message("UMEMBER1", "C0CLIENTS", "said just before the disconnect")],
+      ["mention", mention("UMEMBER1", "C0CLIENTS", "Client Success, asked just before the disconnect")],
+    ] as const) {
+      // Route, token and identity are read; the disconnect lands before the write.
+      let moved = false;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          const hook = async (sqls: string[]) => {
+            if (!moved && sqls.some((s) => /INSERT INTO slack_event_receipts/.test(s))) moved = (await startDisconnectOfAlpha()) !== null;
+          };
+          if (prop === "execute") {
+            return async (stmt: Parameters<typeof db.execute>[0]) => {
+              await hook([typeof stmt === "string" ? stmt : stmt.sql]);
+              return target.execute(stmt);
+            };
+          }
+          if (prop === "batch") {
+            return async (stmts: Parameters<typeof db.batch>[0], mode?: Parameters<typeof db.batch>[1]) => {
+              await hook(stmts.map((s) => (typeof s === "string" ? s : s.sql)));
+              return target.batch(stmts, mode);
+            };
+          }
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      try {
+        const r = await events.handleSlackEvents(signed(eventBody(ev)), { ...deps(), db: racing as unknown as typeof db });
+        assert.ok(moved, `${kind}: the disconnect started mid-event`);
+        assert.deepEqual([r.status, r.body.dropped], [200, "connection_changed"], `${kind}: ${JSON.stringify(r.body)}`);
+      } finally {
+        await restoreAlpha(generation);
+      }
+    }
+    assert.equal((await slackRows(ALPHA)).length, mirroredBefore, "no mirrored text");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_event_receipts"), receiptsBefore, "no receipt");
+    assert.equal(dispatched.length, jobsBefore, "no job");
+  });
+
+  await check("a mention job creates no approval when its connection was disconnected during the turn, and none at all when it was reinstalled before the job ran", async () => {
+    const generation = await alphaGeneration();
+    const postsBefore = posts.length;
+    const ephemeralsBefore = ephemerals.length;
+    try {
+      // The disconnect starts while the model is drafting.
+      const job = { ...dispatched[0], eventId: "EvTURNRACE01" };
+      const out = await jobs.runSlackMentionJob(job, {
+        ...turnDeps("a draft that finished after the disconnect"),
+        runText: (async () => {
+          await startDisconnectOfAlpha();
+          return { ok: true, text: "a draft that finished after the disconnect" };
+        }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["runText"]>,
+      });
+      assert.deepEqual(out, { outcome: "dropped", reason: "connection_changed" });
+      assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND idempotency_key = ?", [ALPHA, jobs.approvalKeyForEvent("EvTURNRACE01")]), 0, "no approval");
+    } finally {
+      await restoreAlpha(generation);
+    }
+    // A job bound to another generation (the connection was installed again since) never starts a turn.
+    let prepared = 0;
+    const stale = await jobs.runSlackMentionJob({ ...dispatched[0], eventId: "EvOLDGEN0001", generation: generation + 7 }, {
+      db,
+      now,
+      prepare: (async () => {
+        prepared += 1;
+        return { ok: false, status: 500, error: "should_not_run" };
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    });
+    assert.deepEqual([stale, prepared], [{ outcome: "dropped", reason: "connection_changed" }, 0]);
+    assert.deepEqual([posts.length, ephemerals.length], [postsBefore, ephemeralsBefore], "nothing posted in Slack");
+  });
+
+  await check("an approval drafted under an earlier generation never posts, even once the same Slack is connected again; one with no binding never posts either", async () => {
+    const generation = await alphaGeneration();
+    const { id, hash } = await pendingSlackApproval("EvOLDAPPROVE1");
+    const stored = approvalsStore.parsePayload((await approvalsStore.getApprovalInTenant(db, ALPHA, id))!);
+    assert.deepEqual([stored.connection_id, stored.connection_generation], ["conn-slack-a", generation], "the draft carries its connection and generation");
+    const postsBefore = posts.length;
+    try {
+      // Disconnected and installed again: the same row, a later generation, connected.
+      assert.notEqual(await startDisconnectOfAlpha(), null);
+      await restoreAlpha(generation + 2);
+      const r = await pressApprove("UOWNER1", `${id}|${hash}`);
+      assert.match(String(r.replaced), /drafted while an earlier Slack connection was in place/);
+      assert.equal(posts.length, postsBefore, "nothing posted through the new connection");
+      const row = await approvalsStore.getApprovalInTenant(db, ALPHA, id);
+      assert.deepEqual([row?.status, (row?.execution_result as { reason?: string } | null)?.reason], ["failed", "slack_connection_changed"]);
+    } finally {
+      await restoreAlpha(generation);
+    }
+  });
+
+  await check("a Slack reply stored before replies carried their connection: a client's is refused in plain words; OASIS's own goes out through its live connection", async () => {
+    const deps = { ...executors.defaultExecutorDeps(), publishEvent: async () => undefined };
+    const exec = executors.EXECUTORS.send_slack_message!;
+    // Exactly the shape an approval created before this change has: no connection_id, no generation.
+    const legacy = async (tenantId: string, teamId: string, channelId: string, text: string) => {
+      const created = await approvalsStore.createApproval(
+        db,
+        {
+          tenantId,
+          departmentKey: "client_success",
+          requestedBy: { type: "agent", id: "csm" },
+          actionKind: "send_slack_message",
+          title: "Slack reply",
+          payload: { team_id: teamId, channel_id: channelId, thread_ts: "1727700000.000400", text },
+        },
+        now(),
+      );
+      assert.ok(created.ok, JSON.stringify(created));
+      return (created as { approval: Parameters<typeof exec.run>[0]["approval"] }).approval;
+    };
+    const postsBefore = posts.length;
+    const client = await legacy(ALPHA, TEAM_A, "C0CLIENTS", "a client draft from before");
+    const refused = await exec.run({ db, approval: client, payload: approvalsStore.parsePayload(client), tenant: { id: ALPHA, slug: "alpha-co" }, approver: null, deps });
+    const result = (refused as { result?: { reason?: string; message?: string } }).result;
+    assert.deepEqual([refused.ok, result?.reason], [false, "slack_draft_outdated"], JSON.stringify(refused));
+    assert.match(String(result?.message), /nothing was posted\. Ask again in Slack for a new draft\.$/);
+    assert.equal(posts.length, postsBefore, "a client's old draft is never guessed onto a connection");
+    // OASIS's own workspace: its Slack is always OASIS's app, so the old draft goes out through the connection live now.
+    const oasis = await legacy(OASIS, "T0OASIS", "C0OASIS1", "an OASIS draft from before");
+    const sent = await exec.run({ db, approval: oasis, payload: approvalsStore.parsePayload(oasis), tenant: { id: OASIS, slug: "oasis-ai-cc" }, approver: null, deps });
+    assert.deepEqual([sent.ok, (sent as { result?: { outcome?: string } }).result?.outcome], [true, "sent"], JSON.stringify(sent));
+    assert.equal(posts.length, postsBefore + 1);
+    assert.equal(posts.at(-1)?.body.text, "an OASIS draft from before");
+  });
+
+  await check("a reply bound to generation G never posts with the token a reinstall stored at G+1: the token read is fenced on G, and the generation is checked again right before the post", async () => {
+    const generation = await alphaGeneration();
+    const { id } = await pendingSlackApproval("EvREINSTALL01");
+    const payload = approvalsStore.parsePayload((await approvalsStore.getApprovalInTenant(db, ALPHA, id))!);
+    const binding = { id: String(payload.connection_id), generation: Number(payload.connection_generation) };
+    assert.equal(binding.generation, generation);
+    /** The same Slack team installed again: its next generation, a new token stored, connected. */
+    const reinstall = async () => {
+      const claim = await connStore.claimConnection(db, {
+        tenantId: ALPHA,
+        provider: "slack",
+        authKind: "app_install",
+        scopeKind: "tenant",
+        userId: null,
+        externalAccountId: TEAM_A,
+        externalAccountLabel: `${TEAM_A} workspace`,
+        environment: null,
+        grantedScopes: [],
+        scopeSetVersion: 1,
+        connectedBy: null,
+        now: now(),
+      });
+      assert.ok(claim.ok && claim.connection.token_version === generation + 1, JSON.stringify(claim));
+      const saved = await tokens.saveBotTokenAt(db, { tenantId: ALPHA, connectionId: "conn-slack-a", generation: generation + 1, token: { bot_token: TOKEN_A2, bot_user_id: BOT_A }, now: now() });
+      assert.ok(saved.ok, JSON.stringify(saved));
+      await db.execute("UPDATE tenant_connections SET status = 'connected' WHERE id = 'conn-slack-a'");
+    };
+    /** `db`, with the reinstall landing just before the first statement matching `pattern`. */
+    const reinstallingAt = (pattern: RegExp) => {
+      let moved = false;
+      const racing = new Proxy(db, {
+        get(target, prop) {
+          if (prop === "execute") {
+            return async (stmt: Parameters<typeof db.execute>[0]) => {
+              const sql = (typeof stmt === "string" ? stmt : stmt.sql).trim();
+              if (!moved && pattern.test(sql)) {
+                moved = true;
+                await reinstall();
+              }
+              return target.execute(stmt);
+            };
+          }
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      return { db: racing as unknown as typeof db, moved: () => moved };
+    };
+    // The token read on its own: a reinstall between the generation check and the read hands over no token at all.
+    {
+      const racing = reinstallingAt(/LEFT JOIN tenant_integration_credentials/);
+      try {
+        const read = await send.slackTokenFor(racing.db, ALPHA, TEAM_A, binding);
+        assert.ok(racing.moved(), "the reinstall landed between the generation check and the token read");
+        assert.deepEqual([read.ok, (read as { reason?: string }).reason, (read as { token?: string }).token], [false, "slack_connection_changed", undefined]);
+      } finally {
+        await tokens.saveBotToken(ALPHA, "conn-slack-a", { bot_token: TOKEN_A, bot_user_id: BOT_A });
+        await restoreAlpha(generation);
+      }
+    }
+    for (const [step, pattern] of [
+      ["between the generation check and the token read", /LEFT JOIN tenant_integration_credentials/],
+      ["between the token read and the post", /^SELECT EXISTS \(SELECT 1 FROM tenant_connections/],
+    ] as const) {
+      const racing = reinstallingAt(pattern);
+      const moved = racing.moved;
+      const postsBefore = posts.length;
+      try {
+        const out = await send.postSlackReply(racing.db, {
+          tenantId: ALPHA,
+          teamId: TEAM_A,
+          channelId: "C0CLIENTS",
+          threadTs: "1727700000.000500",
+          text: "drafted under the earlier install",
+          department: "client_success",
+          approvalId: id,
+          connection: binding,
+        });
+        assert.ok(moved(), `${step}: the reinstall landed`);
+        assert.equal((await tokens.readBotToken(ALPHA, "conn-slack-a")).ok && (await tokens.readBotToken(ALPHA, "conn-slack-a") as { token: string }).token, TOKEN_A2, `${step}: the reinstall's token is the one stored now`);
+        assert.deepEqual([out.ok, (out as { reason?: string }).reason], [false, "slack_connection_changed"], `${step}: ${JSON.stringify(out)}`);
+        assert.equal(posts.length, postsBefore, `${step}: nothing posted, with either token`);
+      } finally {
+        await tokens.saveBotToken(ALPHA, "conn-slack-a", { bot_token: TOKEN_A, bot_user_id: BOT_A });
+        await restoreAlpha(generation);
+      }
     }
   });
 

@@ -40,12 +40,16 @@ import type { Client } from "@libsql/client";
 import {
   getTenantIntegrationBundle,
   readTenantCredentialStrict,
+  readTenantCredentialsWhile,
   setTenantIntegrationBundle,
+  setTenantIntegrationBundleWhile,
 } from "@/lib/tenant-integration-store";
 import { BOT_TOKEN_FIELD, REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFor } from "@/lib/connections/rules";
 import { alertConnectionWorsened } from "@/lib/connections/health";
 import {
   getConnection,
+  liveConnectionGuard,
+  pendingClaimGuard,
   recordHealthCheck,
   releaseRefreshLease,
   takeRefreshLease,
@@ -137,7 +141,8 @@ export function isConfirmedRefreshRefusal(err: unknown): boolean {
  * none of the lease machinery above applies: it is stored once, encrypted,
  * under the connection's own credential service, and read back strictly (no
  * env fallback). Removing the app in Slack revokes it; the health probe
- * (auth.test) then turns the connection expired.
+ * (auth.test) then turns the connection expired. An install saves with
+ * saveBotTokenAt instead, fenced on its own claim.
  */
 export async function saveBotToken(
   tenantId: string,
@@ -156,9 +161,58 @@ export async function saveBotToken(
   if (!saved.ok) throw new TokenStoreError("save_failed", saved.error);
 }
 
+/**
+ * An install's bot token, saved ONLY while the connection is still the
+ * pending claim this install made at `generation` (lib/connections/store.ts
+ * pendingClaimGuard), atomically. "connection_changed": a disconnect, or a
+ * newer install of the same connection, moved it on first, and nothing was
+ * written. The token is never logged.
+ */
+export async function saveBotTokenAt(
+  db: Client,
+  input: { tenantId: string; connectionId: string; generation: number; token: { bot_token: string; bot_user_id: string | null }; now: Date },
+): Promise<{ ok: true } | { ok: false; reason: "connection_changed" | "save_failed"; error?: string }> {
+  const bundle: Record<string, string> = { [BOT_TOKEN_FIELD]: input.token.bot_token };
+  if (input.token.bot_user_id) bundle.bot_user_id = input.token.bot_user_id;
+  const saved = await setTenantIntegrationBundleWhile(db, {
+    tenantId: input.tenantId,
+    service: credentialServiceFor(input.connectionId),
+    bundle,
+    guard: pendingClaimGuard(input.tenantId, input.connectionId, input.generation),
+    now: input.now,
+  });
+  if (saved.ok) return { ok: true };
+  return saved.error === "guard_refused" ? { ok: false, reason: "connection_changed" } : { ok: false, reason: "save_failed", error: saved.error };
+}
+
 export type BotTokenRead =
   | { ok: true; token: string; botUserId: string | null }
   | { ok: false; reason: "missing" | "unreadable" | "lookup_failed" };
+
+/**
+ * The bot token of the connection AT `generation`, in one statement with the
+ * generation check (lib/tenant-integration-store.ts readTenantCredentialsWhile):
+ * work bound to a generation reads that generation's token or nothing, never
+ * the token a later install stored ("connection_changed"). The token is never
+ * logged.
+ */
+export async function readBotTokenAt(
+  db: Client,
+  tenantId: string,
+  connectionId: string,
+  generation: number,
+): Promise<BotTokenRead | { ok: false; reason: "connection_changed" }> {
+  const read = await readTenantCredentialsWhile(db, {
+    tenantId,
+    service: credentialServiceFor(connectionId),
+    fieldKeys: [BOT_TOKEN_FIELD, "bot_user_id"],
+    guard: liveConnectionGuard(tenantId, connectionId, generation),
+  });
+  if (!read.ok) return read.reason === "guard_refused" ? { ok: false, reason: "connection_changed" } : { ok: false, reason: read.reason };
+  const token = read.values[BOT_TOKEN_FIELD];
+  if (!token) return { ok: false, reason: "missing" };
+  return { ok: true, token, botUserId: read.values.bot_user_id ?? null };
+}
 
 /** The connection's bot token, strictly: missing, unreadable and a failed lookup stay apart. */
 export async function readBotToken(tenantId: string, connectionId: string): Promise<BotTokenRead> {
@@ -221,7 +275,7 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
 
   const conn = await getConnection(db, input.tenantId, input.connectionId);
   if (!conn) throw new TokenStoreError("connection_not_found");
-  if (conn.revoked_at) throw new TokenStoreError("connection_revoked");
+  if (conn.revoked_at || conn.status === "disconnecting") throw new TokenStoreError("connection_revoked");
   if (conn.status === "expired") throw new TokenStoreError("refresh_failed", "The provider refused the last refresh. Reconnect.");
 
   const tokens = await loadTokens(input.tenantId, input.connectionId);
@@ -282,6 +336,8 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
           detail: "The provider refused to refresh this connection. Reconnect it.",
           latencyMs: null,
           now: now(),
+          // The lease holder's own generation: never written over a reconnect.
+          generation: version,
         });
         if (recorded.worsened) {
           await alertConnectionWorsened({}, {
