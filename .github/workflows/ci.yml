@@ -137,6 +137,12 @@ jobs:
           # is one line, and the failure is invisible — pages that repeat or skip
           # rows, producing counts wrong in an unpredictable direction.
           npm run test:paged-reads
+          # ADDED 2026-10-01 (WQA). The rules of the signed-in QA crawl
+          # (.github/workflows/qa-crawl.yml, docs/qa/CRAWL.md): the route list
+          # derived from lib/os/nav.ts and app/, the clipped-text detector, the
+          # defect ranking, and a schema fixture holding CREATE statements only.
+          # The crawl itself needs a build and a browser and does not run here.
+          npm run test:qa
           # ADDED 2026-09-24. Projects + Tickets: a client must never read
           # another client's ticket, project or internal note; work is only
           # assignable to the active roster; a support-form submission becomes

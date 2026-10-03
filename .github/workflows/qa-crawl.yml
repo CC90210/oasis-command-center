@@ -1,0 +1,173 @@
+# QA crawl: a signed-in crawl of every Command Center page (docs/qa/CRAWL.md).
+#
+# WHAT IT DOES. Builds THIS commit with `npm run build` (next build) and serves
+# it with `next start` on 127.0.0.1. Not the OpenNext Worker preview: next start
+# runs the same app code on Node and is enough to see whether a page renders,
+# errors, clips or crawls; the Worker runtime has its own checks in ci.yml.
+# The server reads a LOCAL libSQL file built from the committed production
+# schema (scripts/qa/fixtures/production-schema.json, CREATE statements only)
+# and seeded with synthetic rows (scripts/qa/seed.mjs). Four viewers sign in
+# with sessions minted by the app's own session code under a secret generated
+# in this job; Chromium opens every route at 1440x900 and 390x844 and the report
+# (JSON + markdown, no screenshots) is uploaded as the `qa-crawl` artifact.
+#
+# NOTHING LEAVES THE RUNNER. scripts/qa/egress-guard.cjs is preloaded into the
+# seed, the build and the server and refuses every non-loopback connection; the
+# browser aborts every request to another host. No repository secret is read:
+# the session and field keys are random per run and masked.
+#
+# WHEN IT RUNS. On push to the branch that introduced it (GitHub offers "Run
+# workflow" only for a workflow file already on the default branch), then by
+# hand from Actions > QA crawl > Run workflow. Never on pull requests: it takes
+# the better part of an hour.
+name: QA crawl
+
+on:
+  push:
+    branches: [test/wqa-signed-in-crawl]
+  workflow_dispatch:
+    inputs:
+      viewers:
+        description: "Viewers to crawl (comma list; empty = all four)"
+        required: false
+        default: ""
+      match:
+        description: "Only routes matching this regular expression (empty = all)"
+        required: false
+        default: ""
+      concurrency:
+        description: "Pages open at once per viewer"
+        required: false
+        default: "2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-crawl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      # The app reads the local file through the Turso adapter (lib/turso.ts).
+      EMPIRE_DATA_BACKEND: turso_cloud
+      EMPIRE_AUTH_BACKEND: turso
+      TURSO_AUTH_TOKEN: local-qa-placeholder-not-a-token
+      # Non-secret production flags, so the gates behave as they do live.
+      FOUNDERS_TENANT_IDS: ef8d389e-3f15-43f2-ae00-3660f69a1452
+      OPERATOR_EMAIL: conaugh@oasisai.work
+      OPERATOR_TIMEZONE: America/Toronto
+      NEXT_PUBLIC_OPERATOR_TIMEZONE: America/Toronto
+      BRAVO_FORCE_DRY_RUN: "1"
+      DEPLOY_ENV: qa-crawl
+      DEPLOY_PLATFORM: local
+      DEPLOY_SURFACE: oasis
+      QA_PORT: "3100"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Playwright is NOT a dependency of the app: installed for this run only.
+      - name: Install Chromium for Playwright (this run only)
+        run: |
+          npm i --no-save --no-audit --no-fund playwright@1.58.2
+          npx playwright install --with-deps chromium
+
+      - name: Local environment (random secrets, local database paths)
+        run: |
+          set -euo pipefail
+          QA_DIR="$RUNNER_TEMP/qa"
+          mkdir -p "$QA_DIR/report" "$QA_DIR/logs"
+          SESSION_SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64url'))")"
+          FIELD_KEY="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))")"
+          echo "::add-mask::$SESSION_SECRET"
+          echo "::add-mask::$FIELD_KEY"
+          {
+            echo "QA_DIR=$QA_DIR"
+            echo "QA_DB=$QA_DIR/occ-qa.db"
+            echo "TURSO_DB_PATH=$QA_DIR/occ-qa.db"
+            echo "TURSO_DATABASE_URL=file:$QA_DIR/occ-qa.db"
+            echo "AUTH_SESSION_SECRET=$SESSION_SECRET"
+            echo "BRAVO_FIELD_ENCRYPTION_KEY=$FIELD_KEY"
+            echo "PUBLIC_APP_URL=http://localhost:$QA_PORT"
+            echo "EGRESS_LOG=$QA_DIR/logs/egress.log"
+            echo "QA_GUARD=$GITHUB_WORKSPACE/scripts/qa/egress-guard.cjs"
+          } >> "$GITHUB_ENV"
+
+      - name: Local database (production schema, synthetic rows)
+        run: |
+          set -euo pipefail
+          node scripts/qa/build-db.mjs "$QA_DB"
+          NODE_OPTIONS="--require $QA_GUARD --conditions=react-server" node --import tsx scripts/qa/seed.mjs "$QA_DB" "$QA_DIR/seed.json"
+
+      - name: Build (next build, outbound blocked)
+        env:
+          NODE_OPTIONS_EXTRA: "--max-old-space-size=4096"
+        run: NODE_OPTIONS="--require $QA_GUARD $NODE_OPTIONS_EXTRA" npm run build
+
+      - name: Start (next start on 127.0.0.1, outbound blocked)
+        run: |
+          set -euo pipefail
+          NODE_OPTIONS="--require $QA_GUARD" nohup npx next start --port "$QA_PORT" --hostname 127.0.0.1 > "$QA_DIR/logs/server.log" 2>&1 &
+          echo $! > "$QA_DIR/server.pid"
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$QA_PORT/api/health" > /dev/null 2>&1; then echo "server up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::the server did not answer /api/health within 90s"
+          tail -n 80 "$QA_DIR/logs/server.log"
+          exit 1
+
+      # The browser uses "localhost", not 127.0.0.1: next start writes
+      # localhost into the absolute URLs of its own redirects, and a redirect
+      # to another origin would drop the session cookie and land on sign-in.
+      - name: Crawl
+        env:
+          QA_VIEWERS: ${{ inputs.viewers }}
+          QA_MATCH: ${{ inputs.match }}
+          QA_CONCURRENCY: ${{ inputs.concurrency || '2' }}
+        run: |
+          set -euo pipefail
+          npm run qa:crawl -- \
+            --base "http://localhost:$QA_PORT" \
+            --db "$QA_DB" \
+            --seed "$QA_DIR/seed.json" \
+            --out "$QA_DIR/report" \
+            --egress-log "$EGRESS_LOG" \
+            --concurrency "$QA_CONCURRENCY" \
+            ${QA_VIEWERS:+--viewers "$QA_VIEWERS"} \
+            ${QA_MATCH:+--match "$QA_MATCH"}
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$QA_DIR/report/qa-crawl.md" ]; then
+            # The headline tables; the full list is in the artifact.
+            awk '/^## Every defect/{exit} {print}' "$QA_DIR/report/qa-crawl.md" | head -c 900000 >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written; see the Crawl step and the qa-crawl artifact's logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$QA_DIR/server.pid" ]; then kill "$(cat "$QA_DIR/server.pid")" 2>/dev/null || true; fi
+          cp "$QA_DIR/seed.json" "$QA_DIR/report/seed.json" 2>/dev/null || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-crawl
+          path: |
+            ${{ env.QA_DIR }}/report
+            ${{ env.QA_DIR }}/logs
+          retention-days: 30
+          if-no-files-found: warn
