@@ -233,7 +233,7 @@ async function main() {
   }
   for (const text of Object.values(KIND_SENTENCE)) assert.doesNotMatch(text, /—/);
   assert.match(bookMeetMessage("something_new", "unconfirmed"), /not confirmed/);
-  assert.match(KIND_SENTENCE.unconfirmed, /15 minutes/);
+  assert.match(KIND_SENTENCE.unconfirmed, /20 minutes/);
   assert.doesNotMatch(readFileSync("lib/web-leads/book-meet-flow.ts", "utf8"), /—/, "no em dash in the flow module");
 
   // 14. Call Mode cursor after a booking (Review Focus 2).
@@ -276,6 +276,10 @@ async function main() {
     assert.equal(rc.result.kind === "fix" ? rc.result.field : null, "dnc");
     assert.match(BOOK_MEET_COPY.do_not_call, /owner asked/i);
   }
+
+  // An organiser mismatch can follow a created Google event that is then
+  // cancelled: the copy must not let a rep tell the client nothing was sent.
+  assert.match(BOOK_MEET_COPY.calendar_organizer_mismatch, /cancelled automatically within 20 minutes/);
 
   console.log("book-meet-flow: OK");
 }

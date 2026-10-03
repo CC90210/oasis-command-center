@@ -220,7 +220,11 @@ export const BOOK_MEET_COPY: Record<string, string> = {
   google_calendar_not_connected: "That host's Google Calendar is not connected. Pick another host, or they reconnect Google in Settings.",
   calendar_scope_required: "That host must reconnect Google once to allow calendar access. Pick another host for now.",
   token_refresh_failed: "Google rejected that host's saved sign-in. Pick another host, or they reconnect Google in Settings.",
-  calendar_organizer_mismatch: "That host connected a different Google account. Pick another host, or they reconnect with their OASIS email.",
+  // Raised before Google is called, OR after Google created the event under the
+  // wrong account (lib/website-sales-founder-meeting.ts assertOrganizer). In the
+  // second case the event is cancelled at once, or by the booking saga if that
+  // cancel fails, so the client may briefly see an invite. Say so.
+  calendar_organizer_mismatch: "That host's Google account is not their OASIS email. If an invite reached the client, it is cancelled automatically within 20 minutes. Pick another host, or they reconnect with their OASIS email.",
   workspace_calendar_token_invalid: "Booking is down for everyone because the shared Google connection failed. Tell an admin.",
   google_oauth_config_missing: "Booking is down for everyone because Google sign-in is not set up on this server. Tell an admin.",
   idempotency_check_failed: "We could not check whether this booking already exists.",
@@ -260,7 +264,7 @@ export const KIND_SENTENCE: Record<BookMeetResult["kind"], string> = {
   blocked: "Nothing was booked.",
   retry_safe: "Nothing was booked yet. Press Try again.",
   unconfirmed:
-    "The meeting is not confirmed. Press Try again now: it reuses the same booking and will not send a second invite. If it is not finished within 15 minutes, any invite already sent is cancelled automatically.",
+    "The meeting is not confirmed. Press Try again now: it reuses the same booking and will not send a second invite. If it is not finished within 20 minutes, any invite already sent is cancelled automatically.",
 };
 
 export function bookMeetMessage(code: string, kind: BookMeetResult["kind"]): string {
