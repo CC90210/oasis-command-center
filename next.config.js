@@ -105,9 +105,25 @@ const nextConfig = {
     //    wrong number.
     //
     //    So: cpus 1 instead of 2, and the freed budget goes to the one worker.
-    //    5 GB + parent + install overhead fits inside 8 GB with room, and there
-    //    is no second worker to race for it. Build time is the cost, and it is
-    //    the right thing to spend when the scarce resource is RAM.
+    //
+    // 6. 5 GB WAS STILL TOO MUCH, and the reason is a property of NODE_OPTIONS I
+    //    had not accounted for: it applies to EVERY node process in the build,
+    //    not just the compile worker. Parent and worker were each entitled to
+    //    5 GB — a ~10 GB ceiling against an 8 GB container. It held for a dozen
+    //    builds and then production died at 72 seconds with a container SIGKILL
+    //    (not V8's own heap error, which is the tell: the worker was still under
+    //    its cap when the CONTAINER ran out).
+    //
+    //    "Fits with room" in note 5 was arithmetic on one process. The cap has to
+    //    be sized for the SUM. 4 GB keeps the worker above its measured need
+    //    (>3 GB with Vercel's restored build cache — 3072 failed in 36s) while
+    //    leaving the parent and install room inside 8 GB.
+    //
+    //    Build time is the cost of a low cpus count, and it is the right thing to
+    //    spend when the scarce resource is RAM and the failure mode is a
+    //    production deploy that errors while the old build keeps serving — which
+    //    is exactly how this went unnoticed until someone checked the deploy
+    //    state rather than the HTTP status.
     //
     //    NODE_OPTIONS reaches the workers, which is the half worth checking
     //    rather than assuming — jest-worker children inherit the parent env.
