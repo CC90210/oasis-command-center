@@ -123,7 +123,7 @@ async function main() {
     }) as never;
   const approve = async (approvalId: string, over: Record<string, unknown> = {}) => {
     const a = await approvals.getApprovalInTenant(db, DESK_TENANT, approvalId);
-    const d = await approvals.decideApproval(db, founder, approvalId, { kind: "approve", payloadHash: a!.payload_hash }, new Date());
+    const d = await approvals.decideApproval(db, founder, approvalId, { kind: "approve", payloadHash: a!.payload_hash }, clock);
     assert.ok(d.ok, JSON.stringify(d));
     const x = await executeApproval(db, { tenantId: DESK_TENANT, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, execDeps(over));
     assert.ok(x.ok);
