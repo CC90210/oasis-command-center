@@ -36,6 +36,7 @@ import {
   bookMeetMessage,
   bookingSignature,
   meetingAtOf,
+  needsFreshBookingId,
   outcomeSignature,
   runBookMeetFlow,
   type BookMeetDraft,
@@ -539,6 +540,9 @@ function BookMeetPanelForLead(props: BookMeetPanelProps) {
   const [outcomeSaved, setOutcomeSaved] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const idsRef = useRef<{ outcome: string; outcomeSig: string; booking: string; bookingSig: string } | null>(null);
+  // The booking id that reached the server and came back unconfirmed or
+  // booked_finish: retrying THAT id goes to the route's replay, not the gates.
+  const sentBookingRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Context read. Per-effect `alive`, never a module-scope promise (Worker request isolation).
@@ -628,6 +632,7 @@ function BookMeetPanelForLead(props: BookMeetPanelProps) {
       booking: !cur || cur.bookingSig !== bSig ? crypto.randomUUID() : cur.booking,
       bookingSig: bSig,
     };
+    const attempt = idsRef.current;
     const io: FlowIO = {
       postOutcome: (id, body) => http(`/api/web-leads/${encodeURIComponent(id)}/outcome`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
       getContext: (id) => http(`/api/web-leads/${encodeURIComponent(id)}?view=booking`),
@@ -636,13 +641,19 @@ function BookMeetPanelForLead(props: BookMeetPanelProps) {
     setStatus({ kind: "working", step: outcomeSaved || draft.doNotCall ? "check" : "call" });
     const { result, outcomeSaved: saved } = await runBookMeetFlow(
       draft,
-      { outcomeRequestId: idsRef.current.outcome, bookingRequestId: idsRef.current.booking },
-      { outcomeSaved },
+      { outcomeRequestId: attempt.outcome, bookingRequestId: attempt.booking },
+      { outcomeSaved, bookingMayExist: sentBookingRef.current === attempt.booking },
       io,
       draft.smsConsent ? smsConsentArtifact() : null,
       (step) => setStatus({ kind: "working", step }),
     );
     setOutcomeSaved(saved);
+    if (result.kind === "unconfirmed" || result.kind === "booked_finish") sentBookingRef.current = attempt.booking;
+    // A cancelled attempt is spent: the next press must carry a new booking id.
+    if (needsFreshBookingId(result)) {
+      idsRef.current = { ...attempt, bookingSig: "" };
+      sentBookingRef.current = null;
+    }
     // A do-not-call refusal means the lead is on the list now even if it was
     // not when the panel opened: show the owner-asked box (unticked).
     if (result.kind === "fix" && result.field === "dnc") setDraft((d) => (d ? { ...d, doNotCall: true } : d));

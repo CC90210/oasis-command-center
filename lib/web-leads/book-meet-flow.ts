@@ -248,7 +248,7 @@ export const BOOK_MEET_COPY: Record<string, string> = {
   lifecycle_transition_failed: "Google may have booked it, but the lead did not update.",
   meeting_activation_failed: "Reminders for this meeting did not switch on.",
   booking_request_mismatch: "The details changed after you pressed Book.",
-  booking_request_cancelled: "That booking attempt was cancelled.",
+  booking_request_cancelled: "That booking attempt was cancelled and no invite stands. Pressing Try again starts a fresh one.",
   request_id_reused_for_different_lead: "This screen sent an invalid request. Reload the page.",
   request_id_reused_for_different_action: "This screen sent an invalid request. Reload the page.",
   request_id_required: "This screen sent an invalid request. Reload the page.",
@@ -302,7 +302,16 @@ const FIX_CODES = new Set([...Object.keys(FIELD_FOR), "booking_confirmations_req
 const RETRY_SAFE_CODES = new Set([
   "stage_changed_refresh", "sales_roster_unavailable", "audit_host_lookup_failed", "idempotency_check_failed",
   "tenant_lookup_failed",
+  // The server cancelled that attempt (lib/website-sales-founder-meeting.ts);
+  // the route answers 503, which would otherwise read as "unconfirmed" and
+  // resend the dead request id forever. Nothing stands: a FRESH id books it.
+  "booking_request_cancelled",
 ]);
+
+/** The booking request id is spent and must be replaced before the next attempt. */
+export function needsFreshBookingId(r: BookMeetResult): boolean {
+  return "code" in r && r.code === "booking_request_cancelled";
+}
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
@@ -336,7 +345,16 @@ function classifyBooking(r: HttpResult): BookMeetResult {
 export async function runBookMeetFlow(
   d: BookMeetDraft,
   ids: { outcomeRequestId: string; bookingRequestId: string },
-  progress: { outcomeSaved: boolean },
+  /**
+   * bookingMayExist: THIS booking request id already reached the server and
+   * came back unconfirmed or booked_finish. The lead may then read as
+   * already_booked (or be handed to the host), so the canBook and do-not-call
+   * gates below would refuse the very retry the rep was told to press. Skip
+   * them and let the route's idempotent replay of this request id decide
+   * (app/api/website-sales/[leadId]/route.ts runs the replay before the stage
+   * check). A changed booking gets a new id, so this never admits a new booking.
+   */
+  progress: { outcomeSaved: boolean; bookingMayExist?: boolean },
   io: FlowIO,
   smsConsentArtifact: Record<string, unknown> | null,
   onStep?: (step: "call" | "check" | "booking") => void,
@@ -371,14 +389,16 @@ export async function runBookMeetFlow(
     const code = "networkError" in ctx ? "network" : str(ctx.body.error) || "lead_read_failed";
     return { result: { kind: "retry_safe", code, message: bookMeetMessage(code, "retry_safe") }, outcomeSaved };
   }
-  if (ctx.body.canBook !== true) {
-    const code = str(ctx.body.blocked) || "claim_first";
-    return { result: { kind: "blocked", code, message: bookMeetMessage(code, "blocked") }, outcomeSaved };
-  }
-  // The lead turned do-not-call since the panel opened: never send a booking
-  // without the owner-asked tick; the panel shows the box.
-  if (ctx.body.doNotCall === true && !(d.doNotCall && d.confirmations.ownerRequestedMeeting)) {
-    return { result: dncFix(), outcomeSaved };
+  if (!progress.bookingMayExist) {
+    if (ctx.body.canBook !== true) {
+      const code = str(ctx.body.blocked) || "claim_first";
+      return { result: { kind: "blocked", code, message: bookMeetMessage(code, "blocked") }, outcomeSaved };
+    }
+    // The lead turned do-not-call since the panel opened: never send a booking
+    // without the owner-asked tick; the panel shows the box.
+    if (ctx.body.doNotCall === true && !(d.doNotCall && d.confirmations.ownerRequestedMeeting)) {
+      return { result: dncFix(), outcomeSaved };
+    }
   }
 
   onStep?.("booking");
