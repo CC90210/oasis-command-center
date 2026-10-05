@@ -43,7 +43,7 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
-import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
+import { brandIsSendable, toDripBrand, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
@@ -51,6 +51,8 @@ import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-c
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
 import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
 import { getChannelLimits } from "@/lib/drips/channel-limits";
+import { withLeadSourceParam } from "@/lib/forms/lead-source";
+import { publicFormOrigin, sunbizFormLinkForSend } from "@/lib/forms/public-origin";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -58,12 +60,12 @@ import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
-import { brandForStage, brandForSend } from "@/lib/drips/brand-routing";
+import { brandForSend } from "@/lib/drips/brand-routing";
 import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
-import { wasShoppedRecently } from "@/lib/drips/enroller";
+import { assignedRepDeactivated, wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, staticRegistryNumbers, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
@@ -77,6 +79,7 @@ import {
   type EmailBudget,
 } from "@/lib/drips/governor";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 export const BATCH_LIMIT = 12;
 // Read a numeric env var, treating unset OR blank/whitespace as "use default"
@@ -290,6 +293,9 @@ type RunState = {
    *  query per text and, worse, would race itself into overshooting the cap —
    *  none of this batch's in-flight sends are visible to a fresh read yet. */
   smsCountsByTenant: Map<string, PacingCounts>;
+  /** Whether each lead's assigned rep is deactivated, keyed (tenant, rep), so a
+   *  batch of one rep's leads costs one standing read. See signingData. */
+  repDeactivated: Map<string, boolean>;
 };
 
 /**
@@ -736,9 +742,17 @@ function isOptedOutOrDead(data: LeadData): boolean {
  *     (company is the alias several seeded templates use for business_name).
  *   - rep_name / assigned_agent_name → the lead's rep (the enroller backfills
  *     rep_name from assigned_to, so this is populated for all but the rare
- *     fully-unassigned lead), else a brand-safe "your funding specialist".
+ *     fully-unassigned lead, and signingData clears it for a deactivated rep),
+ *     else a brand-safe "your funding specialist".
  *     Exposed under BOTH names the seeded sequences reference. */
-function buildContext(data: LeadData): Record<string, unknown> {
+export function buildContext(
+  data: LeadData,
+  // Which channel is carrying THIS render. The same application_url goes out
+  // over sms AND email steps, so the channel tag has to be applied here rather
+  // than baked into the stored link — otherwise every drip-SMS application
+  // reports as Email, or every emailed one reports as nothing.
+  channel: "sms" | "email",
+): Record<string, unknown> {
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
   const rawContact = str(data.contact_name);
   const contactName = rawContact || "there";
@@ -749,9 +763,17 @@ function buildContext(data: LeadData): Record<string, unknown> {
   // else the generic SunBiz intake form (same URL pattern the live "Incomplete
   // Application" email uses) so a template never renders a blank link for a
   // hot_lead/follow_up lead. Env-overridable base for domain changes.
+  // Both are SunBiz links, so both go out on SunBiz's public origin, never
+  // OASIS's domain: a stored link keeps the host it was minted on, and 736
+  // SunBiz leads still held one on oasisai.work on 2026-09-11.
   const repSlug = repName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, "") || "team";
-  const intakeBase = process.env.DRIP_INTAKE_URL || "https://oasisai.work/f/submissions/initial-lead-capture";
-  const applyUrl = str(data.application_url) || `${intakeBase}?rep=${repSlug}`;
+  const intakeBase =
+    process.env.DRIP_INTAKE_URL ||
+    `${publicFormOrigin({ tenantSlug: "submissions" })}/f/submissions/initial-lead-capture`;
+  const baseApplyUrl = sunbizFormLinkForSend(str(data.application_url) || `${intakeBase}?rep=${repSlug}`);
+  // sms -> "text", email -> "email": the two names this codebase already uses
+  // for those channels (lib/forms/lead-source.ts).
+  const applyUrl = withLeadSourceParam(baseApplyUrl, channel === "sms" ? "text" : "email");
   return {
     lead: {
       ...data,
@@ -764,6 +786,25 @@ function buildContext(data: LeadData): Record<string, unknown> {
       application_url: applyUrl,
     },
   };
+}
+
+/**
+ * The lead as a drip step should SIGN it — what buildContext and
+ * resolveDripSmsIdentity read.
+ *
+ * A deactivated rep keeps the lead: assigned_to and the stored rep_name are
+ * history, and every write-back in this file keeps using the untouched row. But
+ * a NEW step must not be signed by them, sent from their line, or land replies
+ * in their inbox, so they get a COPY with the two rep fields cleared. That is
+ * the existing no-rep lane, unchanged: buildContext's "your funding specialist"
+ * signer and apply-link slug, and classifyRep's admin wire, the tenant's shared
+ * line. An active rep gets `data` itself back.
+ *
+ * A failed standing read keeps today's behaviour; see assignedRepDeactivated.
+ */
+async function signingData(row: ClaimedRow, data: LeadData, run: RunState): Promise<LeadData> {
+  if (!(await assignedRepDeactivated(row.tenant_id, data.assigned_to, run.repDeactivated))) return data;
+  return { ...data, rep_name: null, assigned_agent_name: null };
 }
 
 // The deterministic per-(lead, step) variant hash moved to
@@ -1121,7 +1162,10 @@ async function processSmsStep(
     stage: typeof data.stage === "string" ? data.stage : undefined,
     pool: run.templatePoolByTenant.get(row.tenant_id) ?? [],
   });
-  const rendered = renderTemplate(copy.body, buildContext(data));
+  // Who signs AND which wire it leaves on come from the same row, so a retired
+  // rep's lead is neither signed by them nor texted from their line.
+  const signer = await signingData(row, data, run);
+  const rendered = renderTemplate(copy.body, buildContext(signer, "sms"));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
@@ -1176,7 +1220,7 @@ async function processSmsStep(
   if (pinned) {
     identity = { actAsEmail: null, senderId: pinned, repKey: "accel" };
   } else {
-    const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
+    const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, signer);
     if ("error" in resolved) {
       // "This rep owns no usable number" is BLOCKED, not FAILED. Retrying
       // cannot buy a number, so burning the attempt budget only converts a
@@ -1527,6 +1571,13 @@ async function processEmailStep(
     stage: data.stage,
     stampedBrand: run.brandByLead.get(row.lead_id),
   });
+  // The send budget and the SMS lane are two-brand concepts (drip-rules-core's
+  // BudgetBrand). OASIS became a real BrandKey on 2026-09-09 so that an OASIS
+  // email stops resolving to the client's identity — but it has no drip
+  // sequences, no per-domain send budget and no SMS provider, so it must not
+  // silently borrow SunBiz's. Narrowed once here rather than at each budget
+  // call site, and loudly: see toDripBrand for why this throws.
+  const budgetBrand = toDripBrand(brand, "drips/executor: send budget");
 
   // Resolve the copy first so the app-link pre-flight can inspect it.
   // Drawn from the APPROVED pool for this brand+stage+role when one exists;
@@ -1589,7 +1640,7 @@ async function processEmailStep(
     }
   }
 
-  const ctx = buildContext(data);
+  const ctx = buildContext(await signingData(row, data, run), "email");
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
   const renderedCustomHtml = copy.bodyHtml ? renderTemplate(copy.bodyHtml, ctx) : "";
@@ -1630,7 +1681,7 @@ async function processEmailStep(
     // Tenant + sequence, so an operator's own per-sequence daily cap is honoured
     // and the hold reason names THEIR setting rather than a system rule.
     const seqRef = { tenantId: row.tenant_id, id: row.sequence_id, name: row.sequence_name };
-    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef);
+    const gated = emailGateReason(run.emailBudget, row.lead_id, budgetBrand, gateStage, seqRef);
     if (gated) {
       return markRescheduled(
         db,
@@ -1729,7 +1780,7 @@ async function processEmailStep(
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
     if (run.emailBudget) {
-      consumeEmail(run.emailBudget, row.lead_id, brand, {
+      consumeEmail(run.emailBudget, row.lead_id, budgetBrand, {
         tenantId: row.tenant_id,
         id: row.sequence_id,
         name: row.sequence_name,
@@ -2020,6 +2071,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       .update({ status: "scheduled" })
       .eq("status", "sending")
       .lt("claimed_at", staleBeforeIso)
+      .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
       .select("id");
     reclaimed = reclaim.data?.length || 0;
   } catch (err) {
@@ -2061,12 +2113,16 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
   }
 
-  // 3) Find due 'scheduled' work (bounded by the hourly cap).
+  // 3) Find due 'scheduled' work (bounded by the hourly cap). A retired
+  // tenant's runs are excluded here and in the stale reclaim above, in the
+  // query itself: they must never be claimed or sent, and filtering after the
+  // LIMIT would let them hold every slot.
   const dueRes = await db
     .from("drip_runs")
     .select("id")
     .eq("status", "scheduled")
     .lte("scheduled_for", nowIso)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("scheduled_for", { ascending: true })
     .limit(claimBudget);
   if (dueRes.error) return empty();
@@ -2221,6 +2277,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     availabilityByTenant,
     linesByWire: new Map<string, string[]>(),
     smsCountsByTenant: new Map<string, PacingCounts>(),
+    repDeactivated: new Map<string, boolean>(),
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

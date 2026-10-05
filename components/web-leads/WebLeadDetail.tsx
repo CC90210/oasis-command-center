@@ -28,23 +28,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { X, Phone, MapPin, Globe, Tag, ExternalLink } from "lucide-react";
+import { X, Phone, ExternalLink } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
-import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { BusinessFacts } from "./BusinessFacts";
 import { WebsiteComparison } from "./WebsiteComparison";
 import { CallOutcomeLog } from "./CallOutcomeLog";
-
-function Row({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
-  return (
-    <div className="flex gap-3 py-2.5">
-      <div className="mt-0.5 text-fg-dim">{icon}</div>
-      <div className="min-w-0 flex-1">
-        <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">{label}</p>
-        <p className="mt-0.5 break-words text-sm text-fg">{value || "—"}</p>
-      </div>
-    </div>
-  );
-}
 
 function HeaderSkeleton() {
   return (
@@ -55,7 +44,15 @@ function HeaderSkeleton() {
   );
 }
 
-export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: () => void }) {
+export function WebLeadDetail({
+  leadId,
+  onClose,
+  canMutate,
+}: {
+  leadId: string;
+  onClose: () => void;
+  canMutate: boolean;
+}) {
   const [lead, setLead] = useState<WebLead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -141,14 +138,18 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
           {lead && (
             <>
               <div className="flex flex-col gap-2 sm:flex-row">
-                {lead.phone && (
+                {lead.phone && canMutate ? (
                   <a
                     href={`tel:${lead.phone}`}
                     className="flex flex-1 items-center justify-center gap-2 rounded-md bg-gradient-to-br from-accent to-accent-muted px-4 py-2.5 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.4)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                   >
                     <Phone className="h-4 w-4" />Call {lead.phone}
                   </a>
-                )}
+                ) : lead.phone ? (
+                  <p className="flex flex-1 items-center justify-center rounded-md border border-bg-border px-4 py-2.5 text-sm tabular-nums text-fg-muted">
+                    {lead.phone}
+                  </p>
+                ) : null}
                 {/* safeExternalUrl adds a scheme to bare domains (217 of our
                     stored websites have none -- a bare string in an href is
                     app-relative and would navigate inside our own dashboard)
@@ -157,7 +158,7 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                     our origin). Render nothing rather than a dead or
                     dangerous link when it returns null. */}
                 {(() => {
-                  const websiteHref = safeExternalUrl(lead.websiteUrl);
+                  const websiteHref = preferredSiteUrl(lead.websiteUrl);
                   return websiteHref && (
                     // rel="noopener noreferrer" is required: without it the
                     // opened page can reach back through window.opener, and
@@ -177,17 +178,19 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
               {/* HERO. See module header. */}
               <WebsiteComparison leadId={leadId} />
 
-              <div className="mt-5 divide-y divide-bg-border/60 border-t border-bg-border">
-                <Row icon={<MapPin className="h-4 w-4" />} label="Address" value={[lead.address, lead.city, lead.province, lead.postal].filter(Boolean).join(", ") || null} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Industry" value={lead.industry} />
-                <Row icon={<Globe className="h-4 w-4" />} label="Website" value={lead.websiteUrl} />
-                {/* VERBATIM — see spec section 2. */}
-                <Row icon={<Globe className="h-4 w-4" />} label="Website status" value={lead.websiteCondition} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Research notes" value={lead.auditFindings} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
+              {/* The SAME component the battle card renders, not a second copy
+                  of these rows. The page shipped on 2026-08-24 without any of
+                  them, which is the bug this extraction closes; leaving two
+                  hand-maintained lists would let the two surfaces drift again,
+                  and two screens disagreeing about one business's address
+                  while a rep is on the phone is the failure mode worth paying
+                  a shared component for. It carries the verbatim
+                  websiteCondition/auditFindings rules with it. */}
+              <div className="mt-5">
+                <BusinessFacts lead={lead} layout="stack" />
               </div>
 
-              <CallOutcomeLog leadId={leadId} />
+              <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
             </>
           )}
         </div>

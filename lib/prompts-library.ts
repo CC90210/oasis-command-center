@@ -14,8 +14,9 @@
  * Hard-coded prompts are foundational + cannot be deleted from the UI;
  * mutable prompts can be added/edited via the dashboard later.
  *
- * Each prompt routes to a specific agent + opens the chat composer
- * pre-filled. Click → /agents?agent=…&prompt=…
+ * Each prompt names the agent it was written for; the Playbook hands it to the
+ * department that answers for that agent (lib/os/chat-href.ts askDepartment),
+ * whose composer prefills it. Nothing is sent until the person presses Send.
  */
 
 export type PromptAgent = "bravo" | "atlas" | "maven" | "aura" | "hermes";
@@ -289,7 +290,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     foundational: true,
     tags: ["client", "setup", "bridge", "multi-tenant", "admin"],
     prompt:
-      "I'm setting up a new client tenant. The client's owner/admin will run one always-on machine that powers the bridge daemon for every employee. Walk me through: (1) confirm the admin's machine is suitable (idle CPU + memory headroom; stable network; can run 24/7 without sleep). (2) Install the OASIS Desktop app on the admin's machine + pair it as the tenant's primary bridge. Verify the launchd / pm2 service is set to auto-start on boot. (3) Confirm the admin's Claude / Codex / Gemini CLI subscriptions are signed in on that machine — every employee on this tenant will chat against those subscriptions by default. (4) Set the tenant's workspace-default API key in Settings → Agents (the fallback when the bridge isn't reachable from an employee's browser, e.g. quota exceeded). (5) Onboard each employee with their own dashboard account — they inherit the admin's bridge automatically. Walk them through where to paste their PERSONAL API key (Settings → My Agents) if they ever want to override — that key is private to them via RLS (migration 063), no other tenant member can read or use it. Confirm step-by-step with the admin in chat. Report what's done + what's pending.",
+      "I'm setting up a new client tenant. The client's owner/admin will run one always-on machine that powers the bridge daemon for every employee. Walk me through: (1) confirm the admin's machine is suitable (idle CPU + memory headroom; stable network; can run 24/7 without sleep). (2) Install the OASIS Desktop app on the admin's machine + pair it as the tenant's primary bridge. Run the installed `oasis bridge install` command and verify its native supervisor is set to auto-start on boot (Windows Task Scheduler/Startup, macOS launchd, or the Linux systemd user service). (3) Confirm the admin's Claude / Codex / Gemini CLI subscriptions are signed in on that machine — every employee on this tenant will chat against those subscriptions by default. (4) Set the tenant's workspace-default API key in Settings → Agents (the fallback when the bridge isn't reachable from an employee's browser, e.g. quota exceeded). (5) Onboard each employee with their own dashboard account — they inherit the admin's bridge automatically. Walk them through where to paste their PERSONAL API key (Settings → My Agents) if they ever want to override — that key is private to them via RLS (migration 063), no other tenant member can read or use it. Confirm step-by-step with the admin in chat. Report what's done + what's pending.",
   },
   {
     id: "client-fresh-machine-bootstrap",
@@ -375,7 +376,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
       "Most crons in the default repo are CC-specific. Audit, recommend which to enable / disable for this client.",
     tags: ["onboarding", "crons"],
     prompt:
-      "Audit every cron in vercel.json and .agents/workflows/ for this client. For each, tell me: does it apply to their business model? Should we enable, disable, or change frequency? Don't disable anything yet — just give me the recommendation list.",
+      "Audit every cron in config/cron-registry.json and .agents/workflows/ for this client. For each, tell me: does it apply to their business model? Should we enable, disable, or change frequency? Don't disable anything yet — just give me the recommendation list.",
   },
   {
     id: "client-mcp-setup",
@@ -400,7 +401,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     foundational: true,
     tags: ["onboarding", "multi-machine", "pair"],
     prompt:
-      "Pair this second machine to the same dashboard tenant as the existing one. Read brain/MULTI_MACHINE_PAIRING_PROMPT.md (was MAC_COMMAND_CENTER_PROMPT pre-2026-05-09) for the canonical 12-step playbook. Hard constraint: only ONE machine runs scheduler.py / skool_engine.py daemon / telegram_agent.js — those are state-mutating singletons. The second machine runs ONLY `bravo bridge serve` (the operator-side chat-server). Both bridges paired = both chat-servers visible on /devices. The pair endpoint is idempotent by machine_fingerprint (commit d0e15e0 + migration 030) so re-running is safe. Verify: dashboard /operations shows 2 paired machines, both online, no duplicates.",
+      "Pair this second machine to the same dashboard tenant as the existing one. Read brain/MULTI_MACHINE_PAIRING_PROMPT.md (was MAC_COMMAND_CENTER_PROMPT pre-2026-05-09) for the canonical 12-step playbook. Hard constraint: only ONE machine runs scheduler.py / skool_engine.py daemon / telegram_agent.js — those are state-mutating singletons. The second machine runs ONLY `oasis bridge serve` (the operator-side chat-server) through the installed OASIS launcher. Both bridges paired = both chat-servers visible on /devices. The pair endpoint is idempotent by machine_fingerprint (commit d0e15e0 + migration 030) so re-running is safe. Verify: dashboard /operations shows 2 paired machines, both online, no duplicates.",
   },
 
   // ── CLIENT OPTIMIZATION ─────────────────────────────────────────
@@ -438,7 +439,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
       "Most clients don't need every cron firing. Audit, recommend a leaner schedule based on their volume.",
     tags: ["crons", "ops"],
     prompt:
-      "This client's cron schedule is probably over-tuned for someone running CC's volume. Audit every cron in vercel.json + .agents/workflows/ and recommend a leaner schedule based on their actual lead volume + team size. Be specific about which to disable, which to drop in frequency, which to keep.",
+      "This client's cron schedule is probably over-tuned for someone running CC's volume. Audit every cron in config/cron-registry.json + .agents/workflows/ and recommend a leaner schedule based on their actual lead volume + team size. Be specific about which to disable, which to drop in frequency, which to keep.",
   },
   {
     id: "client-revenue-baseline",
@@ -531,7 +532,14 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     foundational: true,
     tags: ["override", "cron"],
     prompt:
-      "[OVERRIDE]\nContext: pause autonomous agent activity for the next 24h.\n\nDisable every cron in vercel.json by setting it to a date in the past. List what you disabled, the original schedule, and write a re-enable script I can run when I'm back. Do NOT touch any data — just the cron triggers.",
+      // The firer is .github/workflows/cron-driver.yml, NOT vercel.json —
+      // Vercel's scheduler died 2026-08-06 and the schedule list moved to
+      // config/cron-registry.json on 2026-08-30. This prompt used to say
+      // "disable every cron in vercel.json", which after the move edits a file
+      // with no crons in it: the operator would report the fleet paused while
+      // all 28 jobs kept firing. An emergency control that lies is worse than
+      // none.
+      "[OVERRIDE]\nContext: pause autonomous agent activity for the next 24h.\n\nComment out the `schedule:` triggers in .github/workflows/cron-driver.yml (the ACTIVE firer — vercel.json no longer schedules anything), and confirm the oasis-cc-cron Cloudflare Worker is not armed (its CRON_FORWARD secret must be unset/off). List what you disabled, the original schedules from config/cron-registry.json, and write a re-enable script I can run when I'm back. Do NOT touch any data — just the triggers.",
   },
   {
     id: "override-voice-shift",
@@ -592,7 +600,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
 
 **4. MCP configs.** \`python scripts/audit_mcp_secrets.py\`. It sweeps every path in \`MCP_CONFIG_PATHS\`, including \`%APPDATA%\\\\Antigravity\\\\User\\\\mcp.json\` which lives outside the repo and was the source of a real plaintext-key leak. A plaintext credential in any config is a STOP-and-report, not an auto-fix.
 
-**5. Automations.** \`python scripts/integrations/supabase_tool.py select cron_jobs --project bravo --limit 50\`. Flag any job whose \`last_result\` starts with ERROR or FAILED, and any whose \`last_run_at\` is older than 2× its schedule interval — a silently dead cron is the most expensive failure here because nothing alerts on it.
+**5. Automations.** \`python scripts/integrations/turso_tool.py select cron_jobs --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --limit 50\`. Flag any job whose \`last_result\` starts with ERROR or FAILED, and any whose \`last_run_at\` is older than 2× its schedule interval — a silently dead cron is the most expensive failure here because nothing alerts on it.
 
 **6. File integrity.** \`brain/\`, \`memory/\`, \`skills/\`, \`scripts/\`: broken imports, dead cross-references, entry-point drift (\`python scripts/genome_sync.py --check\`), and stale inventory counts.
 
@@ -634,10 +642,10 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
     title: "Bridge status",
     description:
       "Traces the full chain — process, port, pairing, heartbeat, CLI auth — and names the first broken link. Checks the running daemon, not just the repo.",
-    tags: ["health", "bridge", "pm2"],
+    tags: ["health", "bridge", "fleet-watchdog"],
     prompt: `Diagnose the bridge end to end. Follow the chain in order and stop at the first genuinely broken link — everything downstream of a break reports failure for the same reason and that's misleading.
 
-**1. Process.** Is the daemon actually running? \`pm2 status\` on Windows, \`launchctl list | grep bravo-bridge\` on Mac. Note its start time.
+**1. Process.** Is the daemon actually running? Use the installed launcher on every platform: PowerShell \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge status\`; macOS/Linux \`"$HOME/.oasis/bin/oasis" bridge status\`. Note its start time and the native supervisor named in the result.
 
 **2. Port + health.** \`curl -s http://127.0.0.1:9100/warm-status\` — expect \`{"ok": true, ...}\`. If the port doesn't answer but the process is up, the process is wedged, not absent; those need different fixes.
 
@@ -647,9 +655,9 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
 
 **5. CLI auth.** Verify claude / codex / gemini each report installed AND authenticated. An expired login degrades chat to API-key mode, which is banned here — we're subscription-CLI only, never \`ANTHROPIC_API_KEY\`.
 
-**Critical — check the RUNNING daemon, not the repo.** PM2 holds the source and environment captured at spawn time. If the process start time predates the last relevant commit, it is running stale code and every check above can pass while the behaviour is still wrong. Compare the two explicitly and say so.
+**Critical — check the RUNNING daemon, not the repo.** The active supervisor holds the source and environment captured at spawn time. If the process start time predates the last relevant commit, it is running stale code and every check above can pass while the behaviour is still wrong. Compare the two explicitly and say so.
 
-**Report:** the chain with a pass/fail per link, the first genuine break, and the exact command to fix it. Canonical restart is \`bravo bridge restart\` — it cycles both the heartbeat daemon and the chat-server and waits for :9100 to free. If a restart needs new env values, use \`pm2 restart --update-env\`, but flag that it copies the calling shell's environment.`,
+**Report:** the chain with a pass/fail per link, the first genuine break, and the exact command to fix it. Canonical cross-platform restart is \`$HOME/.oasis/bin/oasis bridge restart\` (PowerShell: \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge restart\`). It cycles both the heartbeat and chat server and waits for :9100 to free. Restart from the canonical launcher so the installed environment is used.`,
   },
   {
     id: "health-metric-audit",
@@ -685,7 +693,7 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
     foundational: true,
     tags: ["bridge", "restart", "operator"],
     prompt:
-      "Run `bravo bridge restart` to cleanly cycle both the heartbeat daemon and the chat-server. After it completes, verify with `curl -s http://127.0.0.1:9100/warm-status` — expect `{\"ok\": true, ...}`. If port :9100 doesn't free in time, the restart waits and retries. This is the canonical 'chat feels stuck' move — replaces the old 'kill python.exe in Task Manager' ritual.",
+      "Run `oasis bridge restart` through the installed OASIS launcher to cleanly cycle both the heartbeat daemon and the chat-server. After it completes, verify with `curl -s http://127.0.0.1:9100/warm-status` — expect `{\"ok\": true, ...}`. If port :9100 doesn't free in time, the restart waits and retries. This is the canonical 'chat feels stuck' move — replaces the old 'kill python.exe in Task Manager' ritual.",
   },
   {
     id: "client-popup-audit",
@@ -719,7 +727,7 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
     tags: ["daily", "kickoff", "pipeline", "inbound"],
     prompt: `Run my morning briefing. Pull everything live — if a source is unreachable, say so on its line rather than skipping it or estimating.
 
-**1. Pipeline movement (last 24h).** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\`. Read the table's own status values, don't assume an enum. Report: new leads since yesterday and where they came from, any status changes, and anyone sitting in an active stage untouched for 7+ days. Name the businesses, not just counts.
+**1. Pipeline movement (last 24h).** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\` (the rows the Pipeline page shows). Read each row's own \`data.stage\`, don't assume an enum. Report: new leads since yesterday and where they came from, any status changes, and anyone sitting in an active stage untouched for 7+ days. Name the businesses, not just counts.
 
 **2. Client delivery health.** For every active client engagement: anything due today or overdue, any blocker waiting on me, and anything waiting on THEM that I should chase. If a deliverable has slipped twice, flag it explicitly — that's the pattern worth catching early.
 
@@ -755,24 +763,24 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
 - CEO-Agent (\`~/CEO-Agent\` on Mac / \`C:\\Users\\User\\CEO-Agent\` on Windows — was \`Business-Empire-Agent\` pre-rename, check both) — Bravo brain
 - CMO-Agent (\`~/CMO-Agent\`) — Maven content/brand
 - CFO-Agent (\`~/CFO-Agent\` or \`~/APPS/CFO-Agent\`) — Atlas finance (branch may be \`master\`, not \`main\`)
-- oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (Vercel-watched)
+- oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (Cloudflare-deployed)
 - hermes (\`~/hermes\` or \`~/APPS/hermes\`) — community manager (optional, skip if missing)
 
 For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on tracking/state files (AGENTS.md, brain/STATE.md, memory/*.md), \`git stash push -m "machine-sync stale state"\` then re-pull. Report any conflict that wasn't trivially stash-resolvable.
 
 **2. Refresh the bridge daemon so it loads new code:**
 - macOS: \`launchctl kickstart -k gui/$(id -u)/work.oasisai.bravo-bridge\`
-- Windows: \`pm2 restart claude-bridge\` (or \`bravo bridge restart\`)
+- Windows: \`python scripts/ops/fleet_watchdog.py restart claude-bridge\` from the agent repo
 - Confirm: \`curl -s http://localhost:9100/health\` returns ok=true.
 - Confirm: \`~/.oasis/bridge_chat.last_heartbeat\` mtime is <2 min old (Mac) or the equivalent freshness check on Windows.
 
 **3. Audit .env.agents for drift:**
 - Count keys: should be ~62 populated. Empty / placeholder keys (\`REPLACE_\`, \`your-key-here\`, \`...\`, \`TODO\`, \`CHANGEME\`) mean either a value rotated and didn't propagate OR a new service got added on the other machine.
 - DO NOT read or echo values. Use the sanitized count + key-name listing only.
-- Surface any key that's blank, surface any key on the OTHER machine's git-tracked \`.env.agents.template\` that's missing here. Don't try to fix — flag them so CC can paste fresh values.
+- Surface only the names of blank or missing keys. Repair them through Settings → Integrations or the managed secret-sync workflow; never tell the operator to open, edit, copy, or back up \`.env.agents\` manually.
 
 **4. Verify every CLI is still installed + authenticated:**
-- \`curl -s -X POST http://localhost:9100/exec-tool -H "content-type: application/json" -H "Origin: https://agent-dashboard-cc90210.vercel.app" -d '{"tool_name":"cli_status","input":{}}'\` should return all three (claude / codex / gemini) with \`installed=true\` and \`authenticated=true\`.
+- \`curl -s -X POST http://localhost:9100/exec-tool -H "content-type: application/json" -H "Origin: https://oasisai.work" -d '{"tool_name":"cli_status","input":{}}'\` should return all three (claude / codex / gemini) with \`installed=true\` and \`authenticated=true\`.
 - If any CLI is missing: \`npm i -g @anthropic-ai/claude-code\` / \`npm i -g @openai/codex\` / \`npm i -g @google/gemini-cli\` as needed.
 - If any is unauthenticated: tell CC which one + the specific re-auth command (\`claude /login\` / \`codex login\` / \`gemini auth login\`).
 
@@ -784,10 +792,11 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 **5. Re-run any pending install steps that the puller may have added:**
 - If \`install.sh\` / \`install.ps1\` changed since last sync, scan the diff for new \`npm i -g\` or \`brew install\` lines. Run them.
 - If \`bravo_cli/requirements.txt\` changed, \`pip install -r bravo_cli/requirements.txt\` inside the venv.
-- If there are new database migrations under \`database/\` or \`supabase/migrations/\`, surface them for CC to apply via the Supabase dashboard or migration tool.
+- If there are new database migrations under \`database/\`, surface them for CC to apply with \`python scripts/apply_turso_migration.py\`. Never apply one yourself.
 
-**6. Restart any per-machine daemons that should be running:**
-- PM2 daemons (Mac): \`pm2 resurrect\` to bring back saved daemons after reboot. Check \`pm2 status\` shows event-router online.
+**6. Restart only the per-machine daemons this host owns:**
+- Windows: run \`python scripts/ops/fleet_watchdog.py up\` and \`python scripts/ops/fleet_watchdog.py status\` from the agent repo. Fleet Watchdog reconciles the enabled process list without restoring retired processes.
+- macOS/Linux: run \`$HOME/.oasis/bin/oasis bridge install\` and \`$HOME/.oasis/bin/oasis bridge status\`; the installer selects launchd or the systemd user service.
 - Telegram bridge: skip if Windows is the bridge-owner; only start here if Windows is offline and the bridge lock at \`~/.oasis/bridge_locks/bravo.json\` has a stale heartbeat (>60s).
 
 **7. Final report — surface ONLY these in this exact order, one per line:**
@@ -813,7 +822,7 @@ Personal context: I'm CC. My main work machine is Windows; my travel machine is 
     tags: ["daily", "pipeline", "relationships", "inbound"],
     prompt: `Pick my three highest-leverage relationship moves for today.
 
-**Pull the real state first.** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\` for pipeline, plus \`lead_interactions\` for the last touch on each. Read status values from the data — don't assume the enum.
+**Pull the real state first.** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\` for pipeline, plus \`python scripts/integrations/turso_tool.py select lead_interactions --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "lead_id = ?" --param <lead id>\` for the last touch on each. Read stage values from each row's \`data.stage\` — don't assume the enum.
 
 **Scope: inbound and warm only.** OASIS runs an inbound-first motion — funnel, DMs, and content generate leads; we nurture and book a call. Cold outbound is on-demand and operator-approved, never a suggestion you volunteer. If a lead never initiated contact, it's out of scope for this ranking.
 
@@ -846,7 +855,7 @@ Draft-only. Do not call send_gateway or any send path — I approve every send m
     tags: ["daily", "pipeline", "sales", "inbound"],
     prompt: `Show me every lead currently in an active pipeline stage, with the next move on each.
 
-**Pull the data.** \`python scripts/integrations/supabase_tool.py select leads --project bravo --limit 100\`, then \`lead_interactions\` for the history on each. Read the status values off the rows — don't assume an enum, and don't invent stages the tenant doesn't use.
+**Pull the data.** \`python scripts/integrations/turso_tool.py select tenant_records --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "entity_type = ?" --param lead --limit 100\`, then \`python scripts/integrations/turso_tool.py select lead_interactions --tenant ef8d389e-3f15-43f2-ae00-3660f69a1452 --where "lead_id = ?" --param <lead id>\` for the history on each. Read the stage values off each row's \`data.stage\` — don't assume an enum, and don't invent stages the tenant doesn't use.
 
 **For each lead give me:**
 - Business + contact name, and how they actually arrived (funnel, DM, referral, content)

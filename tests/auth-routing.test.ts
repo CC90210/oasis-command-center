@@ -40,6 +40,20 @@ assert.equal(
   "External redirects are rejected",
 );
 
+for (const unsafeNext of [
+  "//evil.example/steal",
+  "/\\evil.example/steal",
+  "/\t/evil.example",
+  "/\n/evil.example",
+  "/\r/evil.example",
+]) {
+  assert.equal(
+    normalizePostLoginRedirect(unsafeNext, { isEmpireOperator: true }),
+    "/",
+    `${JSON.stringify(unsafeNext)} cannot escape /auth/land`,
+  );
+}
+
 assert.equal(
   normalizePostLoginRedirect("/login?next=/t/sun", {
     tenantSlug: "oasis-ai-cc",
@@ -280,7 +294,9 @@ async function testOrphanRecoveryHappyPath() {
         },
       ],
     ],
-    inviteRows: [{ token_hash: "abc123hash", created_at: "2026-05-27T00:00:00Z" }],
+    // tenant_id / team_role: recovery plans the member's profile for the
+    // invite's workspace before claiming it (lib/invite-profile-finalization.ts).
+    inviteRows: [{ token_hash: "abc123hash", tenant_id: "sunbiz-uuid", team_role: "member", created_at: "2026-05-27T00:00:00Z" }],
     redeemResult: { ok: true, tenant_id: "sunbiz-uuid", team_role: "member" },
     tenantRow: { slug: "submissions", custom_fields: { command_center_profile_slug: "sun" } },
     redeemCalls: [],

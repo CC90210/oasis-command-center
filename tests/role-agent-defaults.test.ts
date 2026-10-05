@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import { defaultAgentsForRole } from "../lib/role-agent-defaults";
+import { OASIS_AI_CC_SEED } from "../lib/manifest/seeds";
 import type { TenantManifest } from "../lib/manifest/schema";
 
 function sunbizManifest(): TenantManifest {
@@ -92,4 +93,32 @@ assert.deepEqual(
   "no manifest + no policy = empty",
 );
 
-console.log("role-agent-defaults ok (8 cases)");
+assert.deepEqual(
+  defaultAgentsForRole({
+    tenantSlug: "oasis-ai-cc",
+    role: "owner",
+    manifest: OASIS_AI_CC_SEED,
+  }),
+  ["bravo", "atlas", "maven", "aura"],
+  "OASIS owners receive the canonical four-agent workspace roster",
+);
+assert.deepEqual(
+  defaultAgentsForRole({
+    tenantSlug: "oasis-ai-cc",
+    role: "opener",
+    manifest: OASIS_AI_CC_SEED,
+  }),
+  ["bravo"],
+  "an OASIS opener receives the sales agent only",
+);
+assert.deepEqual(
+  defaultAgentsForRole({
+    tenantSlug: "oasis-ai-cc",
+    role: "marketing",
+    manifest: OASIS_AI_CC_SEED,
+  }),
+  ["maven"],
+  "an OASIS marketer receives Maven rather than a stale profile roster",
+);
+
+console.log("role-agent-defaults ok (11 cases)");

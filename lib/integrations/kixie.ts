@@ -51,8 +51,9 @@ export type KixieCredentials = {
 
 export async function getKixieCredentials(
   tenantId: string,
+  options: { allowEnvFallback?: boolean } = {},
 ): Promise<KixieCredentials> {
-  const bundle = await getTenantIntegrationBundle(tenantId, "kixie");
+  const bundle = await getTenantIntegrationBundle(tenantId, "kixie", options);
   if (!bundle.api_key || !bundle.business_id) {
     throw new KixieError(
       "missing_credentials",

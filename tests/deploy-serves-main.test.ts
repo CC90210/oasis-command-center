@@ -99,6 +99,41 @@ const run = (async () => {
     assert.equal(await check!.observe(db, "tenant", Date.now()), 0, "local dev has no Vercel identity");
   });
 
+  // Cloudflare deployments carry a platform-neutral identity from the deploy
+  // workflow and must be graded exactly like Vercel production.
+  await withEnv(
+    {
+      VERCEL_ENV: undefined,
+      VERCEL_GIT_COMMIT_REF: undefined,
+      VERCEL_GIT_COMMIT_SHA: undefined,
+      DEPLOY_ENV: "production",
+      DEPLOY_GIT_REF: "main",
+      DEPLOY_GIT_SHA: "c10df1a9aa",
+    },
+    async () => {
+      assert.equal(await check!.observe(db, "tenant", Date.now()), 0);
+      assert.match(
+        check!.describe(evaluate(check!.id, check!.rule, 0, [])),
+        /c10df1a9/,
+      );
+    },
+  );
+  await withEnv(
+    {
+      VERCEL_ENV: undefined,
+      VERCEL_GIT_COMMIT_REF: undefined,
+      DEPLOY_ENV: "production",
+      DEPLOY_GIT_REF: undefined,
+    },
+    async () => {
+      assert.equal(
+        await check!.observe(db, "tenant", Date.now()),
+        1,
+        "a Cloudflare CLI deploy with no git identity must fail closed",
+      );
+    },
+  );
+
   // ── wired in ─────────────────────────────────────────────────────────────
   const RUNNER = readFileSync("lib/health/runner.ts", "utf8");
   assert.ok(/\.\.\.DEPLOY_CHECKS/.test(RUNNER), "DEPLOY_CHECKS must be in allChecks()");

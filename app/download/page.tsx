@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { Apple, Download, MonitorDown } from "lucide-react";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +29,15 @@ export const dynamic = "force-dynamic";
  * alpha.5 (2026-05-23): mac + linux bumped to the turnkey deep-link
  * sign-in build. Windows kept on alpha.4 until a Windows CI runner
  * lands — the auto-detect proxy routes to the right tag per platform.
+ *
+ * OPERATOR ONLY since 2026-09-29 (F0 containment). Every build here
+ * (alpha.4 to alpha.6) is a release asset of CC90210/CEO-Agent, which went
+ * private that day, so each link was a GitHub 404 for the public. A verified
+ * platform operator still gets the links, with a note that they need GitHub
+ * access. Everyone else gets PrivateBeta: what the app is, that it is in
+ * private beta, and one way to ask for access (see PrivateBeta for which). The
+ * branch is taken before anything renders, so no release URL reaches a
+ * non-operator's HTML.
  */
 
 const VERSION = "0.1.0-alpha.6";
@@ -48,43 +59,18 @@ const CHECKSUMS = [
   ["Windows installer (alpha.4)", "18e09eb6efd275d06c6b2f8f1e116f3edfe9635e888b0d6fb04cf069f3db23cd"],
 ] as const;
 
-export default function DownloadPage() {
+export default async function DownloadPage() {
+  // Fails closed: a session or membership lookup error is logged inside and
+  // answers "not an operator", which renders the private-beta page.
+  const op = await resolvePlatformOperator();
+  if (!op.operator) return <PrivateBeta signedOut={op.reason === "no_session"} />;
+
   return (
     <main className="relative min-h-screen overflow-hidden bg-bg-deep text-fg">
-      {/* Aurora backdrop — single conic + radial layer, no grid clutter */}
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-30">
-        <div
-          className="absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 opacity-45 blur-3xl animate-[orbit-soft_42s_linear_infinite]"
-          style={{
-            background:
-              "conic-gradient(from 0deg at 50% 50%, rgba(0,212,255,0.32), rgba(59,130,246,0.18), transparent 45%, rgba(34,211,238,0.22) 75%, rgba(0,212,255,0.32))",
-          }}
-        />
-      </div>
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-20"
-        style={{
-          background:
-            "radial-gradient(ellipse 60% 60% at 50% 50%, transparent 0%, rgba(8,11,16,0.7) 100%)",
-        }}
-      />
+      <Backdrop />
 
       {/* === Top brand strip ============================================ */}
-      <header className="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6 sm:px-10">
-        <Link href="/" className="group flex items-center gap-2.5">
-          <OasisLogo
-            size={32}
-            priority
-            className="transition-shadow group-hover:shadow-[0_0_28px_-2px_rgba(0,212,255,0.7)]"
-          />
-          <div className="leading-none">
-            <div className="text-sm font-black tracking-tight text-fg">OASIS AI</div>
-            <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">
-              Desktop · v{VERSION}
-            </div>
-          </div>
-        </Link>
+      <BrandHeader subtitle={`Desktop · v${VERSION} · operator only`}>
         <a
           href={RELEASE_URL}
           target="_blank"
@@ -93,19 +79,26 @@ export default function DownloadPage() {
         >
           Release notes →
         </a>
-      </header>
+      </BrandHeader>
 
       {/* === Hero ===================================================== */}
       <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 text-center sm:pt-16">
         <h1 className="text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
           <span className="block">OASIS Desktop.</span>
-          <span className="block bg-gradient-to-r from-accent via-cyan-300 to-accent bg-clip-text text-transparent">
-            One click to install.
-          </span>
+          {/* Gradient-filled heading text removed: bg-clip-text with transparent
+              text is a reliable generated-UI signature, and it drops contrast
+              below the WCAG 2.2 AA floor this product is required to meet,
+              because the measured colour of the text is the gradient's lightest
+              stop. A solid accent carries the same emphasis and passes. */}
+          <span className="block text-accent">One click to install.</span>
         </h1>
         <p className="mt-5 max-w-md text-sm leading-relaxed text-fg-muted sm:text-base">
           The native shell for the Agent Command Center. Picks your OS
           automatically.
+        </p>
+        <p className="mt-3 max-w-md text-xs leading-relaxed text-fg-dim">
+          Operator only: alpha.4 to alpha.6 download from the private CC90210/CEO-Agent
+          repository, so your browser needs a GitHub session with access to it.
         </p>
 
         {/* === MASSIVE primary CTA ==================================== */}
@@ -236,15 +229,108 @@ export default function DownloadPage() {
           </div>
         </details>
       </section>
+    </main>
+  );
+}
 
-      {/* === Keyframes ============================================ */}
+/**
+ * What everyone who is not a verified platform operator sees: signed out, a
+ * client, or a session whose operator check failed. No release link, no
+ * checksum, no GitHub URL, since none of them work without access to the
+ * private repo.
+ *
+ * The one action depends on who is asking. A signed-in viewer gets the support
+ * form, the same "ask OASIS" route Settings › Billing uses for add-ons. A
+ * signed-out visitor is a prospect, and the support form never creates a lead
+ * (lib/delivery/support-form.ts: a submission is a support_tickets row and
+ * nothing else, with a first-response clock), so they get /contact, whose form
+ * does.
+ */
+function PrivateBeta({ signedOut }: { signedOut: boolean }) {
+  const askHref = signedOut ? "/contact" : SUPPORT_FORM_PATH;
+  return (
+    <main className="relative min-h-screen overflow-hidden bg-bg-deep text-fg">
+      <Backdrop />
+
+      <BrandHeader subtitle="Desktop · private beta">
+        {signedOut && (
+          <Link
+            href="/login?next=%2Fdownload"
+            className="text-xs text-fg-dim transition-colors hover:text-fg"
+          >
+            Sign in
+          </Link>
+        )}
+      </BrandHeader>
+
+      <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 pb-24 text-center sm:pt-16">
+        <h1 className="text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
+          <span className="block">OASIS Desktop.</span>
+          <span className="block text-accent">In private beta.</span>
+        </h1>
+        <p className="mt-5 max-w-md text-sm leading-relaxed text-fg-muted sm:text-base">
+          The desktop app lets your agents work with the files and tools on your
+          own computer. While it is in beta, OASIS sets it up with each workspace
+          directly, so there is no public download yet.
+        </p>
+        <a
+          href={askHref}
+          className="mt-10 inline-flex items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-7 py-3.5 text-sm font-bold text-fg transition-colors hover:bg-accent/25"
+        >
+          Ask for access
+        </a>
+      </section>
+    </main>
+  );
+}
+
+function Backdrop() {
+  return (
+    <>
+      {/* Aurora backdrop — single conic + radial layer, no grid clutter */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 -z-30">
+        <div
+          className="absolute left-1/2 top-1/2 h-[120vmax] w-[120vmax] -translate-x-1/2 -translate-y-1/2 opacity-45 blur-3xl animate-[orbit-soft_42s_linear_infinite]"
+          style={{
+            background:
+              "conic-gradient(from 0deg at 50% 50%, rgba(0,212,255,0.32), rgba(59,130,246,0.18), transparent 45%, rgba(34,211,238,0.22) 75%, rgba(0,212,255,0.32))",
+          }}
+        />
+      </div>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-20"
+        style={{
+          background:
+            "radial-gradient(ellipse 60% 60% at 50% 50%, transparent 0%, rgba(8,11,16,0.7) 100%)",
+        }}
+      />
       <style>{`
         @keyframes orbit-soft {
           from { transform: translate(-50%, -50%) rotate(0deg); }
           to { transform: translate(-50%, -50%) rotate(360deg); }
         }
       `}</style>
-    </main>
+    </>
+  );
+}
+
+function BrandHeader({ subtitle, children }: { subtitle: string; children?: React.ReactNode }) {
+  return (
+    <header className="relative z-10 mx-auto flex max-w-6xl items-center justify-between px-6 py-6 sm:px-10">
+      <Link href="/" className="group flex items-center gap-2.5">
+        <OasisLogo
+          size={32}
+          priority
+          className="transition-shadow group-hover:shadow-[0_0_28px_-2px_rgba(0,212,255,0.7)]"
+        />
+        <div className="leading-none">
+          <div className="text-sm font-black tracking-tight text-fg">OASIS AI</div>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-fg-dim">{subtitle}</div>
+        </div>
+      </Link>
+      {children}
+    </header>
   );
 }
 

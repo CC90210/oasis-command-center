@@ -20,6 +20,7 @@ import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/sche
 import { humanize } from "@/lib/manifest/humanize";
 import { LEAD_DOC_TYPES, humanLeadDocSize } from "@/lib/lead-doc-display";
 import { AddressAutocompleteField } from "@/components/forms/AddressAutocompleteField";
+import { invalidateWebLeadsClientCache } from "@/lib/web-leads/client-cache";
 
 type Props = {
   tenantSlug: string;
@@ -36,6 +37,26 @@ type Props = {
   initial?: Record<string, unknown>;
   /** Optional record id for edit mode (Phase 5.1). */
   editId?: string;
+  /**
+   * Display labels for enum options, keyed by field name then option value.
+   * An option without a label falls back to humanize(value). /pipeline/new
+   * passes the board's own stage labels ("Founder Meeting") so the picker
+   * reads the way the board does.
+   */
+  optionLabels?: Record<string, Record<string, string>>;
+  /**
+   * Display labels for fields, keyed by field name. A field without one is
+   * labelled humanize(name). Only the label changes, never the key the value
+   * is saved under: /pipeline/new shows `state` as "Province / State" because
+   * its options include Canadian provinces.
+   */
+  fieldLabels?: Record<string, string>;
+  /**
+   * After a successful CREATE, land on `${landOnStagePath}?stage=<the saved
+   * record's stage>` instead of backHref — the column the new record is in.
+   * The stage is read from the server's response, not from the form.
+   */
+  landOnStagePath?: string;
 };
 
 type PendingDocument = {
@@ -96,6 +117,76 @@ function newPendingDocumentId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Loose equality for "did the operator actually change this field?".
+ * Inputs hand back strings, so a numeric field loaded as 650 and left alone
+ * comes back as "650" — a strict compare would call that an edit and send it.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return a == null && b == null;
+  if (typeof a === "object" || typeof b === "object") {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return String(a) === String(b);
+}
+
+/**
+ * The sentence shown when a save is refused. The form never shows a raw error
+ * code: "use_website_sales_workflow" told CC nothing about what to do next.
+ *
+ * The server's own `message` wins -- it knows the reason, and the OASIS create
+ * route names the stages that ARE allowed. A database failure is the exception:
+ * its message is driver text, so the plain sentence is shown instead.
+ */
+const SAVE_ERROR_SENTENCES: Record<string, string> = {
+  unauthorized: "Your session has ended. Sign in again, then save.",
+  forbidden: "Your role can't save this record. Ask an admin.",
+  forbidden_role: "Your role can't save this record. Ask an admin.",
+  forbidden_fields: "Your role can't change some of these fields. Ask an admin.",
+  no_identity: "We couldn't tell who is saving this. Sign in again, then save.",
+  no_tenant: "This account isn't attached to a workspace yet.",
+  slug_not_owned: "This record belongs to a workspace this account can't write to.",
+  unknown_tenant: "No workspace was found at this address.",
+  unknown_entity: "This workspace doesn't have this kind of record.",
+  invalid_slug: "This workspace address isn't valid. Reload the page.",
+  invalid_entity: "This kind of record isn't valid here. Reload the page.",
+  invalid_json: "The form sent something the server couldn't read. Reload the page and try again.",
+  data_required: "The form sent something the server couldn't read. Reload the page and try again.",
+  patch_required: "The form sent something the server couldn't read. Reload the page and try again.",
+  id_required: "The form lost track of which record this is. Reload the page and try again.",
+  protected_lifecycle_fields:
+    "Some of these fields are set by the pipeline itself and can't be saved from this form.",
+  use_website_sales_workflow: "That change goes through the lead's lifecycle actions, not this form.",
+  stage_not_creatable: "A new lead can't start in that stage. Pick another one.",
+  region_required: "Pick the province or state this business is in.",
+  invalid_region: "Pick a province or state from the list.",
+  assignee_required: "Choose the sales rep who will own this lead.",
+  target_not_on_sales_roster: "Choose an active sales rep from this workspace.",
+  sales_roster_unavailable: "The sales roster could not be verified. Try again in a moment.",
+  validation: "One of the values wasn't accepted. Check the fields and try again.",
+  not_found: "This record no longer exists. Reload the page.",
+  conflict: "Someone changed this record while you were editing. Reload the page and try again.",
+  db: "The database didn't accept the save, so nothing changed. Try again in a moment.",
+};
+
+function saveErrorMessage(
+  status: number,
+  body: { error?: unknown; message?: unknown } | null,
+): string {
+  const code = body && typeof body.error === "string" ? body.error : "";
+  if (code !== "db" && body && typeof body.message === "string" && body.message.trim()) {
+    return body.message.trim();
+  }
+  if (SAVE_ERROR_SENTENCES[code]) return SAVE_ERROR_SENTENCES[code];
+  if (status >= 500) return "The server hit an error, so nothing was saved. Try again in a moment.";
+  return "The save was refused and nothing changed. Reload the page and try again.";
+}
+
 export function ManifestRecordForm({
   tenantSlug,
   entity,
@@ -103,6 +194,9 @@ export function ManifestRecordForm({
   backHref,
   initial,
   editId,
+  optionLabels,
+  fieldLabels,
+  landOnStagePath,
 }: Props) {
   const router = useRouter();
   const resolvedBackHref = backHref ?? `/t/${tenantSlug}/${backPath}`;
@@ -142,6 +236,12 @@ export function ManifestRecordForm({
       const empty = raw === undefined || raw === "" || raw === null;
       if (empty) {
         if (f.required) errs[f.name] = "Required";
+        // Emptying an optional field is an edit, not a non-answer. Skipping it
+        // outright meant a wrong phone number or a stale audit note could be
+        // replaced but never simply deleted — the old value silently survived
+        // the save. Only on edit: on create there is nothing to clear, and
+        // writing empty strings into a new record just adds noise.
+        else if (isEdit && f.name in (initial || {})) out[f.name] = "";
         continue;
       }
       if (f.type === "number") {
@@ -164,6 +264,29 @@ export function ManifestRecordForm({
       }
     }
     if (Object.keys(errs).length > 0) return { errors: errs };
+
+    if (isEdit) {
+      // A PATCH should carry what changed, not the whole record. Resending
+      // every field made each save clobber concurrent edits, and it put
+      // `stage` in the body of a form that has no business moving a deal —
+      // which the records API now rejects for non-admins, so a rep fixing a
+      // phone number would have been refused over a field they never touched.
+      const changed: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(out)) {
+        if (!sameValue(value, (initial || {})[key])) changed[key] = value;
+      }
+      return { payload: changed };
+    }
+
+    // On create, carry forward anything the caller seeded that the entity
+    // doesn't declare — `sales_program` is passed this way by /pipeline/new
+    // and was being dropped by the loop above, so every hand-created lead was
+    // born without the stamp the board filters on and never appeared on it.
+    for (const [key, value] of Object.entries(initial || {})) {
+      if (!(key in out) && value !== undefined && value !== null && value !== "") {
+        out[key] = value;
+      }
+    }
     return { payload: out };
   }
 
@@ -203,12 +326,18 @@ export function ManifestRecordForm({
         credentials: "include",
         body: fd,
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      };
       if (!res.ok || !data.ok) {
-        return {
-          error: `${doc.file.name}: ${data.error || `upload_failed_${res.status}`}`,
-          uploadedIds,
-        };
+        // A sentence naming the file, never the upload route's code.
+        const reason =
+          typeof data.message === "string" && data.message.trim()
+            ? data.message.trim()
+            : "it wasn't accepted. Try that file again.";
+        return { error: `${doc.file.name}: ${reason}`, uploadedIds };
       }
       uploadedIds.push(doc.id);
     }
@@ -240,11 +369,26 @@ export function ManifestRecordForm({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(isEdit ? { patch: result.payload } : { data: result.payload }),
       });
-      const data = (await res.json()) as
-        | { ok: true; record: { id: string } }
-        | { ok: false; error: string; message?: string };
-      if (!data.ok) {
-        setFormError(data.message || data.error);
+      // A non-JSON body (an HTML error page, a proxy timeout) is a refusal
+      // with no explanation, not an exception to surface verbatim.
+      const data = (await res.json().catch(() => null)) as
+        | { ok: true; record: { id: string; data?: Record<string, unknown> } }
+        | { ok: false; error?: string; message?: string; fields?: unknown }
+        | null;
+      if (!res.ok || !data || !data.ok) {
+        const refusal = data && !data.ok ? data : null;
+        // Point at the field the server named, when this form has it, so the
+        // operator fixes it in place instead of hunting for it.
+        if (refusal && Array.isArray(refusal.fields)) {
+          const named: Record<string, string> = {};
+          for (const name of refusal.fields) {
+            if (typeof name === "string" && entity.fields.some((f) => f.name === name)) {
+              named[name] = "Check this field";
+            }
+          }
+          if (Object.keys(named).length > 0) setFieldErrors(named);
+        }
+        setFormError(saveErrorMessage(res.status, refusal));
         setSaving(false);
         return;
       }
@@ -266,10 +410,23 @@ export function ManifestRecordForm({
       setFlash(uploadedCount > 0
         ? `Saved and uploaded ${uploadedCount} file${uploadedCount === 1 ? "" : "s"}. Redirecting...`
         : "Saved. Redirecting...");
-      router.push(resolvedBackHref);
+      // Land on the column the record is now in. The stage is the SERVER's, read
+      // off the saved record, so the landing can never disagree with the row.
+      const savedStage = data.record.data?.stage;
+      const landing =
+        !editId && landOnStagePath && typeof savedStage === "string" && savedStage
+          ? `${landOnStagePath}?stage=${encodeURIComponent(savedStage)}`
+          : resolvedBackHref;
+      // A new OASIS lead must show on the Leads page too, not only the board:
+      // drop that page's 15-second in-tab cache so its next visit reads live.
+      if (!editId && landOnStagePath) invalidateWebLeadsClientCache();
+      router.push(landing);
       router.refresh();
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : "network_error");
+    } catch {
+      // fetch rejected: the request may or may not have reached the server.
+      setFormError(
+        "Couldn't reach the server. Check your connection, then reload to see whether it saved.",
+      );
       setSaving(false);
     }
   }
@@ -284,6 +441,8 @@ export function ManifestRecordForm({
           error={fieldErrors[field.name] ?? null}
           onChange={(v) => setField(field.name, v)}
           disabled={saving}
+          optionLabels={optionLabels?.[field.name]}
+          fieldLabel={fieldLabels?.[field.name]}
         />
       ))}
 
@@ -340,14 +499,20 @@ function FieldInput({
   error,
   onChange,
   disabled,
+  optionLabels,
+  fieldLabel,
 }: {
   field: ManifestEntityField;
   value: unknown;
   error: string | null;
   onChange: (v: unknown) => void;
   disabled?: boolean;
+  /** Display label per enum option; missing options fall back to humanize(). */
+  optionLabels?: Record<string, string>;
+  /** This field's label; without one it falls back to humanize(field.name). */
+  fieldLabel?: string;
 }) {
-  const labelText = humanize(field.name);
+  const labelText = fieldLabel ?? humanize(field.name);
   const label = (
     <span className="text-xs font-semibold text-fg block mb-1">
       {labelText}
@@ -375,7 +540,7 @@ function FieldInput({
     </div>
   ) : null;
 
-  if (field.type === "enum" && field.enum_values && field.enum_values.length > 0) {
+  if (field.type === "enum" && field.enum_values) {
     return (
       <label className="block">
         {label}
@@ -388,7 +553,7 @@ function FieldInput({
           <option value="">— pick one —</option>
           {field.enum_values.map((v) => (
             <option key={v} value={v}>
-              {humanize(v)}
+              {optionLabels?.[v] ?? humanize(v)}
             </option>
           ))}
         </select>

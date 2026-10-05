@@ -24,7 +24,6 @@ function inferFormat(key) {
   return "ad";
 }
 function inferCanvas(html) {
-  const w = html.match(/width\s*:\s*(1080|540)px/);
   const isStory = /1920px/.test(html);
   return isStory ? "1080x1920" : "1080x1080";
 }

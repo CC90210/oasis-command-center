@@ -215,7 +215,10 @@ export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
           onClick={submit}
           disabled={!good.length || busy}
           className="rounded-full px-5 py-2 text-sm font-bold transition-all disabled:cursor-not-allowed disabled:opacity-40"
-          style={{ background: "#1FE3F0", color: "#050B12", boxShadow: "0 0 24px rgba(31,227,240,0.28)" }}
+          // Was a 24px cyan bloom with zero offsets. Light has a direction, so
+          // this is now real elevation. The button already carries the brand
+          // colour; the glow added no information.
+          style={{ background: "#1FE3F0", color: "#050B12", boxShadow: "0 2px 4px rgba(0,0,0,0.45), 0 8px 24px rgba(0,0,0,0.35)" }}
         >
           {busy
             ? "Queueing…"

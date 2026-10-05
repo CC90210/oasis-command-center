@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
@@ -37,7 +37,7 @@ import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { ApplicationUnderwritingReport } from "@/components/underwriting/ApplicationUnderwritingReport";
-import { attachAssignedNames } from "@/lib/assigned-names";
+import { attachAssignedNames, buildMemberDirectory } from "@/lib/assigned-names";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
@@ -69,8 +69,14 @@ import {
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { oasisLeadCreateRedirect } from "@/lib/oasis-lead-create";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -165,18 +171,51 @@ export default async function TenantCatchAllPage({
     return <UnknownPath slug={normalised} subPath={subPath} />;
   }
 
+  // An OASIS lead create URL opens the one OASIS create form, /pipeline/new,
+  // whatever the caller's role -- see oasisLeadCreateRedirect. The create
+  // branch below would otherwise render the seed lead entity (the prospect
+  // pool, a free-text State, a lifecycle field), which the records route
+  // refuses, to every profile the role redirect further down does not name.
+  const oasisCreateTarget = oasisLeadCreateRedirect({
+    tenantSlug: normalised,
+    entity: pageDef.entity,
+    isNewForm,
+    stage: stageFilter,
+  });
+  if (oasisCreateTarget) redirect(oasisCreateTarget);
+
   const user = await getSessionUser();
-  const service = getServiceSupabase();
   const profileRes = user
-    ? await service
-        .from("user_profiles")
-        .select("tenant_id, email, team_role, is_owner, admin_access")
-        .eq("auth_user_id", user.id)
-        .maybeSingle()
-    : { data: null };
-  const profileRow = profileRes.data as
-    | { tenant_id: string | null; email: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
-    | null;
+    ? await resolveActiveProfileForUser(user)
+    : { profile: null, error: null };
+  if (profileRes.error) {
+    throw new Error(`active_profile_resolution_failed: ${profileRes.error}`);
+  }
+  const profileRow = profileRes.profile;
+
+  // OASIS sales seats use the dedicated pipeline, whose query can express
+  // their exact role/stage/ownership boundary. The generic manifest lead
+  // surface obeys the environment rollout flag and filter mode, so a direct
+  // URL there cannot be allowed to become a second, broader records door.
+  // The generic manifest lead surface has only admin/all vs own semantics and
+  // therefore cannot safely represent that scope. Redirect both list and
+  // detail URLs before it can read data; direct/shared URLs are not an escape
+  // hatch into unassigned, founder, or system records.
+  const oasisDirectRole = profileRow?.team_role?.trim().toLowerCase() || "";
+  const isOasisLeadSurface = isOasisSurfaceTenant(normalised) && pageDef.entity === "lead";
+  if (
+    isOasisLeadSurface &&
+    ["owner", "admin", "member", "manager", "closer", "opener", "builder", "marketing", "agent"].includes(
+      oasisDirectRole,
+    )
+  ) {
+    if (recordDetailId) redirect(`/pipeline/${recordDetailId}`);
+    const target = new URLSearchParams();
+    if (stageFilter) target.set("stage", stageFilter);
+    if (query) target.set("q", query);
+    if (agentFilter) target.set("rep", agentFilter);
+    redirect(`/pipeline${target.size ? `?${target.toString()}` : ""}`);
+  }
   const userTenantId = profileRow?.tenant_id ?? null;
   // Resolve which tenant_id should scope record reads. If the caller
   // isn't the owner of this manifest, dataTenantId is null and the
@@ -222,20 +261,13 @@ export default async function TenantCatchAllPage({
       pageDef.kind === "dashboard");
   let adminRoster: Array<{ id: string; name: string }> = [];
   if (showLeadFilter && dataTenantId) {
-    const rosterRes = await service
-      .from("user_profiles")
-      .select("auth_user_id, display_name, full_name")
-      .eq("tenant_id", dataTenantId);
-    adminRoster = ((rosterRes.data || []) as Array<{
-      auth_user_id: string | null;
-      display_name: string | null;
-      full_name: string | null;
-    }>)
-      .filter((m) => m.auth_user_id)
-      .map((m) => ({
-        id: m.auth_user_id as string,
-        name: m.display_name || m.full_name || "Unnamed",
-      }));
+    // A chip is a live control, so only active teammates get one — the rule
+    // /pipeline applies (2026-09-24). A deactivated rep's existing
+    // ?agent=<id> link still filters through leadScope above; it has no chip.
+    const { names, activeIds } = await buildMemberDirectory(dataTenantId);
+    adminRoster = [...names]
+      .filter(([id]) => activeIds.has(id))
+      .map(([id, name]) => ({ id, name }));
   }
 
   // Record-detail view — opened when an operator clicks a Kanban card or
@@ -345,6 +377,15 @@ export default async function TenantCatchAllPage({
               applicationId={recordDetailId}
               tenantSlug={normalised}
               businessName={title}
+            />
+          )}
+          {/* A won deal: "Convert to client" / the client record it became.
+              Draws nothing for any other stage or entity. */}
+          {entity.name === "lead" && dataTenantId && (
+            <ClientRecordCard
+              tenantId={dataTenantId}
+              leadId={recordDetailId}
+              stage={typeof record.data.stage === "string" ? record.data.stage : null}
             />
           )}
           <ManifestRecordForm
@@ -607,7 +648,25 @@ async function PageBody({
       if (slug === "sun") {
         return <ImportClient tenantSlug={slug} />;
       }
-      return <LeadsImportClient />;
+      if (isWebsiteSalesTenantSlug(slug)) {
+        let assignmentOptions: Array<{ id: string; name: string }> = [];
+        if (tenantId) {
+          try {
+            const roster = await getOasisPipelineAssignmentRoster(tenantId);
+            assignmentOptions = roster.map((member) => ({
+              id: member.auth_user_id!,
+              name: member.display_name || member.full_name || member.email,
+            }));
+          } catch (error) {
+            console.error("[manifest.import] OASIS assignment roster unavailable", {
+              tenantId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        return <LeadsImportClient assignmentOptions={assignmentOptions} />;
+      }
+      return <LeadsImportClient assignmentOptions={null} />;
     case "shopping_out":
       // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach UI;
       // ranks lenders via lib/lenders/match-fitness, attaches docs,

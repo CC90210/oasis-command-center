@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { resolveBrandKey } from "../lib/email/brands";
 
 // ---------------------------------------------------------------------------
 // 1. Find every file that sends mail through the shared Gmail sender AND is
@@ -67,15 +68,35 @@ for (const file of lenderFacing) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. The defaults that make omission safe must still hold. If `brand` ever
-//    stopped defaulting to SunBiz, every lender path above would silently
-//    rebrand without any of them changing a line.
+// 3. Omission must still land on SunBiz — but ONLY omission.
+//
+// REWRITTEN 2026-09-09. This used to pin the literal source text
+//     `...includes(s) ? (s as BrandKey) : "sunbiz"`
+// which made "every unrecognised value becomes SunBiz" a tested requirement.
+// That is what put the client's legal identity on OASIS mail: "oasis" was not a
+// BrandKey, so it was unrecognised, so it became SunBiz — and this assertion
+// reported that as correct.
+//
+// The property lender mail actually needs is narrower: an ABSENT brand stays
+// SunBiz. An unrecognised one must now throw. Asserted behaviourally rather
+// than by matching source text, so a refactor that preserves the behaviour
+// does not fail, and one that quietly restores the blanket fallback does.
 // ---------------------------------------------------------------------------
-const brands = readFileSync("lib/email/brands.ts", "utf8");
-assert.match(
-  brands,
-  /return\s*\(ALL_BRAND_KEYS as readonly string\[\]\)\.includes\(s\)\s*\?\s*\(s as BrandKey\)\s*:\s*"sunbiz"/,
-  "resolveBrandKey must fall back to sunbiz — omitting a brand is how lender mail stays SunBiz",
+assert.equal(
+  resolveBrandKey(undefined),
+  "sunbiz",
+  "omitting a brand is how lender mail stays SunBiz — this must not change",
+);
+assert.equal(resolveBrandKey(""), "sunbiz");
+assert.throws(
+  () => resolveBrandKey("nonsense"),
+  /unknown brand/,
+  "an UNRECOGNISED brand must refuse, not silently become SunBiz",
+);
+assert.equal(
+  resolveBrandKey("oasis"),
+  "oasis",
+  "and a real brand must resolve to itself, not to the lender brand",
 );
 
 const gmail = readFileSync("lib/integrations/submissions-gmail.ts", "utf8");

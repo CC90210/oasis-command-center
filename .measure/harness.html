@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The app's own viewport meta (app/layout.tsx). Without it a headless
+         Chrome at a 390px window still lays out at 980px and every mobile
+         measurement is a fiction. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>web-leads geometry harness</title>
+    <link rel="stylesheet" href="./harness.css" />
+    <style>
+      /* MainShell drives the sidebar margin off this custom property. 15rem is
+         the expanded default; the collapsed case is measured by overriding it
+         from the measuring script. */
+      :root { --sidebar-w: 15rem; }
+      /* The harness stacks three surfaces on one page; a rule between them
+         makes a screenshot readable and contributes no width. */
+      .harness-sep { border-top: 1px dashed #22262e; }
+    </style>
+  </head>
+  <body class="bg-bg text-fg antialiased">
+    <!-- MainShell.tsx: MAIN_BASE + the constrained content wrapper, verbatim.
+         measure.mjs asserts these class strings still appear in MainShell.tsx. -->
+    <main id="shell" class="ml-0 md:ml-[var(--sidebar-w,15rem)] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200 min-h-screen">
+      <div id="content" class="mx-auto max-w-7xl px-4 md:px-8 py-6 md:py-8">
+        <section id="header"></section>
+        <section id="pool"></section>
+        <section class="harness-sep mt-10 pt-10"></section>
+        <section id="mine"></section>
+      </div>
+    </main>
+    <!-- Call Mode is `fixed inset-0`, so it is measured against the viewport
+         rather than the content box. Rendered into a detached host and shown
+         only when the measuring script asks for it. -->
+    <div id="callmode" hidden></div>
+    <script src="./harness.js"></script>
+  </body>
+</html>

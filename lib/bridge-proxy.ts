@@ -188,13 +188,24 @@ export type BridgeAuthResult =
        *  has a per-user identity column on this table. */
       isOperator: boolean;
     }
-  | { ok: false; status: number; error: string };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      /** Set on bridge_not_configured only: that caller passed the tenant gate,
+       *  so who they are is already known. The OASIS fleet control route uses
+       *  it to name the missing bridge to the operator in an OASIS workspace
+       *  and still answer everyone else with a 404 that names nothing. Never
+       *  serialized into a response. */
+      isOperator?: boolean;
+      tenantSlug?: string;
+    };
 
 export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   // Imported lazily to keep this module's import graph small for the /chat
   // route, which does not call this function.
   const { getServiceSupabase, getSessionUser } = await import("@/lib/supabase-server");
-  const { isOperatorEmail } = await import("@/lib/operator-credentials");
+  const { isPlatformOperatorForAuthUser } = await import("@/lib/platform-operator");
 
   const user = await getSessionUser();
   if (!user) return { ok: false, status: 401, error: "unauthenticated" };
@@ -202,11 +213,10 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   const svc = getServiceSupabase();
   let tenantId = "";
   let teamRole = "read_only"; // fail-closed default (least privilege)
-  let email: string | null = user.email ?? null;
   try {
     const opRow = await svc
       .from("user_profiles")
-      .select("tenant_id, team_role, is_owner, admin_access, email")
+      .select("tenant_id, team_role, is_owner, admin_access")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const op = opRow.data as
@@ -215,7 +225,6 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
           team_role: string | null;
           is_owner: boolean | null;
           admin_access: boolean | null;
-          email: string | null;
         }
       | null;
     if (!op) return { ok: false, status: 403, error: "no_profile" };
@@ -231,13 +240,19 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     if (op.admin_access === true && teamRole !== "owner" && teamRole !== "admin") {
       teamRole = "admin";
     }
-    if (op.email) email = op.email;
   } catch {
     return { ok: false, status: 403, error: "profile_lookup_failed" };
   }
   if (!tenantId) return { ok: false, status: 403, error: "no_tenant" };
 
-  const isOperator = isOperatorEmail(email);
+  // The verified check (lib/platform-operator.ts): an operator alias AND an
+  // owner/admin OASIS membership, keyed on the AUTH user. This used to test the
+  // alias alone — and preferred the profile row's email column over the
+  // session's — so registering an unclaimed alias, or writing one into your own
+  // profile, put the shell/file tools of every tenant one request away. A
+  // failed membership lookup answers "not an operator" (logged there), which
+  // lands on the tenant gate's 403 below, never on "allow".
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   let tenantRow: { slug: string; custom_fields: Record<string, unknown> | null };
   try {
     const r = await svc
@@ -255,7 +270,7 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   }
 
   const target = resolveBridgeTarget(tenantRow);
-  if (!target) return { ok: false, status: 503, error: "bridge_not_configured" };
+  if (!target) return { ok: false, status: 503, error: "bridge_not_configured", isOperator, tenantSlug: tenantRow.slug };
   return {
     ok: true,
     target,

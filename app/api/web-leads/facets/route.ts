@@ -17,7 +17,8 @@
  *
  * A tenant check alone is NOT sufficient: `agent` is the commission-only
  * outside-contractor role added for website sales, and it lives INSIDE this
- * tenant. The fast fetchSheets() counters are tenant-wide, so serving them
+ * tenant. The denormalized leadgen_territories counters are tenant-wide AND
+ * stale -- written on promotion, never recomputed on removal -- so serving them
  * unscoped would show a contractor the true size and shape of a book they
  * cannot open (e.g. "Toronto 8,246" beside a table of zero rows) -- the
  * same class of leak #237 (26ecc31a) closed on the manifest records route.
@@ -30,15 +31,15 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { parseFilters } from "@/lib/web-leads/filters";
 import { buildFacets } from "@/lib/web-leads/queries";
 import {
-  fetchSheets,
   fetchSheetsScopedToViewer,
-  isScopedContractor,
   WEBDEV_TENANT_ID,
-  type Viewer,
 } from "@/lib/web-leads/data";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const PRIVATE_BROWSER_CACHE = "private, max-age=15, stale-while-revalidate=30";
 
 export async function GET(req: NextRequest) {
   const session = await resolveSessionContext();
@@ -54,12 +55,31 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
+    const viewer = await resolveWebLeadViewer(session);
+    const fresh = req.nextUrl.searchParams.get("fresh") === "1";
+    const filters = parseFilters(req.nextUrl.searchParams);
+    const scope = filters.view === "mine" ? "mine" : "pool";
     // Keep the fast tenant-wide counter path for the normal (unscoped) case;
     // only a scoped contractor pays for the per-lead re-derivation.
-    const sheets = isScopedContractor(viewer) ? await fetchSheetsScopedToViewer(viewer) : await fetchSheets();
-    const filters = parseFilters(req.nextUrl.searchParams);
-    return NextResponse.json(buildFacets(sheets, filters));
+    // Derived for every viewer — see the note in ../route.ts. The
+    // leadgen_territories counters are written on promotion and never
+    // recomputed on removal, so after the board was consolidated they claimed
+    // 133,599 leads against 1,846 that exist. This endpoint and the list
+    // endpoint must agree, and the only number they can both be right about is
+    // the one computed from the rows themselves.
+    const sheets = await fetchSheetsScopedToViewer(viewer, {
+      fresh,
+      scope,
+      now: Date.now(),
+    });
+    return NextResponse.json(buildFacets(sheets, filters), {
+      headers: {
+        // Facet counts reveal a tenant's book just as the rows do. Brief
+        // browser reuse is safe; a CDN/shared proxy cache is not.
+        "Cache-Control": PRIVATE_BROWSER_CACHE,
+        "Vary": "Cookie",
+      },
+    });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "facets_failed" },

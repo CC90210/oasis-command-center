@@ -53,6 +53,25 @@ type LenderData = {
   defaults_policy?: "none" | "satisfied_only" | "accepts";
   max_negative_days?: number;
   reverses_only?: boolean;
+  /**
+   * SOP §1/§4 restricted lists. THESE WERE MISSING, AND THE GATE WAS DORMANT
+   * ON THIS PATH (measured 2026-09-07).
+   *
+   * scoreLenderMatch only raises `restricted_state` when
+   * `lender.restricted_states` is a non-empty array. This type did not declare
+   * the field, so the LenderProfile built below never carried it, so the check
+   * could not fire — while the comment on the applicationProfile above claimed
+   * the preview "reflects the restricted-lender gates". It did not.
+   *
+   * Consequence: an operator reading Match Lenders saw a lender presented as a
+   * clean match when that lender does not fund the merchant's state at all.
+   * 13 of the 47 live lenders carry a restricted-states list, covering
+   * TX (7 lenders), UT (5), CA (5), VA (4), NY (2), PR (1). The LIVE send path
+   * (shop-out.ts) always populated these, so real submissions were gated; it was
+   * the preview an operator makes decisions from that was blind.
+   */
+  restricted_states?: string[];
+  restricted_industries?: string[];
 };
 
 type CheckResult = {
@@ -214,6 +233,69 @@ export async function POST(
   const ranked: Ranked[] = (lendersRes.data || []).map((r) => {
     const data = ((r as { data: Record<string, unknown> }).data || {}) as LenderData;
     const checks: CheckResult[] = [];
+
+    /*
+     * SOP §4 RESTRICTED STATE / INDUSTRY — RENDERED AS A CHECK, ON PURPOSE.
+     *
+     * These have to live in `checks`, not only in the MatchScore warnings the
+     * narrative layer consumes. ApplicationCardActions.tsx (the sole consumer of
+     * this route) types the response as { score, passes, checks } and renders
+     * `checks` plus a passes/total badge. A restriction expressed only as a
+     * warning is computed, returned, and then invisible to the operator, who
+     * still sees a clean row and an enabled Shop out button. Codex adversarial
+     * review 2026-09-07 caught exactly that after the first pass of this fix.
+     *
+     * Unlike every other check here these are REFUSALS, not preferences: the
+     * lender does not fund this state at all, so a failure must also drag the
+     * passes/total badge down rather than sit as a footnote.
+     */
+    const merchantState =
+      typeof applicationProfile.merchant_state === "string"
+        ? applicationProfile.merchant_state.trim().toUpperCase()
+        : null;
+    const restrictedStates = Array.isArray(data.restricted_states)
+      ? data.restricted_states
+          .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
+          .map((s) => s.toUpperCase())
+      : [];
+    if (restrictedStates.length > 0) {
+      checks.push({
+        key: "restricted_state",
+        label: "State",
+        requirement: `does not fund ${restrictedStates.join(", ")}`,
+        actual: merchantState ?? "unknown",
+        // Unknown fails: a lender with a restricted list and no merchant state
+        // on file is not something to wave through. Same posture as
+        // scoreLenderMatch's missing_merchant_state warning.
+        passed: merchantState ? !restrictedStates.includes(merchantState) : false,
+      });
+    }
+
+    // Legacy key `industry_restrictions` is still honoured by
+    // lib/lenders/shop-out.ts. Reading only the new name here would show a
+    // legacy lender as clean in the preview and then flag it high_risk on the
+    // live send -- the exact preview/send divergence this commit exists to end.
+    const merchantIndustry =
+      typeof applicationProfile.industry === "string"
+        ? applicationProfile.industry.trim().toLowerCase()
+        : null;
+    const restrictedIndustriesRaw = Array.isArray(data.restricted_industries)
+      ? data.restricted_industries
+      : Array.isArray((data as { industry_restrictions?: unknown }).industry_restrictions)
+        ? ((data as { industry_restrictions?: unknown[] }).industry_restrictions as unknown[])
+        : [];
+    const restrictedIndustries = restrictedIndustriesRaw
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      .map((s) => s.trim().toLowerCase());
+    if (restrictedIndustries.length > 0) {
+      checks.push({
+        key: "restricted_industry",
+        label: "Industry",
+        requirement: `does not fund ${restrictedIndustries.join(", ")}`,
+        actual: merchantIndustry ?? "unknown",
+        passed: merchantIndustry ? !restrictedIndustries.includes(merchantIndustry) : false,
+      });
+    }
 
     // Monthly revenue floor. If application doesn't have monthly
     // revenue, mark this check inconclusive (passed=false but with
@@ -399,6 +481,27 @@ export async function POST(
       defaults_policy: raw?.defaults_policy,
       max_negative_days: raw?.max_negative_days,
       reverses_only: raw?.reverses_only,
+      // Normalised the same way lib/lenders/shop-out.ts does, so the preview and
+      // the live send apply an IDENTICAL gate. Two paths deriving the compliance
+      // inputs differently is what left this one dormant.
+      restricted_states: Array.isArray(raw?.restricted_states)
+        ? raw.restricted_states
+            .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
+            .map((s) => s.toUpperCase())
+        : undefined,
+      // Legacy `industry_restrictions` honoured too, matching shop-out.ts.
+      restricted_industries: (() => {
+        const legacy = (raw as { industry_restrictions?: unknown } | undefined)?.industry_restrictions;
+        const list = Array.isArray(raw?.restricted_industries)
+          ? raw.restricted_industries
+          : Array.isArray(legacy)
+            ? (legacy as unknown[])
+            : null;
+        if (!list) return undefined;
+        return list
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim().toLowerCase());
+      })(),
     };
     return { matchScore: scoreLenderMatch(lenderProfile, applicationProfile), lenderProfile };
   });

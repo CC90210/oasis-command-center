@@ -217,7 +217,14 @@ function ItemRow({
   onDismiss: (id: string) => void;
 }) {
   const router = useRouter();
+  // The business is the headline; the PERSON is a separate fact shown beside
+  // it. They used to be one ranked pair — `business_name || contact_name` —
+  // which means the contact only ever appeared when the business name was
+  // missing. Now that the route resolves contact_name through contactNameFor()
+  // and it holds a real owner on 1,853 leads, that ladder would have hidden
+  // every one of them behind a business name that is almost always present.
   const displayName = item.business_name || item.contact_name || "(unnamed)";
+  const askFor = item.contact_name && item.contact_name !== displayName ? item.contact_name : null;
 
   function openRecord() {
     if (item.application_id) {
@@ -231,6 +238,12 @@ function ItemRow({
     <div className="group flex items-start gap-3 px-3 py-2.5 border-b border-bg-border last:border-b-0 hover:bg-bg-elev/40">
       <div className="flex-1 min-w-0">
         <div className="text-[13px] font-semibold text-fg truncate">{displayName}</div>
+        {/* Who to ask for, in the same words as the pipeline row, the battle
+            card and Today. Absent when nobody is known — never the business
+            name standing in for a person. */}
+        {askFor && (
+          <div className="truncate text-[11px] font-medium text-accent">Ask for {askFor}</div>
+        )}
         <div className="text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-1">
           {item.reason}
         </div>

@@ -100,6 +100,42 @@ export async function getUserIntegrationBundle(
 }
 
 /**
+ * Status/readiness variant of the bundle read. Unlike the send-path helper
+ * above, this throws when storage or decryption is unavailable so Settings can
+ * render "Unavailable" instead of the false claim "Not connected".
+ */
+export async function getUserIntegrationBundleForStatus(
+  tenantId: string,
+  userId: string,
+  service: string,
+): Promise<Record<string, string>> {
+  if (!tenantId || !userId || !service) return {};
+  const db = getServiceSupabase();
+  const result = await db
+    .from("user_integration_credentials")
+    .select("field_key, encrypted_value")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .eq("service", service);
+  if (result.error) throw new Error(result.error.message || "personal_integration_bundle_failed");
+
+  const bundle: Record<string, string> = {};
+  for (const row of (result.data || []) as Array<{ field_key: string; encrypted_value: string }>) {
+    try {
+      bundle[row.field_key] = decryptField(row.encrypted_value);
+    } catch (error) {
+      console.error("[user-integration-store] status decrypt failed", {
+        service,
+        field: row.field_key,
+        error,
+      });
+      throw new Error("personal_integration_decrypt_failed");
+    }
+  }
+  return bundle;
+}
+
+/**
  * Upsert a single field. Encrypts via AES-256-GCM before insert.
  * Returns the row id on success.
  */
@@ -148,9 +184,9 @@ export async function setUserIntegrationValue(
  * callbacks where we receive { refresh_token, access_token, expires_at,
  * scope, gmail_address } at once and want them all in or none in.
  *
- * Each entry that fails encryption is skipped and reported in the
- * returned errors map. A partial success is still a success — the
- * caller decides whether to surface the partial state to the user.
+ * Encryption completes before one batch upsert. A bad field writes nothing,
+ * and the database receives the remaining bundle as one statement so the UI
+ * can never report a half-connected account as saved.
  */
 export async function setUserIntegrationBundle(
   tenantId: string,
@@ -158,17 +194,41 @@ export async function setUserIntegrationBundle(
   service: string,
   bundle: Record<string, string>,
 ): Promise<{ ok: boolean; written: string[]; errors: Record<string, string> }> {
-  const written: string[] = [];
+  if (!tenantId || !userId || !service || Object.keys(bundle).length === 0) {
+    return { ok: false, written: [], errors: { bundle: "missing_required_field" } };
+  }
+
   const errors: Record<string, string> = {};
+  const rows: Array<{
+    tenant_id: string;
+    user_id: string;
+    service: string;
+    field_key: string;
+    encrypted_value: string;
+  }> = [];
   for (const [fieldKey, value] of Object.entries(bundle)) {
-    const r = await setUserIntegrationValue(tenantId, userId, service, fieldKey, value);
-    if (r.ok) {
-      written.push(fieldKey);
-    } else {
-      errors[fieldKey] = r.error;
+    try {
+      rows.push({
+        tenant_id: tenantId,
+        user_id: userId,
+        service,
+        field_key: fieldKey,
+        encrypted_value: encryptField(value),
+      });
+    } catch (error) {
+      errors[fieldKey] = error instanceof Error ? error.message : "encrypt_failed";
     }
   }
-  return { ok: written.length > 0, written, errors };
+  if (Object.keys(errors).length > 0) return { ok: false, written: [], errors };
+
+  const db = getServiceSupabase();
+  const result = await db.from("user_integration_credentials").upsert(rows, {
+    onConflict: "tenant_id,user_id,service,field_key",
+  });
+  if (result.error) {
+    return { ok: false, written: [], errors: { bundle: result.error.message || "upsert_failed" } };
+  }
+  return { ok: true, written: Object.keys(bundle), errors: {} };
 }
 
 /**
@@ -188,6 +248,9 @@ export async function listUserIntegrationStatus(
     .select("service, field_key, encrypted_value, last_tested_at, last_test_ok, last_test_error, updated_at")
     .eq("tenant_id", tenantId)
     .eq("user_id", userId);
+  if (r.error) {
+    throw new Error(r.error.message || "personal_integration_status_failed");
+  }
   return (r.data || []).map((row) => {
     const r2 = row as {
       service: string;

@@ -1,0 +1,720 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { buildRecordSearchOr, type ListRecordsInput, type ListRecordsResult } from "../lib/manifest/data";
+import {
+  OASIS_PIPELINE_OVERVIEW_LIMIT,
+  listOasisPipelineWindow,
+  normalizeOasisPipelinePage,
+  resolveOasisPipelineAssigneeScope,
+} from "../lib/oasis-pipeline-query";
+import { OPENER_PIPELINE_STAGE_KEYS } from "../lib/oasis-sales-pipeline-policy";
+import {
+  CURRENT_OASIS_PIPELINE_CYCLE,
+  isInPipelineCycle,
+  pipelineCycleAssignmentFacts,
+  planPipelineCycleArchive,
+} from "../lib/pipeline-cycle";
+import {
+  OASIS_PIPELINE_ASSIGNMENT_EMAILS,
+  isOasisPipelineAssignmentMember,
+} from "../lib/team";
+
+const pipelinePageSource = readFileSync("app/pipeline/page.tsx", "utf8");
+const pipelineViewSource = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
+assert.equal(pipelinePageSource.includes("limit: 500"), false, "the global cap regression stays removed");
+assert.equal(
+  pipelinePageSource.includes("repScopedRows.filter") || pipelinePageSource.includes("hay.includes"),
+  false,
+  "rep and search filtering cannot drift back behind an in-memory slice",
+);
+assert(
+  pipelinePageSource.includes("listOasisPipelineWindow") &&
+    pipelineViewSource.includes("View all {totalCount}") &&
+    pipelineViewSource.includes('aria-label="Pipeline result pages"'),
+  "the bounded query is wired to complete stage pagination in the UI",
+);
+
+assert.equal(normalizeOasisPipelinePage("3"), 3);
+assert.equal(normalizeOasisPipelinePage("-4"), 1);
+assert.equal(normalizeOasisPipelinePage("not-a-page"), 1);
+
+assert.match(
+  pipelinePageSource,
+  /cycle:\s*CURRENT_OASIS_PIPELINE_CYCLE/,
+  "the live Pipeline board must activate the non-destructive current-cycle boundary",
+);
+
+assert.deepEqual(
+  OASIS_PIPELINE_ASSIGNMENT_EMAILS,
+  ["conaugh@oasisai.work", "adon@oasisai.work"],
+  "the assignment roster is a separate founder-only boundary seeded to CC and Adon",
+);
+assert.equal(isOasisPipelineAssignmentMember({ email: " CONAUGH@OASISAI.WORK " }), true);
+assert.equal(isOasisPipelineAssignmentMember({ email: "adon@oasisai.work" }), true);
+assert.equal(isOasisPipelineAssignmentMember({ email: "rep@oasisai.work" }), false);
+
+const cycle = CURRENT_OASIS_PIPELINE_CYCLE;
+assert.equal(
+  isInPipelineCycle({ data: { pipeline_cycle: cycle.id }, updated_at: "2000-01-01T00:00:00Z" }, cycle),
+  true,
+  "an explicit current-cycle stamp is authoritative",
+);
+assert.equal(
+  isInPipelineCycle({ data: { pipeline_cycle: "previous", assigned_at: "2099-01-01T00:00:00Z" }, updated_at: "2099-01-01T00:00:00Z" }, cycle),
+  false,
+  "a prior explicit cycle cannot leak in through a newer timestamp",
+);
+assert.equal(
+  isInPipelineCycle({ data: { assigned_at: cycle.startedAt }, updated_at: cycle.startedAt }, cycle),
+  true,
+  "new untagged assignments remain compatible at the cycle boundary",
+);
+assert.equal(
+  isInPipelineCycle({ data: { assigned_at: "2026-09-22T23:59:59.999Z" }, updated_at: "2026-09-22T23:59:59.999Z" }, cycle),
+  false,
+  "the current board starts from the declared boundary instead of deleting history",
+);
+
+const importedAssignment = pipelineCycleAssignmentFacts(
+  " CC-AUTH-ID ",
+  "2026-09-23T09:15:00.000Z",
+  cycle,
+);
+assert.deepEqual(importedAssignment, {
+  assigned_to: "CC-AUTH-ID",
+  assigned_at: "2026-09-23T09:15:00.000Z",
+  pipeline_cycle: cycle.id,
+});
+assert.equal(
+  isInPipelineCycle({ data: { stage: "assigned", ...importedAssignment } }, cycle),
+  true,
+  "a newly imported CC/Adon assignment must be visible in the active cycle",
+);
+assert.throws(
+  () => pipelineCycleAssignmentFacts("", "2026-09-23T09:15:00.000Z", cycle),
+  /pipeline_assignment_owner_required/,
+  "an OASIS import cannot create unowned work",
+);
+assert.throws(
+  () => pipelineCycleAssignmentFacts("cc", "2026-09-22T09:15:00.000Z", cycle),
+  /pipeline_assignment_before_cycle/,
+  "a current-cycle stamp cannot carry an assignment clock from a prior cycle",
+);
+
+const archivePlan = planPipelineCycleArchive(
+  [
+    { id: "old", data: { stage: "assigned", assigned_to: "former", assigned_at: "2026-09-01T00:00:00Z" }, updated_at: "2026-09-01T00:00:00Z" },
+    { id: "current-cc", data: { stage: "connected", assigned_to: "cc", pipeline_cycle: cycle.id }, updated_at: cycle.startedAt },
+    { id: "current-other", data: { stage: "qualified", assigned_to: "other", assigned_at: cycle.startedAt }, updated_at: cycle.startedAt },
+  ],
+  cycle,
+  ["cc", "adon"],
+);
+assert.deepEqual(archivePlan.archive.map((row) => row.id), ["old"]);
+assert.deepEqual(archivePlan.current.map((row) => row.id), ["current-cc", "current-other"]);
+assert.deepEqual(archivePlan.outsideAssignmentRoster, ["current-other"]);
+assert.deepEqual(
+  archivePlan.archive[0],
+  {
+    id: "old",
+    priorStage: "assigned",
+    priorAssignedTo: "former",
+    priorAssignedAt: "2026-09-01T00:00:00Z",
+    priorUpdatedAt: "2026-09-01T00:00:00Z",
+  },
+  "the archive manifest carries the exact facts needed to restore a hidden row",
+);
+
+for (const path of [
+  "app/api/web-leads/claim/route.ts",
+  "app/api/web-leads/assignable-reps/route.ts",
+  "app/api/web-leads/territories/[id]/assign/route.ts",
+  "app/api/leads/[id]/assign/route.ts",
+  "app/api/leads/bulk/route.ts",
+  "app/api/manifest/[slug]/records/[entity]/route.ts",
+  "app/pipeline/new/page.tsx",
+  "app/api/leads/quick-add/route.ts",
+  "app/api/leads/import/route.ts",
+]) {
+  assert.match(
+    readFileSync(path, "utf8"),
+    /getOasisPipelineAssignmentRoster/,
+    `${path} must use the founder-only assignment roster rather than the manager read roster`,
+  );
+}
+const manifestCreateRoute = readFileSync("app/api/manifest/[slug]/records/[entity]/route.ts", "utf8");
+assert.match(
+  manifestCreateRoute,
+  /resolveAssignableTarget\(roster,\s*user\.id\)/,
+  "a non-admin OASIS creator must also resolve through the CC+Adon roster",
+);
+const quickAddRoute = readFileSync("app/api/leads/quick-add/route.ts", "utf8");
+assert.match(
+  quickAddRoute,
+  /resolveAssignableTarget\(roster,\s*sess\.userId\)/,
+  "OASIS quick-add must refuse self-assignment outside CC+Adon",
+);
+const importRoute = readFileSync("app/api/leads/import/route.ts", "utf8");
+assert.match(
+  importRoute,
+  /resolveAssignableTarget\(assignmentRoster,\s*assignedTo\)/,
+  "an imported OASIS owner must resolve through the same CC+Adon roster",
+);
+assert.match(
+  importRoute,
+  /error:\s*"assignee_required"/,
+  "an OASIS import must reject a row without a CC/Adon owner",
+);
+assert.match(
+  importRoute,
+  /pipelineCycleAssignmentFacts\(/,
+  "an OASIS import must stamp the assignment clock and current cycle together",
+);
+const cycleScript = readFileSync("scripts/plan-oasis-pipeline-cycle.ts", "utf8");
+assert.match(cycleScript, /DRY RUN/i);
+assert.match(cycleScript, /pipeline-cycle/);
+assert.doesNotMatch(cycleScript, /\.update\(|\.delete\(|\.upsert\(|\.rpc\(/, "the cycle tool is read/archive-only");
+
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({ isAdmin: true, userId: "admin", repFilter: null }),
+  { allowed: true, assignedTo: undefined },
+);
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({ isAdmin: true, userId: "admin", repFilter: "unassigned" }),
+  { allowed: true, assignedTo: null },
+);
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({ isAdmin: false, userId: "REP-1", repFilter: null }),
+  { allowed: true, assignedTo: "rep-1" },
+);
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({ isAdmin: false, userId: "rep-1", repFilter: "rep-2" }),
+  { allowed: false },
+  "a rep cannot widen the DB query to a colleague's book",
+);
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({
+    isAdmin: false,
+    userId: "manager-1",
+    repFilter: null,
+    canReadTeam: true,
+    teamRepUserIds: [" REP-1 ", "rep-2", "rep-1"],
+  }),
+  { allowed: true, assignedTo: undefined, assignedToAny: ["rep-1", "rep-2"] },
+  "manager default is the normalized tenant sales roster, not the whole tenant",
+);
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({
+    isAdmin: false,
+    userId: "manager-1",
+    repFilter: "REP-2",
+    canReadTeam: true,
+    teamRepUserIds: ["rep-1", "rep-2"],
+  }),
+  { allowed: true, assignedTo: "rep-2" },
+);
+for (const forged of ["unassigned", "founder-1", "foreign-rep", "random-uuid"]) {
+  assert.deepEqual(
+    resolveOasisPipelineAssigneeScope({
+      isAdmin: false,
+      userId: "manager-1",
+      repFilter: forged,
+      canReadTeam: true,
+      teamRepUserIds: ["rep-1", "rep-2"],
+    }),
+    { allowed: false },
+    `manager ?rep=${forged} must fail before querying`,
+  );
+}
+assert.deepEqual(
+  resolveOasisPipelineAssigneeScope({
+    isAdmin: false,
+    userId: "manager-1",
+    repFilter: null,
+    canReadTeam: true,
+    teamRepUserIds: [],
+  }),
+  { allowed: false },
+  "a missing roster fails closed",
+);
+
+const searchOr = buildRecordSearchOr(["name", "business_city"], "Acme, Inc. (Montréal)");
+assert.equal(
+  searchOr,
+  "data->>name.ilike.*Acme*Inc.*Montréal*,data->>business_city.ilike.*Acme*Inc.*Montréal*",
+  "reserved OR-grammar characters become wildcards without losing useful search terms",
+);
+assert.throws(() => buildRecordSearchOr(["name,stage.eq.researched"], "Acme"), /invalid search field/);
+
+async function main() {
+const totals: Record<string, number> = {
+  assigned: 145,
+  attempting_contact: 3,
+  connected: 2,
+  qualified: 1,
+  founder_meeting_booked: 4,
+};
+const calls: ListRecordsInput[] = [];
+const fakeList = async (input: ListRecordsInput): Promise<ListRecordsResult> => {
+  calls.push(input);
+  const requestedStages = input.whereIn?.stage ?? [String(input.where?.stage || "")];
+  const allRows = requestedStages.flatMap((stage) =>
+    Array.from({ length: totals[stage] || 0 }, (_, index) => ({
+      id: `${stage}-${index}`,
+      tenant_id: input.tenant_id,
+      entity_type: "lead",
+      data: {
+        name: "Acme, Inc. old deal",
+        stage,
+        assigned_to: input.where?.assigned_to,
+        sales_program: input.where?.sales_program,
+        sales_motion: input.where?.sales_motion,
+      },
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-08-24T00:00:00.000Z",
+    })),
+  );
+  const total = allRows.length;
+  const offset = input.offset || 0;
+  const limit = input.limit || 100;
+  return {
+    total,
+    rows: allRows.slice(offset, offset + limit),
+  };
+};
+
+const overview = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: OPENER_PIPELINE_STAGE_KEYS,
+    salesProgram: "website_sales_v1",
+    salesMotion: "cold_outbound",
+    assignedTo: "rep-1",
+    query: "Acme, Inc.",
+  },
+  { list: fakeList },
+);
+
+assert.equal(overview.activeStage, null);
+assert.equal(overview.stageCounts.assigned, 145, "stage count is the database total, not the 40-row window");
+assert.equal(overview.total, 155);
+assert.equal(
+  overview.rows.filter((row) => row.data.stage === "assigned").length,
+  OASIS_PIPELINE_OVERVIEW_LIMIT,
+  "overview stays bounded per stage",
+);
+assert.deepEqual(overview.truncatedStages, ["assigned"]);
+assert.deepEqual(
+  calls[0]?.whereIn?.stage,
+  OPENER_PIPELINE_STAGE_KEYS,
+  "the bounded read asks only for the opener's assigned lifecycle, never the researched pool",
+);
+assert.equal(calls.length, 1);
+assert.equal(calls[0].where?.sales_program, "website_sales_v1");
+assert.equal(calls[0].where?.sales_motion, "cold_outbound");
+assert.equal(calls[0].where?.assigned_to, "rep-1");
+assert.equal(calls[0].search?.query, "Acme, Inc.");
+assert.equal(calls[0].limit, 2_000);
+
+calls.length = 0;
+await listOasisPipelineWindow(
+  { tenantId: "tenant-1", stageKeys: ["assigned"], assignedTo: null },
+  { list: fakeList },
+);
+assert.deepEqual(calls[0].whereEmpty, ["assigned_to"]);
+assert.equal(calls[0].where?.assigned_to, undefined, "unassigned includes both null and legacy empty values");
+
+calls.length = 0;
+const clampedPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: OPENER_PIPELINE_STAGE_KEYS,
+    requestedStage: "assigned",
+    requestedPage: "999",
+    salesProgram: "website_sales_v1",
+    assignedTo: "rep-1",
+    query: "old deal",
+  },
+  { list: fakeList },
+);
+
+assert.equal(clampedPage.page, 2, "a stale page URL clamps to the last real page");
+assert.equal(clampedPage.rows.length, 45);
+assert.equal(clampedPage.shownFrom, 101);
+assert.equal(clampedPage.shownTo, 145);
+assert.equal(clampedPage.hasPrevious, true);
+assert.equal(clampedPage.hasNext, false);
+assert.equal(calls.length, 1, "one bounded server read drives exact active counts and pagination");
+assert.equal(calls[0].limit, 2_000);
+
+let viewerReads = 0;
+const viewerPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: OPENER_PIPELINE_STAGE_KEYS,
+    assignedTo: "rep-1",
+    viewerUserId: "REP-1",
+    salesMotion: "cold_outbound",
+  },
+  {
+    list: async () => {
+      throw new Error("self-scoped pipeline should use the owned-or-collaborating read");
+    },
+    listForViewer: async (input) => {
+      viewerReads += 1;
+      assert.equal(input.userId, "rep-1");
+      return {
+        total: 5,
+        rows: [
+          {
+            id: "expired-assigned",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: {
+              stage: "assigned",
+              assigned_to: "rep-1",
+              claimed_at: "2000-01-01T00:00:00.000Z",
+              sales_motion: "cold_outbound",
+            },
+            created_at: "2000-01-01T00:00:00.000Z",
+            updated_at: "2026-09-01T12:00:00.000Z",
+          },
+          {
+            id: "owned-lost",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "lost", assigned_to: "rep-1", sales_motion: "cold_outbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-31T12:00:00.000Z",
+          },
+          {
+            id: "collaborating-launched",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: {
+              stage: "launched",
+              assigned_to: "closer-1",
+              collaborators: ["rep-1"],
+              sales_motion: "cold_outbound",
+            },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-30T12:00:00.000Z",
+          },
+          {
+            id: "prospect-pool",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "researched", assigned_to: "rep-1", sales_motion: "cold_outbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-29T12:00:00.000Z",
+          },
+          {
+            id: "wrong-motion",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "won", assigned_to: "rep-1", sales_motion: "warm_inbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-28T12:00:00.000Z",
+          },
+        ],
+      };
+    },
+  },
+);
+assert.equal(viewerReads, 1, "one owned-or-collaborating read replaces one query per stage");
+assert.deepEqual(
+  viewerPage.rows.map((row) => row.id),
+  ["owned-lost", "collaborating-launched"],
+  "a rep retains active history and collaborator deals without also seeing an expired claim that returned to Leads",
+);
+assert.equal(
+  viewerPage.rows.some((row) => row.id === "expired-assigned"),
+  false,
+  "an expired claim cannot appear in both the Leads pool and the former rep's Pipeline",
+);
+assert.equal(viewerPage.stageCounts.lost, 1);
+assert.equal(viewerPage.stageCounts.launched, 1);
+
+let builderViewerReads = 0;
+let builderFulfillmentReads = 0;
+const builderPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["onboarding", "in_build", "client_review"],
+    assignedTo: "builder-1",
+    viewerUserId: "builder-1",
+    fulfillmentOwnerId: "BUILDER-1",
+  },
+  {
+    listForViewer: async (input) => {
+      builderViewerReads += 1;
+      return {
+        total: 1,
+        rows: [{
+          id: "builder-owned",
+          tenant_id: input.tenant_id,
+          entity_type: "lead",
+          data: { stage: "onboarding", assigned_to: "builder-1" },
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-30T12:00:00.000Z",
+        }],
+      };
+    },
+    list: async (input) => {
+      builderFulfillmentReads += 1;
+      assert.equal(input.where?.fulfillment_owner_id, "builder-1");
+      return {
+        total: 1,
+        rows: [{
+          id: "builder-delivery",
+          tenant_id: input.tenant_id,
+          entity_type: "lead",
+          data: {
+            stage: "in_build",
+            assigned_to: "closer-1",
+            fulfillment_owner_id: "builder-1",
+          },
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-31T12:00:00.000Z",
+        }],
+      };
+    },
+  },
+);
+assert.equal(builderViewerReads, 1);
+assert.equal(builderFulfillmentReads, 1);
+assert.deepEqual(
+  builderPage.rows.map((row) => row.id),
+  ["builder-owned", "builder-delivery"],
+  "the builder list includes both sales ownership and fulfillment-only delivery rows",
+);
+
+const teamCalls: ListRecordsInput[] = [];
+const teamList = async (input: ListRecordsInput): Promise<ListRecordsResult> => {
+  teamCalls.push(input);
+  assert.deepEqual(
+    input.whereIn?.assigned_to,
+    ["rep-1", "rep-2"],
+    "the roster must reach the parameterized database IN filter",
+  );
+  assert.equal(input.where?.assigned_to, undefined);
+  const total = 160;
+  const offset = input.offset || 0;
+  const limit = input.limit || 100;
+  const size = Math.max(0, Math.min(limit, total - offset));
+  return {
+    total,
+    rows: Array.from({ length: size }, (_, index) => {
+      const rank = offset + index;
+      const assignedTo = rank % 2 === 0 ? "rep-1" : "rep-2";
+      return {
+        id: `${assignedTo}-${rank}`,
+        tenant_id: input.tenant_id,
+        entity_type: "lead",
+        data: {
+          stage: "assigned",
+          assigned_to: assignedTo,
+          ...(rank === 0
+            ? { claimed_at: "2000-01-01T00:00:00.000Z", last_call_at: null }
+            : {}),
+        },
+        created_at: "2026-08-31T00:00:00.000Z",
+        updated_at: "2026-08-31T12:00:00.000Z",
+      };
+    }),
+  };
+};
+
+const teamPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned", "lost"],
+    requestedStage: "assigned",
+    requestedPage: "2",
+    assignedToAny: ["rep-1", "rep-2"],
+  },
+  { list: teamList },
+);
+assert.equal(teamPage.total, 159, "manager count excludes a released claim now visible in Leads");
+assert.equal(teamPage.rows.length, 59, "the second global page is based on the active filtered total");
+assert.equal(teamPage.shownFrom, 101);
+assert.equal(teamPage.shownTo, 159);
+assert.deepEqual(
+  teamCalls.map((call) => call.whereIn?.assigned_to),
+  [["rep-1", "rep-2"]],
+  "one DB-native roster query replaces one remote query per stage or rep",
+);
+assert.equal(
+  teamCalls[0]?.where?.stage,
+  undefined,
+  "the roster is fetched once and grouped into lifecycle stages in memory",
+);
+assert.equal(
+  teamPage.rows.some((row) => row.data.assigned_to === null || !row.data.assigned_to),
+  false,
+  "manager union contains no unassigned records",
+);
+
+let adminReads = 0;
+const adminPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned", "lost"],
+    salesMotion: "cold_outbound",
+  },
+  {
+    list: async (input) => {
+      adminReads += 1;
+      assert.equal(input.where?.stage, undefined);
+      assert.equal(input.where?.sales_motion, "cold_outbound");
+      assert.deepEqual(
+        input.whereNotEmpty,
+        ["assigned_to"],
+        "admin Pipeline must exclude ownerless working rows in the database before pagination",
+      );
+      return {
+        total: 4,
+        rows: [
+          { id: "admin-expired", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "rep-3", claimed_at: "2000-01-01T00:00:00.000Z", last_call_at: null, sales_motion: "cold_outbound" }, created_at: "", updated_at: "4" },
+          { id: "admin-assigned", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "rep-1", sales_motion: "cold_outbound" }, created_at: "", updated_at: "3" },
+          { id: "admin-lost-1", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "lost", assigned_to: "rep-1", sales_motion: "cold_outbound" }, created_at: "", updated_at: "2" },
+          { id: "admin-lost-2", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "lost", assigned_to: "rep-2", sales_motion: "cold_outbound" }, created_at: "", updated_at: "1" },
+        ],
+      };
+    },
+  },
+);
+assert.equal(adminReads, 1, "a bounded admin board is read once, not once per lifecycle stage");
+assert.deepEqual(adminPage.stageCounts, { assigned: 1, lost: 2 });
+assert.equal(adminPage.rows.some((row) => row.id === "admin-expired"), false);
+
+let adminRepReads = 0;
+const adminRepPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned"],
+    assignedTo: "rep-1",
+    salesMotion: "cold_outbound",
+  },
+  {
+    list: async (input) => {
+      adminRepReads += 1;
+      assert.equal(input.where?.assigned_to, "rep-1");
+      assert.deepEqual(input.whereIn?.stage, ["assigned"]);
+      return {
+        total: 2,
+        rows: [
+          { id: "rep-filter-expired", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "rep-1", claimed_at: "2000-01-01T00:00:00.000Z", last_call_at: null, sales_motion: "cold_outbound" }, created_at: "", updated_at: "2" },
+          { id: "rep-filter-active", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "rep-1", claimed_at: new Date().toISOString(), last_call_at: null, sales_motion: "cold_outbound" }, created_at: "", updated_at: "1" },
+        ],
+      };
+    },
+  },
+);
+assert.equal(adminRepReads, 1, "admin rep-filter scope must use one bounded read");
+assert.deepEqual(adminRepPage.rows.map((row) => row.id), ["rep-filter-active"]);
+assert.deepEqual(adminRepPage.stageCounts, { assigned: 1 });
+assert.equal(adminRepPage.total, 1, "admin rep-filter counts included a released claim");
+
+const conflicting = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned"],
+    assignedTo: "rep-1",
+    assignedToAny: ["rep-2"],
+  },
+  { list: teamList },
+);
+assert.equal(conflicting.total, 0, "conflicting assignee scopes fail closed");
+
+const boundedCycle = { id: "cycle-now", startedAt: "2026-09-23T06:00:00.000Z", focus: ["sales"] };
+const cycleWindow = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned"],
+    cycle: boundedCycle,
+  },
+  {
+    list: async () => ({
+      total: 3,
+      rows: [
+        { id: "old", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "cc", assigned_at: "2026-09-01T00:00:00Z" }, created_at: "", updated_at: "2026-09-01T00:00:00Z" },
+        { id: "explicit-current", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "cc", pipeline_cycle: "cycle-now" }, created_at: "", updated_at: "2026-09-01T00:00:00Z" },
+        { id: "new-assignment", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "adon", assigned_at: "2026-09-23T06:00:00.000Z" }, created_at: "", updated_at: "2026-09-23T06:00:00.000Z" },
+      ],
+    }),
+  },
+);
+assert.deepEqual(
+  cycleWindow.rows.map((row) => row.id),
+  ["explicit-current", "new-assignment"],
+  "the working board starts at the reversible cycle boundary while prior rows stay stored",
+);
+
+// ── The admin single-read must ask for the stages it will render ───────────
+//
+// It did not, and that made the ADMIN board the slow one — the opposite of how
+// the code reads. Measured on the live OASIS tenant: 1846 rows and 3.0 MB of
+// JSON in 1056 ms, of which 1678 were `researched`, a stage the page strips
+// out of `stages` before calling this. 91% of the payload was fetched to be
+// discarded by scopedWindowFromRows, whose first act is to drop any row whose
+// stage is not in stageKeys. With the predicate: 168 rows, 292 KB, 249 ms.
+//
+// A rep never reaches this branch (viewerUserId sends them to the per-stage
+// queries, capped at 40 rows each), so no rep-facing test would have caught it.
+{
+  const seen: Array<Record<string, unknown>> = [];
+  const adminList = async (input: Record<string, unknown>) => {
+    seen.push(input);
+    return {
+      total: 2,
+      rows: [
+        {
+          id: "a", tenant_id: "tenant-1", entity_type: "lead",
+          data: { stage: "assigned", assigned_to: "rep-1" },
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-08-24T00:00:00.000Z",
+        },
+        {
+          id: "b", tenant_id: "tenant-1", entity_type: "lead",
+          data: { stage: "connected", assigned_to: "rep-2" },
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+    };
+  };
+
+  const adminWindow = await listOasisPipelineWindow(
+    // No assignedTo and no viewerUserId — this is the admin/owner branch.
+    { tenantId: "tenant-1", stageKeys: ["assigned", "connected"] },
+    { list: adminList as never },
+  );
+
+  assert.equal(seen.length, 1, "the admin board is one read, not one per stage");
+  assert.deepEqual(
+    seen[0].whereIn,
+    { stage: ["assigned", "connected"] },
+    "the single read must be scoped to the stages that will be rendered",
+  );
+  assert.deepEqual(
+    seen[0].whereNotEmpty,
+    ["assigned_to"],
+    "the bounded admin read must exclude null and empty assignees before its 2,000-row cap",
+  );
+  assert.deepEqual(
+    adminWindow.rows.map((row) => row.id),
+    ["a", "b"],
+    "scoping the query must not change what the board shows",
+  );
+  assert.equal(adminWindow.stageCounts.assigned, 1);
+  assert.equal(adminWindow.stageCounts.connected, 1);
+}
+
+console.log("oasis-pipeline-query: ok");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

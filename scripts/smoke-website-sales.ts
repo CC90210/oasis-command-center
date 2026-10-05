@@ -3,11 +3,42 @@ import { existsSync, readFileSync } from "node:fs";
 import { AGENT_PIPELINE_STAGE_KEYS, filterWebsiteSalesRows } from "../lib/oasis-sales-pipeline-policy";
 import { OASIS_WEBSITE_TENANT_SLUG, dispositionPatch } from "../lib/website-sales-workflow";
 import { BOOKING_URL } from "../lib/marketing/routes";
+import { isUsableBookingUrl } from "../lib/booking-link";
 
 assert.equal(OASIS_WEBSITE_TENANT_SLUG, "oasis-webdev");
 assert.equal(existsSync("app/sales-engine/page.tsx"), false);
-assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, ["assigned", "attempting_contact", "connected", "qualified", "founder_meeting_booked"]);
-assert(BOOKING_URL.startsWith("https://calendar.app.google/"));
+assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, [
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+  "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
+  "won",
+  "lost",
+  "onboarding",
+  "in_build",
+  "client_review",
+  "launched",
+]);
+// THIS ASSERTION IS WHY THE DEAD LINK SURVIVED.
+//
+// It pinned the SHAPE of the URL, and the shape stayed perfect the whole time
+// the schedule behind it was deleted: `https://calendar.app.google/...` is what
+// an "Appointment not found" page looks like from here. A check that a string
+// starts with the right prefix cannot say anything about whether a prospect can
+// book, so it read as coverage while every CTA on the site was broken.
+//
+// The contract now is: absent is allowed (callers hide the CTA and offer email
+// instead), and anything present must survive lib/booking-link.ts — which, in
+// particular, refuses the retired URL by name. Liveness is not assertable here:
+// Google serves HTTP 200 and renders the error in JavaScript, so it needs a
+// real browser. See docs/BOOKING_LINK.md.
+assert(
+  BOOKING_URL === "" || isUsableBookingUrl(BOOKING_URL),
+  "a configured booking link must pass lib/booking-link.ts, not merely look right",
+);
 
 const rows = [
   { id: "legacy", data: { stage: "qualified", assigned_to: "rep-a" } },
@@ -15,7 +46,7 @@ const rows = [
   { id: "theirs", data: { sales_program: "website_sales_v1", stage: "assigned", assigned_to: "rep-b" } },
   { id: "internal", data: { sales_program: "website_sales_v1", stage: "proposal_sent", assigned_to: "rep-a" } },
 ];
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-a" }).map((row) => row.id), ["mine"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-a" }).map((row) => row.id), ["mine", "internal"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "admin", userId: "admin" }).map((row) => row.id), ["mine", "theirs", "internal"]);
 
 const now = "2026-08-19T12:00:00.000Z";
@@ -25,7 +56,8 @@ assert.throws(() => dispositionPatch("voicemail", "2026-08-18T12:00:00.000Z", no
 const route = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
 assert(route.includes("request_id_required"));
 assert(route.includes("idempotency_check_failed"));
-assert(route.includes("interaction_log_failed"));
+assert(route.includes("lifecycle_transition_failed"));
+assert(route.includes('rpc("transition_pipeline_lead"'));
 assert(route.includes('from("lead_interactions")'));
 
 const intake = readFileSync("lib/leads-import-service.ts", "utf8");

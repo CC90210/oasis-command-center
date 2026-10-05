@@ -1,10 +1,16 @@
 /**
  * GET /api/quests — read-only quest list for the OASIS Town Quest Log.
  *
- * Public path (per the Phase 5 directive). Returns CC's live ACTIVE_TASKS.md
- * state as rows from the Supabase `oasis_quests` table. The OASIS Town
- * Convex backend polls this every 60 seconds; the frontend renders a
- * Quest Log overlay panel.
+ * Returns CC's live ACTIVE_TASKS.md state as rows from the `oasis_quests`
+ * table.
+ *
+ * OPERATOR-ONLY since 2026-09-28 (P0-6, doc 02 F2). It was a public path "for
+ * Phase 5 proof-of-life", which served CC's whole task list (55 rows of
+ * internal work, counted live 2026-09-28) to anyone on the internet. It is off
+ * middleware's public list and admits a platform operator session only:
+ * 401 without a session, 404 for anyone else. The OASIS Town Convex backend
+ * that polled it every 60 s holds no session, so it no longer reads this; if
+ * that consumer is still alive it needs its own credential, not a public URL.
  *
  * Query params:
  *   status?     'open' | 'completed' | 'archived'   (default: not 'archived')
@@ -16,11 +22,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
+  // Before any read. Middleware already 401s a signed-out caller; this is the
+  // wall for a signed-in non-operator, and the backstop if the path is ever
+  // made public again.
+  const op = await resolvePlatformOperator();
+  if (!op.operator) return op.reason === "no_session" ? bad(401, "unauthorized") : bad(404, "not_found");
+
   const url = new URL(req.url);
   const status = url.searchParams.get("status");
   const bucket = url.searchParams.get("bucket");

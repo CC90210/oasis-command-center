@@ -8,6 +8,11 @@
  *
  * The state machine + polling logic lives in hooks/useBridgePairing.ts so
  * this file is a thin render-only wrapper. The Modal consumes the same hook.
+ *
+ * Operator only: page.tsx mounts it for a verified platform operator and
+ * passes `installRepo` (the private harness repo). Everyone else gets
+ * PairBridgeOnly, which shares the pairing hook but pairs an already-installed
+ * bridge only and never imports lib/bridge-install-command.ts.
  */
 
 import { useState } from "react";
@@ -24,10 +29,18 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import { operatorBridgeCommand } from "@/lib/bridge-install-command";
+import {
+  bridgeInstallCommands,
+  bridgeRestartCommand,
+  bridgeSupervisorLabel,
+} from "@/lib/bridge-install-guidance";
 
-export function InstallBridgeWizard() {
-  const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing();
+export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
+  const { os, setOs, mode, setMode, code, secondsLeft, phase, error, retryMint } = useBridgePairing();
+  // The operator's command: pair-only, or the full install from the private
+  // repo passed in by the operator-gated server component.
+  const oneLiner = code ? operatorBridgeCommand(os, code, mode, installRepo) : "";
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -44,7 +57,7 @@ export function InstallBridgeWizard() {
   return (
     <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-5">
       <div>
-        <h2 className="text-base font-bold text-fg">Pair this machine</h2>
+        <h2 className="text-base font-bold text-fg">Connect this computer</h2>
         <p className="text-xs text-fg-muted mt-0.5">
           One command on your machine. The dashboard polls for your bridge to come online — usually 60–90 seconds.
         </p>
@@ -78,7 +91,7 @@ export function InstallBridgeWizard() {
         <>
           <div className="space-y-2">
             <div className="text-[11px] uppercase tracking-wider font-bold text-fg-dim">
-              This machine
+              This computer
             </div>
             <div className="flex gap-2">
               <button
@@ -90,7 +103,7 @@ export function InstallBridgeWizard() {
                     : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                 }`}
               >
-                New machine — full install
+                New computer: full install
               </button>
               <button
                 type="button"
@@ -101,14 +114,25 @@ export function InstallBridgeWizard() {
                     : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                 }`}
               >
-                Already set up — pair only
+                Already installed: connect only
               </button>
             </div>
             <p className="text-[11px] text-fg-dim leading-relaxed">
               {mode === "install"
-                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
-                : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
+                ? "Installs the OASIS bridge on this computer, then connects it. Use it on a computer that has never had the bridge."
+                : "Connects a computer that already has the OASIS bridge. Nothing is installed. After it runs, restart the bridge so it picks up its new token."}
             </p>
+            {/* The full install clones a private repository, which only
+                OASIS's own computers can read today. Collapsed, so nobody
+                else is asked to sign in to GitHub. */}
+            {mode === "install" && (
+              <details className="text-[11px] text-fg-dim leading-relaxed">
+                <summary className="cursor-pointer hover:text-fg-muted">OASIS team computers only</summary>
+                <p className="mt-1.5">
+                  {"The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."}
+                </p>
+              </details>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -175,7 +199,7 @@ export function InstallBridgeWizard() {
           </div>
 
           <div className="text-xs text-fg-dim">
-            Prefer a download over a curl pipe? Grab the desktop installer at{" "}
+            Prefer the desktop app? The operator builds are on{" "}
             <Link
               href="/download"
               className="text-accent hover:text-accent-bright inline-flex items-center gap-1"
@@ -192,19 +216,20 @@ export function InstallBridgeWizard() {
           <div className="rounded-lg border border-status-engaged/40 bg-status-engaged/10 p-4 flex items-start gap-3">
             <Check className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold text-fg">{mode === "pair" ? "Paired ✓" : "Bridge is online."}</div>
+              <div className="font-bold text-fg">
+                {mode === "pair"
+                  ? "This computer is paired with OASIS AI Command Center."
+                  : "This computer is connected to OASIS AI Command Center."}
+              </div>
               <div className="text-sm text-fg-muted mt-1">
                 {mode === "pair" ? (
                   <>
                     Token issued and written to{" "}
                     <span className="font-mono">~/.oasis/bridge_token</span>. Start (or restart) your bridge daemon —
-                    e.g. <span className="font-mono">pm2 restart claude-bridge-ping</span> — and it&apos;ll connect with the new token.
+                    e.g. <span className="font-mono">{bridgeRestartCommand(os)}</span> — and it&apos;ll connect with the new token.
                   </>
                 ) : (
-                  <>
-                    Open any agent chat. The mode picker in the chat header will start defaulting to{" "}
-                    <span className="text-accent font-mono">CLI (bridge)</span> on Auto. Your chat now runs through this machine&apos;s Claude subscription with full file + script access.
-                  </>
+                  <>Agents can now use this computer for files, tools and scheduled jobs.</>
                 )}
               </div>
             </div>
@@ -212,30 +237,24 @@ export function InstallBridgeWizard() {
 
           {/*
             Self-sufficiency follow-up. The pair-code one-liner above starts
-            the bridge for THIS session but doesn't survive a reboot. Three
-            one-time commands wire it into PM2 so it (and the V6 + cron
-            daemons) auto-start on login. Optional — operators who shut down
-            their machine nightly should run them; always-on desktops can
-            skip.
+            the bridge for THIS session but doesn't survive a reboot. The
+            installed OASIS launcher selects the native supervisor for the OS.
           */}
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4 space-y-2">
             <div className="text-xs uppercase tracking-wider font-bold text-fg-dim">
               Optional · Make this survive reboots
             </div>
             <p className="text-xs text-fg-muted leading-relaxed">
-              The bridge is running in this session. To have it (plus the cron
-              poller, event-bus router, and override consumer) auto-start at
-              login, run these three one-time commands from the repo root:
+              The bridge is running in this session. To have it auto-start at
+              login under {bridgeSupervisorLabel(os)}, run these commands from
+              any directory:
             </p>
             <pre className="text-[11px] font-mono text-accent bg-bg-deep border border-bg-border rounded p-2.5 overflow-x-auto select-all">
-{`pm2 start ecosystem.config.js
-pm2 save
-pm2 startup    # follow the platform-specific line PM2 prints`}
+{bridgeInstallCommands(os)}
             </pre>
             <div className="text-[11px] text-fg-dim">
-              After this, your operator daemons (claude-bridge, claude-bridge-ping,
-              event-router, override-consumer) survive shutdowns and PM2 will
-              auto-restart any of them that crash.
+              The launcher uses its installed absolute path, so this works even
+              when the repo is elsewhere or your current terminal has not refreshed PATH.
             </div>
           </div>
 

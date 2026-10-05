@@ -1,15 +1,11 @@
 /**
- * POST /api/leads/[id]/stage-event — generic stage-engine trigger.
+ * POST /api/leads/[id]/stage-event — common communication-event trigger.
  *
- * Lets non-server-rendered surfaces (the SMS composer, future
- * voice-note recorders, manual operator "mark contacted" buttons)
- * fire a lead_stage_engine event without re-implementing the rule
- * lookup. The engine itself owns whether the event causes a
- * transition or is a no-op.
+ * Lets non-server-rendered communication surfaces report an outbound send or
+ * a signed form without re-implementing the tenant-aware rule lookup.
  *
- * Whitelisted event types only — operators can't synthesize a
- * `lead_replied_negative` from the UI (that's reserved for the
- * inbound classifier).
+ * OASIS qualification, booking, proposal, payment, and delivery transitions
+ * are not exposed here; they require the structured website-sales workflow.
  *
  * Body: { type: "outbound_email_sent" | "outbound_email_queued" |
  *                "form_signed" }
@@ -19,8 +15,10 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { dispatchLeadStageEvent, dispatchOasisOnlyEvent } from "@/lib/lead-stage-dispatcher";
-import type { OasisLeadStageEvent } from "@/lib/oasis-lead-stage-engine";
+import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,19 +29,6 @@ const COMMON_OPERATOR_TRIGGERABLE = new Set<string>([
   "outbound_email_sent",
   "outbound_email_queued",
   "form_signed",
-]);
-
-const OASIS_OPERATOR_TRIGGERABLE = new Set<OasisLeadStageEvent["type"]>([
-  "discovery_call_scheduled",
-  "lead_qualified",
-  "proposal_sent",
-  "proposal_viewed",
-  "contract_signed",
-  "onboarding_complete",
-  "lead_replied_negative",
-  "contract_ended",
-  "manual_outreach_started",
-  "manual_archive",
 ]);
 
 export async function POST(
@@ -66,31 +51,43 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
   const type = typeof body.type === "string" ? body.type : "";
-  if (!COMMON_OPERATOR_TRIGGERABLE.has(type) && !OASIS_OPERATOR_TRIGGERABLE.has(type as OasisLeadStageEvent["type"])) {
+  if (!COMMON_OPERATOR_TRIGGERABLE.has(type)) {
     return NextResponse.json(
       { ok: false, error: "event_type_not_allowed", type },
       { status: 400 },
     );
   }
 
-  const result = OASIS_OPERATOR_TRIGGERABLE.has(type as OasisLeadStageEvent["type"])
-    ? await dispatchOasisOnlyEvent({
-        type: type as OasisLeadStageEvent["type"],
-        tenantId: sess.tenantId,
-        leadId,
-      })
-    : await dispatchLeadStageEvent({
-        type: type as "outbound_email_sent" | "outbound_email_queued" | "form_signed",
-        tenantId: sess.tenantId,
-        leadId,
-      });
+  const tenantSlug = await resolveOwnedSlug(sess.tenantId);
+  if (!tenantSlug) {
+    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: isWebsiteSalesTenantSlug(tenantSlug) ? "owned_oasis_sales" : "crm",
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
+  }
+
+  const result = await dispatchLeadStageEvent({
+    type: type as "outbound_email_sent" | "outbound_email_queued" | "form_signed",
+    tenantId: sess.tenantId,
+    leadId,
+  });
 
   // Cache invalidation moved into the dispatcher (lib/lead-stage-
-  // dispatcher.ts) so every caller — API route, cloud tool,
+  // dispatcher.ts) so every caller — API route or webhook —
   // webhook — refreshes the operator's kanban + lead detail + tenant
-  // shell on a successful fire. Pre-extraction this lived inline
-  // here and in toolAdvanceLeadStage; the duplication would have
-  // drifted the first time someone added a new caller.
+  // shell on a successful fire.
 
   return NextResponse.json({
     ok: true,

@@ -27,6 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { createRecord, RecordsError } from "@/lib/manifest/data";
 import { promoteLeadToApplication } from "@/lib/applications/promote-lead-to-application";
+import { findExistingLead } from "@/lib/forms/agent-routing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,33 +54,6 @@ function sanitizeLeadData(raw: Record<string, unknown>): Record<string, unknown>
   for (const k of CONTROL_FIELDS) delete out[k];
   out.stage = "uw_sheet"; // server-forced; never from the sheet
   return out;
-}
-
-/** Find an existing lead for this merchant by email/phone (cross-sheet dedup). */
-async function findExistingLead(
-  db: ReturnType<typeof getServiceSupabase>,
-  tenantId: string,
-  email: string,
-  phone: string,
-): Promise<string | null> {
-  const safe = (v: string) => v && !/[(),]/.test(v);
-  const ors: string[] = [];
-  if (safe(email)) ors.push(`data->>email.eq.${email}`);
-  if (safe(phone)) ors.push(`data->>phone.eq.${phone}`);
-  if (ors.length === 0) return null;
-  const r = await db
-    .from("tenant_records")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .or(ors.join(","))
-    .limit(1)
-    .maybeSingle();
-  if (r.error) {
-    console.error("[scrub-candidates] findExistingLead error:", r.error.message);
-    return null; // fail open to createRecord — best-effort dedup
-  }
-  return (r.data as { id: string } | null)?.id ?? null;
 }
 
 /** Best-effort promote after the lead exists. A promote failure does NOT undo
@@ -198,7 +172,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const phone = String(raw.phone || "").trim();
 
   // Cross-sheet dedup: link to an existing merchant lead instead of duplicating.
-  const existingLeadId = await findExistingLead(db, tenantId, email, phone);
+  // The shared matcher the forms and quick-add use: values are bound, so an
+  // all-digit phone matches (it never did through the .or() string), and the
+  // sheet's business name only refuses a phone shared by a different
+  // business; it never matches on its own.
+  const existingLead = await findExistingLead(
+    tenantId,
+    { email, phone, business: String(raw.business_name || "") },
+    { matchOnBusinessName: false },
+  );
+  const existingLeadId = existingLead?.id ?? null;
   if (existingLeadId) {
     await db
       .from("scrub_candidates")

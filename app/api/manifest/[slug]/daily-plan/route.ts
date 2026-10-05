@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -139,10 +140,13 @@ export async function GET(
       (appData.business_name as string | undefined) ??
       (leadData.business_name as string | undefined) ??
       null;
-    const contact_name =
-      (appData.contact_name as string | undefined) ??
-      (leadData.contact_name as string | undefined) ??
-      null;
+    // The PERSON to ask for. This read only contact_name, which is empty on
+    // every lead on the OASIS board, so the daily plan showed no contact at all
+    // for the 1,853 leads whose owner we actually know. contactNameFor adds
+    // owner_name and refuses to return a name that IS the company, so widening
+    // it here cannot start printing a business in the person slot.
+    // Application data still wins over lead data, as before.
+    const contact_name = contactNameFor(appData) || contactNameFor(leadData) || null;
     return {
       id: row.id,
       category: row.category,

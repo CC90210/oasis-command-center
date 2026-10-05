@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +40,19 @@ function inferPlatform(userAgent: string | null) {
   return null;
 }
 
-export function GET(req: NextRequest) {
+/**
+ * OPERATOR ONLY since 2026-09-29 (F0 containment). The release assets live in
+ * CC90210/CEO-Agent, which went private that day, so this redirect hands anyone
+ * without access to that repo a GitHub 404. A verified platform operator is
+ * still sent to the file (their browser needs a GitHub session with access);
+ * everyone else goes back to /download, which explains the private beta.
+ */
+export async function GET(req: NextRequest) {
+  const op = await resolvePlatformOperator();
+  if (!op.operator) {
+    return NextResponse.redirect(new URL("/download", req.url));
+  }
+
   const url = new URL(req.url);
   const explicitPlatform = normalizePlatform(url.searchParams.get("platform"));
   const inferredPlatform = inferPlatform(req.headers.get("user-agent"));

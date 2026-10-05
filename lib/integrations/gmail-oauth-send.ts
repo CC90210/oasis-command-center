@@ -23,6 +23,11 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // CANSPAM_FOOTER, which had NO rep signature and a stale street address —
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
+import type { BrandKey } from "@/lib/email/brands";
+import { gmailMessageIdForIdempotencyKey } from "@/lib/integrations/email-delivery-safety";
+
+export { gmailMessageIdForIdempotencyKey } from "@/lib/integrations/email-delivery-safety";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -33,7 +38,7 @@ export type GmailOAuthSendResult =
   | {
       ok: false;
       provider: "gmail_oauth";
-      reason: "not_connected" | "refresh_failed" | "send_failed" | "suppressed" | "suppression_error";
+      reason: "not_connected" | "refresh_failed" | "send_failed" | "delivery_unknown" | "suppressed" | "suppression_error" | "sender_mismatch";
       error: string;
       http_status?: number;
     };
@@ -93,13 +98,34 @@ function encodeHeader(value: string): string {
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 }
 
+export function gmailAddressesMatch(actual: string, expected: string): boolean {
+  return actual.trim().toLowerCase() === expected.trim().toLowerCase();
+}
+
+export function gmailFailureReason(status: number): "send_failed" | "delivery_unknown" {
+  return status === 0 || status >= 500 ? "delivery_unknown" : "send_failed";
+}
+
 /** Build a base64url RFC-822 message (text/plain, UTF-8, base64 body). */
-function buildRawMessage(args: { from: string; to: string; subject: string; body: string }): string {
+export function buildGmailRawMessage(args: {
+  from: string;
+  to: string;
+  /** Already filtered — see finalizeCopyList. Omitted when empty. */
+  cc?: string;
+  subject: string;
+  body: string;
+  messageId?: string;
+}): string {
   const bodyB64 = Buffer.from(args.body, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n");
+  const cc = (args.cc || "").trim();
   const headers = [
     `From: ${args.from}`,
     `To: ${args.to}`,
+    // The lead's assigned rep. Without it a send from a rep's OWN mailbox
+    // leaves the rep who actually owns the lead with no copy anywhere.
+    ...(cc ? [`Cc: ${cc}`] : []),
     `Subject: ${encodeHeader(args.subject)}`,
+    ...(args.messageId ? [`Message-ID: ${args.messageId}`] : []),
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "Content-Transfer-Encoding: base64",
@@ -143,9 +169,17 @@ export async function sendGmailAsOperator(args: {
   tenantId: string;
   userId: string;
   to: string;
+  /** Who to copy — the lead's assigned rep first. See lead-copy-recipients.ts. */
+  cc?: string | string[] | null;
   subject: string;
   body: string;
   signer?: EmailSigner | null;
+  /** Which company this message is from. REQUIRED — see the sibling
+   *  app-password sender: this omitted it too, so every message it sent
+   *  carried SunBiz's legal footer regardless of which company it was for. */
+  brand: BrandKey;
+  expectedFromAddress?: string | null;
+  idempotencyKey?: string;
 }): Promise<GmailOAuthSendResult> {
   // Opt-out gate FIRST — before any token work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -162,6 +196,15 @@ export async function sendGmailAsOperator(args: {
   if (!refreshToken || !fromAddress) {
     return { ok: false, provider: "gmail_oauth", reason: "not_connected", error: "no gmail_oauth bundle" };
   }
+  const expectedFromAddress = args.expectedFromAddress?.trim().toLowerCase();
+  if (expectedFromAddress && !gmailAddressesMatch(fromAddress, expectedFromAddress)) {
+    return {
+      ok: false,
+      provider: "gmail_oauth",
+      reason: "sender_mismatch",
+      error: `connected mailbox does not match approved sender ${expectedFromAddress}`,
+    };
+  }
 
   // Use the stored access token if still fresh; else refresh.
   let accessToken = bundle.access_token || "";
@@ -174,11 +217,20 @@ export async function sendGmailAsOperator(args: {
     accessToken = ref.accessToken;
   }
 
-  const raw = buildRawMessage({
+  const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
+  const raw = buildGmailRawMessage({
     from: fromAddress,
     to: args.to,
+    ...(ccList.length ? { cc: ccList.join(", ") } : {}),
     subject: args.subject,
-    body: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
+    body: appendSignatureAndFooter(args.body, {
+      signer: args.signer,
+      fromAddress,
+      brand: args.brand,
+    }),
+    messageId: args.idempotencyKey
+      ? gmailMessageIdForIdempotencyKey(args.idempotencyKey)
+      : undefined,
   });
 
   let res = await gmailSend(accessToken, raw);
@@ -191,7 +243,8 @@ export async function sendGmailAsOperator(args: {
     res = await gmailSend(ref.accessToken, raw);
   }
   if (!res.ok) {
-    return { ok: false, provider: "gmail_oauth", reason: "send_failed", error: res.error, http_status: res.status };
+    const reason = gmailFailureReason(res.status);
+    return { ok: false, provider: "gmail_oauth", reason, error: res.error, http_status: res.status };
   }
   return {
     ok: true,

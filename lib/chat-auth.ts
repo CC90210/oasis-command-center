@@ -20,7 +20,8 @@
  *      no user override exists. cfgScope is "tenant".
  *
  *   3. PLATFORM FALLBACK (operatorPlatformFallback env var):
- *      Last-resort default for the platform operator's email only.
+ *      Last-resort default for the VERIFIED platform operator only
+ *      (lib/platform-operator.ts — an alias email is not enough).
  *      Used when:
  *        - No row exists at all (fresh tenant pre-AI-setup), OR
  *        - A row exists but its encrypted_api_key is null.
@@ -35,7 +36,8 @@
 import type { Provider } from "./providers";
 import { getServiceSupabase } from "./supabase-server";
 import { decryptField } from "./field-encryption";
-import { isOperatorEmail, operatorPlatformFallback } from "./operator-credentials";
+import { operatorPlatformFallback } from "./operator-credentials";
+import { isPlatformOperatorForAuthUser } from "./platform-operator";
 
 export type ChatAuthContext = {
   tenantId: string;
@@ -50,11 +52,20 @@ export type ChatAuthContext = {
    *  (chat header, persona self-introduction). Backend daemon logs
    *  still use the canonical agent name. Null = canonical name. */
   displayNameOverride: string | null;
-  /** True when the user matches isOperatorEmail. Useful for routes that
-   *  want to grant operator-only features beyond what auth covers. */
+  /** True when the user passed the VERIFIED platform-operator check
+   *  (lib/platform-operator.ts: alias AND owner/admin OASIS membership by
+   *  auth id). Routes that grant operator-only features beyond what auth
+   *  covers read this rather than re-deriving it. */
   isOperator: boolean;
   /** Which config row actually supplied the model/key, if any. */
   cfgScope: "user" | "tenant" | null;
+  /**
+   * Who pays for the key: "tenant" (a key the workspace or the teammate saved)
+   * or "platform" (OASIS's platform key, verified operator only). The AI usage
+   * ledger records it as billing_mode (lib/ai/usage.ts billingForKey).
+   * cfgScope cannot say this: a config row with no key still names its scope.
+   */
+  keySource: "tenant" | "platform";
 };
 
 export type ChatAuthError = {
@@ -134,11 +145,14 @@ export async function resolveChatContext(
       ? "tenant"
       : null;
 
-  const isOperator = isOperatorEmail(user.email || "");
+  // Keyed on the auth user, not the email alone: the platform key bills OASIS,
+  // and anyone could register an unclaimed alias. Fails closed (logged).
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   let provider: Provider;
   let model: string;
   let apiKey = "";
   let cfgOverride: string | null = null;
+  let keySource: "tenant" | "platform" = "tenant";
 
   if (cfg) {
     if (!cfg.enabled) {
@@ -156,6 +170,7 @@ export async function resolveChatContext(
       provider = fallback.provider;
       model = fallback.model;
       apiKey = fallback.apiKey;
+      keySource = "platform";
     } else {
       try {
         apiKey = decryptField(cfg.encrypted_api_key as string);
@@ -181,6 +196,7 @@ export async function resolveChatContext(
     provider = fallback.provider;
     model = fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
   }
 
   return {
@@ -193,5 +209,56 @@ export async function resolveChatContext(
     displayNameOverride,
     isOperator,
     cfgScope,
+    keySource,
   };
+}
+
+/**
+ * A chat session id from a request body, kept only when that session is the
+ * caller's own: this workspace's (from the session, never the body) and this
+ * person's, the same pair /api/chat/sessions lists by. Anything else (another
+ * workspace's id, a teammate's, a made-up one, or a failed read) comes back
+ * null, so the turn opens a new session instead of writing into someone else's
+ * and filing its AI usage under that id.
+ */
+export async function ownedChatSessionId(
+  sessionId: unknown,
+  tenantId: string,
+  userId: string,
+): Promise<string | null> {
+  if (typeof sessionId !== "string" || !sessionId.trim()) return null;
+  const owner = await chatSessionOwner(sessionId, tenantId, userId);
+  if (owner.state === "unavailable") {
+    console.error("[chat-auth] could not check a chat session's owner; opening a new one", { tenantId, error: owner.error });
+    return null;
+  }
+  if (owner.state === "not_owned") {
+    console.error("[chat-auth] a chat session id that is not the caller's was refused; opening a new one", { tenantId });
+    return null;
+  }
+  return sessionId;
+}
+
+/**
+ * Whether a chat session is the caller's own, with a failed read kept apart
+ * from "not yours": "owned" (this workspace's and this person's), "not_owned"
+ * (another workspace's or person's, or no such session, e.g. deleted), or
+ * "unavailable" (the read failed, so nobody knows). /api/chat can open a new
+ * session on anything but "owned"; /api/chat/resume cannot, because a resumed
+ * turn belongs to the session its signed state names, so it refuses instead.
+ */
+export async function chatSessionOwner(
+  sessionId: string,
+  tenantId: string,
+  userId: string,
+): Promise<{ state: "owned" } | { state: "not_owned" } | { state: "unavailable"; error: string }> {
+  const { data, error } = await getServiceSupabase()
+    .from("chat_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) return { state: "unavailable", error: error.message };
+  return data ? { state: "owned" } : { state: "not_owned" };
 }

@@ -20,15 +20,11 @@
  * invocations racing the same row can each only flip it out of 'pending'
  * once, so only one ever proceeds to send.
  *
- * Stale-'sending' recovery: if a prior invocation was killed mid-batch by
- * the platform's maxDuration (a claimed row's send hangs, e.g. TextTorrent's
- * client has no request timeout), that row would otherwise be stuck at
- * 'sending' forever — the claim query only looks at 'pending'. Fixed by
- * reclaiming any 'sending' row whose `scheduled_for` is more than
- * STALE_SENDING_MINUTES old back to 'pending' at the TOP of every run,
- * before claiming new work. A real send takes seconds, not minutes, so this
- * can't clash with an in-flight send from THIS invocation (it only reclaims
- * rows scheduled long before "now").
+ * Stale-'sending' recovery keys on `claimed_at`, never `scheduled_for`: an
+ * overdue row can be claimed seconds ago and must not look stale to an
+ * overlapping invocation. An interrupted send on either channel crosses an
+ * ambiguous provider boundary, so it becomes terminal review-required instead
+ * of auto-retrying.
  *
  * Dry-run gate: SMS sends re-check lib/integrations/send-mode.ts isDryRun()
  * right before the TextTorrent call — the SAME gate
@@ -37,6 +33,12 @@
  * must not be the one path that bypasses it. The email path has no such
  * gate, matching app/api/leads/[id]/email/route.ts (which doesn't check it
  * either) — an existing asymmetry in this codebase, not introduced here.
+ *
+ * Sender standing: every row goes out AS its actor — their own Gmail, their
+ * own TextTorrent line — and replies route back to them. A row a teammate
+ * queued before being deactivated (user_profiles.deactivated_at) must not
+ * fire from a retired person's mailbox, so the actor's standing in the row's
+ * tenant is re-read before any lane is chosen (senderMayDispatch).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -52,13 +54,29 @@ import {
 import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import { memberStanding, type MemberStanding } from "@/lib/team";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
+import {
+  recoverStaleDashboardEmailReservations,
+  type DashboardEmailReservationRecovery,
+} from "@/lib/leads/dashboard-email-reservations";
+import {
+  DeliveryStateUnknownError,
+  markScheduledSendDeliveryUnknown,
+  markScheduledSendPermanentFail,
+  markScheduledSendRetryOrFail,
+  markScheduledSendSent,
+  recoverStaleScheduledSendClaims,
+  releaseUnstartedScheduledSendClaims,
+  scheduledSendIdempotencyKey,
+} from "@/lib/scheduled-sends/delivery-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const BATCH_LIMIT = 50;
-const MAX_ATTEMPTS = 3;
 const STALE_SENDING_MINUTES = 15;
 // Soft time budget — stop claiming/processing further rows once we're this
 // deep into the 60s maxDuration, so the function returns cleanly instead of
@@ -79,6 +97,7 @@ type ClaimedRow = {
   actor_user_id: string;
   from_identity: string | null;
   attempts: number;
+  claimed_at: string | null;
 };
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -120,31 +139,68 @@ async function logInteraction(
   }
 }
 
-async function markSent(db: Db, id: string) {
-  await db
-    .from("scheduled_sends")
-    .update({ status: "sent", sent_at: new Date().toISOString() })
-    .eq("id", id);
-}
-
 /** Retryable failure — increments attempts, requeues to 'pending' (picked up
- *  next cron tick) until MAX_ATTEMPTS, then a permanent 'failed'. */
+ *  next cron tick) until the maximum, then a permanent 'failed'. */
 async function markRetryOrFail(db: Db, row: ClaimedRow, reason: string) {
-  const attempts = (row.attempts || 0) + 1;
-  const status = attempts >= MAX_ATTEMPTS ? "failed" : "pending";
-  await db
-    .from("scheduled_sends")
-    .update({ status, attempts, last_error: reason.slice(0, 500) })
-    .eq("id", row.id);
+  await markScheduledSendRetryOrFail(db, row, reason);
 }
 
 /** Non-retryable failure (confirmed opt-out/suppression) — permanent fail
  *  immediately regardless of attempt count; retrying can't change reality. */
 async function markPermanentFail(db: Db, row: ClaimedRow, reason: string) {
-  await db
-    .from("scheduled_sends")
-    .update({ status: "failed", attempts: (row.attempts || 0) + 1, last_error: reason.slice(0, 500) })
-    .eq("id", row.id);
+  await markScheduledSendPermanentFail(db, row, reason);
+}
+
+/** The provider may have accepted the delivery. Freeze it for manual review;
+ * automatic retry is forbidden because it can send a duplicate. */
+async function markDeliveryUnknown(db: Db, row: ClaimedRow, reason: string) {
+  await markScheduledSendDeliveryUnknown(db, row, reason);
+}
+
+/**
+ * Whether the row's actor may still send as themselves. Returns false once the
+ * row has been marked; true hands it to its lane unchanged. Standing is read
+ * only in the row's own tenant, and once per (tenant, actor) per pass — a
+ * batch often holds several rows from one rep.
+ *
+ *  - deactivated → permanent fail `sender_deactivated`. The send would leave
+ *    from their mailbox or line and pull the replies back to them; there is no
+ *    one else's credential to fall back to, so it never fires.
+ *  - not_member → today's behaviour: the lane's tenant-scoped credential
+ *    lookup decides, exactly as it did before this check existed.
+ *  - read error → the normal retry path, never a send: this row would go out
+ *    as the person, so an unknown standing must not send it. That holds for
+ *    the SunBiz automations that queue here too (Kixie voicemail follow-ups,
+ *    renewal notices) — a requeue delays them one tick, it does not drop them.
+ *    A failure is not cached, so the actor's next row asks again.
+ */
+async function senderMayDispatch(
+  db: Db,
+  row: ClaimedRow,
+  standings: Map<string, MemberStanding>,
+): Promise<boolean> {
+  const key = `${row.tenant_id}:${row.actor_user_id}`;
+  let standing = standings.get(key);
+  if (!standing) {
+    try {
+      standing = (await memberStanding(row.tenant_id, row.actor_user_id)).standing;
+    } catch (err) {
+      console.error("[dispatch-scheduled-sends] sender standing check failed", {
+        id: row.id,
+        tenant: row.tenant_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await markRetryOrFail(db, row, "sender_standing_check_failed");
+      return false;
+    }
+    standings.set(key, standing);
+  }
+  if (standing === "deactivated") {
+    console.warn("[dispatch-scheduled-sends] sender deactivated", { id: row.id, tenant: row.tenant_id });
+    await markPermanentFail(db, row, "sender_deactivated");
+    return false;
+  }
+  return true;
 }
 
 async function processSms(db: Db, row: ClaimedRow): Promise<void> {
@@ -198,6 +254,12 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
     } catch (err) {
       const reason =
         err instanceof TextTorrentError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : "send_failed";
+      if (
+        err instanceof TextTorrentError &&
+        (err.code === "network_error" || /^http_5\d\d$/.test(err.code))
+      ) {
+        return markDeliveryUnknown(db, row, reason);
+      }
       return markRetryOrFail(db, row, reason);
     }
   }
@@ -213,7 +275,7 @@ async function processSms(db: Db, row: ClaimedRow): Promise<void> {
     actorUserId: row.actor_user_id,
     metadata: { provider: "texttorrent", scheduled_send_id: row.id, from_number: row.from_identity, dry_run: dryRun },
   });
-  await markSent(db, row.id);
+  await markScheduledSendSent(db, row.id);
   await nudgeConversations(row.tenant_id);
 }
 
@@ -226,6 +288,16 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
 
   const subject = row.subject || "";
 
+  // Which company is this scheduled send from? Derived from the row's tenant,
+  // fail-closed. Both senders below appended the SunBiz legal footer to
+  // everything before 2026-09-09, because they called the footer helper without
+  // a brand and it defaulted. A cron has no operator watching it, so a
+  // mis-signed scheduled send is the least likely of all to be noticed.
+  const brand = brandForTenant({ tenantId: row.tenant_id });
+  if (!brand) {
+    return markPermanentFail(db, row, "no_sending_brand_for_tenant");
+  }
+
   // Same preference ladder as app/api/leads/[id]/email/route.ts minus the
   // submissions@ queue fallback — a cron has no session to drive the bridge
   // exec-tool, so a scheduled email send is per-rep Gmail only. Re-resolves
@@ -233,38 +305,68 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
   // persisted here) rather than trusting from_identity is still valid.
   let sendResult:
     | { ok: true; provider: string; from_address: string; message_id: string }
-    | { ok: false; reason: string };
+    | { ok: false; reason: string; error: string };
+  const idempotencyKey = scheduledSendIdempotencyKey(row.id);
 
   if (await operatorHasAppPassword(row.tenant_id, row.actor_user_id)) {
-    const g = await sendGmailAppPasswordAsOperator({
-      tenantId: row.tenant_id,
-      userId: row.actor_user_id,
-      to: row.to_email,
-      subject,
-      body: row.body,
-    });
+    let g: Awaited<ReturnType<typeof sendGmailAppPasswordAsOperator>>;
+    try {
+      g = await sendGmailAppPasswordAsOperator({
+        tenantId: row.tenant_id,
+        userId: row.actor_user_id,
+        to: row.to_email,
+        subject,
+        body: row.body,
+        brand,
+        idempotencyKey,
+      });
+    } catch (err) {
+      return markDeliveryUnknown(
+        db,
+        row,
+        err instanceof Error ? err.message : "app_password_provider_threw",
+      );
+    }
     sendResult = g.ok
       ? { ok: true, provider: "gmail_apppassword", from_address: g.from_address, message_id: g.gmail_message_id }
-      : { ok: false, reason: `${g.reason}: ${g.error}` };
+      : { ok: false, reason: g.reason, error: g.error };
   } else if (await operatorHasGmailOAuth(row.tenant_id, row.actor_user_id)) {
-    const g = await sendGmailAsOperator({
-      tenantId: row.tenant_id,
-      userId: row.actor_user_id,
-      to: row.to_email,
-      subject,
-      body: row.body,
-    });
+    let g: Awaited<ReturnType<typeof sendGmailAsOperator>>;
+    try {
+      g = await sendGmailAsOperator({
+        tenantId: row.tenant_id,
+        userId: row.actor_user_id,
+        to: row.to_email,
+        subject,
+        body: row.body,
+        brand,
+        idempotencyKey,
+      });
+    } catch (err) {
+      return markDeliveryUnknown(
+        db,
+        row,
+        err instanceof Error ? err.message : "oauth_provider_threw",
+      );
+    }
     sendResult = g.ok
       ? { ok: true, provider: "gmail_oauth", from_address: g.from_address, message_id: g.gmail_message_id }
-      : { ok: false, reason: `${g.reason}: ${g.error}` };
+      : { ok: false, reason: g.reason, error: g.error };
   } else {
-    sendResult = { ok: false, reason: "no_email_sender_connected" };
+    sendResult = { ok: false, reason: "not_connected", error: "no_email_sender_connected" };
   }
 
   if (!sendResult.ok) {
-    return markRetryOrFail(db, row, sendResult.reason);
+    if (sendResult.reason === "delivery_unknown") {
+      return markDeliveryUnknown(db, row, sendResult.error);
+    }
+    return markRetryOrFail(db, row, `${sendResult.reason}: ${sendResult.error}`);
   }
 
+  // Commit the terminal queue state before secondary bookkeeping. Once the
+  // provider says sent, no logging or realtime failure may make this row
+  // retryable again.
+  await markScheduledSendSent(db, row.id);
   await logInteraction(db, {
     tenantId: row.tenant_id,
     leadId: row.lead_id,
@@ -281,8 +383,14 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
       scheduled_send_id: row.id,
     },
   });
-  await markSent(db, row.id);
-  await nudgeConversations(row.tenant_id);
+  try {
+    await nudgeConversations(row.tenant_id);
+  } catch (err) {
+    console.error("[dispatch-scheduled-sends] conversation nudge failed after email sent", {
+      scheduledSendId: row.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function handleDispatch(req: NextRequest): Promise<NextResponse> {
@@ -294,27 +402,46 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   const nowIso = new Date().toISOString();
   const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
 
-  // 1) Stale-'sending' recovery — see file header. Best-effort; a failure
-  // here just means a stuck row waits for the next run's recovery attempt.
-  let reclaimed = 0;
+  // Recover direct-email requests that were interrupted by a platform kill.
+  // Pre-dispatch reservations are safe to queue; a row whose provider call
+  // already began is terminally marked unknown and NEVER auto-retried.
+  let dashboardEmailRecovery: DashboardEmailReservationRecovery = {
+    inspected: 0,
+    queued: 0,
+    delivery_unknown: 0,
+    raced: 0,
+    errors: 0,
+  };
   try {
-    const reclaim = await db
-      .from("scheduled_sends")
-      .update({ status: "pending" })
-      .eq("status", "sending")
-      .lt("scheduled_for", staleBeforeIso)
-      .select("id");
-    reclaimed = reclaim.data?.length || 0;
+    dashboardEmailRecovery = await recoverStaleDashboardEmailReservations({ db });
+  } catch (err) {
+    dashboardEmailRecovery.errors += 1;
+    console.error("[dispatch-scheduled-sends] dashboard email reservation recovery failed", err);
+  }
+
+  // 1) Stale-'sending' recovery. Claim age is the lease clock; scheduled_for
+  // says when work was due and may already be hours old at the instant a fresh
+  // worker claims it. Either channel may have crossed the provider boundary,
+  // so every stale in-flight row is frozen for review and never auto-re-sent.
+  const reclaimed = 0;
+  let deliveryUnknownRecovered = 0;
+  try {
+    const recovery = await recoverStaleScheduledSendClaims({ db, staleBeforeIso });
+    deliveryUnknownRecovered =
+      recovery.emailDeliveryUnknown + recovery.smsDeliveryUnknown;
   } catch (err) {
     console.error("[dispatch-scheduled-sends] stale reclaim failed", err);
   }
 
-  // 2) Find due pending work.
+  // 2) Find due pending work. A retired tenant's rows are excluded in the
+  // query, before the LIMIT: they must never be claimed or sent, and filtering
+  // afterwards would let them occupy every slot of the batch.
   const dueRes = await db
     .from("scheduled_sends")
     .select("id")
     .eq("status", "pending")
     .lte("scheduled_for", nowIso)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("scheduled_for", { ascending: true })
     .limit(BATCH_LIMIT);
   if (dueRes.error) {
@@ -322,7 +449,14 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   }
   const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
   if (dueIds.length === 0) {
-    return NextResponse.json({ ok: true, reclaimed, claimed: 0, processed: 0 });
+    return NextResponse.json({
+      ok: true,
+      reclaimed,
+      delivery_unknown_recovered: deliveryUnknownRecovered,
+      dashboard_email_recovery: dashboardEmailRecovery,
+      claimed: 0,
+      processed: 0,
+    });
   }
 
   // 3) Claim: conditional UPDATE (status still 'pending' at write time) —
@@ -330,11 +464,11 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   // header for the race-safety argument.
   const claimRes = await db
     .from("scheduled_sends")
-    .update({ status: "sending" })
+    .update({ status: "sending", claimed_at: nowIso })
     .in("id", dueIds)
     .eq("status", "pending")
     .select(
-      "id, tenant_id, lead_id, thread_key, channel, to_phone, to_email, subject, body, actor_user_id, from_identity, attempts",
+      "id, tenant_id, lead_id, thread_key, channel, to_phone, to_email, subject, body, actor_user_id, from_identity, attempts, claimed_at",
     );
   if (claimRes.error) {
     return NextResponse.json({ ok: false, error: claimRes.error.message }, { status: 500 });
@@ -342,22 +476,59 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   const claimed = (claimRes.data || []) as ClaimedRow[];
 
   // 4) Process serially, each fully isolated by try/catch so one bad row
-  // never blocks the rest of the batch. Stop early if we're eating into the
-  // platform timeout — remainder stays 'sending' and is caught by the
-  // stale-reclaim above on a later run.
+  // never blocks the rest of the batch. If the soft budget ends this loop,
+  // untouched claims are released below before the invocation returns.
   let processed = 0;
   let sentCount = 0;
   let failedCount = 0;
+  const senderStandings = new Map<string, MemberStanding>();
   for (const row of claimed) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     try {
-      if (row.channel === "sms") await processSms(db, row);
-      else await processEmail(db, row);
+      if (await senderMayDispatch(db, row, senderStandings)) {
+        if (row.channel === "sms") await processSms(db, row);
+        else await processEmail(db, row);
+      }
     } catch (err) {
       console.error("[dispatch-scheduled-sends] unhandled row error", row.id, err);
-      await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(() => {});
+      if (!(err instanceof DeliveryStateUnknownError)) {
+        await markRetryOrFail(
+          db,
+          row,
+          err instanceof Error ? err.message : "unhandled_error",
+        ).catch((stateErr) => {
+          console.error("[dispatch-scheduled-sends] retry state update failed", row.id, stateErr);
+        });
+      }
     }
     processed++;
+  }
+
+  // The soft budget can stop this loop before every batch claim is started.
+  // Return those untouched leases immediately: they definitely did not cross
+  // a provider boundary and must remain safe to process on the next tick.
+  const unstarted = claimed.slice(processed);
+  const releasedUnstarted = await releaseUnstartedScheduledSendClaims({
+    db,
+    ids: unstarted.map((row) => row.id),
+    claimedAt: nowIso,
+  });
+  if (releasedUnstarted !== unstarted.length) {
+    console.error("[dispatch-scheduled-sends] unstarted claim release incomplete", {
+      claimedAt: nowIso,
+      expected: unstarted.length,
+      released: releasedUnstarted,
+    });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "unstarted_claim_release_incomplete",
+        claimed: claimed.length,
+        processed,
+        released_unstarted: releasedUnstarted,
+      },
+      { status: 500 },
+    );
   }
 
   // Best-effort post-hoc tally for the response (not load-bearing — status
@@ -378,8 +549,11 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({
     ok: true,
     reclaimed,
+    delivery_unknown_recovered: deliveryUnknownRecovered,
+    dashboard_email_recovery: dashboardEmailRecovery,
     claimed: claimed.length,
     processed,
+    released_unstarted: releasedUnstarted,
     sent: sentCount,
     failed: failedCount,
   });

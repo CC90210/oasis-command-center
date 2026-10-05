@@ -63,20 +63,29 @@ export async function signInWithPassword(
 }
 
 export async function requestPasswordReset(
-    email: string, redirectTo: string,
+    email: string,
+    _redirectTo: string,
+    options?: { inviteToken?: string },
 ): Promise<{ ok: boolean; error?: string }> {
     if ((await authMode()) === "turso") {
         const r = await fetch("/api/auth/turso-reset-request", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email }),
+            body: JSON.stringify({ email, invite_token: options?.inviteToken || undefined }),
         });
-        // Deliberately uniform: this endpoint always 200s so it cannot be used
-        // to discover which addresses have accounts.
-        return r.ok ? { ok: true } : { ok: false, error: "could not send reset email" };
+        const j = await r.json().catch(() => ({}));
+        // Unauthenticated requests remain uniform. The route returns a specific
+        // non-200 error only when a signed-in user requests their own reset.
+        return r.ok
+            ? { ok: true }
+            : { ok: false, error: j?.error || "could not send reset email" };
     }
+    // The legacy provider cannot validate our Turso tenant-invite email pin.
+    // Keep its callback deliberately free of invite/email query capabilities;
+    // only the Turso reset-request route may add a verified invite continuation.
+    const cleanRedirectTo = new URL("/auth/reset-password", window.location.origin).toString();
     const { error } = await getBrowserSupabase().auth.resetPasswordForEmail(
-        email, { redirectTo });
+        email, { redirectTo: cleanRedirectTo });
     return error ? { ok: false, error: error.message } : { ok: true };
 }
 

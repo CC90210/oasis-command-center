@@ -28,9 +28,56 @@
 
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import type { Tenant } from "@/lib/supabase";
 import { chatAgentKeys } from "@/lib/agent-personas";
+import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { getManifest } from "./loader";
-import { getManifestRow } from "./persistence";
+import { getManifestRow, getManifestSlugForTenant } from "./persistence";
+import { resolveEnabledAgentSlugs } from "./agent-roster";
+import { OASIS_SEED_TENANT_IDS } from "./seeds";
+
+/**
+ * The two facts the ownership rule reads. resolveDataTenant and
+ * ownsSlugOrThrow differ only in what a FAILED read means, so they share the
+ * rule itself (ownsUnder) and cannot disagree about who owns a slug.
+ */
+type OwnershipReads = {
+  /** The manifest row that claims `slug` (only its tenant binding matters), or null when none does. */
+  row: (slug: string) => Promise<{ tenant_id: string | null } | null>;
+  /** The caller's tenants row. Read only when no manifest row claims the slug. */
+  tenant: (tenantId: string) => Promise<Pick<Tenant, "slug" | "custom_fields"> | null>;
+};
+
+async function ownsUnder(slug: string, userTenantId: string, reads: OwnershipReads): Promise<boolean> {
+  const row = await reads.row(slug);
+  if (row) return !!row.tenant_id && row.tenant_id === userTenantId;
+  const userSlug = resolveClientProfileSlug(await reads.tenant(userTenantId));
+  return !!userSlug && userSlug.toLowerCase() === slug.toLowerCase();
+}
+
+/** A failed read answers "no row" / "no tenant": preview mode for a renderer, 403 for a write API. */
+const LENIENT_READS: OwnershipReads = {
+  row: (slug) => getManifestRow(slug).catch(() => null),
+  tenant: async (tenantId) => (await getTenant(tenantId).catch(() => null)) || null,
+};
+
+/**
+ * A failed read THROWS. getTenant answers a failed read with null, so these
+ * read the columns the rule needs themselves.
+ */
+const STRICT_READS: OwnershipReads = {
+  row: async (slug) => {
+    const r = await getServiceSupabase().from("tenant_manifests").select("tenant_id").eq("slug", slug).maybeSingle();
+    if (r.error) throw new Error(`tenant_manifests read failed: ${r.error.message}`);
+    return (r.data as { tenant_id: string | null } | null) ?? null;
+  },
+  tenant: async (tenantId) => {
+    const r = await getServiceSupabase().from("tenants").select("slug, custom_fields").eq("id", tenantId).maybeSingle();
+    if (r.error) throw new Error(`tenants read failed: ${r.error.message}`);
+    return (r.data as Pick<Tenant, "slug" | "custom_fields"> | null) ?? null;
+  },
+};
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -43,16 +90,50 @@ export async function resolveDataTenant(
   userTenantId: string | null
 ): Promise<string | null> {
   if (!userTenantId) return null;
-  const row = await getManifestRow(slug).catch(() => null);
-  if (row?.tenant_id && row.tenant_id === userTenantId) return userTenantId;
-  if (!row) {
-    const tenant = await getTenant(userTenantId).catch(() => null);
-    const userSlug = resolveClientProfileSlug(tenant || null);
-    if (userSlug && userSlug.toLowerCase() === slug.toLowerCase()) {
-      return userTenantId;
-    }
-  }
-  return null;
+  return (await ownsUnder(slug, userTenantId, LENIENT_READS)) ? userTenantId : null;
+}
+
+/**
+ * ownsSlug for a page GATE (lib/tenant-access.ts requireOwnedTenantSlug): the
+ * same rule, but a read that fails THROWS instead of answering "not yours".
+ * resolveDataTenant's null is right for a renderer (preview mode) and a write
+ * API (403); a gate turns it into the 404 a stranger gets, so a Turso blip
+ * would 404 a workspace's own owner with nothing in the logs to tell it from a
+ * refusal (W1a review R3).
+ */
+export async function ownsSlugOrThrow(slug: string, userTenantId: string | null): Promise<boolean> {
+  if (!userTenantId) return false;
+  return ownsUnder(slug, userTenantId, STRICT_READS);
+}
+
+/**
+ * The inverse of resolveDataTenant: "which slug does THIS caller own?"
+ *
+ * Pages that render a write surface (ManifestRecordForm, LeadPipelineView)
+ * must send a slug the records API will accept, or every save 403s with
+ * slug_not_owned. Hardcoding one — /pipeline shipped `tenantSlug="oasis"` —
+ * breaks the moment the real tenant is slugged anything else, which every
+ * OASIS workspace is (oasis-ai-cc, oasis-webdev). The seed manifest keyed
+ * "oasis" let the request past manifestExists() and straight into the
+ * ownership gate, so the failure surfaced as a permission error on a lead
+ * the operator plainly owns.
+ *
+ * Both branches below return a value resolveDataTenant grants on:
+ *   1. the tenant's own manifest row slug → matches on row.tenant_id;
+ *   2. resolveClientProfileSlug(tenant) → matches the no-row fallback.
+ * Client and server therefore cannot disagree about the namespace.
+ *
+ * Returns null when there's no tenant or no resolvable slug — callers
+ * render read-only rather than shipping a slug that is going to 403.
+ */
+export async function resolveOwnedSlug(
+  userTenantId: string | null
+): Promise<string | null> {
+  if (!userTenantId) return null;
+  const claimed = await getManifestSlugForTenant(userTenantId).catch(() => null);
+  if (claimed) return claimed;
+  const tenant = await getTenant(userTenantId).catch(() => null);
+  return resolveClientProfileSlug(tenant || null);
 }
 
 /** True when the caller owns the slug (data access granted). */
@@ -101,9 +182,19 @@ export async function getTenantEnabledAgents(
 ): Promise<string[]> {
   const manifest = await getTenantManifestForUser(userTenantId);
   if (!manifest) return [];
-  return (manifest.agents || [])
-    .filter((a) => a.enabled)
-    .map((a) => a.slug.toLowerCase());
+  return resolveEnabledAgentSlugs({ manifestAgents: manifest.agents || [] });
+}
+
+/**
+ * The agents an OPERATOR surface lists for OASIS's own workspaces (by tenant
+ * id): a tenant cron's agent key (POST and PATCH /api/cron-jobs), /operations'
+ * workers and tapes, /health's integrations. That is the house agents OASIS's
+ * bridge runs (lib/agents.ts OASIS_RUNTIME_AGENT_KEYS), not its business
+ * roster, which is its department leads since W4a (decision 21; review R4).
+ * Null for every other workspace: the caller keeps its enabled roster.
+ */
+export function oasisOperatorAgents(tenantId: string | null | undefined): string[] | null {
+  return tenantId && OASIS_SEED_TENANT_IDS.has(tenantId) ? [...OASIS_RUNTIME_AGENT_KEYS] : null;
 }
 
 /**
@@ -121,9 +212,9 @@ export async function getTenantEnabledAgents(
  *
  * Order of precedence:
  *   1. tenant_manifests.manifest.agents.filter(enabled) — the canonical
- *      "what this tenant has" list.
- *   2. user_profiles.agents_enabled — legacy per-user override (kept for
- *      back-compat with tenants that haven't fully migrated to manifest).
+ *      "what this tenant has" list, including an intentionally empty list.
+ *   2. user_profiles.agents_enabled — legacy per-user fallback only when no
+ *      manifest resolves (kept for tenants that haven't migrated yet).
  *   3. empty array — caller decides what empty means.
  *
  * Operator-bypass: when isOperator is true the caller can do its own
@@ -135,12 +226,11 @@ export async function getTenantAwareEnabledAgents(args: {
   userTenantId: string | null;
   profileAgentsEnabled?: string[] | null;
 }): Promise<string[]> {
-  const manifestSlugs = await getTenantEnabledAgents(args.userTenantId);
-  if (manifestSlugs.length > 0) return manifestSlugs;
-  const profileSlugs = (args.profileAgentsEnabled || [])
-    .filter(Boolean)
-    .map((s) => s.toLowerCase());
-  return profileSlugs;
+  const manifest = await getTenantManifestForUser(args.userTenantId);
+  return resolveEnabledAgentSlugs({
+    manifestAgents: manifest ? manifest.agents || [] : null,
+    legacyProfileAgents: args.profileAgentsEnabled,
+  });
 }
 
 

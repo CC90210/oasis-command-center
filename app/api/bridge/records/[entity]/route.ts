@@ -45,6 +45,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { rateLimit } from "@/lib/rate-limit";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 
 /** Token-bucket gate — applied BEFORE the bridge token check so
  *  brute-forcers can't probe the hash-comparison timing. Writes get
@@ -76,6 +78,30 @@ type Pairing = {
   user_id: string | null;
   revoked_at: string | null;
 };
+
+async function rejectUnsafeOasisLeadWrite(
+  tenantId: string,
+  entity: string,
+): Promise<NextResponse | null> {
+  if (entity !== "lead") return null;
+  const tenantSlug = await resolveOwnedSlug(tenantId);
+  if (!tenantSlug) {
+    return NextResponse.json(
+      { ok: false, error: "tenant_scope_unresolved" },
+      { status: 503 },
+    );
+  }
+  if (!isWebsiteSalesTenantSlug(tenantSlug)) return null;
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "canonical_sales_workflow_required",
+      message:
+        "Raw bridge writes cannot mutate OASIS leads. Use the claim, import, assignment, or lifecycle workflow so CC/Adon ownership and the active cycle remain intact.",
+    },
+    { status: 409 },
+  );
+}
 
 /**
  * Validate the bearer token + return the bridge_pairing row. Single
@@ -122,6 +148,8 @@ export async function POST(
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;
+  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenant_id, entity);
+  if (unsafeWrite) return unsafeWrite;
 
   let body: { data?: Record<string, unknown> };
   try {
@@ -162,6 +190,8 @@ export async function PATCH(
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;
+  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenant_id, entity);
+  if (unsafeWrite) return unsafeWrite;
 
   const id = new URL(req.url).searchParams.get("id");
   if (!id) {

@@ -5,36 +5,44 @@ on:
   push:
     branches: [main]
 
+# ONE RUN PER REF (2026-09-29, F0 release gate). A newer push to the same ref
+# cancels the run still going for the older one. On main this is what makes a
+# deploy that waits for CI (a workflow_run trigger on this workflow) safe:
+# without it, two pushes close together can finish CI in either order, each
+# success starts a deploy, and the deploy's cancel-in-progress group lets the
+# LAST one to start win, which can be the older commit. A superseded run ends
+# as cancelled, and a deploy gated on success skips it. On a pull request it
+# stops a stale head from holding a runner for the full build.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # SAME TOOLCHAIN AS THE DEPLOY (2026-09-29, F0 release gate).
+      # Production is the OpenNext Worker that deploy-cloudflare.yml builds on
+      # Node 22 from `npm ci`. This job used to build plain `next build` on
+      # Node 20 from `npm install`, so a green check here said nothing about
+      # the artifact that ships: a different Node, a dependency tree the
+      # lockfile does not pin, and no OpenNext or wrangler step at all.
+      # Node version, install command and build command now match the deploy.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '22'
           cache: npm
-      # `npm ci` cannot install this project on Linux.
-      #
-      # package-lock.json is generated on Windows, and npm records optional
-      # platform-specific dependencies only for the host platform. Linux
-      # resolves a different `sharp` variant, which pulls
-      # @emnapi/runtime@1.11.3 — an entry a Windows-generated lockfile does
-      # not contain. `npm ci` treats that as a lockfile/manifest mismatch
-      # and aborts, so EVERY run since 2026-08-01 died at the install step
-      # before reaching typecheck, lint, tests or build.
-      #
-      # That is worse than it sounds: the pipeline was red continuously, so
-      # nothing it was supposed to guard was actually being guarded, and a
-      # test added to it changed nothing. A CI that cannot install is not a
-      # weaker gate, it is no gate.
-      #
-      # `npm install` resolves per-platform on the runner and installs
-      # correctly. It trades strict lockfile determinism for a pipeline that
-      # runs at all, which is the right trade while the lockfile cannot be
-      # regenerated on Linux. Proper fix when someone has a Linux shell:
-      # regenerate package-lock.json there and restore `npm ci`.
-      - run: npm install --no-audit --no-fund
+      # `npm ci` is back. From 2026-08-01 it could not install here: the
+      # Windows-generated lockfile lacked @emnapi/runtime@1.11.3, the entry
+      # Linux's `sharp` variant needs, and the job ran `npm install` instead.
+      # The lockfile has carried that entry since, and deploy-cloudflare.yml
+      # installs with `npm ci` on this same runner image on every push to main
+      # (green on 2026-09-29), so CI can pin the exact tree the deploy builds.
+      # If the lockfile loses a Linux entry again, this step fails before the
+      # deploy does, which is where that should be found.
+      - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
       - name: Tests
@@ -60,8 +68,9 @@ jobs:
           #
           # Setting the condition here fixes the whole step at once instead of
           # rewriting 48 invocations, and it is what test:watermark already
-          # does inline. Verified on node v20.20.2 (the version this job pins)
-          # that --conditions IS honoured via NODE_OPTIONS.
+          # does inline. Verified on node v20.20.2 that --conditions IS honoured
+          # via NODE_OPTIONS; Node 22 (pinned since 2026-09-29) honours it the
+          # same way, and every server-only test below fails at import if not.
           NODE_OPTIONS: --conditions=react-server
         run: |
           npm run test:sunbiz
@@ -76,11 +85,23 @@ jobs:
           # against a real half-applied boundary and then never run by anything
           # but a human on demand. A guard nothing executes is documentation.
           npm run test:founders-marketing
+          # FOUNDERS > Finances (2026-09-24): the balanced-entry invariant,
+          # GST/QST math, own-day FX, Stripe signature + idempotency, import
+          # dedupe, personal-book privacy, and revenueCollected never counting
+          # a Stripe-paid invoice twice — run against a real local libSQL file.
+          npm run test:finances
           # A client's book must never render on an OASIS surface. Added
           # 2026-08-17 after the Breeze underwriting queue appeared on
           # top-level /automations because the gate keyed on operator ROLE
           # rather than on which tenant's surface was being rendered.
           npm run test:isolation
+          # OASIS OS shell + Phase-0 security (ADDED 2026-09-29). These are the
+          # gate tests the OS plan names (operator check by auth id, admin
+          # surfaces, env fallback OASIS-only, invite-only signup, tool
+          # default-deny, retired-tenant producers, approvals exactly-once,
+          # unknown-is-not-zero) and none of them had a CI entry: every OS PR
+          # before this one deployed on typecheck + build alone.
+          npm run test:os
           # Repo invariant: the chat's CLI-runtime storage key is declared
           # once. It used to be a literal in two files synchronised by a
           # comment — desyncing them breaks the runtime picker silently.
@@ -93,12 +114,34 @@ jobs:
           # OASIS website-sales appointment-setting workflow: role isolation,
           # lifecycle transitions, idempotent handoffs and production smoke.
           npm run test:website-sales
+          # Schedule calendar (2026-09-29): recurrence + DST, "this/following/
+          # all" edit planning, overlap layout, sunset math against published
+          # Montreal times, and the Shabbat lock the server enforces on writes.
+          npm run test:calendar
+          # ADDED 2026-09-08. 26 of the 27 tests/web-leads-*.test.ts files were
+          # in NO npm script, so CI had never run one of them. That is how the
+          # owner-tier filters shipped returning zero rows against 1,668
+          # owner-named leads and stayed that way: the tier had unit tests, they
+          # were green, nothing executed them — and run, they still passed,
+          # because they fed enrichmentTier objects that already carried an
+          # owner name while the real path fetched a projection that dropped it.
+          # This suite runs every file and names every failure rather than
+          # stopping at the first.
+          npm run test:web-leads
+          # Twilio carrier commands, durable inbound queue, sender selection,
+          # consent, suppression, and the existing SMS compliance invariants.
+          npm run test:sms-agent
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix
           # is one line, and the failure is invisible — pages that repeat or skip
           # rows, producing counts wrong in an unpredictable direction.
           npm run test:paged-reads
+          # ADDED 2026-09-24. Projects + Tickets: a client must never read
+          # another client's ticket, project or internal note; work is only
+          # assignable to the active roster; a support-form submission becomes
+          # a ticket and never a lead; SLA breaches alert exactly once.
+          npm run test:delivery
           # Re-enabled 2026-08-08. This was excluded for exactly the
           # server-only import chain that NODE_OPTIONS above now resolves;
           # 41 assertions came back with it.
@@ -112,11 +155,76 @@ jobs:
           # through. It needs --conditions=react-server because the renderer
           # imports server-only.
           npm run test:watermark
-      - name: Build
+          # ADDED 2026-09-24 (OASIS fresh start): teammate deactivation and the
+          # rosters that must hide inactive people, the revenue-goal arithmetic,
+          # Today's board-summary congruency, and the worker-status reporter
+          # (panel rule + Health check) behind the 2026-09-23 false "11/12 down".
+          npm run test:fresh-start
+          # ADDED 2026-09-29 (F0 release gate). These four groups were defined
+          # in package.json and run by nothing, so six files had never gated a
+          # deploy: AI-audit funnel intake and its notification, lead transfer
+          # and the lead drawer, legal-copy drift, and media framing.
+          # tests/test-suite-coverage.test.ts (in test:os) now fails the build
+          # when any tests/ file is reachable from no group this step runs.
+          npm run test:funnels
+          npm run test:lead-advancements
+          npm run test:legal
+          npm run test:media
+          npm run test:onboarding
+          # ADDED 2026-10-01 (W10a). Every connection a workspace can see works
+          # or says it does not: Twilio end to end per workspace (keys, the
+          # read-only test's plain states, webhook addresses, each workspace's
+          # own signature token, live-send gate) against a mocked Twilio, and
+          # the not-built apps' requests, the setup step and AI brain on the
+          # same drawer and statuses as Settings > Connections.
+          npm run test:connections
+      # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
+      # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
+      # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
+      # next.config.js traces the full @libsql/client tree and drops the
+      # @napi-rs includes only when it is "1", so building without it checks a
+      # different bundle from the one production runs. `opennextjs-cloudflare
+      # build` runs `next build` itself, so the Next build is still covered.
+      #
+      # No secrets. The deploy passes every manifest key because module-scope
+      # SDK init can run during page-data collection; this job has never had
+      # them and the build has never needed more than the three placeholders
+      # below. They are fake on purpose and must stay fake: a pull request's
+      # code runs here.
+      - name: Build (OpenNext -> Cloudflare Worker)
         env:
-          # Minimal env so the build doesn't blow up on missing required vars.
-          # Real values come from Vercel in production deploys.
+          NODE_OPTIONS: "--max-old-space-size=4096 --use-system-ca"
+          CF_MIGRATION_BUILD: "1"
           BRAVO_SUPABASE_URL: https://placeholder.supabase.co
           BRAVO_SUPABASE_SERVICE_ROLE_KEY: placeholder
           BRAVO_SUPABASE_ANON_KEY: placeholder
-        run: npm run build
+        run: npx opennextjs-cloudflare build
+      # Hand the OpenNext output to wrangler the way the deploy's
+      # `wrangler deploy` does, without uploading: it bundles .open-next/worker.js
+      # against wrangler.jsonc and prints the upload size. A Worker that
+      # wrangler cannot bundle fails here instead of in the deploy after merge.
+      # No Cloudflare credentials.
+      #
+      # The dry run does NOT fail on size: it only colours the size line and
+      # exits 0 (wrangler 4.127.1, printBundleSize). scripts/check-worker-bundle.ts
+      # reads that line from the log and fails the step past the budget below,
+      # and fails it too when the line is missing (an unknown size is not a
+      # small one). pipefail keeps a failed dry run failing through `tee`.
+      #
+      # WORKER_UPLOAD_BUDGET_KIB is checked against wrangler's `Total Upload`
+      # KiB, the UNCOMPRESSED size. Cloudflare's limit is 64 MiB (65536 KiB)
+      # uncompressed, and it has no compressed limit (the gzip figure is for
+      # reference only). The budget is that limit less 1 MiB, because the dry
+      # run builds with placeholder env and reads slightly below the deploy
+      # for the same commit. On 2026-09-29 the upload was 59014 KiB.
+      #
+      # The same check reads the uploaded worker.js from --outdir and fails on
+      # any character above U+00FF: one such character makes V8 hold the whole
+      # source as UTF-16, and isolates then run out of memory (#485).
+      - name: Bundle the Worker (wrangler dry run) and check its size
+        env:
+          WORKER_UPLOAD_BUDGET_KIB: "64512"
+        run: |
+          set -o pipefail
+          npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
+          node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run

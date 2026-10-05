@@ -17,11 +17,33 @@ import type { FormBranding } from "./types";
 /**
  * Shared fallback colors for forms with no branding set. Both the prospect
  * render (FormPublicClient) and the shared FormRenderer use these so an
- * unbranded form is one consistent color, not two-tone (gold header + cyan
- * button). Match the SunBiz Standard theme.
+ * unbranded form is one consistent color, not two-tone.
+ *
+ * NEUTRAL, AND DELIBERATELY NOBODY'S (2026-09-18).
+ *
+ * These were #E0A53F / #FFB81C — SunBiz Standard gold — described here as
+ * "Match the SunBiz Standard theme". On a single-tenant platform that was
+ * reasonable. On a multi-tenant one it means every unbranded form on the
+ * platform renders in a live client's brand colour, under that client's sun
+ * glyph, for a company that has nothing to do with them. CC saw exactly this on
+ * his own OASIS funnel and concluded he had been redirected into the client's
+ * pipeline.
+ *
+ * A default that belongs to a real company is a tenant decision hiding in a
+ * constant. The default is now slate — it belongs to no tenant, so a form that
+ * reaches it looks unfinished rather than looking like somebody else. That is
+ * the correct failure: unbranded is a fixable oversight, mis-branded is a trust
+ * incident.
+ *
+ * Branded colour comes from the tenant, resolved through
+ * lib/tenant/public-identity.ts. Do not reintroduce a brand hex here.
+ *
+ * SAFE FOR SUNBIZ: all four SunBiz forms set primary_color explicitly
+ * (#175637 / #E0A53F in their branding rows), so they never read these
+ * constants — verified against the live `forms` table 2026-09-18.
  */
-export const DEFAULT_PRIMARY_COLOR = "#E0A53F";
-export const DEFAULT_ACCENT_COLOR = "#FFB81C";
+export const DEFAULT_PRIMARY_COLOR = "#64748B";
+export const DEFAULT_ACCENT_COLOR = "#94A3B8";
 
 export type FormTheme = {
   /** Stable key written into the branding object so the next load picks it back up. */

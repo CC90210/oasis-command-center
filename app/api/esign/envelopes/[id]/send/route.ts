@@ -14,6 +14,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getEnvelopeById, getPendingSigners, rotateSignerToken, updateEnvelopeStatus, logEvent } from "@/lib/esign/db";
 import { mintSigningToken } from "@/lib/esign/tokens";
 import { sendSigningLinkEmail } from "@/lib/esign/email";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   const envRes = await getEnvelopeById(sess.tenantId, id);
   if (!envRes.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });

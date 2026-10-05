@@ -15,7 +15,8 @@
  * submission, not just the lead card.
  *
  * Body: { key: string, value: string | number | boolean | null }
- * Auth: any non-read_only tenant member (canWriteCrm) — same class as /assign.
+ * Auth: shared CRM writers on legacy records; on OASIS, only admins or an
+ * authorized sales operator who owns/collaborates on the lead.
  * Writes via the atomic patch_tenant_record_data RPC (no read-modify-write race).
  */
 
@@ -24,6 +25,16 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { APPLICATION_FIELD_KEYS } from "@/lib/forms/application-upsert";
+import {
+  OASIS_WEBSITE_SALES_PROGRAM,
+  isWebsiteSalesTenantSlug,
+} from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import {
+  ownsOasisSalesRecord,
+  rejectedOasisGenericPatchKeys,
+  roleMayOperateOasisSalesLead,
+} from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,9 +73,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // CRM-write gate first — identical 403 whether or not the record exists (no
-  // enumeration oracle), fail closed for read_only.
-  if (!canWriteCrm(sess.teamRole)) {
+  // Shared CRM writers may continue. OASIS sales titles reach the record gate
+  // below, where role + ownership are both required; every other role fails now.
+  if (!canWriteCrm(sess.teamRole) && !roleMayOperateOasisSalesLead(sess.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't edit lead fields." },
       { status: 403 },
@@ -90,13 +101,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       { status: 400 },
     );
   }
-  if (PROTECTED_KEYS.has(key)) {
-    return NextResponse.json(
-      { ok: false, error: "protected_key", message: "That field is managed by the system and can't be edited here." },
-      { status: 400 },
-    );
-  }
-
   // Accept string | number | boolean | null (null clears). Trim + bound strings.
   const rawVal = body.value;
   let value: string | number | boolean | null;
@@ -134,6 +138,62 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const rec = existing.data as { entity_type: string; data?: Record<string, unknown> };
   const recEntity = rec.entity_type;
   const recData = rec.data || {};
+
+  const tenantSlug = await resolveOwnedSlug(tenantId);
+  if (!tenantSlug) {
+    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+  }
+  const isOasisSalesLead =
+    recEntity === "lead" &&
+    (recData.sales_program === OASIS_WEBSITE_SALES_PROGRAM ||
+      isWebsiteSalesTenantSlug(tenantSlug));
+  if (isOasisSalesLead) {
+    const ownedByActor = ownsOasisSalesRecord(
+      { id: recordId, data: recData },
+      sess.userId,
+    );
+    if (
+      !sess.isAdmin &&
+      (!roleMayOperateOasisSalesLead(sess.teamRole) || !ownedByActor)
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "forbidden_role",
+          message: "You can only edit OASIS leads assigned or shared with you.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const protectedKeys = rejectedOasisGenericPatchKeys({ [key]: value });
+    if (PROTECTED_KEYS.has(key) && !protectedKeys.includes(key)) {
+      protectedKeys.push(key);
+    }
+    if (protectedKeys.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          fields: protectedKeys,
+        },
+        { status: 409 },
+      );
+    }
+  } else {
+    if (PROTECTED_KEYS.has(key)) {
+      return NextResponse.json(
+        { ok: false, error: "protected_key", message: "That field is managed by the system and can't be edited here." },
+        { status: 400 },
+      );
+    }
+    if (!canWriteCrm(sess.teamRole)) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden_role", message: "Your role can't edit this record." },
+        { status: 403 },
+      );
+    }
+  }
 
   const upd = await db.rpc("patch_tenant_record_data", {
     p_id: recordId,

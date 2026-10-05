@@ -22,7 +22,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveBrandKey } from "@/lib/email/brands";
+import { resolveBrandKeyOrNull } from "@/lib/email/brands";
 import type { PoolTemplate } from "./template-pool";
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -62,14 +62,37 @@ export async function loadApprovedPoolOrThrow(db: Db, tenantId: string): Promise
     .order("id", { ascending: true })
     .limit(2000);
   if (r.error) throw new Error(`template pool read failed: ${r.error.message}`);
-  return ((r.data || []) as Array<Record<string, unknown>>).map((row) => ({
-    id: String(row.id),
-    brand: resolveBrandKey(row.brand),
-    stage: String(row.stage || ""),
-    role: String(row.role || "nudge"),
-    subject: String(row.subject || ""),
-    bodyText: String(row.body_text || ""),
-    status: "approved" as const,
-    weight: Number(row.weight ?? 1),
-  }));
+  // QUARANTINE THE BAD ROW, KEEP THE POOL.
+  //
+  // This mapped through resolveBrandKey, which now throws on an unrecognised
+  // brand. One malformed row would have thrown out of .map(), discarding the
+  // ENTIRE tenant's approved pool and silently falling back to sequence copy —
+  // a tenant-wide content change caused by one bad record, with no error a
+  // human would ever see. (Codex, adversarial review, 2026-09-09.)
+  //
+  // The `brand` column is CHECK-constrained to ('sunbiz','bluerise') in
+  // migration 000, so this is defence in depth rather than an expected path —
+  // which is exactly why it must not be able to take the pool down.
+  const out: PoolTemplate[] = [];
+  for (const row of (r.data || []) as Array<Record<string, unknown>>) {
+    const brand = resolveBrandKeyOrNull(row.brand);
+    if (!brand) {
+      console.error(
+        `[drips.template-pool] approved template ${String(row.id)} has unrecognised ` +
+          `brand ${JSON.stringify(row.brand)} — excluded from the pool`,
+      );
+      continue;
+    }
+    out.push({
+      id: String(row.id),
+      brand,
+      stage: String(row.stage || ""),
+      role: String(row.role || "nudge"),
+      subject: String(row.subject || ""),
+      bodyText: String(row.body_text || ""),
+      status: "approved" as const,
+      weight: Number(row.weight ?? 1),
+    });
+  }
+  return out;
 }

@@ -30,12 +30,21 @@
 import { usePathname } from "next/navigation";
 import { useRef } from "react";
 import ChatWidget from "@/components/ChatWidget";
+import { RunnerStatusHeader } from "@/components/admin/RunnerStatusHeader";
+import { ContentHeader, type ContentHeaderProps } from "@/components/os/ContentHeader";
 import type { ChatShellProps } from "@/lib/chat-shell-props";
 
 // Shared base: sidebar-margin tracking (responds to the data-sidebar collapse
 // var on <html>), z-index, mobile-topbar top padding, margin transition.
+//
+// OASIS OS CANVAS: `os-canvas-main` (app/globals.css) insets the page 0.5rem
+// from the window at md+, flush against the open rail, and `os-canvas-frame`
+// gives the inner wrapper a hairline edge and rounded corners. The rail sits
+// on the ground with no border; this edge is the separation. Plain CSS because
+// the left inset depends on html[data-sidebar], which is set before paint.
 const MAIN_BASE =
-  "ml-0 md:ml-[var(--sidebar-w,15rem)] relative z-10 pt-14 md:pt-0 transition-[margin] duration-200";
+  "ml-0 md:ml-[var(--sidebar-w,15rem)] relative z-10 pt-14 md:pt-0 transition-[margin] duration-150 os-canvas-main";
+const CANVAS = "os-canvas-frame bg-bg";
 
 // All constrained pages share one width so the CRM routes match the Agents
 // tab, Dashboard, and every other surface (no edge-to-edge stretch).
@@ -63,7 +72,8 @@ function isChatShellPath(pathname: string): boolean {
  * apex/conversations-inbox-v2 Phase 1).
  */
 function isFullBleedPath(pathname: string): boolean {
-  return /^\/t\/[^/]+\/conversations(\/.*)?$/.test(pathname);
+  // /schedule is a calendar: it owns the viewport and scrolls its own grid.
+  return /^\/t\/[^/]+\/conversations(\/.*)?$/.test(pathname) || pathname === "/schedule";
 }
 
 /**
@@ -81,6 +91,7 @@ export function MainShell({
   footerLabel,
   footerTagline,
   chat,
+  header = null,
 }: {
   children: React.ReactNode;
   footerLabel: string;
@@ -88,6 +99,9 @@ export function MainShell({
   /** Server-resolved props for the persistent ChatWidget. Null when the
    *  tenant has no chat (e.g. a brand-new signup pre-provisioning). */
   chat?: ChatShellProps | null;
+  /** The OS content header (breadcrumb + Ask). Null on the preview/demo
+   *  shells, which render another workspace's manifest and have no OS rail. */
+  header?: ContentHeaderProps | null;
 }) {
   const pathname = usePathname() || "";
   const onAgent = isOwnAgentChatPath(pathname);
@@ -104,35 +118,42 @@ export function MainShell({
   const chatActivated = activatedRef.current;
 
   const mainEl = chatShell ? (
-    // Full-screen chat shell: NO constrained wrapper, NO footer. The page (and,
-    // on /agent, the fixed persistent chat below) own the 100dvh viewport;
-    // overflow-hidden so the chat's own scroll region is the only scroller.
-    <main className={`${MAIN_BASE} h-[100dvh] overflow-hidden`}>{children}</main>
+    // Full-screen chat shell: NO constrained wrapper, NO footer, NO content
+    // header. The page (and, on /agent, the fixed persistent chat below) own
+    // the viewport; overflow-hidden so the chat's own scroll region is the
+    // only scroller. The canvas frame is h-full of the padded main, so a
+    // child sized h-full still fills exactly the visible panel.
+    <main className={`${MAIN_BASE} h-[100dvh] overflow-hidden`}>
+      <div className={`${CANVAS} h-full overflow-hidden`}>{children}</div>
+    </main>
   ) : (
     <main className={`${MAIN_BASE} min-h-screen`}>
-      <div className={`mx-auto ${CONTENT_WIDTH} px-4 md:px-8 py-6 md:py-8`}>
-        {children}
-      </div>
-      <footer className={`mx-auto ${CONTENT_WIDTH} px-8 py-6 text-xs text-fg-faint`}>
-        <div className="border-t border-bg-border pt-4 flex flex-wrap items-center justify-between gap-y-2">
-          <span>{footerLabel}</span>
-          <div className="flex items-center gap-4">
-            {/* Platform legal links. Deliberately UNBRANDED: this footer also
-                renders under a client tenant's shell (SunBiz et al), and the
-                2026-05-25 cross-tenant audit removed "Powered by OASIS AI"
-                from tenant surfaces. The distinction that makes these links
-                correct anyway — unlike on the public form — is WHO is reading:
-                an operator inside the Command Center is the platform's own
-                customer and these terms genuinely govern their use, whereas a
-                lead filling out a tenant's public form is not. Keep them
-                label-neutral so a SunBiz operator sees "Privacy", not
-                "OASIS AI Privacy". */}
-            <a href="/privacy" className="hover:text-fg-dim">Privacy</a>
-            <a href="/terms" className="hover:text-fg-dim">Terms</a>
-            <span>{footerTagline}</span>
-          </div>
+      <div className={`${CANVAS} flex min-h-[calc(100dvh-3.5rem)] flex-col md:min-h-[calc(100dvh-1rem)]`}>
+        {header && <ContentHeader {...header} />}
+        <div className={`mx-auto w-full flex-1 ${CONTENT_WIDTH} px-4 md:px-8 py-6 md:py-8`}>
+          {children}
         </div>
-      </footer>
+        <footer className={`mx-auto w-full ${CONTENT_WIDTH} px-4 md:px-8 py-6 text-xs text-fg-dim`}>
+          <div className="border-t border-hairline pt-4 flex flex-wrap items-center justify-between gap-y-2">
+            <span>{footerLabel}</span>
+            <div className="flex items-center gap-4">
+              {/* Platform legal links. Deliberately UNBRANDED: this footer also
+                  renders under a client tenant's shell (SunBiz et al), and the
+                  2026-05-25 cross-tenant audit removed "Powered by OASIS AI"
+                  from tenant surfaces. The distinction that makes these links
+                  correct anyway — unlike on the public form — is WHO is reading:
+                  an operator inside the Command Center is the platform's own
+                  customer and these terms genuinely govern their use, whereas a
+                  lead filling out a tenant's public form is not. Keep them
+                  label-neutral so a SunBiz operator sees "Privacy", not
+                  "OASIS AI Privacy". */}
+              <a href="/privacy" className="hover:text-fg-muted">Privacy</a>
+              <a href="/terms" className="hover:text-fg-muted">Terms</a>
+              <span>{footerTagline}</span>
+            </div>
+          </div>
+        </footer>
+      </div>
     </main>
   );
 
@@ -147,25 +168,36 @@ export function MainShell({
           the tree it renders, which is what makes the hoist safe. */}
       {chat && chatActivated && (
         <div
+          // `os-canvas-overlay` (app/globals.css) floats it on the same inset,
+          // hairline-edged canvas as every other page at md+ and tracks the
+          // collapsed rail; below md it is the old edge-to-edge box under the
+          // mobile top bar.
           className={
             onAgent
-              ? "fixed top-14 md:top-0 left-0 md:left-[var(--sidebar-w,15rem)] right-0 bottom-0 z-20 bg-bg transition-[left] duration-200"
+              ? "fixed top-14 left-0 right-0 bottom-0 z-20 flex flex-col bg-bg os-canvas-overlay transition-[left] duration-150"
               : "hidden"
           }
           aria-hidden={!onAgent}
         >
-          <ChatWidget
-            agentKeys={chat.agentKeys}
-            defaultAgent={chat.defaultAgent}
-            isAdmin={chat.isAdmin}
-            welcomeMessages={chat.welcomeMessages}
-            advancedPicker={chat.advancedPicker}
-            variant="fullscreen"
-            // Off /agent the instance stays mounted (transcript survives) but
-            // pauses its prewarm + 30s health poll so it isn't working on every
-            // page. The live stream reader is unaffected.
-            active={onAgent}
-          />
+          {/* The Coding harness's runner strip: computer, AI tools, warm pool.
+              Mounted only on /agent so it never polls from another page. */}
+          {onAgent && <RunnerStatusHeader />}
+          <div className="min-h-0 flex-1">
+            <ChatWidget
+              agentKeys={chat.agentKeys}
+              defaultAgent={chat.defaultAgent}
+              isAdmin={chat.isAdmin}
+              welcomeMessages={chat.welcomeMessages}
+              advancedPicker={chat.advancedPicker}
+              targetLabels={chat.targetLabels}
+              variant="fullscreen"
+              // Off /agent the instance stays mounted (transcript survives) but
+              // pauses its prewarm + 30s health poll so it isn't working on every
+              // page, and ignores ?agent / ?prompt that belong to other pages.
+              // The live stream reader is unaffected.
+              active={onAgent}
+            />
+          </div>
         </div>
       )}
     </>

@@ -70,8 +70,9 @@ export function SidebarShell(props: SidebarProps) {
 
   return (
     <>
-      {/* Mobile top bar — desktop hides this. */}
-      <div className="md:hidden fixed top-0 inset-x-0 h-14 z-30 bg-bg-panel border-b border-bg-border flex items-center px-3 gap-3">
+      {/* Mobile top bar — desktop hides this. Same ground as the rail it
+          opens; the hairline separates it from the page scrolling under it. */}
+      <div className="md:hidden fixed top-0 inset-x-0 h-14 z-30 bg-bg-rail border-b border-hairline flex items-center px-3 gap-3">
         <button
           ref={hamburgerRef}
           type="button"
@@ -79,11 +80,11 @@ export function SidebarShell(props: SidebarProps) {
           aria-label="Open menu"
           aria-expanded={open}
           aria-controls="sidebar-drawer"
-          className="inline-flex h-9 w-9 items-center justify-center rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-fg-muted hover:text-fg hover:bg-active-hover"
         >
           <Menu className="w-5 h-5" />
         </button>
-        <Link href="/" className="text-sm font-bold text-fg truncate">
+        <Link href="/" prefetch={false} className="text-sm font-semibold text-fg truncate">
           {/* Neutralized 2026-05-25 — was "OASIS AI" fallback which
               leaked OASIS branding into Sun Biz routes if a caller
               forgot to pass brand. "Command Center" is the brand-
@@ -99,7 +100,7 @@ export function SidebarShell(props: SidebarProps) {
           type="button"
           aria-label="Close menu"
           onClick={() => setOpen(false)}
-          className="md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm"
+          className="md:hidden fixed inset-0 z-30 bg-black/60"
         />
       )}
 
@@ -114,7 +115,7 @@ export function SidebarShell(props: SidebarProps) {
           aria-expanded={false}
           aria-controls="sidebar-drawer"
           title="Reopen sidebar"
-          className="hidden md:inline-flex fixed top-3 left-3 z-30 h-9 w-9 items-center justify-center rounded-md border border-bg-border bg-bg-panel/80 backdrop-blur text-fg-muted hover:text-fg hover:bg-bg-elev shadow-card transition-colors"
+          className="hidden md:inline-flex fixed top-3 left-3 z-30 h-9 w-9 items-center justify-center rounded-lg border border-hairline bg-bg-panel text-fg-muted hover:text-fg hover:bg-bg-elev shadow-card transition-colors duration-150"
         >
           <PanelLeftOpen className="w-4 h-4" />
         </button>

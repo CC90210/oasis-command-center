@@ -11,6 +11,29 @@
  */
 
 import { createClient, type Client } from "@libsql/client";
+import { instrumentTursoClient } from "@/lib/perf/server-timing";
+
+/**
+ * Options for every libSQL client kept at module scope.
+ *
+ * @libsql/client queues statements behind a per-client concurrency limit
+ * (default 20). getTursoClient() is ONE client per isolate, shared by every
+ * request that isolate serves, so that queue is shared too. A statement that
+ * waits in it is started later by ANOTHER request's completion; the Workers
+ * runtime ties the statement to that other request, cancels the waiting
+ * request's continuation, and kills it as hung. Any page that keeps 20 reads in
+ * flight fills the queue, and a request landing in the same isolate meanwhile
+ * dies: "Something went wrong" on every other click (2026-10-01 pipeline
+ * incident; see lib/runtime/settled-once.ts for the runtime messages). Worse,
+ * if the request holding those slots is canceled, its statements never settle,
+ * the slots are never released, and every later statement in that isolate
+ * waits forever.
+ *
+ * A limit no isolate can reach means no statement waits on another request.
+ * Each request's own fetches stay bounded by the runtime's per-request
+ * connection limit, which queues inside that request.
+ */
+export const LIBSQL_CLIENT_OPTIONS = { concurrency: Number.MAX_SAFE_INTEGER } as const;
 
 let _cached: Client | null = null;
 
@@ -23,12 +46,16 @@ export function getTursoClient(): Client {
   const remote = process.env.TURSO_DATABASE_URL || process.env.TURSO_DB_URL;
   const token = process.env.TURSO_AUTH_TOKEN;
 
+  // instrumentTursoClient is the P0 latency seam: EVERY app→Turso call
+  // (query builder, RPC shim, session verification) flows through this
+  // factory, so wrapping here measures all of them. Pass-through unless
+  // PERF_DB_VERBOSE=1; never logs bound args (PII lives there).
   if (path) {
-    _cached = createClient({ url: `file:${path}` });
+    _cached = instrumentTursoClient(createClient({ url: `file:${path}`, ...LIBSQL_CLIENT_OPTIONS }));
     return _cached;
   }
   if (remote) {
-    _cached = createClient({ url: remote, authToken: token });
+    _cached = instrumentTursoClient(createClient({ url: remote, authToken: token, ...LIBSQL_CLIENT_OPTIONS }));
     return _cached;
   }
   throw new Error(

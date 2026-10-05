@@ -65,6 +65,9 @@ export function PageSearchBar({ entityLabel, newHref }: Props) {
       const params = new URLSearchParams(Array.from(searchParams.entries()));
       if (next) params.set("q", next);
       else params.delete("q");
+      // A server-paged list can have fewer pages under a new search. Always
+      // restart at page one so a valid query never lands on a stale empty page.
+      params.delete("page");
       const qs = params.toString();
       startTransition(() => {
         router.replace(qs ? `${pathname}?${qs}` : pathname);

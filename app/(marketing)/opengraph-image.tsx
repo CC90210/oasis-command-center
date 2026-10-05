@@ -9,11 +9,10 @@ import { ImageResponse } from "next/og";
  * element with more than one child needs an explicit `display: flex`.
  *
  * No webfont is loaded: fetching one at image-generation time is a network
- * call in the render path that fails closed on a cold edge, and the card is
+ * call in the render path that fails closed on a cold runtime, and the card is
  * six words. The system fallback is the right trade here.
  */
 
-export const runtime = "edge";
 export const alt =
   "OASIS AI — Operational Agentic Systems Increasing Scalability";
 export const size = { width: 1200, height: 630 };

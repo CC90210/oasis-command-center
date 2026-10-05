@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lastTouchIso, lastTouchIsoFlat } from "../lib/lead-staleness";
+import { lastTouchIso, lastTouchIsoFlat, latestTouchIso } from "../lib/lead-staleness";
 
 // Nested-data shape (TenantRecord / pipeline rows).
 
@@ -80,5 +80,21 @@ assert.equal(
 );
 
 assert.equal(lastTouchIsoFlat({}), null, "flat: empty → null");
+
+assert.equal(
+  latestTouchIso("2026-08-24T16:00:00.000Z", "2026-08-24T15:00:00.000Z"),
+  "2026-08-24T16:00:00.000Z",
+  "a delayed webhook cannot move Last Touch backwards",
+);
+assert.equal(
+  latestTouchIso("2026-08-24T15:00:00.000Z", "2026-08-24T16:00:00.000Z"),
+  "2026-08-24T16:00:00.000Z",
+  "a newer contact advances Last Touch",
+);
+assert.equal(
+  latestTouchIso("not-a-date", "2026-08-24T16:00:00.000Z"),
+  "2026-08-24T16:00:00.000Z",
+  "invalid legacy data cannot block a valid contact",
+);
 
 console.log("lead-staleness ok (10 cases)");

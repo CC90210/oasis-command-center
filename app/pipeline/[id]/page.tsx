@@ -1,41 +1,72 @@
-/**
- * /pipeline/[id] — lead detail page on the empire side.
- *
- * Mirrors the record-detail logic in app/t/[slug]/[...path]/page.tsx but
- * routed under /pipeline so the OASIS CRM feels like one continuous
- * surface instead of bouncing the operator into the tenant route. Reuses
- * ManifestRecordForm in edit mode against the OASIS_SEED lead entity —
- * every field on the record is visible + editable on one screen with no
- * separate detail primitive.
- */
-
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import { notFound } from "next/navigation";
 import { PageHeader, Card } from "@/components/Card";
-import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
+import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
+import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
+import { LeadWebsiteAuditBand } from "@/components/leads/LeadWebsiteAuditBand";
+import { LeadContextEditor } from "@/components/leads/LeadContextEditor";
+import { BOOKING_URL } from "@/lib/marketing/routes";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
+import { LeadNoteComposer } from "@/components/leads/LeadNoteComposer";
+import type { BuildBriefDraft } from "@/components/leads/LeadBuildBriefForm";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
 import { getRecord } from "@/lib/manifest/data";
-import { lastTouchIso } from "@/lib/lead-staleness";
+import { lastTouchIso, latestTouchIso } from "@/lib/lead-staleness";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
-import { formatMoney, nonEmptyString, relTime } from "@/lib/format-helpers";
-import { ScoreLeadButton } from "./ScoreLeadButton";
-import { NextActionButton } from "./NextActionButton";
-import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
+import { nonEmptyString } from "@/lib/format-helpers";
+import { BattleCard } from "@/components/web-leads/BattleCard";
+import { factsFrom } from "@/lib/web-leads/claim";
+import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
-import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
-import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
-import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
+import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canOpenOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  canMutateOasisSalesRecord,
+  canOpenOasisSalesRecord,
+  mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
+  ownsOasisSalesRecord,
+} from "@/lib/oasis-sales-pipeline-policy";
+import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
+import { mayQuoteAndClose } from "@/lib/team-roles";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { buildMemberNameMap } from "@/lib/assigned-names";
+import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
+import {
+  canReadOasisSalesTeamPipeline,
+  managerRosterCoversAssignment,
+} from "@/lib/role-surfaces";
+import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
+
+async function loadFounderMeetingSmsConsent(
+  tenantId: string,
+  leadId: string,
+  appointmentId: string | null,
+): Promise<boolean> {
+  if (!appointmentId) return false;
+  const meeting = await getServiceSupabase()
+    .from("call_appointments")
+    .select("sms_consent")
+    .eq("tenant_id", tenantId)
+    .eq("lead_id", leadId)
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (meeting.error) {
+    console.error("[pipeline-lead] founder meeting SMS consent lookup failed", meeting.error.message);
+    return false;
+  }
+  return Boolean((meeting.data as { sms_consent?: number | boolean } | null)?.sms_consent);
+}
 
 export default async function PipelineLeadDetailPage({
   params,
@@ -43,7 +74,7 @@ export default async function PipelineLeadDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
+  const leadEntity = OASIS_SEED.data_model?.find((entity) => entity.name === "lead");
   if (!leadEntity) notFound();
 
   const profile = await safe("pipeline.detail.profile", getActiveProfile(), null);
@@ -56,19 +87,35 @@ export default async function PipelineLeadDetailPage({
     );
   }
 
-  const record = await getRecord({
-    tenant_id: tenantId,
-    entity: "lead",
-    id,
-  }).catch(() => null);
+  const [record, session, ownedSlug] = await Promise.all([
+    getRecord({ tenant_id: tenantId, entity: "lead", id }).catch(() => null),
+    resolveSessionContext(),
+    resolveOwnedSlug(tenantId),
+  ]);
 
-  const session = await resolveSessionContext();
-  // Opening ONE record is an access question: is it mine, or am I an admin?
-  // It is NOT the board's list-shaping question. Running a single record through
-  // filterWebsiteSalesRows made every lead on oasis-ai-cc unopenable (31,031
-  // rows, none stamped website_sales_v1) and stopped a rep opening the very
-  // deal they closed once its stage moved past the five rep stages.
-  const visibleRecord =
+  // One roster, two questions. OPENING a lead is a history read: a closed or
+  // in-delivery deal keeps its deactivated rep's assigned_to forever
+  // (lib/team-activation-rules.ts "keep"), so their former manager must still
+  // open it rather than land on "Lead not found". The battle card is a read
+  // too: its API resolves this same history roster (lib/web-leads/viewer.ts,
+  // includeInactive), and the card only mutates behind canMutateLead. OPERATING
+  // on a lead (managerWorksTeamBook) stays on ACTIVE reps.
+  const managerRoster =
+    session.ok && canReadOasisSalesTeamPipeline({ teamRole: session.teamRole, tenantSlug: ownedSlug })
+      ? await safe(
+          "pipeline.detail.managerRoster",
+          getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true }),
+          [],
+        )
+      : [];
+  const readableRepUserIds = managerRoster.flatMap((member) =>
+    member.auth_user_id ? [member.auth_user_id] : [],
+  );
+  const activeRepUserIds = managerRoster.flatMap((member) =>
+    member.auth_user_id && isActiveMember(member) ? [member.auth_user_id] : [],
+  );
+
+  const activeRecord =
     record &&
     session.ok &&
     canOpenOasisSalesRecord(record, {
@@ -76,113 +123,343 @@ export default async function PipelineLeadDetailPage({
       userId: session.userId,
       isOwner: session.isTrueAdmin,
       adminAccess: session.adminAccess,
+      readableRepUserIds,
     })
       ? record
       : null;
 
-  if (!visibleRecord) {
+  if (!activeRecord) {
     return (
       <div className="space-y-4 animate-fade-in">
         <PageHeader
           title="Lead not found"
-          subtitle={`No lead with id ${id.slice(0, 8)}…`}
-          action={
-            <Link
-              href="/pipeline"
-              className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              Back to pipeline
-            </Link>
-          }
+          subtitle={`No accessible lead with id ${id.slice(0, 8)}…`}
+          action={<BackToPipeline />}
         />
         <Card>
           <div className="text-sm text-fg-muted">
-            The lead may have been deleted, or the link is stale. Use the
-            pipeline kanban to find a live record.
+            The lead may have been deleted, reassigned, or the link may be stale. Use the pipeline to
+            find a live record.
           </div>
         </Card>
       </div>
     );
   }
 
-  const activeRecord = visibleRecord;
+  const appointmentId = nonEmptyString(activeRecord.data.calendar_appointment_id);
+  const [metrics, memberNames, founderMeetingSmsConsent] = await Promise.all([
+    loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at),
+    buildMemberNameMap(tenantId),
+    loadFounderMeetingSmsConsent(tenantId, id, appointmentId),
+  ]);
 
   const title =
-    (typeof activeRecord.data.name === "string" && activeRecord.data.name) ||
-    (typeof activeRecord.data.company === "string" && activeRecord.data.company) ||
+    nonEmptyString(activeRecord.data.name) ||
+    nonEmptyString(activeRecord.data.company) ||
     `Lead ${id.slice(0, 8)}`;
-  const metrics = await loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at);
+  const canManage = session.ok && session.isAdmin;
+  const canMutateLead =
+    session.ok &&
+    canMutateOasisSalesRecord(activeRecord, {
+      role: session.teamRole,
+      userId: session.userId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    });
+  const assignedTo = nonEmptyString(activeRecord.data.assigned_to)?.toLowerCase();
+  const repOwnsDeal =
+    session.ok &&
+    ownsOasisSalesRecord(activeRecord, session.userId);
+  const canRunDeal =
+    session.ok &&
+    // ONE list (DEAL_CLOSING_ROLES via mayQuoteAndClose) — a hand-copied array
+    // here is how UI and API drifted apart before. Ownership stays separate.
+    (session.isTrueAdmin || (mayQuoteAndClose(session.teamRole) && repOwnsDeal));
+  const canRunDelivery =
+    session.ok &&
+    mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey) &&
+    ownsOasisDeliveryRecord(activeRecord, session.userId);
+  // A sales manager works their TEAM's book, not just their own seat
+  // (CC directive, 2026-09-01, asked three times).
+  //
+  // canMutateOasisSalesRecord answers ownership, and a manager owns nothing --
+  // they are measured on their reps' deals, not their own. So the previous gate
+  // gave every manager the read-only coaching view on every lead in the company
+  // and no way to book a meeting for the rep they are actively coaching. On the
+  // live tenant both managers own zero leads, so this was their whole
+  // experience of the pipeline.
+  //
+  // Scoped to the roster the server already resolved, and it deliberately does
+  // NOT widen what may be changed: stage, assignment, collaborators and
+  // sales_program remain admin-only behind their audited routes
+  // (/api/leads/[id]/set-stage, /api/leads/[id]/assign), exactly as they are for
+  // a rep. This grants the lifecycle actions -- book the audit, correct a
+  // contact fact -- on leads their own reps hold, plus unassigned leads, which
+  // belong to nobody and which every opener can already work.
+  // activeRepUserIds is populated ONLY when canReadOasisSalesTeamPipeline
+  // passed above, which already requires the manager role on an OASIS surface
+  // tenant. The explicit role check is kept anyway so this does not silently
+  // widen if that resolution is ever reused for another role. A deactivated
+  // rep's kept deal opens in the coaching view, never the operate one.
+  // Roster membership is answered by the shared predicate, never re-derived
+  // here: lib/web-leads/data.ts asks the identical question for the prospecting
+  // surface, and a second inline copy is how those two surfaces drift.
+  //
+  // The unassigned case is deliberately OUTSIDE the predicate. "Is this seat on
+  // my roster" and "may I work a lead nobody owns" are different questions, and
+  // folding the second into the shared helper would hand the claimable pool to
+  // every caller that only asked about the roster.
+  const managerWorksTeamBook =
+    session.ok &&
+    session.teamRole.trim().toLowerCase() === "manager" &&
+    activeRepUserIds.length > 0 &&
+    (!assignedTo ||
+      managerRosterCoversAssignment({
+        teamRole: session.teamRole,
+        assignedTo,
+        readableAssigneeIds: activeRepUserIds,
+      }));
+  const canWorkLifecycle =
+    (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
+    (managerWorksTeamBook && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
+    canRunDelivery;
+  // Coaching is the fallback for a lead OUTSIDE their roster (a founder's or an
+  // admin's). Inside it they operate, so the wizard renders in "operate" mode.
+  const managerCoachingView =
+    session.ok &&
+    session.teamRole.trim().toLowerCase() === "manager" &&
+    !canMutateLead &&
+    !managerWorksTeamBook;
+  const assignedRepName = assignedTo ? memberNames.get(assignedTo) || null : null;
+  const founderId =
+    nonEmptyString(activeRecord.data.audit_host_user_id) ||
+    nonEmptyString(activeRecord.data.booked_founder);
+  const bookedHostName = founderId ? memberNames.get(founderId) || null : null;
+
+  // Is this a web-lead, i.e. does a battle card exist for it? Keyed on the
+  // pointer JARVIS's crm-sink stamps at promotion time, the same field the
+  // audit and score lookups key on. An ordinary CRM lead has no audit and
+  // /api/web-leads/[id]/battlecard would 404 for it.
+  const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
+
+  /**
+   * ═══ TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (review, 2026-08-25) ══════
+   *
+   * This page admits a viewer through `canOpenOasisSalesRecord`, which accepts
+   * the assignee OR anyone listed in `collaborators` -- that is what makes the
+   * opener-to-closer handoff work, and the comp plan pays both people.
+   *
+   * The battle card fetches /api/web-leads/[id]/battlecard, whose scoping runs
+   * through `visibleToViewer`, and that one accepts the assignee ONLY. It has
+   * no collaborator concept at all. So a collaborator opens this record and the
+   * card inside it 404s.
+   *
+   * NOBODY IS LEFT WITH NOTHING, and that is why this is a gate rather than an
+   * error left to happen: `LeadWebsiteAuditBand` renders unconditionally in
+   * the Lead details disclosure below,
+   * carrying the website, the industry, the condition and the findings for
+   * every viewer. So a collaborator who cannot load the card still sees the
+   * business; asking the same function the API asks just means they are not
+   * shown a panel that would only render an error.
+   *
+   * ▶ FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
+   * collaborators so the two doors genuinely match rather than this page
+   * routing around the gap. That widens the boundary PR #237 established and
+   * deserves its own review.
+   */
+  const cardViewer =
+    session.ok && session.userId
+      ? {
+          userId: session.userId,
+          teamRole: session.teamRole,
+          isAdmin: session.isAdmin,
+          readableAssigneeIds: readableRepUserIds,
+        }
+      : null;
+  const willRenderBattleCard = Boolean(
+    webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
+  );
 
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
         title={title}
-        subtitle={`Lead · ${leadEntity.fields.length} fields`}
-        action={
-          <Link
-            href="/pipeline"
-            className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back to pipeline
-          </Link>
-        }
+        subtitle="Lead workspace · closed-loop lifecycle"
+        action={<BackToPipeline />}
       />
+
+      <LeadMetricsBand metrics={metrics} canChangeStage={canWorkLifecycle} />
+
+      {/* Won deals only: "Convert to client" / the client record it became.
+          Draws nothing on any other stage, and changes nothing about the deal. */}
+      <ClientRecordCard tenantId={tenantId} leadId={id} stage={metrics.stageKey} />
+
+      {canWorkLifecycle || managerCoachingView ? (
+        <LeadLifecycleActions
+          leadId={id}
+          // The PERSON to ask for, not the business. This seeds the founder
+          // meeting's "Contact name", which is saved with the handoff and used
+          // for the Google Calendar invite — so `data.name` put the COMPANY on
+          // an invite addressed to a human on 1,684 of 1,685 owner-named leads.
+          // Empty when we truly know nobody; the booking step still accepts the
+          // company alone (founderNameValid checks name OR company).
+          leadName={nonEmptyString(contactNameFor(activeRecord.data))}
+          leadCompany={nonEmptyString(activeRecord.data.company)}
+          leadEmail={nonEmptyString(activeRecord.data.email)}
+          leadPhone={nonEmptyString(activeRecord.data.phone)}
+          leadWebsite={nonEmptyString(activeRecord.data.website)}
+          currentStage={metrics.stageKey}
+          canManage={canManage}
+          canRunDeal={canRunDeal}
+          canRunDelivery={canRunDelivery}
+          viewerMode={managerCoachingView ? "coaching" : "operate"}
+          assignedRepName={assignedRepName}
+          bookedMeetingAt={nonEmptyString(activeRecord.data.founder_meeting_at)}
+          bookedHostName={bookedHostName}
+          initialHandoffNote={
+            nonEmptyString(activeRecord.data.founder_handoff_note) ||
+            nonEmptyString(activeRecord.data.last_handoff_note) ||
+            nonEmptyString(activeRecord.data.notes)
+          }
+          initialPromisedDemo={nonEmptyString(activeRecord.data.promised_demo)}
+          initialFounderMeetingSmsConsent={founderMeetingSmsConsent}
+          leadDoNotCall={factsFrom(activeRecord.data).dnc}
+          initialOffer={{
+            packageId: nonEmptyString(activeRecord.data.recommended_tier),
+            setupAmount: numberValue(activeRecord.data.quoted_setup_amount),
+            monthlyAmount: numberValue(activeRecord.data.quoted_monthly_amount),
+            currency: nonEmptyString(activeRecord.data.currency),
+            automationIds: stringArray(activeRecord.data.automation_interests),
+            paymentDueAmount: numberValue(activeRecord.data.payment_due_amount),
+            collectedSetupAmount: numberValue(activeRecord.data.collected_setup_amount),
+            checkoutReference: nonEmptyString(activeRecord.data.stripe_checkout_session_id),
+            checkoutUrl: nonEmptyString(activeRecord.data.stripe_checkout_url),
+            builderUserId: nonEmptyString(activeRecord.data.fulfillment_owner_id),
+          }}
+          initialBuildBrief={buildBriefDraft(activeRecord.data.build_brief)}
+        />
+      ) : canMutateLead ? (
+        <Card>
+          <div className="text-sm font-semibold text-fg">Lifecycle is read-only</div>
+          <div className="mt-1 text-sm text-fg-muted">
+            Your account can review this lead, but only an assigned sales rep or admin can change its stage.
+          </div>
+        </Card>
+      ) : null}
+
       <CollapsibleSection
-        title="Contact"
+        title="Lead details"
+        subtitle="Contact, website context, and audit findings"
         storageKey="oasis.pipeline.contactBand.collapsed"
-        defaultCollapsed={false}
+        defaultCollapsed
         collapsedPreview={renderContactPreview(activeRecord.data)}
       >
-        <LeadContactBand data={activeRecord.data} />
+        <div className="space-y-3">
+          <LeadContactBand data={activeRecord.data} />
+          <LeadWebsiteAuditBand data={activeRecord.data} />
+        </div>
       </CollapsibleSection>
-      <LeadMetricsBand metrics={metrics} />
-      <LeadActionToolbar
-        leadId={id}
-        leadName={typeof activeRecord.data.name === "string" ? activeRecord.data.name : null}
-        leadCompany={typeof activeRecord.data.company === "string" ? activeRecord.data.company : null}
-        leadEmail={typeof activeRecord.data.email === "string" ? activeRecord.data.email : null}
-        daysSinceLastTouch={metrics.daysSinceLastTouch}
-        operatorEmail={profile?.email ?? null}
-        operatorFullName={profile?.full_name ?? profile?.display_name ?? null}
-        aiToolsSlot={
-          <>
-            <ScoreLeadButton
-              leadId={id}
-              existingScore={typeof activeRecord.data.ai_score === "number" ? activeRecord.data.ai_score : null}
-              existingReasoning={typeof activeRecord.data.ai_reasoning === "string" ? activeRecord.data.ai_reasoning : null}
-              existingScoredAt={typeof activeRecord.data.ai_scored_at === "string" ? activeRecord.data.ai_scored_at : null}
-            />
-            <NextActionButton
-              leadId={id}
-              existingAction={typeof activeRecord.data.ai_next_action === "string" ? activeRecord.data.ai_next_action : null}
-              existingRationale={typeof activeRecord.data.ai_next_action_rationale === "string" ? activeRecord.data.ai_next_action_rationale : null}
-              existingAt={typeof activeRecord.data.ai_next_action_at === "string" ? activeRecord.data.ai_next_action_at : null}
-            />
-          </>
-        }
-      />
-      <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} canManage={session.ok && session.isAdmin} />
-      <MCAProfilePanel data={activeRecord.data} />
-      <LeadTimelinePanel leadId={id} />
+
+      {/*
+        ═══ THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) ═════════════
+        "we have to ensure that the leads tab and the pipeline are completely
+        synonymous... The pipeline is how we're going to track whose lead is
+        who. It should be what's going to be used more than the leads tab...
+        Right now as soon as you claim a lead, you're losing a lot of the
+        information that we have on the leads tab."
+
+        He was right, and the loss was STRUCTURAL rather than a missing field.
+        Claiming a lead moves it OUT of the /web-leads pool and onto the
+        pipeline, and this page rendered a CRM workspace -- so the score, the
+        percentile, the seven-axis profile, the named competitors, the
+        everything-wrong list, the sales angles and the objection panel all
+        disappeared at precisely the moment a rep committed to calling.
+
+        THE SAME COMPONENT, NOT A PIPELINE-SHAPED COPY. It reads the same
+        /api/web-leads/[id]/battlecard payload through the same authorization
+        boundary, so there is no second implementation of any of it to drift.
+        A second rendering of one business's failings is two things that can
+        disagree mid-call.
+
+        Placed AFTER the lifecycle actions on purpose: logging a call and
+        advancing a stage are what the pipeline is FOR, and burying those
+        controls under a full-height card would trade one dysfunction for
+        another. It now stays behind the supporting-information disclosure so
+        the stage-specific next action remains the single visual priority.
+      */}
+      {willRenderBattleCard ? (
+        <CollapsibleSection
+          title="Website battle card"
+          subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
+          storageKey="oasis.pipeline.battleCard.collapsed"
+          defaultCollapsed
+        >
+          {/* `canMutate` mirrors the page: the card owns write controls (the
+              call-outcome log), and a viewer who may not mutate this lead here
+              must not be handed a writeable one inside it. */}
+          <BattleCard leadId={id} canMutate={canMutateLead} embedded />
+        </CollapsibleSection>
+      ) : null}
+
+      {["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].includes(metrics.stageKey) ? (
+        <CollapsibleSection
+          title="Handoff and delivery brief"
+          subtitle="Meeting receipt, commercial context, and builder-ready requirements"
+          storageKey="oasis.pipeline.handoffSummary.collapsed"
+          defaultCollapsed
+        >
+          <HandoffSummary data={activeRecord.data} memberNames={memberNames} />
+        </CollapsibleSection>
+      ) : null}
+
+      {canMutateLead && ownedSlug ? (
+        <CollapsibleSection
+          title="Edit lead details"
+          subtitle="Durable contact and business context"
+          storageKey="oasis.pipeline.contextEditor.collapsed"
+          defaultCollapsed
+        >
+          <LeadContextEditor
+            leadId={id}
+            tenantSlug={ownedSlug}
+            initial={activeRecord.data}
+            bookingUrl={BOOKING_URL}
+            // A booked founder meeting suppresses the self-scheduling link in
+            // the quick email — see LeadQuickEmail's hasBookedMeeting note.
+            hasBookedMeeting={Boolean(nonEmptyString(activeRecord.data.founder_meeting_at))}
+          />
+        </CollapsibleSection>
+      ) : canMutateLead ? (
+        <Card>
+          <div className="text-sm text-fg-muted">
+            This account has no workspace namespace, so lead context cannot be edited here. Ask an
+            admin to finish tenant setup.
+          </div>
+        </Card>
+      ) : null}
+
       <CollapsibleSection
-        title="Edit lead fields"
-        subtitle={`${leadEntity.fields.length} fields — open to edit name, company, email, value, etc.`}
-        storageKey="oasis.pipeline.editForm.collapsed"
-        defaultCollapsed={true}
+        title="Activity and files"
+        subtitle="Notes, lifecycle history, messages, and documents"
+        storageKey="oasis.pipeline.activity.collapsed"
+        defaultCollapsed
       >
-        <ManifestRecordForm
-          tenantSlug="oasis"
-          entity={leadEntity}
-          backPath="pipeline"
-          backHref="/pipeline"
-          initial={activeRecord.data}
-          editId={id}
-        />
+        <div className="space-y-4">
+          {canMutateLead ? <LeadNoteComposer leadId={id} /> : null}
+          <LeadTimelinePanel leadId={id} />
+          <LeadDocumentsPanel tenantId={tenantId} leadId={id} canMutate={canMutateLead} />
+        </div>
       </CollapsibleSection>
-      <LeadDocumentsPanel tenantId={tenantId} leadId={id} />
     </div>
+  );
+}
+
+function BackToPipeline() {
+  return (
+    <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
+      <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+      Back to pipeline
+    </Link>
   );
 }
 
@@ -191,15 +468,11 @@ type LeadDetailMetrics = {
   stageLabel: string;
   stageMeta: StageMeta | null;
   daysInStage: number | null;
-  stageSince: string | null;
   lastTouch: string | null;
   daysSinceLastTouch: number | null;
-  aiScore: number | null;
-  aiReasoning: string | null;
-  nextAction: string | null;
-  nextActionRationale: string | null;
-  valueEstimate: unknown;
-  source: string | null;
+  daysSinceSlaAnchor: number | null;
+  touchCount: number | null;
+  nextScheduledAt: string | null;
 };
 
 async function loadLeadDetailMetrics(
@@ -211,7 +484,7 @@ async function loadLeadDetailMetrics(
   const db = getServiceSupabase();
   const stageKey = nonEmptyString(data.stage) || "researched";
   const stageMeta = findOasisStage("lead", stageKey) || null;
-  const [stageEvents, lastTouchEvent] = await Promise.all([
+  const [stageEvents, interactions, touchCountResult] = await Promise.all([
     db
       .from("agent_events")
       .select("published_at, created_at, payload")
@@ -221,14 +494,22 @@ async function loadLeadDetailMetrics(
       .limit(50),
     db
       .from("lead_interactions")
-      .select("created_at")
+      .select("created_at, metadata")
       .eq("tenant_id", tenantId)
       .eq("lead_id", leadId)
       .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+      .limit(100),
+    db
+      .from("lead_interactions")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("lead_id", leadId),
   ]);
 
+  const matchingInteraction = (interactions.data || []).find((row) => {
+    const metadata = row.metadata as Record<string, unknown> | null;
+    return metadata?.to === stageKey;
+  });
   const matchingStageEvent = (stageEvents.data || []).find((row) => {
     const payload = row.payload as Record<string, unknown> | null;
     return (
@@ -238,61 +519,64 @@ async function loadLeadDetailMetrics(
     );
   });
   const stageSince =
-    typeof matchingStageEvent?.published_at === "string"
-      ? matchingStageEvent.published_at
-      : typeof matchingStageEvent?.created_at === "string"
-        ? matchingStageEvent.created_at
-        : null;
-  // Prefer the most recent lead_interactions row directly — it's the
-  // source of truth for "touched at." Fall back to the canonical
-  // staleness ladder (lib/lead-staleness) when no interaction is
-  // logged yet. updated_at intentionally NOT in the ladder.
-  const lastTouch =
-    typeof lastTouchEvent.data?.created_at === "string"
-      ? lastTouchEvent.data.created_at
-      : lastTouchIso({ data, created_at: recordCreatedAt });
-  const aiScore =
-    typeof data.ai_score === "number"
-      ? data.ai_score
-      : typeof data.score === "number"
-        ? data.score
-        : null;
+    typeof matchingInteraction?.created_at === "string"
+      ? matchingInteraction.created_at
+      : typeof matchingStageEvent?.published_at === "string"
+        ? matchingStageEvent.published_at
+        : typeof matchingStageEvent?.created_at === "string"
+          ? matchingStageEvent.created_at
+          : nonEmptyString(data.stage_entered_at);
+  const newestInteraction = interactions.data?.[0];
+  const canonicalTouch = lastTouchIso({ data, created_at: null });
+  const interactionTouch =
+    typeof newestInteraction?.created_at === "string" &&
+    Number.isFinite(Date.parse(newestInteraction.created_at))
+      ? newestInteraction.created_at
+      : null;
+  const lastTouch = interactionTouch
+    ? latestTouchIso(canonicalTouch, interactionTouch)
+    : canonicalTouch;
+  const slaAnchor = lastTouch || lastTouchIso({ data, created_at: recordCreatedAt });
 
   return {
     stageKey,
     stageLabel: stageMeta?.label || titleCase(stageKey),
     stageMeta,
     daysInStage: stageSince ? daysSince(stageSince) : null,
-    stageSince,
     lastTouch,
     daysSinceLastTouch: lastTouch ? daysSince(lastTouch) : null,
-    aiScore,
-    aiReasoning: nonEmptyString(data.ai_reasoning),
-    nextAction: nonEmptyString(data.ai_next_action),
-    nextActionRationale: nonEmptyString(data.ai_next_action_rationale),
-    valueEstimate: data.value_estimate ?? data.pipeline_value ?? null,
-    source: nonEmptyString(data.source),
+    daysSinceSlaAnchor: slaAnchor ? daysSince(slaAnchor) : null,
+    touchCount: touchCountResult.error ? null : (touchCountResult.count ?? 0),
+    nextScheduledAt:
+      nonEmptyString(data.next_action_at) || nonEmptyString(data.founder_meeting_at),
   };
 }
 
-/**
- * LeadContactBand — sticky quick-summary at the top of the lead page
- * so an operator on a cold call has name / company / email / phone
- * in one row instead of scrolling to the form below. CC's feedback
- * 2026-05-22: "I need a quick client summary I can see within the
- * same stage, last touch, AI score, value plus score, and UI display."
- */
 function LeadContactBand({ data }: { data: Record<string, unknown> }) {
-  const name = nonEmptyString(data.name);
-  const company = nonEmptyString(data.company);
-  const email = nonEmptyString(data.email);
-  const phone = nonEmptyString(data.phone);
+  const website = nonEmptyString(data.website);
+  const city = nonEmptyString(data.business_city);
+  const state = nonEmptyString(data.state);
+  const location = [city, state].filter(Boolean).join(", ") || null;
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <ContactCell label="Name" value={name} />
-      <ContactCell label="Company" value={company} />
-      <ContactCell label="Email" value={email} mono />
-      <ContactCell label="Phone" value={phone} mono />
+    <div className="grid gap-3 rounded-lg border border-bg-border bg-bg-elev/40 p-4 sm:grid-cols-2 xl:grid-cols-4">
+      <ContactCell label="Contact" value={nonEmptyString(data.name)} />
+      <ContactCell label="Company" value={nonEmptyString(data.company)} />
+      <ContactCell
+        label="Email"
+        value={nonEmptyString(data.email)}
+        mono
+        href={nonEmptyString(data.email) ? `mailto:${nonEmptyString(data.email)}` : null}
+      />
+      <ContactCell
+        label="Phone"
+        value={nonEmptyString(data.phone)}
+        mono
+        href={nonEmptyString(data.phone) ? `tel:${nonEmptyString(data.phone)}` : null}
+      />
+      <ContactCell label="Website" value={website} href={safeExternalUrl(website)} external />
+      <ContactCell label="Industry" value={nonEmptyString(data.industry)} />
+      <ContactCell label="Location" value={location} />
+      <ContactCell label="Source" value={nonEmptyString(data.source)} />
     </div>
   );
 }
@@ -301,144 +585,279 @@ function ContactCell({
   label,
   value,
   mono = false,
+  href = null,
+  external = false,
 }: {
   label: string;
   value: string | null;
   mono?: boolean;
+  href?: string | null;
+  external?: boolean;
+}) {
+  const valueClass = `mt-1 text-sm ${value ? "text-fg" : "italic text-fg-faint"} ${
+    mono ? "break-all font-mono" : "break-words"
+  }`;
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">{label}</div>
+      {value && href ? (
+        <a
+          href={href}
+          target={external ? "_blank" : undefined}
+          rel={external ? "noopener noreferrer" : undefined}
+          className={`${valueClass} inline-flex max-w-full items-center gap-1.5 text-accent hover:underline`}
+        >
+          <span className="truncate">{value}</span>
+          {external && <ExternalLink className="h-3 w-3 shrink-0" aria-hidden />}
+        </a>
+      ) : (
+        <div className={valueClass}>{value || "—"}</div>
+      )}
+    </div>
+  );
+}
+
+function LeadMetricsBand({
+  metrics,
+  canChangeStage,
+}: {
+  metrics: LeadDetailMetrics;
+  canChangeStage: boolean;
+}) {
+  const slaDays = OASIS_STAGE_SLA_DAYS[metrics.stageKey] ?? null;
+  const hasSla = slaDays !== null && slaDays < 999;
+  const overdueDays =
+    hasSla && metrics.daysSinceSlaAnchor !== null ? metrics.daysSinceSlaAnchor - slaDays : null;
+  const isOverdue = overdueDays !== null && overdueDays > 0;
+
+  return (
+    <section
+      aria-label="Lead status summary"
+      className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-xl border border-bg-border bg-bg-elev/25 px-4 py-3"
+    >
+      <div className="flex items-center gap-2">
+        {canChangeStage ? (
+          <a
+            href="#lead-lifecycle-control"
+            className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white ring-offset-2 ring-offset-bg-deep transition hover:ring-2 hover:ring-accent/50"
+            style={{ background: metrics.stageMeta?.bg || "#414957" }}
+          >
+            {metrics.stageLabel}
+          </a>
+        ) : (
+          <span
+            className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white"
+            style={{ background: metrics.stageMeta?.bg || "#414957" }}
+          >
+            {metrics.stageLabel}
+          </span>
+        )}
+        {hasSla ? <span className="font-mono text-[10px] text-fg-dim">{slaDays}d target</span> : null}
+      </div>
+      <CompactMetric
+        label="Last touch"
+        value={
+          metrics.daysSinceLastTouch === null
+            ? "None"
+            : metrics.daysSinceLastTouch === 0
+              ? "Today"
+              : `${metrics.daysSinceLastTouch}d ago`
+        }
+        warning={isOverdue}
+      />
+      <CompactMetric label="Touches" value={metrics.touchCount === null ? "—" : String(metrics.touchCount)} />
+      <CompactMetric
+        label="Next"
+        value={metrics.nextScheduledAt ? formatDateTime(metrics.nextScheduledAt) : "Not scheduled"}
+      />
+      {isOverdue ? (
+        <span className="ml-auto text-xs font-medium text-status-warm">Overdue by {overdueDays}d</span>
+      ) : null}
+    </section>
+  );
+}
+
+function CompactMetric({
+  label,
+  value,
+  warning = false,
+}: {
+  label: string;
+  value: string;
+  warning?: boolean;
 }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">{label}</div>
-      <div className={`mt-0.5 text-sm ${value ? "text-fg" : "text-fg-faint italic"} ${mono ? "font-mono break-all" : ""}`}>
-        {value || "—"}
+    <div className="min-w-0">
+      <div className="text-[9px] font-bold uppercase tracking-wider text-fg-dim">{label}</div>
+      <div className={`mt-0.5 truncate text-xs font-semibold ${warning ? "text-status-warm" : "text-fg-muted"}`}>
+        {value}
       </div>
     </div>
   );
 }
-
-function LeadMetricsBand({ metrics }: { metrics: LeadDetailMetrics }) {
-  // Overdue framing — match the pipeline's "Touch first" callout math
-  // so the operator doesn't see "5d overdue" on the kanban and "9d ago"
-  // on the detail page and wonder which one's lying. Uses the SAME
-  // SLA table the pipeline view uses (lib/oasis-sla.ts), applied to
-  // the same days-since-last-touch number this page computes.
-  const slaDays = OASIS_STAGE_SLA_DAYS[metrics.stageKey] ?? null;
-  const isTerminalSla = slaDays === null || slaDays >= 999;
-  const overdueDays =
-    !isTerminalSla && slaDays !== null && metrics.daysSinceLastTouch !== null
-      ? metrics.daysSinceLastTouch - slaDays
-      : null;
-  const isOverdue = overdueDays !== null && overdueDays > 0;
+function HandoffSummary({
+  data,
+  memberNames,
+}: {
+  data: Record<string, unknown>;
+  memberNames: Map<string, string>;
+}) {
+  const assignedId = nonEmptyString(data.assigned_to);
+  const founderId = nonEmptyString(data.audit_host_user_id) || nonEmptyString(data.booked_founder);
+  const assigned =
+    nonEmptyString(data.assigned_to_name) ||
+    (assignedId ? memberNames.get(assignedId) || assignedId : null);
+  const founder = founderId ? memberNames.get(founderId) || founderId : null;
+  const meetingAt = nonEmptyString(data.founder_meeting_at);
+  const calendarUrl = safeExternalUrl(nonEmptyString(data.google_calendar_event_url));
+  const meetUrl = safeExternalUrl(nonEmptyString(data.google_meet_link));
+  const calendarStatus = humanize(nonEmptyString(data.calendar_event_status));
   return (
-    <div className="space-y-3">
+    <section className="rounded-2xl border border-bg-border bg-bg-deep/50 p-5">
+      <div className="mb-4">
+        <h2 className="text-sm font-semibold text-fg">Handoff summary</h2>
+        <p className="mt-1 text-xs text-fg-muted">
+          The context the next owner needs without searching through edit fields.
+        </p>
+      </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <MetricBox label="Stage">
-          <div className="flex items-center gap-2">
-            <span
-              className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold"
-              style={{
-                background: metrics.stageMeta?.bg || "#414957",
-                color: metrics.stageMeta?.fg || "#E5E7EB",
-              }}
-            >
-              {metrics.stageLabel}
-            </span>
-            {slaDays !== null && !isTerminalSla && (
-              <span className="text-[10px] text-fg-dim font-mono">
-                {slaDays}d target
-              </span>
-            )}
-          </div>
-          <div className="mt-2 text-xs text-fg-dim">
-            {metrics.daysInStage == null
-              ? "Exact stage history unavailable"
-              : `${metrics.daysInStage} day${metrics.daysInStage === 1 ? "" : "s"} in stage`}
-          </div>
-        </MetricBox>
-        <MetricBox label="Last touch">
-          <MetricValue>
-            {metrics.daysSinceLastTouch == null
-              ? "No touch logged"
-              : `${metrics.daysSinceLastTouch} day${metrics.daysSinceLastTouch === 1 ? "" : "s"} ago`}
-          </MetricValue>
-          <div className="mt-2 text-xs">
-            {isOverdue ? (
-              <span className="text-status-warm font-medium">
-                Overdue by {overdueDays}d
-                <span className="text-fg-dim font-normal">
-                  {" "}
-                  ({slaDays}d target for {metrics.stageLabel})
-                </span>
-              </span>
-            ) : (
-              <span className="text-fg-dim">
-                {metrics.lastTouch ? relTime(metrics.lastTouch) : "Timeline is empty"}
-              </span>
-            )}
-          </div>
-        </MetricBox>
-        <MetricBox label="AI score">
-          <MetricValue>{metrics.aiScore == null ? "Not scored" : `${metrics.aiScore}/100`}</MetricValue>
-          <div className="mt-2 line-clamp-2 text-xs text-fg-dim">
-            {metrics.aiReasoning || "Run Score with AI to generate a reasoned fit score."}
-          </div>
-        </MetricBox>
-        <MetricBox label="Value + source">
-          <MetricValue>{formatMoney(metrics.valueEstimate)}</MetricValue>
-          <div className="mt-2 text-xs text-fg-dim">{metrics.source || "Source not captured"}</div>
-        </MetricBox>
+        <SummaryCell label="Assigned rep" value={assigned} />
+        <SummaryCell label="Audit host" value={founder} />
+        <SummaryCell label="15-minute audit (ET)" value={meetingAt ? formatDateTime(meetingAt) : null} />
+        <SummaryCell label="Calendar invite" value={calendarStatus} />
       </div>
-      <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-        <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-          AI next action
-        </div>
-        <div className="mt-2 text-sm font-semibold text-fg">
-          {metrics.nextAction || "No recommendation yet"}
-        </div>
-        <div className="mt-1 text-sm text-fg-muted">
-          {metrics.nextActionRationale || "Run Suggest next action to generate the next best operator move."}
-        </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <SummaryCell
+          label="Promised demo"
+          value={nonEmptyString(data.promised_demo)}
+          roomy
+        />
+        <SummaryCell
+          label="Founder handoff note"
+          value={nonEmptyString(data.founder_handoff_note) || nonEmptyString(data.last_handoff_note) || nonEmptyString(data.notes)}
+          roomy
+        />
+        {nonEmptyString(data.loss_reason) && (
+          <SummaryCell label="Loss reason" value={nonEmptyString(data.loss_reason)} roomy />
+        )}
       </div>
-    </div>
+      {(calendarUrl || meetUrl) && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {meetUrl && (
+            <a href={meetUrl} target="_blank" rel="noopener noreferrer" className="btn-primary inline-flex items-center gap-2 !px-3 !py-2 text-xs">
+              Join Google Meet
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            </a>
+          )}
+          {calendarUrl && (
+            <a href={calendarUrl} target="_blank" rel="noopener noreferrer" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-2 text-xs">
+              Open Calendar event
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            </a>
+          )}
+        </div>
+      )}
+      {websiteBuildBriefIsReady(data.build_brief) && (
+        <div className="mt-4 rounded-xl border border-accent/20 bg-accent/[0.035] p-4">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+            Builder-ready brief
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <SummaryCell label="Business goal" value={data.build_brief.businessGoal} roomy />
+            <SummaryCell label="Ideal customer" value={data.build_brief.targetAudience} roomy />
+            <SummaryCell label="Pages" value={data.build_brief.mustHavePages} roomy />
+            <SummaryCell label="Required features" value={data.build_brief.requiredFeatures} roomy />
+            <SummaryCell label="Integrations" value={data.build_brief.integrations} roomy />
+            <SummaryCell label="Content and assets" value={data.build_brief.contentAndAssets} roomy />
+            <SummaryCell label="Domain and access" value={data.build_brief.domainAndAccess} roomy />
+            <SummaryCell label="Launch timing" value={data.build_brief.launchTiming} roomy />
+            <SummaryCell label="Decision process" value={data.build_brief.decisionProcess} roomy />
+            <SummaryCell label="Closing-call transcript notes" value={data.build_brief.transcriptNotes} roomy />
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
-function MetricBox({ label, children }: { label: string; children: ReactNode }) {
+function SummaryCell({
+  label,
+  value,
+  roomy = false,
+}: {
+  label: string;
+  value: string | null;
+  roomy?: boolean;
+}) {
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-      <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">{label}</div>
-      <div className="mt-2">{children}</div>
+    <div className={`rounded-lg border border-bg-border/70 bg-bg-elev/30 p-3 ${roomy ? "min-h-24" : ""}`}>
+      <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">{label}</div>
+      <div className="mt-1.5 whitespace-pre-wrap break-words text-sm text-fg-muted">{value || "—"}</div>
     </div>
   );
-}
-
-function MetricValue({ children }: { children: ReactNode }) {
-  return <div className="text-xl font-semibold text-fg">{children}</div>;
 }
 
 function daysSince(iso: string): number {
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return 0;
-  return Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) return 0;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+}
+
+function formatDateTime(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  return new Intl.DateTimeFormat("en-CA", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "America/Toronto",
+  }).format(date);
 }
 
 function titleCase(value: string): string {
-  return value.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  return value.replaceAll("_", " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-/**
- * Compact one-line preview rendered when the Contact section is
- * collapsed — name · company · email tag — so the operator still sees
- * the essentials at a glance without expanding the band.
- */
+function humanize(value: string | null): string | null {
+  return value ? titleCase(value) : null;
+}
+
 function renderContactPreview(data: Record<string, unknown>): ReactNode {
-  const parts: string[] = [];
-  const name = nonEmptyString(data.name);
-  const company = nonEmptyString(data.company);
-  const email = nonEmptyString(data.email);
-  if (name) parts.push(name);
-  if (company) parts.push(company);
-  if (email) parts.push(email);
-  if (parts.length === 0) return null;
-  return <span className="font-mono text-xs">{parts.join(" · ")}</span>;
+  const parts = [
+    nonEmptyString(data.name),
+    nonEmptyString(data.company),
+    nonEmptyString(data.website),
+  ].filter((value): value is string => Boolean(value));
+  return parts.length ? <span className="font-mono text-xs">{parts.join(" · ")}</span> : null;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function buildBriefDraft(value: unknown): Partial<BuildBriefDraft> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const fields: Array<keyof BuildBriefDraft> = [
+    "businessGoal",
+    "targetAudience",
+    "mustHavePages",
+    "requiredFeatures",
+    "integrations",
+    "contentAndAssets",
+    "domainAndAccess",
+    "launchTiming",
+    "decisionProcess",
+    "transcriptNotes",
+  ];
+  const out: Partial<BuildBriefDraft> = {};
+  for (const field of fields) {
+    if (typeof source[field] === "string") out[field] = source[field];
+  }
+  return out;
 }

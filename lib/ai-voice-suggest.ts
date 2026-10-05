@@ -16,7 +16,7 @@
  */
 import { wrapUntrusted, INJECTION_GUARD, safeJsonExtract } from "./llm-input-boundary";
 import type { ConversationMessage } from "./conversation-threading";
-import { inferTextWithFallback } from "./bridge-infer";
+import { inferTextWithFallbackForTenant } from "./ai/infer";
 import type { BridgeTarget } from "./bridge-proxy";
 
 const SUGGEST_MODEL = "claude-haiku-4-5";
@@ -128,7 +128,9 @@ ${COMMON_RULES}`;
 
 export async function generateVoiceSuggestion(
   input: VoiceSuggestInput,
-  opts?: { bridgeTarget?: BridgeTarget | null },
+  // tenantId is REQUIRED: it decides whether this may run on the OASIS
+  // subscription at all (lib/ai/infer.ts). Non-OASIS tenants are refused.
+  opts: { bridgeTarget?: BridgeTarget | null; tenantId: string | null },
 ): Promise<VoiceSuggestResult> {
   const channel: ComposerChannel = input.channel === "email" ? "email" : "sms";
   const system = [
@@ -153,10 +155,10 @@ export async function generateVoiceSuggestion(
 
   // Subscription bridge first (free); paid Anthropic API fallback. Throws
   // anthropic_key_missing only when neither is available (→ deterministic fallback).
-  const text = await inferTextWithFallback({
+  const text = await inferTextWithFallbackForTenant(opts.tenantId, {
     system,
     prompt: userParts.join("\n\n"),
-    bridgeTarget: opts?.bridgeTarget ?? null,
+    bridgeTarget: opts.bridgeTarget ?? null,
     bridgeModel: "fast",
     paidModel: SUGGEST_MODEL,
     maxTokens: MAX_TOKENS,

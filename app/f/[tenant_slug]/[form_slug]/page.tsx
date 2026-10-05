@@ -28,6 +28,7 @@ import {
   type FormBranding,
 } from "@/lib/forms/types";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
+import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -57,9 +58,19 @@ export async function generateMetadata({
   } catch {
     // Fall through to form name on parse failure.
   }
+  // The TAB belongs to the tenant too. app/layout.tsx sets one global icon —
+  // OASIS AI's — so a SunBiz merchant uploading three months of bank statements
+  // saw another company's mark in the browser tab on the most sensitive page in
+  // the flow. Resolved per tenant here; an unmapped tenant keeps the platform
+  // default rather than borrowing anyone's.
+  const icon = faviconForTenant({
+    tenantId: lookup.form.tenant_id,
+    tenantSlug: resolved.tenant_slug,
+  });
   return {
     title,
     robots: { index: false, follow: false },
+    ...(icon ? { icons: { icon } } : {}),
   };
 }
 
@@ -107,9 +118,33 @@ async function loadForm(params: RouteParams): Promise<LoadResult> {
       detail: err instanceof Error ? err.message : String(err),
     };
   }
-  // Tenant-logo fallback (same rule the personalized route uses).
+  // Logo fallback chain, most specific first. Resolved HERE, server-side,
+  // because the mark comes from lib/email/brands.ts which reads server env.
+  //
+  //   1. the form's own branding.logo_url   (an operator set it on this form)
+  //   2. the tenant's logo_url               (an operator set it on the tenant)
+  //   3. the tenant -> brand registry        (the company this tenant IS)
+  //   4. nothing                             (render a neutral header)
+  //
+  // Rung 3 is new and rung 4 is the point. Before 2026-09-18 the chain stopped
+  // at rung 2 and the RENDER then substituted <SunMark/> — "Gold SunBiz sun
+  // glyph" by its own doc comment — for anyone who fell through. Both OASIS
+  // forms and both tenants carry a NULL logo_url, so every OASIS prospect was
+  // asked for their name and mobile under a lending client's mark. All four
+  // SunBiz forms set branding.logo_url, so they win at rung 1 and never saw it:
+  // the fallback was only ever visible to the tenants it did not belong to.
+  //
+  // publicMarkForTenant fails closed. An unmapped tenant gets null and a
+  // brandless header, never another company's glyph.
   if (branding.logo_url == null && resolved.tenant_logo_url) {
     branding = { ...branding, logo_url: resolved.tenant_logo_url };
+  }
+  if (branding.logo_url == null) {
+    const mark = publicMarkForTenant({
+      tenantId: resolved.form.tenant_id,
+      tenantSlug: resolved.tenant_slug,
+    });
+    if (mark) branding = { ...branding, logo_url: mark };
   }
 
   return {
@@ -136,11 +171,17 @@ export default async function AnonymousFormPage({
   // interest form with their own rep param; the submit route resolves it to
   // assigned_to so the lead lands under that agent. Spoofing only reassigns
   // among real tenant members (resolved server-side), never an outsider.
-  searchParams?: Promise<{ rep?: string }>;
+  //
+  // ?source=<text|dial> — origination attribution. Orthogonal to ?rep: the same
+  // agent blasts texts AND dials, so both params travel together on a link.
+  // Passed through raw; lib/forms/lead-source.ts normalizes it server-side on
+  // submit, where a bad value becomes "unknown" instead of rejecting the lead.
+  searchParams?: Promise<{ rep?: string; source?: string }>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
   const rep = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : undefined;
+  const source = typeof sp.source === "string" && sp.source.trim() ? sp.source.trim() : undefined;
   const result = await loadForm(resolved);
 
   if (!result.ok) {
@@ -162,10 +203,28 @@ export default async function AnonymousFormPage({
       // actually shown. No Bluerise-hosted form exists yet, so this resolves to
       // SunBiz today; the slug check means standing one up needs no code change.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
+      // Channel on EVERY submit, not only inside anonymous_init.
+      //
+      // Codex review 2026-08-24 (P2, confirmed): a form whose step 0 is a
+      // direct-to-storage upload calls ensureTokenForUpload() first, which
+      // POSTs initialize_only:true. That request carries anonymous_init.source
+      // but RETURNS at the token mint, before the submission row (and the
+      // channel record) exists. Every later submit then has a token, so it
+      // omits anonymous_init entirely — and the channel was lost, leaving the
+      // completion email reporting Unknown for exactly the bank-statement
+      // upload flow.
+      //
+      // Passing it here as well makes the anonymous page symmetric with the
+      // token page: submission_source rides on every request regardless of
+      // which auth shape that request uses. anonymousInit.source stays because
+      // it feeds a DIFFERENT thing — lead_source origination at lead creation.
+      submissionSource={source}
+      submissionPath={`/f/${result.tenant_slug}/${result.form.slug}`}
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,
         ...(rep ? { rep } : {}),
+        ...(source ? { source } : {}),
       }}
     />
   );

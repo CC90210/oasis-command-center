@@ -30,8 +30,14 @@ const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8")
 // ---------------------------------------------------------------------------
 
 const index: ScoreIndex = {
-  scored: new Map([["biz-scored", 34], ["biz-both", 71], ["biz-zero", 0]]),
+  scored: new Map([["biz-scored", 34], ["biz-both", 71], ["biz-zero", 0], ["biz-parked-and-scored", 82]]),
   unreachable: new Set(["biz-unreachable", "biz-both"]),
+  // `biz-parked-and-scored` carries BOTH a score and a parked mark on purpose.
+  // That is not a contrived case: every one of the 53 parking pages in the
+  // corpus WAS scored, at exactly 82, which is how two of them reached a
+  // prospect as "best-scoring competitors" (2026-08-25). The precedence
+  // assertions below are the thing that stops that number being shown.
+  parked: new Set(["biz-parked", "biz-parked-and-scored"]),
 };
 
 assert.deepEqual(
@@ -71,6 +77,39 @@ assert.deepEqual(
   resolveScore("https://example.com", "biz-both", index),
   { score: null, scoreState: "unreachable" },
   "unreachable outranks a stored score, matching audit.ts's precedence exactly",
+);
+
+// THE OTHER LOAD-BEARING ONE, added 2026-08-25 after it reached a prospect.
+//
+// `biz-parked-and-scored` holds a score of 82 AND a parked mark. That is the
+// real shape, not a contrived one: all 53 HugeDomains parking pages in the
+// corpus were scored, every one at exactly 82, and every one landed in the top
+// tier -- because a parking page genuinely is fast, HTTPS, mobile-friendly and
+// full of CTAs, which is what the 49 checks measure.
+//
+// Competitor selection takes the BEST-scoring peers, so an 82 outranked almost
+// every real business. Two of them were shown to Adon on a live battle card as
+// "best-scoring competitors", with links that opened hugedomains.com.
+assert.deepEqual(
+  resolveScore("https://example.com", "biz-parked-and-scored", index),
+  { score: null, scoreState: "parked" },
+  "a domain listed for sale must never carry its 82 -- that number describes a broker's landing page",
+);
+
+// Parked outranks unreachable too, and the order matters. We did not fail to
+// reach a parked domain; we reached it perfectly and got a sales listing.
+// Reporting "we could not check this site" swaps one false statement for
+// another and throws away the strongest opener a rep has.
+assert.deepEqual(
+  resolveScore("https://example.com", "biz-parked", index),
+  { score: null, scoreState: "parked" },
+  "a parked domain names what it is",
+);
+
+assert.deepEqual(
+  resolveScore(null, "biz-parked", index),
+  { score: null, scoreState: "no_website" },
+  "no website on the lead still outranks everything, parked included",
 );
 
 assert.deepEqual(
@@ -164,11 +203,29 @@ assert.deepEqual(
   // review, 2026-08-23.) `count: "exact"` is computed by a separate COUNT(*)
   // with no limit applied, so comparing rows-returned against rows-matched
   // detects truncation from any source.
+  //
+  // TEN: five tenant-wide reads for the Leads pool and the same five
+  // completeness-proved, business-id-bounded reads for the Pipeline. The
+  // count is asserted exactly, not as a minimum, precisely so that adding a
+  // read forces someone to come here and decide whether it needs the same
+  // completeness proof. It did -- a truncated parked read leaves the parking
+  // pages it missed sitting in `scored` at 82, back at the top of every peer
+  // group, offered to prospects as their best competitor, with nothing on
+  // screen looking wrong. This assertion is what caught that omission.
+  //
+  // WAS EIGHT until 2026-09-02 (instant-load P2). The parked read became TWO
+  // reads per call site: the stored `is_parked = 1` verdict (migration 012,
+  // indexed) plus the original LIKE net restricted to rows not yet stamped.
+  // This assertion did its job again -- both new reads had to come here and
+  // prove they carry the same exact-count completeness proof. They do.
   const counted = src.match(/\{ count: "exact" \}/g) || [];
-  assert.equal(counted.length, 3, "all three score-index reads must request an exact count");
+  assert.equal(counted.length, 10, "all full and targeted score-index reads must request an exact count");
   // The open quote distinguishes a real call from a comment naming it.
+  // Ten for the same reason as above: each of the two parked tiers proves its
+  // own completeness at each call site. One shared proof would let the other
+  // tier truncate silently.
   const asserted = src.match(/assertCompleteRead\("/g) || [];
-  assert.equal(asserted.length, 3, "all three score-index reads must prove completeness before being used");
+  assert.equal(asserted.length, 10, "all full and targeted score-index reads must prove completeness before being used");
   assert.doesNotMatch(
     src,
     /length >= LEAD_READ_CAP/,
@@ -178,7 +235,7 @@ assert.deepEqual(
   // Never invent a number for a null column.
   assert.match(
     src,
-    /typeof r\.quality_score !== "number"/,
+    /typeof row\.quality_score !== "number"/,
     "a null quality_score must be skipped, not coerced to 0",
   );
 
@@ -190,7 +247,7 @@ assert.deepEqual(
   // exactly why it would have gone unnoticed until the next re-crawl.)
   assert.match(
     src,
-    /newestAt\.get\(r\.business_id\) !== r\.fetched_at/,
+    /newestAt\.get\(row\.business_id\) !== row\.fetched_at/,
     "a score must be ignored unless its row is the business's NEWEST audit -- otherwise a superseded crawl resurfaces as a current score",
   );
   // An unfiltered read of every audit row, which is what the newest-per-business
@@ -301,7 +358,9 @@ assert.doesNotThrow(
   // Advancing on a failed write loses the call silently: the rep sees the queue
   // move, believes it was logged, and it was not. The failure branch must
   // return before next() is reached.
-  const logFn = src.match(/const log = useCallback\([\s\S]*?\n {4}\[lead, note, pending, next\],/);
+  // Anchored on the leading dependencies only, so adding one (callbackPreset)
+  // does not hide the callback from this check.
+  const logFn = src.match(/const log = useCallback\([\s\S]*?\n {4}\[lead, note, pending, next(?:, \w+)*\],/);
   assert.ok(logFn, "CallMode must have its log() callback");
   const failureBranch = logFn[0].match(/if \(!r\.ok\)[\s\S]*?\n {8}\}/);
   assert.ok(failureBranch, "log() must handle a non-ok response");

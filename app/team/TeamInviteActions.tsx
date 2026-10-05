@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { isInvitableRole, type RoleOption } from "@/lib/team-roles";
+import { isInvitableRole, teamRoleLabel, type RoleOption } from "@/lib/team-roles";
 
 type ActiveInvite = {
   id: string;
@@ -29,32 +29,58 @@ export function TeamInviteActions({
   const [role, setRole] = useState(roleOptions[0]?.value ?? "member");
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
-  const [issuedToken, setIssuedToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [issuedUrl, setIssuedUrl] = useState<string | null>(null);
   const [issuedExpiry, setIssuedExpiry] = useState<string | null>(null);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [emailSent, setEmailSent] = useState<boolean | null>(null);
+  const [superseded, setSuperseded] = useState(0);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    && normalizedEmail.length <= 254;
+  const selectedRole = roleOptions.find((option) => option.value === role);
 
-  async function generate() {
+  async function sendInvite() {
+    if (busy) return;
     setError(null);
-    setIssuedToken(null);
+    setIssuedUrl(null);
+    setEmailSent(null);
+    setSentTo(null);
+    setSuperseded(0);
     setCopied(false);
+    if (!emailIsValid) {
+      setError("Enter the teammate's valid work email.");
+      return;
+    }
+    setBusy(true);
     try {
       const res = await fetch("/api/team/invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, email: email.trim() || null }),
+        body: JSON.stringify({ role, email: normalizedEmail }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
         setError(data.error || "Failed to create invite.");
         return;
       }
-      setIssuedToken(data.invite.raw_token);
+      if (typeof data.invite?.invite_url !== "string") {
+        setError("The invite was created, but its delivery receipt was incomplete.");
+        return;
+      }
+      setIssuedUrl(data.invite.invite_url);
       setIssuedExpiry(data.invite.expires_at);
+      setEmailSent(data.invite.email_sent === true);
+      setSentTo(normalizedEmail);
+      setSuperseded(Number(data.invite.superseded) || 0);
       setEmail("");
       startTransition(() => router.refresh());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create invite.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -69,19 +95,17 @@ export function TeamInviteActions({
     startTransition(() => router.refresh());
   }
 
-  const inviteLink = issuedToken
-    ? `${typeof window !== "undefined" ? window.location.origin : ""}/invite/${issuedToken}`
-    : null;
-
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-[1fr_12rem_8rem] gap-3 items-end">
+      <div className="grid grid-cols-1 gap-3 items-end md:grid-cols-[1fr_14rem_8rem]">
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-fg-dim">
-            Email (optional)
+            Work email
           </span>
           <input
             type="email"
+            required
+            maxLength={254}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="teammate@company.com"
@@ -106,14 +130,19 @@ export function TeamInviteActions({
               </option>
             ))}
           </select>
+          {selectedRole && (
+            <span className="mt-1 block text-[11px] leading-4 text-fg-dim">
+              {selectedRole.description}
+            </span>
+          )}
         </label>
         <button
           type="button"
-          onClick={generate}
-          disabled={pending}
+          onClick={sendInvite}
+          disabled={pending || busy || !emailIsValid}
           className="bg-accent text-bg font-semibold py-2 px-3 rounded text-sm hover:opacity-90 disabled:opacity-50"
         >
-          {pending ? "..." : "Generate link"}
+          {busy ? "Sending..." : "Send invite email"}
         </button>
       </div>
 
@@ -123,24 +152,54 @@ export function TeamInviteActions({
         </div>
       )}
 
-      {inviteLink && (
-        <div className="rounded border border-accent/40 bg-bg-elevated p-3 space-y-2">
+      {issuedUrl && emailSent === true && (
+        <div className="rounded border border-status-engaged/40 bg-status-engaged/10 p-3 space-y-2">
+          <div className="text-sm font-semibold text-status-engaged">
+            Invite email sent to {sentTo}.
+          </div>
+          <div className="text-xs text-fg-muted">
+            The one-time link expires{" "}
+            {issuedExpiry ? new Date(issuedExpiry).toLocaleString() : "in 7 days"}.
+            {superseded > 0 ? " An earlier link for this person was revoked." : ""}
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(issuedUrl);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              } catch {
+                setCopied(false);
+              }
+            }}
+            className="text-xs text-fg-muted underline underline-offset-2 hover:text-fg"
+          >
+            {copied ? "Backup link copied" : "Copy backup link"}
+          </button>
+        </div>
+      )}
+
+      {issuedUrl && emailSent === false && (
+        <div className="rounded border border-status-attention/40 bg-status-attention/10 p-3 space-y-2">
+          <div className="text-sm font-semibold text-status-attention">
+            Email delivery failed. The invite is valid; send this backup link to {sentTo}.
+          </div>
           <div className="text-xs uppercase tracking-wider text-accent font-mono">
-            One-time link · copy now
+            Backup delivery link
           </div>
           <div className="flex items-center gap-2">
             <input
               readOnly
-              value={inviteLink}
+              value={issuedUrl}
               className="flex-1 bg-bg text-fg border border-bg-border rounded px-2 py-1.5 text-xs font-mono"
               onFocus={(e) => e.currentTarget.select()}
             />
             <button
               type="button"
               onClick={async () => {
-                if (!inviteLink) return;
                 try {
-                  await navigator.clipboard.writeText(inviteLink);
+                  await navigator.clipboard.writeText(issuedUrl);
                   setCopied(true);
                   setTimeout(() => setCopied(false), 2000);
                 } catch {
@@ -157,7 +216,7 @@ export function TeamInviteActions({
             {issuedExpiry
               ? new Date(issuedExpiry).toLocaleString()
               : "in 7 days"}
-            . This token will not be shown again — store it now.
+            . This backup is shown only because email delivery failed.
           </div>
         </div>
       )}
@@ -174,9 +233,9 @@ export function TeamInviteActions({
                 className="grid grid-cols-[1fr_8rem_8rem_5rem] gap-3 py-2 items-center"
               >
                 <span className="text-sm text-fg">
-                  {inv.email || "(open link)"}
+                  {inv.email || "(invalid legacy invite)"}
                 </span>
-                <span className="text-sm text-fg-muted">{inv.team_role}</span>
+                <span className="text-sm text-fg-muted">{teamRoleLabel(inv.team_role)}</span>
                 <span className="text-xs text-fg-dim">
                   expires {new Date(inv.expires_at).toLocaleDateString()}
                 </span>
@@ -253,6 +312,128 @@ export function AdminAccessToggle({
       }`}
     >
       {busy ? "..." : granted ? "Admin: on" : "Admin: off"}
+    </button>
+  );
+}
+
+type DeactivationImpact = {
+  leadHandling: boolean;
+  leads: { pool: number; board: number; keep: number };
+  unpaidCommissions: number;
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Active / Inactive switch (2026-09-24). Deactivating asks the server what will
+ * happen first and says it in the confirm, because it moves leads — the one
+ * part reactivation does not undo.
+ */
+export function MemberActivationToggle({
+  profileId,
+  name,
+  active,
+}: {
+  profileId: string;
+  name: string;
+  active: boolean;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [pending, startTransition] = useTransition();
+  const url = `/api/team/members/${encodeURIComponent(profileId)}/activation`;
+
+  async function deactivate() {
+    const preview = await fetch(url);
+    const previewBody = await preview.json().catch(() => ({}));
+    if (!preview.ok) {
+      alert(previewBody.error || "Could not check what deactivating would change.");
+      return;
+    }
+    const impact = previewBody.impact as DeactivationImpact;
+    const lines = [
+      `Deactivate ${name}?`,
+      "",
+      "They are removed from the pipeline, assign lists, and reports, and can't sign in until reactivated. Their history stays.",
+    ];
+    if (impact.leadHandling) {
+      lines.push(
+        "",
+        `• ${plural(impact.leads.pool, "early-stage lead")} go back to the Leads pool`,
+        `• ${plural(impact.leads.board, "warm lead")} stay on the board, unassigned, for you to pick up`,
+        `• ${plural(impact.leads.keep, "closed or delivery lead")} keep ${name} as owner (history)`,
+        "",
+        "Lead moves are not undone by reactivating.",
+      );
+    }
+    if (impact.unpaidCommissions > 0) {
+      lines.push("", `${plural(impact.unpaidCommissions, "unpaid commission line")} stay open for your review.`);
+    }
+    if (!confirm(lines.join("\n"))) return;
+
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: false, reason: "Deactivated from the Team page" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(body.error || "Deactivation failed.");
+      return;
+    }
+    const notes: string[] = [];
+    if (body.loginNote) notes.push(body.loginNote);
+    if (Array.isArray(body.refused) && body.refused.length > 0) {
+      notes.push(
+        `${plural(body.refused.length, "lead")} changed while this ran and were left as they were — run Deactivate again to retry them.`,
+      );
+    }
+    if (notes.length > 0) alert(notes.join("\n"));
+  }
+
+  async function reactivate() {
+    if (!confirm(`Reactivate ${name}? They can sign in again and reappear in assign lists. Their old leads are not handed back.`)) {
+      return;
+    }
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: true }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || "Reactivation failed.");
+    }
+  }
+
+  async function toggle() {
+    setBusy(true);
+    try {
+      if (active) await deactivate();
+      else await reactivate();
+      startTransition(() => router.refresh());
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy || pending}
+      title={active ? "Deactivate — hide from every live list and block sign-in" : "Reactivate this teammate"}
+      className={`text-[11px] font-mono px-2 py-1 rounded border transition-colors disabled:opacity-50 ${
+        active
+          ? "border-status-engaged/40 text-status-engaged hover:border-status-warm/50 hover:text-status-warm"
+          : "border-bg-border text-fg-muted hover:text-fg hover:border-accent/40"
+      }`}
+    >
+      {busy ? "..." : active ? "Active" : "Inactive · reactivate"}
     </button>
   );
 }

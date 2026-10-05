@@ -28,6 +28,9 @@ import {
 } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import { isActiveMember } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,12 +84,15 @@ export async function POST(
 
   const db = getServiceSupabase();
 
-  // The added user must be a member of THIS tenant (prevents cross-tenant
-  // sharing). Removal needs no membership check — we just drop the id.
+  // The added user must be an ACTIVE member of THIS tenant (prevents
+  // cross-tenant sharing, and sharing a deal with a deactivated teammate).
+  // Removal needs no membership check — we just drop the id — so a deactivated
+  // collaborator already on a deal stays listed until someone removes them.
+  let addDeactivated = false;
   if (addId) {
     const memberCheck = await db
       .from("user_profiles")
-      .select("auth_user_id")
+      .select("auth_user_id, deactivated_at")
       .eq("tenant_id", tenantId)
       .eq("auth_user_id", addId)
       .maybeSingle();
@@ -96,6 +102,9 @@ export async function POST(
         { status: 400 },
       );
     }
+    // Refused below, once the deal's current collaborators are known: re-adding
+    // someone already listed grants them nothing new.
+    addDeactivated = !isActiveMember(memberCheck.data as { deactivated_at?: string | null });
   }
 
   // Existence + entity gate + current owner/collaborators read.
@@ -111,18 +120,54 @@ export async function POST(
   }
 
   const data = (existing.data as { data?: Record<string, unknown> }).data || {};
-  // currentOwner: used for the owner-not-collaborator check + the board nudge.
-  // Authorization already happened at the top (canWriteCrm).
-  const currentOwner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
+  // Managing the collaborator roster is stricter than working a shared lead.
+  // On the OASIS sales surface, a collaborator may edit the lead itself but may
+  // not grant or revoke somebody else's access. Only the assigned owner (or an
+  // admin capability) controls this list.
+  const currentOwner =
+    typeof data.assigned_to === "string" ? data.assigned_to.trim().toLowerCase() : null;
+  if (
+    !canMutateGenericLeadForTenant(
+      {
+        teamRole: sess.teamRole,
+        userId: sess.userId,
+        isOwner: sess.isTrueAdmin,
+        adminAccess: sess.adminAccess,
+      },
+      { id: recordId, data },
+    ) ||
+    (!sess.isAdmin &&
+      roleMayOperateOasisSalesLead(sess.teamRole) &&
+      currentOwner !== sess.userId.trim().toLowerCase())
+  ) {
+    return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
 
   // Compute the next collaborator set.
-  let next = normalizeCollaborators(data);
+  const current = normalizeCollaborators(data);
+  let next = current;
   if (removeId) next = next.filter((c) => c !== removeId);
   if (addId) {
     // Adding the owner as a collaborator is redundant — they already see it.
     if (addId === currentOwner) {
       return NextResponse.json(
         { ok: false, error: "owner_not_collaborator", message: "The owner already has access; assign instead to transfer ownership." },
+        { status: 400 },
+      );
+    }
+    const alreadyListed = current.includes(addId);
+    // Already on the deal: nothing is granted, so nothing is written, audited
+    // or refused — a deactivated collaborator simply stays listed.
+    if (alreadyListed && !removeId) {
+      return NextResponse.json({ ok: true, collaborators: current });
+    }
+    if (addDeactivated && !alreadyListed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "member_deactivated",
+          message: "That teammate has been deactivated and can't be added to a deal. Choose an active teammate.",
+        },
         { status: 400 },
       );
     }

@@ -25,6 +25,11 @@ import {
 } from "./manifest/data";
 import { resolveClientProfileSlug } from "./client-profiles";
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "./lead-scope";
+import { isWebsiteSalesTenantSlug } from "./leads/canonical-lead-fields";
+import {
+  ownsOasisSalesRecord,
+  rejectedOasisGenericPatchKeys,
+} from "./oasis-sales-pipeline-policy";
 import type { ManifestEntityDef, TenantManifest } from "./manifest/schema";
 
 export type ActionContext = {
@@ -56,9 +61,9 @@ const ACTIONS: Record<string, Handler> = {
       "display_name",
       "brand",
       "primary_agent",
-      "mrr_target_usd",
-      "mrr_current_usd",
-      "mrr_target_date",
+      // No mrr_* fields (2026-09-24): MRR is live Stripe and the goal is a
+      // revenue_goals row. A chat that could type MRR is how the dashboard
+      // came to disagree with the bank.
       "manifesto",
       "agents_enabled",
     ]);
@@ -83,23 +88,6 @@ const ACTIONS: Record<string, Handler> = {
         }
         update[k] = v;
         summaryParts.push(`agents enabled: ${(v as string[]).join(", ")}`);
-        continue;
-      }
-      if (k === "mrr_target_usd" || k === "mrr_current_usd") {
-        const n = Number(v);
-        if (!isFinite(n) || n < 0 || n > 10_000_000) {
-          return { ok: false, type: "update_profile", error: `${k} out of range` };
-        }
-        update[k] = n;
-        summaryParts.push(`${k} → $${n.toLocaleString()}`);
-        continue;
-      }
-      if (k === "mrr_target_date") {
-        if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-          return { ok: false, type: "update_profile", error: "mrr_target_date must be YYYY-MM-DD" };
-        }
-        update[k] = v;
-        summaryParts.push(`MRR target date → ${v}`);
         continue;
       }
       // text fields
@@ -165,18 +153,15 @@ const ACTIONS: Record<string, Handler> = {
     return ACTIONS.update_profile({ primary_agent: payload.agent_key }, ctx);
   },
 
-  async update_mrr(payload, ctx): Promise<ActionResult> {
-    const slim: Record<string, unknown> = {};
-    if ("current_usd" in payload) slim.mrr_current_usd = payload.current_usd;
-    if ("target_usd" in payload) slim.mrr_target_usd = payload.target_usd;
-    if ("target_date" in payload) slim.mrr_target_date = payload.target_date;
-    if (Object.keys(slim).length === 0) {
-      return { ok: false, type: "update_mrr", error: "no MRR fields supplied" };
-    }
-    const r = await ACTIONS.update_profile(slim, ctx);
-    return r.ok
-      ? { ok: true, type: "update_mrr", summary: r.summary }
-      : { ok: false, type: "update_mrr", error: r.error };
+  // Kept so an older prompt that still emits it gets a clear answer instead of
+  // "unknown action" — but it no longer writes anything (2026-09-24).
+  async update_mrr(): Promise<ActionResult> {
+    return {
+      ok: false,
+      type: "update_mrr",
+      error:
+        "MRR is no longer set by hand: it is read live from Stripe, and the company goal is set under Settings → Revenue goal.",
+    };
   },
 
   /**
@@ -208,6 +193,9 @@ const ACTIONS: Record<string, Handler> = {
     if (!ctxResolved.ok) return { ok: false, type: "create_record", error: ctxResolved.error };
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "create_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
+    if (entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug)) {
+      return { ok: false, type: "create_record", error: "use_website_sales_workflow" };
+    }
 
     const validated = validateAgainstEntity(entityDef, data as Record<string, unknown>, { requireAll: true });
     if (!validated.ok) return { ok: false, type: "create_record", error: validated.error };
@@ -262,7 +250,8 @@ const ACTIONS: Record<string, Handler> = {
       // be asked to dump another rep's leads. The arbitrary field `where` is
       // dropped for scoped entities (security > filter flexibility; the model
       // can still reason over the scoped set). Admins / system callers see all.
-      const scoped = SCOPED_ENTITIES.has(entityName) && leadScopingEnabled();
+      const scoped =
+        SCOPED_ENTITIES.has(entityName) && (!ctx.isAdmin || leadScopingEnabled());
       const result = scoped
         ? await listByAssignedScope({
             tenant_id: ctx.tenantId,
@@ -318,6 +307,33 @@ const ACTIONS: Record<string, Handler> = {
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "update_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
 
+    const isOasisSalesLead =
+      entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug);
+    if (isOasisSalesLead) {
+      const protectedKeys = rejectedOasisGenericPatchKeys(
+        patch as Record<string, unknown>,
+      );
+      if (protectedKeys.length > 0) {
+        return {
+          ok: false,
+          type: "update_record",
+          error: "use_website_sales_workflow",
+        };
+      }
+
+      // Generic chat edits may correct safe profile facts, but they may never
+      // become a cross-rep write path. Admins can correct any lead; everyone
+      // else must own or collaborate on this exact record.
+      const existing = await getRecord({
+        tenant_id: ctx.tenantId,
+        entity: entityName,
+        id,
+      }).catch(() => null);
+      if (!existing || (!ctx.isAdmin && !ownsOasisSalesRecord(existing, ctx.userId ?? null))) {
+        return { ok: false, type: "update_record", error: "record_not_found" };
+      }
+    }
+
     const validated = validateAgainstEntity(entityDef, patch as Record<string, unknown>, { requireAll: false });
     if (!validated.ok) return { ok: false, type: "update_record", error: validated.error };
 
@@ -358,6 +374,9 @@ const ACTIONS: Record<string, Handler> = {
     if (!ctxResolved.ok) return { ok: false, type: "delete_record", error: ctxResolved.error };
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "delete_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
+    if (entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug)) {
+      return { ok: false, type: "delete_record", error: "use_website_sales_workflow" };
+    }
 
     // Look up the row first so we can include a meaningful label in the
     // result summary; the toast tells the operator what got destroyed,

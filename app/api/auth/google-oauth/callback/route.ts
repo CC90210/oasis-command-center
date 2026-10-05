@@ -12,7 +12,8 @@
  *      endpoint so the dashboard knows what "from" address to surface.
  *   4. Encrypt + store the whole bundle in user_integration_credentials
  *      under service='gmail_oauth'.
- *   5. Redirect back to /settings#integrations with success/error
+ *   5. Redirect back to the Google drawer in Settings › Connections
+ *      (/settings/connections?app=google-workspace) with success/error
  *      query param so the Settings UI can show a status banner.
  *
  * Required env (same as start):
@@ -20,20 +21,23 @@
  *   GOOGLE_CLIENT_SECRET
  *   PUBLIC_APP_URL
  *
- * Scope: gmail.send only (verified against what we requested in /start).
+ * Scope: work connections require Gmail send/read plus Calendar events;
+ * personal connections require Gmail read-only only.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import { setUserIntegrationBundle } from "@/lib/user-integration-store";
+import { hasRequiredScope } from "@/lib/integrations/google-calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-const SETTINGS_RETURN_PATH = "/settings#integrations";
+const SETTINGS_RETURN_PATH = "/settings/connections?app=google-workspace";
 // Must mirror start/route.ts. work → send+monitor; personal → monitor only.
 const MAILBOX_SERVICE: Record<string, string> = {
   work: "gmail_oauth",
@@ -157,16 +161,36 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Verify the granted scope covers what this mailbox needs. Google can
-  // grant a SUBSET of what we requested in edge cases. work needs send
-  // (load-bearing) + readonly (monitor); personal needs readonly (monitor).
-  const grantedScopes = (tokenResp.scope || "").split(" ");
-  const needSend = service === "gmail_oauth";
-  if (needSend && !grantedScopes.includes(GMAIL_SEND_SCOPE)) {
+  // Verify the granted scope covers what this mailbox needs. Google can grant
+  // a subset in edge cases. Work needs send + readonly + Calendar events;
+  // personal needs readonly only.
+  const grantedScopeValue = tokenResp.scope || "";
+  const grantedScopes = new Set(grantedScopeValue.split(/\s+/u).filter(Boolean));
+  const needWorkScopes = service === "gmail_oauth";
+  if (needWorkScopes && !grantedScopes.has(GMAIL_SEND_SCOPE)) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_send_scope_not_granted" });
   }
-  if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
+  if (!grantedScopes.has(GMAIL_READONLY_SCOPE)) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_readonly_scope_not_granted" });
+  }
+  // A BROADER GRANT IS NOT A FAILED GRANT.
+  //
+  // This asked `grantedScopes.has(CALENDAR_EVENTS_SCOPE)` -- the literal narrow
+  // string. Google returns the parent `auth/calendar` when the account has
+  // already granted it to this client, and the parent CONTAINS calendar.events.
+  // So a rep whose Google was more privileged than we asked for was bounced
+  // back to Settings with `calendar_events_scope_not_granted` and no way to
+  // succeed: re-consenting grants the same broader scope again.
+  //
+  // hasRequiredScope is the predicate the BOOKING uses. Sharing it is the point
+  // -- a connection this route accepts must be one the booking can spend, and
+  // three separate copies of that question is what put a green banner over a
+  // dead credential twice (#322, #331).
+  if (needWorkScopes && !hasRequiredScope(grantedScopeValue)) {
+    return settingsRedirect(req, {
+      gmail_oauth: "error",
+      reason: "calendar_events_scope_not_granted",
+    });
   }
 
   // Look up the operator's Gmail address. We requested `openid email`
@@ -192,6 +216,25 @@ export async function GET(req: NextRequest) {
       gmail_oauth: "error",
       reason: "userinfo_email_missing",
     });
+  }
+
+  if (needWorkScopes) {
+    const profile = await resolveActiveProfileForUser(user);
+    const expectedWorkEmail = String(profile.profile?.email || "").trim().toLowerCase();
+    if (
+      profile.error ||
+      profile.profile?.tenant_id !== tenantId ||
+      !expectedWorkEmail ||
+      gmailAddress.trim().toLowerCase() !== expectedWorkEmail
+    ) {
+      return settingsRedirect(req, {
+        gmail_oauth: "error",
+        reason: "google_account_must_match_profile_email",
+        expected: expectedWorkEmail || "work_profile_email",
+        gmail: gmailAddress,
+        mailbox: mailboxRaw,
+      });
+    }
   }
 
   // Persist. Tokens are encrypted in user_integration_credentials.

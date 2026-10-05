@@ -26,7 +26,9 @@ import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
+import { oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -52,10 +54,12 @@ export async function AutomationsContent({
   }
 
   const profile = await safe("automations.profile", getActiveProfile(), null);
+  // null = the heartbeat could not be read (getBridgeOnline throws): the
+  // banner says "Couldn't check", never "Computer not connected yet".
   const bridgeOnline = await safe(
     "automations.bridge_online",
     getBridgeOnline(profile?.tenant_id || null),
-    false,
+    null,
   );
 
   const tenantIdForSlug = profile?.tenant_id ?? null;
@@ -81,11 +85,24 @@ export async function AutomationsContent({
   const manifestAgentKeys = (manifest?.agents || [])
     .filter((agent) => agent.enabled)
     .map((agent) => agent.slug);
-  const automationAgentKeys = Array.from(
-    new Set((profileAgentKeys.length > 0 ? profileAgentKeys : manifestAgentKeys)
-      .map((key) => String(key).trim().toLowerCase())
-      .filter(Boolean)),
-  );
+  // The agents a job may run as: in OASIS's own workspace the ones its bridge
+  // runs, the set /api/cron-jobs accepts there and /operations lists (W4a
+  // review R4, verifier D3); its manifest roster is its department leads, and
+  // the API refuses those library templates. Every other workspace keeps its
+  // roster.
+  const automationAgentKeys =
+    oasisOperatorAgents(profile?.tenant_id) ??
+    Array.from(
+      new Set((profileAgentKeys.length > 0 ? profileAgentKeys : manifestAgentKeys)
+        .map((key) => String(key).trim().toLowerCase())
+        .filter(Boolean)),
+    );
+  const isClientAutomationSurface =
+    !externalTenantSurfacesBlocked() && tenantSlug === "sun";
+  // The bridge installer is operator-only (/settings/devices/install gives a
+  // client nothing to install), so only OASIS's own workspace is offered it. A
+  // client workspace is told OASIS pairs its machine, never sent to a dead end.
+  const canInstallBridge = isOasisSurfaceTenant(tenantSlug);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -103,7 +120,13 @@ export async function AutomationsContent({
           <Cloud className="w-5 h-5 text-fg-dim shrink-0 mt-0.5" />
         )}
         <div className="flex-1 text-xs leading-relaxed">
-          {bridgeOnline ? (
+          {bridgeOnline === null ? (
+            <>
+              <span className="text-fg-muted font-bold">Couldn&apos;t check your computer.</span>{" "}
+              The connection could not be read just now, so this is not saying it is disconnected.
+              Reload in a minute.
+            </>
+          ) : bridgeOnline ? (
             <>
               <span className="text-status-engaged font-bold">Your computer is connected.</span>{" "}
               Jobs run on the schedule below. Edits take effect within a minute. Switch any job off
@@ -112,13 +135,19 @@ export async function AutomationsContent({
           ) : (
             <>
               <span className="text-fg-muted font-bold">Computer not connected yet.</span>{" "}
-              Jobs you create here are saved, but they won&apos;t start running until you pair a
-              machine. Click <span className="text-fg font-medium">Install bridge</span> —
-              it takes about a minute, one command to copy-paste, and you&apos;re live.
+              Local agent jobs are paused until a machine is paired. Cloud sales workers, including
+              founder-meeting invitations and reminders, continue independently.{" "}
+              {canInstallBridge ? (
+                <>
+                  Click <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
+                </>
+              ) : (
+                "OASIS pairs a machine with your workspace directly."
+              )}
             </>
           )}
         </div>
-        {!bridgeOnline && (
+        {bridgeOnline === false && canInstallBridge && (
           <Link
             href="/settings/devices/install"
             className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"
@@ -137,9 +166,9 @@ export async function AutomationsContent({
         </summary>
         <div className="mt-3 space-y-3 text-fg-muted leading-relaxed">
           <p>
-            <span className="text-fg font-bold">Where they run.</span> Each automation runs on
-            the connected machine, not the cloud. The machine wakes up every minute, checks the
-            schedule, and runs anything that&apos;s due — quietly in the background.
+            <span className="text-fg font-bold">Where they run.</span> Calendar invitations and
+            meeting reminders run in the cloud, so they do not depend on anyone&apos;s laptop. Agent
+            scripts that need local files or CLIs run through the connected machine.
           </p>
           <p>
             <span className="text-fg font-bold">What it costs.</span> Most jobs are free
@@ -149,7 +178,7 @@ export async function AutomationsContent({
           </p>
           <p>
             <span className="text-fg font-bold">Where output ends up.</span>{" "}
-            {tenantSlug === "sun"
+            {isClientAutomationSurface
               ? "Back in the dashboard — the Daily Plan, the deal records, the Breeze BD deal queue below, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. Scored Breeze deals go to Ezra's Telegram for approve/decline — approving there creates the lead."
               : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
           </p>
@@ -157,7 +186,7 @@ export async function AutomationsContent({
             <span className="text-fg font-bold">Switching jobs on/off.</span> Each row has a
             toggle. Flip it off and the job stops within a minute — spec stays saved.
           </p>
-          {tenantSlug === "sun" && (
+          {isClientAutomationSurface && (
             <p>
               <span className="text-fg font-bold">The four sections below.</span>{" "}
               <span className="text-fg">Modules</span> is what the system can do — your live
@@ -200,7 +229,7 @@ export async function AutomationsContent({
             // tenant and no rep gets CC's machine's daemon list.
             <BackgroundWorkersPanel />
           )}
-          {tenantSlug === "sun" && (
+          {isClientAutomationSurface && (
             // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
             // until 2026-08-17, and the first half of that leaked a client's book
             // onto OASIS's own operations page.

@@ -33,9 +33,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
+import { getReadableLeadRecordForSession } from "@/lib/lead-access";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
+import { MANAGED_RUNTIME_NOT_CONFIGURED } from "@/lib/ai/infer";
 import {
   generateVoiceSuggestion,
   fallbackVoiceDraft,
@@ -110,22 +111,17 @@ export async function POST(req: NextRequest) {
   let leadFacts: Record<string, unknown> = {};
   let repUserId = sess.userId;
   if (leadId) {
-    const { data: leadRow } = await db
-      .from("tenant_records")
-      .select("data")
-      .eq("tenant_id", sess.tenantId)
-      .eq("entity_type", "lead")
-      .eq("id", leadId)
-      .maybeSingle();
-    const leadData = (leadRow as { data: Record<string, unknown> } | null)?.data ?? null;
-    if (leadData) {
-      if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, leadData, leadScopingEnabled())) {
-        return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-      }
-      leadFacts = leadData;
-      if (typeof leadData.assigned_to === "string" && leadData.assigned_to.trim()) {
-        repUserId = leadData.assigned_to.trim();
-      }
+    const access = await getReadableLeadRecordForSession(sess, {
+      tenantId: sess.tenantId,
+      id: leadId,
+    });
+    if (!access) {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const leadData = access.record.data;
+    leadFacts = leadData;
+    if (typeof leadData.assigned_to === "string" && leadData.assigned_to.trim()) {
+      repUserId = leadData.assigned_to.trim();
     }
   }
 
@@ -154,7 +150,7 @@ export async function POST(req: NextRequest) {
         channel,
         instruction,
       },
-      { bridgeTarget },
+      { bridgeTarget, tenantId: sess.tenantId },
     );
 
     const smsSanitize = result.sms ? await sanitizeBlastMessage(sess.tenantId, result.sms, { checkPositioning: true }) : { ok: true as const, cleaned: "" };
@@ -189,7 +185,10 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     let status = 500;
     let errorTag = "voice_suggest_failed";
-    if (message === "anthropic_key_missing") {
+    if (
+      message === "anthropic_key_missing" ||
+      message.startsWith(MANAGED_RUNTIME_NOT_CONFIGURED)
+    ) {
       status = 503;
       errorTag = "ai_unavailable";
     } else if (message.startsWith("voice_suggest_parse_failed")) {

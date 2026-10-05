@@ -33,6 +33,10 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
+import {
+  OASIS_INBOUND_WARM_MOTION,
+  stampSalesProgram,
+} from "@/lib/leads/canonical-lead-fields";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
@@ -66,8 +70,24 @@ import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
+import {
+  adoptLeadSource,
+  normalizeLeadSource,
+  recordSubmissionChannel,
+  redactSubmissionPath,
+  LEAD_SOURCE_KEY,
+  LEAD_SOURCE_AT_KEY,
+  LAST_SUBMITTED_VIA_KEY,
+  LAST_SUBMITTED_LINK_KEY,
+} from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
+import {
+  handleSupportFormSubmission,
+  handleWorkspaceSupportSubmission,
+  isSupportFormSubmission,
+  matchWorkspaceSupportDesk,
+} from "@/lib/delivery/support-intake";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -114,7 +134,18 @@ type SubmitBody = {
     // ?rep=<jordan|alex|matt> from the per-agent interest link — resolved to
     // assigned_to so the lead lands under that agent.
     rep?: string;
+    // ?source=<text|dial> from the per-channel link — normalized to
+    // data.lead_source for origination attribution. Untrusted: an unknown or
+    // malformed value resolves to "unknown", it never rejects the submission.
+    source?: string;
   };
+  /** ?source= on a TOKEN link (drip / rep-sent application). The anonymous
+   *  path carries its own copy inside anonymous_init; this one covers the
+   *  EXISTING-lead path, which had no channel at all before 2026-08-24. */
+  submission_source?: string;
+  /** Path the merchant landed on. The token segment is redacted before this
+   *  ever reaches an email — see describeSubmissionLink. */
+  submission_path?: string;
   /** Mint the anonymous lead/token without recording a form step. Used only
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
@@ -176,7 +207,17 @@ export async function POST(req: NextRequest) {
       errorStack: err instanceof Error ? (err.stack ?? null) : null,
       // The signed lead token is a credential; the recovery record needs the
       // merchant's ANSWERS, not the ability to submit as them.
-      payload: { ...(rawBody as Record<string, unknown>), token: body?.token ? "<redacted>" : undefined },
+      payload: {
+        ...(rawBody as Record<string, unknown>),
+        token: body?.token ? "<redacted>" : undefined,
+        // submission_path is `/f/<tenant>/<form>/<TOKEN>` on the token route,
+        // so spreading rawBody persisted a live bearer credential for that
+        // merchant's form into the failure-capture store. The email path was
+        // already careful about this; this path was not. (CodeRabbit, PR #294.)
+        submission_path: body?.submission_path
+          ? redactSubmissionPath(body.submission_path)
+          : undefined,
+      },
       userAgent: req.headers.get("user-agent"),
     });
     return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
@@ -184,6 +225,25 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleSubmit(req: NextRequest, body: SubmitBody) {
+
+  // CLIENT SUPPORT TICKET FORM (/f/oasis-ai-cc/support). A support request is a
+  // TICKET, never a lead. This returns before everything below — the anonymous
+  // lead create (initAnonymousLead), uploads, stage transitions and every
+  // drip/notification hook — so none of it runs for this form. The gate is an
+  // exact tenant+slug match on the body with no query, so every other form's
+  // path is untouched. See lib/delivery/support-intake.ts.
+  if (isSupportFormSubmission(body)) {
+    return handleSupportFormSubmission(req, body);
+  }
+  // EVERY OTHER WORKSPACE'S SUPPORT FORM (/f/<slug>/support). Same rule: a
+  // ticket on that workspace's desk, never a lead, returned before any lead
+  // code below. Only an anonymous `support` body outside OASIS costs the one
+  // registry read; a workspace's ordinary form that happens to be called
+  // `support` is not registered and carries on down the lead path as before.
+  const supportDesk = await matchWorkspaceSupportDesk(body);
+  if (supportDesk) {
+    return handleWorkspaceSupportSubmission(req, body, supportDesk);
+  }
 
   // Two auth shapes:
   //   1. Personalized link (Solara's mint): body.token is an HMAC.
@@ -243,6 +303,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       payload: body.payload || {},
       ip,
       rep: body.anonymous_init.rep,
+      source: body.anonymous_init.source,
       origin: req.nextUrl.origin,
       initializeOnly: body.initialize_only === true,
     });
@@ -761,7 +822,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // full application happens to carry statements — that's Form 2).
       if (form.slug === "bank-statement-upload") {
         after(() =>
-          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin }),
+          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
         );
       }
     }
@@ -804,6 +865,114 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // ---------------------------------------------------------------------
+  // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if
+  // it was an application coming in from a lead through text, through calls,
+  // or an email link").
+  //
+  // Two entry points feed it: anonymous_init.source on the NEW-lead path, and
+  // submission_source on the TOKEN path (the drip / rep-sent application,
+  // which carried no channel at all before this). Whichever is present wins.
+  //
+  // Deliberately SEPARATE from lead_source. lead_source is origination and is
+  // immutable first-touch; this is latest-wins and answers a different
+  // question. A merchant found by text who applies from a drip email is
+  // origination=text, this-application=email, and both facts are true.
+  // ---------------------------------------------------------------------
+  const submissionChannelRaw = body.submission_source || body.anonymous_init?.source;
+  const submissionUrl = body.submission_path
+    ? `${req.nextUrl.origin}${body.submission_path}`
+    : undefined;
+  const channelPatch = recordSubmissionChannel(
+    submissionChannelRaw,
+    submissionUrl,
+    new Date().toISOString(),
+  );
+  let notifyVia = channelPatch?.[LAST_SUBMITTED_VIA_KEY];
+  let notifyLink = channelPatch?.[LAST_SUBMITTED_LINK_KEY];
+
+  if (channelPatch) {
+    // A hand-rolled read-modify-write here could LOSE an update: two
+    // submissions read the same document, and a delayed earlier request then
+    // writes its older channel over a newer one — or worse, writes back a
+    // stale copy of every OTHER field on the lead. (CodeRabbit, PR #294.)
+    //
+    // updateRecord's ifMatch is real optimistic concurrency: it guards on the
+    // field AND pins updated_at as a row version, both riding on the same
+    // statement as the write. A conflict means somebody else wrote a channel
+    // at least as fresh as ours, so losing our write is the CORRECT outcome
+    // and we swallow it rather than retrying into a fight.
+    const cur = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("id", link.lead_id)
+      .eq("tenant_id", form.tenant_id)
+      .maybeSingle();
+    const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data;
+    if (!cur.error && curData) {
+      const priorVia =
+        typeof curData[LAST_SUBMITTED_VIA_KEY] === "string"
+          ? (curData[LAST_SUBMITTED_VIA_KEY] as string)
+          : null;
+      const unchanged =
+        priorVia === channelPatch[LAST_SUBMITTED_VIA_KEY] &&
+        curData[LAST_SUBMITTED_LINK_KEY] === channelPatch[LAST_SUBMITTED_LINK_KEY];
+      // Skip the write entirely when nothing changed. A multi-step form
+      // submits the same channel on every step; writing each time multiplies
+      // the collision window for no gain.
+      if (!unchanged) {
+        try {
+          await updateRecord({
+            tenant_id: form.tenant_id,
+            entity: "lead",
+            id: link.lead_id,
+            patch: channelPatch,
+            ifMatch: { field: LAST_SUBMITTED_VIA_KEY, value: priorVia },
+          });
+        } catch (err) {
+          // Conflict is expected under concurrency and is not an error. Report
+          // the value that actually won so the notification never claims a
+          // channel the lead does not carry.
+          if (err instanceof RecordsError && err.code === "conflict") {
+            // RE-READ, do not reuse priorVia. (Codex review 2026-08-24, P2.)
+            // priorVia is the value from BEFORE either competing write, so it
+            // is not the winner — reporting it would state a channel the lead
+            // does not carry, which is the precise failure this whole feature
+            // exists to prevent. Read what actually landed and quote that,
+            // link included, since the winner's link IS on the record.
+            const after = await db
+              .from("tenant_records")
+              .select("data")
+              .eq("id", link.lead_id)
+              .eq("tenant_id", form.tenant_id)
+              .maybeSingle();
+            const afterData = (after.data as { data?: Record<string, unknown> } | null)?.data;
+            if (!after.error && afterData) {
+              notifyVia =
+                typeof afterData[LAST_SUBMITTED_VIA_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_VIA_KEY] as string)
+                  : undefined;
+              notifyLink =
+                typeof afterData[LAST_SUBMITTED_LINK_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_LINK_KEY] as string)
+                  : undefined;
+            } else {
+              // Could not confirm what won. Say nothing rather than guess —
+              // the email falls back to the lead's stored value on its own.
+              notifyVia = undefined;
+              notifyLink = undefined;
+            }
+          } else {
+            console.error(
+              "[forms.submit] channel stamp failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+      }
+    }
+  }
 
   // Stage transition — if step_outcomes has a target for this step,
   // patch the lead via updateRecord. Phase 2's BRAVO_RECORD_STATUS_CHANGED
@@ -988,7 +1157,18 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // last-4 lands on the lead; the full value stays on form_submissions.payload.
   try {
     const ownerFields = mapOwnerFields(payload);
-    if (Object.keys(ownerFields).length > 0) {
+    /**
+     * Board identity is GAP-FILL ONLY, unlike the owner_* keys above.
+     *
+     * owner_* are this form's own answers and overwrite freely. contact_name,
+     * email and phone are different: a rep may have corrected them by hand, or
+     * an earlier form may have captured a better address, and a later step of
+     * one application must not quietly replace that. Filling only what is
+     * missing turns a blank card into a callable one without ever overwriting
+     * something a human chose.
+     */
+    const boardIdentity = mapBoardIdentityFields(payload);
+    if (Object.keys(ownerFields).length > 0 || Object.keys(boardIdentity).length > 0) {
       const cur = await db
         .from("tenant_records")
         .select("data")
@@ -997,9 +1177,14 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         .maybeSingle();
       const curData =
         (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      const identityGaps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(boardIdentity)) {
+        const have = curData[k];
+        if (have === undefined || have === null || have === "") identityGaps[k] = v;
+      }
       await db
         .from("tenant_records")
-        .update({ data: { ...curData, ...ownerFields } })
+        .update({ data: { ...curData, ...ownerFields, ...identityGaps } })
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id);
     }
@@ -1081,7 +1266,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 1 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   } else if (isLastStep && form.slug === "full-application") {
@@ -1160,7 +1345,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 2 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   }
@@ -1450,6 +1635,8 @@ async function initAnonymousLead(input: {
   ip: string | null;
   /** ?rep=<agent> from a per-agent interest link → resolved to assigned_to. */
   rep?: string;
+  /** ?source=<text|dial> from a per-channel link → normalized to lead_source. */
+  source?: string;
   /** Request origin, for minting the absolute full-application link. */
   origin: string;
   /** Restricted bootstrap for forms whose first step cannot upload without a token. */
@@ -1518,17 +1705,53 @@ async function initAnonymousLead(input: {
     }
     return "";
   };
-  const name = trimmed("contact_name", "name", "full_name");
+  /**
+   * THE FULL APPLICATION SPEAKS A DIFFERENT VOCABULARY (2026-08-26).
+   *
+   * The reads above are described as "deliberately generous", and for the
+   * intake forms they are. They were not generous enough for the form that
+   * matters most: SunBiz's `full-application` asks for the company under
+   * `business_legal_name`, the person under `owner_full_name`, and the number
+   * under `owner_cell` — none of which appear in the lists below, so a merchant
+   * who applies on that form produced a lead with NO name, NO contact and NO
+   * phone.
+   *
+   * On the board that lead renders as `Untitled 65061d` (LeadPipelineView falls
+   * back to the record id), and a rep cannot identify or call it. Measured on
+   * production: 13 such leads, EVERY ONE of them from this one form, several at
+   * `signed_application` — completed, signed applications from real businesses,
+   * sitting on the board anonymously. The names were never lost; they are on the
+   * application record and in form_submissions the whole time. Only the lead,
+   * the thing a rep actually looks at, never received them.
+   *
+   * Aliases are appended, never reordered: the intake vocabulary still wins
+   * where both are present, so nothing about the existing forms changes.
+   */
+  const name = trimmed("contact_name", "name", "full_name", "owner_full_name", "owner_name");
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
-  const business = trimmed("business_name", "company");
+  const business = trimmed("business_name", "company", "business_legal_name", "legal_business_name", "dba");
   if (business) contactFields[funding ? "business_name" : "company"] = business;
-  const emailRaw = pick("email");
-  const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
+  // `trimmed`, not `??`. Nullish coalescing treats an EMPTY canonical field as a
+  // present value, so a payload carrying `phone: ""` alongside a real
+  // `owner_cell` would select the blank and the lead would still have no number.
+  // trimmed() skips blanks and keeps looking, which is the behaviour the name
+  // and business lookups above have always had (Codex review 2026-08-26).
+  const emailRaw = trimmed("email", "owner_email", "contact_email");
+  const email = emailRaw ? emailRaw.toLowerCase() : undefined;
   if (email) contactFields.email = email;
-  const phone = pick("phone");
+  // `owner_cell` is the full application's phone field. Without it the lead
+  // carries no number at all and the rep cannot call a signed applicant.
+  const phone = trimmed("phone", "owner_cell", "cell_phone");
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
+  // The AI-audit funnel asks the prospect for their website (see
+  // lib/forms/oasis-ai-audit-seed.ts) and it reached the submission payload and
+  // the notify email — but never the lead. The rep calling an inbound audit
+  // request opened a profile with no site on it, for the one lead type that is
+  // entirely ABOUT the site.
+  const website = trimmed("website", "website_url", "site_url", "url");
+  if (website) contactFields.website = website;
 
   // Per-agent routing: resolve ?rep → the agent's user_profiles.auth_user_id.
   const repAssign = await resolveRepAssignment(form.tenant_id, input.rep);
@@ -1546,6 +1769,13 @@ async function initAnonymousLead(input: {
     // original agent or reset pipeline progress. Adopt a rep only if the
     // existing lead was never assigned.
     const merged: Record<string, unknown> = { ...existing.data, ...contactFields };
+    // Preserve the website-sales product classification for downstream intake,
+    // while sales_motion keeps this warm form response out of the cold claimed-
+    // lead Pipeline. stampSalesProgram never overwrites an established program.
+    if (!funding) Object.assign(merged, stampSalesProgram(merged));
+    if (!funding && !existing.data.sales_motion) {
+      merged.sales_motion = OASIS_INBOUND_WARM_MOTION;
+    }
     if (existing.data.stage) merged.stage = existing.data.stage;
     if (existing.data.assigned_to) {
       merged.assigned_to = existing.data.assigned_to;
@@ -1554,6 +1784,13 @@ async function initAnonymousLead(input: {
       merged.assigned_to = repAssign.auth_user_id;
       merged.assigned_agent_name = repAssign.name;
     }
+    // Origination attribution on a RETURNING merchant. adoptLeadSource is the
+    // idempotency boundary: it returns null (no write) when the lead already
+    // carries a real channel, so a retry, a duplicate delivery, or the merchant
+    // opening the other channel's link later can never flip the credit. It only
+    // fills in a lead that has none — an upgrade from "unknown", not a steal.
+    const adopted = adoptLeadSource(existing.data, input.source, new Date().toISOString());
+    if (adopted) Object.assign(merged, adopted);
     await db
       .from("tenant_records")
       .update({ data: merged })
@@ -1579,9 +1816,21 @@ async function initAnonymousLead(input: {
       // OASIS lead source enum has no "public_form" — map to "inbound" (a
       // social/funnel lead came to us). SunBiz keeps "public_form".
       source: funding ? "public_form" : "inbound",
+      // Origination channel (Text vs Dial) — a DIFFERENT axis from `source`
+      // above, which is the channel-of-record enum feeding pipelineBreakdown().
+      // Always stamped, including "unknown", so the metrics denominator counts
+      // every lead and an untagged link shows up as a visible gap instead of
+      // silently vanishing from the chart.
+      [LEAD_SOURCE_KEY]: normalizeLeadSource(input.source),
+      [LEAD_SOURCE_AT_KEY]: new Date().toISOString(),
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
+      // The product is website sales, but the motion is warm inbound. Forms and
+      // the cold claimed-lead Pipeline deliberately remain separate operating
+      // queues. SunBiz's funding funnel is a different program and is untouched.
+      ...(funding ? {} : stampSalesProgram(contactFields)),
+      ...(funding ? {} : { sales_motion: OASIS_INBOUND_WARM_MOTION }),
     };
     if (repAssign) {
       leadData.assigned_to = repAssign.auth_user_id;
@@ -1685,5 +1934,41 @@ function mapOwnerFields(payload: Record<string, unknown>): Record<string, unknow
     out.ownership_pct = pct;
   const addr = s("owner_home_address");
   if (addr) out.owner_address_line1 = addr;
+  return out;
+}
+
+/**
+ * The BOARD-VISIBLE identity, from a later application step.
+ *
+ * mapOwnerFields above feeds the drawer's Owner tab (owner_name, owner_dob, …).
+ * It deliberately does not touch the three fields the Leads board and every
+ * outreach surface actually read: contact_name, email, phone.
+ *
+ * That split is why the alias fix alone was not enough (Codex review
+ * 2026-08-26). The identity extraction at the top of this file runs ONLY when
+ * an anonymous step-0 submission initialises the lead, and the SunBiz full
+ * application asks for the owner, their cell and their email on step 2 — a
+ * tokenised submission that takes the branch above instead. So the merchant
+ * types their email and phone, the lead never receives either, and the rep is
+ * left with a card they cannot call.
+ *
+ * Read generously, exactly like the step-0 extractor, so the two paths agree
+ * about what a name, an email and a phone are called.
+ */
+function mapBoardIdentityFields(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const first = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = payload[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+  };
+  const name = first("contact_name", "full_name", "owner_full_name", "owner_name");
+  if (name) out.contact_name = name;
+  const email = first("email", "owner_email", "contact_email");
+  if (email) out.email = email.toLowerCase();
+  const phone = first("phone", "owner_cell", "cell_phone");
+  if (phone) out.phone = phone;
   return out;
 }

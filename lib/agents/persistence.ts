@@ -28,6 +28,13 @@ export class AgentPersistenceError extends Error {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
 
+/**
+ * Slugs a custom agent cannot take. A teammate's chat is /agents/<slug> and the
+ * builder is /agents/new (app/agents/new); Next serves the static segment
+ * first, so a teammate named "new" would have a chat nobody could open.
+ */
+export const RESERVED_AGENT_SLUGS: ReadonlySet<string> = new Set(["new"]);
+
 const ALLOWED_CATEGORIES = new Set<AgentCategory>([
   "ceo", "cfo", "cmo", "coo", "operations", "sales", "support",
   "research", "content", "engineering", "finance", "legal",
@@ -54,6 +61,9 @@ function validateAgentInput(input: CreateAgentInput): void {
   const slug = input.slug.trim().toLowerCase();
   if (!SLUG_RE.test(slug)) {
     throw new AgentPersistenceError("validation", "slug must match /^[a-z0-9][a-z0-9-]{1,62}$/");
+  }
+  if (RESERVED_AGENT_SLUGS.has(slug)) {
+    throw new AgentPersistenceError("validation", `slug "${slug}" is reserved; choose another URL slug`);
   }
   if (!input.name.trim()) {
     throw new AgentPersistenceError("validation", "name is required");

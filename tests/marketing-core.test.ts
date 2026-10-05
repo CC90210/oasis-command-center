@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import {
   DEGRADED_MARKETING_SUMMARY,
   EMPTY_MARKETING_SUMMARY,
+  getCorpusStats,
   getMarketingSummary,
 } from "../lib/founders/marketing-queries";
 import { join } from "node:path";
@@ -602,26 +603,40 @@ async function brandBoundaryChecks() {
     "and must still be tenant-scoped",
   );
 
+  // The summary describes the Library's own work and nothing else (2026-10-01):
+  // the training material is the Training tab's own read, so the Library's
+  // numbers neither wait on it nor degrade when it fails.
+  assert.equal(
+    calls.some((c) => c.table === "marketing_corpus"),
+    false,
+    "the summary no longer reads marketing_corpus; getCorpusStats does",
+  );
+
   // THE TRAINING CORPUS IS DELIBERATELY *NOT* BRAND-SCOPED, and this pins that so
   // the next person tidying for consistency has to read the reason first.
-  // marketing_corpus is what Maven LEARNS FROM, not what OASIS has shipped — a
-  // client ad that performed is training signal exactly like our own. The brand
-  // boundary governs the founders LIBRARY, not the training set.
+  // marketing_corpus is what the marketing agent LEARNS FROM, not what OASIS has
+  // shipped — a client ad that performed is training signal exactly like our
+  // own. The brand boundary governs the founders LIBRARY, not the training set.
   // marketing_corpus.asset_id IS nullable, so scoping it would be possible; that
-  // is why an explicit assertion is worth more than the absence of one.
+  // is why an explicit assertion is worth more than the absence of one. Pinned
+  // on getCorpusStats, the read the Training tab and card use.
+  calls.length = 0;
+  await getCorpusStats("tenant-founders", db as unknown as Parameters<typeof getCorpusStats>[1]);
   const corpusCall = calls.find((c) => c.table === "marketing_corpus");
-  assert.ok(corpusCall, "the summary must read marketing_corpus");
+  assert.ok(corpusCall, "getCorpusStats must read marketing_corpus");
   assert.ok(
-    corpusCall!.filters.some(([f]) => f === "eq:tenant_id"),
+    corpusCall!.filters.some(([f, v]) => f === "eq:tenant_id" && v === "tenant-founders"),
     "the corpus read is still tenant-scoped",
   );
   assert.equal(
     corpusCall!.filters.some(([f]) => f === "in:asset_id" || f === "eq:brand_slug"),
     false,
-    "marketing_corpus must NOT be brand-scoped — Maven learns from every asset we have " +
-      "produced, including client work. If you are here because you scoped it for " +
+    "marketing_corpus must NOT be brand-scoped — the marketing agent learns from every asset " +
+      "we have produced, including client work. If you are here because you scoped it for " +
       "consistency with open_reviews/open_requests, that is the bug this catches.",
   );
+  calls.length = 0;
+  await getMarketingSummary("tenant-founders", db);
 
   // The asset read must PAGE, not issue one unbounded select. PostgREST returns a
   // short page at max-rows (1,000 on Supabase) with NO error, while the Turso
@@ -822,11 +837,20 @@ async function degradedChecks() {
     "the assets that DID load are still reported — degrading is not blanking the screen",
   );
 
-  // Same for the unbound-request count and the corpus read.
-  for (const table of ["marketing_request", "marketing_corpus"]) {
+  // Same for the request count. The corpus read left the summary (2026-10-01):
+  // a broken training-material read now degrades only getCorpusStats, which
+  // the Training tab and card render as "Couldn't read the training material"
+  // (tests/content-speed.test.ts), and no longer blanks the Library's numbers.
+  for (const table of ["marketing_request"]) {
     const r = await getMarketingSummary("t", dbFailing({ table, onCall: 1, err: BROKEN }));
     assert.equal(r.degraded, true, `a failed ${table} read must degrade the summary`);
   }
+  const corpusBroken = await getMarketingSummary("t", dbFailing({ table: "marketing_corpus", onCall: 1, err: BROKEN }));
+  assert.equal(corpusBroken.degraded, false, "a broken corpus read is not the Library's failure");
+  const statsBroken = await getCorpusStats("t", dbFailing({ table: "marketing_corpus", onCall: 1, err: BROKEN }) as unknown as Parameters<typeof getCorpusStats>[1]);
+  assert.equal(statsBroken.degraded, true, "it is the training material's: getCorpusStats says so");
+  const statsAbsent = await getCorpusStats("t", dbFailing({ table: "marketing_corpus", onCall: 1, err: ABSENT }) as unknown as Parameters<typeof getCorpusStats>[1]);
+  assert.equal(statsAbsent.degraded, false, "a missing corpus table is the honest pre-migration empty");
 
   // A healthy read is NOT degraded — otherwise the flag is just always-on noise
   // and the honest empty state becomes unreachable.

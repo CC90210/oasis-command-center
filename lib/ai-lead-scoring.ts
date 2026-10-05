@@ -33,7 +33,7 @@ import {
   OASIS_LEAD_SCORING_PROMPT,
   LEAD_SCORING_INCLUDED_FIELDS,
 } from "./prompts";
-import { inferText } from "./subscription-infer";
+import { inferForTenant } from "./ai/infer";
 
 const MAX_TOKENS = 400;
 
@@ -104,12 +104,11 @@ ${tape.length === 0 ? "[none recorded — score from lead data only, note 'limit
   // Subscription, not the paid API. See lib/subscription-infer.ts for what
   // changes when a call moves onto the queue (persistence, redaction, and why a
   // timeout is not an answer).
-  const inf = await inferText({
+  const inf = await inferForTenant(opts.tenantId, {
     source: "lead-scoring",
     system: OASIS_LEAD_SCORING_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

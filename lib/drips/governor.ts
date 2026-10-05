@@ -44,7 +44,15 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { EmailBudget } from "./drip-rules-core";
 import { getChannelLimits } from "./channel-limits";
-import { ALL_BRAND_KEYS, resolveBrandKey, type BrandKey } from "@/lib/email/brands";
+import {
+  ALL_BRAND_KEYS,
+  DRIP_BRAND_KEYS,
+  isDripBrand,
+  resolveBrandKey,
+  resolveBrandKeyOrNull,
+  type BrandKey,
+  type DripBrandKey,
+} from "@/lib/email/brands";
 import { sequenceSentToday, sequenceDailyCaps } from "./sequence-volume";
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -133,8 +141,12 @@ const WEEK = 7 * DAY;
 async function countDripEmailByBrand(
   db: Db,
   sinceIso: string,
-): Promise<Record<BrandKey, number> | null> {
-  const out: Record<BrandKey, number> = { sunbiz: 0, bluerise: 0 };
+): Promise<Record<DripBrandKey, number> | null> {
+  // Keyed on the DRIP brands, not every brand. OASIS joined BrandKey on
+  // 2026-09-09 to stop its mail resolving to the client's identity; it has no
+  // drip sequences and no per-domain send budget, so counting it here would
+  // invent a quota for a lane it does not use.
+  const out: Record<DripBrandKey, number> = { sunbiz: 0, bluerise: 0 };
   try {
     // Bounded: a rolling day of drip mail is small. Paginate defensively anyway
     // so a backlog cannot silently truncate the count and under-report volume.
@@ -162,7 +174,14 @@ async function countDripEmailByBrand(
         // Only an EXPLICIT dry run is excluded. Absent means "some writer we do
         // not control produced this", and that must count against the ceiling.
         if (String(md.dry_run) === "true") continue;
-        out[resolveBrandKey(md.sending_brand)] += 1;
+        // Absent still means SunBiz — every row predating `sending_brand` is a
+        // SunBiz drip, which is the case the comment above describes. But this
+        // reads arbitrary stored metadata, so an unrecognised value must not
+        // throw and take the whole count down with it, and a non-drip brand
+        // (OASIS) must not be added to a funding brand's quota.
+        const b = resolveBrandKeyOrNull(md.sending_brand) ?? "sunbiz";
+        if (!isDripBrand(b)) continue;
+        out[b] += 1;
       }
       if (rows.length < 1000) break;
     }
@@ -234,9 +253,14 @@ export async function loadEmailBudget(
   // Per-brand remaining. Each brand carries its own domain reputation, so each
   // gets its own ceiling; a shared one would mean splitting across two domains
   // bought no throughput.
-  const dailyRemaining = {} as Record<BrandKey, number>;
-  const hourlyRemaining = {} as Record<BrandKey, number>;
-  for (const b of ALL_BRAND_KEYS) {
+  // DRIP_BRAND_KEYS, not ALL_BRAND_KEYS. The budget exists to protect each
+  // SENDING DOMAIN's reputation, and OASIS — a BrandKey since 2026-09-09 —
+  // neither drips nor shares those domains. Iterating every brand would mint a
+  // quota it never spends and, worse, make `budget.dailyRemaining.oasis` look
+  // like a real allowance to any future caller reading this shape.
+  const dailyRemaining = {} as Record<DripBrandKey, number>;
+  const hourlyRemaining = {} as Record<DripBrandKey, number>;
+  for (const b of DRIP_BRAND_KEYS) {
     dailyRemaining[b] = today === null ? dailyCapFor(b) : Math.max(0, dailyCapFor(b) - today[b]);
     hourlyRemaining[b] =
       thisHour === null ? emailHourlyCap(b) : Math.max(0, emailHourlyCap(b) - thisHour[b]);

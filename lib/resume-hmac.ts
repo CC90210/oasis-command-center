@@ -21,9 +21,15 @@
  *   the flow to work without the secret, so dev setup doesn't require a
  *   new env var. Production deploys MUST set it.
  *
- * Canonicalization: keys sorted recursively so JSON.stringify variations
+ * Canonicalization: the payload is signed in the form it has on the wire
+ * (see wireForm), with keys sorted recursively so JSON.stringify variations
  * between Node versions / object construction orders don't produce
  * verification false-negatives.
+ *
+ * What is bound: the binding (tenant, user, agent) says who may resume the
+ * state; the state names the chat session it belongs to (ResumeState.sessionId,
+ * stamped by the route that signs it), and /api/chat/resume files the resumed
+ * half under that session. Both are inside the one HMAC.
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
@@ -33,7 +39,11 @@ import { createHmac, timingSafeEqual } from "crypto";
 // reflects that. Legacy fallback for the transition window.
 const HMAC_ENV_VAR = "CHAT_RESUME_HMAC_KEY";
 const HMAC_ENV_VAR_LEGACY = "BRAVO_RESUME_HMAC_KEY";
-const SIG_VERSION = "v1"; // bump when changing the canonicalization or algorithm
+// Bump when changing the canonicalization or algorithm. Signing the wire form
+// (2026-09-30) did not need a bump: a payload that survives JSON unchanged
+// canonicalizes to exactly the string it always did, and a payload that does
+// not could never be verified under v1 anyway.
+const SIG_VERSION = "v1";
 
 /**
  * Whether HMAC verification is enforced. Production = always. Dev = only
@@ -62,6 +72,19 @@ function canonicalize(value: unknown): string {
     keys.map((k) => JSON.stringify(k) + ":" + canonicalize(obj[k])).join(",") +
     "}"
   );
+}
+
+/**
+ * The payload as it crosses the wire. The route sends resume_state to the
+ * browser with JSON.stringify, and it comes back through JSON.parse (the
+ * browser, then req.json()), so the verifier only ever sees JSON's view of it:
+ * a key whose value is undefined is gone, undefined in an array is null.
+ * Hashing the object as the tool loop built it hashed things the browser can
+ * never send back (resume_state.maxTokens is undefined on every chat turn),
+ * so with the key set no paused turn could resume. Both sides hash this form.
+ */
+function wireForm(payload: { state: unknown; binding: ResumeBinding | null }): unknown {
+  return JSON.parse(JSON.stringify(payload));
 }
 
 function getKey(): Buffer | null {
@@ -123,8 +146,7 @@ export function signResumeState(state: unknown, binding?: ResumeBinding): string
     }
     return "";
   }
-  const payload = { state, binding: binding ?? null };
-  const canonical = canonicalize(payload);
+  const canonical = canonicalize(wireForm({ state, binding: binding ?? null }));
   const sig = createHmac("sha256", key).update(canonical, "utf8").digest("base64url");
   return `${SIG_VERSION}.${sig}`;
 }
@@ -168,8 +190,7 @@ export function verifyResumeState(
   if (!sig) {
     return { ok: false, reason: "missing_signature" };
   }
-  const payload = { state, binding: binding ?? null };
-  const canonical = canonicalize(payload);
+  const canonical = canonicalize(wireForm({ state, binding: binding ?? null }));
   const expected = createHmac("sha256", key).update(canonical, "utf8").digest();
   let provided: Buffer;
   try {

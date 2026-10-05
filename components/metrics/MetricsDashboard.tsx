@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, Tag } from "@/components/Card";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Donut } from "@/components/charts/Donut";
 import { TrendArea } from "@/components/metrics/TrendArea";
+import { LeadSourceBreakdown } from "@/components/charts/LeadSourceBreakdown";
 import { DripTrackerClient } from "@/components/drips/DripTrackerClient";
 import type { MetricsPayload, SourceBlock, SequenceMetric, MetricsHealth, SmsMetrics, CallMetrics, CallNumberHealth } from "@/lib/metrics";
 import type { EmailMetrics, MetricSource } from "@/lib/metrics/types";
@@ -44,14 +45,31 @@ function useCountUp(to: number, ms = 850): number {
 // contact) map to a data block; Text Torrent (SMS) + Kixie (calls) render their
 // own panels — Text Torrent shows drip SMS volume today (full campaign metrics
 // connect when TT collection is on); Kixie is awaiting integration.
-type TabKey = "all" | "drips" | "cold" | "texttorrent" | "constant_contact" | "kixie";
-const SOURCES: Array<{ key: TabKey; label: string; kind: "email" | "sms" | "calls" }> = [
+type TabKey =
+  | "all"
+  | "drips"
+  | "cold"
+  | "texttorrent"
+  | "constant_contact"
+  | "kixie"
+  | "lead_origination";
+
+// "origination" is a different KIND from the rest on purpose. Every other tab
+// answers "how did our outbound perform" and reads payload.bySource. This one
+// answers "where did the lead come from in the first place" and reads its own
+// endpoint (/api/metrics/lead-sources), because it counts LEADS, not sends.
+const SOURCES: Array<{
+  key: TabKey;
+  label: string;
+  kind: "email" | "sms" | "calls" | "origination";
+}> = [
   { key: "all", label: "All", kind: "email" },
   { key: "drips", label: "Drips", kind: "email" },
   { key: "cold", label: "Cold", kind: "email" },
   { key: "texttorrent", label: "Text Torrent", kind: "sms" },
   { key: "constant_contact", label: "Constant Contact", kind: "email" },
   { key: "kixie", label: "Kixie", kind: "calls" },
+  { key: "lead_origination", label: "Lead Origination", kind: "origination" },
 ];
 
 const HEALTH_TONE: Record<MetricsHealth, "engaged" | "warm" | "hot"> = { healthy: "engaged", watch: "warm", spammy: "hot" };
@@ -94,7 +112,7 @@ function KpiCard({ label, rate, prevRate, hasPrev, spark, primary }: {
 /* ---------------- health gauge (reuses Donut) ---------------- */
 function HealthGauge({ score, label }: { score: number; label: MetricsHealth }) {
   return (
-    <div className="rounded-xl border border-bg-border bg-bg-panel p-4 shadow-ironman flex flex-col items-center justify-center gap-2">
+    <div className="rounded-xl border border-bg-border bg-bg-panel p-4 shadow-raised flex flex-col items-center justify-center gap-2">
       <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">Deliverability</div>
       <Donut pct={score} size={116} stroke={9} tone="threshold" label={String(score)} sublabel="score" />
       <Tag tone={HEALTH_TONE[label]}>{HEALTH_LABEL[label]}</Tag>
@@ -620,7 +638,17 @@ export function MetricsDashboard({ payload: initialPayload }: { payload: Metrics
 
       {active === "drips" && <DripTrackerClient compact />}
 
-      {kind === "sms" ? (
+      {kind === "origination" ? (
+        <Card
+          title="Lead Origination"
+          subtitle="Text vs Dial — which channel the lead came in through, by day"
+        >
+          {/* `days` is passed down so the shared 7/30/90 control at the top of
+              this dashboard drives it, exactly like every other tab. The
+              component hides its own range selector when it is controlled. */}
+          <LeadSourceBreakdown days={days} />
+        </Card>
+      ) : kind === "sms" ? (
         <SmsPanel sms={payload.sms} windowDays={payload.windowDays} />
       ) : kind === "calls" ? (
         <KixiePanel calls={payload.calls} windowDays={payload.windowDays} />

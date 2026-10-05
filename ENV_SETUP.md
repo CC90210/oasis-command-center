@@ -16,6 +16,45 @@ fully standalone.
 | `BRAVO_FIELD_ENCRYPTION_KEY` | random 32+ byte string | Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Rotating this orphans every encrypted DB field, so set once and treat like a master secret. |
 | `CRON_SECRET` | random secret | Required to authorize `/api/cron/*` requests in production |
 
+### Account-security email (required for Turso password reset)
+
+Password resets use a dedicated company-domain transactional identity. They do
+not fall back to e-sign, outreach, tenant SMTP, or personal Gmail credentials.
+When the dedicated `AUTH_*` set is absent, the support mailbox
+(`SUPPORT_GMAIL_USER` + `SUPPORT_GMAIL_APP_PASSWORD`, below) is used; without
+it, the existing company-domain `GMAIL_USER` + `GMAIL_APP_PASSWORD` Google
+Workspace identity is accepted as a strict compatibility path (logged as a
+fallback); consumer domains such as gmail.com are rejected. Replies always go
+to `support@oasisai.work`.
+
+| Variable | Notes |
+|---|---|
+| `AUTH_SMTP_HOST` | SMTP host for the approved account-security mailbox/provider |
+| `AUTH_SMTP_PORT` | Usually `465` (TLS) or `587` (STARTTLS) |
+| `AUTH_SMTP_SECURE` | Optional; defaults to `true` for port 465 and `false` otherwise |
+| `AUTH_SMTP_USER` | Provider login; consumer-email identities are rejected |
+| `AUTH_SMTP_PASSWORD` | SMTP password/API credential |
+| `AUTH_FROM_EMAIL` | Approved company-domain From address, normally `security@oasisai.work` |
+| `AUTH_FROM_NAME` | Optional; defaults to `OASIS AI Account Security` |
+| `AUTH_ALLOWED_FROM_DOMAINS` | Optional comma-separated sender-domain allowlist for dedicated `AUTH_*` providers; defaults to `oasisai.work`. The `GMAIL_*` compatibility path remains pinned to `oasisai.work`. |
+
+### Support mailbox (`support@oasisai.work`)
+
+`support@oasisai.work` is OASIS's one published contact
+(`lib/legal/constants.ts` `OASIS_SUPPORT_EMAIL`). With these two Worker secrets
+set, OASIS's client-facing system mail leaves from it: the support desk's
+acknowledgements, replies and alerts, Clients-hub emails to a client, approved
+emails to a client, invoices (after an explicit `INVOICE_FROM_*`), and
+account-security mail (after a dedicated `AUTH_*`). Without them each of those
+keeps its previous mailbox and logs one `[support-mail]` line saying so. Every
+client-facing email answers to `support@oasisai.work` (Reply-To) either way.
+Sales email to leads is unaffected (`OASIS_MAIL_FROM`).
+
+| Variable | Notes |
+|---|---|
+| `SUPPORT_GMAIL_USER` | Must be exactly `support@oasisai.work`; any other mailbox is refused and logged as an error (`lib/email/support-mailbox.ts`) |
+| `SUPPORT_GMAIL_APP_PASSWORD` | Google app password for that account (spaces are stripped). SMTP only: no OAuth client or redirect URI is involved |
+
 `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are auto-derived
 from the `BRAVO_*` variants in [next.config.js](next.config.js); set them
 explicitly only if you want different values for browser vs server.
@@ -32,9 +71,49 @@ explicitly only if you want different values for browser vs server.
 | `PUBLIC_APP_URL` | `https://agent-dashboard-cc90210.vercel.app` | Used by CLI pair / provisioning routes |
 | `BRAVO_DASHBOARD_URL` | falls back to `PUBLIC_APP_URL` | Pairing flow alias |
 | `CRON_ALLOW_LOCAL` | _unset_ | Set to `"1"` to bypass cron auth in local dev |
-| `STATE_API_URL` | `http://state-api:8500` | Optional state-api sidecar; `/system-health` falls back to Supabase mirror if unset |
 | `EMPIRE_DATA_BACKEND` | `supabase` | Switch to `turso` to enable libSQL fallback |
 | `TURSO_DB_PATH` / `TURSO_DB_URL` / `TURSO_AUTH_TOKEN` | _unset_ | Required when `EMPIRE_DATA_BACKEND=turso` |
+
+## Optional — Founder-audit booking (shared OASIS calendar)
+
+The founder handoff on `/pipeline/[id]` books a 15-minute audit and emails the
+client a Calendar invite with a Meet link. A host who has connected their own
+Google books as themselves; a host who has **not** — or whose token Google has
+revoked — falls back to a shared OASIS workspace calendar, which is what these
+variables configure. With none of them set, that fallback cannot run and any
+host without a working personal connection is unbookable.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN` | _unset_ | Long-lived refresh credential for the shared calendar account. Needs `calendar.events` or the broader `calendar` scope that contains it. |
+| `GOOGLE_SYSTEM_CALENDAR_CLIENT_ID` | falls back to `GOOGLE_OAUTH_CLIENT_ID`, then `GOOGLE_CLIENT_ID` | The OAuth client that **minted** the refresh credential. |
+| `GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET` | falls back to `GOOGLE_OAUTH_CLIENT_SECRET`, then `GOOGLE_CLIENT_SECRET` | Secret for that same client. |
+| `GOOGLE_SYSTEM_CALENDAR_ADDRESS` | _empty_ | The account that owns the credential, e.g. `conaugh@oasisai.work`. |
+| `GOOGLE_CALENDAR_ID` | `primary` | Target calendar on that account. |
+| `GOOGLE_FOUNDER_MEETING_CC_EMAIL` | `conaugh@oasisai.work` | Ops address copied on every audit invite. |
+
+**Two things that are easy to get wrong, and both fail confusingly:**
+
+1. **The client must be the one that minted the credential.** A Google refresh
+   grant is only valid from its own OAuth client, so a credential minted
+   elsewhere is rejected with `invalid_client` however new it is. This is why
+   `GOOGLE_SYSTEM_CALENDAR_CLIENT_ID/_SECRET` exist as a separate pair: the
+   rep-facing client must be a **Web** client (it needs an https redirect URI
+   for the consent bounce), while the shared calendar is a headless service
+   identity and is perfectly happy as an installed/desktop client. One client
+   cannot be the best form of both. Leave the pair unset only when the shared
+   credential really was minted by `GOOGLE_CLIENT_ID`.
+
+2. **`GOOGLE_SYSTEM_CALENDAR_ADDRESS` must be the account that owns the
+   credential** — not an aspirational alias like `meetings@`. It doubles as the
+   allowed "organizer echo" attendee, so a mismatch fails the booking's identity
+   assertion *after* the event has already been created.
+
+Verify a change end to end with
+`node --conditions=react-server --import tsx scripts/verify-workspace-calendar-live.ts`,
+which books through the calendar adapter against real Google and cancels the
+event it creates. `calendar.workspace_credential_usable` in the 15-minute health
+cron then watches the credential continuously and alerts on the `operator` lane.
 
 ## Optional — AI provider fallbacks
 

@@ -1,0 +1,370 @@
+"use client";
+
+/**
+ * BusinessFacts — everything the directory recorded about ONE business, in the
+ * one place both surfaces read it from.
+ *
+ * ═══ WHY THIS FILE EXISTS ═══════════════════════════════════════════════════
+ *
+ * The battle card (components/web-leads/BattleCard.tsx) was built around the
+ * website analysis and quietly shipped without the identity block: measured on
+ * 2026-08-24, it contained ZERO references to address, postal, osmCategory or
+ * territoryName. A rep who opened a lead from their own book landed on a full
+ * screen of percentile charts and could not see where the business was. The
+ * operator reported it in those words: "When the lead is in their pipeline they
+ * can't view the address and they can't view a lot of information. You need to
+ * be able to view all of the information that we have in the leads tab."
+ *
+ * The drawer (components/web-leads/WebLeadDetail.tsx) had the block all along.
+ * Two surfaces, one of them right, is the shape a copy-paste fix reproduces --
+ * so the block is extracted here and IMPORTED by both rather than written
+ * twice. Two copies of a lead's address on two screens is two things that can
+ * disagree about the same business while a rep is on the phone.
+ *
+ * ═══ THE RULES THIS FILE DOES NOT GET TO BREAK ══════════════════════════════
+ *
+ * 1. `websiteCondition` AND `auditFindings` RENDER VERBATIM. Never shortened,
+ *    never re-worded, never a badge, never an icon, never a coloured pill.
+ *    These are hedged, unverified strings from a public directory that nobody
+ *    on our side has checked. A rep reading a fabricated finding aloud on a
+ *    live call is the worst outcome this system can produce, and a badge is
+ *    exactly how that nuance gets flattened into a verdict.
+ *
+ * 2. NO COLOUR IS KEYED TO ANYTHING. Same ban as the battle card and the
+ *    comparison panel: tests/web-leads-guards.test.ts lists this file and
+ *    forbids the red/green/amber classes outright.
+ *
+ * 3. A MISSING FIELD SAYS SO IN WORDS. "Not on file" rather than a dash or a
+ *    blank: a rep glancing at this mid-call must be able to tell "we do not
+ *    have it" apart from "the page did not finish rendering".
+ *
+ * 4. THE WEBSITE LINK GOES THROUGH preferredSiteUrl AND RENDERS NOTHING WHEN
+ *    IT RETURNS NULL. A missing control is honest; a dead one is not. See
+ *    lib/web-leads/url-safety.ts for why a bare domain would otherwise
+ *    navigate inside our own dashboard and why the scheme allowlist matters.
+ */
+
+// `Map as MapIcon` on purpose: lucide exports an icon called `Map`, and
+// importing it under that name shadows the global Map constructor for the
+// whole module. Nothing here needs a Map today, which is exactly when that
+// trap gets set for whoever adds the first one.
+import { useEffect, useRef, useState } from "react";
+import {
+  AtSign, Building2, Check, Copy, ExternalLink, Globe, Map as MapIcon, MapPin, Phone, Tag,
+} from "lucide-react";
+import type { WebLead } from "@/lib/web-leads/data";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { BusinessHoursPanel, CallingWindowNotice, useNow } from "./OpeningHours";
+
+/**
+ * The one place the address is assembled, so the drawer and the page can never
+ * print a different address for the same business. Joined exactly the way
+ * WebLeadDetail has always joined it.
+ */
+export function fullAddress(lead: WebLead): string | null {
+  return [lead.address, lead.city, lead.province, lead.postal].filter(Boolean).join(", ") || null;
+}
+
+const LABEL = "text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted";
+const NOT_ON_FILE = "Not on file";
+
+/**
+ * Copy one field to the clipboard.
+ *
+ * WHY EVERY FACT GETS ONE. A rep reads these mid-call and then has to get them
+ * into a dialer, an email, a CRM note or a text. Retyping a postal code or a
+ * six-part address off a screen while someone is talking is where transcription
+ * errors come from, and a wrong digit in a phone number is a call that never
+ * happens.
+ *
+ * NO COLOUR, INCLUDING FOR SUCCESS. Rule 2 of this module bans colour keyed to
+ * anything, and tests/web-leads-guards.test.ts enforces it by class name. A
+ * green "Copied" tick would be exactly the precedent the ban exists to stop:
+ * once colour means something anywhere on this card, the next person tints the
+ * website score. So the confirmation is carried by the WORD and by the icon
+ * SHAPE, which also survives greyscale and colour blindness.
+ *
+ * NOT RENDERED WHEN THERE IS NOTHING TO COPY. A button next to "Not on file"
+ * invites a click that silently does nothing, which is worse than no button.
+ *
+ * THE FAILURE PATH IS VISIBLE. navigator.clipboard is unavailable on insecure
+ * origins and can be refused by permissions policy, so a rejection says so
+ * rather than leaving the label reading "Copy" forever while the rep believes
+ * they have the value.
+ */
+function CopyButton({ value, what }: { value: string; what: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  // One timer, cleared on unmount. Without this a copy in a drawer the rep
+  // closes immediately sets state on an unmounted component.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  async function copy() {
+    if (timer.current) clearTimeout(timer.current);
+    try {
+      await navigator.clipboard.writeText(value);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    timer.current = setTimeout(() => setState("idle"), 1600);
+  }
+
+  const label = state === "copied" ? "Copied"
+    : state === "failed" ? "Press Ctrl+C" : "Copy";
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      // The accessible name carries the FIELD, because "Copy" repeated nine
+      // times down a card tells a screen-reader user nothing about which one
+      // they are on.
+      aria-label={state === "copied" ? `${what} copied` : `Copy ${what}`}
+      className="mt-1 inline-flex items-center gap-1 rounded border border-bg-border bg-bg-raised px-1.5 py-0.5 text-[10px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
+      {state === "copied"
+        ? <Check className="h-3 w-3" aria-hidden />
+        : <Copy className="h-3 w-3" aria-hidden />}
+      {label}
+    </button>
+  );
+}
+
+function Fact({
+  icon, label, value, span = "", verbatim = false, copyAs,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | null;
+  /**
+   * What this field is CALLED in a copy button's accessible name, e.g. "phone
+   * number". Passing it opts the row into a copy control; omitting it means the
+   * value is a sentence nobody would paste anywhere — the two verbatim
+   * directory strings — and the row stays plain.
+   */
+  copyAs?: string;
+  /**
+   * Column-span classes for the two long sentences, or "".
+   *
+   * A STRING RATHER THAN A `wide` BOOLEAN, deliberately. A boolean would have
+   * to hardcode `sm:col-span-2 lg:col-span-3` here, and those classes are
+   * wrong in the drawer: applied inside a `grid-cols-1` container, a
+   * `col-span-2` item makes the browser create an IMPLICIT second column and
+   * the single-column layout collapses. Only the parent knows how many
+   * columns it asked for, so only the parent gets to say.
+   */
+  span?: string;
+  /** Italic, plain, uncoloured. The visual treatment for "the directory said
+   *  this and nobody checked it" -- deliberately quieter than a measurement,
+   *  never louder. */
+  verbatim?: boolean;
+}) {
+  return (
+    <div className={`flex gap-3 border-b border-bg-border/60 py-2.5 ${span}`}>
+      <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden>{icon}</div>
+      <div className="min-w-0 flex-1">
+        <p className={LABEL}>{label}</p>
+        <p className={`mt-0.5 break-words text-sm leading-relaxed ${verbatim ? "italic text-fg-dim" : "text-fg"}`}>
+          {value || NOT_ON_FILE}
+        </p>
+        {/* Only when there is something to copy. See CopyButton's header. */}
+        {copyAs && value && <CopyButton value={value} what={copyAs} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Every address we hold for this business, and the page each came from.
+ *
+ * ONE ROW OR FIVE, THE SAME BLOCK. A sole trader publishes `info@`; a law firm
+ * publishes the receptionist and three partners. Rendering only the first would
+ * hide exactly the address a rep wants — the named human rather than the shared
+ * inbox — and rendering a count ("4 emails") would make them open something
+ * else to see them.
+ *
+ * THE SOURCE URL RIDES ALONG. Under CASL the lawful basis for this email is
+ * implied consent through conspicuous publication, and that basis IS the page
+ * the address was published on. It is shown, not hidden behind a tooltip,
+ * because a rep asked "where did you get this?" needs to answer it.
+ *
+ * `lead.email` MAY NOT BE IN `lead.emails`. The JARVIS writer fills the shared
+ * `email` field only when it is empty, so a rep who typed an owner's address
+ * there keeps it. That one is listed first and marked, rather than silently
+ * merged, because "the rep entered this" and "we scraped this" are different
+ * claims about the same field.
+ */
+function EmailFacts({ lead }: { lead: WebLead }) {
+  // `?? []` IS LOAD-BEARING, NOT DEFENSIVE PADDING.
+  //
+  // The type says these are always present, and tsc agrees — but tsc does NOT
+  // check .measure/, because TypeScript skips dot-directories even under a
+  // `**/*.tsx` include (verified with --listFiles: zero matches). So the
+  // geometry harness builds WebLead objects through esbuild, which does not
+  // typecheck either, and any fixture written before this field existed arrives
+  // here with `emails` undefined. `.some()` on undefined throws, and a throw in
+  // this component takes the address, the phone and the hours down with the
+  // email — the exact failure readEmails() was written to prevent one layer up.
+  const scraped = lead.emails ?? [];
+  const primary = lead.email ?? null;
+  const repEntered = primary && !scraped.some((e) => e.email.toLowerCase() === primary.toLowerCase())
+    ? primary
+    : null;
+
+  if (!primary && scraped.length === 0) {
+    return <Fact icon={<AtSign className="h-4 w-4" />} label="Email" value={null} />;
+  }
+
+  return (
+    <div className="flex gap-3 border-b border-bg-border/60 py-2.5">
+      <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden><AtSign className="h-4 w-4" /></div>
+      <div className="min-w-0 flex-1">
+        <p className={LABEL}>{scraped.length > 1 ? `Email (${scraped.length})` : "Email"}</p>
+        <ul className="mt-0.5 space-y-2">
+          {repEntered && (
+            <li className="min-w-0">
+              <p className="break-words text-sm leading-relaxed text-fg">{repEntered}</p>
+              <p className="text-[10px] text-fg-dim">Entered by a rep</p>
+              <CopyButton value={repEntered} what="email address" />
+            </li>
+          )}
+          {scraped.map((e) => (
+            <li key={e.email} className="min-w-0">
+              <p className="break-words text-sm leading-relaxed text-fg">{e.email}</p>
+              {e.sourceUrl && (
+                <p className="break-words text-[10px] text-fg-dim">
+                  Published at {e.sourceUrl}
+                </p>
+              )}
+              <CopyButton value={e.email} what="email address" />
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The website, as text AND as a way out to it.
+ *
+ * Both halves earn their place. The raw string is what a rep reads to the
+ * prospect ("I am looking at joesplumbing.ca right now"); the link is what
+ * they click to actually look at it. preferredSiteUrl sends them to the
+ * ORIGIN rather than the stale deep path OpenStreetMap happens to store --
+ * one in four of those paths 404s, measured 2026-08-24 -- so the text and the
+ * link can legitimately differ, and the text is the honest record of what we
+ * hold.
+ */
+function WebsiteFact({ lead }: { lead: WebLead }) {
+  const href = preferredSiteUrl(lead.websiteUrl);
+  return (
+    <div className="flex gap-3 border-b border-bg-border/60 py-2.5">
+      <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden><Globe className="h-4 w-4" /></div>
+      <div className="min-w-0 flex-1">
+        <p className={LABEL}>Website</p>
+        <p className="mt-0.5 break-words text-sm leading-relaxed text-fg">{lead.websiteUrl || NOT_ON_FILE}</p>
+        {/* Copies the RAW stored string, not preferredSiteUrl's origin. The
+            text is the honest record of what we hold and is what a rep pastes
+            into a note; the button below is for going there. */}
+        {lead.websiteUrl && <CopyButton value={lead.websiteUrl} what="website address" />}
+        {/* Nothing at all when preferredSiteUrl returns null. rel="noopener
+            noreferrer" is a requirement, not a nicety: without it the opened
+            page can reach back through window.opener, and these are ~27,000
+            sites we do not control. */}
+        {href && (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-raised px-2.5 py-1.5 text-xs font-semibold text-fg transition-colors hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />View website
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * @param layout "grid" for the full-width battle card, "stack" for the 28rem
+ *        drawer. Tailwind breakpoints are viewport-based, not container-based,
+ *        so a drawer on a wide screen would take `sm:grid-cols-2` and go
+ *        cramped -- the drawer asks for one column explicitly rather than
+ *        hoping the breakpoint agrees with it.
+ */
+export function BusinessFacts({ lead, layout = "stack" }: { lead: WebLead; layout?: "stack" | "grid" }) {
+  // Empty in the drawer. See the `span` prop doc on Fact: a col-span inside a
+  // one-column grid conjures an implicit second column and breaks the stack.
+  const wide = layout === "grid" ? "sm:col-span-2 lg:col-span-3" : "";
+  // Read ONCE here and handed down, so every hours-derived statement on this
+  // card is computed at one instant. Null until mount -- see useNow.
+  const now = useNow();
+  return (
+    <div
+      className={`grid border-t border-bg-border ${layout === "grid" ? "gap-x-8 sm:grid-cols-2 lg:grid-cols-3" : "grid-cols-1"}`}
+    >
+      {/* Identity and location first. A rep confirms who they are calling
+          BEFORE they pitch, which is the whole reason this block sits at the
+          top of the card rather than under the charts. */}
+      <Fact
+        icon={<MapPin className="h-4 w-4" />} label="Address"
+        value={fullAddress(lead)} copyAs="address"
+      />
+      <Fact
+        icon={<Phone className="h-4 w-4" />} label="Phone"
+        value={lead.phone} copyAs="phone number"
+      />
+      {/* Directly under the phone, because those are the two ways to reach
+          them and a rep chooses between them before anything else on this
+          card matters. */}
+      <EmailFacts lead={lead} />
+      <Fact
+        icon={<Building2 className="h-4 w-4" />} label="Industry"
+        value={lead.industry} copyAs="industry"
+      />
+      <WebsiteFact lead={lead} />
+      <Fact
+        icon={<Tag className="h-4 w-4" />} label="Directory category"
+        value={lead.osmCategory} copyAs="directory category"
+      />
+      <Fact
+        icon={<MapIcon className="h-4 w-4" />} label="Territory"
+        value={lead.territoryName} copyAs="territory"
+      />
+      {/* WHEN THIS BUSINESS IS OPEN, full width, directly under WHERE they are.
+          A rep decides in this order -- who, where, and then whether it is even
+          worth dialling right now -- so the hours sit inside the identity block
+          rather than below the charts. Full width because it carries a seven-row
+          week.
+
+          TWO SEPARATE ROWS, DELIBERATELY. The first is a fact about THEM. The
+          second is a rule about US, and it only appears when the rep is
+          actually outside the window. They were one block until the operator
+          read the legal constant as fabricated data about the prospect: see
+          rule 4 in OpeningHours.tsx. Do not merge them back, and do not give
+          them a shared heading. */}
+      <BusinessHoursPanel lead={lead} now={now} layout={layout} />
+      <CallingWindowNotice lead={lead} now={now} layout={layout} />
+      {/* VERBATIM. See rule 1 in the module header. Last, and full width,
+          because they are sentences rather than fields -- but still inside the
+          identity block, never behind a disclosure. */}
+      <Fact
+        icon={<Globe className="h-4 w-4" />}
+        label="Website status, as recorded by the directory, unverified"
+        value={lead.websiteCondition}
+        span={wide}
+        verbatim
+      />
+      <Fact
+        icon={<Tag className="h-4 w-4" />}
+        label="Research notes, unverified"
+        value={lead.auditFindings}
+        span={wide}
+        verbatim
+      />
+    </div>
+  );
+}

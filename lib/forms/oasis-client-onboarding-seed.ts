@@ -54,9 +54,10 @@ export const CLIENT_ONBOARDING_DESCRIPTION =
 /**
  * Completing onboarding moves the client from `onboarding` to `in_build`.
  *
- * close_website_deal() (database/146) already parks a won lead at `onboarding`.
- * The gate between `onboarding` and `in_build` is exactly this form: assets in,
- * voice rules agreed, permission recorded, build can start. Both keys are in
+ * Verified full payment parks the lead at `won`; an admin then opens the
+ * prepared fulfilment record by advancing it to `onboarding`. The gate between
+ * `onboarding` and `in_build` is exactly this form: assets in, voice rules
+ * agreed, permission recorded, build can start. Both keys are in
  * OASIS_LEAD_STAGES (lib/oasis-stage-meta.ts) — the 14-stage lifecycle runs
  * won → onboarding → in_build → client_review → launched.
  */

@@ -11,8 +11,17 @@ down with it each time.
 | Space Grotesk | 500, 600, 700 | https://fonts.google.com/specimen/Space+Grotesk | OFL-1.1 |
 | Inter Tight | 400, 500, 600 | https://fonts.google.com/specimen/Inter+Tight | OFL-1.1 |
 | JetBrains Mono | 400, 500 | https://fonts.google.com/specimen/JetBrains+Mono | OFL-1.1 |
+| Chakra Petch | 500, 600, 700 | https://fonts.google.com/specimen/Chakra+Petch | OFL-1.1 |
+| Orbitron | 700 | https://fonts.google.com/specimen/Orbitron | OFL-1.1 |
 
-All three are licensed under the SIL Open Font License 1.1, which permits
+Chakra Petch and Orbitron (added 2026-09-01 for the web-leads battle card's HUD
+faces) were vendored from `@fontsource/chakra-petch@5.3.0` and
+`@fontsource/orbitron@5.3.0` (latin subset, npm) rather than a live Google
+fetch, for the same reason the first three exist: the build must never depend
+on fonts.gstatic.com being up. Loaded by `components/web-leads/BattleCard.tsx`
+via `next/font/local`, scoped to the battle card only.
+
+All five are licensed under the SIL Open Font License 1.1, which permits
 redistribution of the font files, bundled or standalone, provided they are not
 sold on their own and the license travels with them:
 https://openfontlicense.org/

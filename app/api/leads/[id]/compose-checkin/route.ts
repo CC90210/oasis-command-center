@@ -21,6 +21,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { composeCheckin, type CheckinInteractionSnapshot } from "@/lib/ai-checkin-compose";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,7 +48,7 @@ function fallbackTemplate(
       ? leadData.company.trim()
       : null;
   const subject = company
-    ? `Quick check-in — ${company}`
+    ? `Quick check-in: ${company}`
     : "Quick check-in";
   const contextLine =
     daysSinceLastTouch !== null && daysSinceLastTouch > 7
@@ -57,7 +58,7 @@ function fallbackTemplate(
 
 ${contextLine}
 
-If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure — just shoot back a thought if anything's on your mind.
+If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure. Just shoot back a thought if anything's on your mind.
 
 Either way, let me know.`;
   return { subject, body };
@@ -74,6 +75,21 @@ export async function POST(
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
   }
 
   const db = getServiceSupabase();

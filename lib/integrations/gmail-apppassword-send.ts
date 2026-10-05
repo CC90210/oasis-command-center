@@ -19,13 +19,19 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // CANSPAM_FOOTER, which had NO rep signature and a stale street address —
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import type { BrandKey } from "@/lib/email/brands";
+import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
+import {
+  gmailMessageIdForIdempotencyKey,
+  smtpFailureReason,
+} from "@/lib/integrations/email-delivery-safety";
 
 export type GmailAppPasswordSendResult =
   | { ok: true; provider: "gmail_apppassword"; gmail_message_id: string; from_address: string }
   | {
       ok: false;
       provider: "gmail_apppassword";
-      reason: "not_connected" | "send_failed" | "suppressed" | "suppression_error";
+      reason: "not_connected" | "send_failed" | "delivery_unknown" | "suppressed" | "suppression_error";
       error: string;
     };
 
@@ -49,9 +55,20 @@ export async function sendGmailAppPasswordAsOperator(args: {
   tenantId: string;
   userId: string;
   to: string;
+  /** Who to copy — the lead's assigned rep first. See lead-copy-recipients.ts. */
+  cc?: string | string[] | null;
   subject: string;
   body: string;
   signer?: EmailSigner | null;
+  /**
+   * Which company this message is from. REQUIRED — this path appended the
+   * SunBiz legal footer to every message it sent, including OASIS prospect
+   * mail, because it called appendSignatureAndFooter without a brand and that
+   * helper defaulted to SunBiz. The rep's own mailbox sends it, so nothing
+   * downstream could have noticed the mismatch.
+   */
+  brand: BrandKey;
+  idempotencyKey?: string;
 }): Promise<GmailAppPasswordSendResult> {
   // Opt-out gate FIRST — before any credential work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -75,18 +92,32 @@ export async function sendGmailAppPasswordAsOperator(args: {
       host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true,
       auth: { user: fromAddress, pass: appPassword },
     });
+    // The lead's assigned rep is copied here too, not only on the shared-mailbox
+    // path. This branch runs when the SENDER has their own mailbox connected —
+    // in which case the sender has a Sent copy but the rep who owns the lead
+    // still has nothing, which is the half of the problem that has nothing to do
+    // with which transport was used. Excludes this mailbox and the recipient.
+    const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
     const info = await transporter.sendMail({
       from: fromAddress,
       to: args.to,
+      ...(ccList.length ? { cc: ccList.join(", ") } : {}),
       subject: args.subject,
-      text: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
+      ...(args.idempotencyKey
+        ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
+        : {}),
+      text: appendSignatureAndFooter(args.body, {
+        signer: args.signer,
+        fromAddress,
+        brand: args.brand,
+      }),
     });
     return { ok: true, provider: "gmail_apppassword", gmail_message_id: info.messageId || "", from_address: fromAddress };
   } catch (e) {
     return {
       ok: false,
       provider: "gmail_apppassword",
-      reason: "send_failed",
+      reason: smtpFailureReason(e),
       error: e instanceof Error ? e.message.split("\n")[0].slice(0, 200) : "smtp_error",
     };
   }

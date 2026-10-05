@@ -44,9 +44,10 @@
  * here so future surfaces have something to dispatch against. ONE rule
  * is wired upstream today — outbound_email_queued / outbound_email_sent
  * via app/api/leads/[id]/email/route.ts and the tenant-aware dispatcher
- * in lib/lead-stage-dispatcher.ts (plus the operator/chat-triggered
- * events via cloud-tool-runner's advance_lead_stage). The remaining
- * events need their own trigger sites (calendar webhook for
+ * in lib/lead-stage-dispatcher.ts. Structured operator transitions now run
+ * through app/api/website-sales/[leadId], where their required facts and
+ * ownership gates are enforced. The remaining automated events need their
+ * own trusted trigger sites (calendar webhook for
  * discovery_call_scheduled, proposal tracking pixel for proposal_viewed,
  * e-signature webhook for contract_signed, etc.) which are deferred.
  */

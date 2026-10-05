@@ -14,6 +14,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { canWriteCrm } from "@/lib/role-gates";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import type { GmailTemplate, GmailTemplateVariant } from "@/lib/gmail-templates";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +26,7 @@ async function authAndFetch(id: string) {
   if (!sess.ok) {
     return { fail: NextResponse.json({ ok: false, error: sess.reason }, { status: 401 }) } as const;
   }
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!canWriteCrm(sess.teamRole) || !(await canAccessSharedTenantResource(sess))) {
     return { fail: NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 }) } as const;
   }
   if (!UUID_RE.test(id)) {

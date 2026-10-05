@@ -78,5 +78,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ job_id: str
     applied_keys: Array.isArray(result.applied_keys) ? result.applied_keys : [],
     application_id: typeof result.application_id === "string" ? result.application_id : null,
     signature_preview: typeof result.signature_preview === "string" ? result.signature_preview : null,
+    // Whether the drop landed on a merchant we already had. The dropzone says so
+    // out loud: a rep who dropped a document expecting a new deal must not have
+    // to work out on their own why no new card appeared.
+    matched_existing: result.matched_existing === true,
   });
 }

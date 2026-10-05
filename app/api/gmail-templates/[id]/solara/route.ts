@@ -18,8 +18,10 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
-import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
+import { operatorPlatformFallback } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { redactAll } from "@/lib/secret-redaction";
+import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import {
   extractGmailTokens,
@@ -28,6 +30,7 @@ import {
   type GmailTemplate,
   type GmailTemplateVariant,
 } from "@/lib/gmail-templates";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -91,7 +94,7 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!canWriteCrm(sess.teamRole) || !(await canAccessSharedTenantResource(sess))) {
     return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
   }
   if (!UUID_RE.test(id)) {
@@ -147,6 +150,7 @@ export async function POST(
   let provider: Provider;
   let model: string;
   let apiKey = "";
+  let keySource: "tenant" | "platform" = "tenant";
   if (cfg && cfg.encrypted_api_key) {
     provider = cfg.provider as Provider;
     model = cfg.model;
@@ -156,7 +160,8 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
   } else {
-    const fallback = isOperatorEmail(sess.email || "") ? operatorPlatformFallback() : null;
+    // The platform key bills OASIS: verified operator only (lib/platform-operator.ts).
+    const fallback = (await isPlatformOperatorForAuthUser(sess.userId, sess.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
         { ok: false, error: "agent_not_configured", hint: "Configure the Solara (or Bravo) provider in Settings to generate variants." },
@@ -166,6 +171,7 @@ export async function POST(
     provider = fallback.provider;
     model = fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
   }
 
   // Model boundary: redact env-secret values / keyed URL params before any
@@ -195,6 +201,13 @@ export async function POST(
       system: SYSTEM_PROMPT,
       messages,
       maxTokens: 1500,
+      meter: modelCallMeter({
+        tenantId: sess.tenantId,
+        surface: "gmail_templates.solara",
+        ...billingForKey(provider, keySource),
+        teammateId: "solara",
+        userId: sess.userId,
+      }),
     })) {
       if (ev.type === "delta") aiText += ev.text;
       else if (ev.type === "error") streamError = ev.message;
@@ -202,6 +215,7 @@ export async function POST(
   } catch (err) {
     streamError = err instanceof Error ? err.message : "stream_failed";
   }
+  if (isAiBudgetCode(streamError)) return budgetRefusalResponse(streamError);
   if (streamError) {
     return NextResponse.json({ ok: false, error: "llm_call_failed", message: streamError }, { status: 502 });
   }

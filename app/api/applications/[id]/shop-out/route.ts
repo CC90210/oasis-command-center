@@ -49,6 +49,7 @@ import { dispatchPendingSunbizThreads } from "@/lib/lenders/shop-out-dispatch";
 import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
+import { memberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +68,38 @@ export const maxDuration = 120;
  * The send now happens in-process (lib/lenders/shop-out-dispatch.ts).
  */
 
+/**
+ * Top-level catch. An uncaught throw in a Next route handler returns a 500
+ * with an EMPTY body, so the browser's `response.json()` fails with
+ * "Unexpected end of JSON input" — a message that names the parser, never the
+ * fault. That is exactly how the 2026-09-15 shop-out outage presented: the real
+ * error (readFileSync on Cloudflare Workers, see lib/config/agents.ts) was
+ * invisible from the client, and the operator saw a JSON-parse complaint.
+ *
+ * Every exit from this route is now a JSON body with an `error` code. The
+ * message is included because this endpoint is operator-only (session-gated,
+ * tenant-scoped, never merchant-facing) and the operator IS the person who has
+ * to act on it. Logged too, so the Worker's observability captures it.
+ *
+ * Pinned by tests/shop-out-route-error-envelope.test.ts.
+ */
 export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  try {
+    return await handleShopOut(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[shop-out] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "shop_out_unhandled_error", message: detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleShopOut(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
@@ -84,7 +116,10 @@ export async function POST(
   // use for BRAVO_FROM_DISPLAY when spawning send_gateway. Shared with
   // /api/leads/[id]/email + lender-threads/[threadId]/retry — see
   // lib/config/agents.ts:resolveSignerForOperator.
-  const signer = resolveSignerForOperator(sess.email);
+  // Lender shop-out is always SunBiz — funders receive SunBiz paper only, the
+  // same hard rule outbound-routing.ts encodes. Stated explicitly now that the
+  // signer no longer defaults to a company.
+  const signer = resolveSignerForOperator(sess.email, { brand: "sunbiz" });
 
   let body: {
     lender_ids?: string[];
@@ -250,18 +285,29 @@ export async function POST(
   // buildShopOutPlan can merge it into the per-row CC alongside the
   // operator's typed list and the lender's stored submission_cc_emails.
   // application.data.assigned_to holds an auth_user_id (set by
-  // /api/leads/[id]/assign); join through user_profiles to get the email.
+  // /api/leads/[id]/assign); resolve it within THIS tenant to get the email.
+  // Only an ACTIVE rep is copied: a deactivated one keeps the deal (history)
+  // but must not be CC'd, sign, or become the Reply-To of new lender mail, so
+  // their email stays null and the operator signer / shared inbox applies. A
+  // failed check withholds the copy the same way.
   let assignedRepEmail: string | null = null;
   const assignedTo = typeof appData.assigned_to === "string" ? appData.assigned_to : null;
   if (assignedTo) {
-    const profileRes = await db
-      .from("user_profiles")
-      .select("email")
-      .eq("auth_user_id", assignedTo)
-      .maybeSingle();
-    const email = (profileRes.data as { email: string | null } | null)?.email;
-    if (typeof email === "string" && email.includes("@")) {
-      assignedRepEmail = email;
+    try {
+      const { standing, member } = await memberStanding(tenantId, assignedTo);
+      const email = member?.email;
+      if (standing === "active" && typeof email === "string" && email.includes("@")) {
+        assignedRepEmail = email;
+      } else if (standing === "deactivated") {
+        console.warn("[shop-out] assigned rep deactivated", { tenantId, applicationId, assignedTo });
+      }
+    } catch (error) {
+      console.warn("[shop-out] assigned rep check failed", {
+        tenantId,
+        applicationId,
+        assignedTo,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

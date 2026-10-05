@@ -14,7 +14,7 @@
  * soft-fail: every error is caught + logged; the submission is never affected.
  */
 import "server-only";
-import { inferText } from "@/lib/subscription-infer";
+import { inferForTenant } from "@/lib/ai/infer";
 import nodemailer from "nodemailer";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -90,12 +90,11 @@ Return ONLY a JSON object with "subject" and "body" keys. The body should be pla
      * loop at all — a prospect filling in the funnel spent money directly.
      * See lib/subscription-infer.ts.
      */
-    const inf = await inferText({
+    const inf = await inferForTenant(tenantId ?? null, {
       source: "oasis-funnel-email",
       system: "",
       prompt,
       maxTokens: 400,
-      tenantId: tenantId ?? null,
       modelTier: "smart",
     });
     // Fallback copy is a complete, sendable email — a slow or unavailable queue

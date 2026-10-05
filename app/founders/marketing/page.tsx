@@ -1,5 +1,5 @@
 /**
- * /founders/marketing — Founders Portal, Studio landing.
+ * /founders/marketing — Founders Portal, the Content hub's Overview tab.
  *
  * FOUNDERS ONLY. SunBiz and every other tenant get a 404, not a 403, so they
  * never learn this route exists. The gate keys on TENANT IDENTITY via the
@@ -20,26 +20,44 @@
  * writing it. A roadmap note describes the day it was written; the code moves
  * and the note does not, and then it actively misinforms whoever reads it next.
  *
- * What is true is checkable from here: "needs you" counts assets at `in_review`,
- * the tiles and cards all render an em dash rather than a zero when the read is
+ * What is true is checkable from here: "needs you" counts the Library's Needs
+ * review bucket on the OASIS tab (draft or in review, not yet posted) with the
+ * same COUNT as that pill, the tiles and cards all render an em dash rather than a zero when the read is
  * degraded (tests/marketing-degraded-render.test.ts enforces that), and the
  * Performance card links to a tab that is live.
+ *
+ * NO CARD WAITS ON ANOTHER TAB'S DATA (2026-10-01). CC: "clicking on the
+ * performance and whatnot, but it just takes a while." This page awaited every
+ * read (summary, facets, lifecycle) before it sent a byte, and the summary is a
+ * chain of round trips, so the whole Overview waited on the Library's slowest
+ * read: about six round trips after the gate. Now the gate is the only wait
+ * before the frame. Each section streams behind its own <Suspense>: the queue,
+ * pipeline and brand tiles (the Library's numbers), the Library and Requests
+ * cards (the same summary, read once per request through readSummary), and the
+ * Training card with its own one-query read of the training material. The
+ * Performance card needs no data and renders with the frame. A section whose
+ * read fails says so in its own place. tests/content-speed.test.ts holds this.
  */
 
+import { Suspense, cache } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Card, PageHeader, Stat } from "@/components/Card";
 import { Library, GraduationCap, Inbox, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
-import { resolveFounder } from "@/lib/founders/gate";
+import { resolveFounder, type FounderContext } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_FACETS,
   DEGRADED_MARKETING_SUMMARY,
+  EMPTY_CORPUS_STATS,
+  getCorpusStats,
+  getLifecycleCounts,
   getMarketingFacets,
   getMarketingSummary,
 } from "@/lib/founders/marketing-queries";
 import {
   BRAND_GROUPS,
+  DEFAULT_BRAND_GROUP,
   brandGroupFor,
   type BrandGroupKey,
 } from "@/lib/founders-marketing-core";
@@ -48,23 +66,86 @@ import { MarketingEmpty } from "@/components/founders/marketing-shared";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Marketing · OASIS",
+  title: "Content · OASIS",
 };
+
+/**
+ * The summary, read once per request however many sections ask for it. React's
+ * cache() is scoped to one request and cleared after it, so no request ever
+ * waits on another request's read (tests/worker-request-isolation.test.ts).
+ *
+ * DEGRADED_, not EMPTY_. safe() returns this fallback when the promise THROWS,
+ * and a throw is a failure, not an absence — handing it the empty summary put
+ * "Nothing waiting on you" back on the screen for every unexpected error, which
+ * is precisely what MarketingSummary.degraded was added to stop. `summary` is
+ * CC's own queue and stays scoped to OASIS's own work.
+ */
+const readSummary = cache((tenantId: string) =>
+  safe("marketing.summary", getMarketingSummary(tenantId), DEGRADED_MARKETING_SUMMARY),
+);
 
 export default async function MarketingPage() {
   const founder = await resolveFounder();
   if (!founder) notFound();
+  const tenantId = founder.tenantId;
 
-  // DEGRADED_, not EMPTY_. safe() returns this fallback when the promise THROWS,
-  // and a throw is a failure, not an absence — handing it the empty summary put
-  // "Nothing waiting on you" back on the screen for every unexpected error, which
-  // is precisely what MarketingSummary.degraded was added to stop.
-  // Two reads, one round trip. `summary` is CC's own queue and stays scoped to
-  // OASIS's own work; `facets` deliberately spans every brand, because the whole
-  // point of the tab counts is to show what is behind the tabs he is NOT on.
-  const [summary, facets] = await Promise.all([
-    safe("marketing.summary", getMarketingSummary(founder.tenantId), DEGRADED_MARKETING_SUMMARY),
+  return (
+    <div className="space-y-6 animate-fade-in">
+      <PageHeader
+        title="Content"
+        subtitle={
+          <Suspense fallback="OASIS's own work">
+            <OverviewSubtitle tenantId={tenantId} />
+          </Suspense>
+        }
+      />
+
+      <Suspense fallback={<SectionLoading line="Loading what needs you..." />}>
+        <QueueAndPipeline founder={founder} />
+      </Suspense>
+
+      <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <Suspense fallback={<CardLoading title="Library" />}>
+          <LibraryCard tenantId={tenantId} />
+        </Suspense>
+        <Suspense fallback={<CardLoading title="Training material" />}>
+          <TrainingCard tenantId={tenantId} />
+        </Suspense>
+        <Suspense fallback={<CardLoading title="Requests" />}>
+          <RequestsCard tenantId={tenantId} />
+        </Suspense>
+        <PerformanceCard />
+      </section>
+    </div>
+  );
+}
+
+async function OverviewSubtitle({ tenantId }: { tenantId: string }) {
+  const summary = await readSummary(tenantId);
+  return (
+    <>
+      {summary.degraded
+        ? `OASIS's own work · at least ${summary.total} ${summary.total === 1 ? "asset" : "assets"} — counts incomplete`
+        : summary.total === 0
+          ? "Founders portal · nothing registered yet"
+          : `OASIS's own work · ${summary.total} ${summary.total === 1 ? "asset" : "assets"} across every channel`}
+    </>
+  );
+}
+
+/** Needs you, the pipeline, the brand tiles and the channel line: the Library's numbers. */
+async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
+  // `facets` deliberately spans every brand, because the whole point of the
+  // tab counts is to show what is behind the tabs he is NOT on.
+  const [summary, facets, lifecycle] = await Promise.all([
+    readSummary(founder.tenantId),
     safe("marketing.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    // The Library's lifecycle pills for the OASIS tab: the SAME call, the same
+    // COUNT, that draws "Needs review N" on the page the line below links to.
+    safe("marketing.lifecycle", getLifecycleCounts(founder.tenantId, DEFAULT_BRAND_GROUP), {
+      counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
+      degraded: true,
+    }),
   ]);
 
   // `"—"` on a failed read, never 0. A brand tile reading 0 says "this brand has
@@ -83,7 +164,13 @@ export default async function MarketingPage() {
   // you" while the Library badged all thirteen assets IN REVIEW. Both were
   // reading truthfully from different sources, and the screen whose entire job
   // is "what needs you" was the one that was wrong.
-  const awaitingVerdict = summary.by_status.in_review || 0;
+  //
+  // ONE COUNT FOR THE LINE AND THE GRID IT OPENS. This was by_status.in_review,
+  // while the link lands on the Library's Needs review grid, which also holds
+  // drafts, so the number and the grid it opened differed by every draft. It is
+  // now that grid's own pill count, so the two cannot disagree. A failed count
+  // is not a zero: the degraded branch below renders instead.
+  const awaitingVerdict = lifecycle.degraded ? 0 : lifecycle.counts.needs_review;
 
   // A failed read has no number to show. Returning 0 here would put a measured
   // zero on screen next to a panel that just said the query failed.
@@ -109,9 +196,10 @@ export default async function MarketingPage() {
   //
   // Identical output today (both are 0 — the Phase 3 loop has never written to
   // either table), and correct the moment Phase 3 starts writing. They are still
-  // shown, as their own counts, just not summed into his queue.
+  // shown, as their own counts, just not summed into his queue. On screen the
+  // agent is "the marketing agent": persona names are internal.
   const needsYou = awaitingVerdict;
-  /** Queued FOR Maven, not waiting on CC — shown, never summed into his queue. */
+  /** Queued FOR the marketing agent, not waiting on CC — shown, never summed into his queue. */
   const withMaven = summary.open_reviews + summary.open_requests;
 
   // The funnel, from the counts the reader already computes. `by_status` has
@@ -157,18 +245,7 @@ export default async function MarketingPage() {
   const offPipeline = summary.degraded ? 0 : Math.max(summary.total - pipelineTotal, 0);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Marketing"
-        subtitle={
-          summary.degraded
-            ? `OASIS's own work · at least ${summary.total} ${summary.total === 1 ? "asset" : "assets"} — counts incomplete`
-            : summary.total === 0
-              ? "Founders portal · nothing registered yet"
-              : `OASIS's own work · ${summary.total} ${summary.total === 1 ? "asset" : "assets"} across every channel`
-        }
-      />
-
+    <>
       {/* Decisions first. */}
       <section>
         <div className="mb-3 flex items-baseline justify-between gap-4 px-1">
@@ -184,23 +261,24 @@ export default async function MarketingPage() {
             <span className="text-xs text-fg-dim">
               {needsYou > 0 && <>{awaitingVerdict} awaiting your verdict</>}
               {needsYou > 0 && withMaven > 0 && <> · </>}
-              {withMaven > 0 && <>{withMaven} with Maven</>}
+              {withMaven > 0 && <>{withMaven} with the marketing agent</>}
             </span>
           )}
         </div>
-        {summary.degraded ? (
+        {lifecycle.degraded || summary.degraded ? (
           // NOT "nothing waiting on you". A query failed, so every number on this
           // page is a floor rather than a fact, and saying "nothing" would be a
           // confident lie about CC's own workload. See MarketingSummary.degraded.
+          // The verdict count is its own read now, so its failure lands here too.
           <MarketingEmpty
             headline="Couldn't load your queue"
-            detail="A query failed, so these counts are incomplete — treat them as a floor, not a total. Nothing has been lost; this is a read-side failure. Refresh, and if it persists the server log carries the reason under [marketing:summary]."
+            detail="Part of this did not load, so these counts are incomplete: treat them as a floor, not a total. Nothing has been lost. Try again in a minute; the cause is logged for the OASIS team."
             hint="Showing whatever did load, rather than a zero that would look like good news."
           />
         ) : needsYou === 0 ? (
           <MarketingEmpty
             headline="Nothing waiting on you"
-            detail="When Maven produces something it lands here for a verdict. Approve, request changes, or reject — a change request with a reason is the most useful thing you can give her."
+            detail="When the marketing agent makes something, it lands here for your verdict. Approve it, ask for changes, or reject it; a change request with a reason is the most useful thing you can give it."
             hint="Open any asset from the Library to approve or archive it."
           />
         ) : (
@@ -337,103 +415,178 @@ export default async function MarketingPage() {
           </div>
         </div>
       )}
+    </>
+  );
+}
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {/* CC, 2026-08-16: "Are the posts in this library just stockpiled, and
-            how do we function with our automations? Are they taking from this
-            library when we post automatically?"
-
-            No — and nothing on this page had ever said which way the arrow
-            points. The daily poster reads data/post_queue/*.json and mirrors the
-            result here as its final step, so this is a record of what already
-            shipped, not a queue anything draws from. A Draft -> Scheduled ->
-            Published pipeline sitting above it invites precisely the opposite
-            reading, which is the reading CC arrived at. */}
-        <Card
-          title="Library"
-          subtitle="A record of what shipped — the poster writes here, never reads from here"
-          action={
-            <Link
-              href="/founders/marketing/library"
-              className="text-xs font-semibold text-accent hover:underline"
-            >
-              Open
-            </Link>
-          }
+/*
+ * CC, 2026-08-16: "Are the posts in this library just stockpiled, and how do
+ * we function with our automations? Are they taking from this library when we
+ * post automatically?"
+ *
+ * No — and nothing on this page had ever said which way the arrow points. The
+ * daily poster reads data/post_queue/*.json and mirrors the result here as its
+ * final step, so this is a record of what already shipped, not a queue anything
+ * draws from. A Draft -> Scheduled -> Published pipeline sitting above it
+ * invites precisely the opposite reading, which is the reading CC arrived at.
+ */
+async function LibraryCard({ tenantId }: { tenantId: string }) {
+  const summary = await readSummary(tenantId);
+  return (
+    <Card
+      title="Library"
+      subtitle="A record of what shipped — the poster writes here, never reads from here"
+      action={
+        <Link
+          href="/founders/marketing/library"
+          className="text-xs font-semibold text-accent hover:underline"
         >
-          <div className="flex items-center gap-3">
-            <Library size={18} className="text-accent" aria-hidden />
-            <div className="text-sm text-fg-muted">
-              {summary.degraded
-                ? "Couldn't read the library."
-                : summary.total === 0
-                  ? "No assets registered yet."
-                  : `${summary.total} asset${summary.total === 1 ? "" : "s"} stored.`}
-            </div>
-          </div>
-        </Card>
+          Open
+        </Link>
+      }
+    >
+      <div className="flex items-center gap-3">
+        <Library size={18} className="text-accent" aria-hidden />
+        <div className="text-sm text-fg-muted">
+          {summary.degraded
+            ? "Couldn't read the library."
+            : summary.total === 0
+              ? "No assets registered yet."
+              : `${summary.total} asset${summary.total === 1 ? "" : "s"} stored.`}
+        </div>
+      </div>
+    </Card>
+  );
+}
 
-        <Card title="Training corpus" subtitle="What Maven learns from">
-          <div className="flex items-center gap-3">
-            <GraduationCap size={18} className="text-accent" aria-hidden />
-            <div className="text-sm text-fg-muted">
-              {summary.degraded ? (
-                "Couldn't read the corpus."
-              ) : summary.corpus_indexed === 0 && summary.corpus_pending === 0 ? (
-                // Ingestion HAS landed — the route enqueues and
-                // scripts/ingest_training_link.py drains it every five minutes.
-                // The old copy said Phase 2 long after both halves existed,
-                // which reads as "this tab does nothing" to the person whose
-                // links are sitting there.
-                <>Nothing yet. Drop links in Train and they land here.</>
-              ) : (
-                <>
-                  {summary.corpus_indexed} indexed
-                  {summary.corpus_pending > 0 && ` · ${summary.corpus_pending} processing`}
-                </>
-              )}
-            </div>
-          </div>
-        </Card>
-
-        <Card title="Requests" subtitle="Work you have queued for Maven">
-          <div className="flex items-center gap-3">
-            <Inbox size={18} className="text-accent" aria-hidden />
-            <div className="text-sm text-fg-muted">
-              {summary.degraded
-                ? "Couldn't read your requests."
-                : summary.open_requests === 0
-                  ? "Nothing queued."
-                  : `${summary.open_requests} open.`}
-            </div>
-          </div>
-        </Card>
-
-        {/* This card said "No metrics connected yet. Phase 5." for hours AFTER
-            the Performance tab shipped with 79 posts of real Zernio data behind
-            it. A stale placeholder is worse than an empty state: it tells the
-            operator a working feature does not exist, so nobody opens it. */}
-        <Card
-          title="Performance"
-          subtitle="Per channel, with provenance"
-          action={
-            <Link
-              href="/founders/marketing/performance"
-              className="text-xs font-semibold text-accent hover:underline"
-            >
-              Open
-            </Link>
-          }
+/**
+ * The Training tab's material, from its own one-query read: it never waits on
+ * the Library's asset pages. CC did not know what the "Training corpus" was, so
+ * the card says it in the tab's words and links to the tab.
+ */
+async function TrainingCard({ tenantId }: { tenantId: string }) {
+  const corpus = await safe("marketing.corpus.stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true });
+  const pending = corpus.queued + corpus.extracting;
+  return (
+    <Card
+      title="Training material"
+      subtitle="What the marketing agent learns from"
+      action={
+        <Link
+          href="/founders/marketing/train"
+          className="text-xs font-semibold text-accent hover:underline"
         >
-          <div className="flex items-center gap-3">
-            <BarChart3 size={18} className="text-accent" aria-hidden />
-            <div className="text-sm text-fg-muted">
-              Views, engagement and retention per channel, pulled from Zernio on a
-              schedule.
-            </div>
+          Open
+        </Link>
+      }
+    >
+      <div className="flex items-center gap-3">
+        <GraduationCap size={18} className="text-accent" aria-hidden />
+        <div className="text-sm text-fg-muted">
+          {corpus.degraded ? (
+            "Couldn't read the training material."
+          ) : corpus.indexed === 0 && pending === 0 ? (
+            // Ingestion HAS landed — the route enqueues and
+            // scripts/ingest_training_link.py drains it every five minutes.
+            <>Nothing yet. Add links on the Training tab.</>
+          ) : (
+            <>
+              {corpus.indexed} learned
+              {pending > 0 && ` · ${pending} being read`}
+            </>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * A request is a job FOR the marketing agent (database/133_marketing_hub.sql:
+ * "Operator -> agent work queue", claimed by an agent). CC asked what this
+ * card was, so it says so; the count is the summary's, scoped to OASIS's own
+ * assets like "Needs you".
+ */
+async function RequestsCard({ tenantId }: { tenantId: string }) {
+  const summary = await readSummary(tenantId);
+  return (
+    <Card title="Requests" subtitle="Jobs for the marketing agent, not for you">
+      <div className="flex items-start gap-3">
+        <Inbox size={18} className="mt-0.5 shrink-0 text-accent" aria-hidden />
+        <div className="space-y-1 text-sm text-fg-muted">
+          <div>
+            {summary.degraded
+              ? "Couldn't read your requests."
+              : summary.open_requests === 0
+                ? "None open."
+                : `${summary.open_requests} open.`}
           </div>
-        </Card>
-      </section>
+          <p className="text-[11px] leading-5 text-fg-dim">
+            A request is a job for the marketing agent, such as &ldquo;make three TikTok hooks for
+            the system ad&rdquo;, so the agent acts on it, not you. None can be filed from this page
+            yet.
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/*
+ * This card said "No metrics connected yet. Phase 5." for hours AFTER the
+ * Performance tab shipped with 79 posts of real Zernio data behind it. A stale
+ * placeholder is worse than an empty state: it tells the operator a working
+ * feature does not exist, so nobody opens it. It needs no data, so it renders
+ * with the frame.
+ */
+function PerformanceCard() {
+  return (
+    <Card
+      title="Performance"
+      subtitle="Per channel, with provenance"
+      action={
+        <Link
+          href="/founders/marketing/performance"
+          className="text-xs font-semibold text-accent hover:underline"
+        >
+          Open
+        </Link>
+      }
+    >
+      <div className="flex items-center gap-3">
+        <BarChart3 size={18} className="text-accent" aria-hidden />
+        <div className="text-sm text-fg-muted">
+          Views, engagement and retention per channel, pulled from Zernio on a
+          schedule.
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** A section on its way: shapes and one plain line, never a number. */
+function SectionLoading({ line }: { line: string }) {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-live="polite">
+      <p className="px-1 text-sm text-fg-muted">{line}</p>
+      <div className="h-24 rounded-xl border border-bg-border bg-bg-elev/40 animate-pulse-slow" />
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-24 rounded-xl border border-bg-border bg-bg-elev/60 animate-pulse-slow" />
+        ))}
+      </div>
     </div>
+  );
+}
+
+/** A card on its way: its own title (a label, not data) and a loading line. */
+function CardLoading({ title }: { title: string }) {
+  return (
+    <Card title={title}>
+      <div className="flex items-center gap-3" aria-busy="true" aria-live="polite">
+        <span className="sr-only">Loading</span>
+        <div className="h-4 w-40 max-w-full rounded-md bg-bg-elev/60 animate-pulse-slow" />
+      </div>
+    </Card>
   );
 }

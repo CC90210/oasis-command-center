@@ -5,7 +5,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { markRead } from "@/lib/agent-inbox-fs";
 import { markReadDb } from "@/lib/agent-inbox-db";
 
@@ -15,7 +15,9 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!isOperatorEmail(user.email)) {
+  // Verified operator (alias AND owner/admin OASIS membership by auth id) —
+  // the same rule the /inbox page gates on. Fails closed.
+  if (!(await isPlatformOperatorForAuthUser(user.id, user.email))) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 

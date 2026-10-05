@@ -13,17 +13,15 @@
  *                                ladder the drawer Call button uses.
  *
  * Safety: every send goes through isDryRun() FIRST. On dry-run we skip the
- * network call entirely, still log a lead_interactions row tagged
- * metadata.dry_run=true so the inbox + drawer timeline reflect the attempt,
- * and return { ok, dry_run:true, would_send }. The dashboard defaults to
+ * network call and all touch tracking so simulations cannot inflate metrics,
+ * then return { ok, dry_run:true, would_send }. The dashboard defaults to
  * dry-run (see lib/integrations/send-mode.ts).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getSessionContext } from "@/lib/team";
-import { isReadOnlyRole } from "@/lib/role-gates";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { normalizePhoneE164, isPhoneOptedOut } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
@@ -36,6 +34,7 @@ import {
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendSmsDirectTwilio } from "@/lib/sms-direct-twilio";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -55,24 +54,70 @@ async function logInteraction(args: {
   userId: string;
   provider: string;
   dryRun: boolean;
-}) {
+  providerMessageId?: string | null;
+}): Promise<string | null> {
+  if (args.dryRun) return null;
+  const warnings: string[] = [];
+  let occurredAt = new Date().toISOString();
   try {
     const db = getServiceSupabase();
-    await db.from("lead_interactions").insert({
+    const row = {
       tenant_id: args.tenantId,
       lead_id: args.leadId,
       type: "sms_sent",
       channel: "sms",
       direction: "outbound",
       agent_source: "dashboard_conversations",
+      provider: args.provider,
+      provider_message_id: args.providerMessageId || null,
       to_phone: args.toPhone,
+      content: args.message,
       content_preview: args.message.slice(0, 1024),
       actor_user_id: args.userId,
-      metadata: { provider: args.provider, dry_run: args.dryRun },
-    });
+      metadata: { provider: args.provider, dry_run: false },
+    };
+    const interaction = args.providerMessageId
+      ? await db.from("lead_interactions").upsert(row, {
+          onConflict: "provider,provider_message_id",
+        }).select("created_at").single()
+      : await db.from("lead_interactions").insert(row).select("created_at").single();
+    if (interaction.error) {
+      warnings.push("interaction_log_failed");
+      console.error("[conversations.reply] interaction insert failed", interaction.error);
+    } else {
+      const createdAt = (interaction.data as { created_at?: string | null } | null)?.created_at;
+      if (typeof createdAt === "string" && Number.isFinite(Date.parse(createdAt))) {
+        occurredAt = new Date(createdAt).toISOString();
+      }
+    }
+
+    if (args.leadId) {
+      try {
+        await persistCanonicalLeadTouch(db, {
+          tenantId: args.tenantId,
+          leadId: args.leadId,
+          occurredAt,
+        });
+      } catch (err) {
+        warnings.push("canonical_touch_failed");
+        console.error("[conversations.reply] canonical touch update failed", err);
+      }
+    }
   } catch (err) {
+    warnings.push("tracking_database_failed");
     console.error("[conversations.reply] interaction insert failed", err);
   }
+  return warnings.length ? warnings.join(",") : null;
+}
+
+function providerMessageIdFrom(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  for (const key of ["messageid", "message_id"]) {
+    const candidate = row[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return providerMessageIdFrom(row.data);
 }
 
 export async function POST(req: NextRequest) {
@@ -91,14 +136,6 @@ export async function POST(req: NextRequest) {
   // this; this is the direct HTTP send path, so it needs the same gate. Fail
   // CLOSED if the role can't be resolved (a passing resolveSessionContext means
   // a profile+tenant exist, so a null here is an anomaly, not a normal member).
-  const roleCtx = await getSessionContext();
-  if (!roleCtx || isReadOnlyRole(roleCtx.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't send messages." },
-      { status: 403 },
-    );
-  }
-
   let body: {
     lead_id?: unknown;
     to_phone?: unknown;
@@ -139,26 +176,35 @@ export async function POST(req: NextRequest) {
   // never send AS another tenant, but without this check it could mis-attribute
   // a timeline row to a foreign record. 404 on mismatch, same as Call.
   if (leadId) {
-    const db = getServiceSupabase();
-    const { data: ownedLead } = await db
-      .from("tenant_records")
-      .select("id")
-      .eq("id", leadId)
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
-    if (!ownedLead) {
+    const access = await assertMayWorkLead({
+      teamRole: session.teamRole,
+      userId,
+      tenantId,
+      leadId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+      accessMode: "owned_oasis_sales",
+    });
+    if (!access.ok) {
       return NextResponse.json(
-        { ok: false, error: "lead_not_found", message: "Lead not found for this workspace." },
-        { status: 404 },
+        { ok: false, error: access.error, message: access.message },
+        { status: access.status },
       );
     }
+  } else if (!session.isAdmin) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "lead_required",
+        message: "Select an assigned lead before sending a reply.",
+      },
+      { status: 403 },
+    );
   }
 
-  // DRY-RUN: short-circuit before any network call. Still log the attempt.
+  // DRY-RUN: short-circuit before network and tracking writes.
   // Per-channel: TextTorrent / Kixie can be live independently.
   if (isDryRun(provider)) {
-    await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: true });
-    await nudgeConversations(tenantId);
     return NextResponse.json({
       ok: true,
       dry_run: true,
@@ -177,6 +223,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  let providerMessageId: string | null = null;
   try {
     if (provider === "twilio") {
       const result = await sendSmsDirectTwilio({ tenantId, to: toPhone, body: message });
@@ -186,6 +233,7 @@ export async function POST(req: NextRequest) {
           { status: result.http_status },
         );
       }
+      providerMessageId = result.message_sid;
     } else if (provider === "kixie") {
       // 3-tier agent email: per-user override → session email → tenant default.
       let agentEmail = email || "";
@@ -220,13 +268,14 @@ export async function POST(req: NextRequest) {
       } catch {
         // soft-fail; tenant default from-number applies
       }
-      await kixieSendSms(creds, {
+      const result = await kixieSendSms(creds, {
         target: toPhone,
         message,
         agentEmail,
         from: fromOverride,
         leadId: leadId ?? undefined,
       });
+      providerMessageId = providerMessageIdFrom(result);
     } else {
       const creds = await getTextTorrentCredentials(tenantId);
       // Per-rep "text from my own number" (2026-06-24): send from the rep's own
@@ -235,7 +284,8 @@ export async function POST(req: NextRequest) {
       // Attribution stays the human rep — logInteraction already stamps
       // actor_user_id + agent_source:"dashboard_conversations".
       const senderId = await resolveTextTorrentSenderId({ tenantId, userId });
-      await ttSendSms(creds, { number: toPhone, message, sender_id: senderId });
+      const result = await ttSendSms(creds, { number: toPhone, message, sender_id: senderId });
+      providerMessageId = result.data.message_id || null;
     }
   } catch (err) {
     if (err instanceof TextTorrentError || err instanceof KixieError) {
@@ -251,7 +301,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  await logInteraction({ tenantId, leadId, toPhone, message, userId, provider, dryRun: false });
+  const trackingWarning = await logInteraction({
+    tenantId,
+    leadId,
+    toPhone,
+    message,
+    userId,
+    provider,
+    dryRun: false,
+    providerMessageId,
+  });
   await nudgeConversations(tenantId);
-  return NextResponse.json({ ok: true, dry_run: false, provider, to_phone: toPhone });
+  return NextResponse.json({
+    ok: true,
+    dry_run: false,
+    provider,
+    to_phone: toPhone,
+    tracking_warning: trackingWarning,
+  });
 }

@@ -23,6 +23,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nextRenewalDate, estCommissionUsd, isTermUnit, type TermUnit } from "@/lib/renewals/derive";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +64,9 @@ export async function GET(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!sess.tenantId) return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
+  if (!(await canAccessSharedTenantResource(sess))) {
+    return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
+  }
 
   const query = (req.nextUrl.searchParams.get("q") || "").trim().toLowerCase().slice(0, 100);
   const db = getServiceSupabase();
@@ -216,7 +220,7 @@ export async function POST(req: NextRequest) {
   }
   // Role checked first, before touching the database, so a read_only caller
   // gets an identical 403 regardless of what exists (no enumeration oracle).
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!canWriteCrm(sess.teamRole) || !(await canAccessSharedTenantResource(sess))) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't record funded deals." },
       { status: 403 },

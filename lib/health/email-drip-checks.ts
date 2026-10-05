@@ -42,6 +42,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isHeldForPolicy } from "@/lib/drips/activity-core";
 import type { CheckRule } from "./checks-core";
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -210,6 +211,60 @@ export function isBenignSendFailure(lastError: string | null | undefined): boole
   return e.includes("suppress") || e.includes("unsubscrib") || e.includes("opted out");
 }
 
+/**
+ * A scheduled row can be deliberately parked without being dispatchable.
+ *
+ * `markRescheduled` keeps the row in status=scheduled and records the gate in
+ * last_error. The channel column also keeps the sequence's stored channel, so
+ * an SMS step awaiting number verification can still appear as channel=email.
+ * Counting those rows as an email-dispatcher outage produced the 2026-09-23
+ * false page: 72 of 73 "overdue email" rows were policy/window/verification
+ * holds, while exactly one row had no hold and was genuinely claimable.
+ *
+ * Reuse the activity ledger's policy vocabulary so the UI and health monitor
+ * do not disagree. Number verification is added here because it is a temporary
+ * infrastructure hold rather than a policy decline, but it is equally not an
+ * email row the dispatcher can send right now.
+ */
+export function isIntentionalScheduledHold(lastError: unknown): boolean {
+  const reason = String(lastError ?? "").trim().toLowerCase();
+  return isHeldForPolicy(reason) || /^sms_awaiting_verification:/i.test(reason);
+}
+
+export function countDispatchableOverdueRows(
+  rows: ReadonlyArray<{ last_error: unknown }>,
+): number {
+  return rows.filter((row) => !isIntentionalScheduledHold(row.last_error)).length;
+}
+
+const DUE_SCAN_LIMIT = 5_000;
+
+async function countDispatchableOverdueEmails(
+  db: Db,
+  tenantId: string,
+  beforeMs: number,
+): Promise<number | null> {
+  try {
+    // Read the reason rather than using a head-only count: status=scheduled is
+    // shared by claimable work and deliberate holds. Fetch one sentinel row
+    // past the bound so a huge backlog fails closed instead of under-counting.
+    const r = await db
+      .from("drip_runs")
+      .select("last_error")
+      .eq("tenant_id", tenantId)
+      .eq("channel", "email")
+      .eq("status", "scheduled")
+      .lt("scheduled_for", iso(beforeMs))
+      .limit(DUE_SCAN_LIMIT + 1);
+    if (r.error) return null;
+    const rows = (r.data || []) as Array<{ last_error: string | null }>;
+    if (rows.length > DUE_SCAN_LIMIT) return null;
+    return countDispatchableOverdueRows(rows);
+  } catch {
+    return null;
+  }
+}
+
 /** Drip email sends that were attempted and refused, minus the benign class. */
 async function countRealFailures(
   db: Db,
@@ -290,25 +345,20 @@ const CHECKS: DripCheck[] = [
     describe: (r) => `${r.observed} new drip steps queued in 24h. ${r.reason}`,
   },
   {
-    // The dispatcher is dead: rows are DUE and nothing is claiming them. The
-    // 2026-08-06 Vercel cron outage looked exactly like this for four days.
+    // The dispatcher is dead: DISPATCHABLE rows are due and nothing is
+    // claiming them. The 2026-08-06 Vercel cron outage looked exactly like
+    // this for four days. Deliberately parked rows stay status=scheduled too;
+    // counting them here turns correct pacing/verification holds into a false
+    // dispatcher page, so the helper above classifies them by their reason.
     id: "drips.email_due_unclaimed",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
-      countOrNull(
-        db
-          .from("drip_runs")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId)
-          .eq("channel", "email")
-          .eq("status", "scheduled")
-          // An hour of slack: a row due 30 seconds ago is not a fault, it is
-          // waiting for the next five-minute tick.
-          .lt("scheduled_for", iso(endMs - HOUR)),
-      ),
+      // An hour of slack: a row due 30 seconds ago is not a fault, it is
+      // waiting for the next five-minute tick.
+      countDispatchableOverdueEmails(db, tenantId, endMs - HOUR),
     describe: (r) =>
-      `${r.observed} email rows are overdue by more than an hour — the dispatcher is not claiming them. ${r.reason}`,
+      `${r.observed} dispatchable email rows are overdue by more than an hour — the dispatcher is not claiming them. ${r.reason}`,
   },
   {
     // Bluerise routed but silent. The brand had a warm domain, working

@@ -97,7 +97,11 @@ export function buildFacets(sheets: Sheet[], f: WebLeadFilters): Facets {
   }
   const industries = [...inds.entries()]
     .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    .sort((a, b) => {
+      if (a.name === "CC Leads") return -1;
+      if (b.name === "CC Leads") return 1;
+      return b.count - a.count || a.name.localeCompare(b.name);
+    });
 
   const totalCallable = sheets
     .filter((s) => matches(s, f, []))

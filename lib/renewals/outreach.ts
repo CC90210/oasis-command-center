@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { getSubmissionsCreds, getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
 import { resolveSunbizRecipients } from "@/lib/notify/sunbiz-events";
 import { sendTelegram } from "@/lib/notify/telegram";
@@ -45,15 +45,35 @@ export async function notifyRenewalAgent(input: {
   const text = lines.join("\n");
   const results = { email: false, telegram: false };
   try {
-    const members = await getTenantMembers(input.tenantId);
+    // History lookup: agentId is the ORIGINAL funding agent, who may have been
+    // deactivated since. The active-only roster would miss them, leave `to`
+    // null, and the threshold email would be skipped with nothing to retry it.
+    const members = await getTenantMembers(input.tenantId, { includeInactive: true });
     const member = members.find((item) => item.auth_user_id === input.agentId);
-    const to = member?.email && EMAIL_RE.test(member.email) ? member.email : null;
-    if (to) {
+    // A deactivated agent has left, so their renewal goes to this tenant's own
+    // submissions inbox instead of to them, marked so the inbox picks it up
+    // (same rule as lib/notify/form-completion-email.ts).
+    const inactive = !!member && !isActiveMember(member);
+    if (inactive) {
+      console.warn("[renewal-outreach] deactivated-agent", {
+        tenantId: input.tenantId,
+        dealId: input.dealId,
+        agentId: input.agentId,
+        deactivatedAt: member?.deactivated_at,
+      });
+    }
+    const agentTo = member?.email && EMAIL_RE.test(member.email) ? member.email : null;
+    if (agentTo || inactive) {
       const creds = await getSubmissionsCreds(input.tenantId);
-      const nodemailer = await import("nodemailer");
-      const transport = nodemailer.createTransport({ host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true, auth: { user: creds.fromAddress, pass: creds.appPassword } });
-      await transport.sendMail({ from: await getSubmissionsFrom(input.tenantId), to, subject: `Renewal ready — ${input.merchant}`, text });
-      results.email = true;
+      const to = inactive ? (EMAIL_RE.test(creds.fromAddress || "") ? creds.fromAddress : null) : agentTo;
+      if (to) {
+        const agentName = (member?.display_name || member?.full_name || member?.email || "").trim();
+        const emailText = inactive ? [lines[0], `(agent inactive: ${agentName})`, ...lines.slice(1)].join("\n") : text;
+        const nodemailer = await import("nodemailer");
+        const transport = nodemailer.createTransport({ host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true, auth: { user: creds.fromAddress, pass: creds.appPassword } });
+        await transport.sendMail({ from: await getSubmissionsFrom(input.tenantId), to, subject: `Renewal ready — ${input.merchant}`, text: emailText });
+        results.email = true;
+      }
     }
   } catch (error) { console.error("[renewal-outreach] internal email", error); }
   try {

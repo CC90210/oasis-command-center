@@ -13,6 +13,8 @@
  */
 
 import type { Client } from "@libsql/client";
+import { dbError, type DriverError } from "@/lib/db-error";
+import { latestTouchIso } from "@/lib/lead-staleness";
 import {
   COMP_VERSION,
   PRICE_BOOK,
@@ -20,6 +22,15 @@ import {
   type LeadSourceTrack,
   type PartyInput,
 } from "@/lib/website-sales-comp";
+import { buildBriefForOnboarding } from "@/lib/website-sales-build-brief";
+import { isRetiredTenant } from "@/lib/tenant/retired";
+import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
+
+function driverError(error: unknown): DriverError {
+  return error && typeof error === "object"
+    ? (error as DriverError)
+    : { message: String(error) };
+}
 
 /**
  * How long a refund can still reverse a commission.
@@ -30,6 +41,29 @@ import {
  * chargeback, short enough that a rep's pay stops being provisional.
  */
 export const CLAWBACK_WINDOW_DAYS = 30;
+
+function isRetryableTursoWriteLock(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: unknown }).code;
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+}
+
+async function beginTursoWriteTransaction(
+  client: Client,
+): Promise<Awaited<ReturnType<Client["transaction"]>>> {
+  const attempts = 6;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await client.transaction("write");
+    } catch (error) {
+      if (!isRetryableTursoWriteLock(error) || attempt === attempts - 1) {
+        throw dbError("turso.begin_write_transaction", driverError(error));
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
+    }
+  }
+  throw new Error("unreachable: Turso write transaction retry exhausted");
+}
 
 export async function approve_sunbiz_draft(client: Client, args: Record<string, unknown>): Promise<unknown> {
   const p_draft_id = typeof args.p_draft_id === "string" ? args.p_draft_id : null;
@@ -187,36 +221,43 @@ export async function approve_sunbiz_draft(client: Client, args: Record<string, 
   return null; // CAS lost: concurrent approval / state change — nothing usable was written
 }
 /**
- * Port of public.close_website_deal — comp v2 shape
- * (database/147_website_sales_comp_v2.sql; tables in
- * database/turso/147_website_sales_engine.turso.sql).
- *
- * Rate keys on WHO CLOSED, not deal size: p_closed_by_rep=true means the
- * attributed rep ran the close themselves (30%); false means the founder
- * closed a rep-opened deal (20%). $2,000 collected-setup floor. Commission is
- * ALWAYS inserted 'accrued' — rep-closed deals never auto-approve; the
- * founder-gated accrued→approved→paid flow is untouched.
+ * Active website close transaction. The historical RPC signature is retained,
+ * while v4 arithmetic comes exclusively from lib/website-sales-comp.ts.
+ * Commission is always inserted `accrued`; verified collection never bypasses
+ * the founder-gated accrued → approved → paid flow.
  *
  * The PG original's auth.role()='service_role' guard has no Turso equivalent:
  * this shim is only reachable through getServiceSupabase()'s rpc proxy, which
  * is the service surface by construction (same treatment as every other port).
  *
- * Atomicity note: money writes (deal + commission + onboarding) are one libsql
- * batch = one transaction. The stage patch runs AFTER, via the ported
- * patch_tenant_record_data. If the patch fails, re-issuing the identical close
- * is safe: the idempotent re-close path no-ops the money writes and re-applies
- * the patch.
+ * Atomicity note: payment verification, the lead compare-and-swap, the close
+ * timeline entry, the deal, every commission line, and onboarding are performed
+ * through one Turso write transaction. A stale stage or owner therefore rolls
+ * the whole close back instead of leaving a paid deal detached from its lead.
  */
 export async function close_website_deal(client: Client, args: Record<string, unknown>): Promise<unknown> {
   const p_tenant_id = typeof args.p_tenant_id === "string" ? args.p_tenant_id : null;
   const p_lead_id = typeof args.p_lead_id === "string" ? args.p_lead_id : null;
   const p_rep_user_id = typeof args.p_rep_user_id === "string" ? args.p_rep_user_id : null;
+  const p_opener_user_id = typeof args.p_opener_user_id === "string" ? args.p_opener_user_id : null;
   const p_founder_user_id = typeof args.p_founder_user_id === "string" ? args.p_founder_user_id : null;
   const p_package_id = typeof args.p_package_id === "string" ? args.p_package_id : null;
   const p_currency = typeof args.p_currency === "string" ? args.p_currency : null;
   const p_payment_reference =
     typeof args.p_payment_reference === "string" && args.p_payment_reference.trim().length > 0
       ? args.p_payment_reference
+      : null;
+  const p_payment_provider =
+    args.p_payment_provider === "stripe" || args.p_payment_provider === "manual"
+      ? args.p_payment_provider
+      : null;
+  const p_verified_payment_id =
+    typeof args.p_verified_payment_id === "string" && args.p_verified_payment_id.trim().length > 0
+      ? args.p_verified_payment_id
+      : null;
+  const p_payment_plan_id =
+    typeof args.p_payment_plan_id === "string" && args.p_payment_plan_id.trim().length > 0
+      ? args.p_payment_plan_id.trim()
       : null;
   // p_closed_by_rep boolean DEFAULT false — an omitted arg is the founder path,
   // exactly like the Postgres default. Anything not literally true is false.
@@ -238,22 +279,81 @@ export async function close_website_deal(client: Client, args: Record<string, un
   }
 
   const p_setup_amount = Number(args.p_setup_amount);
+  const p_collected_amount = Number(args.p_collected_amount ?? args.p_setup_amount);
   const p_monthly_amount = Number(args.p_monthly_amount);
-  if (!Number.isFinite(p_setup_amount) || !Number.isFinite(p_monthly_amount)) {
+  if (
+    !Number.isFinite(p_setup_amount) ||
+    !Number.isFinite(p_collected_amount) ||
+    !Number.isFinite(p_monthly_amount)
+  ) {
     throw new Error("invalid input syntax for type numeric");
   }
+  if (
+    p_collected_amount <= 0 ||
+    p_collected_amount !== p_setup_amount ||
+    Math.abs(p_collected_amount * 100 - Math.round(p_collected_amount * 100)) > 1e-7
+  ) {
+    throw new Error("collected_amount_must_equal_quoted_setup");
+  }
+
+  const expectedStage = typeof args.p_expected_stage === "string" ? args.p_expected_stage.trim() : "";
+  const hasExpectedOwner = Object.prototype.hasOwnProperty.call(args, "p_expected_owner_id");
+  const expectedOwnerId = hasExpectedOwner
+    ? args.p_expected_owner_id === null
+      ? null
+      : typeof args.p_expected_owner_id === "string" && args.p_expected_owner_id.trim()
+        ? args.p_expected_owner_id.trim().toLowerCase()
+        : undefined
+    : undefined;
+  const requestId = typeof args.p_request_id === "string" ? args.p_request_id.trim() : "";
+  const actorUserId = typeof args.p_actor_user_id === "string" ? args.p_actor_user_id.trim() : "";
+  const interactionSubject = typeof args.p_interaction_subject === "string" ? args.p_interaction_subject.trim() : "";
+  const interactionContent = typeof args.p_interaction_content === "string" ? args.p_interaction_content.trim() : "";
+  const occurredMs = Date.parse(typeof args.p_occurred_at === "string" ? args.p_occurred_at : "");
+  let leadPatch = args.p_lead_patch;
+  if (typeof leadPatch === "string") {
+    try { leadPatch = JSON.parse(leadPatch); }
+    catch { throw new Error("close_website_deal: p_lead_patch must be a JSON object"); }
+  }
+  let interactionMetadata = args.p_interaction_metadata;
+  if (typeof interactionMetadata === "string") {
+    try { interactionMetadata = JSON.parse(interactionMetadata); }
+    catch { throw new Error("close_website_deal: p_interaction_metadata must be a JSON object"); }
+  }
+  if (
+    !expectedStage ||
+    !hasExpectedOwner ||
+    expectedOwnerId === undefined ||
+    !requestId ||
+    !actorUserId ||
+    !interactionSubject ||
+    !interactionContent ||
+    !Number.isFinite(occurredMs) ||
+    leadPatch === null ||
+    typeof leadPatch !== "object" ||
+    Array.isArray(leadPatch) ||
+    interactionMetadata === null ||
+    typeof interactionMetadata !== "object" ||
+    Array.isArray(interactionMetadata)
+  ) {
+    throw new Error("close_website_deal: atomic lifecycle arguments required");
+  }
+  const occurredAt = new Date(occurredMs).toISOString();
 
   // NULL required params can never satisfy the PG guards — fail closed, loudly.
-  if (!p_tenant_id || !p_lead_id || !p_rep_user_id || !p_founder_user_id || !p_package_id || !p_currency || !p_payment_reference) {
+  if (!p_tenant_id || !p_lead_id || !p_rep_user_id || !p_founder_user_id || !p_package_id || !p_currency || !p_payment_reference || !p_payment_provider || !p_verified_payment_id || !p_payment_plan_id) {
     throw new Error("close_website_deal: missing required argument");
   }
 
   const nowIso = new Date().toISOString();
 
+  const tx = await beginTursoWriteTransaction(client);
+  try {
+
   // select data into v_lead_data from tenant_records where ... entity_type='lead'
   // A row whose data is NULL raises lead_not_found in the PG source too
   // (v_lead_data is null covers both no-row and null-data).
-  const leadRs = await client.execute({
+  const leadRs = await tx.execute({
     sql: `SELECT data FROM tenant_records WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'`,
     args: [p_lead_id, p_tenant_id],
   });
@@ -268,20 +368,19 @@ export async function close_website_deal(client: Client, args: Record<string, un
   } catch {
     throw new Error(`close_website_deal: tenant_records.data is not valid JSON for id=${p_lead_id}`);
   }
+  let onboardingIntake = buildBriefForOnboarding(leadData.build_brief);
+  const p_lead_source_track: LeadSourceTrack = args.p_lead_source_track === "self" ? "self" : "company";
+  const frozenLeadSourceTrack: LeadSourceTrack = leadData.lead_source_track === "self" ? "self" : "company";
+  if (p_lead_source_track !== frozenLeadSourceTrack) {
+    throw new Error("lead_source_track_does_not_match_frozen_lead");
+  }
+  const frozenSourceUserId = typeof leadData.sourced_by_user_id === "string"
+    ? leadData.sourced_by_user_id.trim().toLowerCase()
+    : "";
 
   // Closer guard, adapted per 147: the owner/admin check applies only on the
   // founder path. On the rep path the closer IS the rep, and authorization
   // comes from the rep guards below (team_role='agent' + frozen attribution).
-  if (!p_closed_by_rep) {
-    const founderRs = await client.execute({
-      sql: `SELECT 1 FROM user_profiles
-            WHERE tenant_id = ? AND auth_user_id = ?
-              AND (is_owner = 1 OR team_role IN ('owner','admin'))
-            LIMIT 1`,
-      args: [p_tenant_id, p_founder_user_id],
-    });
-    if (founderRs.rows.length === 0) throw new Error("founder_not_authorized_for_tenant");
-  }
 
   // WHICH ROLES MAY BE PAID ON A DEAL.
   //
@@ -295,44 +394,209 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // on a deal until someone puts it here deliberately. `member` is absent on
   // purpose — internal staff are not commissioned. `builder` IS present: they
   // are paid a flat fee from the same ledger.
-  const repRs = await client.execute({
-    sql: `SELECT 1 FROM user_profiles
-          WHERE tenant_id = ? AND auth_user_id = ?
-            AND team_role IN ('agent','closer','opener','builder','manager')
-          LIMIT 1`,
-    args: [p_tenant_id, p_rep_user_id],
-  });
-  if (repRs.rows.length === 0) throw new Error("rep_not_agent_for_tenant");
 
-  // v_frozen_rep := coalesce(data->>'attributed_rep_user_id', data->>'assigned_to')
-  const frozenRaw = leadData.attributed_rep_user_id ?? leadData.assigned_to ?? null;
-  const frozenRep = typeof frozenRaw === "string" && frozenRaw.length > 0 ? frozenRaw : null;
-  if (frozenRep === null || frozenRep !== p_rep_user_id) {
-    throw new Error("rep_does_not_match_frozen_attribution");
-  }
-
-  // COMP v3. 147 threw here below $2,000:
+  // The retired v2 close threw here below $2,000:
   //
   //     if (p_setup_amount < 2000) throw new Error("collected setup below
   //     commission floor");
   //
-  // which meant a $500 website could not be CLOSED at all — not merely that it
-  // paid nothing. CC sells those. The floor survives as a SPLIT threshold
-  // instead (lib/website-sales-comp.ts): under it, the deal pays one full-stack
-  // operator rather than a chain of specialists, because $100 and $150 is not
-  // worth two people's time. The deal always books.
+  // which meant a $500 website could not be closed at all. V4 treats $500 as
+  // the Starter book price and supports separate opener and closer accruals.
   const v_closed_by = p_closed_by_rep ? p_rep_user_id : p_founder_user_id;
-  const collectedCents = Math.round(p_setup_amount * 100);
+  const collectedCents = Math.round(p_collected_amount * 100);
 
-  // Optional v3 arguments. Absent = the v2 shape: one rep, company-sourced,
-  // which is exactly what every caller sends today. Adding parties is opt-in,
-  // so this port cannot change the payout of a deal closed the old way.
-  const p_opener_user_id = typeof args.p_opener_user_id === "string" ? args.p_opener_user_id : null;
+  // The API may create the receipt, but the ledger re-checks it here so no
+  // alternate RPC caller can turn an arbitrary reference into commission.
+  const receiptRs = await tx.execute({
+    sql: `SELECT id, amount_cents, currency, status, payment_plan_id
+          FROM website_sales_payment_receipts
+          WHERE id = ? AND tenant_id = ? AND lead_id = ?
+            AND provider = ?
+          LIMIT 1`,
+    args: [p_verified_payment_id, p_tenant_id, p_lead_id, p_payment_provider],
+  });
+  if (receiptRs.rows.length === 0 || receiptRs.rows[0].status !== "verified") {
+    throw new Error("verified_payment_required");
+  }
+  if (
+    String(receiptRs.rows[0].currency) !== p_currency ||
+    String(receiptRs.rows[0].payment_plan_id ?? "") !== p_payment_plan_id
+  ) {
+    throw new Error("verified_payment_does_not_match_close");
+  }
+  const paymentPlanRs = await tx.execute({
+    sql: `SELECT COUNT(*) AS receipt_count,
+                 COALESCE(SUM(amount_cents), 0) AS collected_cents,
+                 COUNT(DISTINCT currency) AS currency_count,
+                 MIN(currency) AS currency
+          FROM website_sales_payment_receipts
+          WHERE tenant_id = ? AND lead_id = ? AND payment_plan_id = ?
+            AND status = 'verified'`,
+    args: [p_tenant_id, p_lead_id, p_payment_plan_id],
+  });
+  const paymentPlan = paymentPlanRs.rows[0] as Record<string, unknown> | undefined;
+  if (
+    !paymentPlan ||
+    Number(paymentPlan.receipt_count ?? 0) < 1 ||
+    Number(paymentPlan.collected_cents ?? 0) !== collectedCents ||
+    Number(paymentPlan.currency_count ?? 0) !== 1 ||
+    String(paymentPlan.currency ?? "") !== p_currency
+  ) {
+    throw new Error("verified_payment_plan_does_not_match_close");
+  }
+
+  // Optional multi-party arguments. A handoff explicitly supplies the frozen
+  // opener as a second party. With no separate opener, provenance decides the
+  // sales label: a company-fed rep is still a closer; only a rep who actually
+  // sourced the lead receives the full_stack/find-and-close line.
   const p_builder_user_id = typeof args.p_builder_user_id === "string" ? args.p_builder_user_id : null;
-  const p_manager_user_id = typeof args.p_manager_user_id === "string" ? args.p_manager_user_id : null;
-  const p_lead_source_track: LeadSourceTrack = args.p_lead_source_track === "self" ? "self" : "company";
+  const p_manager_user_id = typeof args.p_manager_user_id === "string" && args.p_manager_user_id.trim()
+    ? args.p_manager_user_id.trim().toLowerCase()
+    : null;
+  const effectiveOpenerUserId = p_closed_by_rep ? p_opener_user_id : p_rep_user_id;
+  const effectiveCloserUserId = p_closed_by_rep ? p_rep_user_id : null;
+  const automationText = JSON.stringify(automationIds);
 
-  // The rep's own trailing-30-day collected total drives their accelerator.
+  const persistedResponseFor = async (dealId: string, idempotent: boolean) => {
+    const persistedDealRs = await tx.execute({
+      sql: `SELECT sold_price_cents, setup_amount
+            FROM website_deals
+            WHERE tenant_id = ? AND id = ? AND status = 'won'
+            LIMIT 1`,
+      args: [p_tenant_id, dealId],
+    });
+    const persistedDeal = persistedDealRs.rows[0] as Record<string, unknown> | undefined;
+    if (!persistedDeal) throw new Error("persisted_deal_missing_after_close");
+    const soldPriceValue = Number(persistedDeal.sold_price_cents);
+    const persistedCollectedCents = Number.isSafeInteger(soldPriceValue)
+      ? soldPriceValue
+      : Math.round(Number(persistedDeal.setup_amount) * 100);
+    if (!Number.isSafeInteger(persistedCollectedCents)) {
+      throw new Error("persisted_deal_collected_amount_invalid");
+    }
+
+    const persistedCommissionRs = await tx.execute({
+      sql: `SELECT id, rep_user_id, party_role, amount_cents, rate_bps, notes, comp_version
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual'
+            ORDER BY rowid`,
+      args: [p_tenant_id, dealId],
+    });
+    const persistedRows = persistedCommissionRs.rows as Array<Record<string, unknown>>;
+    if (persistedRows.length === 0) throw new Error("persisted_commission_rows_missing_after_close");
+
+    const payoutLines = persistedRows.map((row) => {
+      const amountCents = Number(row.amount_cents);
+      const rateBps = Number(row.rate_bps);
+      if (!Number.isSafeInteger(amountCents) || !Number.isSafeInteger(rateBps)) {
+        throw new Error("persisted_commission_amount_invalid");
+      }
+      let notes: string[] = [];
+      if (typeof row.notes === "string" && row.notes.trim()) {
+        try {
+          const decoded = JSON.parse(row.notes);
+          notes = Array.isArray(decoded) ? decoded.map(String) : [row.notes];
+        } catch {
+          notes = [row.notes];
+        }
+      }
+      return {
+        commissionId: String(row.id),
+        user_id: String(row.rep_user_id),
+        role: String(row.party_role),
+        amount_cents: amountCents,
+        rate_bps: rateBps,
+        notes,
+      };
+    });
+    const primaryLine =
+      payoutLines.find((line) => line.role === "full_stack" || line.role === "closer") ?? payoutLines[0];
+    const totalHumanCents = payoutLines.reduce((sum, line) => sum + line.amount_cents, 0);
+    const persistedCompVersion = Number(persistedRows[0].comp_version);
+    if (!Number.isSafeInteger(persistedCompVersion)) {
+      throw new Error("persisted_commission_version_invalid");
+    }
+    return {
+      deal_id: dealId,
+      commission_id: primaryLine.commissionId,
+      commission_amount: primaryLine.amount_cents / 100,
+      comp_version: persistedCompVersion,
+      payout_lines: payoutLines.map(({ commissionId: _commissionId, ...line }) => line),
+      total_human_cents: totalHumanCents,
+      oasis_retained_cents: persistedCollectedCents - totalHumanCents,
+      guardrail_applied: payoutLines.some((line) => line.notes.some((note) => note.startsWith("guardrail:"))),
+      idempotent,
+    };
+  };
+
+  // Resolve request-id replays before reading trailing volume or running the
+  // current payout engine. The deal's own first accrual belongs to trailing
+  // volume now; recomputing here can cross a band and return numbers that were
+  // never written. A replay is a read of frozen ledger facts, not a new quote.
+  const replayRs = await tx.execute({
+    sql: `SELECT id, lead_id, type,
+                 json_extract(metadata, '$.action') AS action
+          FROM lead_interactions
+          WHERE tenant_id = ?
+            AND agent_source = 'website_sales_pipeline'
+            AND json_extract(metadata, '$.request_id') = ?
+          LIMIT 1`,
+    args: [p_tenant_id, requestId],
+  });
+  if (replayRs.rows.length > 0) {
+    const replay = replayRs.rows[0] as Record<string, unknown>;
+    if (String(replay.lead_id ?? "") !== p_lead_id) {
+      throw new Error("close_website_deal: request_id_reused_for_different_lead");
+    }
+    const replayAction = replay.action == null ? null : String(replay.action);
+    if (
+      String(replay.type ?? "") !== "deal_closed" ||
+      (replayAction !== null && replayAction !== "record_payment")
+    ) {
+      throw new Error("request_id_reused_for_different_action");
+    }
+    const replayDeal = await tx.execute({
+      sql: `SELECT id, rep_user_id, founder_user_id, package_id, automation_ids,
+                   currency, setup_amount, monthly_amount, payment_reference, payment_provider,
+                   verified_payment_id, payment_plan_id, opener_user_id, closer_user_id, builder_user_id,
+                   manager_user_id, lead_source_track, sold_price_cents
+            FROM website_deals WHERE tenant_id = ? AND lead_id = ? AND status = 'won'`,
+      args: [p_tenant_id, p_lead_id],
+    });
+    const existing = replayDeal.rows[0] as Record<string, unknown> | undefined;
+    if (
+      !existing ||
+      existing.rep_user_id !== p_rep_user_id ||
+      existing.founder_user_id !== p_founder_user_id ||
+      existing.package_id !== p_package_id ||
+      String(existing.automation_ids ?? "[]") !== automationText ||
+      existing.currency !== p_currency ||
+      Number(existing.setup_amount) !== p_setup_amount ||
+      Number(existing.sold_price_cents) !== collectedCents ||
+      Number(existing.monthly_amount) !== p_monthly_amount ||
+      existing.payment_reference !== p_payment_reference ||
+      existing.payment_provider !== p_payment_provider ||
+      existing.verified_payment_id !== p_verified_payment_id ||
+      existing.payment_plan_id !== p_payment_plan_id ||
+      ((existing.opener_user_id ?? null) as string | null) !== effectiveOpenerUserId ||
+      ((existing.closer_user_id ?? null) as string | null) !== effectiveCloserUserId ||
+      ((existing.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
+      ((existing.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
+      String(existing.lead_source_track ?? "company") !== p_lead_source_track
+    ) {
+      throw new Error("deal_already_closed_mismatch");
+    }
+    const replayResponse = await persistedResponseFor(String(existing.id), true);
+    await tx.commit();
+    return replayResponse;
+  }
+
+  const hasSeparateOpener = Boolean(p_opener_user_id && p_opener_user_id !== p_rep_user_id);
+
+  // Each sales contractor's own trailing-30-day collected total drives their
+  // accelerator. A split deal therefore needs separate opener and closer
+  // lookups; borrowing the closer's volume (or omitting the opener's) breaks
+  // the signed per-contractor accelerator rule.
   // Read from the ledger rather than passed in: a caller that could set its own
   // volume could set its own rate.
   // COLLECTED REVENUE, not commission earned.
@@ -340,8 +604,8 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // Summing amount_cents was wrong and it underpaid reps against their own
   // signed agreement: VOLUME_ACCELERATOR bands are collected-revenue figures,
   // and lib/contracts/templates.ts states the accelerator is "measured on the
-  // Contractor's own collected revenue over the trailing 30 days". At a 30%
-  // rate a rep who collected $25,000 sums roughly $7,500 of commission, never
+  // Contractor's own collected revenue over the trailing 30 days". At a 25%
+  // rate a rep who collected $25,000 sums roughly $6,250 of commission, never
   // reaches the $10,000 band, and is paid below the rate they signed.
   //
   // DISTINCT on payment_reference because a multi-party deal writes several
@@ -356,35 +620,78 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // inflating their trailing volume by the retainer and buying them an
   // accelerator band they did not sell. Builder lines carry basis 0 and are
   // excluded for the same reason: a flat build fee is not revenue that rep sold.
-  const trailingRs = await client.execute({
-    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
-            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
-            FROM website_sales_commissions
-            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
-              AND status IN ('accrued','approved','paid')
-              AND "party_role" IN ('opener','closer','full_stack')
-              AND created_at >= ?
-          )`,
-    args: [p_tenant_id, p_rep_user_id, new Date(Date.now() - 30 * 864e5).toISOString()],
-  });
-  const trailing30dCollectedCents = Number(trailingRs.rows[0]?.["c"] ?? 0);
+  const trailingByUserId = new Map<string, number>();
+  const trailingCutoff = new Date(Date.now() - 30 * 864e5).toISOString();
+  const salesUserIds = Array.from(new Set([
+    p_rep_user_id,
+    ...(hasSeparateOpener ? [p_opener_user_id!] : []),
+  ]));
+  for (const salesUserId of salesUserIds) {
+    const trailingRs = await tx.execute({
+      sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+              SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+              FROM website_sales_commissions
+              WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+                AND status IN ('accrued','approved','paid')
+                AND "party_role" IN ('opener','closer','full_stack')
+                AND created_at >= ?
+            )`,
+      args: [p_tenant_id, salesUserId, trailingCutoff],
+    });
+    trailingByUserId.set(salesUserId, Number(trailingRs.rows[0]?.["c"] ?? 0));
+  }
+  const trailingFor = (userId: string) => trailingByUserId.get(userId) ?? 0;
 
   const parties: PartyInput[] = [];
-  if (p_opener_user_id && p_opener_user_id !== p_rep_user_id) {
+  const isSelfSourcedSoleClose =
+    p_closed_by_rep &&
+    !hasSeparateOpener &&
+    p_lead_source_track === "self" &&
+    frozenSourceUserId !== "" &&
+    frozenSourceUserId === p_rep_user_id.toLowerCase();
+  if (!p_closed_by_rep) {
+    // Founder close: the primary rep opened and handed off. They earn the
+    // opener line only; the founder is recorded on the deal but is not a
+    // commissioned closer.
+    parties.push({
+      userId: p_rep_user_id,
+      role: "opener",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
+  } else if (hasSeparateOpener) {
     // A separate opener handed off, so the attributed rep is the closer.
-    parties.push({ userId: p_opener_user_id, role: "opener" });
-    parties.push({ userId: p_rep_user_id, role: "closer", trailing30dCollectedCents });
-  } else {
-    // One person owns the sale. Whether they also BUILT it decides 40% vs 70%
-    // on the self-sourced ladder.
+    parties.push({
+      userId: p_opener_user_id!,
+      role: "opener",
+      trailing30dCollectedCents: trailingFor(p_opener_user_id!),
+    });
+    parties.push({
+      userId: p_rep_user_id,
+      role: "closer",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
+  } else if (isSelfSourcedSoleClose) {
+    // This rep supplied the lead and closed it. Building it too activates the
+    // retained 70% all-in special instead of adding a second flat builder line.
     parties.push({
       userId: p_rep_user_id,
       role: "full_stack",
-      trailing30dCollectedCents,
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
       builtItToo: p_builder_user_id === p_rep_user_id,
     });
+  } else {
+    // No separate opener does not manufacture finding credit. The company
+    // supplied the lead, so this remains the standard 25% closer line.
+    parties.push({
+      userId: p_rep_user_id,
+      role: "closer",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
   }
-  if (p_builder_user_id && p_builder_user_id !== p_rep_user_id) {
+  if (p_builder_user_id && !(isSelfSourcedSoleClose && p_builder_user_id === p_rep_user_id)) {
+    // On a company-fed close, the closer may also legitimately be the builder.
+    // Keep both role rows even when they have the same user id; only the 70%
+    // self-source close+build special already includes delivery compensation.
     parties.push({ userId: p_builder_user_id, role: "builder" });
   }
 
@@ -401,20 +708,119 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // never silently re-opens rows that already closed.
   const clawbackDeadlineIso = new Date(Date.now() + CLAWBACK_WINDOW_DAYS * 864e5).toISOString();
 
-  // The v2 legacy mirrors, kept so existing readers of `rate`/`amount` keep
-  // working. Derived from the plan, never computed a second time — two
-  // independent calculations of the same money is how they disagree.
-  const primaryLine =
-    plan.lines.find((l) => l.role === "full_stack" || l.role === "closer") ?? plan.lines[0] ?? null;
-  const automationText = JSON.stringify(automationIds);
+    if (!p_closed_by_rep) {
+      const founderRs = await tx.execute({
+        sql: `SELECT 1 FROM user_profiles
+              WHERE tenant_id = ? AND auth_user_id = ?
+                AND (is_owner = 1 OR team_role IN ('owner','admin')) LIMIT 1`,
+        args: [p_tenant_id, p_founder_user_id],
+      });
+      if (founderRs.rows.length === 0) throw new Error("founder_not_authorized_for_tenant");
+    }
+    const repRs = await tx.execute({
+      sql: `SELECT manager_user_id FROM user_profiles
+            WHERE tenant_id = ? AND auth_user_id = ?
+              AND team_role IN ('agent','closer','opener','builder','manager') LIMIT 1`,
+      args: [p_tenant_id, p_rep_user_id],
+    });
+    if (repRs.rows.length === 0) throw new Error("rep_not_agent_for_tenant");
+    const assignedManagerUserId = p_closed_by_rep && typeof repRs.rows[0].manager_user_id === "string"
+      && String(repRs.rows[0].manager_user_id).trim()
+      ? String(repRs.rows[0].manager_user_id).trim().toLowerCase()
+      : null;
+    if (assignedManagerUserId !== p_manager_user_id) {
+      throw new Error("manager_attribution_does_not_match_closer_profile");
+    }
+    if (p_manager_user_id) {
+      if (p_manager_user_id === p_rep_user_id.toLowerCase()) {
+        throw new Error("manager_cannot_manage_self");
+      }
+      const managerRs = await tx.execute({
+        sql: `SELECT 1 FROM user_profiles
+              WHERE tenant_id = ? AND auth_user_id = ?
+                AND team_role = 'manager' AND COALESCE(is_owner, 0) = 0 LIMIT 1`,
+        args: [p_tenant_id, p_manager_user_id],
+      });
+      if (managerRs.rows.length === 0) throw new Error("manager_not_authorized_for_tenant");
+    }
+    if (p_opener_user_id) {
+      const openerRs = await tx.execute({
+        sql: `SELECT 1 FROM user_profiles
+              WHERE tenant_id = ? AND auth_user_id = ?
+                AND team_role IN ('agent','closer','opener','builder','manager') LIMIT 1`,
+        args: [p_tenant_id, p_opener_user_id],
+      });
+      if (openerRs.rows.length === 0) throw new Error("opener_not_sales_rep_for_tenant");
+    }
+    if (p_builder_user_id) {
+      const builderRs = await tx.execute({
+        sql: `SELECT 1 FROM user_profiles
+              WHERE tenant_id = ? AND auth_user_id = ? AND team_role = 'builder' LIMIT 1`,
+        args: [p_tenant_id, p_builder_user_id],
+      });
+      if (builderRs.rows.length === 0) throw new Error("builder_not_authorized_for_tenant");
+    }
+
+    const atomicLeadRs = await tx.execute({
+      sql: `SELECT data FROM tenant_records
+            WHERE id = ? AND tenant_id = ? AND entity_type = 'lead' LIMIT 1`,
+      args: [p_lead_id, p_tenant_id],
+    });
+    if (atomicLeadRs.rows.length === 0) throw new Error("lead_not_found_or_wrong_tenant");
+    const atomicOldText = (atomicLeadRs.rows[0].data ?? null) as string | null;
+    let atomicLeadData: Record<string, unknown> = {};
+    if (atomicOldText !== null) {
+      try {
+        const parsed = JSON.parse(atomicOldText) as unknown;
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          atomicLeadData = parsed as Record<string, unknown>;
+        }
+      } catch {
+        throw new Error("close_website_deal: lead data is invalid JSON");
+      }
+    }
+    const atomicStage = typeof atomicLeadData.stage === "string" ? atomicLeadData.stage : "";
+    if (atomicStage !== expectedStage) {
+      await tx.rollback();
+      return { ok:false, error:"stage_conflict", expected_stage:expectedStage, current_stage:atomicStage };
+    }
+    const atomicOwner = typeof atomicLeadData.assigned_to === "string"
+      ? atomicLeadData.assigned_to.trim().toLowerCase()
+      : "";
+    if (atomicOwner !== (expectedOwnerId ?? "")) {
+      await tx.rollback();
+      return { ok:false, error:"owner_conflict", expected_owner_id:expectedOwnerId, current_owner_id:atomicOwner };
+    }
+    const atomicAttributed = typeof atomicLeadData.attributed_rep_user_id === "string"
+      ? atomicLeadData.attributed_rep_user_id
+      : null;
+    if (p_opener_user_id) {
+      if (atomicAttributed !== p_opener_user_id) throw new Error("opener_does_not_match_frozen_attribution");
+      if (atomicLeadData.assigned_to !== p_rep_user_id) throw new Error("rep_does_not_match_assigned_closer");
+    } else if ((atomicAttributed ?? atomicLeadData.assigned_to ?? null) !== p_rep_user_id) {
+      throw new Error("rep_does_not_match_frozen_attribution");
+    }
+    onboardingIntake = buildBriefForOnboarding(atomicLeadData.build_brief);
+    const atomicLastTouch = latestTouchIso(
+      typeof atomicLeadData.last_contacted_at === "string" ? atomicLeadData.last_contacted_at : null,
+      occurredAt,
+    );
+    const mergedLeadData: Record<string, unknown> = {
+      ...atomicLeadData,
+      ...(leadPatch as Record<string, unknown>),
+      stage:"won",
+      last_contacted_at:atomicLastTouch,
+    };
 
   // select * into v_deal ... for update — SQLite's single-writer model plus the
   // write batch below replaces the row lock. A concurrent first-close race is
   // caught by UNIQUE(tenant_id, lead_id) failing the batch, never by silence.
-  const dealRs = await client.execute({
+  const dealRs = await tx.execute({
     sql: `SELECT id, status, rep_user_id, founder_user_id, package_id, automation_ids,
-                 currency, setup_amount, monthly_amount, payment_reference, closed_by,
-                 opener_user_id, builder_user_id, manager_user_id, lead_source_track
+                 currency, setup_amount, monthly_amount, payment_reference, payment_provider,
+                 verified_payment_id, payment_plan_id, closed_by,
+                 opener_user_id, closer_user_id, builder_user_id, manager_user_id, lead_source_track,
+                 sold_price_cents
           FROM website_deals WHERE tenant_id = ? AND lead_id = ?`,
     args: [p_tenant_id, p_lead_id],
   });
@@ -434,8 +840,12 @@ export async function close_website_deal(client: Client, args: Record<string, un
       String(d.automation_ids ?? "[]") !== automationText ||
       d.currency !== p_currency ||
       Number(d.setup_amount) !== p_setup_amount ||
+      Number(d.sold_price_cents) !== collectedCents ||
       Number(d.monthly_amount) !== p_monthly_amount ||
       d.payment_reference !== p_payment_reference ||
+      d.payment_provider !== p_payment_provider ||
+      d.verified_payment_id !== p_verified_payment_id ||
+      d.payment_plan_id !== p_payment_plan_id ||
       ((d.closed_by ?? null) as string | null) !== v_closed_by ||
       // THE v3 PARTY FIELDS MUST BE COMPARED TOO, and leaving them out was a
       // double-pay.
@@ -449,7 +859,8 @@ export async function close_website_deal(client: Client, args: Record<string, un
       // The uniqueness rule cannot catch this on its own: it guarantees one row
       // per role, not one SET of roles per payment. Only the mismatch gate can,
       // which is why every input that changes the payout shape belongs here.
-      ((d.opener_user_id ?? null) as string | null) !== p_opener_user_id ||
+      ((d.opener_user_id ?? null) as string | null) !== effectiveOpenerUserId ||
+      ((d.closer_user_id ?? null) as string | null) !== effectiveCloserUserId ||
       ((d.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
       ((d.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
       String(d.lead_source_track ?? "company") !== p_lead_source_track;
@@ -460,22 +871,40 @@ export async function close_website_deal(client: Client, args: Record<string, un
     dealIsNew = true;
   }
 
-  const writes: Array<{ sql: string; args: Array<string | number | null> }> = [];
+  const writes: Array<{ sql: string; args: Array<string | number | null> }> = [{
+    sql: `UPDATE tenant_records
+             SET data = ?, updated_at = ?
+           WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'
+             AND data IS ?
+             AND json_extract(data, '$.stage') IS ?
+             AND lower(coalesce(json_extract(data, '$.assigned_to'), '')) = ?`,
+    args: [
+      JSON.stringify(mergedLeadData),
+      nowIso,
+      p_lead_id,
+      p_tenant_id,
+      atomicOldText,
+      expectedStage,
+      expectedOwnerId ?? "",
+    ],
+  }];
   if (dealIsNew) {
     writes.push({
       sql: `INSERT INTO website_deals
               (id, tenant_id, lead_id, rep_user_id, founder_user_id, closed_by, package_id,
                automation_ids, currency, setup_amount, monthly_amount, proposal_status,
-               status, payment_reference, closed_at, created_at, updated_at,
+               status, payment_reference, payment_provider, verified_payment_id, payment_plan_id,
+               closed_at, created_at, updated_at,
                opener_user_id, closer_user_id, builder_user_id, manager_user_id,
                lead_source_track, book_price_cents, sold_price_cents)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 'won', ?, ?, ?, ?,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 'won', ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         dealId, p_tenant_id, p_lead_id, p_rep_user_id, p_founder_user_id, v_closed_by,
         p_package_id, automationText, p_currency, p_setup_amount, p_monthly_amount,
-        p_payment_reference, nowIso, nowIso, nowIso,
-        p_opener_user_id, p_rep_user_id, p_builder_user_id, p_manager_user_id,
+        p_payment_reference, p_payment_provider, p_verified_payment_id, p_payment_plan_id,
+        nowIso, nowIso, nowIso,
+        effectiveOpenerUserId, effectiveCloserUserId, p_builder_user_id, p_manager_user_id,
         p_lead_source_track,
         // Book price is stamped AT SALE so "sold above book" stays
         // reconstructible after PRICE_BOOK moves.
@@ -498,81 +927,119 @@ export async function close_website_deal(client: Client, args: Record<string, un
   for (const payLine of plan.lines) {
     writes.push({
       sql: `INSERT INTO website_sales_commissions
-              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, entry_type,
+              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, payment_plan_id, entry_type,
                comp_version, basis_amount_cents, rate_bps, amount_cents, notes,
                collected_setup_amount, rate, amount, status,
                clawback_deadline_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'accrual', ?, ?, ?, ?, ?, ?, ?, ?, 'accrued', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'accrual', ?, ?, ?, ?, ?, ?, ?, ?, 'accrued', ?, ?, ?)
             ON CONFLICT ("tenant_id", "payment_reference", "entry_type", "party_role")
             DO UPDATE SET "updated_at" = "updated_at" WHERE "deal_id" = excluded."deal_id"
             RETURNING id, amount_cents`,
       args: [
         crypto.randomUUID(), p_tenant_id, dealId, payLine.userId, payLine.role, p_payment_reference,
+        p_payment_plan_id,
         COMP_VERSION, payLine.basisCents, payLine.rateBps, payLine.amountCents,
         JSON.stringify(payLine.notes),
         // Legacy mirrors, derived from the authoritative integers above.
-        p_setup_amount, payLine.rateBps / 10_000, payLine.amountCents / 100,
+        p_collected_amount, payLine.rateBps / 10_000, payLine.amountCents / 100,
         clawbackDeadlineIso, nowIso, nowIso,
       ],
     });
   }
   writes.push({
-    sql: `INSERT INTO website_onboarding (id, tenant_id, deal_id, lead_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+    sql: `INSERT INTO website_onboarding
+            (id, tenant_id, deal_id, lead_id, fulfillment_owner_id, status, intake, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT ("tenant_id", "deal_id") DO NOTHING`,
-    args: [crypto.randomUUID(), p_tenant_id, dealId, p_lead_id, nowIso, nowIso],
+    args: [
+      crypto.randomUUID(),
+      p_tenant_id,
+      dealId,
+      p_lead_id,
+      p_builder_user_id,
+      p_builder_user_id ? "ready" : "assets_needed",
+      JSON.stringify({
+        ...onboardingIntake,
+        commercial: {
+          package_id: p_package_id,
+          automation_ids: automationIds,
+          currency: p_currency,
+          quoted_setup_amount: p_setup_amount,
+          collected_setup_amount: p_collected_amount,
+          monthly_amount: p_monthly_amount,
+          payment_provider: p_payment_provider,
+          payment_reference: p_payment_reference,
+          payment_plan_id: p_payment_plan_id,
+        },
+      }),
+      nowIso,
+      nowIso,
+    ],
   });
 
-  const batchRs = await client.batch(writes, "write");
+  const closeInteractionId = crypto.randomUUID();
+  writes.push({
+    sql: `INSERT INTO lead_interactions
+            (id, tenant_id, lead_id, type, channel, direction, agent_source,
+             actor_user_id, subject, content, content_preview, metadata, created_at)
+          VALUES (?, ?, ?, 'deal_closed', 'system', 'internal', 'website_sales_pipeline',
+                  ?, ?, ?, ?, ?, ?)`,
+    args: [
+      closeInteractionId,
+      p_tenant_id,
+      p_lead_id,
+      actorUserId,
+      interactionSubject,
+      interactionContent,
+      interactionContent.slice(0, 1_024),
+      JSON.stringify({
+        ...(interactionMetadata as Record<string, unknown>),
+        request_id:requestId,
+        action:"record_payment",
+        changed_by:actorUserId,
+        correlation_id:requestId,
+        from:expectedStage,
+        to:"won",
+      }),
+      occurredAt,
+    ],
+  });
+
+  const batchRs = await tx.batch(writes);
   // The commission writes sit between the optional deal insert and the
   // onboarding insert. Every one of them must have returned a row: a single
   // silent no-op means that payment_reference already belongs to a different
   // deal, and paying only three of four parties is worse than failing.
-  const firstCommissionIdx = dealIsNew ? 1 : 0;
+  if (batchRs[0].rowsAffected !== 1) {
+    await tx.rollback();
+    return { ok:false, error:"stage_conflict", expected_stage:expectedStage, current_stage:expectedStage };
+  }
+  const firstCommissionIdx = dealIsNew ? 2 : 1;
   const commissionRows = batchRs
     .slice(firstCommissionIdx, firstCommissionIdx + commissionWriteCount)
     .map((rs) => rs.rows[0] as Record<string, unknown> | undefined);
   if (commissionRows.length === 0 || commissionRows.some((r) => !r)) {
     throw new Error("payment_reference_already_used_by_another_deal");
   }
-  const cRow = commissionRows[0]!;
 
-  // perform patch_tenant_record_data(... 'stage','onboarding' ...) — through
-  // the ported CAS implementation later in this file (hoisted declaration).
-  await patch_tenant_record_data(client, {
-    p_id: p_lead_id,
-    p_tenant_id,
-    p_patch: {
-      stage: "onboarding",
-      stage_entered_at: nowIso,
-      closed_by: v_closed_by,
-      collected_setup_amount: p_setup_amount,
-      quoted_monthly_amount: p_monthly_amount,
-    },
-  });
+  // The paid lead is now Won. The prepared onboarding row becomes active only
+  // when the guarded Won → Onboarding direct advance runs.
+  // Build the outward result from those just-persisted rows too, so the first
+  // response and every replay share one durable source of monetary truth.
+  const persistedResponse = await persistedResponseFor(dealId, false);
+  await tx.commit();
 
   // RETURNS jsonb — supabase-js callers receive this object as { data }.
   // The first three keys are the v2 contract and are unchanged, so existing
   // callers keep working; `commission_amount` reports the PRIMARY line (the
   // closer or full-stack operator), which is what it always meant.
-  return {
-    deal_id: dealId,
-    commission_id: String(cRow.id),
-    commission_amount: primaryLine ? primaryLine.amountCents / 100 : 0,
-    // v3 additions: the whole split, so a caller can show every party what
-    // they earned and why without recomputing it.
-    comp_version: COMP_VERSION,
-    payout_lines: plan.lines.map((l) => ({
-      user_id: l.userId,
-      role: l.role,
-      amount_cents: l.amountCents,
-      rate_bps: l.rateBps,
-      notes: l.notes,
-    })),
-    total_human_cents: plan.totalHumanCents,
-    oasis_retained_cents: plan.oasisRetainedCents,
-    guardrail_applied: plan.guardrailApplied,
-  };
+  return persistedResponse;
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw dbError("close_website_deal", driverError(error));
+  } finally {
+    tx.close();
+  }
 }
 /**
  * refund_website_deal — reverse a deal's commissions after a refund.
@@ -608,7 +1075,7 @@ export async function refund_website_deal(client: Client, args: Record<string, u
   const nowIso = new Date().toISOString();
 
   const rs = await client.execute({
-    sql: `SELECT id, rep_user_id, party_role, payment_reference, amount_cents, rate_bps,
+    sql: `SELECT id, rep_user_id, party_role, payment_reference, payment_plan_id, amount_cents, rate_bps,
                  basis_amount_cents, collected_setup_amount, amount, status, clawback_deadline_at
           FROM website_sales_commissions
           WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual'
@@ -644,15 +1111,15 @@ export async function refund_website_deal(client: Client, args: Record<string, u
     const cents = Number(row.amount_cents ?? 0);
     writes.push({
       sql: `INSERT INTO website_sales_commissions
-              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, entry_type,
+              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, payment_plan_id, entry_type,
                comp_version, basis_amount_cents, rate_bps, amount_cents, notes,
                collected_setup_amount, rate, amount, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'refund_offset', ?, ?, ?, ?, ?, ?, ?, ?, 'offset', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'refund_offset', ?, ?, ?, ?, ?, ?, ?, ?, 'offset', ?, ?)
             ON CONFLICT ("tenant_id", "payment_reference", "entry_type", "party_role")
             DO UPDATE SET "updated_at" = excluded."updated_at" WHERE "deal_id" = excluded."deal_id"`,
       args: [
         crypto.randomUUID(), p_tenant_id, p_deal_id, String(row.rep_user_id), String(row.party_role),
-        String(row.payment_reference), COMP_VERSION,
+        String(row.payment_reference), String(row.payment_plan_id ?? "") || null, COMP_VERSION,
         Number(row.basis_amount_cents ?? 0), Number(row.rate_bps ?? 0), -cents,
         JSON.stringify([`refund_offset of ${cents}c`, p_reason ? `reason: ${p_reason}` : "reason: not given"]),
         Number(row.collected_setup_amount ?? 0), 0, -Number(row.amount ?? 0),
@@ -718,6 +1185,12 @@ export async function consume_texttorrent_rate_token(client: Client, args: Recor
     throw new Error(`invalid input syntax for type uuid: "${rawTid}"`);
   }
   const tid = rawTid.toLowerCase(); // Postgres uuid canonicalizes to lowercase
+
+  // No token for a retired tenant (2026-09-28, SunBiz). This is the only writer
+  // of sunbiz_provider_rate_state; its callers are the in-app TextTorrent
+  // client and the JARVIS runtime through /api/pg. `false` is the existing
+  // "no token" answer, so a caller defers instead of writing the bucket.
+  if (isRetiredTenant(tid)) return false;
 
   // effective_limit := greatest(1, least(p_limit, CASE priority tiers END))
   // 90+ (compliance) uses all tokens; 80+ (approved replies) retains 5;
@@ -1313,6 +1786,743 @@ export async function patch_tenant_record_data(
     `patch_tenant_record_data: concurrent modification, gave up after ${MAX_ATTEMPTS} attempts (id=${p_id}, tenant=${p_tenant_id})`
   );
 }
+
+const PIPELINE_ONBOARDING_STATUSES = new Set([
+  "assets_needed",
+  "ready",
+  "in_build",
+  "client_review",
+  "launched",
+  "blocked",
+]);
+
+/**
+ * Move one OASIS pipeline lead and write its timeline receipt in a single
+ * Turso transaction.
+ *
+ * A write transaction is intentional here: libSQL starts it with
+ * `BEGIN IMMEDIATE`, so overlapping writers queue before the read. The
+ * expected-stage predicate is still repeated on the UPDATE as an explicit
+ * compare-and-swap guard. A request replay is resolved from the durable
+ * interaction receipt before that guard, which makes retries succeed after
+ * the original request has already moved the lead.
+ *
+ * Delivery transitions may also provide an onboarding status and/or builder.
+ * That companion row is updated inside the same transaction; a missing or
+ * ambiguous tenant+lead onboarding row fails closed and rolls the lead back.
+ */
+export async function transition_pipeline_lead(
+  client: Client,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const stringArg = (name: string, maxLength = 4_000): string => {
+    const value = typeof args[name] === "string" ? args[name].trim() : "";
+    if (!value || value.length > maxLength) {
+      throw new Error(`transition_pipeline_lead: invalid ${name}`);
+    }
+    return value;
+  };
+  const objectArg = (
+    name: string,
+    options: { optional?: boolean } = {},
+  ): Record<string, unknown> => {
+    const raw = args[name];
+    if ((raw === undefined || raw === null) && options.optional) return {};
+    let parsed = raw;
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        throw new Error(`transition_pipeline_lead: ${name} must be a JSON object`);
+      }
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`transition_pipeline_lead: ${name} must be a JSON object`);
+    }
+    return parsed as Record<string, unknown>;
+  };
+
+  const tenantId = stringArg("p_tenant_id", 200);
+  const leadId = stringArg("p_lead_id", 200);
+  const expectedStage = stringArg("p_expected_stage", 100);
+  const requestId = stringArg("p_request_id", 200);
+  const actorUserId = stringArg("p_actor_user_id", 200);
+  const hasExpectedOwner = Object.prototype.hasOwnProperty.call(args, "p_expected_owner_id");
+  const expectedOwnerId = hasExpectedOwner
+    ? args.p_expected_owner_id === null
+      ? null
+      : stringArg("p_expected_owner_id", 200).toLowerCase()
+    : null;
+  const action = stringArg("p_action", 100);
+  const interactionType = stringArg("p_interaction_type", 100);
+  const subject = stringArg("p_subject", 500);
+  const content = stringArg("p_content", 20_000);
+  const patch = objectArg("p_patch");
+  const suppliedMetadata = objectArg("p_metadata", { optional: true });
+  const nextStage = typeof patch.stage === "string" ? patch.stage.trim() : "";
+  if (!nextStage || nextStage.length > 100) {
+    throw new Error("transition_pipeline_lead: p_patch.stage is required");
+  }
+
+  const occurredMs = Date.parse(typeof args.p_occurred_at === "string" ? args.p_occurred_at : "");
+  if (!Number.isFinite(occurredMs)) {
+    throw new Error("transition_pipeline_lead: invalid p_occurred_at");
+  }
+  const occurredAt = new Date(occurredMs).toISOString();
+  const channel =
+    typeof args.p_channel === "string" && args.p_channel.trim()
+      ? args.p_channel.trim().slice(0, 100)
+      : "system";
+  const direction =
+    typeof args.p_direction === "string" && args.p_direction.trim()
+      ? args.p_direction.trim().slice(0, 100)
+      : "internal";
+  const isCall = args.p_is_call === true || channel.toLowerCase() === "phone";
+
+  const hasOnboardingStatus = Object.prototype.hasOwnProperty.call(args, "p_onboarding_status");
+  const onboardingStatus = hasOnboardingStatus && typeof args.p_onboarding_status === "string"
+    ? args.p_onboarding_status.trim()
+    : null;
+  if (hasOnboardingStatus && (!onboardingStatus || !PIPELINE_ONBOARDING_STATUSES.has(onboardingStatus))) {
+    throw new Error("transition_pipeline_lead: invalid p_onboarding_status");
+  }
+  const hasFulfillmentOwner = Object.prototype.hasOwnProperty.call(args, "p_fulfillment_owner_id");
+  const fulfillmentOwnerId = hasFulfillmentOwner
+    ? args.p_fulfillment_owner_id === null
+      ? null
+      : typeof args.p_fulfillment_owner_id === "string" && args.p_fulfillment_owner_id.trim()
+        ? args.p_fulfillment_owner_id.trim()
+        : undefined
+    : undefined;
+  if (hasFulfillmentOwner && fulfillmentOwnerId === undefined) {
+    throw new Error("transition_pipeline_lead: invalid p_fulfillment_owner_id");
+  }
+  const syncOnboarding = hasOnboardingStatus || hasFulfillmentOwner;
+
+  const tx = await client.transaction("write");
+  try {
+    // Idempotency is tenant-wide because migration 147's durable unique index
+    // is tenant + request_id. Reusing a request for another lead/action is a
+    // caller bug, not a successful replay.
+    const replayResult = await tx.execute({
+      sql: `SELECT id, lead_id, metadata
+              FROM lead_interactions
+             WHERE tenant_id = ?
+               AND agent_source = 'website_sales_pipeline'
+               AND json_extract(metadata, '$.request_id') = ?
+             LIMIT 1`,
+      args: [tenantId, requestId],
+    });
+    if (replayResult.rows.length > 0) {
+      const replay = replayResult.rows[0] as Record<string, unknown>;
+      if (String(replay.lead_id ?? "") !== leadId) {
+        throw new Error("transition_pipeline_lead: request_id_reused_for_different_lead");
+      }
+      let replayMetadata: Record<string, unknown> = {};
+      if (typeof replay.metadata === "string") {
+        try {
+          const parsed = JSON.parse(replay.metadata) as unknown;
+          if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            replayMetadata = parsed as Record<string, unknown>;
+          }
+        } catch {
+          throw new Error("transition_pipeline_lead: replay metadata is invalid JSON");
+        }
+      }
+      if (replayMetadata.action !== undefined && replayMetadata.action !== action) {
+        throw new Error("transition_pipeline_lead: request_id_reused_for_different_action");
+      }
+      await tx.commit();
+      return {
+        ok: true,
+        idempotent: true,
+        interaction_id: String(replay.id),
+        previous_stage: replayMetadata.from ?? expectedStage,
+        current_stage: replayMetadata.to ?? null,
+      };
+    }
+
+    const selected = await tx.execute({
+      sql: `SELECT data
+              FROM tenant_records
+             WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'
+             LIMIT 1`,
+      args: [leadId, tenantId],
+    });
+    if (selected.rows.length === 0) {
+      throw new Error("transition_pipeline_lead: lead_not_found_or_wrong_tenant");
+    }
+
+    const oldText = (selected.rows[0].data ?? null) as string | null;
+    let current: Record<string, unknown> = {};
+    if (oldText !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(oldText);
+      } catch {
+        throw new Error("transition_pipeline_lead: lead data is invalid JSON");
+      }
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        current = parsed as Record<string, unknown>;
+      }
+    }
+    const currentStage = typeof current.stage === "string" ? current.stage : "";
+    if (currentStage !== expectedStage) {
+      await tx.rollback();
+      return {
+        ok: false,
+        error: "stage_conflict",
+        expected_stage: expectedStage,
+        current_stage: currentStage,
+      };
+    }
+    const currentOwnerId =
+      typeof current.assigned_to === "string" ? current.assigned_to.trim().toLowerCase() : "";
+    if (hasExpectedOwner && currentOwnerId !== (expectedOwnerId ?? "")) {
+      await tx.rollback();
+      return {
+        ok: false,
+        error: "owner_conflict",
+        expected_owner_id: expectedOwnerId,
+        current_owner_id: currentOwnerId,
+        current_stage: currentStage,
+      };
+    }
+
+    const lastContactedAt = latestTouchIso(
+      typeof current.last_contacted_at === "string" ? current.last_contacted_at : null,
+      occurredAt,
+    );
+    const merged: Record<string, unknown> = {
+      ...current,
+      ...patch,
+      stage: nextStage,
+      // Never trust a caller-supplied patch timestamp to move the SLA clock
+      // backwards; the transaction's occurred_at is the canonical candidate.
+      last_contacted_at: lastContactedAt,
+    };
+    if (nextStage !== currentStage) {
+      merged.stage_entered_at = occurredAt;
+    } else if (current.stage_entered_at !== undefined) {
+      // A same-stage call outcome is a touch, not a fresh SLA window. Ignore a
+      // caller-supplied timestamp so dispositions cannot make an aging lead new.
+      merged.stage_entered_at = current.stage_entered_at;
+    } else {
+      delete merged.stage_entered_at;
+    }
+    if (isCall) {
+      merged.last_call_at = latestTouchIso(
+        typeof current.last_call_at === "string" ? current.last_call_at : null,
+        occurredAt,
+      );
+    }
+
+    const updatedAt = new Date().toISOString();
+    const updateResult = await tx.execute({
+      sql: `UPDATE tenant_records
+               SET data = ?, updated_at = ?
+             WHERE id = ?
+               AND tenant_id = ?
+               AND entity_type = 'lead'
+               AND data IS ?
+               AND json_extract(data, '$.stage') IS ?
+               AND (? = 0 OR lower(coalesce(json_extract(data, '$.assigned_to'), '')) = ?)`,
+      args: [
+        JSON.stringify(merged),
+        updatedAt,
+        leadId,
+        tenantId,
+        oldText,
+        expectedStage,
+        hasExpectedOwner ? 1 : 0,
+        expectedOwnerId ?? "",
+      ],
+    });
+    if (updateResult.rowsAffected !== 1) {
+      const latest = await tx.execute({
+        sql: `SELECT json_extract(data, '$.stage') AS stage
+                FROM tenant_records
+               WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'
+               LIMIT 1`,
+        args: [leadId, tenantId],
+      });
+      const latestStage = latest.rows.length > 0 ? String(latest.rows[0].stage ?? "") : "";
+      await tx.rollback();
+      return {
+        ok: false,
+        error: "stage_conflict",
+        expected_stage: expectedStage,
+        current_stage: latestStage,
+      };
+    }
+
+    if (syncOnboarding) {
+      const onboardingRows = await tx.execute({
+        sql: "SELECT id FROM website_onboarding WHERE tenant_id = ? AND lead_id = ?",
+        args: [tenantId, leadId],
+      });
+      if (onboardingRows.rows.length === 0) {
+        throw new Error("transition_pipeline_lead: onboarding_not_found_for_lead");
+      }
+      if (onboardingRows.rows.length > 1) {
+        throw new Error("transition_pipeline_lead: ambiguous_onboarding_for_lead");
+      }
+      const onboardingUpdate = await tx.execute({
+        sql: `UPDATE website_onboarding
+                 SET status = CASE WHEN ? = 1 THEN ? ELSE status END,
+                     fulfillment_owner_id = CASE WHEN ? = 1 THEN ? ELSE fulfillment_owner_id END,
+                     launched_at = CASE
+                       WHEN ? = 1 AND ? = 'launched' THEN coalesce(launched_at, ?)
+                       ELSE launched_at
+                     END,
+                     updated_at = ?
+               WHERE id = ? AND tenant_id = ? AND lead_id = ?`,
+        args: [
+          hasOnboardingStatus ? 1 : 0,
+          onboardingStatus,
+          hasFulfillmentOwner ? 1 : 0,
+          fulfillmentOwnerId ?? null,
+          hasOnboardingStatus ? 1 : 0,
+          onboardingStatus,
+          occurredAt,
+          updatedAt,
+          String(onboardingRows.rows[0].id),
+          tenantId,
+          leadId,
+        ],
+      });
+      if (onboardingUpdate.rowsAffected !== 1) {
+        throw new Error("transition_pipeline_lead: onboarding_update_failed");
+      }
+    }
+
+    const interactionId = crypto.randomUUID();
+    const interactionMetadata = JSON.stringify({
+      ...suppliedMetadata,
+      request_id: requestId,
+      action,
+      changed_by: actorUserId,
+      correlation_id: requestId,
+      from: expectedStage,
+      to: nextStage,
+    });
+    await tx.execute({
+      sql: `INSERT INTO lead_interactions
+              (id, tenant_id, lead_id, type, channel, direction, agent_source,
+               actor_user_id, subject, content, content_preview, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'website_sales_pipeline', ?, ?, ?, ?, ?, ?)`,
+      args: [
+        interactionId,
+        tenantId,
+        leadId,
+        interactionType,
+        channel,
+        direction,
+        actorUserId,
+        subject,
+        content,
+        content.slice(0, 1_024),
+        interactionMetadata,
+        occurredAt,
+      ],
+    });
+
+    await tx.commit();
+    return {
+      ok: true,
+      idempotent: false,
+      interaction_id: interactionId,
+      previous_stage: expectedStage,
+      current_stage: nextStage,
+      last_contacted_at: lastContactedAt,
+      data: merged,
+    };
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw dbError("transition_pipeline_lead", driverError(error));
+  } finally {
+    tx.close();
+  }
+}
+
+type CommissionTransitionAction = "approve" | "mark_paid" | "void";
+
+/**
+ * Advance one positive commission accrual through the founder payout ledger.
+ *
+ * The commission compare-and-swap and its attributed tenant audit event share
+ * one libSQL write transaction. This deliberately does not write a
+ * lead_interactions row: paying a rep is an internal accounting event, not a
+ * new client touch, and must not move the Pipeline's Last Touch clock.
+ */
+export async function transition_commission_entry(
+  client: Client,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const stringArg = (name: string, maxLength: number): string => {
+    const value = typeof args[name] === "string" ? args[name].trim() : "";
+    if (!value || value.length > maxLength) {
+      throw new Error(`transition_commission_entry: invalid ${name}`);
+    }
+    return value;
+  };
+
+  const tenantId = stringArg("p_tenant_id", 200);
+  const commissionId = stringArg("p_commission_id", 200);
+  const actorUserId = stringArg("p_actor_user_id", 200);
+  const requestId = stringArg("p_request_id", 200);
+  const rawAction = stringArg("p_action", 50);
+  if (!["approve", "mark_paid", "void"].includes(rawAction)) {
+    throw new Error("transition_commission_entry: invalid action");
+  }
+  const action = rawAction as CommissionTransitionAction;
+  const occurredMs = Date.parse(typeof args.p_occurred_at === "string" ? args.p_occurred_at : "");
+  if (!Number.isFinite(occurredMs)) {
+    throw new Error("transition_commission_entry: invalid p_occurred_at");
+  }
+  const occurredAt = new Date(occurredMs).toISOString();
+  const payoutReference = typeof args.p_payout_reference === "string"
+    ? args.p_payout_reference.trim()
+    : "";
+  const voidReason = typeof args.p_void_reason === "string" ? args.p_void_reason.trim() : "";
+  if (action === "mark_paid" && (payoutReference.length < 3 || payoutReference.length > 200)) {
+    throw new Error("transition_commission_entry: payout_reference_required");
+  }
+  if (action === "void" && (voidReason.length < 8 || voidReason.length > 500)) {
+    throw new Error("transition_commission_entry: void_reason_required");
+  }
+
+  const expectedStatusLabel = action === "mark_paid"
+    ? "approved"
+    : action === "void"
+      ? "accrued_or_approved"
+      : "accrued";
+  const nextStatus = action === "approve" ? "approved" : action === "mark_paid" ? "paid" : "voided";
+  const tx = await client.transaction("write");
+  try {
+    const replayResult = await tx.execute({
+      sql: `SELECT target_id, action_type, after, metadata
+              FROM tenant_audit_log
+             WHERE tenant_id = ?
+               AND action_type LIKE 'website_sales.commission.%'
+               AND json_extract(metadata, '$.request_id') = ?
+             LIMIT 1`,
+      args: [tenantId, requestId],
+    });
+    if (replayResult.rows.length > 0) {
+      const replay = replayResult.rows[0] as Record<string, unknown>;
+      let metadata: Record<string, unknown> = {};
+      let after: Record<string, unknown> = {};
+      try {
+        metadata = JSON.parse(String(replay.metadata ?? "{}")) as Record<string, unknown>;
+        after = JSON.parse(String(replay.after ?? "{}")) as Record<string, unknown>;
+      } catch {
+        throw new Error("transition_commission_entry: replay audit JSON is invalid");
+      }
+      if (
+        String(replay.target_id ?? "") !== commissionId ||
+        metadata.action !== action ||
+        metadata.changed_by !== actorUserId
+      ) {
+        throw new Error("transition_commission_entry: request_id_reused");
+      }
+      await tx.commit();
+      return {
+        ok: true,
+        idempotent: true,
+        commission_id: commissionId,
+        previous_status: metadata.from ?? null,
+        current_status: after.status ?? metadata.to ?? null,
+      };
+    }
+
+    const selected = await tx.execute({
+      sql: `SELECT c.id, c.deal_id, c.rep_user_id, c.party_role,
+                   c.payment_reference, c.entry_type, c.status,
+                   c.payment_plan_id,
+                   coalesce(c.amount_cents, cast(round(c.amount * 100) AS integer)) AS amount_cents,
+                   cast(round(c.collected_setup_amount * 100) AS integer) AS collected_amount_cents,
+                   d.lead_id, d.currency AS deal_currency,
+                   p.verified_receipt_count,
+                   p.verified_payment_amount_cents,
+                   p.currency_count,
+                   p.payment_currency
+              FROM website_sales_commissions c
+              JOIN website_deals d ON d.id = c.deal_id AND d.tenant_id = c.tenant_id
+              LEFT JOIN (
+                SELECT tenant_id, lead_id, payment_plan_id,
+                       COUNT(*) AS verified_receipt_count,
+                       SUM(amount_cents) AS verified_payment_amount_cents,
+                       COUNT(DISTINCT currency) AS currency_count,
+                       MIN(currency) AS payment_currency
+                  FROM website_sales_payment_receipts
+                 WHERE status = 'verified'
+                 GROUP BY tenant_id, lead_id, payment_plan_id
+              ) p
+                ON p.tenant_id = c.tenant_id
+               AND p.lead_id = d.lead_id
+               AND p.payment_plan_id = c.payment_plan_id
+             WHERE c.id = ? AND c.tenant_id = ?
+             LIMIT 1`,
+      args: [commissionId, tenantId],
+    });
+    if (selected.rows.length === 0) {
+      throw new Error("transition_commission_entry: commission_not_found_or_wrong_tenant");
+    }
+    const current = selected.rows[0] as Record<string, unknown>;
+    const previousStatus = String(current.status ?? "");
+    const amountCents = Number(current.amount_cents ?? 0);
+    if (current.entry_type !== "accrual" || !Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      throw new Error("transition_commission_entry: commission_entry_immutable");
+    }
+    if (
+      action !== "void" &&
+      (
+        !current.payment_plan_id ||
+        Number(current.verified_receipt_count ?? 0) < 1 ||
+        Number(current.verified_payment_amount_cents) !== Number(current.collected_amount_cents) ||
+        Number(current.currency_count ?? 0) !== 1 ||
+        current.payment_currency !== current.deal_currency
+      )
+    ) {
+      throw new Error("transition_commission_entry: verified_payment_required");
+    }
+    if (action === "approve" && current.rep_user_id === actorUserId) {
+      throw new Error("transition_commission_entry: self_approval_forbidden");
+    }
+    const statusAllowed = action === "void"
+      ? previousStatus === "accrued" || previousStatus === "approved"
+      : previousStatus === expectedStatusLabel;
+    if (!statusAllowed) {
+      await tx.rollback();
+      return {
+        ok: false,
+        error: "status_conflict",
+        commission_id: commissionId,
+        expected_status: expectedStatusLabel,
+        current_status: previousStatus,
+      };
+    }
+
+    let updated;
+    if (action === "approve") {
+      updated = await tx.execute({
+        sql: `UPDATE website_sales_commissions
+                 SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = ?
+               WHERE id = ? AND tenant_id = ? AND status = 'accrued'
+                 AND entry_type = 'accrual'
+                 AND coalesce(amount_cents, cast(round(amount * 100) AS integer)) > 0`,
+        args: [actorUserId, occurredAt, occurredAt, commissionId, tenantId],
+      });
+    } else if (action === "mark_paid") {
+      updated = await tx.execute({
+        sql: `UPDATE website_sales_commissions
+                 SET status = 'paid', paid_by = ?, paid_at = ?, payout_reference = ?, updated_at = ?
+               WHERE id = ? AND tenant_id = ? AND status = 'approved'
+                 AND entry_type = 'accrual'
+                 AND approved_by IS NOT NULL AND approved_at IS NOT NULL
+                 AND coalesce(amount_cents, cast(round(amount * 100) AS integer)) > 0`,
+        args: [actorUserId, occurredAt, payoutReference, occurredAt, commissionId, tenantId],
+      });
+    } else {
+      updated = await tx.execute({
+        sql: `UPDATE website_sales_commissions
+                 SET status = 'voided', voided_by = ?, voided_at = ?, void_reason = ?, updated_at = ?
+               WHERE id = ? AND tenant_id = ? AND status IN ('accrued','approved')
+                 AND entry_type = 'accrual'
+                 AND coalesce(amount_cents, cast(round(amount * 100) AS integer)) > 0`,
+        args: [actorUserId, occurredAt, voidReason, occurredAt, commissionId, tenantId],
+      });
+    }
+    if (updated.rowsAffected !== 1) {
+      const latest = await tx.execute({
+        sql: "SELECT status FROM website_sales_commissions WHERE id = ? AND tenant_id = ? LIMIT 1",
+        args: [commissionId, tenantId],
+      });
+      await tx.rollback();
+      return {
+        ok: false,
+        error: "status_conflict",
+        commission_id: commissionId,
+        expected_status: expectedStatusLabel,
+        current_status: latest.rows.length > 0 ? String(latest.rows[0].status ?? "") : null,
+      };
+    }
+
+    const auditId = crypto.randomUUID();
+    const before = JSON.stringify({ status: previousStatus });
+    const after = JSON.stringify({
+      status: nextStatus,
+      ...(action === "approve" ? { approved_by: actorUserId, approved_at: occurredAt } : {}),
+      ...(action === "mark_paid"
+        ? { paid_by: actorUserId, paid_at: occurredAt, payout_reference: payoutReference }
+        : {}),
+      ...(action === "void"
+        ? { voided_by: actorUserId, voided_at: occurredAt, void_reason: voidReason }
+        : {}),
+    });
+    const metadata = JSON.stringify({
+      request_id: requestId,
+      correlation_id: requestId,
+      action,
+      changed_by: actorUserId,
+      from: previousStatus,
+      to: nextStatus,
+      commission_id: commissionId,
+      deal_id: String(current.deal_id),
+      lead_id: String(current.lead_id),
+      rep_user_id: String(current.rep_user_id),
+      party_role: String(current.party_role),
+      amount_cents: amountCents,
+      payment_reference: String(current.payment_reference),
+      ...(action === "mark_paid" ? { payout_reference: payoutReference } : {}),
+      ...(action === "void" ? { void_reason: voidReason } : {}),
+    });
+    await tx.execute({
+      sql: `INSERT INTO tenant_audit_log
+              (id, tenant_id, actor_user_id, actor_email, action_type,
+               target_table, target_id, before, after, ip_hash, user_agent,
+               metadata, created_at)
+            VALUES (?, ?, ?, NULL, ?, 'website_sales_commissions', ?, ?, ?, NULL, NULL, ?, ?)`,
+      args: [
+        auditId,
+        tenantId,
+        actorUserId,
+        `website_sales.commission.${nextStatus}`,
+        commissionId,
+        before,
+        after,
+        metadata,
+        occurredAt,
+      ],
+    });
+
+    await tx.commit();
+    return {
+      ok: true,
+      idempotent: false,
+      audit_id: auditId,
+      commission_id: commissionId,
+      previous_status: previousStatus,
+      current_status: nextStatus,
+      amount_cents: amountCents,
+      payout_reference: action === "mark_paid" ? payoutReference : null,
+    };
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw dbError("transition_commission_entry", driverError(error));
+  } finally {
+    tx.close();
+  }
+}
+
+/**
+ * Atomically record the newest known contact timestamp for one lead.
+ *
+ * Unlike a caller-side read followed by patch_tenant_record_data, the max
+ * calculation happens inside the compare-and-swap retry. If two provider
+ * webhooks overlap, the loser rereads the winner's value before retrying and
+ * can therefore never move either canonical field backwards.
+ */
+export async function record_lead_touch(
+  client: Client,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const p_id = typeof args.p_id === "string" ? args.p_id : null;
+  const p_tenant_id = typeof args.p_tenant_id === "string" ? args.p_tenant_id : null;
+  const rawOccurredAt = typeof args.p_occurred_at === "string" ? args.p_occurred_at : "";
+  const occurredMs = Date.parse(rawOccurredAt);
+  if (!p_id || !p_tenant_id || !Number.isFinite(occurredMs)) {
+    throw new Error("record_lead_touch: invalid arguments");
+  }
+  const occurredAt = new Date(occurredMs).toISOString();
+  const isCall = args.p_is_call === true;
+  const hasExpectedOwner = Object.prototype.hasOwnProperty.call(args, "p_expected_owner_id");
+  const expectedOwnerId = hasExpectedOwner
+    ? args.p_expected_owner_id === null
+      ? null
+      : typeof args.p_expected_owner_id === "string"
+        ? args.p_expected_owner_id.trim().toLowerCase()
+        : undefined
+    : undefined;
+  if (hasExpectedOwner && expectedOwnerId === undefined) {
+    throw new Error("record_lead_touch: invalid expected owner");
+  }
+
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const selected = await client.execute({
+      sql: "SELECT data FROM tenant_records WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'",
+      args: [p_id, p_tenant_id],
+    });
+    if (selected.rows.length === 0) {
+      throw new Error("record_lead_touch: lead_not_found_or_wrong_tenant");
+    }
+
+    const oldText = (selected.rows[0]["data"] ?? null) as string | null;
+    let oldData: Record<string, unknown> = {};
+    if (oldText !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(oldText);
+      } catch {
+        throw new Error(`record_lead_touch: tenant_records.data is not valid JSON for id=${p_id}`);
+      }
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        oldData = parsed as Record<string, unknown>;
+      }
+    }
+
+    const currentOwnerId =
+      typeof oldData.assigned_to === "string" ? oldData.assigned_to.trim().toLowerCase() : "";
+    if (hasExpectedOwner && currentOwnerId !== (expectedOwnerId ?? "")) {
+      throw new Error("record_lead_touch: owner_conflict");
+    }
+
+    const lastContactedAt = latestTouchIso(
+      typeof oldData.last_contacted_at === "string" ? oldData.last_contacted_at : null,
+      occurredAt,
+    );
+    const lastCallAt = isCall
+      ? latestTouchIso(
+          typeof oldData.last_call_at === "string" ? oldData.last_call_at : null,
+          occurredAt,
+        )
+      : typeof oldData.last_call_at === "string"
+        ? oldData.last_call_at
+        : null;
+    const merged = {
+      ...oldData,
+      last_contacted_at: lastContactedAt,
+      ...(isCall ? { last_call_at: lastCallAt } : {}),
+    };
+    const updated = await client.execute({
+      sql:
+        "UPDATE tenant_records SET data = ?, updated_at = ? " +
+        "WHERE id = ? AND tenant_id = ? AND entity_type = 'lead' AND data IS ? " +
+        "AND (? = 0 OR lower(coalesce(json_extract(data, '$.assigned_to'), '')) = ?)",
+      args: [
+        JSON.stringify(merged),
+        new Date().toISOString(),
+        p_id,
+        p_tenant_id,
+        oldText,
+        hasExpectedOwner ? 1 : 0,
+        expectedOwnerId ?? "",
+      ],
+    });
+    if (updated.rowsAffected === 1) {
+      return {
+        last_contacted_at: lastContactedAt,
+        last_call_at: lastCallAt,
+      };
+    }
+  }
+
+  throw new Error(
+    `record_lead_touch: concurrent modification, gave up after ${MAX_ATTEMPTS} attempts (id=${p_id}, tenant=${p_tenant_id})`,
+  );
+}
 export async function preview_tenant_invite(
   client: Client,
   args: Record<string, unknown>
@@ -1342,6 +2552,8 @@ export async function preview_tenant_invite(
             AND ti.redeemed_at IS NULL
             AND ti.revoked_at IS NULL
             AND ti.expires_at > ?
+            AND ti.email IS NOT NULL
+            AND trim(ti.email) <> ''
           LIMIT 1`,
     args: [p_token_hash, nowIso],
   });
@@ -1860,6 +3072,7 @@ export async function redeem_tenant_invite(
     typeof args["p_redeemer_full_name"] === "string"
       ? (args["p_redeemer_full_name"] as string)
       : null;
+  const verifiedFullName = redeemerFullName?.trim() || "";
 
   // PG now() is transaction-fixed — capture once, reuse everywhere.
   const nowIso = new Date().toISOString();
@@ -1900,18 +3113,54 @@ export async function redeem_tenant_invite(
     already_redeemed: true,
   });
 
+  // The joining member's profile, decided by the app BEFORE this call
+  // (lib/invite-profile-finalization.ts finalizeInviteProfile) and written in
+  // the SAME batch as the claim below, so a redemption either claims the
+  // invite AND leaves a finished profile, or does neither (2026-09-30: the
+  // profile used to be finished in a second step after the claim committed,
+  // and a failure there used up the invite and left a half-made member).
+  // Absent args (the orphan-recovery caller before it passes a plan) mean "no
+  // agents": never the old hard-coded '["bravo"]', which put OASIS's own agent
+  // on every client's member.
+  const planAgents = Array.isArray(args["p_agents_enabled"])
+    ? (args["p_agents_enabled"] as unknown[]).filter((a): a is string => typeof a === "string" && a.trim() !== "")
+    : [];
+  const planPrimary =
+    typeof args["p_primary_agent"] === "string" && planAgents.includes(args["p_primary_agent"] as string)
+      ? (args["p_primary_agent"] as string)
+      : planAgents[0] ?? "";
+  const planBrand =
+    typeof args["p_brand"] === "string" && (args["p_brand"] as string).trim() !== ""
+      ? (args["p_brand"] as string).trim()
+      : null;
+  const expectedTenantId =
+    typeof args["p_expected_tenant_id"] === "string" ? (args["p_expected_tenant_id"] as string) : null;
+
   // PG: SELECT * ... WHERE token_hash = ? AND redeemed_at IS NULL AND
   //     revoked_at IS NULL AND expires_at > now() FOR UPDATE;
   // token_hash is UNIQUE (tenant_invites_token_hash_key) — at most one row.
   // The FOR UPDATE lock is replaced by the compare-and-swap claim below.
-  const sel = await client.execute({
-    sql:
-      `SELECT "id", "tenant_id", "email", "team_role", "created_by" ` +
-      `FROM "tenant_invites" ` +
-      `WHERE "token_hash" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
-      `AND ${notExpired} LIMIT 1`,
-    args: [tokenHash, nowIso],
-  });
+  //
+  // `kind` arrives with bravo__196. Until that migration is applied the column
+  // does not exist, and then no owner-claim invite can exist either, so every
+  // invite is read as a member invite. Only that exact error is tolerated.
+  const selectInvite = async (withKind: boolean) =>
+    client.execute({
+      sql:
+        `SELECT "id", "tenant_id", "email", "team_role", "created_by"${withKind ? `, "kind"` : ""} ` +
+        `FROM "tenant_invites" ` +
+        `WHERE "token_hash" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
+        `AND ${notExpired} LIMIT 1`,
+      args: [tokenHash, nowIso],
+    });
+  let sel;
+  try {
+    sel = await selectInvite(true);
+  } catch (e) {
+    if (!/no such column:\s*"?kind"?/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    console.warn("[redeem_tenant_invite] tenant_invites.kind is missing (bravo__196 not applied); reading every invite as a member invite");
+    sel = await selectInvite(false);
+  }
   const invite = (sel.rows[0] as unknown as Record<string, unknown> | undefined) ?? null;
 
   if (invite === null) {
@@ -1924,34 +3173,157 @@ export async function redeem_tenant_invite(
   // trim() in PG strips spaces only — replicate exactly (JS .trim() is wider).
   const pgTrimLower = (s: string) => s.replace(/^ +| +$/g, "").toLowerCase();
   const inviteEmail = invite["email"];
+  if (inviteEmail === null || inviteEmail === undefined || pgTrimLower(String(inviteEmail)) === "") {
+    return { ok: false, error: "email_pin_required" };
+  }
   if (
-    inviteEmail !== null &&
-    inviteEmail !== undefined &&
     pgTrimLower(String(inviteEmail)) !== pgTrimLower(redeemerEmail)
   ) {
     return { ok: false, error: "email_mismatch" };
   }
 
-  const existingProfileId = await profileIdOf();
   const inviteId = String(invite["id"]);
   const tenantId = String(invite["tenant_id"]);
-  const teamRole = String(invite["team_role"]);
   const createdBy = String(invite["created_by"]);
+  // The plan was made for one workspace; never apply it to another.
+  if (expectedTenantId !== null && expectedTenantId !== tenantId) {
+    return { ok: false, error: "invite_tenant_changed" };
+  }
+  // Ownership comes from the invite's KIND, which only the operator's
+  // owner-invite route can mint. A member invite whose team_role says "owner"
+  // (only ever hand-inserted) joins as a member and never as an owner.
+  const ownerClaim = invite["kind"] === "owner_claim";
+  const rawRole = String(invite["team_role"]);
+  const teamRole = ownerClaim ? "owner" : rawRole === "owner" ? "member" : rawRole;
+  const isOwner = ownerClaim ? 1 : 0;
+  if (ownerClaim) {
+    const owner = await client.execute({
+      sql: `SELECT 1 FROM "user_profiles" WHERE "tenant_id" = ? AND "is_owner" = 1 LIMIT 1`,
+      args: [tenantId],
+    });
+    // user_profiles_one_owner_per_tenant would refuse the write anyway (and
+    // roll the claim back with it); this names the reason instead.
+    if (owner.rows.length > 0) return { ok: false, error: "workspace_already_has_owner" };
+  }
 
-  // The profile statement runs second in the same transactional batch;
-  // changes() at that point is the claim UPDATE's affected-row count, so the
-  // profile mutation applies ONLY when this call actually won the redemption.
-  // A lost race therefore mutates nothing — mirroring PG, where the profile
-  // upsert sits behind the FOR UPDATE lock.
+  const existingProfileQuery = await client.execute({
+    sql: `SELECT "id", "tenant_id", "team_role" FROM "user_profiles"
+          WHERE "auth_user_id" = ? LIMIT 1`,
+    args: [redeemerAuthId],
+  });
+  const existingProfile = existingProfileQuery.rows[0] as
+    | { id?: unknown; tenant_id?: unknown; team_role?: unknown }
+    | undefined;
+  const existingProfileId = existingProfile?.id ? String(existingProfile.id) : null;
+  const existingTenantId = existingProfile?.tenant_id
+    ? String(existingProfile.tenant_id)
+    : null;
+
+  // One auth identity currently owns one Command Center profile. Never move a
+  // live profile between tenants as a side effect of opening an invite link:
+  // that would replace the user's authorization boundary and make the old
+  // workspace disappear. Detached/orphan profiles (tenant_id NULL) remain
+  // recoverable, which is the intended existing-account onboarding path.
+  if (existingTenantId) {
+    if (existingTenantId !== tenantId) {
+      return { ok: false, error: "already_member_of_another_tenant" };
+    }
+    if (ownerClaim && existingProfileId) {
+      // THE FOUNDER IS ALREADY A MEMBER (2026-09-30 fix pass). Every workspace
+      // made by signup_tenant or the setup CLI has its creator as its only,
+      // non-owner member, and the wizard is now owner-only, so an owner invite
+      // is those creators' one path to ownership. It used to return
+      // already_member here without reading the claim: the invite stayed
+      // unclaimed, is_owner stayed 0, and the redemption still answered ok.
+      // Now the claim and the promotion are one compare-and-swap batch: the
+      // invite is claimed only while this person is still an active member of
+      // this workspace and the workspace still has no owner, and the profile
+      // is promoted only if that claim happened.
+      const promote = await client.batch(
+        [
+          {
+            sql:
+              `UPDATE "tenant_invites" SET "redeemed_at" = ?, "redeemed_by" = ? ` +
+              `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL AND ${notExpired} ` +
+              `AND EXISTS (SELECT 1 FROM "user_profiles" p WHERE p."id" = ? AND p."tenant_id" = ? AND p."deactivated_at" IS NULL) ` +
+              `AND NOT EXISTS (SELECT 1 FROM "user_profiles" o WHERE o."tenant_id" = ? AND o."is_owner" = 1)`,
+            args: [nowIso, redeemerAuthId, inviteId, nowIso, existingProfileId, tenantId, tenantId],
+          },
+          {
+            sql:
+              `UPDATE "user_profiles" SET "is_owner" = 1, "team_role" = 'owner' ` +
+              `WHERE "id" = ? AND "tenant_id" = ? AND changes() = 1`,
+            args: [existingProfileId, tenantId],
+          },
+        ],
+        "write",
+      );
+      if (promote[0].rowsAffected === 1) {
+        return {
+          ok: true,
+          tenant_id: tenantId,
+          team_role: "owner",
+          is_owner: true,
+          profile_id: existingProfileId,
+          already_redeemed: false,
+          promoted_existing_member: true,
+        };
+      }
+      const again = await retrySelect();
+      if (again !== null) return alreadyRedeemedResponse(again);
+      const ownerNow = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "tenant_id" = ? AND "is_owner" = 1 LIMIT 1`,
+        args: [tenantId],
+      });
+      if (ownerNow.rows.length > 0) return { ok: false, error: "workspace_already_has_owner" };
+      const active = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "id" = ? AND "tenant_id" = ? AND "deactivated_at" IS NULL LIMIT 1`,
+        args: [existingProfileId, tenantId],
+      });
+      if (active.rows.length === 0) return { ok: false, error: "member_deactivated" };
+      return { ok: false, error: "invalid_or_expired" };
+    }
+    return {
+      ok: true,
+      tenant_id: existingTenantId,
+      team_role: String(existingProfile?.team_role ?? "member"),
+      profile_id: existingProfileId,
+      already_member: true,
+    };
+  }
+
+  // The profile pre-read above is only an early diagnostic. The authorization
+  // boundary is re-checked INSIDE the write transaction below. Without that
+  // second check, two different tenant invites could both observe one detached
+  // profile, both claim their token, and the last profile UPDATE would win.
+  //
+  // The invite claim is conditional on the profile still being detached. An
+  // existing same-tenant member returned above without consuming the invite or
+  // changing their role. The profile mutation has the same tenant CAS
+  // and is gated by changes() from that claim. SQLite serializes these write
+  // batches, so only one competing tenant can attach the identity and the
+  // losing invite remains untouched.
   let newProfileId: string | null = null;
-  const statements: Array<{ sql: string; args: Array<string | number> }> = [
+  const profileClaimGuard = existingProfileId === null
+    ? `AND NOT EXISTS (
+         SELECT 1 FROM "user_profiles" p WHERE p."auth_user_id" = ?
+       )`
+    : `AND EXISTS (
+         SELECT 1 FROM "user_profiles" p
+         WHERE p."id" = ? AND p."tenant_id" IS NULL
+       )`;
+  const profileClaimArgs = existingProfileId === null
+    ? [redeemerAuthId]
+    : [existingProfileId];
+  const statements: Array<{ sql: string; args: Array<string | number | null> }> = [
     {
       // Compare-and-swap claim: re-asserts every predicate the PG SELECT
       // evaluated under lock. rowsAffected === 0 -> lost the race.
       sql:
         `UPDATE "tenant_invites" SET "redeemed_at" = ?, "redeemed_by" = ? ` +
-        `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL AND ${notExpired}`,
-      args: [nowIso, redeemerAuthId, inviteId, nowIso],
+        `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
+        `AND ${notExpired} ${profileClaimGuard}`,
+      args: [nowIso, redeemerAuthId, inviteId, nowIso, ...profileClaimArgs],
     },
   ];
 
@@ -1967,8 +3339,8 @@ export async function redeem_tenant_invite(
       sql:
         `INSERT INTO "user_profiles" ` +
         `("id", "auth_user_id", "email", "full_name", "tenant_id", "team_role", ` +
-        `"invited_by", "joined_at", "is_owner", "agents_enabled", "prospect_focus") ` +
-        `SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0, '["bravo"]', '["service_trades"]' ` +
+        `"invited_by", "joined_at", "is_owner", "agents_enabled", "primary_agent", "brand", "prospect_focus") ` +
+        `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '["service_trades"]' ` +
         `WHERE changes() = 1`,
       args: [
         newProfileId,
@@ -1979,15 +3351,39 @@ export async function redeem_tenant_invite(
         teamRole,
         createdBy,
         nowIso,
+        isOwner,
+        JSON.stringify(planAgents),
+        planPrimary,
+        // The workspace's own name from the plan. Without one (a caller that
+        // passed no plan), the person's own "<First name>'s workspace", never
+        // the column's legacy 'OASIS AI' default.
+        planBrand ?? defaultWorkspaceName(redeemerFullName, redeemerEmail),
       ],
     });
   } else {
     statements.push({
       sql:
         `UPDATE "user_profiles" SET "tenant_id" = ?, "team_role" = ?, "invited_by" = ?, ` +
-        `"joined_at" = COALESCE("joined_at", ?), "is_owner" = 0 ` +
-        `WHERE "id" = ? AND changes() = 1`,
-      args: [tenantId, teamRole, createdBy, nowIso, existingProfileId],
+        `"email" = ?, ` +
+        `"full_name" = CASE WHEN trim(?) <> '' THEN ? ELSE "full_name" END, ` +
+        `"joined_at" = COALESCE("joined_at", ?), "is_owner" = ?, ` +
+        `"agents_enabled" = ?, "primary_agent" = ?, ` +
+        `"brand" = COALESCE(?, "brand") ` +
+        `WHERE "id" = ? AND "tenant_id" IS NULL AND changes() = 1`,
+      args: [
+        tenantId,
+        teamRole,
+        createdBy,
+        redeemerEmail,
+        verifiedFullName,
+        verifiedFullName,
+        nowIso,
+        isOwner,
+        JSON.stringify(planAgents),
+        planPrimary,
+        planBrand,
+        existingProfileId,
+      ],
     });
   }
 
@@ -2000,6 +3396,24 @@ export async function redeem_tenant_invite(
     // friendly response if this same user already redeemed it, else invalid.
     const again = await retrySelect();
     if (again !== null) return alreadyRedeemedResponse(again);
+    const currentProfile = await client.execute({
+      sql: `SELECT "id", "tenant_id", "team_role" FROM "user_profiles"
+            WHERE "auth_user_id" = ? LIMIT 1`,
+      args: [redeemerAuthId],
+    });
+    const currentTenant = currentProfile.rows[0]?.tenant_id;
+    if (currentTenant) {
+      if (String(currentTenant) !== tenantId) {
+        return { ok: false, error: "already_member_of_another_tenant" };
+      }
+      return {
+        ok: true,
+        tenant_id: String(currentTenant),
+        team_role: String(currentProfile.rows[0]?.team_role ?? "member"),
+        profile_id: String(currentProfile.rows[0]?.id ?? ""),
+        already_member: true,
+      };
+    }
     return { ok: false, error: "invalid_or_expired" };
   }
 
@@ -2007,6 +3421,7 @@ export async function redeem_tenant_invite(
     ok: true,
     tenant_id: tenantId,
     team_role: teamRole,
+    is_owner: isOwner === 1,
     profile_id: existingProfileId ?? newProfileId,
     already_redeemed: false,
   };
@@ -2020,8 +3435,15 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
   const pAuthUserId = args.p_auth_user_id == null ? null : String(args.p_auth_user_id);
   const pEmail = args.p_email == null ? null : String(args.p_email);
   const pFullName = args.p_full_name == null ? null : String(args.p_full_name);
-  // p_brand DEFAULT 'OASIS AI' — default applies only when the key is absent; an explicit null stays null (and hits NOT NULL, as in PG).
-  const pBrand = 'p_brand' in args ? (args.p_brand == null ? null : String(args.p_brand)) : 'OASIS AI';
+  // p_brand: the Postgres default was 'OASIS AI', which named 18 strangers'
+  // workspaces after OASIS. An absent (or blank) brand now defaults to
+  // "<First name>'s workspace" (lib/provisioning/workspace-name.ts); an explicit
+  // null still stays null and hits NOT NULL, as in PG.
+  const pBrand = 'p_brand' in args
+    ? (args.p_brand == null
+        ? null
+        : String(args.p_brand).trim() || defaultWorkspaceName(args.p_full_name == null ? null : String(args.p_full_name), args.p_email == null ? null : String(args.p_email)))
+    : defaultWorkspaceName(args.p_full_name == null ? null : String(args.p_full_name), args.p_email == null ? null : String(args.p_email));
   const pSlugRaw = 'p_slug' in args && args.p_slug != null ? String(args.p_slug) : null;
 
   // v_slug := COALESCE(NULLIF(trim(p_slug), ''), regexp_replace(lower(split_part(p_email,'@',1)), '[^a-z0-9-]+', '-', 'g'))
@@ -2070,7 +3492,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
               )
               VALUES (
                 :id, :auth_user_id, :email, :full_name, :display_name, :brand, 'operator',
-                :tenant_id, :agents_enabled, 'bravo', :prospect_focus,
+                :tenant_id, :agents_enabled, '', :prospect_focus,
                 :now, :now
               )`,
         args: {
@@ -2081,8 +3503,10 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
           display_name: displayName,
           brand: pBrand,
           tenant_id: tenantId,
-          // text[] columns are stored as JSON text in the Turso schema.
-          agents_enabled: JSON.stringify(['bravo']),
+          // text[] columns are stored as JSON text in the Turso schema. A new
+          // workspace starts with no agents (it used to get OASIS's own 'bravo');
+          // its teammates arrive when OASIS provisions it.
+          agents_enabled: JSON.stringify([]),
           // Postgres relied on the column default ARRAY['service_trades']; the transpiler
           // dropped it (column is NOT NULL, no default in SQLite) so it must be supplied here.
           prospect_focus: JSON.stringify(['service_trades']),
@@ -2119,6 +3543,9 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
  *   materialize_today_plan             ported-unverified  writes=True  confidence=high
  *   patch_tenant_record_data           ported-unverified  writes=True  confidence=high
  *   preview_tenant_invite              ported-unverified  writes=False  confidence=high
+ *   record_lead_touch                  hand-ported + concurrency-tested  writes=True  confidence=high
+ *   transition_commission_entry        hand-ported + transaction-tested  writes=True  confidence=high
+ *   transition_pipeline_lead           hand-ported + transaction-tested  writes=True  confidence=high
  *   record_inbound_from_n8n_v2         ported-unverified  writes=True  confidence=high
  *   record_outbound_from_gateway_v1    ported-unverified  writes=True  confidence=high
  *   record_tenant_cron_run             ported-unverified  writes=True  confidence=high
@@ -2137,10 +3564,13 @@ export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string
   materialize_today_plan,
   patch_tenant_record_data,
   preview_tenant_invite,
+  record_lead_touch,
   record_inbound_from_n8n_v2,
   record_outbound_from_gateway_v1,
   record_tenant_cron_run,
   redeem_pair_code,
   redeem_tenant_invite,
   signup_tenant,
+  transition_commission_entry,
+  transition_pipeline_lead,
 };

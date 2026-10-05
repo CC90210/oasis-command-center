@@ -26,10 +26,26 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
+import { getOasisSalesRepRoster } from "@/lib/team";
+import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
+import { countryOf, type LeadCountry } from "./filters";
+import { enrichmentRank, passesEnrichment } from "./enrichment";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
+import { invalidate, memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
+import {
+  factsFrom,
+  isInBookOf,
+  isReleasedFromBook,
+  claimState,
+  type ClaimFacts,
+  type ClaimState,
+} from "./claim";
+import { leadHours } from "./hours";
+import { isClaimable } from "./claim-ops";
 
 // Re-exported so every existing import site keeps working. They live in a leaf
 // module now so scores.ts can pin the same tenant and cap without creating an
@@ -48,12 +64,135 @@ export { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP };
  * reads the same tenant_records table through a different door and must
  * enforce the identical rule, or it reopens the exact leak #237 closed.
  */
-export type Viewer = { userId: string; teamRole: string; isAdmin: boolean };
+export type Viewer = {
+  userId: string;
+  teamRole: string;
+  isAdmin: boolean;
+  /**
+   * Server-resolved auth-user ids whose assigned leads this viewer may read.
+   * Only the manager role consumes this expansion; supplying it for any other
+   * role cannot widen access. It never authorizes an unassigned lead.
+   */
+  readableAssigneeIds?: readonly string[];
+};
 
-/** True for the commission-only outside-contractor role that must always be
- *  scoped to its own leads -- see the Viewer doc comment above. */
+/**
+ * auth_user_id (LOWERCASED) -> the rep's display name, for the owner badge.
+ *
+ * Keyed lowercase because `assigned_to` is stored raw; assignedNameFor() does
+ * the matching lowercase on the lookup side. Memoised on the same TTL as the
+ * lead read, so adding the badge costs one roster query per 90 seconds per
+ * instance rather than one per request.
+ *
+ * Uses the SALES roster, not every profile on the tenant, so the badge can
+ * only ever name somebody who held a lead as a rep.
+ *
+ * DEACTIVATED REPS INCLUDED (2026-09-24). A name is HISTORY, not a live
+ * target: a retired rep keeps assigned_to on their closed / won / in-delivery
+ * leads, and the active-only default blanked the badge on exactly those rows.
+ * This map only NAMES a holder -- it never decides who may be assigned or
+ * claim (the claim route checks the active assignment roster itself), so
+ * widening it hands nobody new work.
+ */
+async function repNameMap(): Promise<ReadonlyMap<string, string>> {
+  return memo(`web-leads:rep-names:${WEBDEV_TENANT_ID}`, TTL.LEADS, async () => {
+    const roster = await getOasisSalesRepRoster(WEBDEV_TENANT_ID, undefined, { includeInactive: true });
+    const map = new Map<string, string>();
+    for (const m of roster) {
+      const id = (m.auth_user_id || "").trim().toLowerCase();
+      if (!id) continue;
+      const name = (m.display_name || m.full_name || m.email || "").trim();
+      if (name) map.set(id, name);
+    }
+    return map;
+  });
+}
+
+/**
+ * May THIS viewer be told WHICH rep holds a lead?
+ *
+ * Extracted from the inline expression the row projection used, so the rule has
+ * one definition and the lead's owner NAME cannot drift from its owner ID: both
+ * are gated on this single predicate, and it is unit-tested directly in
+ * tests/web-leads-owner-badge.test.ts.
+ *
+ * Whether a lead is held at all is a different question with a different
+ * answer -- claimState() tells every viewer that much, because two reps working
+ * the same business is the problem the claim system exists to solve. This
+ * function governs only the identity, which is the cross-book disclosure PR
+ * #237 closed: this board carries outside contractors, and a roster of who
+ * works which business is not theirs to read.
+ */
+export function canSeeAssignee(facts: ClaimFacts, viewer: Viewer): boolean {
+  return (
+    isInBookOf(facts, viewer.userId) ||
+    viewer.isAdmin ||
+    managerCanReadAssignment(facts.assignedTo, viewer)
+  );
+}
+
+/**
+ * The holder's display name, or null when this viewer may not see it.
+ *
+ * Returns null rather than the raw id for an unknown holder: an operator shown
+ * a bare UUID learns nothing and a contractor shown one learns too much, so an
+ * unresolved name degrades to the plain "Taken" badge.
+ *
+ * `repNames` is keyed LOWERCASE while `assigned_to` is stored raw -- the same
+ * asymmetry tests/pipeline-own-book-chip.test.ts pins on the CRM side, where a
+ * case-sensitive lookup silently blanked the name.
+ */
+export function assignedNameFor(
+  facts: ClaimFacts,
+  viewer: Viewer,
+  repNames: ReadonlyMap<string, string>,
+): string | null {
+  if (!facts.assignedTo) return null;
+  if (!canSeeAssignee(facts, viewer)) return null;
+  return repNames.get(facts.assignedTo.trim().toLowerCase()) ?? null;
+}
+
+function managerCanReadAssignment(
+  assignedTo: string | null | undefined,
+  viewer: Viewer,
+): boolean {
+  // Delegates to the single definition in lib/role-surfaces.ts. This used to
+  // hold its own copy of the comparison, and app/pipeline/[id]/page.tsx grew a
+  // second one — two answers to the same question, which is the drift that put
+  // the Leads list and the Leads detail out of sync. The thin wrapper stays
+  // because callers here pass a Viewer, not three loose fields.
+  return managerRosterCoversAssignment({
+    teamRole: viewer.teamRole,
+    assignedTo,
+    readableAssigneeIds: viewer.readableAssigneeIds,
+  });
+}
+
+/**
+ * True for any role that must always be scoped to its own leads -- see the
+ * Viewer doc comment above.
+ *
+ * WIDENED 2026-08-24, AND THIS WAS A LIVE LEAK. It read `teamRole === "agent"`
+ * and nothing else. `agent` is the LEGACY contractor role; the 2026-08-21 job
+ * titles replaced it with `opener` and `closer`, which are what the invite menu
+ * actually offers. lib/role-surfaces.ts already gives all three the SAME "sales"
+ * persona -- own book, own commission, no company money -- but this predicate
+ * never learned about the two new ones.
+ *
+ * So a rep invited as Opener or Closer was not scoped here at all, and the Web
+ * Leads browser handed them every lead in the tenant. That is precisely the leak
+ * PR #237 closed for `agent`, reopened by the roles that replaced it. The set
+ * lives in lib/team-roles.ts so the manifest records route and this one cannot
+ * drift apart again.
+ *
+ * MADE FAIL-CLOSED 2026-08-24, after review. This asked `isSelfScopedRole`,
+ * which is a membership test: an unrecognised role answered `false` and was
+ * served the whole tenant. Now it asks `mustSeeOwnRecordsOnly`, which confines
+ * anything not on the explicit tenant-wide allowlist. Deny-by-default has to be
+ * an allowlist of who may see everything, never a denylist of who may not.
+ */
 export function isScopedContractor(viewer: Viewer): boolean {
-  return !viewer.isAdmin && viewer.teamRole === "agent";
+  return !viewer.isAdmin && mustSeeOwnRecordsOnly(viewer.teamRole);
 }
 
 /**
@@ -74,6 +213,7 @@ export function isScopedContractor(viewer: Viewer): boolean {
 export function visibleToViewer(assignedTo: string | null, viewer: Viewer): boolean {
   if (!isScopedContractor(viewer)) return true;
   if (!assignedTo) return false;
+  if (managerCanReadAssignment(assignedTo, viewer)) return true;
   return assignedTo.trim().toLowerCase() === viewer.userId.trim().toLowerCase();
 }
 
@@ -87,12 +227,78 @@ export type WebLead = {
   address: string | null;
   postal: string | null;
   websiteUrl: string | null;
+  /**
+   * The address a rep should write to, and every other one we found.
+   *
+   * WHY BOTH. `email` is the single field the older MCA drawer and the email
+   * composer already read, so it stays a plain string and keeps working.
+   * `emails` is the full set the JARVIS contact pass extracted, each with the
+   * page that proved it — a law firm publishes four, and the rep deciding
+   * between `info@` and the named partner needs to see both and where each
+   * came from.
+   *
+   * THE SOURCE URL IS NOT DECORATION. Under CASL the lawful basis for a cold
+   * commercial email here is implied consent through conspicuous publication,
+   * and that basis IS the page the address appeared on. A rep answering "how
+   * did you get this?" needs the URL, not a reassurance.
+   *
+   * `email` may be an address a REP typed rather than one we scraped: the
+   * JARVIS writer only fills it when it is empty. So `email` is not guaranteed
+   * to appear in `emails`, and the two must not be assumed to agree.
+   */
+  email: string | null;
+  emails: Array<{
+    email: string;
+    confidence: number | null;
+    sourceUrl: string | null;
+    foundAt: string | null;
+  }>;
+  /**
+   * The person who owns the business, read off their own About/Team page by
+   * the JARVIS enrichment pass, with the page that proved it. Null means
+   * nobody has been identified — never "there is no owner".
+   */
+  ownerName: string | null;
+  ownerTitle: string | null;
+  /** A line the site labels as the owner's cell/direct, NOT the main number. */
+  ownerPhone: string | null;
+  ownerEvidenceUrl: string | null;
+  /** One of confirmed | self_reported | conflict | unchecked | lookup_failed. */
+  ownerVerification: string | null;
+  /** Plain-English sentence a rep can read aloud. Never a template guess. */
+  ownerEvidence: string | null;
+  /**
+   * When this rep promised to come back to this one.
+   *
+   * `dispositionPatch` in lib/website-sales-workflow.ts REQUIRES a future date
+   * for the attempted and voicemail dispositions and refuses the write without
+   * one, so this has been filling up since that shipped. Nothing ever read it
+   * back: a rep said "call me in two weeks", the date was stored, and no screen
+   * in this product mentioned it again. On a cold week deferrals are most of
+   * what the week produces, so the largest category of work the board knew
+   * about was the one category it could not show. The `due` filter reads it.
+   */
+  nextActionAt: string | null;
   websiteCondition: string;
   auditFindings: string;
   territoryId: string | null;
   territoryName: string | null;
   osmCategory: string | null;
   firstSeen: string | null;
+  /** The OpenStreetMap `opening_hours` value, VERBATIM. See toWebLead. */
+  openingHoursRaw: string | null;
+  /** JARVIS's parsed grid. Decoded by lib/web-leads/hours.ts, never here. */
+  openingHours: unknown;
+  /** When we last looked for hours, whatever the answer. Null means never. */
+  openingHoursCheckedAt: string | null;
+  /**
+   * WHICH collector produced the hours: "osm", "site-jsonld", "site-microdata"
+   * or "site-text". Decoded by lib/web-leads/hours.ts, and shown to the rep,
+   * because a value read out of visible page text is weaker evidence than a
+   * schema.org openingHoursSpecification and they are about to repeat it to a
+   * stranger. Null on rows written before the collector recorded provenance.
+   */
+  openingHoursSource: string | null;
 };
 
 /**
@@ -111,13 +317,122 @@ export type WebLead = {
 export type WebLeadRow = WebLead & {
   score: number | null;
   scoreState: ScoreState;
+  /** Auth user id of the rep who holds it, or null when it is in the pool. */
+  assignedTo: string | null;
+  /** What this row should SAY about ownership, from this viewer's seat. Every
+   *  viewer gets this, so no rep works a lead another rep is already on. */
+  claimState: ClaimState;
+  /** WHO holds it, in words. Null when this viewer may not be told (the #237
+   *  fence) or when the holder is not on the sales roster. NOTE: this is the
+   *  REP. The business's own owner is `ownerName`, an unrelated field. */
+  assignedToName: string | null;
+  /** Current lifecycle stage, for My Leads. */
+  stage: string | null;
+  /** True when a rep nominally holds this lead but the claim has lapsed -- see
+   *  lib/web-leads/claim.ts. Rendered as a marker in the rep's own book rather
+   *  than by silently removing the row. */
+  released: boolean;
+  /** When the last call was logged, so a rep can see what they have not touched. */
+  lastCallAt: string | null;
 };
+
+/**
+ * Which slice of the world a list read is asking for.
+ *
+ *   "pool" — the shared Leads tab: only leads nobody currently holds. This is
+ *            what stops two reps dialling the same business.
+ *   "mine" — the caller's own book, including leads whose claim has lapsed.
+ */
+export type LeadScope = "pool" | "mine" | "team";
 
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
 
+/**
+ * Read the address list JARVIS writes, tolerating anything it is not.
+ *
+ * The value arrives from `tenant_records.data.webdev_emails`, written by
+ * services/leadgen/push-contacts-to-crm.mjs. It is an array of objects — but
+ * this is a JSON blob on a row a rep can also edit, and libSQL hands JSON
+ * columns back as TEXT, so it may equally arrive as a string, as null, or as
+ * something a future writer changed shape on. A lead card that throws takes the
+ * whole drawer with it and the rep loses the address, the phone and the hours
+ * along with the email, so anything unrecognised degrades to an empty list.
+ *
+ * Rows with no address are dropped rather than rendered as blanks: "Not on
+ * file" is the honest empty state (rule 3 in BusinessFacts.tsx), and an empty
+ * string masquerading as an entry defeats it.
+ */
+function readEmails(raw: unknown): WebLead["emails"] {
+  let value = raw;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return []; }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((e) => {
+    if (!e || typeof e !== "object") return [];
+    const row = e as Record<string, unknown>;
+    const email = str(row.email);
+    if (!email) return [];
+    const confidence = typeof row.confidence === "number" && Number.isFinite(row.confidence)
+      ? row.confidence
+      : null;
+    return [{
+      email,
+      confidence,
+      sourceUrl: str(row.source_url),
+      foundAt: str(row.found_at),
+    }];
+  });
+}
+
+/**
+ * Audit sources that mean THE SITE WAS NEVER SUCCESSFULLY OBSERVED.
+ *
+ * A row carrying one of these is telling us its own fetch failed. Anything the
+ * writer stored alongside it -- a website_condition, an audit_findings line --
+ * therefore describes OUR failure, not the prospect's website, and must not
+ * reach a rep as a finding about them.
+ *
+ * WHY THIS EXISTS (live data incident, 2026-08-26). CC's `seed_cc_leads_turso`
+ * run wrote 52 leads. 46 carried `audit_source: "fallback"` AND
+ * `website_condition: "unreachable"` AND a pitch instructing the rep to open
+ * with "when I tried to look at your website it wouldn't even load properly for
+ * me". All 46 URLs were refetched on 2026-08-26; every one returned HTTP
+ * 200/202. The verdict was not merely unverified, it was FALSE -- and on 23 of
+ * the rows the business name was the placeholder "Trade Business", so the line
+ * rendered as "when I tried to look at 's website". Nothing had been sent and
+ * nobody was assigned, so no prospect ever heard it, and the rows were repaired
+ * in place. This is the guard that stops the next seed run reintroducing it.
+ *
+ * WHY A NAMED FAILURE SET RATHER THAN AN ALLOWLIST OF TRUSTED SOURCES: measured
+ * against the live tenant on 2026-08-26, 31,034 of 31,086 leads carry no
+ * `audit_source` at all, and 31,021 of those carry a real website_condition --
+ * the OpenStreetMap pipeline predates the field entirely. An allowlist would
+ * blank a correct, load-bearing sentence on 31,021 leads in order to suppress
+ * 46. An ABSENT field means "this pipeline had no audit concept"; that is not
+ * the same claim as "an audit ran and failed", and only the second one lies.
+ *
+ * Proven by tests/web-leads-data.test.ts, which asserts the guard fires on the
+ * exact payload that shipped, and that it does NOT fire on the 6 genuinely
+ * audited leads from the same run nor on the 31,021 OSM rows.
+ */
+const NON_OBSERVING_AUDIT_SOURCES = new Set(["fallback", "none", "error", "skipped", "timeout", "blocked"]);
+
+/**
+ * True when the record itself says the observation never happened. Compared
+ * lower-cased and trimmed: a seeder writing "Fallback" or " fallback " is making
+ * exactly the same claim, and a guard that a whitespace difference walks past is
+ * not a guard.
+ */
+export function auditDidNotObserve(auditSource: unknown): boolean {
+  const s = str(auditSource);
+  return s !== null && NON_OBSERVING_AUDIT_SOURCES.has(s.toLowerCase());
+}
+
 export function toWebLead(row: { id: string; data: Record<string, unknown> }): WebLead {
   const d = row.data || {};
+  const unaudited = auditDidNotObserve(d.audit_source);
   return {
     id: row.id,
     name: str(d.business_name) || str(d.name) || "Unnamed business",
@@ -128,17 +443,43 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     address: str(d.business_address),
     postal: str(d.business_zip),
     websiteUrl: str(d.website),
+    email: str(d.email),
+    emails: readEmails(d.webdev_emails),
+    ownerName: str(d.owner_name),
+    ownerTitle: str(d.owner_title),
+    ownerPhone: str(d.owner_phone),
+    ownerEvidenceUrl: str(d.owner_evidence_url),
+    ownerVerification: str(d.owner_verification_state),
+    ownerEvidence: str(d.owner_verification_evidence),
+    nextActionAt: str(d.next_action_at),
     // VERBATIM. Nothing in this pipeline has fetched these websites — OpenStreetMap
     // lacking a website tag means nobody mapped one, not that no site exists. A rep
     // reading a fabricated finding aloud on a live call is the worst outcome this
     // system can produce, so these two fields must never be shortened, re-worded,
     // normalised, or defaulted to a confident-sounding verdict.
-    websiteCondition: str(d.website_condition) || "Not checked",
-    auditFindings: str(d.audit_findings) || "Not audited yet - confirm on the call",
+    // A record that declares its own observation failed may not also carry a
+    // finding derived from that observation -- see auditDidNotObserve above.
+    // Falling through to the same defaults an un-audited lead gets is the whole
+    // point: "Not checked" is true, and "unreachable" was not.
+    websiteCondition: (unaudited ? null : str(d.website_condition)) || "Not checked",
+    auditFindings: (unaudited ? null : str(d.audit_findings)) || "Not audited yet - confirm on the call",
     territoryId: str(d.webdev_territory_id),
     territoryName: str(d.webdev_territory),
     osmCategory: str(d.webdev_osm_category),
     firstSeen: str(d.first_seen_at),
+    // OPENING HOURS. The raw string is the load-bearing one and is carried
+    // VERBATIM for the same reason websiteCondition is: JARVIS's parser
+    // deliberately refuses forms it cannot read exactly (seasonal rules,
+    // `sunrise-sunset`, "by appointment"), and a rep reading the recorded
+    // string beats a rep reading a confident wrong parse. `openingHours` is
+    // left as `unknown` on purpose -- lib/web-leads/hours.ts owns decoding it,
+    // and a type assertion here would let a future schema version through
+    // unchecked. Absent on ~74% of the corpus (measured 2026-08-24), which
+    // renders as a SENTENCE, never a blank and never an assumption of open.
+    openingHoursRaw: str(d.webdev_opening_hours_raw),
+    openingHours: d.webdev_opening_hours ?? null,
+    openingHoursCheckedAt: str(d.webdev_opening_hours_checked_at),
+    openingHoursSource: str(d.webdev_opening_hours_source),
   };
 }
 
@@ -151,8 +492,14 @@ export async function fetchSheets(): Promise<Sheet[]> {
     )
     .eq("tenant_id", WEBDEV_TENANT_ID);
   if (error) throw new Error(`sheets_read_failed: ${error.message}`);
+  // NO stored-count filter. This used to drop any territory whose stored
+  // leads_total was 0, which decided EXISTENCE from a column that is written on
+  // promotion and never recomputed on removal. Counts are derived now; deciding
+  // membership from the dead number would leave a territory holding real leads
+  // invisible in pool scope -- accurate counts on a sheet nobody can select.
+  // The zero rows are dropped after derivation instead, in
+  // fetchSheetsScopedToViewer, where the number is true.
   return (data || [])
-    .filter((r: Sheet) => (r.leads_total || 0) > 0)
     .map((r: Sheet) => ({
       id: r.id,
       region: r.region,
@@ -176,47 +523,309 @@ export async function fetchSheets(): Promise<Sheet[]> {
  * also the layer that decides what a failed score read means -- see
  * app/api/web-leads/route.ts.
  */
-export async function fetchLeads(
-  f: WebLeadFilters,
-  sheetIds: string[],
+/**
+ * The FIFTEEN keys of `data` that filtering, sorting and counting actually
+ * read. Derived from the call graph, not guessed:
+ *
+ *   toWebLead's filterable fields  business_name, name, phone, website,
+ *                                  webdev_territory_id, state,
+ *                                  webdev_opening_hours(+_raw)
+ *   resolveScore                   website, webdev_source_business_id
+ *   factsFrom (claim.ts)           assigned_to, claimed_at, last_call_at,
+ *                                  stage, lost_at, dnc
+ *
+ * `->` AND NOT `->>`, DELIBERATELY, AND THIS IS THE SUBTLE ONE. PostgREST's
+ * `->>` yields TEXT: `dnc` would arrive as the string "true" on the supabase-js
+ * path and as the number 1 on ours, and factsFrom's deliberately strict
+ * `data.dnc === true || data.dnc === 1` would read the string as FALSE --
+ * silently dropping a do-not-call flag on one backend only. `->` yields JSON on
+ * both: supabase-js parses it to a real boolean, our adapter's json_extract
+ * returns 1, and those are exactly the two shapes factsFrom already accepts. So
+ * every field keeps the same JS type it has today, on both backends, and
+ * factsFrom needs no change. Nothing here widens or relaxes the dnc test.
+ */
+/**
+ * Exported so tests can replay the exact narrowing this projection performs.
+ * A filter that reads a field missing from here sees `undefined` and fails
+ * SILENTLY — see tests/web-leads-projection-covers-filters.test.ts for the
+ * production incident that proved it.
+ */
+export const FILTER_KEYS = [
+  "business_name", "name", "phone", "website", "webdev_territory_id",
+  "webdev_source_business_id", "state",
+  "webdev_opening_hours", "webdev_opening_hours_raw",
+  "assigned_to", "claimed_at", "last_call_at", "stage", "lost_at", "dnc",
+  // OWNER EVIDENCE. Read by enrichmentTier() (the "what we know" filter and
+  // its sort) and by the older ownerOnly toggle, both of which run HERE, on
+  // the projected row — so leaving these out does not degrade them, it makes
+  // them answer "no" for every lead in the tenant. That is what happened:
+  // 1,668 leads carrying a real owner name and phone were unreachable through
+  // "Owner named" and "Verified owner" from 2026-08-25 until 2026-09-08, with
+  // no error raised anywhere. Three short text fields; the transfer cost this
+  // projection exists to control lives in the big blob fields it still omits.
+  "owner_name", "owner_phone", "owner_verification_state",
+  // THE CALLBACK PROMISE. Read by the `due` filter, which runs HERE on the
+  // projected row, so omitting it would not weaken that filter -- it would make
+  // it answer "nothing is due" for every lead in the tenant, forever, with no
+  // error. That is precisely the failure the three fields above caused for two
+  // weeks, and the one tests/web-leads-projection-covers-filters.test.ts exists
+  // to catch. One short text field.
+  "next_action_at",
+] as const;
+
+const FILTER_SELECT = `id,${FILTER_KEYS.map((k) => `data->${k}`).join(",")}`;
+
+/**
+ * Every lead for this tenant, PROJECTED to the fields that decide whether it is
+ * on the page -- memoised for a few seconds.
+ *
+ * ═══ THIS READ WAS THE 15-SECOND PAGE LOAD ══════════════════════════════════
+ *
+ * Measured against live production data, 2026-08-25:
+ *
+ *   SELECT id,data   31,034 rows   37.8 MB   4.4s - 18.0s across six samples
+ *   this projection  31,034 rows   15.7 MB   1.8s -  3.6s
+ *
+ * Not 31,000 rows of overhead: 31,000 rows carrying the WHOLE `data` blob --
+ * 57 distinct keys, averaging 1,111 bytes -- pulled across a WAN to render
+ * fifty. The blob's biggest fields (`tags`, `webdev_dedupe_key`, `source`,
+ * `company`, `icp_track`, `audit_findings`, `business_address`) are read by
+ * NOTHING on this path. The transfer is the cost and it is wildly variable,
+ * which is why the same page felt like five seconds one day and fifteen the
+ * next.
+ *
+ * The projection does NOT relax the injection rule. Territory, city and
+ * industry are still free text ("Québec", "Restaurants & Bars") and still never
+ * enter a filter string -- they are still compared IN MEMORY. What changed is
+ * only which COLUMNS come back, and the key list is a compile-time constant
+ * with no caller input anywhere near it.
+ *
+ * Rows still arrive shaped `{ id, data }` so the mapping below is unchanged;
+ * `data` is simply narrower. The full blob for the ~100 rows that survive
+ * filtering is fetched separately -- see fetchPageData().
+ *
+ * WHY A CACHE IS SAFE HERE: claiming is a compare-and-swap (claim-ops.ts), so a
+ * stale pool cannot produce a duplicate call, only a claim that fails and tells
+ * the rep the truth. Worst case is one wasted click, never a wasted phone call.
+ * Full argument in lib/web-leads/cache.ts; writes invalidate it immediately.
+ * IF THE SWAP EVER GOES, THIS CACHE MUST GO WITH IT.
+ */
+type ProjectedLeadRow = { id: string; data: Record<string, unknown> };
+
+function nestProjectedLeadRows(data: unknown[] | null): ProjectedLeadRow[] {
+  // supabase-js parses the select STRING at the type level to infer a row
+  // shape, and its parser does not model JSON-path projection -- it widens
+  // any select it cannot parse to GenericStringError[]. That is a limitation
+  // of the type, not of the query: both backends return one column per path
+  // (see FILTER_SELECT). The cast is confined to this one function and the
+  // loop below reads only names from FILTER_KEYS.
+  const rows = (data || []) as unknown as Record<string, unknown>[];
+  return rows.map((r) => {
+    const d: Record<string, unknown> = {};
+    for (const k of FILTER_KEYS) d[k] = r[k];
+    return { id: String(r.id), data: d };
+  });
+}
+
+async function loadAllTenantLeads(): Promise<ProjectedLeadRow[]> {
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`leads_read_failed: ${error.message}`);
+  // A short list that LOOKS complete is worse than a loud failure. Proved
+  // against the read's own match count, not against our cap -- PostgREST
+  // enforces its own server-side max-rows regardless of what `.limit()` asks
+  // for, and a cap comparison passes silently when that binds first. See
+  // assertCompleteRead() in ./tenant.
+  assertCompleteRead("leads_read", data || [], count);
+  return nestProjectedLeadRows(data);
+}
+
+async function allTenantLeads(fresh = false): Promise<ProjectedLeadRow[]> {
+  const key = "web-leads:leads";
+  if (fresh) invalidate(key);
+  return memo(key, TTL.LEADS, loadAllTenantLeads);
+}
+
+/**
+ * The assigned book path never needs the 31K-row tenant pool. Filtering by the
+ * server-resolved assignee allowlist in the database makes a rep/manager team
+ * view proportional to the book they can actually open (78 rows for the live
+ * OASIS roster at implementation time), while preserving the same projected
+ * row shape and completeness guard as the pool path.
+ */
+//
+// NOT MEMOISED (2026-09-10). A book is read live: CC added a lead, opened My
+// leads, and the 90-second memo on this read is one of the reasons it was not
+// there. The read is bounded by the assignee list, so there is nothing for a
+// memo to save that is worth a lead going missing from its owner's own page.
+async function tenantLeadsAssignedTo(
+  assigneeIds: readonly string[],
+): Promise<ProjectedLeadRow[]> {
+  const normalized = [...new Set(assigneeIds.map((id) => id.trim().toLowerCase()).filter(Boolean))]
+    .sort();
+  if (normalized.length === 0) return [];
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .in("data->>assigned_to", normalized)
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`assigned_leads_read_failed: ${error.message}`);
+  assertCompleteRead("assigned_leads_read", data || [], count);
+  return nestProjectedLeadRows(data);
+}
+
+/**
+ * Every lead somebody holds -- an admin's Team leads book. Read live, like the
+ * assigned read above. A lead nobody holds is the pool, not anyone's book, so
+ * it is excluded here rather than left to a filter downstream: without the
+ * territory filter (which now shapes the pool only) it would otherwise flood
+ * the Team tab with the whole prospect directory.
+ */
+async function tenantLeadsHeldBySomeone(): Promise<ProjectedLeadRow[]> {
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .not("data->>assigned_to", "is", null)
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`held_leads_read_failed: ${error.message}`);
+  assertCompleteRead("held_leads_read", data || [], count);
+  return nestProjectedLeadRows(data).filter(
+    (row) => typeof row.data.assigned_to === "string" && row.data.assigned_to.trim() !== "",
+  );
+}
+
+/** Start the scope-appropriate projected read before sheets/scores resolve. */
+export function fetchLeadProjection(
   viewer: Viewer,
-  scoreIndex: ScoreIndex,
-): Promise<{ leads: WebLeadRow[]; total: number }> {
-  if (sheetIds.length === 0) return { leads: [], total: 0 };
+  scope: LeadScope,
+  fresh = false,
+): Promise<ProjectedLeadRow[]> {
+  if (scope === "mine") {
+    return tenantLeadsAssignedTo([viewer.userId, ...(viewer.readableAssigneeIds || [])]);
+  }
+  if (scope === "team") {
+    // A book, never the pool. An admin's team is every held lead; anyone else's
+    // is their own plus the server-resolved roster (only a manager has one),
+    // and canViewerRead in fetchLeads still decides row by row.
+    return viewer.isAdmin
+      ? tenantLeadsHeldBySomeone()
+      : tenantLeadsAssignedTo([viewer.userId, ...(viewer.readableAssigneeIds || [])]);
+  }
+  return allTenantLeads(fresh);
+}
+
+/**
+ * The FULL `data` blob for one page of leads, keyed by id.
+ *
+ * Phase two of the split above. Filtering and sorting need eighteen fields
+ * across all 31,034 leads; RENDERING needs the whole blob for the ~100 that
+ * actually reach the screen. Fetching the blob for all of them to show a
+ * hundred is what made this page slow, and fetching it for a hundred costs
+ * 0.12 MB (measured).
+ *
+ * `.in("id", ids)` carries no free text: these are ids this function just read
+ * out of the database itself, never anything a caller typed.
+ *
+ * NOT MEMOISED. It is per-page and already cheap, and a lead's rendered detail
+ * is exactly the thing a rep expects to be current after they act on it.
+ */
+async function fetchPageData(ids: string[]): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  if (ids.length === 0) return out;
   const db = getServiceSupabase();
   const { data, error, count } = await db
     .from("tenant_records")
     .select("id,data", { count: "exact" })
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
+    .in("id", ids)
     .limit(LEAD_READ_CAP);
-  if (error) throw new Error(`leads_read_failed: ${error.message}`);
+  if (error) throw new Error(`lead_page_read_failed: ${error.message}`);
+  assertCompleteRead("lead_page_read", data || [], count);
+  for (const r of (data || []) as { id: string; data: Record<string, unknown> }[]) {
+    out.set(r.id, r.data || {});
+  }
+  return out;
+}
 
-  // A short list that LOOKS complete is worse than a loud failure, so refuse to
-  // serve a possibly-partial dataset.
-  //
-  // This used to compare the row count against LEAD_READ_CAP, which only
-  // catches truncation by OUR cap. PostgREST enforces its own server-side
-  // max-rows regardless of what `.limit()` asks for, and on that path the check
-  // passed while most of the tenant's leads went missing -- the filter rail
-  // confidently showing 10,872 over a table holding whatever the server felt
-  // like returning. Comparing against the read's own match count proves
-  // completeness instead of guessing at the source of the limit. See
-  // assertCompleteRead() in ./tenant.
-  assertCompleteRead("leads_read", data || [], count);
+export async function fetchLeads(
+  f: WebLeadFilters,
+  sheetIds: string[],
+  viewer: Viewer,
+  scoreIndex: ScoreIndex,
+  // `now` is injected, never read here, for the same reason claim.ts takes it
+  // as a parameter: ownership expiry is a pure derivation over timestamps, and
+  // one request must not see the clock move between filtering and paging.
+  {
+    scope,
+    now,
+    fresh = false,
+    projectedRows,
+  }: {
+    scope: LeadScope;
+    now: number;
+    fresh?: boolean;
+    projectedRows?: ProjectedLeadRow[];
+  },
+): Promise<{ leads: WebLeadRow[]; total: number; boards: Record<LeadCountry, number> | null }> {
+  // A rep's own book is not confined to the sheets the filters selected, so an
+  // empty sheet selection means "no leads" only for the shared pool.
+  if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0, boards: null };
+  const data = projectedRows ?? await fetchLeadProjection(viewer, scope, fresh);
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
-  const all = (data || [])
+  // Names for the owner badge. Fails CLOSED to an empty map: if the roster read
+  // breaks, rows say "Taken" with no name rather than the board breaking or a
+  // raw UUID reaching an operator. The catch is here, not inside the memo, so a
+  // transient failure is not cached for the whole TTL.
+  const repNames = await repNameMap().catch(() => new Map<string, string>());
+  const matching = (data || [])
     // Scope BEFORE mapping to WebLead: assigned_to lives on the raw row and
     // is deliberately not surfaced on WebLead (see the Viewer doc comment on
     // isScopedContractor -- a scoped viewer must never receive rows outside
     // their own book, not just have them hidden client-side).
+    /**
+     * OWNERSHIP AND VISIBILITY, resolved together rather than as two stacked
+     * filters -- because stacking them broke the feature.
+     *
+     * `visibleToViewer` hides every UNASSIGNED lead from an `agent`-role
+     * contractor (fail closed: see its doc comment). Run before the pool
+     * filter, that left exactly the people this feature is for -- outside
+     * contractors selling websites -- looking at an empty pool with a Claim
+     * button they could never use, because unassigned leads ARE the claimable
+     * inventory. Codex caught it (2026-08-23).
+     *
+     *   "mine"  — strictly the caller's own book. Self-scoping by
+     *             construction: isInBookOf compares against this viewer's id,
+     *             so a contractor cannot widen it and #237's leak stays shut.
+     *
+     *   "pool"  — every lead nobody currently holds, for everyone in the
+     *             tenant. This is a DELIBERATE widening for `agent`, and it is
+     *             what Adon asked for: "all the accounts can assign themselves
+     *             the lead." A claimable lead is in nobody's book, so there is
+     *             no rep's book to leak; what #237 actually closed was reading
+     *             other people's assigned leads, and that stays closed --
+     *             assigned leads are exactly what the pool excludes. Volume is
+     *             bounded separately by the 250-lead cap in claim.ts.
+     */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
-      visibleToViewer(
-        typeof r.data.assigned_to === "string" ? r.data.assigned_to : null,
-        viewer,
-      ),
+      scope === "team"
+        ? canViewerRead(r.data || {}, viewer, now)
+        : scope === "mine"
+          ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+          : isClaimable(r.data || {}, now),
     )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
       const lead = toWebLead(r);
@@ -227,17 +836,147 @@ export async function fetchLeads(
       const bid = typeof r.data.webdev_source_business_id === "string"
         ? r.data.webdev_source_business_id
         : null;
-      return { ...lead, ...resolveScore(lead.websiteUrl, bid, scoreIndex) };
+      const facts = factsFrom(r.data || {});
+      const assignmentVisible = canSeeAssignee(facts, viewer);
+      return {
+        ...lead,
+        ...resolveScore(lead.websiteUrl, bid, scoreIndex),
+        // A lead in the POOL can still carry a previous owner -- an expired
+        // claim or a 90-day-old loss is claimable while `assigned_to` still
+        // names whoever had it last. Surfacing that id would tell a contractor
+        // which rep held which business, which is the kind of cross-book
+        // information PR #237 closed. Non-admins see an owner id only for
+        // leads in their own book; everyone else gets null, and the lead is
+        // claimable either way.
+        assignedTo: assignmentVisible ? facts.assignedTo : null,
+        // What the row SAYS about ownership, which every viewer gets, and WHO
+        // holds it, which only an owner/manager/admin gets. Splitting them is
+        // the point: a rep must be able to see that a lead is taken without
+        // being told whose it is. See claimState() and assignedNameFor().
+        claimState: claimState(facts, viewer.userId, now),
+        assignedToName: assignedNameFor(facts, viewer, repNames),
+        stage: facts.stage,
+        released: isReleasedFromBook(facts, now),
+        lastCallAt: facts.lastCallAt,
+      };
     })
-    .filter((l) => l.territoryId && wanted.has(l.territoryId))
-    .filter((l) => Boolean(l.phone))
+    // Sheet narrowing and the phone requirement shape the POOL, which is a
+    // call queue. My leads and Team leads are BOOKS: a lead someone holds must
+    // show whatever its territory and whether or not we have a number yet.
+    // Applied to "team" too, these emptied the Team tab for everyone (sheets
+    // are loaded for the pool only), and a lead added by hand -- no territory,
+    // often no phone -- never reached anyone's book at all (2026-09-10).
+    .filter((l) => (scope === "pool" ? Boolean(l.territoryId && wanted.has(l.territoryId)) : true))
+    .filter((l) => (scope === "pool" ? Boolean(l.phone) : true))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
+    .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
+    // WHAT THIS REP ALREADY OWES, evaluated against the same injected `now` as
+    // the claim-expiry rules so one page never sees two clocks.
+    //
+    // Due means the promised moment has ARRIVED OR PASSED. An overdue callback
+    // is more urgent than a fresh one, so both belong in the same list and the
+    // sort puts the oldest promise at the top.
+    //
+    // A missing date is NOT due. A lead nobody promised to call back is ordinary
+    // queue work and belongs in the main list, not in the one screen that says
+    // "you said you would do this".
+    //
+    // Intended with the `mine` view, which is what scopes it to the caller's own
+    // book. Deliberately NOT forcing that scope here: a filter that silently
+    // rewrites the view is how surprising behaviour gets built, and the pool
+    // shows only unheld leads anyway.
+    .filter((l) => (f.due ? isDue(l.nextActionAt, now) : true))
+    // How much we know before the dial. A chosen tier means that tier AND
+    // better, so asking for named owners never hides the verified ones.
+    .filter((l) => passesEnrichment(l, f.enrichment))
+    // OPEN NOW, in the BUSINESS's time zone, evaluated against this request's
+    // clock rather than anything cached. `now` is already injected for the
+    // claim-expiry rules, so the whole page still sees one instant.
+    //
+    // Only "open" survives. A lead whose hours we do not hold is excluded --
+    // see the openNow doc comment in ./filters for why an unknown is not a
+    // maybe here.
+    .filter((l) =>
+      f.openNow
+        ? leadHours(
+          {
+            province: l.province,
+            openingHours: l.openingHours,
+            openingHoursRaw: l.openingHoursRaw,
+          },
+          new Date(now),
+        ).state === "open"
+        : true,
+    )
     .filter((l) => matchesBand(l, f.band))
-    .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true))
-    .sort(comparatorFor(f.sort));
+    .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true));
+
+  // Country is ALWAYS applied, never "all". The two markets run under
+  // different law (CASL vs TCPA/DNC), so a rep must be looking at one of them
+  // and know which — an "everything" view is how a US mobile gets dialled
+  // under Canadian assumptions. Derived from the region code, so no backfill.
+  // Applied last -- every filter above is a pure predicate, so the order does
+  // not change the result -- because the book count below needs the rows that
+  // pass everything else.
+  const all = matching
+    .filter((l) => countryOf(l.province) === f.country)
+    // A WORK QUEUE HAS ONE CORRECT ORDER, so `due` overrides the chosen sort
+    // rather than composing with it. The oldest broken promise goes first: a
+    // callback owed since last Tuesday outranks one owed this morning, and any
+    // other ordering makes the screen a list rather than a queue. Ties break on
+    // name like every other comparator here, so paging stays stable.
+    .sort(f.due ? byDueThenName : comparatorFor(f.sort));
+
+  // A BOOK SAYS WHERE ITS OTHER LEADS ARE (2026-09-10). My leads and Team leads
+  // show one board at a time, like the pool, and a lead on the other board was
+  // on no screen its owner could reach: CC added a Florida lead and his book
+  // opened on Canada. The switch on those tabs reads these counts, so the other
+  // board's leads show before anyone clicks. Same filters as the list, so a
+  // count never disagrees with what the switch then shows. The pool's rail has
+  // its own facet counts, so it gets none.
+  const boards: Record<LeadCountry, number> | null = scope === "pool" ? null : { ca: 0, us: 0 };
+  if (boards) for (const l of matching) boards[countryOf(l.province)] += 1;
 
   const start = (f.page - 1) * PAGE_SIZE;
-  return { leads: all.slice(start, start + PAGE_SIZE), total: all.length };
+  const page = all.slice(start, start + PAGE_SIZE);
+
+  // PHASE TWO. Everything above ran on the eighteen projected fields, which is
+  // all that filtering, sorting and counting need. The rows that survived now
+  // get their full blob so the list can render city, industry and the verbatim
+  // websiteCondition -- fetched for ~100 leads instead of 31,034.
+  const full = await fetchPageData(page.map((l) => l.id));
+  const leads = page.map((l): WebLeadRow => {
+    const blob = full.get(l.id);
+    // A lead deleted between the two reads keeps the row built from the
+    // projection rather than vanishing from a page whose `total` still counts
+    // it. Its display-only fields then fall back to toWebLead's honest
+    // defaults ("Not checked" / "Not audited yet - confirm on the call"),
+    // which is the same sentence a never-audited lead shows. Nothing is
+    // invented to fill the gap.
+    if (!blob) return l;
+    return {
+      ...toWebLead({ id: l.id, data: blob }),
+      // Recomputing these from the blob would be redundant work over identical
+      // values -- every field they derive from is in FILTER_KEYS. Carried
+      // across so the score and ownership a rep sees are exactly the ones the
+      // filter, the sort and the band selection just agreed on.
+      score: l.score,
+      scoreState: l.scoreState,
+      assignedTo: l.assignedTo,
+      // Carried, never recomputed. toWebLead() has no viewer, so rebuilding
+      // these here would silently drop the gating and hand every rep the
+      // holder's name -- the phase-one values already answered both questions
+      // for THIS viewer.
+      claimState: l.claimState,
+      assignedToName: l.assignedToName,
+      stage: l.stage,
+      released: l.released,
+      lastCallAt: l.lastCallAt,
+      nextActionAt: l.nextActionAt,
+    };
+  });
+
+  return { leads, total: all.length, boards };
 }
 
 /**
@@ -265,9 +1004,65 @@ function matchesBand(l: WebLeadRow, band: ScoreBand): boolean {
  * Unscored leads sort AFTER every scored lead in both score orders (not as a
  * zero, not as a 100). A missing score is not a low score -- see scores.ts.
  */
+/**
+ * Does this rep already owe this call?
+ *
+ * Exported so it can be tested directly. Re-stating the predicate inside a test
+ * would prove only that the test and the source agree with each other, which is
+ * the mistake tests/web-leads-projection-covers-filters.test.ts was written to
+ * stop being repeated.
+ *
+ * NO DATE IS NOT DUE. A lead nobody promised to call back is ordinary queue
+ * work, not a broken promise, and putting it on the one screen that says "you
+ * said you would do this" would make that screen mean nothing. An unparseable
+ * date is treated the same way, for the same reason scores.ts refuses to read a
+ * missing score as a low one.
+ *
+ * @param nextActionAt ISO timestamp the rep committed to, or null
+ * @param now          the request's single injected clock, in ms
+ */
+export function isDue(nextActionAt: string | null | undefined, now: number): boolean {
+  if (!nextActionAt) return false;
+  const at = Date.parse(nextActionAt);
+  return Number.isFinite(at) && at <= now;
+}
+
+/**
+ * The due queue's order: oldest promise first, ties on name.
+ *
+ * Only reachable when the `due` filter is on, and that filter has already
+ * dropped every row without a parseable date, so the fallbacks here are for
+ * type-safety rather than for a case this can actually reach. A row that
+ * somehow arrives without one sorts LAST rather than first, because an unknown
+ * date is not an overdue one -- the same rule scores.ts applies to a missing
+ * score.
+ */
+export function byDueThenName(a: WebLeadRow, b: WebLeadRow): number {
+  const at = a.nextActionAt ? Date.parse(a.nextActionAt) : Number.POSITIVE_INFINITY;
+  const bt = b.nextActionAt ? Date.parse(b.nextActionAt) : Number.POSITIVE_INFINITY;
+  const av = Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
+  const bv = Number.isFinite(bt) ? bt : Number.POSITIVE_INFINITY;
+  if (av !== bv) return av - bv;
+  return a.name.localeCompare(b.name);
+}
+
 function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number {
   const byName = (a: WebLeadRow, b: WebLeadRow) => a.name.localeCompare(b.name);
   if (sort === "name") return byName;
+  if (sort === "enriched_desc") {
+    // Best-known first, then the existing opportunity order WITHIN a tier, so
+    // this reorders the queue rather than replacing its logic: among leads we
+    // know equally well, the worst website still comes first.
+    return (a, b) => {
+      const d = enrichmentRank(b) - enrichmentRank(a);
+      if (d !== 0) return d;
+      const aHas = a.score !== null;
+      const bHas = b.score !== null;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      if (aHas && bHas && a.score !== b.score) return a.score! - b.score!;
+      return byName(a, b);
+    };
+  }
   return (a, b) => {
     const aHas = a.score !== null;
     const bHas = b.score !== null;
@@ -295,10 +1090,70 @@ export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | n
   // doesn't exist -- returning null here (not a distinguishable error) is
   // what lets the route answer with a 404 instead of a 403, so a scoped
   // contractor can't use this endpoint to probe which ids exist tenant-wide.
-  if (!visibleToViewer(typeof row.data.assigned_to === "string" ? row.data.assigned_to : null, viewer)) {
-    return null;
-  }
+  //
+  // THIS MUST MATCH WHAT THE LIST SHOWS. fetchLeads' pool scope deliberately
+  // shows an `agent`-role contractor every claimable lead, and every by-id
+  // route -- detail, audit, outcome -- authorizes through here. Left as a bare
+  // visibleToViewer check, a contractor saw the pool, opened a lead, and got a
+  // 404; entered Call Mode and every disposition failed. A list you cannot
+  // click is worse than no list, because the rep only finds out mid-call.
+  // (Codex review, 2026-08-23.)
+  //
+  // So the two rules are the same rule: readable if it is in your book, or if
+  // it is claimable by anyone. Nothing widens beyond that -- a lead somebody
+  // else currently holds is still invisible, which is the property PR #237
+  // closed.
+  if (!canViewerRead(row.data || {}, viewer, Date.now())) return null;
   return toWebLead(row);
+}
+
+/**
+ * Whether `viewer` may read this lead at all, by id.
+ *
+ * The single definition of by-id readability, shared by fetchLead and anything
+ * else that authorizes one lead -- two independent answers to "may they see
+ * it" is how the list and the detail page drift apart, which is exactly the
+ * bug this replaced.
+ */
+export function canViewerRead(
+  data: Record<string, unknown>,
+  viewer: Viewer,
+  now: number,
+): boolean {
+  const facts = factsFrom(data);
+  // Unscoped roles (admins and every established role) are unchanged.
+  if (!isScopedContractor(viewer)) return true;
+  // Managers read their server-resolved sales roster, their own assignment
+  // (even if the roster lookup omitted their seat), AND the shared claimable
+  // pool.
+  //
+  // The pool clause was added 2026-09-01 because its absence was the bug, not
+  // the boundary. fetchLeads' "pool" scope returns isClaimable(...) for EVERY
+  // role including manager, so a manager's Leads page listed the whole
+  // claimable pool and every one of those rows 404'd on click. That is
+  // precisely the list/detail split the comment above fetchLead describes
+  // closing for contractors -- it was simply reintroduced one branch lower.
+  // Measured on the live tenant: 96,700 of 124,166 businesses are unassigned,
+  // so this was most of what a manager could see and none of what they could
+  // open.
+  //
+  // It widens nothing real. A pool lead is BY DEFINITION assigned to nobody,
+  // so reading one discloses no rep's book, and every opener could already
+  // open it -- the manager was the only sales role denied what its own reports
+  // have. The property that actually matters is untouched: isClaimable is
+  // false for a lead somebody currently holds, so an off-roster assignment
+  // (a founder's, an admin's) stays invisible. That is the boundary PR #237
+  // closed, and it is still closed -- asserted directly in
+  // tests/web-leads-scope.test.ts.
+  if (viewer.teamRole.trim().toLowerCase() === "manager") {
+    return (
+      managerCanReadAssignment(facts.assignedTo, viewer) ||
+      isInBookOf(facts, viewer.userId) ||
+      isClaimable(data, now)
+    );
+  }
+  if (isInBookOf(facts, viewer.userId)) return true;
+  return isClaimable(data, now);
 }
 
 /**
@@ -310,31 +1165,45 @@ export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | n
  * "Toronto 8,246" while the table renders zero rows tells that contractor
  * exactly how big and where the rest of the tenant's book is, which is the
  * same class of leak #237 closed on the manifest route (see the Viewer doc
- * comment). This walks every lead once, keeps only the ones visible to this
- * viewer, and re-tallies each sheet's four counters from that subset --
+ * comment). This walks the cached, narrow lead projection once, keeps only the
+ * ones visible to this viewer, and re-tallies each sheet's four counters from that subset --
  * same Sheet[] shape fetchSheets() returns, so buildFacets() can't tell the
  * difference. Unscoped viewers never call this and keep the O(sheets)
- * counter path in fetchSheets() -- this is the slow path, on purpose, only
- * for the narrow audience that must never see the fast one's true numbers.
+ * counter path in fetchSheets(). Scoped viewers still pay O(leads) CPU, but
+ * they no longer transfer every record's full JSON blob. The assigned-book
+ * projection carries only filter/ownership fields and is bounded to the
+ * server-resolved rep roster. The sheet lookup starts concurrently.
  */
-export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]> {
-  const db = getServiceSupabase();
-  const { data, error, count } = await db
-    .from("tenant_records")
-    .select("id,data", { count: "exact" })
-    .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("entity_type", "lead")
-    .limit(LEAD_READ_CAP);
-  if (error) throw new Error(`leads_read_failed: ${error.message}`);
-  // Completeness proved against the read's own match count, not inferred from
-  // our cap -- see assertCompleteRead() in ./tenant for what that catches.
-  assertCompleteRead("leads_read", data || [], count);
+export async function fetchSheetsScopedToViewer(
+  viewer: Viewer,
+  {
+    scope = "mine",
+    now = Date.now(),
+    fresh = false,
+    projectedRows,
+    baseSheets,
+  }: {
+    scope?: LeadScope;
+    now?: number;
+    fresh?: boolean;
+    projectedRows?: ProjectedLeadRow[];
+    baseSheets?: Sheet[];
+  } = {},
+): Promise<Sheet[]> {
+  const [rows, sheets] = await Promise.all([
+    projectedRows ?? fetchLeadProjection(viewer, scope, fresh),
+    baseSheets ?? fetchSheets(),
+  ]);
 
   type Bucket = { total: number; callable: number; noSite: number; callableNoSite: number };
   const counts = new Map<string, Bucket>();
-  for (const r of (data || []) as { id: string; data: Record<string, unknown> }[]) {
+  for (const r of rows) {
     const assignedTo = typeof r.data.assigned_to === "string" ? r.data.assigned_to : null;
-    if (!visibleToViewer(assignedTo, viewer)) continue;
+    if (
+      scope === "mine"
+        ? !visibleToViewer(assignedTo, viewer)
+        : !isClaimable(r.data, now)
+    ) continue;
     const lead = toWebLead(r);
     if (!lead.territoryId) continue;
     const bucket = counts.get(lead.territoryId) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
@@ -347,17 +1216,22 @@ export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]
     counts.set(lead.territoryId, bucket);
   }
 
-  const sheets = await fetchSheets();
-  return sheets.map((s) => {
-    const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
-    return {
-      ...s,
-      leads_total: c.total,
-      leads_callable: c.callable,
-      leads_no_site: c.noSite,
-      leads_callable_no_site: c.callableNoSite,
-    };
-  });
+  // Filtered on the DERIVED total, so a sheet is listed exactly when it holds
+  // something this viewer can act on. Measured 2026-09-02: 1,871 of 2,356
+  // territories were listed while genuinely empty, because the filter used to
+  // run on the stored column before any counting happened.
+  return sheets
+    .map((s) => {
+      const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
+      return {
+        ...s,
+        leads_total: c.total,
+        leads_callable: c.callable,
+        leads_no_site: c.noSite,
+        leads_callable_no_site: c.callableNoSite,
+      };
+    })
+    .filter((s) => s.leads_total > 0);
 }
 
 /**

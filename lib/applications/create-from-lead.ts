@@ -26,6 +26,45 @@ import {
   GENERATED_APPLICATION_OWNERSHIP_PCT,
   mapLeadDataToApplicationFields,
 } from "@/lib/applications/live-sub-mapping";
+import { memberStanding, type MemberStanding } from "@/lib/team";
+
+/**
+ * The lead's owner becomes the new application's owner, unless they have been
+ * deactivated. The lead stays theirs (history), but a NEW application is new
+ * ownership, so it is created unowned and an admin assigns it through the
+ * checked assign route. A non-member owner or a failed standing read keeps
+ * today's copy: generating the application must not be blocked by the check.
+ */
+async function ownerForNewApplication(
+  tenantId: string,
+  leadId: string,
+  owner: string,
+): Promise<string | null> {
+  let standing: MemberStanding;
+  try {
+    standing = (await memberStanding(tenantId, owner)).standing;
+  } catch (err) {
+    console.warn("[applications.create-from-lead] owner standing check failed; copying the lead owner", {
+      tenantId,
+      leadId,
+      owner,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return owner;
+  }
+  if (standing === "deactivated") {
+    console.warn("[applications.create-from-lead] owner deactivated", { tenantId, leadId, owner });
+    return null;
+  }
+  if (standing === "not_member") {
+    console.warn("[applications.create-from-lead] owner is not a member; copying the lead owner", {
+      tenantId,
+      leadId,
+      owner,
+    });
+  }
+  return owner;
+}
 
 export type CreateAppFromLeadResult =
   | { ok: true; applicationId: string; created: boolean }
@@ -102,10 +141,11 @@ export async function createApplicationFromLead(input: {
       (typeof leadData.legal_name === "string" && leadData.legal_name.trim()) ||
       "Untitled application";
   }
-  const assignedTo =
+  const leadOwner =
     typeof leadData.assigned_to === "string" && leadData.assigned_to
       ? leadData.assigned_to
       : null;
+  const assignedTo = leadOwner ? await ownerForNewApplication(tenantId, leadId, leadOwner) : null;
 
   try {
     const created = await createRecord({

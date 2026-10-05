@@ -1,7 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
-import { roleAllowedForTenant } from "@/lib/role-surfaces";
+import { sendAuthEmail } from "@/lib/auth-email";
+import { teamInviteEmailText, teamInviteUrl } from "@/lib/team-invite-email";
+import { teamRoleLabel } from "@/lib/team-roles";
+import {
+  invitableRoleOptionsForActor,
+  roleAllowedForTenant,
+} from "@/lib/role-surfaces";
 import {
   canManageTeam,
   createInvite,
@@ -9,9 +15,10 @@ import {
   isInvitableRole,
   isTrueAdminRole,
   listActiveInvites,
+  normalizeInviteEmail,
+  supersedeActiveInvites,
   tenantSlugFor,
 } from "@/lib/team";
-import { isOasisSalesRole } from "@/lib/team-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,9 +27,16 @@ export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
   if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) return bad(403, "forbidden");
-  const invites = await listActiveInvites(ctx.tenantId);
+  const [invites, tenantSlug] = await Promise.all([
+    listActiveInvites(ctx.tenantId),
+    tenantSlugFor(ctx.tenantId),
+  ]);
   return NextResponse.json({
     ok: true,
+    role_options: invitableRoleOptionsForActor(
+      tenantSlug,
+      isTrueAdminRole(ctx.teamRole, ctx.isOwner),
+    ),
     invites: invites.map((i) => ({
       id: i.id,
       email: i.email,
@@ -60,7 +74,7 @@ export async function POST(req: NextRequest) {
   // The slug read happens ONLY on the sales-role path, so the ordinary
   // member/admin invite pays no extra query. An unresolvable slug is treated as
   // "not OASIS" and rejects, which is the fail-closed direction.
-  if (isOasisSalesRole(role) && !roleAllowedForTenant(role, await tenantSlugFor(ctx.tenantId))) {
+  if (!roleAllowedForTenant(role, await tenantSlugFor(ctx.tenantId))) {
     return bad(400, "invalid role");
   }
   // ESCALATION GUARD: minting a permanent ADMIN via invite is a TRUE-admin
@@ -69,15 +83,42 @@ export async function POST(req: NextRequest) {
   if (role === "admin" && !isTrueAdminRole(ctx.teamRole, ctx.isOwner)) {
     return bad(403, "forbidden");
   }
-  const email = body.email?.trim() || null;
+  // Every invite is a bearer credential. Pinning it to one normalized mailbox
+  // prevents a forwarded/leaked link from enrolling an unrelated account.
+  const email = normalizeInviteEmail(body.email);
+  if (!email) return bad(400, "valid teammate email required");
 
+  let superseded = 0;
   try {
+    // Fail closed on retries: retire an earlier equivalent grant before
+    // minting its replacement. The UI also blocks ordinary double-clicks.
+    superseded = await supersedeActiveInvites({
+      tenantId: ctx.tenantId,
+      email,
+    });
     const invite = await createInvite({
       tenantId: ctx.tenantId,
       role,
       createdBy: ctx.authUserId,
       email,
     });
+    const inviteUrl = teamInviteUrl(invite.rawToken);
+    const delivery = await sendAuthEmail({
+      to: email,
+      subject: "You're invited to the OASIS AI Command Center",
+      text: teamInviteEmailText({
+        roleLabel: teamRoleLabel(role),
+        inviteUrl,
+        expiresAt: invite.expiresAt,
+      }),
+    });
+    if (!delivery.ok) {
+      console.error("[team-invite] delivery failed", {
+        tenantId: ctx.tenantId,
+        inviteId: invite.id,
+        code: delivery.code,
+      });
+    }
     // Audit-log the invite creation (Phase D). Best-effort — never fail
     // the operator-facing request because the audit write hiccuped.
     try {
@@ -87,22 +128,40 @@ export async function POST(req: NextRequest) {
         p_action_type: "invite.create",
         p_target_table: "tenant_invites",
         p_target_id: invite.id,
-        p_after: { team_role: role, email, expires_at: invite.expiresAt },
+        p_after: {
+          team_role: role,
+          email,
+          expires_at: invite.expiresAt,
+          email_sent: delivery.ok,
+          superseded,
+        },
       });
     } catch {
       // audit-log soft-fail
     }
-    return NextResponse.json({
-      ok: true,
-      invite: {
-        id: invite.id,
-        raw_token: invite.rawToken,
-        expires_at: invite.expiresAt,
+    return NextResponse.json(
+      {
+        ok: true,
+        invite: {
+          id: invite.id,
+          invite_url: inviteUrl,
+          expires_at: invite.expiresAt,
+          email_sent: delivery.ok,
+          superseded,
+        },
+        message: delivery.ok
+          ? `Invite emailed to ${email}.`
+          : `Invite created, but email delivery failed. Copy the backup link for ${email}.`,
       },
-      message: "Copy this token now. It will not be shown again.",
-    });
+      { status: 201 },
+    );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "invite_create_failed";
-    return bad(500, msg);
+    console.error("[team-invite] create failed", err);
+    return bad(
+      500,
+      superseded > 0
+        ? "invite_create_failed_after_previous_revoked"
+        : "invite_create_failed",
+    );
   }
 }

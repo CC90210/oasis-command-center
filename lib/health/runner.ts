@@ -17,13 +17,17 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
-import { DRIP_CHECKS, runCheck } from "./drip-checks";
+import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
+import { CALENDAR_CHECKS } from "./calendar-checks";
+import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
+import { healthAlertStateKey } from "./alert-state-key";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 import { computeCoverage } from "./coverage";
 
@@ -36,11 +40,91 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
+  return [...tenantOutcomeChecks(), ...OASIS_GLOBAL_CHECKS];
+}
+
+/**
+ * OASIS-global infrastructure checks, persisted under the OASIS tenant and
+ * paged to CC's lane: the shared calendar, and (2026-09-24) whether worker
+ * status still reaches the dashboard. Calendar stays FIRST — its probe owns a
+ * wall-clock budget the route depends on.
+ */
+export const OASIS_GLOBAL_CHECKS: DripCheck[] = [...CALENDAR_CHECKS, ...WORKER_REPORTER_CHECKS];
+
+/** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */
+export function tenantOutcomeChecks(): DripCheck[] {
   return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS];
 }
 
+/**
+ * Checks that grade the whole estate and ignore the tenant they run under:
+ * whether production serves main, whether pages reach their lanes (it reads
+ * every `alerting.telegram_delivery` row), and the estate-wide form
+ * dead-letter table.
+ *
+ * They rode SunBiz's tenant run until SunBiz was retired on 2026-09-28, and
+ * now persist under the OASIS tenant. Retiring a client must never silence a
+ * platform check, and a platform check must never keep writing rows for a
+ * client that is gone.
+ */
+const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_failures_open"]);
+export const ESTATE_WIDE_CHECKS: DripCheck[] = [
+  ...DEPLOY_CHECKS,
+  ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),
+];
+
 
 type Db = ReturnType<typeof getServiceSupabase>;
+
+/**
+ * Where a check's alerts go.
+ *
+ * `sunbiz-ops` is the default because every check that existed when this runner
+ * was written was a SunBiz drip check, and the lane was hardcoded to match. The
+ * estate outgrew that: the OASIS workspace-calendar check added in #334 would
+ * have announced an OASIS booking outage into the CLIENT's ops channel, for a
+ * product they do not operate. An alert in the wrong room is an alert nobody
+ * acts on, which is indistinguishable from no alert at all -- the exact failure
+ * mode this whole subsystem was built after.
+ *
+ * Defaulting rather than requiring the field keeps every existing check on the
+ * lane it already used, so this is additive: nothing reroutes by accident.
+ */
+function lanesFor(check: { lane?: TelegramLane | TelegramLane[] }): TelegramLane[] {
+  if (Array.isArray(check.lane)) return check.lane;
+  return [check.lane ?? "sunbiz-ops"];
+}
+
+/**
+ * Lanes still owed a RECOVERED message, parked in `last_signature`.
+ *
+ * A failure alert can afford to lose a lane: the ladder re-sends it, and
+ * `alerting.telegram_delivery` catches a channel that is dead outright. A
+ * recovery cannot. Clearing `first_failed_at` is terminal — there is no second
+ * chance — so a lane that rejects the one recovery message keeps its red alert
+ * until a human notices, which is the whole failure mode this file exists to
+ * prevent.
+ *
+ * Retrying the message wholesale would be worse: a lane that is dead for days
+ * (2026-08-07: @KnutRPEbot kicked from the sunbiz-ops group) would re-tell the
+ * REACHABLE audience "RECOVERED" every 15 minutes. So only the lanes that did
+ * not accept are carried forward, and only they are retried.
+ *
+ * `last_signature` is the carrier because it is dead space during an ok run —
+ * it only means anything while a failure is active. A real signature can never
+ * collide with this marker, so a NEW failure arriving mid-retry reads as a new
+ * signature and alerts immediately, which is exactly right.
+ */
+const RECOVERY_PENDING = "recovery-pending:";
+
+export function pendingRecoveryLanes(signature: string | null | undefined): TelegramLane[] | null {
+  if (!signature || !signature.startsWith(RECOVERY_PENDING)) return null;
+  const lanes = signature
+    .slice(RECOVERY_PENDING.length)
+    .split(",")
+    .filter(Boolean) as TelegramLane[];
+  return lanes.length ? lanes : null;
+}
 
 const SEV_ICON: Record<string, string> = {
   failing: "🔴",
@@ -69,9 +153,24 @@ export type RunSummary = {
  */
 export async function runHealthChecks(
   tenantId: string,
-  opts: { nowMs?: number; notify?: boolean } = {},
+  opts: {
+    nowMs?: number;
+    notify?: boolean;
+    checks?: readonly DripCheck[];
+    /** Test seam for exercising the real state machine without production data. */
+    db?: Db;
+    /** Test seam for proving delivery decisions without sending Telegram messages. */
+    sendTelegramImpl?: typeof sendTelegram;
+  } = {},
 ): Promise<RunSummary> {
-  const db = getServiceSupabase();
+  // A retired tenant has no outcomes left to grade, and every row this writes
+  // (health_check_runs, health_alert_state) lands in tables that are being
+  // exported and deleted. Nothing is checked, persisted or paged.
+  if (isRetiredTenant(tenantId)) {
+    return { ran: 0, results: [], alerted: [], recovered: [], worst: worstVerdict([]) };
+  }
+  const db = opts.db ?? getServiceSupabase();
+  const send = opts.sendTelegramImpl ?? sendTelegram;
   const nowMs = opts.nowMs ?? Date.now();
   const notify = opts.notify !== false;
   const results: CheckResult[] = [];
@@ -79,7 +178,7 @@ export async function runHealthChecks(
   const recovered: string[] = [];
   let telegramFailures = 0;
 
-  const checks = allChecks();
+  const checks = opts.checks ? [...opts.checks] : allChecks();
   for (const check of checks) {
     let result: CheckResult;
     try {
@@ -110,8 +209,16 @@ export async function runHealthChecks(
 
     if (!notify) continue;
 
-    const key = `health:${result.id}`;
-    const stateRow = await db.from("health_alert_state").select("*").eq("alert_key", key).maybeSingle();
+    // `alert_key` is globally unique in the deployed schema. Qualifying it as
+    // well as filtering by tenant keeps two workspaces running the same check
+    // on independent decay/recovery ladders.
+    const key = healthAlertStateKey(tenantId, result.id);
+    const stateRow = await db
+      .from("health_alert_state")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("alert_key", key)
+      .maybeSingle();
     const state = stateRow.data as
       | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null }
       | null;
@@ -121,15 +228,51 @@ export async function runHealthChecks(
       // starts a fresh ladder rather than inheriting a 24h window.
       if (state?.first_failed_at) {
         recovered.push(result.id);
-        await sendTelegram(
-          `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
-          { lane: "sunbiz-ops" },
-        ).catch(() => undefined);
+        // Recovery is announced to every lane that was told about the failure.
+        // Telling one team it is fixed while the other is still watching a red
+        // alert is how a resolved incident stays open.
+        //
+        // On a retry run, only the lanes that did not accept it last time.
+        const owed = pendingRecoveryLanes(state.last_signature) ?? lanesFor(check);
+        const stillOwed: TelegramLane[] = [];
+        for (const lane of owed) {
+          const r = await send(
+            `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
+            { lane },
+          ).catch(() => ({ ok: false }));
+          if (!r.ok) stillOwed.push(lane);
+        }
+        // The episode stays OPEN while a lane is still owed the news, so the
+        // next run retries it. Closing it here would strand that lane's
+        // operators on a red alert with nothing left to resolve it.
         await db.from("health_alert_state").upsert({
-          alert_key: key, tenant_id: tenantId, last_signature: null,
-          last_alerted_at: state.last_alerted_at, repeat_n: 0, first_failed_at: null,
+          alert_key: key, tenant_id: tenantId,
+          last_signature: stillOwed.length ? `${RECOVERY_PENDING}${stillOwed.join(",")}` : null,
+          last_alerted_at: state.last_alerted_at, repeat_n: 0,
+          first_failed_at: stillOwed.length ? state.first_failed_at : null,
           updated_at: new Date(nowMs).toISOString(),
         }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+
+        if (stillOwed.length) {
+          // Same principle as an undeliverable alert: record it in the
+          // DATABASE, on a path that does not depend on the channel that just
+          // failed. `alerting.telegram_delivery` is itself a check, so a lane
+          // that stays dead becomes an alert of its own rather than silence.
+          console.error("[health] telegram recovery delivery failed", {
+            check: result.id, lanes: stillOwed,
+          });
+          telegramFailures += 1;
+          await db.from("health_check_runs").insert({
+            tenant_id: tenantId,
+            check_id: "alerting.telegram_delivery",
+            surface: "oasis",
+            verdict: "failing",
+            observed: 0,
+            baseline: 1,
+            reason: `could not deliver the ${result.id} recovery to ${stillOwed.join(", ")}`.slice(0, 500),
+            ran_at: new Date(nowMs).toISOString(),
+          }).then(() => undefined, () => undefined);
+        }
       }
       continue;
     }
@@ -146,7 +289,16 @@ export async function runHealthChecks(
       `${SEV_ICON[result.verdict]} <b>${esc(result.verdict.toUpperCase())}</b> — ${esc(result.id)}\n` +
       `${esc(check.describe(result))}\n` +
       `<i>next check in 15 min · re-alerts in ${decision.windowH}h if still bad</i>`;
-    const sent = await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => ({ ok: false }));
+    // Delivery counts as successful if ANY lane took it. The ladder exists to
+    // stop re-sending every 15 minutes; one reachable audience is enough for
+    // that, and the delivery self-test is what catches a dead channel.
+    let sent: { ok: boolean } = { ok: false };
+    const rejected: TelegramLane[] = [];
+    for (const lane of lanesFor(check)) {
+      const r = await send(body, { lane }).catch(() => ({ ok: false }));
+      if (r.ok) sent = { ok: true };
+      else rejected.push(lane);
+    }
 
     // Record the alert attempt regardless of delivery. If Telegram is down we
     // must not spin re-sending every 15 minutes; the delivery self-test is the
@@ -162,7 +314,15 @@ export async function runHealthChecks(
       updated_at: new Date(nowMs).toISOString(),
     }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
 
-    if (!sent.ok) {
+    // RECORDED WHENEVER A LANE REFUSED, not only when EVERY lane refused.
+    //
+    // This used to be `if (!sent.ok)`. With one lane the two conditions were
+    // the same sentence. With two they are not: the 2026-08-07 outage was
+    // exactly one dead lane (@KnutRPEbot kicked from the sunbiz-ops group)
+    // while the other kept working, so `sent.ok` stayed true and the dead lane
+    // left no trace at all. The audience that heard nothing is the audience
+    // whose silence needs recording.
+    if (rejected.length) {
       // THE ALERT CHANNEL IS A SINGLE POINT OF FAILURE (2026-06-30 audit,
       // finding #1) and on 2026-08-07 it was genuinely down: @KnutRPEbot had
       // been kicked from the sunbiz-ops group, so every alert returned 403 and
@@ -177,7 +337,7 @@ export async function runHealthChecks(
       // Note also: Telegram's getChat returns ok for a group the bot has been
       // kicked from. Only a real send proves deliverability, so any future
       // self-test must SEND, not probe.
-      console.error("[health] telegram delivery failed", { check: result.id });
+      console.error("[health] telegram delivery failed", { check: result.id, lanes: rejected });
       telegramFailures += 1;
       await db.from("health_check_runs").insert({
         tenant_id: tenantId,
@@ -186,7 +346,19 @@ export async function runHealthChecks(
         verdict: "failing",
         observed: 0,
         baseline: 1,
-        reason: `could not deliver the ${result.id} alert to the sunbiz-ops lane`.slice(0, 500),
+        // Name the lanes that actually rejected it. This line used to read
+        // "the sunbiz-ops lane" unconditionally — the same defect as the rest
+        // of this branch: a lane constant standing in for a lane decision. It
+        // sent whoever read the row looking at the wrong chat.
+        // Name the lanes, and say whether ANYONE heard it. "one of two lanes
+        // is down" and "the alert reached nobody" are different incidents with
+        // different urgency, and a reader at 2am should not have to infer
+        // which one this row is.
+        reason: (
+          sent.ok
+            ? `could not deliver the ${result.id} alert to ${rejected.join(", ")} (another lane took it)`
+            : `could not deliver the ${result.id} alert to ${rejected.join(", ")} — NO lane took it`
+        ).slice(0, 500),
         ran_at: new Date(nowMs).toISOString(),
       }).then(() => undefined, () => undefined);
     }
@@ -212,7 +384,7 @@ export async function runHealthChecks(
  * What exists but is not checked.
  *
  * The 2026-08-06 incident was caused by a hand-maintained watch list, not by a
- * missing check. So the gap itself is monitored: crons come from vercel.json,
+ * missing check. So the gap itself is monitored: crons come from config/cron-registry.json,
  * brands from the registry, and anything without a corresponding check is
  * reported. Low severity and weekly, because it is a backlog rather than an
  * outage — but never silent, because silence is how the list fell behind.
@@ -231,7 +403,7 @@ export async function reportCoverageGap(
       `⚪ <b>MONITORING GAP</b> — ${cov.uncovered.length} surface(s) have no health check\n` +
         shown.map((u) => `· ${esc(u)}`).join("\n") +
         (cov.uncovered.length > shown.length ? `\n…and ${cov.uncovered.length - shown.length} more` : "") +
-        `\n<i>${cov.crons.length} cron routes discovered from vercel.json</i>`,
+        `\n<i>${cov.crons.length} cron routes discovered from config/cron-registry.json</i>`,
       { lane: "sunbiz-ops" },
     ).catch(() => undefined);
   }

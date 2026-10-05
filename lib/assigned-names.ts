@@ -15,7 +15,7 @@
  * Added 2026-06-16.
  */
 
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 
 /**
  * Build a Map<auth_user_id, displayName> for one tenant. Soft-fails to an
@@ -26,14 +26,31 @@ import { getTenantMembers } from "@/lib/team";
 export async function buildMemberNameMap(
   tenantId: string,
 ): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  const members = await getTenantMembers(tenantId).catch(() => []);
+  return (await buildMemberDirectory(tenantId)).names;
+}
+
+/**
+ * Names for EVERY teammate plus the subset still active, from one read.
+ *
+ * The two answer different questions and must not be confused (2026-09-24):
+ * a lead still assigned to a deactivated rep must keep showing that rep's name
+ * (history), but a rep filter chip or picker must offer only active people.
+ * /pipeline used the name map for its chips, which is how retired reps would
+ * have stayed on the board's filter row after deactivation.
+ */
+export async function buildMemberDirectory(
+  tenantId: string,
+): Promise<{ names: Map<string, string>; activeIds: Set<string> }> {
+  const names = new Map<string, string>();
+  const activeIds = new Set<string>();
+  const members = await getTenantMembers(tenantId, { includeInactive: true }).catch(() => []);
   for (const m of members) {
     if (!m.auth_user_id) continue;
     const name = (m.display_name || m.full_name || "").trim();
-    if (name) map.set(m.auth_user_id, name);
+    if (name) names.set(m.auth_user_id, name);
+    if (isActiveMember(m)) activeIds.add(m.auth_user_id);
   }
-  return map;
+  return { names, activeIds };
 }
 
 /**

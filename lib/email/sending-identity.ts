@@ -17,10 +17,8 @@
 
 import { resolveTrackingBase, trackingHost } from "./tracking-base";
 import { ALL_BRAND_KEYS, getBrand, resolveBrandKey, type BrandKey } from "./brands";
+import { publicFormOrigin } from "@/lib/forms/public-origin";
 
-/** What the sender was before any of this was configurable. Kept as the default
- *  so an unset environment is byte-identical to the pre-2026-07-29 behaviour. */
-const LEGACY_FROM = "submissions@sunbizfunding.com";
 const LEGACY_PLATFORM = "https://oasisai.work";
 
 function env(name: string): string | undefined {
@@ -230,6 +228,14 @@ export function clickAllowedHosts(): Set<string> {
   } catch {
     /* an unparseable intake URL contributes nothing rather than widening */
   }
+
+  // SunBiz's per-lead application links are built on their own public origin
+  // (lib/forms/public-origin.ts). Without that host here, an unsigned click on a
+  // merchant's own application link lands on the generic intake form instead,
+  // and moving SUNBIZ_PUBLIC_FORM_ORIGIN to a new host would do that to all of
+  // them. Only an https origin is added, like the tracking host above.
+  const sunbizForms = new URL(publicFormOrigin({ tenantSlug: "submissions" }));
+  if (sunbizForms.protocol === "https:") hosts.add(sunbizForms.hostname);
   return hosts;
 }
 

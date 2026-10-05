@@ -31,6 +31,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AlertCircle, ArrowRight, CheckCircle2, Mail, Shield } from "lucide-react";
 import { InviteRedeemForSignedInUser } from "./InviteRedeemForSignedInUser";
+import { teamRoleLabel } from "@/lib/team-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,16 +42,6 @@ type Preview = {
   team_role: string;
   expires_at: string;
   email_pinned: string | null;
-};
-
-const ROLE_LABEL: Record<string, string> = {
-  admin: "Admin",
-  agent: "Sales Agent",
-  loan_officer: "Loan Officer",
-  processor: "Processor",
-  read_only: "Read-Only Viewer",
-  member: "Member",
-  owner: "Owner",
 };
 
 function hashToken(raw: string): string {
@@ -95,23 +86,11 @@ export default async function InviteLanding({
           <InviteRedeemForSignedInUser
             token={token}
             tenantName={preview.tenant_name}
-            roleLabel={ROLE_LABEL[preview.team_role] || preview.team_role}
+            roleLabel={teamRoleLabel(preview.team_role)}
             email={user.email || ""}
           />
         ) : (
           <ValidCard token={token} preview={preview} />
-        )}
-
-        {!user && (
-          <div className="text-center text-[11px] text-fg-dim mt-6">
-            Already have an account?{" "}
-            <Link
-              href={`/login?invite=${encodeURIComponent(token)}`}
-              className="text-accent hover:text-accent/80 underline underline-offset-2"
-            >
-              Sign in
-            </Link>
-          </div>
         )}
       </div>
     </div>
@@ -144,7 +123,7 @@ function InvalidCard() {
         </Link>
         <p className="text-[11px] text-fg-dim leading-relaxed text-center">
           Need a fresh invite? Ask the person who sent you this link to send a new one — they can
-          generate it from their workspace&apos;s Team page.
+          send it from their workspace&apos;s Team page.
         </p>
       </div>
     </div>
@@ -152,7 +131,7 @@ function InvalidCard() {
 }
 
 function ValidCard({ token, preview }: { token: string; preview: Preview }) {
-  const roleLabel = ROLE_LABEL[preview.team_role] || preview.team_role;
+  const roleLabel = teamRoleLabel(preview.team_role);
   const expiresMs = Date.parse(preview.expires_at);
   const daysLeft = Number.isNaN(expiresMs)
     ? null
@@ -203,13 +182,46 @@ function ValidCard({ token, preview }: { token: string; preview: Preview }) {
         })()}
         className="block w-full text-center rounded-lg bg-accent text-bg-deep font-bold py-2.5 text-sm hover:bg-accent/90 transition-colors"
       >
-        Continue → Create account
+        Create a new account
         <ArrowRight className="w-4 h-4 inline-block ml-1.5 align-text-bottom" />
       </Link>
 
+      <div className="rounded-lg border border-bg-border bg-bg-panel/60 p-3 space-y-2">
+        <div className="text-xs font-semibold text-fg">Already use OASIS?</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              query.set("invite", token);
+              if (preview.email_pinned) query.set("email", preview.email_pinned);
+              return `/login?${query.toString()}`;
+            })()}
+            className="rounded-md border border-accent/40 px-3 py-2 text-center text-xs font-bold text-accent hover:bg-accent/10"
+          >
+            Sign in &amp; join
+          </Link>
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              query.set("invite", token);
+              if (preview.email_pinned) query.set("email", preview.email_pinned);
+              query.set("workspace", preview.tenant_name);
+              return `/forgot-password?${query.toString()}`;
+            })()}
+            className="rounded-md border border-bg-border px-3 py-2 text-center text-xs font-bold text-fg hover:border-accent/50"
+          >
+            Reset password
+          </Link>
+        </div>
+        <p className="text-[11px] text-fg-dim">
+          Resetting keeps your existing account and returns you here to finish joining.
+        </p>
+      </div>
+
+      {/* No "you can leave at any time" line: there is no self-serve leave
+          control. Removing a member is an admin action on the Team page. */}
       <p className="text-[11px] text-fg-dim leading-relaxed">
-        By accepting, you&apos;ll join {preview.tenant_name} with {roleLabel} permissions. You can leave
-        the workspace at any time from your profile settings.
+        By accepting, you&apos;ll join {preview.tenant_name} with {roleLabel} permissions.
       </p>
     </div>
   );

@@ -9,7 +9,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { getReadableLeadTargetForSession } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,11 +19,18 @@ export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) {
+  const session = await resolveSessionContext();
+  if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const { id: leadId } = await ctx.params;
+  const target = await getReadableLeadTargetForSession(session, {
+    tenantId: session.tenantId,
+    id: leadId,
+  });
+  if (!target) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const db = getServiceSupabase();
 
   const result = await db
@@ -43,8 +51,8 @@ export async function GET(
         "state",
       ].join(", "),
     )
-    .eq("tenant_id", tenantId)
-    .eq("lead_id", leadId)
+    .eq("tenant_id", session.tenantId)
+    .eq("lead_id", target.queryLeadId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

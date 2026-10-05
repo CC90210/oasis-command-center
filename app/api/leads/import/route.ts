@@ -8,8 +8,22 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { routeSunBizImportStage } from "@/lib/sunbiz-stage-routing";
+import {
+  isWebsiteSalesTenantSlug,
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+  stampSalesProgramForTenant,
+  stageForWebsiteSalesLead,
+} from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { createImportAssigneeCheck, type ImportAssigneeCheck } from "@/lib/leads-import-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,6 +112,9 @@ type IncomingRow = {
   business_city?: string | null;
   business_zip?: string | null;
   website?: string | null;
+  website_condition?: string | null;
+  audit_findings?: string | null;
+  icp_track?: string | null;
   entity_type?: string | null;
   record_type?: string | null;
   industry?: string | null;
@@ -112,17 +129,41 @@ type IncomingRow = {
 };
 
 export async function POST(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-
+  const sess = await resolveSessionContext();
+  if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't import leads." },
+      { status: 403 },
+    );
+  }
   const db = getServiceSupabase();
-  const profileRes = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
-  if (!tenantId) return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 401 });
+  const tenantId = sess.tenantId;
+  // Which pipeline is this import FOR? A website column is ordinary detail on
+  // a funding application, so the program stamp below is gated on the tenant
+  // running that program — not on the row happening to carry a URL.
+  const importTenantSlug = await resolveOwnedSlug(tenantId);
+  if (!importTenantSlug) {
+    return NextResponse.json(
+      { ok: false, error: "tenant_scope_unresolved" },
+      { status: 503 },
+    );
+  }
+  let assignmentRoster: Awaited<ReturnType<typeof getOasisPipelineAssignmentRoster>> | null = null;
+  if (isWebsiteSalesTenantSlug(importTenantSlug)) {
+    try {
+      assignmentRoster = await getOasisPipelineAssignmentRoster(tenantId);
+    } catch (error) {
+      console.error("[leads.import] OASIS assignment roster could not be verified", {
+        tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
+        { status: 503 },
+      );
+    }
+  }
 
   let body: { rows?: IncomingRow[]; dedup_by?: string[]; default_source?: string };
   try {
@@ -197,6 +238,8 @@ export async function POST(req: NextRequest) {
   const seenEmails = new Set<string>();
   const seenPhones = new Set<string>();
   const seenBusinesses = new Set<string>();
+  const importedAt = new Date().toISOString();
+  const checkAssignee = createImportAssigneeCheck(tenantId);
 
   for (const [i, raw] of rows.entries()) {
     const name = cleanString(raw.name, 200);
@@ -228,6 +271,14 @@ export async function POST(req: NextRequest) {
     const businessCity = cleanString(raw.business_city, 120);
     const businessZip = cleanString(raw.business_zip, 32);
     const website = cleanString(raw.website, 240);
+    // The parser has recognised these headers since the website-sales engine
+    // shipped, but this route dropped them on the floor — so a CSV of
+    // researched sites imported as bare contacts, un-stamped and therefore
+    // invisible on the OASIS board. lib/leads-import-service.ts (the chat
+    // importer) carried them all along; this is the same mapping.
+    const websiteCondition = cleanString(raw.website_condition, 240);
+    const auditFindings = cleanString(raw.audit_findings, 2_000);
+    const icpTrack = cleanString(raw.icp_track, 120);
     const entityType = cleanString(raw.entity_type, 80);
     const industry = cleanString(raw.industry, 180);
     const title = cleanString(raw.title, 80);
@@ -247,10 +298,16 @@ export async function POST(req: NextRequest) {
         bankStatementUrls ||
         dlVcUrls,
     );
-    const { stage, entityType: rowEntityType } = routeSunBizImportStage(raw.stage, {
+    const routedStage = routeSunBizImportStage(raw.stage, {
       explicitRecordType: raw.record_type,
       hasApplicationEvidence,
     });
+    // This endpoint is shared with SunBiz, whose lead CSV can intentionally
+    // become an application. OASIS imports are the current sales pipeline:
+    // retain the original stage as metadata, but never route those rows into
+    // SunBiz's application entity or they disappear from the OASIS board.
+    const stage = routedStage.stage;
+    const rowEntityType = assignmentRoster ? "lead" : routedStage.entityType;
 
     if (!email && !phone && !name && !businessName) {
       skippedMalformed += 1;
@@ -288,6 +345,81 @@ export async function POST(req: NextRequest) {
     if (phone) seenPhones.add(phone);
     if (businessKey) seenBusinesses.add(businessKey);
 
+    // A row carrying website research belongs to the OASIS website-sales
+    // board, which filters on sales_program and speaks a different stage
+    // vocabulary than SunBiz. Without the stamp the row is invisible there;
+    // with a SunBiz stage it has no column to sit in. Decide both here.
+    const websiteFields = {
+      ...(website ? { website } : {}),
+      ...(websiteCondition ? { website_condition: websiteCondition } : {}),
+      ...(auditFindings ? { audit_findings: auditFindings } : {}),
+      ...(icpTrack ? { icp_track: icpTrack } : {}),
+    };
+    const programStamp =
+      rowEntityType === "lead" ? stampSalesProgramForTenant(websiteFields, importTenantSlug) : {};
+    const isWebsiteSalesRow = Boolean(programStamp.sales_program);
+    const rowStage = isWebsiteSalesRow ? stageForWebsiteSalesLead(originalStage) : stage;
+    let assignmentFacts: Record<string, string> = assignedTo ? { assigned_to: assignedTo } : {};
+    if (assignmentRoster) {
+      if (!assignedTo) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "assignee_required",
+            message: `Row ${i + 1} needs CC or Adon as owner. No rows were imported.`,
+          },
+          { status: 422 },
+        );
+      }
+      const resolved = resolveAssignableTarget(assignmentRoster, assignedTo);
+      if (!resolved) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "target_not_on_sales_roster",
+            message: `Row ${i + 1} names an owner outside the CC + Adon assignment roster. No rows were imported.`,
+          },
+          { status: 422 },
+        );
+      }
+      assignmentFacts = {
+        ...pipelineCycleAssignmentFacts(resolved, importedAt),
+        claimed_at: importedAt,
+        ...(rowEntityType === "lead"
+          ? {
+              sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+              sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+              stage_entered_at: importedAt,
+            }
+          : {}),
+      };
+    } else if (assignedTo) {
+      // Non-OASIS: the row's owner must be an ACTIVE member of this tenant,
+      // checked before anything is written so a refusal imports nothing.
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(assignedTo, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new leads.
+        console.error("[leads.import] row owner could not be verified", {
+          tenantId,
+          row: i + 1,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "member_check_failed",
+            message: `Row ${i + 1}'s owner couldn't be verified right now. No rows were imported. Try again in a moment.`,
+            row: i + 1,
+          },
+          { status: 503 },
+        );
+      }
+      if (!owner.ok) return NextResponse.json(owner, { status: 422 });
+      assignmentFacts = { assigned_to: owner.authUserId };
+    }
+
     toInsert.push({
       tenant_id: tenantId,
       entity_type: rowEntityType,
@@ -304,14 +436,15 @@ export async function POST(req: NextRequest) {
         ...(monthlyRevenue != null ? { monthly_revenue: monthlyRevenue } : {}),
         ...(paperGrade ? { paper_grade: paperGrade } : {}),
         ...(timeInBusiness ? { time_in_business: timeInBusiness } : {}),
-        ...(assignedTo ? { assigned_to: assignedTo } : {}),
+        ...assignmentFacts,
         ...(dateSubmitted ? { date_submitted: dateSubmitted, submitted_at: dateSubmitted } : {}),
         ...(lenderList ? { lender_list: lenderList } : {}),
         ...(dba ? { dba } : {}),
         ...(businessAddress ? { business_address: businessAddress } : {}),
         ...(businessCity ? { business_city: businessCity } : {}),
         ...(businessZip ? { business_zip: businessZip } : {}),
-        ...(website ? { website } : {}),
+        ...websiteFields,
+        ...programStamp,
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),
         ...(title ? { title } : {}),
@@ -324,7 +457,7 @@ export async function POST(req: NextRequest) {
         ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
         ...(originalStage ? { original_stage: originalStage } : {}),
-        stage,
+        stage: assignmentRoster && rowEntityType === "lead" ? "assigned" : rowStage,
         status: rowEntityType === "application" ? stage : "new",
         score: 0,
       },

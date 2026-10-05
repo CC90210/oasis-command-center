@@ -7,10 +7,8 @@
  * The Settings UI redirects the browser to that URL; Google bounces
  * back to /api/auth/google-oauth/callback after consent.
  *
- * Scope: gmail.send only. The operator deliberately CANNOT read their
- * inbox or modify labels from the dashboard — that's a planning
- * decision. Future phases can expand the scope if a feature requires
- * inbox read.
+ * Work scope: Gmail send/read plus Calendar event management so a founder can
+ * own the client invite and Google Meet. Personal scope remains Gmail read-only.
  *
  * State parameter packs the auth_user_id + tenant_id + a CSRF nonce
  * into a short-lived signed token. The callback validates it against
@@ -25,20 +23,28 @@
 
 import { NextResponse } from "next/server";
 import { randomBytes, createHmac } from "node:crypto";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveTenantId } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// gmail.send authorizes the send; gmail.readonly authorizes the Operator
-// Email Agent's inbox MONITOR (read-only — it never modifies/deletes mail).
-// openid + email let the callback resolve the connected Gmail address.
-// (2026-07: expanded from send-only to enable the monitor. Reading the inbox
-// is now in-scope by explicit operator consent; the agent still cannot modify.)
-const OAUTH_SCOPES = [
+// gmail.send authorizes work sends; gmail.readonly authorizes the Operator
+// Email Agent's inbox monitor (it never modifies/deletes mail). openid + email
+// let the callback resolve the connected address.
+// The work account owns both outbound email and founder meetings. Keep the
+// personal account independent so it remains a read-only inbox monitor.
+const WORK_OAUTH_SCOPES = [
   "openid",
   "email",
   "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
+].join(" ");
+
+const PERSONAL_OAUTH_SCOPES = [
+  "openid",
+  "email",
   "https://www.googleapis.com/auth/gmail.readonly",
 ].join(" ");
 
@@ -60,6 +66,7 @@ export async function GET(req: Request) {
   // Which mailbox to connect (default work). Unknown values fail closed to work.
   const mailboxParam = new URL(req.url).searchParams.get("mailbox") || "work";
   const mailbox = mailboxParam in MAILBOX_SERVICE ? mailboxParam : "work";
+  const oauthScopes = mailbox === "personal" ? PERSONAL_OAUTH_SCOPES : WORK_OAUTH_SCOPES;
 
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) {
@@ -80,13 +87,7 @@ export async function GET(req: Request) {
   // Resolve tenant_id so the callback can write to the right slot.
   // The session-user lookup gives us auth_user_id; tenant_id comes
   // from user_profiles.
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json(
       { ok: false, error: "no_tenant", message: "Your account isn't attached to a workspace yet." },
@@ -126,14 +127,17 @@ export async function GET(req: Request) {
 
   const baseUrl =
     process.env.PUBLIC_APP_URL?.replace(/\/$/, "") ||
-    "https://agent-dashboard-cc90210.vercel.app";
+    "https://oasisai.work";
   const redirectUri = `${baseUrl}/api/auth/google-oauth/callback`;
 
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", OAUTH_SCOPES);
+  authUrl.searchParams.set("scope", oauthScopes);
+  // Preserve a host's existing Gmail grants when they reconnect once to add
+  // the Calendar event permission.
+  authUrl.searchParams.set("include_granted_scopes", "true");
   authUrl.searchParams.set("access_type", "offline"); // need refresh_token
   authUrl.searchParams.set("prompt", "consent"); // force refresh_token issuance
   authUrl.searchParams.set("state", state);

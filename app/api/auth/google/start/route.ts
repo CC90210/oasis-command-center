@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import { tursoAuthActive } from "@/lib/turso-auth";
+import { safeInternalPath } from "@/lib/turso-auth-admin";
 
 export const runtime = "nodejs";
 
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest) {
   }
   const state = randomBytes(24).toString("base64url");
   const redirectUri = new URL("/api/auth/google/callback", req.url).toString();
-  const next = req.nextUrl.searchParams.get("next") || "/";
+  const next = safeInternalPath(req.nextUrl.searchParams.get("next"));
 
   const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   auth.searchParams.set("client_id", clientId);

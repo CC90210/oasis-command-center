@@ -163,6 +163,30 @@ function normalizeProductTypes(v: LenderProfile["product_types"]): string[] {
  * calls. Pass profiles in; get a score out. Caller batches over a
  * list of lenders for the shop-out UI.
  */
+/*
+ * EVERY LENDER-SIDE NUMERIC GUARD USES `!= null`, NOT `!== undefined`.
+ *
+ * The lender profiles come from operator-maintained JSON in tenant_records, and
+ * a field an operator cleared is stored as `null`, not removed. Measured on the
+ * live SunBiz catalog 2026-09-07: of 47 lenders, 9 carry `max_funded_amount:
+ * null`, 10 `fico_floor: null`, 9 `min_time_in_business_months: null`, 10
+ * `max_negative_days: null`, 4 `min_monthly_revenue: null`.
+ *
+ * `!== undefined` is TRUE for null, so those branches were entered with a null
+ * threshold. Two consequences, one loud and one quiet:
+ *   - max_funded_amount THREW: `50000 > null` coerces to `50000 > 0`, so the
+ *     branch ran and called `null.toLocaleString()`. TypeError, and rankLenders
+ *     maps without a try/catch, so one such lender takes down a whole ranking.
+ *   - the rest were silent: `revenue >= null` is `revenue >= 0`, so a lender
+ *     with no revenue floor was credited with "meets revenue floor" and scored
+ *     as a better match than it had earned.
+ *
+ * Both production loaders (lib/lenders/shop-out.ts and the match-lenders route)
+ * happen to coerce null to undefined, which is why this stayed latent rather
+ * than live. That is a guarantee held in two call sites that each have to
+ * remember it; the third caller is where it bites. Guarding here makes the
+ * function correct on its own terms.
+ */
 export function scoreLenderMatch(
   lender: LenderProfile,
   application: ApplicationProfile,
@@ -176,7 +200,7 @@ export function scoreLenderMatch(
   };
 
   // ── Revenue floor (high_risk) ──────────────────────────────────────
-  if (lender.min_monthly_revenue !== undefined && application.monthly_revenue !== undefined) {
+  if (lender.min_monthly_revenue != null && application.monthly_revenue !== undefined) {
     if (application.monthly_revenue < lender.min_monthly_revenue) {
       flag(
         "high_risk",
@@ -188,14 +212,14 @@ export function scoreLenderMatch(
         `Revenue $${application.monthly_revenue.toLocaleString()} clears $${lender.min_monthly_revenue.toLocaleString()} floor`,
       );
     }
-  } else if (lender.min_monthly_revenue !== undefined) {
+  } else if (lender.min_monthly_revenue != null) {
     score -= 10;
     flag("info", "missing_revenue_data", "Lender requires revenue floor; application doesn't report monthly revenue");
   }
 
   // ── Time in business floor (high_risk) ─────────────────────────────
   if (
-    lender.min_time_in_business_months !== undefined &&
+    lender.min_time_in_business_months != null &&
     application.time_in_business_months !== undefined
   ) {
     if (application.time_in_business_months < lender.min_time_in_business_months) {
@@ -209,13 +233,13 @@ export function scoreLenderMatch(
         `${application.time_in_business_months}mo TIB clears ${lender.min_time_in_business_months}mo floor`,
       );
     }
-  } else if (lender.min_time_in_business_months !== undefined) {
+  } else if (lender.min_time_in_business_months != null) {
     score -= 5;
     flag("info", "missing_tib_data", "Lender requires TIB floor; application doesn't report TIB");
   }
 
   // ── FICO floor (high_risk) ─────────────────────────────────────────
-  if (lender.fico_floor !== undefined && application.applicant_fico !== undefined) {
+  if (lender.fico_floor != null && application.applicant_fico !== undefined) {
     if (application.applicant_fico < lender.fico_floor) {
       flag(
         "high_risk",
@@ -225,14 +249,14 @@ export function scoreLenderMatch(
     } else {
       reasons.push(`FICO ${application.applicant_fico} clears ${lender.fico_floor} floor`);
     }
-  } else if (lender.fico_floor !== undefined) {
+  } else if (lender.fico_floor != null) {
     score -= 5;
     flag("info", "missing_fico_data", "Lender requires FICO floor; application doesn't report FICO");
   }
 
   // ── Max funded amount (warning — counter-offer at cap likely) ──────
   if (
-    lender.max_funded_amount !== undefined &&
+    lender.max_funded_amount != null &&
     application.requested_amount !== undefined &&
     application.requested_amount > lender.max_funded_amount
   ) {
@@ -259,11 +283,11 @@ export function scoreLenderMatch(
   }
 
   // ── Position range (high_risk) — SOP §1 ────────────────────────────
-  if (lender.position_min !== undefined || lender.position_max !== undefined) {
+  if (lender.position_min != null || lender.position_max != null) {
     if (application.position_count !== undefined) {
       const min = lender.position_min ?? 1;
       const max =
-        lender.position_max !== undefined && lender.position_max > 0
+        lender.position_max != null && lender.position_max > 0
           ? lender.position_max
           : Number.POSITIVE_INFINITY;
       if (application.position_count < min || application.position_count > max) {
@@ -335,7 +359,7 @@ export function scoreLenderMatch(
   }
 
   // ── Max negative days (high_risk) — SOP §1 ─────────────────────────
-  if (lender.max_negative_days !== undefined && application.negative_days !== undefined) {
+  if (lender.max_negative_days != null && application.negative_days !== undefined) {
     if (application.negative_days > lender.max_negative_days) {
       flag(
         "high_risk",
@@ -409,7 +433,7 @@ export function scoreLenderMatch(
   }
 
   // ── SLA visibility (info) ──────────────────────────────────────────
-  if (lender.sla_response_days !== undefined) {
+  if (lender.sla_response_days != null) {
     reasons.push(`SLA: ${lender.sla_response_days}d typical response`);
   }
 

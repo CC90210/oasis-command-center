@@ -19,7 +19,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, checkBearerSecret } from "@/lib/api-helpers";
-import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
+import { applyClientProvisioningProfile, newWorkspaceShellRefusal } from "@/lib/client-provisioning";
+import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,12 +34,28 @@ export async function POST(req: NextRequest) {
     brand?: string;
     prefer_oauth?: boolean;
     agent?: string;
+    /**
+     * The shell to give this workspace, a registered id in lib/client-profiles.ts.
+     * Before 2026-09-30 the route never passed one, so
+     * applyClientProvisioningProfile wrote nothing and "provisioned" workspaces
+     * stayed unprovisioned. Only shells in NEW_WORKSPACE_SHELL_IDS
+     * (lib/client-provisioning.ts) are accepted; anything else is refused
+     * (400), not ignored.
+     */
+    client_profile_slug?: string;
   };
   try { body = await req.json(); } catch { return bad(400, "invalid JSON"); }
   const email = (body.email || "").trim().toLowerCase();
   if (!email || !email.includes("@")) return bad(400, "valid email required");
   const fullName = body.full_name?.trim() || email.split("@")[0];
-  const brand = body.brand?.trim() || "OASIS AI";
+  // Never "OASIS AI": that default named strangers' workspaces after OASIS.
+  const brand = body.brand?.trim() || defaultWorkspaceName(fullName, email);
+  const clientProfileSlug = (body.client_profile_slug || "").trim().toLowerCase() || null;
+  // An allowlist of shells a NEW workspace may start with (empty today): the
+  // retired SunBiz shell, OASIS's own and one named client's are all refused
+  // here, before any account or workspace is created (2026-09-30 fix pass).
+  const shellRefusal = clientProfileSlug ? newWorkspaceShellRefusal(clientProfileSlug) : null;
+  if (shellRefusal) return bad(400, `client_profile_slug refused: ${shellRefusal}`);
   const agentToAdd = (body.agent || "").trim().toLowerCase();
   // Includes deprecated aliases (sunbiz, suga_sean, lyra*) so existing CLIs
   // that still pass the old slugs keep working; agents.ts:resolveAgentKey
@@ -74,7 +91,7 @@ export async function POST(req: NextRequest) {
   } else {
     // Send invite + set-password email
     const redirectTo =
-      (process.env.PUBLIC_APP_URL?.replace(/\/$/, "") || "https://agent-dashboard-cc90210.vercel.app") +
+      (process.env.PUBLIC_APP_URL?.replace(/\/$/, "") || "https://oasisai.work") +
       "/auth/reset-password";
     const invited = await db.auth.admin.inviteUserByEmail(email, {
       redirectTo,
@@ -100,11 +117,34 @@ export async function POST(req: NextRequest) {
   } else {
     const byEmail = await db
       .from("user_profiles")
-      .select("id, tenant_id")
+      .select("id, tenant_id, auth_user_id")
       .eq("email", email)
       .maybeSingle();
+    if (byEmail.error) return bad(503, "profile lookup failed");
     if (byEmail.data) {
-      await db.from("user_profiles").update({ auth_user_id: authUserId }).eq("id", byEmail.data.id);
+      // Relink only an UNCLAIMED row. A row already bound to another auth
+      // account is that account's profile; overwriting auth_user_id would hand
+      // it (and its tenant) to whoever this email now resolves to (P0-8).
+      if (byEmail.data.auth_user_id && byEmail.data.auth_user_id !== authUserId) {
+        return bad(409, "profile_owned_by_another_account");
+      }
+      if (!byEmail.data.auth_user_id) {
+        const relink = await db
+          .from("user_profiles")
+          .update({ auth_user_id: authUserId })
+          .eq("id", byEmail.data.id)
+          .is("auth_user_id", null)
+          .select("id");
+        if (relink.error) return bad(503, "profile relink failed");
+        // The IS NULL guard stops a concurrent claim from being overwritten, but
+        // a guarded UPDATE that matches nothing is not an error: it means another
+        // account claimed the row after the read above. Reporting success here
+        // would hand this caller that account's profile and tenant (same rule as
+        // lib/auth-provisioning.ts).
+        if (!relink.data || relink.data.length !== 1) {
+          return bad(409, "profile_owned_by_another_account");
+        }
+      }
       profileId = byEmail.data.id;
       tenantId = byEmail.data.tenant_id;
     } else {
@@ -151,8 +191,7 @@ export async function POST(req: NextRequest) {
     db,
     tenantId,
     profileId,
-    brand,
-    email,
+    clientProfileSlug,
   });
 
   return NextResponse.json({
@@ -166,6 +205,6 @@ export async function POST(req: NextRequest) {
     requested_agent: agentToAdd || null,
     client_profile_slug: client.clientProfileSlug,
     primary_agent: client.primaryAgent,
-    sign_in_url: (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app") + "/login",
+    sign_in_url: (process.env.PUBLIC_APP_URL || "https://oasisai.work") + "/login",
   });
 }

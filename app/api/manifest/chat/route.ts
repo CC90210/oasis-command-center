@@ -29,7 +29,8 @@ import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
-import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
+import { operatorPlatformFallback } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import {
   applyMutations,
@@ -40,6 +41,7 @@ import { diffManifests } from "@/lib/manifest/diff";
 import { buildManifestEditorPrompt } from "@/lib/manifest/ai-prompt";
 import { parseAIEnvelope } from "@/lib/manifest/ai-parser";
 import { manifestWriteGuards } from "@/lib/manifest/guards";
+import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -116,6 +118,7 @@ export async function POST(req: NextRequest) {
   let provider: Provider;
   let model: string;
   let apiKey = "";
+  let keySource: "tenant" | "platform" = "tenant";
 
   if (cfg && cfg.encrypted_api_key) {
     provider = cfg.provider as Provider;
@@ -126,7 +129,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
   } else {
-    const fallback = isOperatorEmail(user.email || "") ? operatorPlatformFallback() : null;
+    // The platform key bills OASIS: verified operator only (lib/platform-operator.ts).
+    const fallback = (await isPlatformOperatorForAuthUser(user.id, user.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
         { ok: false, error: "agent_not_configured", hint: "Configure your Bravo provider key in Settings before using the manifest editor." },
@@ -136,6 +140,7 @@ export async function POST(req: NextRequest) {
     provider = fallback.provider;
     model = fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
   }
 
   const manifest = await getManifest(slug);
@@ -164,6 +169,13 @@ export async function POST(req: NextRequest) {
       system,
       messages,
       maxTokens: 2048,
+      meter: modelCallMeter({
+        tenantId: profile.tenant_id,
+        surface: "manifest.chat",
+        ...billingForKey(provider, keySource),
+        teammateId: "bravo",
+        userId: user.id,
+      }),
     })) {
       if (ev.type === "delta") aiText += ev.text;
       else if (ev.type === "error") streamError = ev.message;
@@ -172,6 +184,7 @@ export async function POST(req: NextRequest) {
     streamError = err instanceof Error ? err.message : "stream_failed";
   }
 
+  if (isAiBudgetCode(streamError)) return budgetRefusalResponse(streamError);
   if (streamError) {
     return NextResponse.json({ ok: false, error: "llm_call_failed", message: streamError }, { status: 502 });
   }

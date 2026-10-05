@@ -60,8 +60,8 @@ test("client panels are gated on the surface, not on the viewer's role", () => {
       "will happily serve it because empire operators resolve to the SunBiz tenant",
   );
   assert.ok(
-    SRC.includes('{tenantSlug === "sun" && ('),
-    "the client section must be gated on tenantSlug === \"sun\" alone",
+    SRC.includes('!externalTenantSurfacesBlocked() && tenantSlug === "sun"'),
+    "the client section must require both the client tenant and a non-OASIS deployment",
   );
 });
 
@@ -70,8 +70,14 @@ test("no operator-identity check survives in this component at all", () => {
   // for "who is looking" now. Keeping the helper around invites the next person
   // to reach for it, which is exactly how this was written the first time.
   for (const token of ["isOperatorEmail", "isOperator"]) {
-    const uses = SRC.split(token).length - 1;
-    const inComment = SRC.split(new RegExp(`//.*${token}`)).length - 1;
+    // A SUBSTRING match, so a renamed check (isOperatorViewer, isOperatorAccount)
+    // still fails this. The one exemption is oasisOperatorAgents, whose letters
+    // contain the token: OASIS's bridge agents, keyed by the workspace's tenant
+    // id, not by who is looking. Whole-word matching would have let the renames
+    // through.
+    const live = `(?<!oas)${token}`;
+    const uses = SRC.split(new RegExp(live)).length - 1;
+    const inComment = SRC.split(new RegExp(`//.*${live}`)).length - 1;
     assert.equal(
       uses - inComment,
       0,

@@ -21,6 +21,7 @@
  */
 
 import UnsubscribeForm from "./UnsubscribeForm";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
 
 export const dynamic = "force-dynamic";
 
@@ -60,26 +61,29 @@ export default async function UnsubscribePage({
         {email ? (
           <UnsubscribeForm email={email} brand={brand} token={token} />
         ) : (
-          <div className="text-center">
-            <p className="text-[#a8b0bd] text-sm mb-4">
-              No email address was provided in the URL. If you got here from an
-              email link, please copy the full link from your email and try
-              again, or write to{" "}
-              <a
-                href="mailto:unsubscribe@oasisai.work"
-                className="text-[#00d4ff] underline"
-              >
-                unsubscribe@oasisai.work
-              </a>{" "}
-              to opt out manually.
+          <>
+            {/* No address in the link: the recipient types it and the opt-out
+                goes through /api/unsubscribe like a linked one, into the
+                email_suppressions table every sender checks. The form offers
+                writing to the inbox as the fallback (ManualOptOut says why it
+                is not the first choice). */}
+            <p className="text-[#a8b0bd] text-sm mb-4 text-center">
+              This link did not include your email address. Type the address
+              that received the email, then confirm.
             </p>
-          </div>
+            <UnsubscribeForm email="" brand={brand} token={token} />
+          </>
         )}
 
         <div className="mt-10 pt-6 border-t border-[rgba(255,255,255,0.06)] text-center">
           <p className="text-[11px] text-[#6b7280] leading-relaxed">
-            OASIS AI Solutions · Collingwood, ON, Canada<br />
-            Questions? <a href="mailto:conaugh@oasisai.work" className="text-[#00d4ff] underline">conaugh@oasisai.work</a>
+            {/* Montreal, not Collingwood (CC confirmed 2026-09-09). Every OASIS
+                email footer already said Montreal while this page said
+                Collingwood, so the opt-out page a recipient lands on disagreed
+                with the message that sent them there — on the one page whose
+                whole job is a legally-required identification. */}
+            OASIS AI Solutions · 6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada<br />
+            Questions? <a href={`mailto:${CONTACT_EMAIL}`} className="text-[#00d4ff] underline">{CONTACT_EMAIL}</a>
           </p>
         </div>
       </div>

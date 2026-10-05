@@ -22,7 +22,6 @@ import { tzFromPhone } from "@/lib/phone-timezone";
 const OP_TZ =
   typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "America/New_York";
 const MIN = 60_000;
-const HOUR = 3_600_000;
 const DAY_MS = 86_400_000;
 
 type CallRow = {

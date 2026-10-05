@@ -12,44 +12,29 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
-import { canManageTeam, type TeamRole } from "@/lib/team";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
   listTenantIntegrationStatus,
+  tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
 import {
-  findIntegrationSchema,
+  findTenantManuallyEditableIntegrationSchema,
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
+import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// Re-uses the canonical `canManageTeam` helper from lib/team so the
-// owner+admin gate stays in lockstep with the rest of the dashboard
-// (Team management, Plan templates, Branding all use the same shape).
-async function canManageTenant(tenantId: string, userId: string): Promise<boolean> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("team_role, is_owner, admin_access")
-    .eq("auth_user_id", userId)
-    .eq("tenant_id", tenantId)
-    .maybeSingle();
-  const row = r.data as
-    | { team_role: TeamRole | null; is_owner: boolean | null; admin_access: boolean | null }
-    | null;
-  if (!row) return false;
-  if (row.is_owner) return true;
-  return canManageTeam(row.team_role || "member", row.admin_access === true);
-}
 
 export async function GET() {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(sess))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
   const status = await listTenantIntegrationStatus(sess.tenantId);
   return NextResponse.json({ ok: true, rows: status });
@@ -60,7 +45,7 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
@@ -75,9 +60,12 @@ export async function POST(req: NextRequest) {
   const fieldKey = typeof body.field_key === "string" ? body.field_key.toLowerCase() : "";
   const value = typeof body.value === "string" ? body.value : "";
 
-  const schema = findIntegrationSchema(service);
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
   if (!schema) {
-    return NextResponse.json({ ok: false, error: "unknown_service" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "service_not_tenant_editable" },
+      { status: 400 },
+    );
   }
   const fieldDef = schema.fields.find((f) => f.key === fieldKey);
   if (!fieldDef) {
@@ -86,6 +74,20 @@ export async function POST(req: NextRequest) {
   const validation = validateIntegrationValue(fieldDef, value);
   if (validation) {
     return NextResponse.json({ ok: false, error: validation }, { status: 422 });
+  }
+  // Client workspaces connect Stripe READ-ONLY, with a restricted key, through
+  // Settings › Connections (/api/connections/stripe/connect). This editor would
+  // store a full secret key that can move money, so it stays OASIS's own
+  // (the checkout-link key). Deleting a key stored here before is still allowed.
+  if (service === "stripe" && !tenantMayUseEnvFallback(sess.tenantId)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "stripe_connects_with_restricted_key",
+        message: "Connect Stripe from the Stripe card in Settings › Connections, with a read-only restricted key (rk_…).",
+      },
+      { status: 422 },
+    );
   }
 
   const result = await setTenantIntegrationValue({
@@ -98,7 +100,10 @@ export async function POST(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
-  return NextResponse.json({ ok: true, id: result.id });
+  // Twilio: the webhooks find this workspace by its saved sender's routing row
+  // (lib/twilio/sender-route.ts), so the row follows every save.
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_saved") : undefined;
+  return NextResponse.json({ ok: true, id: result.id, ...(routing ? { routing } : {}) });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -106,7 +111,7 @@ export async function DELETE(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
@@ -121,6 +126,16 @@ export async function DELETE(req: NextRequest) {
   if (!service || !fieldKey) {
     return NextResponse.json({ ok: false, error: "missing_service_or_field" }, { status: 400 });
   }
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
+  if (!schema) {
+    return NextResponse.json(
+      { ok: false, error: "service_not_tenant_editable" },
+      { status: 400 },
+    );
+  }
+  if (!schema.fields.some((field) => field.key === fieldKey)) {
+    return NextResponse.json({ ok: false, error: "unknown_field" }, { status: 400 });
+  }
   const result = await deleteTenantIntegrationValue({
     tenantId: sess.tenantId,
     service,
@@ -129,5 +144,7 @@ export async function DELETE(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
-  return NextResponse.json({ ok: true });
+  // A removed Twilio sender stops routing incoming texts to this workspace.
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_removed") : undefined;
+  return NextResponse.json({ ok: true, ...(routing ? { routing } : {}) });
 }

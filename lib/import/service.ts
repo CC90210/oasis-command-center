@@ -16,6 +16,15 @@
  */
 
 import { type EntityDefinition } from "./entities";
+import {
+  isWebsiteSalesTenantSlug,
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+  stampSalesProgramForTenant,
+  stageForWebsiteSalesLead,
+} from "@/lib/leads/canonical-lead-fields";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { createImportAssigneeCheck, type ImportAssigneeCheck } from "@/lib/leads-import-service";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const MAX_ROWS = 5_000;
@@ -39,6 +48,8 @@ export type ImportFailure = {
   message?: string;
   detail?: string;
   would_have_inserted?: number;
+  /** 1-based row that stopped the batch, when one row did. */
+  row?: number;
 };
 
 // ---------------- normalizers (mirror the leads importer to keep
@@ -50,7 +61,7 @@ function parseMoney(v: unknown): number | null {
   const raw = String(v)
     .trim()
     .replace(/[,$%]/g, "")
-    .replace(/[–—]/g, "-")
+    .replace(/[\u2013\u2014]/g, "-")
     .toLowerCase();
   if (!raw) return null;
   const matches = Array.from(raw.matchAll(/(\d+(?:\.\d+)?)\s*([km])?/g));
@@ -357,8 +368,25 @@ export async function importRowsForTenant(input: {
   dedupBy?: string[];
   defaultSource?: string;
   dryRun?: boolean;
+  /**
+   * The importing tenant's slug. Decides whether website columns mean
+   * "website-sales lead" or are just ordinary detail on a funding
+   * application. Omitted → never classified, which is the safe default for
+   * every caller that hasn't been taught to pass it.
+   */
+  tenantSlug?: string | null;
+  /** Canonical auth user id, already resolved against the CC + Adon roster. */
+  oasisAssigneeUserId?: string | null;
 }): Promise<ImportResult | ImportFailure> {
-  const { db, tenantId, entity, rows, dryRun = false } = input;
+  const {
+    db,
+    tenantId,
+    entity,
+    rows,
+    dryRun = false,
+    tenantSlug = null,
+    oasisAssigneeUserId = null,
+  } = input;
   if (!Array.isArray(rows) || rows.length === 0) {
     return { ok: false, error: "no_rows" };
   }
@@ -375,6 +403,16 @@ export async function importRowsForTenant(input: {
       ? input.dedupBy
       : entity.defaultDedupBy;
   const defaultSource = input.defaultSource || "csv_import";
+  const isOasisLeadImport =
+    entity.entity_type === "lead" && isWebsiteSalesTenantSlug(tenantSlug);
+  if (isOasisLeadImport && !oasisAssigneeUserId?.trim()) {
+    return {
+      ok: false,
+      error: "assignee_required",
+      message: "Choose CC or Adon before importing OASIS leads.",
+    };
+  }
+  const importedAt = new Date().toISOString();
 
   // ----- 1. Pull existing tenant_records of this entity_type for dedup -----
   const existingRes = await db
@@ -423,6 +461,11 @@ export async function importRowsForTenant(input: {
   let skippedMalformed = 0;
   const duplicateKeys: string[] = [];
   const errors: string[] = [];
+  // Applications and funded deals take their owner from the row's assigned_to
+  // cell, which was stored verbatim — so a CSV could hand new records to a
+  // deactivated teammate or a non-member. Same check as /api/leads/import;
+  // one instance per batch, so standing is read once per named owner.
+  const checkAssignee = createImportAssigneeCheck(tenantId);
 
   for (const [i, raw] of rows.entries()) {
     // Normalize every canonical field per its declared type.
@@ -436,6 +479,26 @@ export async function importRowsForTenant(input: {
 
     // Source + entity_type metadata
     data.source = data.source || defaultSource;
+
+    // A row carrying website research belongs to the website-sales board,
+    // which filters on this stamp — and its stage vocabulary is not SunBiz's,
+    // so a stage lifted verbatim from a spreadsheet ("Hot Lead") would strand
+    // the row in a column that doesn't exist.
+    if (entity.entity_type === "lead") {
+      Object.assign(data, stampSalesProgramForTenant(data, tenantSlug));
+      if (isOasisLeadImport) {
+        Object.assign(data, {
+          sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+          sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+          stage: "assigned",
+          stage_entered_at: importedAt,
+          ...pipelineCycleAssignmentFacts(oasisAssigneeUserId!, importedAt),
+          claimed_at: importedAt,
+        });
+      } else if (data.sales_program) {
+        data.stage = stageForWebsiteSalesLead(typeof data.stage === "string" ? data.stage : null);
+      }
+    }
 
     // Required-field check.
     const requiredFields = entity.canonicalFields.filter((f) => f.requirement === "required");
@@ -485,12 +548,38 @@ export async function importRowsForTenant(input: {
       if (k) seen[k.kind].add(k.key);
     }
 
+    // Non-OASIS: the row's owner must be an ACTIVE member of this tenant,
+    // checked before anything is written so a refusal imports nothing.
+    // OASIS leads are owned by the roster-resolved batch assignee instead.
+    if (!isOasisLeadImport && typeof data.assigned_to === "string") {
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(data.assigned_to, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new records.
+        console.error("[import] row owner could not be verified", {
+          tenantId,
+          entity: entity.entity_type,
+          row: i + 1,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return {
+          ok: false,
+          error: "member_check_failed",
+          message: `Row ${i + 1}'s owner couldn't be verified right now. No rows were imported. Try again in a moment.`,
+          row: i + 1,
+        };
+      }
+      if (!owner.ok) return owner;
+      data.assigned_to = owner.authUserId;
+    }
+
     toInsert.push({
       tenant_id: tenantId,
       entity_type: entity.entity_type,
       data: {
         ...data,
-        imported_at: new Date().toISOString(),
+        imported_at: importedAt,
       },
     });
   }

@@ -13,6 +13,13 @@ for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  // Added 2026-09-01 with the per-lead re-check. A WRITE that names a lead
+  // id carries the identical gate stack as the reads: anyone who may read
+  // the card may queue a re-check; nobody else may learn the id exists.
+  "app/api/web-leads/[id]/recheck/route.ts",
+  // Added 2026-09-03 with the presence layer: same write-that-names-a-lead
+  // shape, same gate stack, same reasoning.
+  "app/api/web-leads/[id]/presence/route.ts",
 ]) {
   const src = read(route);
   assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
@@ -52,6 +59,20 @@ for (const route of [
 }
 
 const data = read("lib/web-leads/data.ts");
+const scopedFacetsBody = data.match(
+  /export async function fetchSheetsScopedToViewer[\s\S]*?\r?\n\}\r?\n/,
+);
+assert.ok(scopedFacetsBody, "must find fetchSheetsScopedToViewer() in lib/web-leads/data.ts");
+assert.match(
+  scopedFacetsBody[0],
+  /projectedRows \?\? fetchLeadProjection\(viewer, scope, fresh\)/,
+  "scoped facets must reuse the list projection or start the scope-appropriate projected read",
+);
+assert.doesNotMatch(
+  scopedFacetsBody[0],
+  /select\("id,data"/,
+  "scoped facets must not transfer every lead's full JSON blob",
+);
 assert.match(data, /WEBDEV_TENANT_ID/, "reads must pin the tenant");
 // Every table read pins the tenant. Count the reads and the pins together so a
 // new unpinned query cannot slip in beside the pinned ones.
@@ -79,12 +100,47 @@ assert.doesNotMatch(code, /aa04fa1f/, "this feature must never reference the Sun
 // fabricated finding on a live call is the worst outcome this system can
 // produce, and a badge is exactly how that nuance gets flattened.
 // ---------------------------------------------------------------------------
+// The shared block is asserted FIRST and by name, because the two host views
+// below are allowed to satisfy the requirement by importing it. If that
+// indirection were permitted without pinning the component it points at, an
+// empty <BusinessFacts /> would pass every assertion in this section.
+{
+  const facts = "components/web-leads/BusinessFacts.tsx";
+  const src = read(facts);
+  assert.match(src, /lead\.websiteCondition/, `${facts} must render the website status`);
+  assert.match(src, /lead\.auditFindings/, `${facts} must render the research notes`);
+  // Verbatim means the field reaches the screen as-is. A slice, a split, a
+  // replace or a truncate class on the way there is the shortening this rule
+  // exists to forbid.
+  assert.doesNotMatch(
+    src,
+    /(websiteCondition|auditFindings)\s*[.?]?\.?(slice|substring|split|replace|toUpperCase|toLowerCase)/,
+    `${facts} must not transform the verbatim directory strings`,
+  );
+  assert.doesNotMatch(src, /truncate/, `${facts} must not truncate a verbatim directory string`);
+}
+
 for (const view of [
   "components/web-leads/LeadsTable.tsx",
   "components/web-leads/WebLeadDetail.tsx",
+  // Added 2026-08-24. The battle card shipped WITHOUT the identity block --
+  // zero references to address, postal, osmCategory or territoryName -- so a
+  // rep working a lead in their own book could not see where the business was.
+  // It is now held to the same rule as the drawer rather than trusted to keep
+  // carrying the block it was missing on day one.
+  "components/web-leads/BattleCard.tsx",
 ]) {
   const src = read(view);
-  assert.match(src, /websiteCondition/, `${view} should show the website status`);
+  // Either the view renders the field itself (LeadsTable does, for the
+  // no-website cell) or it delegates to the ONE shared block, which is
+  // separately pinned above. Delegation is the outcome this codebase wants:
+  // two hand-maintained copies of a lead's address on two screens are two
+  // things that can disagree about the same business mid-call.
+  assert.match(
+    src,
+    /websiteCondition|<BusinessFacts/,
+    `${view} should show the website status, itself or through the shared BusinessFacts block`,
+  );
   // No view may hardcode a shorter, more confident verdict.
   assert.doesNotMatch(src, /"No website"/, `${view} must not render a bare "No website" verdict`);
   assert.doesNotMatch(src, /No significant issues/, `${view} must not claim a clean audit`);
@@ -152,28 +208,33 @@ assert.match(data, /LEAD_READ_CAP/, "fetchLeads must reference LEAD_READ_CAP");
 // see every lead in it. This branch reads the same tenant_records table
 // through a different door (the Web Leads browser) and would reopen the
 // exact leak #237 closed if it didn't apply the identical role scoping.
-// These assertions require each route to actually WIRE the scoping through
-// (reference the role/viewer), and require the data layer to key off
-// assigned_to -- not just assert that a scoping FUNCTION exists somewhere
-// unused, which would pass even if no route called it.
+// These assertions require each route to actually WIRE the scoping through,
+// either inline or through the canonical server-only viewer resolver, and
+// require the data layer to key off assigned_to -- not just assert that a
+// scoping FUNCTION exists somewhere unused, which would pass even if no route
+// called it.
 // ---------------------------------------------------------------------------
 for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  "app/api/web-leads/[id]/recheck/route.ts",
+  "app/api/web-leads/[id]/presence/route.ts",
 ]) {
   const src = read(route);
-  assert.match(
-    src,
-    /session\.teamRole/,
-    `${route} must reference session.teamRole -- tenant match alone does not exclude the outside-contractor role`,
-  );
-  assert.match(
-    src,
-    /session\.isAdmin/,
-    `${route} must reference session.isAdmin when building the viewer passed to the scoped data layer`,
+  const buildsViewerInline =
+    /session\.teamRole/.test(src) && /session\.isAdmin/.test(src);
+  const usesCanonicalViewer = /resolveWebLeadViewer\(session\)/.test(src);
+  assert.equal(
+    buildsViewerInline || usesCanonicalViewer,
+    true,
+    `${route} must pass role/admin state through the scoped data layer; tenant match alone does not exclude the outside-contractor role`,
   );
 }
+const viewerResolver = read("lib/web-leads/viewer.ts");
+assert.match(viewerResolver, /session\.teamRole/);
+assert.match(viewerResolver, /session\.isAdmin/);
+assert.match(viewerResolver, /canReadOasisSalesTeamPipeline/);
 assert.match(
   data,
   /assigned_to/,
@@ -195,10 +256,84 @@ assert.match(
 // assertion below is unchanged; only its line-ending assumption is.
 const fetchLeadsBody = code.match(/export async function fetchLeads\([\s\S]*?\r?\n\}\r?\n/);
 assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
+// RESTATED 2026-08-23, NOT RELAXED. This asserted `visibleToViewer` by name.
+// Ownership replaced that mechanism: a contractor must now be able to SEE the
+// claimable pool (unassigned leads are the inventory they are meant to claim --
+// Adon: "all the accounts can assign themselves the lead"), while still never
+// reading another rep's book. visibleToViewer, which hides every unassigned
+// lead from an agent, would have handed those reps an empty pool and a Claim
+// button that could not work.
+//
+// The property PR #237 actually protects is unchanged and is asserted directly
+// below: no caller ever receives a lead that belongs to someone else. It now
+// holds by construction rather than by a filter --
+//
+//   scope "mine" -> ordinary reps use isInBookOf(.., viewer.userId); an OASIS
+//                   manager uses canViewerRead(), whose only widening is the
+//                   server-resolved roster;
+//   scope "pool" -> isClaimable(..), which excludes every currently-held lead.
+//
+// Plus: a pool lead can still carry a PREVIOUS owner (an expired claim, a
+// recycled loss), so the owner id is nulled for anyone but that lead's own
+// holder or an admin -- otherwise the pool would quietly tell a contractor
+// which rep had which business.
+// RE-AIMED 2026-09-02, NOT RELAXED. The manager branch used to be nested
+// inside `scope === "mine"`; it is now its own `scope === "team"` (managers
+// land on their roster's book, see app/web-leads/page.tsx). The regex above
+// pinned the OLD nesting by exact text, so the refactor turned this guard red
+// on `main` for four consecutive merges while the property it protects was
+// never actually broken. Re-aiming beats deleting -- and beats leaving main red,
+// which is how a real regression gets waved through as "that test is always
+// red".
+//
+// The property is unchanged and each branch is asserted SEPARATELY below, so a
+// future edit that collapses one of them cannot pass by matching the others:
+//   "team" -> canViewerRead(), whose only widening is the server-resolved roster
+//   "mine" -> isInBookOf() against THIS viewer's id, so it cannot be widened
+//   pool   -> isClaimable(), which excludes every currently-held lead
 assert.match(
   fetchLeadsBody[0],
-  /visibleToViewer/,
-  "fetchLeads must apply visibleToViewer scoping to each row -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
+  /scope === "team"\s*\?\s*canViewerRead\(r\.data \|\| \{\}, viewer, now\)/,
+  "fetchLeads must route the 'team' scope through canViewerRead -- a manager reads their roster, never the whole tenant",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /scope === "mine"\s*\?\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)/,
+  "fetchLeads must scope 'mine' to the caller's OWN book by comparing against viewer.userId -- an agent-role contractor sits INSIDE the tenant, so tenant-pinning the read alone is not enough",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /:\s*isClaimable\(r\.data \|\| \{\}, now\)/,
+  "the pool scope must be isClaimable() -- anything else hands a contractor leads that are already in another rep's book",
+);
+// The three-way rule moved into canSeeAssignee() on 2026-09-14, when the owner
+// badge gave the SAME question a second consumer: the holder's display name.
+// Two copies of a disclosure rule is how one of them drifts, so it has one
+// definition and the guard now pins that definition AND both of its call sites
+// separately -- the property is unchanged, and collapsing any one of the three
+// still fails here.
+assert.match(
+  data,
+  /export function canSeeAssignee\(facts: ClaimFacts, viewer: Viewer\): boolean \{\s*return \(\s*isInBookOf\(facts, viewer\.userId\) \|\|\s*viewer\.isAdmin \|\|\s*managerCanReadAssignment\(facts\.assignedTo, viewer\)\s*\);/,
+  "canSeeAssignee must keep the exact three-way rule -- own book, admin, or a manager's server-resolved roster, and nothing else",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /const assignmentVisible = canSeeAssignee\(facts, viewer\);[\s\S]*?assignedTo: assignmentVisible \? facts\.assignedTo : null/,
+  "fetchLeads must not surface another rep's user id on a pool lead -- an expired claim still names its previous owner",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /assignedToName: assignedNameFor\(facts, viewer, repNames\)/,
+  "the holder's NAME must go through assignedNameFor, which gates on the same canSeeAssignee predicate -- a name identifies a rep just as surely as their user id does",
+);
+// The phase-two re-map rebuilds each row from its full blob. toWebLead() has no
+// viewer, so recomputing the badge there would drop the gate entirely and hand
+// every rep the holder's name; both fields must be CARRIED from phase one.
+assert.match(
+  fetchLeadsBody[0],
+  /claimState: l\.claimState,\s*assignedToName: l\.assignedToName,/,
+  "the full-blob re-map must carry claimState and assignedToName across rather than recomputing them without a viewer",
 );
 
 // ---------------------------------------------------------------------------
@@ -273,6 +408,114 @@ for (const view of [
   // site" turns straight into a spoken claim -- so it earns the same ban as
   // the panel rather than being trusted to stay clean on its own.
   "components/web-leads/CallMode.tsx",
+  // Added 2026-08-24 with the battle card. It is the densest surface in the
+  // feature -- a radar, a distribution strip, seven recoverable-points bars, a
+  // head-to-head track per dimension, and a percentile marker -- which makes it
+  // the file where a colour keyed to a score is both most tempting and most
+  // damaging. A red arc beside a named local competitor is a rep telling a
+  // stranger their site is bad on the authority of a gradient. Proved to fire
+  // against this file by planting `text-red-400` on the composite score once
+  // (2026-08-24): the assertion failed as intended, and the class was reverted.
+  "components/web-leads/BattleCard.tsx",
+  // Added 2026-08-31 with the collapsible-sections redesign. Pure chrome -- a
+  // disclosure shell that renders no audit data -- which is exactly why it is
+  // listed rather than trusted: a section header is the single most tempting
+  // place to "helpfully" tint a closed section that contains bad news, and a
+  // tinted header is a verdict rendered before the rep has even opened the
+  // drawer. Proved to fire against this file by planting `text-red-400` on the
+  // teaser span once (2026-08-31): the assertion failed as intended, and the
+  // class was reverted.
+  "components/web-leads/BattleSection.tsx",
+  // components/web-leads/Radar3D.tsx (added 2026-09-01) and
+  // lib/web-leads/lead-profile.ts (added 2026-09-01, round 5) were listed here
+  // until the compact card (2026-10-01) DELETED both files. Their entries left
+  // with them because a guard cannot read a file that does not exist; that
+  // they stay deleted is pinned in web-leads-battlecard.test.ts §8d.
+  // Added 2026-09-01 with the shared HUD palette. The one module every chart
+  // reads its colours from -- which makes it the highest-leverage place to
+  // sneak a verdict colour into the whole feature at once.
+  "components/web-leads/battle-hud.ts",
+  // Added 2026-09-03 with the presence layer. Three files, one temptation:
+  // a presence score sitting beside a star rating is the most red/green-
+  // hungry surface the feature has ever grown. Pass/fail renders as SHAPE
+  // (filled dot vs ring); the pillar hues are identity. Proved to fire by
+  // planting `text-red-400` in PresenceBlock once (2026-09-03): the
+  // assertion failed as intended and was reverted.
+  "lib/web-leads/presence.ts",
+  "lib/web-leads/presence-evidence.ts",
+  "components/web-leads/PresenceBlock.tsx",
+  // Added 2026-09-10 with the objection console. This is now the most tempting
+  // place in the feature to reach for red: a "lost" resolution button. Colour
+  // there would teach reps not to press it, and the log rate is the feature.
+  "components/web-leads/ObjectionConsole.tsx",
+  "components/web-leads/ObjectionCard.tsx",
+  // Added 2026-08-24 with the shared identity block. It is the file that now
+  // renders BOTH verbatim directory sentences on BOTH surfaces, which makes it
+  // the single most tempting place to "helpfully" tint a bad website status
+  // red -- one edit here would colour a judgement onto every screen in the
+  // feature at once.
+  "components/web-leads/BusinessFacts.tsx",
+  // Added 2026-08-24 with opening hours. The open/closed indicator is the single
+  // most tempting place in this feature to reach for green and red, and because
+  // open/closed is factual state rather than a judgement, the temptation feels
+  // harmless. It is not: a green dot two columns from a website score teaches
+  // the eye that colour means quality on this screen, and the next person tints
+  // the score. So the state is carried by WORDS and by SHAPE -- filled dot,
+  // ring, dash -- which also survives greyscale and colour blindness, and the
+  // only colour in the file is the neutral accent. Proved to fire against this
+  // file by planting `bg-green-500 text-red-400` on the open-state dot once
+  // (2026-08-24): the assertion failed as intended, and the classes were
+  // reverted.
+  "components/web-leads/OpeningHours.tsx",
+  // Added 2026-08-25 with the mobile card layout. These two are the reason the
+  // extraction happened at all: WebsiteCell -- the ONE renderer that decides
+  // whether a lead shows a number or an honest sentence -- lived inside
+  // LeadsTable.tsx, which can never join this list because it carries the
+  // repo's red "Could not load leads" banner. So the single most tempting
+  // place in the feature to tint a low score had no guard on it, and it now
+  // feeds BOTH the desktop table and every card a rep sees on a phone. Both
+  // were proved to fire (2026-08-25): `text-red-400` planted on the score span
+  // in LeadCells.tsx and `bg-green-500` on LeadCards' label constant each
+  // failed the assertion as intended, and both were reverted.
+  "components/web-leads/LeadCells.tsx",
+  "components/web-leads/LeadCards.tsx",
+  // Added 2026-09-14 with the capability catalogue, which took over the
+  // card's "fixes" section from FixFirst. Two things on this surface read
+  // like they want a colour and neither may get one.
+  //
+  // A STAGE LABEL READS LIKE A STATUS. Every row carries when it becomes
+  // sellable -- "Sell this on this call", "Later, month six at the earliest"
+  // -- and a stage is one tint away from looking like a verdict on the
+  // business rather than a note about our own sequencing. A greyed or
+  // ambered "later" row tells a rep this is the weak part of the offer, which
+  // is the opposite of why those entries are on screen: they exist so a rep
+  // can answer a question about them without opening the call with them.
+  //
+  // A RANKING FIGURE READS LIKE A SCORE. Each scored row prints weighted
+  // composite points and draws a bar, and both are ORDER, not grade: the
+  // largest one on a good site and the largest one on a terrible site look
+  // identical here by design. Tinting either turns "this is the heaviest
+  // thing we would build" into "your site is bad", which is a claim about a
+  // stranger's business that a rep would then say out loud. The bar wears the
+  // dimension identity hue the caller passes and nothing else.
+  //
+  // Proved to fire against CapabilityRow.tsx by planting `text-red-500` on
+  // the points figure once (2026-09-14): the assertion failed as intended,
+  // and the class was reverted before commit.
+  "components/web-leads/CapabilityCatalogue.tsx",
+  "components/web-leads/CapabilityRow.tsx",
+  // And the module both of them and BattleCard.tsx now share. It renders the
+  // meter, the remedy pair and the evidence line for every audit surface in
+  // the feature at once, which makes it the single highest-leverage place to
+  // put a verdict colour on this screen: one class here lands on all three.
+  "components/web-leads/audit-parts.tsx",
+  // Added 2026-08-25 when the website block reached the CRM board. This page
+  // renders the same website_condition / audit_findings sentences the battle
+  // card does, on the screen a rep actually works from, so the same rule
+  // applies to it. Whole-file ban is safe here: the page carries no colour of
+  // its own. Proved to fire by planting `text-green-400` on the condition
+  // paragraph once; the assertion failed as intended and it was reverted.
+  "app/pipeline/[id]/page.tsx",
 ]) {
   const src = read(view);
 
@@ -302,6 +545,64 @@ for (const view of [
       `${view} must not attach ${cls} to audit/score content -- a colour keyed to a score renders a judgement the number does not support`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME RULE, SCOPED TO ONE FUNCTION, ON A FILE THAT LEGITIMATELY USES RED.
+//
+// components/manifest/LeadPipelineView.tsx grew a website block on 2026-08-25
+// (Adon: "you should also be able to click and view the website as well as see
+// all of the leads information... on the pipeline tab, which is our CRM").
+//
+// It cannot join the whole-file list above. That file has carried `text-red-300`
+// on the going-cold SLA marker and a red destructive-action button since long
+// before any of this, and those are not judgements about a website -- an SLA
+// breach is a fact about US, not a verdict on the prospect.
+//
+// So the ban is scoped to the function that renders audit content. This is the
+// weaker form and it is used ONLY because the stronger one is unavailable: if a
+// future website control is added OUTSIDE PipelineWebsiteCell, this will not see
+// it. The extraction below therefore fails loudly if the function disappears or
+// is renamed, rather than silently checking an empty string and passing --
+// which is the exact way a guard stops guarding.
+// ---------------------------------------------------------------------------
+{
+  const PIPELINE_VIEW = "components/manifest/LeadPipelineView.tsx";
+  const src = read(PIPELINE_VIEW);
+  const start = src.indexOf("function PipelineWebsiteCell(");
+  assert.notEqual(
+    start,
+    -1,
+    `${PIPELINE_VIEW} must still define PipelineWebsiteCell -- if the website block moved or was renamed, re-aim this guard at wherever it lives now instead of deleting it`,
+  );
+  // To the next top-level declaration: every brace in between belongs to it.
+  const rest = src.slice(start);
+  const endRel = rest.indexOf("\nfunction ");
+  const body = endRel === -1 ? rest : rest.slice(0, endRel);
+  assert.ok(
+    body.length > 500,
+    `extracted PipelineWebsiteCell body is only ${body.length} chars -- the extraction broke, and a guard checking an empty string passes while protecting nothing`,
+  );
+  // It really is the audit-rendering block, not some unrelated slice.
+  assert.match(body, /webScoreState/, "extracted body must be the website block");
+
+  for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-", "bg-amber-"]) {
+    assert.doesNotMatch(
+      body,
+      new RegExp(cls.replace(/-/g, "\\-")),
+      `PipelineWebsiteCell must not attach ${cls} to audit/score content -- a colour keyed to a score renders a judgement the number does not support, and a rep who sees red says something on a live call they cannot back up`,
+    );
+  }
+  // The three non-scored states are SENTENCES on this surface too. A rep
+  // triaging the CRM board must never see a bare zero or a dash where a site
+  // our crawler was blocked from should read "We could not check this site".
+  assert.match(body, /We could not check this site/, "unreachable must render as a sentence on the pipeline board");
+  assert.match(body, /Not scored yet/, "not_scored must render as a sentence on the pipeline board");
+  assert.match(
+    body,
+    /websiteCondition/,
+    "no_website must fall back to the lead's own verbatim website_condition, not a fabricated verdict",
+  );
 }
 
 // The hedged phrasing is what must actually appear where a bare "No website"
@@ -334,10 +635,177 @@ assert.match(
 // opened tab can reach back through window.opener (e.g. redirect the
 // original tab to a fake "session expired" page) -- a real security
 // requirement, not a style nit, and easy to lose in a refactor of this link.
-assert.match(
-  read("components/web-leads/WebLeadDetail.tsx"),
-  /target="_blank"[\s\S]{0,120}?rel="noopener noreferrer"/,
-  'WebLeadDetail\'s external website link must carry rel="noopener noreferrer" alongside target="_blank"',
-);
+for (const view of [
+  "components/web-leads/WebLeadDetail.tsx",
+  // The shared identity block carries its own "View website" link, on both
+  // surfaces at once, so it needs the same requirement rather than inheriting
+  // trust from the button beside it.
+  "components/web-leads/BusinessFacts.tsx",
+]) {
+  const src = read(view);
+  // Counted rather than merely found: a second link added later without the
+  // rel is exactly what a presence check misses.
+  const blanks = (src.match(/target="_blank"/g) || []).length;
+  const safe = (src.match(/target="_blank"[\s\S]{0,160}?rel="noopener noreferrer"/g) || []).length;
+  assert.ok(blanks >= 1, `${view} must open the prospect's site in a new tab`);
+  assert.equal(
+    safe,
+    blanks,
+    `every target="_blank" in ${view} must carry rel="noopener noreferrer" -- without it the opened tab reaches back through window.opener`,
+  );
+  // And the href must come from the allowlisting helper, never the raw stored
+  // value: 217 of these are bare domains (which navigate inside our own
+  // dashboard) and they come from a public map anyone can edit.
+  assert.match(src, /preferredSiteUrl\(/, `${view} must resolve the website URL through preferredSiteUrl`);
+  assert.doesNotMatch(
+    src,
+    /href=\{lead\.websiteUrl\}/,
+    `${view} must never put the raw stored websiteUrl in an href`,
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE BUSINESS'S HOURS AND THE LEGAL CALLING WINDOW NEVER SHARE A BOX.
+//
+// The defect this pins, in the operator's words: "I don't know what these
+// Calling Hours mean. They're completely hallucinating that you didn't take any
+// of their actual business work hours."
+//
+// He was looking at a heading a rep reads as "this shop's hours" under which
+// the only concrete times were 9:00 a.m. and 9:30 p.m. -- the CRTC window,
+// identical on all 31,034 leads, because none of them carried any hours at all.
+// A generic legal constant rendered in the slot reserved for facts about the
+// prospect IS fabricated data about the prospect, however careful the
+// surrounding sentence is.
+//
+// The fix is structural, so the guard is structural: the hours panel may not
+// reference the calling-window state at all, and the calling notice may not
+// borrow the hours vocabulary for its own label.
+//
+// PROVED TO FIRE (2026-08-25): putting `{h.call.reason}` back inside
+// BusinessHoursPanel failed the first assertion, and renaming the notice's
+// label to "Calling hours" failed the third. Both were reverted.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const src = read("components/web-leads/OpeningHours.tsx");
+
+  // Comments are stripped before every assertion below. This guard is about
+  // what RENDERS, and on its first run it failed against CallingWindowNotice's
+  // own doc comment explaining the defect -- a prose mention of "9:30" is not a
+  // legal window printed on a rep's screen. (That miss is itself the proof the
+  // numeric assertion fires; see the PROVED note above.)
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const panel = strip(src.slice(
+    src.indexOf("export function BusinessHoursPanel"),
+    src.indexOf("export function CallingWindowNotice"),
+  ));
+  assert.ok(panel.length > 400, "BusinessHoursPanel and CallingWindowNotice must both exist, in that order");
+
+  assert.doesNotMatch(
+    panel,
+    /\bh\.call\b/,
+    "BusinessHoursPanel must not read the calling-window state -- the legal window renders as a separate sibling, never inside the business's own hours",
+  );
+  // The window's numbers, in any spelling. A future edit that inlines "9:00 am
+  // to 9:30 pm" as a literal would sail past the h.call check above.
+  assert.doesNotMatch(
+    panel,
+    /9:30|21 \* 60/,
+    "BusinessHoursPanel must not print the CRTC window's times, even as a literal",
+  );
+
+  const notice = strip(src.slice(src.indexOf("export function CallingWindowNotice")));
+  assert.doesNotMatch(
+    notice,
+    /<p className=\{LABEL\}>[^<]*(?:Business|Opening) hours/,
+    "the calling-window notice must not label itself with the business-hours vocabulary",
+  );
+  assert.match(
+    notice,
+    /if \(call\.allowed === true\) return null;/,
+    "the calling-window notice must render nothing while the rep is inside the window -- a caution shown on every card all day stops being read",
+  );
+
+  // And the two are actually mounted as siblings on the card, not nested.
+  const facts = read("components/web-leads/BusinessFacts.tsx");
+  assert.match(facts, /<BusinessHoursPanel[^>]*\/>\s*<CallingWindowNotice[^>]*\/>/,
+    "BusinessFacts must render the two as sibling rows");
+}
+
+// UNKNOWN HOURS ARE A SENTENCE, AND THE TWO KINDS OF UNKNOWN STAY APART.
+// "Nobody has looked" and "we looked and found nothing" are different facts and
+// a rep acts on them differently. Collapsing them is how a gap in OUR
+// collection gets read as a fact about the business.
+{
+  const hours = read("lib/web-leads/hours.ts");
+  assert.match(hours, /Nobody has checked this business's hours yet/);
+  assert.match(hours, /We looked and found no published hours/);
+  // No default, anywhere on the unknown path.
+  assert.doesNotMatch(
+    hours,
+    /state = "open"|headline = "Open now";\s*\n\s*\}\s*else \{/,
+    "the unknown state must never fall through to open",
+  );
+  // Provenance must survive to the screen, and a weak source must say so.
+  assert.match(hours, /"site-text": \{ label: [^}]*weak: true/);
+  const ui = read("components/web-leads/OpeningHours.tsx");
+  assert.match(ui, /h\.source/, "the card must show where the hours came from");
+}
 
 console.log("web-leads-guards ok");
+
+// ---------------------------------------------------------------------------
+// EVERY tenant_records READ IN THIS FEATURE MUST PIN THE TENANT.
+//
+// Added 2026-08-26. `tenant_records` is SHARED. Measured live that day it holds
+// leads for three tenants in one table:
+//
+//   ef8d389e-...  oasis-ai-cc      31,086 leads   <- this feature
+//   aa04fa1f-...  SunBiz            1,375 leads   <- a DIFFERENT portal, worked
+//                                                    on by a different agent
+//   42423fde-...  Oasis Web Studio    293 leads
+//
+// libSQL has no row-level security. The tenant predicate in the query IS the
+// authorization boundary -- there is no second line of defence behind it. A
+// single read that forgets `.eq("tenant_id", ...)` serves SunBiz's book to an
+// Oasis rep, and it does so silently: the page renders, the rows look like
+// leads, and nothing anywhere reports an error.
+//
+// The route-level checks above prove the CALLER is resolved. This proves the
+// QUERY is scoped, which is a different failure and the one that leaks data.
+//
+// Deliberately a source check rather than a runtime one: the danger is a read
+// added later, by someone (or something) that never runs this feature's tests
+// against a multi-tenant fixture. A grep over the source catches it at the only
+// moment it is cheap to catch.
+{
+  const dir = path.join(process.cwd(), "lib/web-leads");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".ts"));
+  assert.ok(files.length > 10, "sanity: the web-leads lib directory should not be near-empty");
+
+  let audited = 0;
+  for (const f of files) {
+    const src = read(path.join("lib/web-leads", f));
+    // Each `.from("tenant_records")` opens a query chain that ends at a
+    // terminator. Take the text up to the next `;` and require a tenant pin
+    // inside it -- that is the whole builder chain for that read.
+    const parts = src.split('from("tenant_records")');
+    for (let i = 1; i < parts.length; i++) {
+      const chain = parts[i].slice(0, parts[i].indexOf(";") === -1 ? 400 : parts[i].indexOf(";"));
+      audited++;
+      assert.match(
+        chain,
+        /\.eq\(\s*["']tenant_id["']/,
+        `lib/web-leads/${f}: a tenant_records query is not pinned to a tenant. ` +
+          `tenant_records is shared with SunBiz (aa04fa1f-...); an unpinned read serves their leads to an Oasis rep with no error.`,
+      );
+    }
+  }
+  // Prove the sweep actually looked at something. A regex that silently matched
+  // nothing would pass this block while checking zero queries -- the exact
+  // "redundancy hides failure" shape this codebase guards against elsewhere.
+  assert.ok(audited >= 12, `expected to audit at least 12 tenant_records reads, saw ${audited}`);
+}
+
+console.log("web-leads-guards tenant-pin sweep ok");

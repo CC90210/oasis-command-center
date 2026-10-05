@@ -24,9 +24,8 @@ CC's working copy). Every push to `main` auto-deploys via Vercel.
 |---|---|
 | `/` (anonymous) | Public marketing home — rewritten to `app/(marketing)/home`, so the URL stays `/`. Signed in, the same path is the Today dashboard below. |
 | `/fleet` · `/work` · `/about` · `/contact` | Public marketing site. Not `/agents` — that is the auth-gated dashboard page. |
-| `/start` | Entry-path chooser (build / sign in / download). Was `/welcome` until 2026-07-31; the old URL 308s here. |
 | `/privacy` · `/terms` · `/dmca` | Public legal pages, rendered from `lib/legal/constants.ts` |
-| `/download` | Public download surface for the OASIS Desktop app (alpha.6) |
+| `/download` | OASIS Desktop. A verified platform operator sees the alpha.4-6 release links (they need GitHub access to the private release repo); everyone else sees a private-beta notice with a request-access link. |
 | `/desktop-link` | Deep-link sign-in target for the desktop app (mints pair codes, fires `oasis://pair` deep link) |
 | `/login` · `/signup` | Supabase email + Google OAuth |
 | `/forgot-password` · `/auth/reset-password` | Self-serve password recovery |
@@ -49,7 +48,7 @@ mode dropdown:
 
 - **CLI (local bridge)** — browser POSTs directly to `localhost:9100/chat` on
   the operator's machine. The bridge (Python sidecar shipped with the desktop
-  app or `bravo bridge serve`) spawns Claude Code / Codex / Gemini CLI with
+  app or `oasis bridge serve` through the installed launcher) spawns Claude Code / Codex / Gemini CLI with
   the operator's persona prompt. Full file/script access, free under the
   operator's CLI subscription.
 - **Cloud + my files** / **Cloud only** — POST to `/api/chat` (Next route).
@@ -74,8 +73,9 @@ release: **alpha.6** (Mac universal + Linux x86_64/arm64). Highlights:
 - Bridge sidecar with enriched PATH discovery (Homebrew / npm-global / Bun /
   Deno / nvm) so chat works from Electron's slim LaunchServices PATH.
 
-Downloads route through `/api/download/desktop` which 307s to the latest
-GitHub release asset for the operator's OS.
+Downloads route through `/api/download/desktop` which 307s a verified platform
+operator to the latest GitHub release asset for their OS, and sends everyone
+else back to `/download` (the release repo is private).
 
 ## Local dev
 

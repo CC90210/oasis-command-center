@@ -118,6 +118,25 @@ export function WebsiteComparison({ leadId }: { leadId: string }) {
     );
   }
 
+  // THE DOMAIN IS FOR SALE. There is nothing to compare, and saying so is
+  // worth more than any comparison would have been: a business whose web
+  // address has lapsed is the easiest conversation a rep will have all day.
+  // The broker URL is shown because it is checkable on the call, in the same
+  // small muted treatment as the unreachable reason -- it is a fact about the
+  // domain, not a judgement about the business.
+  if (audit.state === "parked") {
+    return (
+      <div className="mt-6 border-t border-bg-border pt-5">
+        <p className="text-sm text-fg-muted">
+          Their domain has lapsed and is listed for sale, so there is no site to compare.
+        </p>
+        <p className="mt-1 text-xs text-fg-faint">
+          {audit.url} now redirects to {audit.finalUrl}
+        </p>
+      </div>
+    );
+  }
+
   // audit.state === "scored"
   const gaps = biggestGaps(audit.dimensions);
 

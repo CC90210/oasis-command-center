@@ -2,6 +2,7 @@ import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { recentActions, getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { timeAgo } from "@/lib/fmt";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,9 @@ type ActionPayload = {
 };
 
 export default async function RunsPage() {
+  // Operator-only (P0-5). Gate before any query, so a client member never has
+  // the agent audit log fetched, rather than fetched and left unpainted.
+  await requireOperator();
   const profile = await getActiveProfile();
   if (!profile?.tenant_id) {
     return (
@@ -27,7 +31,9 @@ export default async function RunsPage() {
       </div>
     );
   }
-  const events = await safe("runs.recent_actions", recentActions(profile.tenant_id, 100), []);
+  // null = the audit log could not be read: "Couldn't check", never the
+  // "No agent mutations recorded yet" of a log that really is empty.
+  const events = await safe("runs.recent_actions", recentActions(profile.tenant_id, 100), null);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -39,20 +45,19 @@ export default async function RunsPage() {
       <Card title="What lands here">
         <div className="space-y-3 text-sm text-fg-muted leading-relaxed">
           <p>
-            When you chat an agent and it changes something — your MRR target,
-            a lead&apos;s status, a profile field, a plan-template entry — it
-            emits a <span className="font-mono text-fg">&lt;dashboard-action&gt;</span>{" "}
-            marker that the chat route applies to your tenant&apos;s data.
-            Every one of those mutations gets logged here, success or failure,
-            with the agent that did it and when.
+            When an agent changes something in your dashboard — a lead&apos;s
+            status, a profile field, a plan-template entry — it writes a{" "}
+            <span className="font-mono text-fg">&lt;dashboard-action&gt;</span>{" "}
+            marker in its reply, and the Command Center applies it to your
+            workspace&apos;s data. Every one of those changes is logged here,
+            success or failure, with the agent that made it and when.
           </p>
           <p>
-            <span className="text-fg font-medium">Local bridge vs cloud — both flow through here.</span>{" "}
-            The bridge spawns Claude Code on your machine, but the model&apos;s
-            response (with action markers) still comes back through{" "}
-            <span className="font-mono text-fg">/api/chat</span> on the
-            dashboard so the markers can be parsed and applied. Cloud mode
-            uses the same path. Two execution surfaces, one audit trail.
+            <span className="text-fg font-medium">The Coding harness and cloud chats both land here.</span>{" "}
+            The harness runs Claude Code on your computer. Each change its reply
+            proposes waits in the chat until you click Apply, then Confirm; only
+            then is it written, and logged here. A cloud chat applies its changes
+            as it answers. Two places to work, one audit trail.
           </p>
           <p className="text-fg-dim">
             <span className="text-fg font-medium">When to look here:</span>{" "}
@@ -66,13 +71,17 @@ export default async function RunsPage() {
       <Card
         title="Recent agent actions"
         subtitle={
-          events.length === 0
-            ? "Empty so far — ask an agent to update something to see it here."
-            : `Last ${events.length} mutations across all agents.`
+          events === null
+            ? "Couldn't check the audit log just now."
+            : events.length === 0
+              ? "Empty so far — ask an agent to update something to see it here."
+              : `Last ${events.length} mutations across all agents.`
         }
       >
-        {events.length === 0 ? (
-          <EmptyState message="No agent mutations recorded yet. Try chatting Bravo: &quot;set my MRR target to $7000&quot; — that change will land here." />
+        {events === null ? (
+          <EmptyState message="Couldn't check the agent actions. The read failed and has been logged; this does not mean nothing changed. Reload to try again." />
+        ) : events.length === 0 ? (
+          <EmptyState message="No agent mutations recorded yet. When an agent changes dashboard data from the Coding harness or a chat, the change lands here." />
         ) : (
           <ul className="divide-y divide-bg-border">
             {events.map((ev) => {

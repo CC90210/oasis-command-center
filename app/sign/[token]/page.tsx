@@ -14,6 +14,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { resolveSigningSession } from "@/lib/esign/resolve-signing-session";
 import { SignClient } from "@/components/esign/SignClient";
+import { clientIpFromHeaders } from "@/lib/api-helpers";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -30,9 +31,7 @@ type RouteParams = { token: string };
  *  NextRequest rather than the ReadonlyHeaders this page has access to. */
 async function resolveIpAndUa(): Promise<{ ip: string; userAgent: string }> {
   const h = await headers();
-  const xff = h.get("x-forwarded-for") || "";
-  const first = xff.split(",")[0]?.trim();
-  const ip = first || h.get("x-real-ip") || "unknown";
+  const ip = clientIpFromHeaders(h);
   const userAgent = h.get("user-agent") || "unknown";
   return { ip, userAgent };
 }

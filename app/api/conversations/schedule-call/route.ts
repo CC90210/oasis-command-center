@@ -16,6 +16,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
+import { getWritableLead } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,12 +72,40 @@ export async function POST(req: NextRequest) {
   }
 
   const leadId = typeof body.lead_id === "string" && UUID_RE.test(body.lead_id) ? body.lead_id : null;
+  const exactOasisActor = !session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole);
+  if (exactOasisActor && !leadId) {
+    return NextResponse.json({ ok: false, error: "lead_required" }, { status: 403 });
+  }
   const threadKey = typeof body.thread_key === "string" && body.thread_key.trim() ? body.thread_key.trim() : null;
   const toPhone = typeof body.to_phone === "string" ? normalizePhoneE164(body.to_phone) || null : null;
   const contactLabel = typeof body.contact_label === "string" ? body.contact_label.trim().slice(0, 120) || null : null;
   const notes = typeof body.notes === "string" ? body.notes.trim().slice(0, MAX_NOTES) || null : null;
 
   const db = getServiceSupabase();
+  let authorizedLeadData: Record<string, unknown> | null = null;
+  if (leadId) {
+    const writable = await getWritableLead(
+      {
+        teamRole: session.teamRole,
+        userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      },
+      { tenantId, id: leadId },
+    );
+    if (!writable.ok) {
+      return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
+    }
+    authorizedLeadData = writable.record.data;
+  }
+  if (exactOasisActor && leadId && authorizedLeadData) {
+    const allowedPhones = ["phone", "phone_number", "mobile", "contact_phone"]
+      .map((key) => normalizePhoneE164(String(authorizedLeadData?.[key] || "")))
+      .filter((value): value is string => Boolean(value));
+    if (threadKey !== `lead:${leadId}` || !toPhone || !allowedPhones.includes(toPhone)) {
+      return NextResponse.json({ ok: false, error: "contact_lead_mismatch" }, { status: 400 });
+    }
+  }
   const ins = await db
     .from("scheduled_calls")
     .insert({
@@ -115,6 +145,32 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
   }
   const db = getServiceSupabase();
+  if (!session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole)) {
+    const existing = await db
+      .from("scheduled_calls")
+      .select("id, lead_id, actor_user_id")
+      .eq("id", id)
+      .eq("tenant_id", session.tenantId)
+      .maybeSingle();
+    const row = existing.data as
+      | { id: string; lead_id: string | null; actor_user_id: string | null }
+      | null;
+    if (!row || row.actor_user_id !== session.userId || !row.lead_id) {
+      return NextResponse.json({ ok: false, error: "not_found_or_not_pending" }, { status: 404 });
+    }
+    const writable = await getWritableLead(
+      {
+        teamRole: session.teamRole,
+        userId: session.userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      },
+      { tenantId: session.tenantId, id: row.lead_id },
+    );
+    if (!writable.ok) {
+      return NextResponse.json({ ok: false, error: "not_found_or_not_pending" }, { status: 404 });
+    }
+  }
   const upd = await db
     .from("scheduled_calls")
     .update({ status: "cancelled" })

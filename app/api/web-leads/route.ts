@@ -24,12 +24,26 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { parseFilters } from "@/lib/web-leads/filters";
-import { selectSheetIds } from "@/lib/web-leads/queries";
-import { fetchSheets, fetchLeads, PAGE_SIZE, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
+import { buildFacets, selectSheetIds } from "@/lib/web-leads/queries";
+import {
+  fetchLeadProjection,
+  fetchSheets,
+  fetchSheetsScopedToViewer,
+  fetchLeads,
+  PAGE_SIZE,
+  WEBDEV_TENANT_ID,
+} from "@/lib/web-leads/data";
+import { CacheWaitTimeout } from "@/lib/web-leads/cache";
 import { fetchScoreIndex } from "@/lib/web-leads/scores";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const PRIVATE_BROWSER_CACHE = "private, max-age=15, stale-while-revalidate=30";
+// My leads and Team leads are BOOKS: a lead someone just added or claimed must
+// be there on the next read. Only the shared pool is briefly reusable.
+const BOOK_NO_STORE = "private, no-store";
 
 export async function GET(req: NextRequest) {
   const session = await resolveSessionContext();
@@ -47,8 +61,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
+    const viewer = await resolveWebLeadViewer(session);
     const filters = parseFilters(req.nextUrl.searchParams);
+    const fresh = req.nextUrl.searchParams.get("fresh") === "1";
+    const scopeParam = req.nextUrl.searchParams.get("scope");
+    const scope = scopeParam === "mine" ? "mine" : scopeParam === "team" ? "team" : "pool";
     // Concurrent, not serial: the score index is a tenant-wide read that does
     // not depend on which sheets the filters select, so it has no reason to
     // wait on fetchSheets().
@@ -60,11 +77,114 @@ export async function GET(req: NextRequest) {
     // filter would return nothing, and a rep would work a queue that silently
     // excluded exactly the prospects they asked for. Nothing on screen would
     // say so. An error the operator can see is the honest failure here.
-    const [sheets, scoreIndex] = await Promise.all([fetchSheets(), fetchScoreIndex()]);
+    //
+    // TIMING IS MEASURED, NOT INFERRED. This route was reported at "15 seconds"
+    // and the cause turned out not to be where it looked: the score index (three
+    // whole-table reads) is ~1.3s, while the single lead read was 4.4-18.0s
+    // because it pulled 37.8 MB of JSON blob to render one page. Guessing which
+    // half is slow is how that went unfixed; a Server-Timing header means the
+    // next person reads the answer off the response instead. Visible in the
+    // browser's network panel under Timing, and in `curl -i`.
+    const t0 = Date.now();
+    const projectedRowsPromise = fetchLeadProjection(viewer, scope, fresh);
+    const sheetsPromise = scope === "pool" ? fetchSheets() : Promise.resolve([]);
+    const [sheets, scoreIndex, projectedRows] = await Promise.all([
+      sheetsPromise,
+      fetchScoreIndex(),
+      projectedRowsPromise,
+    ]);
+    const tIndex = Date.now() - t0;
     const ids = selectSheetIds(sheets, filters);
-    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex);
-    return NextResponse.json({ leads, total, page: filters.page, pageSize: PAGE_SIZE });
+    // scope=mine returns the caller's OWN book (including lapsed claims);
+    // the default pool excludes every lead somebody currently holds, which is
+    // what stops two reps dialling the same business. One clock for the whole
+    // request so the expiry rules cannot see time move mid-read.
+    const t1 = Date.now();
+    // ONE availability clock for the whole response. fetchLeads decides which
+    // leads are claimable and the facets count the claimable ones; reading
+    // Date.now() twice lets a claim expire between them, so the rail and the
+    // table would disagree by one lead for reasons no one could reproduce.
+    // The file already says this above -- "One clock for the whole request so
+    // the expiry rules cannot see time move mid-read" -- and passing the facets
+    // their own default broke it. (CodeRabbit, PR #377.)
+    const availabilityNow = Date.now();
+    const { leads, total, boards } = await fetchLeads(filters, ids, viewer, scoreIndex, {
+      scope,
+      now: availabilityNow,
+      fresh,
+      projectedRows,
+    });
+    const tLeads = Date.now() - t1;
+    // Counts are DERIVED from the rows this response is built from, for every
+    // viewer — not read off leadgen_territories' denormalized columns.
+    //
+    // Those columns are written when leads are promoted and never recomputed
+    // when they leave. After the board was consolidated from ~27,000 rows to
+    // ~1,800 they were wrong by 72x: the rail advertised 133,599 leads against
+    // 1,846 that exist, and "Toronto, ON - Restaurants & Bars" offered 6,225
+    // where 37 remain. A rep picked a sheet and got a near-empty table.
+    //
+    // The derivation already existed but was gated on isScopedContractor,
+    // because at 31,000 rows walking them was a real cost worth paying only to
+    // close a leak. At 1,846 it is one pass over an array already in memory:
+    // `projectedRows` is fetched for every request regardless, and `baseSheets`
+    // reuses the territory read for its labels. So the fast path bought nothing
+    // and cost correctness for exactly the people who trust the number most --
+    // admins and managers, the only viewers who were still on it.
+    const facets = scope === "pool"
+      ? buildFacets(
+          await fetchSheetsScopedToViewer(viewer, {
+            scope,
+            now: availabilityNow,
+            fresh,
+            projectedRows,
+            baseSheets: sheets,
+          }),
+          filters,
+        )
+      : null;
+    return NextResponse.json(
+      {
+        leads,
+        total,
+        page: filters.page,
+        pageSize: PAGE_SIZE,
+        facets,
+        // My leads / Team leads: how many of the rows in view sit on each
+        // country board, for the switch on those tabs. Null for the pool.
+        boards,
+      },
+      {
+        headers: {
+          // Authenticated tenant data may be reused only by this browser and
+          // only for the same session cookie. `private` keeps CDNs/shared
+          // proxies out; Vary prevents one signed-in identity reusing another's
+          // response in a shared browser cache.
+          "Cache-Control": scope === "pool" ? PRIVATE_BROWSER_CACHE : BOOK_NO_STORE,
+          "Vary": "Cookie",
+          // Both legs plus the total, so a slow page can be attributed without
+          // reproducing it locally. Cache state is what separates a cold
+          // instance from a warm one, and it is the difference that matters:
+          // the memo (lib/web-leads/cache.ts) is per-instance, so on Vercel a
+          // fresh instance pays full price no matter how warm its neighbours
+          // are.
+          "Server-Timing": [
+            `index;desc="sheets+scores+projection";dur=${tIndex}`,
+            `leads;desc="filter+page";dur=${tLeads}`,
+            `total;dur=${Date.now() - t0}`,
+          ].join(", "),
+        },
+      },
+    );
   } catch (err) {
+    // Another request is still loading these tables and this one waited its
+    // full allowance: retryable, and not a server fault (lib/web-leads/cache.ts).
+    if (err instanceof CacheWaitTimeout) {
+      return NextResponse.json(
+        { ok: false, error: err.message, code: "cache_wait_timeout" },
+        { status: 503, headers: { "Retry-After": "5" } },
+      );
+    }
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "leads_failed" },
       { status: 500 },

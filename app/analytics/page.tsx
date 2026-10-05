@@ -1,14 +1,12 @@
 import { Card, PageHeader, Stat, EmptyState } from "@/components/Card";
-import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
+import { GoalPaceChart } from "@/components/charts/GoalPaceChart";
 import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
-import {
-  mrrSnapshot,
-  mrrHistory,
-  pipelineBreakdown,
-  getActiveProfile,
-} from "@/lib/queries";
+import { pipelineBreakdown, getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { formatMoney } from "@/lib/fmt";
+import { requireSystemSurface, resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { loadOasisMoney } from "@/lib/goals/oasis-money";
+import { analyticsMrrState, MRR_COPY, stripeMrrHint, wonCount } from "./mrr-state";
 
 export const dynamic = "force-dynamic";
 
@@ -20,15 +18,31 @@ export default async function AnalyticsPage() {
   await requireSystemSurface();
   const profile = await safe("analytics.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
-  const [mrr, history, pipeline] = await Promise.all([
-    safe("analytics.mrr_snapshot", mrrSnapshot(), { current: 0, target: 10000, pct: 0 }),
-    safe("analytics.mrr_history", mrrHistory(60), [] as Array<{ date: string; mrr: number; synthetic: boolean }>),
-    safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
+  // An OASIS workspace reads the same money block as Today (live Stripe MRR +
+  // collected vs the revenue goal). A confirmed non-OASIS workspace has no
+  // live MRR source yet, so it says "Not connected": the Finances ledger is
+  // OASIS's books and must never render there, and the typed profile MRR it
+  // used to show (with an invented $5,000 target and a synthetic decline
+  // curve when no history existed) was a number nothing measured. A workspace
+  // that could not be confirmed says "Couldn't check" (./mrr-state.ts).
+  const surface = await resolveViewerSurface();
+  const mrrState = analyticsMrrState(surface);
+  // pipeline is null when tenant_records could not be read (pipelineBreakdown
+  // throws): the four pipeline numbers say "Couldn't check", never 0 won / 0
+  // lost over an empty funnel.
+  const [money, pipeline] = await Promise.all([
+    mrrState === "oasis" ? loadOasisMoney(tenantId, "analytics") : Promise.resolve(null),
+    safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), null),
   ]);
+  const dollars = (cents: number) => formatMoney(cents / 100);
+  // The words for a page with no money block. Read only when `money` is null,
+  // which is never the "oasis" state: loadOasisMoney always answers.
+  const noMoney = mrrState === "oasis" ? "unconfirmed" : mrrState;
 
-  const totalLeads = pipeline.total;
-  const won = pipeline.stages["won"] || 0;
-  const lost = pipeline.stages["lost"] || 0;
+  const totalLeads = pipeline?.total ?? 0;
+  // Won = every stage that means the lead became a client (Clients' own list), not the literal "won" stage.
+  const won = pipeline ? wonCount(pipeline.stages) : 0;
+  const lost = pipeline?.stages["lost"] || 0;
   const conversion = totalLeads ? ((won / totalLeads) * 100).toFixed(1) : "—";
 
   return (
@@ -36,31 +50,77 @@ export default async function AnalyticsPage() {
       <PageHeader title="Analytics" subtitle="The numbers that matter, charted." />
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat label="Net MRR" value={`$${Math.round(mrr.current).toLocaleString()}`} accent />
-        <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
-        <Stat label="Won" value={won} />
-        <Stat label="Lost" value={lost} />
+        {money ? (
+          <Stat
+            label="MRR (Stripe)"
+            value={
+              money.mrr
+                ? `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`
+                : "—"
+            }
+            hint={
+              money.mrr
+                ? // When the books last heard from Stripe, never a bare "live".
+                  stripeMrrHint(
+                    money.stripeSync.ok ? { lastSyncAt: money.stripeSync.lastSyncAt } : null,
+                    Date.now(),
+                    money.mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? dollars(money.mrrUsdCents) : null,
+                  )
+                : money.stripeConnected === false
+                  ? "Stripe not connected yet — Finances → Settings"
+                  : "Stripe unavailable"
+            }
+            accent
+          />
+        ) : (
+          <Stat label="MRR (Stripe)" value={MRR_COPY[noMoney].value} hint={MRR_COPY[noMoney].hint} accent />
+        )}
+        {pipeline === null ? (
+          <>
+            <Stat label="Conversion" value="Couldn't check" hint="the pipeline could not be read" />
+            <Stat label="Won" value="Couldn't check" />
+            <Stat label="Lost" value="Couldn't check" />
+          </>
+        ) : (
+          <>
+            <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
+            <Stat label="Won" value={won} hint="Leads that became clients, at any delivery stage" />
+            <Stat label="Lost" value={lost} />
+          </>
+        )}
       </section>
 
-      <Card
-        title="MRR · 60 days"
-        subtitle={(() => {
-          const realDays = history.filter((h) => !h.synthetic).length;
-          const target = `Target $${mrr.target.toLocaleString()}`;
-          if (realDays === 0) return `${target} · projected (no snapshot history)`;
-          if (realDays < 14) return `${target} · ${realDays} day${realDays === 1 ? "" : "s"} of real data, rest back-filled — cron snapshots build up daily`;
-          return target;
-        })()}
-      >
-        <MRRProgressChart data={history} target={mrr.target} />
-      </Card>
+      {money ? (
+        money.goal ? (
+          <Card
+            title="Sprint · collected vs pace"
+            subtitle={`Cumulative USD collected against the straight line to ${dollars(money.goal.target_cents)} by ${money.goal.period_end}`}
+          >
+            <GoalPaceChart data={money.paceSeries} target={money.goal.target_cents / 100} />
+          </Card>
+        ) : (
+          <Card title="Revenue goal">
+            <EmptyState message="No active revenue goal. A founder sets one in Settings → Revenue goal." />
+          </Card>
+        )
+      ) : (
+        <Card title="MRR">
+          <EmptyState message={MRR_COPY[noMoney].card} />
+        </Card>
+      )}
 
       <Card title="Pipeline" subtitle="Funnel by stage">
-        <PipelineFunnel stages={pipeline.stages} />
+        {pipeline === null ? (
+          <EmptyState message="Couldn't check the pipeline. The read failed and has been logged; this does not mean it is empty. Reload to try again." />
+        ) : (
+          <PipelineFunnel stages={pipeline.stages} />
+        )}
       </Card>
 
       <Card title="Lead sources" subtitle="Where leads come from">
-        {Object.keys(pipeline.sources || {}).length === 0 ? (
+        {pipeline === null ? (
+          <EmptyState message="Couldn't check where leads come from. Reload to try again." />
+        ) : Object.keys(pipeline.sources || {}).length === 0 ? (
           <EmptyState message="No source data yet." />
         ) : (
           <ul className="space-y-2">

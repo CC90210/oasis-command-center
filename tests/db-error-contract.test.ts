@@ -79,8 +79,40 @@ const KNOWN_BARE_THROWS: Readonly<Record<string, number>> = {
   "lib/queries/merchant-summary.ts": 2,
 };
 
-// `throw <something>.error` or `throw error;` — the driver-object shapes.
-const BARE_THROW = /throw\s+(?:\w+\.)?error(?:s)?\s*;|throw\s+\w+Res(?:ult)?\.error\s*;/g;
+// `throw <result>.error;` — a driver result's error property. Never anything else.
+const PROPERTY_THROW = /throw\s+\w+\.error(?:s)?\s*;/g;
+// A bare `throw error;`. Ambiguous on its own — see DESTRUCTURED_ERROR below.
+const BARE_THROW = /throw\s+(error(?:s)?)\s*;/g;
+
+/**
+ * Does this file bind that identifier from a query RESULT?
+ *
+ * A bare `throw error;` has two completely different meanings and the scan
+ * cannot tell them apart from the throw alone:
+ *
+ *   const { data, error } = await db...;  if (error) throw error;   ← THE BUG
+ *   } catch (error) { ...; throw error; }                           ← correct
+ *
+ * The first sends a plain driver object across a boundary. The second re-raises
+ * whatever was already caught, which is the only correct thing to do when you
+ * cannot handle it — and lib/integrations/google-calendar.ts grew exactly that
+ * form in #324 (`if (!system) throw error;`, re-raising a
+ * GoogleCalendarIntegrationError when no workspace calendar is configured to
+ * fall back to). It was reported as new undeclared debt, which is how main went
+ * red. Adding it to KNOWN_BARE_THROWS would have been worse than the red: it
+ * would record a debt that does not exist, and set that file's ratchet to 1 so
+ * a genuine bare throw appearing there later would pass unnoticed.
+ *
+ * A driver error only ever enters scope by being destructured off an awaited
+ * result, so that binding is what distinguishes the two. Deliberately
+ * conservative: a file that destructures `error` anywhere still has ALL its
+ * bare throws counted, so the ambiguous case resolves toward reporting.
+ * Verified against the eight declared files above — every one destructures
+ * `error`, so none of their counts move; google-calendar.ts never does, and
+ * binds `error` only in `catch`.
+ */
+const bindsDestructuredError = (src: string, id: string): boolean =>
+  new RegExp(String.raw`(?:const|let|var)\s*\{[^}]*\b${id}\b[^}]*\}\s*=`).test(src);
 
 const files = sourceTree("app", "lib", "components");
 assert.ok(files.length > 200, `only ${files.length} files walked — the scan is broken`);
@@ -88,7 +120,10 @@ assert.ok(files.length > 200, `only ${files.length} files walked — the scan is
 const offenders = new Map<string, number>();
 for (const f of files) {
   const src = readFileSync(f, "utf8");
-  const hits = [...src.matchAll(BARE_THROW)].length;
+  let hits = [...src.matchAll(PROPERTY_THROW)].length;
+  for (const [, id] of src.matchAll(BARE_THROW)) {
+    if (bindsDestructuredError(src, id)) hits += 1;
+  }
   if (hits) offenders.set(rel(f), hits);
 }
 

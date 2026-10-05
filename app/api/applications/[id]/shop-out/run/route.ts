@@ -34,7 +34,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { executeShopOutRun } from "@/lib/lenders/shop-out-run";
 import { getAgents, deriveSigner, findAgentByEmail } from "@/lib/config/agents";
 import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
@@ -66,7 +66,33 @@ function jsonError(status: number, error: string, extra: Record<string, unknown>
   return NextResponse.json({ ok: false, error, ...extra }, { status });
 }
 
+/**
+ * Top-level catch, same contract as the two plan routes.
+ *
+ * This route shared the 2026-09-15 outage — it calls getAgents() too, so the
+ * readFileSync that killed the lender grid killed the actual SEND here. It was
+ * missed in the first pass of that fix, which covered only the routes the
+ * Shopping Out screen calls. This one backs the /applications/[id]/shop-out
+ * panel, and it is the highest-stakes surface in the flow: an empty-bodied 500
+ * here leaves the operator unable to tell whether lenders were emailed.
+ */
 export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  try {
+    return await handleShopOutRun(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[shop-out:run] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "shop_out_unhandled_error", message: detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleShopOutRun(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
@@ -128,8 +154,10 @@ export async function POST(
     .eq("id", sess.tenantId)
     .maybeSingle();
   const tenantSlug = (tenantRow.data as { slug: string } | null)?.slug || "";
-  const isOperator = isOperatorEmail(sess.email);
-  if (tenantSlug !== "submissions" && !isOperator) {
+  // Operator = the verified check (alias AND owner/admin OASIS membership by
+  // auth id), asked only when the tenant gate would otherwise refuse. Fails
+  // closed: a failed lookup is a 403, never a send.
+  if (tenantSlug !== "submissions" && !(await isPlatformOperatorForAuthUser(sess.userId, sess.email))) {
     return jsonError(403, "shop_out_not_enabled_for_tenant");
   }
 
@@ -168,7 +196,7 @@ export async function POST(
 
   // Derive the agent CC list — single source of truth for the rep-fields
   // scan + UUID resolution + agents.config.json intersection.
-  const derivedAgents = await deriveAgentCcs(db, appData);
+  const derivedAgents = await deriveAgentCcs(db, sess.tenantId, appData);
   const agentEmails = new Set(getAgents().map((a) => a.email.toLowerCase().trim()));
   const derivedCcs = derivedAgents.map((a) => a.email.toLowerCase().trim());
 

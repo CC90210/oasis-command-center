@@ -1,13 +1,388 @@
+import {
+  mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
+  ownsOasisSalesRecord,
+  roleMayOperateOasisSalesLead,
+} from "@/lib/oasis-sales-pipeline-policy";
+import { mayQuoteAndClose } from "@/lib/team-roles";
+import type { LeadSourceTrack } from "@/lib/website-sales-comp";
+import { canonicalFromRepDisposition } from "./call-disposition";
+
 export const OASIS_WEBSITE_TENANT_SLUG = "oasis-webdev";
 
 export type RepDisposition = "attempted" | "voicemail" | "connected" | "lost";
+
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Select payout provenance from the persisted lead only. Missing, malformed,
+ * or browser-invented values fail closed to the company track.
+ */
+export function resolveWebsiteSalesLeadSourceTrack(value: unknown): LeadSourceTrack {
+  return value === "self" ? "self" : "company";
+}
+
+/**
+ * Role floor for changing the OASIS sales lifecycle. Ownership is checked
+ * separately by the route; this prevents an assigned read-only, marketing, or
+ * delivery account from turning record visibility into sales-write authority.
+ */
+export function mayWorkWebsiteSalesLifecycle(
+  teamRole: string | null | undefined,
+  isAdmin = false,
+): boolean {
+  if (isAdmin) return true;
+  return roleMayOperateOasisSalesLead(teamRole);
+}
+
+/**
+ * Quote/payment/close authority follows the current deal seat, not historical
+ * opener attribution. After a two-person handoff the opener remains a reader
+ * and keeps their 15% line, while only the assigned or recorded audit-host rep
+ * may execute closer actions.
+ */
+export function mayRepRunWebsiteSalesDeal(input: {
+  actorUserId: unknown;
+  assignedTo: unknown;
+  auditHostUserId: unknown;
+}): boolean {
+  const normalize = (value: unknown) =>
+    typeof value === "string" ? value.trim().toLowerCase() : "";
+  const actor = normalize(input.actorUserId);
+  if (!actor) return false;
+  return actor === normalize(input.assignedTo) || actor === normalize(input.auditHostUserId);
+}
+
+export type WebsiteSalesLeadSeat = {
+  assignedToUser: boolean;
+  attributedToUser: boolean;
+  actorHoldsDealSeat: boolean;
+  builderMayRunDelivery: boolean;
+  builderOwnsDelivery: boolean;
+  builderOnOwnSalesLead: boolean;
+};
+
+/**
+ * May this actor write this one website-sales lead at all? The ownership half
+ * of PATCH /api/website-sales/[leadId] (the role floor is
+ * mayWorkWebsiteSalesLifecycle, checked before the read). Shared with
+ * GET /api/web-leads/[id]?view=booking so the call screen never offers a
+ * booking the PATCH would refuse: a manager who is only a collaborator is
+ * refused here even though ownsOasisSalesRecord counts collaborators.
+ */
+export function websiteSalesLeadSeat(input: {
+  teamRole: string;
+  isAdmin: boolean;
+  userId: string;
+  row: { id: string; data: Record<string, unknown> };
+}):
+  | ({ ok: true } & WebsiteSalesLeadSeat)
+  | { ok: false; error: "lead_not_assigned_to_agent" | "builder_not_assigned_to_lead" | "builder_delivery_stage_only" } {
+  const { isAdmin, userId, row } = input;
+  const role = input.teamRole.trim().toLowerCase();
+  const current = row.data;
+  const me = userId.toLowerCase();
+  const assignedToUser = String(current.assigned_to || "").toLowerCase() === me;
+  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === me;
+  const actorOwnsSalesLead = ownsOasisSalesRecord(row, userId);
+  const actorHoldsDealSeat = mayRepRunWebsiteSalesDeal({
+    actorUserId: userId,
+    assignedTo: current.assigned_to,
+    auditHostUserId: current.audit_host_user_id,
+  });
+  // A manager's frozen attribution survives a handoff for reporting, but it is
+  // not continuing write authority. Managers operate their own assigned lead
+  // normally and coach every other roster lead read-only. The explicit
+  // admin_access toggle retains its existing tenant-wide semantics via isAdmin.
+  if (role === "manager" && !isAdmin && !assignedToUser && !actorHoldsDealSeat) {
+    return { ok: false, error: "lead_not_assigned_to_agent" };
+  }
+  const isBuilder = role === "builder";
+  const builderMayRunDelivery = mayOperateOasisDeliveryStage(input.teamRole, current.stage);
+  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(row, userId);
+  // CC, 2026-08-25: a builder working HIS OWN sales lead (assigned, or frozen
+  // attribution) walks the normal rep path. The delivery lane exists for his
+  // BUILD work; letting it intercept the selling half 403'd every structured
+  // sales action a selling builder clicked.
+  const builderOnOwnSalesLead = isBuilder && (assignedToUser || attributedToUser);
+  if (isBuilder && !builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)) {
+    return { ok: false, error: builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only" };
+  }
+  if (!isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
+    return { ok: false, error: "lead_not_assigned_to_agent" };
+  }
+  return {
+    ok: true,
+    assignedToUser,
+    attributedToUser,
+    actorHoldsDealSeat,
+    builderMayRunDelivery,
+    builderOwnsDelivery,
+    builderOnOwnSalesLead,
+  };
+}
+
+/**
+ * A request-id replay is safe only when the payment payload is byte-for-byte
+ * equivalent after the same normalization used by the first write. Otherwise
+ * a reused key could turn a changed receipt, amount, currency, or payee shape
+ * into a misleading generic success.
+ */
+export function matchesWebsiteSalesPaymentReplay(
+  body: Record<string, unknown>,
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!metadata) return false;
+  const amount = Number(body.paymentAmount);
+  const amountCents = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || !Number.isSafeInteger(amountCents)) return false;
+  const provider = body.paymentProvider === "manual" ? "manual" : "stripe";
+  const reference = typeof body.paymentReference === "string" ? body.paymentReference.trim() : "";
+  const currency = body.paymentCurrency === "USD" ? "USD" : "CAD";
+  const builderUserId = typeof body.builderUserId === "string" && body.builderUserId.trim()
+    ? body.builderUserId.trim().toLowerCase()
+    : null;
+  const storedBuilderUserId = typeof metadata.builder_user_id === "string" && metadata.builder_user_id.trim()
+    ? metadata.builder_user_id.trim().toLowerCase()
+    : null;
+  return metadata.payment_provider === provider &&
+    metadata.provider_reference === reference &&
+    Number(metadata.installment_amount_cents) === amountCents &&
+    metadata.currency === currency &&
+    storedBuilderUserId === builderUserId;
+}
+
+export type WebsiteSalesCloseParties = {
+  closerUserId: string;
+  openerUserId: string | null;
+  closedByRep: boolean;
+};
+
+/**
+ * A founder clicking "payment verified" is not evidence that the founder ran
+ * the close. Credit a different closer only when tenant-scoped profile data
+ * still says they are close-capable and the lead identifies them as either the
+ * booked audit host or the current assigned closer.
+ */
+export function mayCreditAdminVerifiedCloser(input: {
+  candidateUserId: unknown;
+  frozenOpenerUserId: unknown;
+  auditHostUserId: unknown;
+  assignedTo: unknown;
+  recordedAuditHostRole: unknown;
+  liveTeamRole: unknown;
+  isOwner: unknown;
+}): boolean {
+  const normalizeUserId = (value: unknown) =>
+    typeof value === "string" && USER_ID.test(value.trim()) ? value.trim().toLowerCase() : "";
+  const candidate = normalizeUserId(input.candidateUserId);
+  const frozenOpener = normalizeUserId(input.frozenOpenerUserId);
+  if (!candidate || input.isOwner === true || input.isOwner === 1) return false;
+  if (!mayQuoteAndClose(input.liveTeamRole)) return false;
+
+  const auditHost = normalizeUserId(input.auditHostUserId);
+  const assigned = normalizeUserId(input.assignedTo);
+  const verifiedAuditHost = candidate === auditHost && mayQuoteAndClose(input.recordedAuditHostRole);
+  // When the candidate is also the frozen opener, assignment alone is not new
+  // evidence that they ran the close. A matching audit-host record plus their
+  // live close-capable profile is. That produces one combined sales party, not
+  // duplicate opener and closer lines for the same person.
+  if (candidate === frozenOpener) return verifiedAuditHost;
+  return candidate === assigned || verifiedAuditHost;
+}
+
+/** Freeze handoff credit to the existing opener, then the assigned rep, and
+ * only finally the actor. This keeps an admin-assisted booking from claiming
+ * attribution that belongs to the rep already working the lead. */
+export function resolveWebsiteSalesHandoffRep(
+  attributedRepUserId: unknown,
+  assignedTo: unknown,
+  actorUserId: string,
+): string {
+  for (const candidate of [attributedRepUserId, assignedTo]) {
+    if (typeof candidate === "string" && USER_ID.test(candidate.trim())) {
+      return candidate.trim().toLowerCase();
+    }
+  }
+  return actorUserId.trim().toLowerCase();
+}
+
+/**
+ * Resolve the people attached to a close without collapsing a two-person sale
+ * into the frozen opener. `attributed_rep_user_id` is the opener after handoff;
+ * `assigned_to` is the closer currently working the deal. A non-admin caller
+ * can only close when they are one of those two people. An admin verifier may
+ * supply a separately validated closer; otherwise the close is founder-run and
+ * pays only the frozen opener.
+ */
+export function resolveWebsiteSalesCloseParties(input: {
+  assignedTo: unknown;
+  attributedRepUserId: unknown;
+  actorUserId: string;
+  isTrueAdmin: boolean;
+  trustedCloserUserId?: unknown;
+}): WebsiteSalesCloseParties | null {
+  const actor = input.actorUserId.trim().toLowerCase();
+  const assigned = typeof input.assignedTo === "string" ? input.assignedTo.trim().toLowerCase() : "";
+  const attributed =
+    typeof input.attributedRepUserId === "string"
+      ? input.attributedRepUserId.trim().toLowerCase()
+      : "";
+  const trustedCloser =
+    typeof input.trustedCloserUserId === "string" && USER_ID.test(input.trustedCloserUserId.trim())
+      ? input.trustedCloserUserId.trim().toLowerCase()
+      : "";
+
+  if (input.isTrueAdmin) {
+    if (trustedCloser) {
+      return {
+        closerUserId: trustedCloser,
+        openerUserId: attributed && attributed !== trustedCloser
+          ? attributed
+          : assigned && assigned !== trustedCloser
+            ? assigned
+            : null,
+        closedByRep: true,
+      };
+    }
+    // When a founder actually closes, the paid sales party is the opener.
+    // Frozen attribution is the strongest opener fact; assignment is the
+    // legacy fallback. Treating that rep as a full-stack closer would overpay
+    // the common "rep books, founder closes" path at 35% instead of 15%.
+    const openerUserId = attributed || assigned;
+    if (!openerUserId) return null;
+    return {
+      // The RPC's primary rep parameter is named closer for legacy reasons;
+      // p_closed_by_rep=false makes this party an opener in the v3 engine.
+      closerUserId: openerUserId,
+      openerUserId: null,
+      closedByRep: false,
+    };
+  }
+
+  if (!actor || (actor !== assigned && actor !== attributed)) return null;
+  return {
+    closerUserId: actor,
+    openerUserId: attributed && attributed !== actor ? attributed : null,
+    closedByRep: true,
+  };
+}
+
+/**
+ * The normal forward edge from each OASIS stage. Lost and launched are
+ * terminal; researched enters the working pipeline through assignment/claim,
+ * not through the lead-file action panel.
+ *
+ * This is intentionally a map instead of an array-index lookup. Won branches
+ * into delivery while lost branches out of the lifecycle entirely, and making
+ * those edges explicit prevents a reordered display list from silently
+ * changing business behavior.
+ */
+const NEXT_OASIS_LIFECYCLE_STAGE: Readonly<Record<string, string>> = {
+  assigned: "attempting_contact",
+  attempting_contact: "connected",
+  connected: "qualified",
+  qualified: "founder_meeting_booked",
+  founder_meeting_booked: "demo_completed",
+  demo_completed: "proposal_sent",
+  proposal_sent: "won",
+  won: "onboarding",
+  onboarding: "in_build",
+  in_build: "client_review",
+  client_review: "launched",
+};
+
+export function nextOasisLifecycleStage(stage: unknown): string | null {
+  return typeof stage === "string" ? NEXT_OASIS_LIFECYCLE_STAGE[stage] ?? null : null;
+}
+
+const ADMIN_SET_STAGE_TARGETS = new Set([
+  "researched",
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+  "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
+  "lost",
+]);
+const PAID_OR_DELIVERY_STAGES = new Set(["won", "onboarding", "in_build", "client_review", "launched"]);
+
+/**
+ * Won proves full payment and delivery stages prove explicit handoffs. The
+ * generic dropdown may repair ordinary sales stages, but cannot mint either
+ * fact without its guarded workflow action. It also cannot erase the visible
+ * lifecycle after those facts exist: refunds, voids, and delivery handoffs
+ * have structured actions that keep the deal and commission ledger coupled.
+ */
+export function mayAdminSetWebsiteSalesStage(currentStage: unknown, targetStage: unknown): boolean {
+  return (
+    typeof currentStage === "string" &&
+    typeof targetStage === "string" &&
+    !PAID_OR_DELIVERY_STAGES.has(currentStage) &&
+    ADMIN_SET_STAGE_TARGETS.has(targetStage)
+  );
+}
+
+const ADMIN_DIRECT_ADVANCE_STAGES = new Set([
+  "assigned",
+  "won",
+  "onboarding",
+  "in_build",
+  "client_review",
+]);
+
+/**
+ * Direct advance is reserved for edges that need no extra business data.
+ * Calls, qualification, proposals, and closes have structured actions so a
+ * stage button can never skip the facts, pricing, or payment record they need.
+ */
+export function mayUseDirectAdvance(
+  stage: unknown,
+  isAdmin: boolean,
+  _mayRunDeal = false,
+): boolean {
+  if (stage === "assigned") return true;
+  return isAdmin && typeof stage === "string" && ADMIN_DIRECT_ADVANCE_STAGES.has(stage);
+}
+
+export function maySendWebsiteProposal(stage: unknown): boolean {
+  return stage === "demo_completed";
+}
+
+export function mayCloseWebsiteDeal(stage: unknown): boolean {
+  return stage === "proposal_sent";
+}
 
 export function mayAgentQualify(stage: unknown): boolean {
   return stage === "connected";
 }
 
-export function mayAgentBookFounder(stage: unknown): boolean {
-  return stage === "qualified";
+/**
+ * A rep may always book from the explicit Qualified stage. The lead profile
+ * also supports the real-world "the prospect agreed to the audit on this
+ * call" path: a pre-Founder stage may book only when the same request carries
+ * every qualification gate. The API still validates and persists those facts
+ * before it uses this predicate.
+ */
+export function mayAgentBookFounder(
+  stage: unknown,
+  qualificationIncluded = false,
+): boolean {
+  if (stage === "qualified") return true;
+  return qualificationIncluded && ["assigned", "attempting_contact", "connected"].includes(String(stage));
+}
+
+export function mayRecordDisposition(stage: unknown, disposition: RepDisposition): boolean {
+  if (typeof stage !== "string") return false;
+  if (disposition === "lost") {
+    return ["assigned", "attempting_contact", "connected", "qualified"].includes(stage);
+  }
+  if (disposition === "connected") {
+    return ["assigned", "attempting_contact", "connected"].includes(stage);
+  }
+  return stage === "assigned" || stage === "attempting_contact";
 }
 
 export function dispositionPatch(
@@ -22,17 +397,42 @@ export function dispositionPatch(
   if (nextActionAt && (!Number.isFinite(Date.parse(nextActionAt)) || Date.parse(nextActionAt) <= Date.parse(occurredAt))) {
     throw new Error("next_action_must_be_in_future");
   }
-  if (disposition === "lost" && !lossReason.trim()) throw new Error("loss_reason_required");
+  const cleanLossReason = lossReason.trim();
+  if (disposition === "lost" && !cleanLossReason) throw new Error("loss_reason_required");
+  if (cleanLossReason.length > 500) throw new Error("loss_reason_too_long");
   const stage = disposition === "connected"
     ? "connected"
     : disposition === "lost"
       ? "lost"
       : "attempting_contact";
-  return {
+  const patch: Record<string, unknown> = {
     stage,
-    last_disposition: disposition,
+    // CANONICAL, not the raw RepDisposition. Both this path and the board
+    // write this field, so until they agreed on a vocabulary the value a
+    // lead carried depended on which screen the rep happened to use -- and
+    // components/today/RepToday.tsx renders it, so one lead read "attempted"
+    // and another read "no_answer" for the same real event. The stage logic
+    // above still switches on `disposition`; only the stored word changes.
+    last_disposition: canonicalFromRepDisposition(disposition),
     last_contact_at: occurredAt,
-    next_action_at: nextActionAt,
-    ...(disposition === "lost" ? { loss_reason: lossReason } : {}),
+    // Supabase migration 074 mirrors interaction rows into this field, but
+    // Turso has no Postgres trigger. Persist it with the lifecycle write so
+    // /pipeline and /today agree with the interaction ledger on both backends.
+    last_contacted_at: occurredAt,
+    // Claim expiry keys off the last real dial, not a generic record update.
+    // Every disposition represents an attempted call, including a loss.
+    last_call_at: occurredAt,
+    ...(disposition === "lost" ? { loss_reason: cleanLossReason } : {}),
   };
+  // Connected is the ONLY outcome whose follow-up date is optional, so it is the
+  // only one that must not blank an existing one. The record store merges
+  // shallowly, so emitting next_action_at:null here ERASED a callback the rep
+  // had already scheduled — a lead with a promise and a lead with none then
+  // render identically. attempted and voicemail always carry a date (enforced
+  // at the top of this function), and `lost` clearing it is correct: a closed
+  // lead has no next action. Omitting the key is what preserves the value.
+  if (!(disposition === "connected" && !nextActionAt)) {
+    patch.next_action_at = nextActionAt ?? null;
+  }
+  return patch;
 }

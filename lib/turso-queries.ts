@@ -14,8 +14,7 @@
  */
 
 import { getTursoClient } from "@/lib/turso";
-import type { DailyPlan, Lead } from "@/lib/supabase";
-import { operatorDateKey } from "@/lib/dates";
+import type { Lead } from "@/lib/supabase";
 
 function _rowToObject(columns: string[], row: unknown[]): Record<string, unknown> {
   const obj: Record<string, unknown> = {};
@@ -32,30 +31,8 @@ function _warnOnce(scope: string, err: unknown) {
   console.warn(`[turso-queries:${scope}] Turso read failed — check libSQL bootstrap:`, err);
 }
 
-export async function getTodayPlanTurso(profileId: string): Promise<DailyPlan | null> {
-  try {
-    const client = getTursoClient();
-    const r = await client.execute({
-      sql: "SELECT * FROM daily_plans WHERE profile_id = ? AND plan_date = ? LIMIT 1",
-      args: [profileId, operatorDateKey()],
-    });
-    const row = r.rows?.[0];
-    if (!row) return null;
-    const obj = _rowToObject(r.columns, row as unknown as unknown[]);
-    // Schedule is stored as TEXT (JSON) in SQLite/libSQL; parse it.
-    if (typeof obj.schedule === "string") {
-      try {
-        obj.schedule = JSON.parse(obj.schedule);
-      } catch {
-        obj.schedule = [];
-      }
-    }
-    return obj as unknown as DailyPlan;
-  } catch (err) {
-    _warnOnce("getTodayPlanTurso", err);
-    return null;
-  }
-}
+// getTodayPlanTurso went with its only caller, queries.ts getTodayPlan
+// (2026-09-29: nothing called either).
 
 /**
  * Tenant-scoped recent leads (SunBiz "Leads" page + the lead-discovery surface).

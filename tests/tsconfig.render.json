@@ -1,0 +1,7 @@
+{
+  "//": "tsx transpile settings for tests/web-leads-automations-catalogue.render.ts ONLY. The root tsconfig sets jsx:\"preserve\" because Next does its own JSX transform; tsx honours that and falls back to the CLASSIC runtime, so a .tsx component renders as `React.createElement` with no React in scope and throws `React is not defined`. This file overrides jsx for that one spawned process and is passed via TSX_TSCONFIG_PATH. It changes nothing about the build, the typecheck or any other test.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

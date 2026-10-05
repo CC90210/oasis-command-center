@@ -1,78 +1,52 @@
 /**
- * /health — single-pane "is the system healthy" dashboard.
+ * /health — System health, the one operator page for "is everything OK?"
+ * (2026-09-30: /system-health folds into it and redirects here).
  *
- * Round 3 R3-13. Operator request: "no errors-in-last-24h view, no
- * stuck-thread alerts, no Telegram on daemon crashes ... operator
- * has no way to tell if system is OK at a glance."
+ * OPERATOR ONLY. requireOperator() is the first statement: the page reads the
+ * OASIS platform's own schedules, workers and guard reports, which belong to
+ * no client workspace. It used requireSystemSurface, which let any client
+ * workspace owner open it by URL and read OASIS's cron failures.
  *
- * Four data tiles:
+ * Top to bottom, one plain sentence per card on what it means for CC:
+ *   1. The verdict: is everything protected, and when did the computer last
+ *      check in.
+ *   2. Your computer: the paired machines (online < 90 s, idle < 5 min) and
+ *      whether the Command Center itself can reach the bridge.
+ *   3. Safety guards: the five guards on the operator's machine, as that
+ *      machine reports them. "Not reported yet" / "Not verified since T",
+ *      never "off" for a report that is missing or old.
+ *   4. Background work: the OASIS workers, and every schedule that failed in
+ *      the last 24 hours with a one-line what-to-do.
+ *   5. Automation signals: the buckets that might need you (errors, warnings,
+ *      failed automations, workers down, cold leads by COUNT), the founder-
+ *      booking check, the event list, the cold-lead list and the integration
+ *      heartbeats.
  *
- *   1. Recent error/warn events from agent_events (last 24h)
- *      Sources: daemon crashes (Round 3 R3-11 notify path), cron
- *      failures that ERROR-prefix their last_result, app-level
- *      route warnings (forms/submit stage_warning, etc.).
- *
- *   2. Crons that failed their last run
- *      Joins empire `cron_jobs` (last_result starts with 'ERROR' or
- *      'FAILED' or 'unknown_action_type') + tenant `tenant_cron_jobs`
- *      (last_run_status = 'error').
- *
- *   3. Lender threads stuck at status='sent' > 7 days
- *      Means a shop-out went out, no reply within the SLA window,
- *      and the classifier daemon's SLA-sweep hasn't auto-flipped
- *      them to 'no_response' yet. Operator should chase manually.
- *
- *   4. Leads stuck in the same stage > 14 days
- *      Pipeline stall. Drip sequences should have moved them or the
- *      operator should disposition. Listed by stage so operator can
- *      see WHERE the pipeline is sticking.
- *
- * Page is server-rendered + dynamic (no caching) so the operator
- * always sees the current state. Refresh = page reload.
+ * Every number comes from lib/admin/system-health.ts, which reads in-process
+ * (no HTTP self-fetch; that fetch carried no session and got the middleware's
+ * 401) and from lib/admin/attention.ts, the same definition of "needs you" the
+ * /operations tiles use. A read that failed says "Couldn't check", never 0.
  */
 
 import { PageHeader, Card, Tag } from "@/components/Card";
 import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
-import { loadOutcomeChecks } from "@/lib/health/outcome-panel-data";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { safe } from "@/lib/api-helpers";
+import { requireOperator } from "@/lib/role-surfaces-session";
+import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { getTenant } from "@/lib/queries";
+import { aiKeyOnFile, aiServicesWithKey, getTenant, integrationsHealth } from "@/lib/queries";
+import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
+import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
+import { formatAgo, loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { AlertCircle, AlertTriangle, Clock, Activity, CheckCircle2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
-
-type ErrorEvent = {
-  id: string;
-  event_type: string;
-  severity: string;
-  publisher_agent: string | null;
-  payload: Record<string, unknown> | null;
-  published_at: string;
-};
-
-type FailedCron = {
-  id: string;
-  name: string;
-  schedule: string;
-  last_run_at: string | null;
-  last_result: string | null;
-  source: "empire" | "tenant";
-};
-
-type StuckThread = {
-  id: string;
-  application_id: string;
-  lender_id: string | null;
-  recipient_email: string | null;
-  status: string;
-  sent_at: string | null;
-};
 
 type StuckLead = {
   id: string;
@@ -80,439 +54,432 @@ type StuckLead = {
   updated_at: string;
 };
 
-async function loadHealth(
-  tenantId: string,
-  enabledAgents: string[],
-  // Lender shop-outs are SunBiz funding workflow. Other tenants have no
-  // application_lender_threads rows by definition — skip the read instead of
-  // rendering a SunBiz-vocabulary section around an inevitable zero.
-  includeLenderThreads: boolean,
-) {
-  const db = getServiceSupabase();
-  const now = Date.now();
-  const dayAgoIso = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const weekAgoIso = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const twoWeeksAgoIso = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
-
-  // All four lookups are independent — fire in parallel so the page
-  // renders in max(query) instead of sum(query).
-  //
-  // 1. Recent error/warn events from agent_events. The table has no
-  //    tenant_id column (legacy schema debt); scope by the tenant's
-  //    enabled-agent set, same posture todayCounts takes. Empty
-  //    enabled-agents → resolved promise of empty list, no round trip.
-  const recentErrorsPromise = enabledAgents.length > 0
-    ? db
-        .from("agent_events")
-        .select("id, event_type, severity, publisher_agent, payload, published_at")
-        .in("publisher_agent", enabledAgents)
-        .in("severity", ["error", "warn"])
-        .gte("published_at", dayAgoIso)
-        .order("published_at", { ascending: false })
-        .limit(50)
-        .then((res) => (res.data as ErrorEvent[]) || [])
-    : Promise.resolve<ErrorEvent[]>([]);
-
-  // 2a + 2b. Failed crons across both registries.
-  //
-  // Empire crons run on CC's local box (cron_engine.py polling SEED_JOBS).
-  // A cron that errored months ago and was never retried will still match
-  // last_result LIKE 'ERROR%' forever — flooding the Health page with stale
-  // phantom failures (e.g. the Atlas Pulse Refresh "script not found" entry
-  // from a one-off config typo months ago). Scope to the last 24h so the
-  // page reflects "what's broken right now," not "what ever broke."
-  // last_run_at IS NULL means the cron never ran — keep those visible too
-  // (a cron that's enabled but never fired is a legit health signal).
-  const empireFailedPromise = db
-    .from("cron_jobs")
-    .select("id, name, schedule, last_run_at, last_result")
-    .or(
-      "last_result.like.ERROR%,last_result.like.FAILED%,last_result.like.unknown_action_type%",
-    )
-    .gte("last_run_at", dayAgoIso)
-    .order("last_run_at", { ascending: false })
-    .limit(20);
-  const tenantFailedPromise = db
-    .from("tenant_cron_jobs")
-    .select("id, name, schedule, last_run_at, last_run_status, last_run_error")
-    .eq("tenant_id", tenantId)
-    .eq("last_run_status", "error")
-    .order("last_run_at", { ascending: false })
-    .limit(20);
-
-  // 3. Lender threads stuck at sent>7d (SunBiz only — see includeLenderThreads).
-  const stuckThreadsPromise = includeLenderThreads
-    ? db
-        .from("application_lender_threads")
-        .select("id, application_id, lender_id, recipient_email, status, sent_at")
-        .eq("tenant_id", tenantId)
-        .eq("status", "sent")
-        .lt("sent_at", weekAgoIso)
-        .order("sent_at", { ascending: true })
-        .limit(50)
-        .then((res) => (res.data as StuckThread[]) || [])
-    : Promise.resolve<StuckThread[]>([]);
-
-  // 4. Lead rows with updated_at >14d. Cap at 50 — the operator only
-  //    needs the worst offenders; if there are more, the count tile
-  //    will under-report but the list stays scannable.
-  const stuckLeadsPromise = db
+/** The oldest untouched leads, for the list. The tile's number is COUNT(*), not this list's length. */
+async function loadColdLeadList(tenantId: string, now: number): Promise<StuckLead[]> {
+  const r = await getServiceSupabase()
     .from("tenant_records")
     .select("id, data, updated_at")
     .eq("tenant_id", tenantId)
     .eq("entity_type", "lead")
-    .lt("updated_at", twoWeeksAgoIso)
+    .lt("updated_at", new Date(now - COLD_LEAD_MS).toISOString())
     .order("updated_at", { ascending: true })
-    .limit(50)
-    .then((res) => (res.data as StuckLead[]) || []);
-
-  const [recentErrors, empireFailed, tenantFailed, stuckThreads, stuckLeads] =
-    await Promise.all([
-      recentErrorsPromise,
-      empireFailedPromise,
-      tenantFailedPromise,
-      stuckThreadsPromise,
-      stuckLeadsPromise,
-    ]);
-
-  const failedCrons: FailedCron[] = [
-    ...((empireFailed.data || []) as Array<{
-      id: string;
-      name: string;
-      schedule: string;
-      last_run_at: string | null;
-      last_result: string | null;
-    }>).map((c) => ({ ...c, source: "empire" as const })),
-    ...((tenantFailed.data || []) as Array<{
-      id: string;
-      name: string;
-      schedule: string;
-      last_run_at: string | null;
-      last_run_error: string | null;
-    }>).map((c) => ({
-      id: c.id,
-      name: c.name,
-      schedule: c.schedule,
-      last_run_at: c.last_run_at,
-      last_result: c.last_run_error,
-      source: "tenant" as const,
-    })),
-  ];
-
-  return { recentErrors, failedCrons, stuckThreads, stuckLeads };
+    .limit(ATTENTION_LIST_LIMIT);
+  if (r.error) throw new Error(`cold lead list read failed: ${r.error.message}`);
+  return ((r.data as StuckLead[]) || []).map((l) => ({
+    ...l,
+    data: typeof l.data === "string" ? (JSON.parse(l.data) as Record<string, unknown>) : l.data || {},
+  }));
 }
 
 export default async function HealthPage() {
-  // System surface. 404 for an outside contractor before any read runs — this
-  // page lists stuck lender threads and stalled leads across the tenant.
-  await requireSystemSurface();
+  await requireOperator();
   const tenantId = await resolveTenantId();
   if (!tenantId) redirect("/login");
-  const enabledAgents = await getTenantEnabledAgents(tenantId);
-  // Resolve the caller's tenant slug so the cold-lead and stuck-thread
-  // links land on THEIR tenant shell, not the hardcoded "sun" path the
-  // links used to use. Without this, the operator on the oasis tenant
-  // clicked "Bennett Agency" and landed on /t/sun/leads/<id> — a 404
-  // for their tenant, which is exactly why CC could see Bennett was
-  // stale but couldn't fix the stage from this page.
-  const tenant = await getTenant(tenantId).catch(() => null);
+  const now = Date.now();
+
+  const [system, enabledAgents, tenant] = await Promise.all([
+    loadSystemHealth(tenantId, { now }),
+    // OASIS's own workspace: the agents its bridge runs (W4a review R4).
+    oasisOperatorAgents(tenantId) ?? safe("health.enabled_agents", getTenantEnabledAgents(tenantId), [] as string[]),
+    safe("health.tenant", getTenant(tenantId), null),
+  ]);
   const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;
-  // SunBiz-specific sections (outcome checks, lender shop-outs) render ONLY
-  // on the SunBiz tenant. A failed tenant lookup resolves to null → the
-  // SunBiz sections stay hidden (fail closed, never another tenant's copy).
-  const isSunbizTenant = profileSlug === "sun";
-  // Link base for the shop-outs card (sun-only, so the fallback matters only
-  // while standing in the SunBiz workspace).
-  const tenantSlug = profileSlug || "sun";
-  const { recentErrors, failedCrons, stuckThreads, stuckLeads } = await loadHealth(
-    tenantId,
-    enabledAgents,
-    isSunbizTenant,
-  );
+  const isOasisTenant = tenantId === WEBDEV_TENANT_ID;
 
-  // The outcome checks count toward the HEADER, not just their own card.
-  // Otherwise the page renders "All clear" directly above a failing check, a
-  // stale one, an open alert, or a blind read — and the header is the part
-  // people actually read. SunBiz only: the checks are the SunBiz outcome
-  // system (app/api/cron/health-check runs them for SUNBIZ_TENANT_ID alone),
-  // so on any other tenant the panel could only ever render an alarming
-  // empty state about a checker that was never meant to run there.
-  const outcome = isSunbizTenant ? await loadOutcomeChecks(tenantId, Date.now()) : null;
+  const [heartbeats, keyedAi, coldLeadRows] = await Promise.all([
+    // null = the read failed, which is "unknown", never "no integrations".
+    safe("health.integrations_health", integrationsHealth(tenantId), null),
+    // null = the key read failed: each AI provider card says "Couldn't check",
+    // never "Not connected" for a key that may well be on file (aiKeyOnFile).
+    safe("health.ai_keys", aiServicesWithKey(tenantId), null),
+    safe("health.cold_lead_list", loadColdLeadList(tenantId, now), null),
+  ]);
+  // requireOperator passed, so this viewer sees the platform integrations too.
+  const heartbeatServices = new Set(visibleIntegrationsForTenant(enabledAgents, { isOperator: true }).map((d) => d.service));
+  const visibleHeartbeats = heartbeats?.filter((h) => heartbeatServices.has(h.service)) ?? null;
 
-  const totalSignals =
-    recentErrors.length +
-    failedCrons.length +
-    stuckThreads.length +
-    stuckLeads.length +
-    (outcome?.signalCount ?? 0);
-  const overallHealthy = totalSignals === 0;
+  // The outcome checks (OASIS: the founder-booking check), loaded once for the
+  // card below and the header count, so the two cannot disagree.
+  const outcome = await loadWorkspaceOutcome(tenantId, profileSlug, now);
+
+  const a = system.attention;
+  // The one count (lib/admin/attention.ts), the same one /operations' "All
+  // clear" reads. null = an alarm count could not be read.
+  const total = needsYouCount(a, outcome);
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="System health"
-        subtitle="Each tile is a bucket that might need you. Green means everything in that bucket is fine. Hover each one for plain-English context."
+        subtitle="Whether your computer, its guards and your automations are working, in plain words. Every line says when it can't tell."
         action={
-          overallHealthy ? (
-            <Tag tone="engaged">
-              <CheckCircle2 className="w-3 h-3 inline mr-1" />
-              All clear
-            </Tag>
+          total === null ? (
+            <Tag tone="neutral">Couldn&apos;t check everything</Tag>
+          ) : total === 0 ? (
+            <Tag tone="engaged">Nothing needs you</Tag>
           ) : (
-            <Tag tone="warm">{totalSignals} signal{totalSignals === 1 ? "" : "s"}</Tag>
+            <Tag tone="warm">{total} need{total === 1 ? "s" : ""} you</Tag>
           )
         }
       />
 
-      {/* ── Tile grid — Phase 10.1 each tile has an explanatory hint so
-          CC doesn't have to translate the developer jargon ("stuck
-          shop-outs", "stale leads") into "what does this mean for me". */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <HealthTile
-          label="Errors today"
-          count={recentErrors.length}
-          icon={<AlertCircle className="w-4 h-4" />}
-          tone={recentErrors.length === 0 ? "engaged" : "warm"}
-          hint="Things that broke or threw a warning in the last 24 hours — daemon crashes, API failures, anything an agent flagged as wrong."
-        />
-        <HealthTile
-          label="Failed automations"
-          count={failedCrons.length}
-          icon={<AlertTriangle className="w-4 h-4" />}
-          tone={failedCrons.length === 0 ? "engaged" : "warm"}
-          hint="Scheduled jobs (Daily Brief, lead scoring, etc.) whose last run errored. Fix the underlying script or pause the job."
-        />
-        {isSunbizTenant && (
-          <HealthTile
-            label="Quiet shop-outs"
-            count={stuckThreads.length}
-            icon={<Clock className="w-4 h-4" />}
-            tone={stuckThreads.length === 0 ? "engaged" : "accent"}
-            hint="Emails sent to lenders more than 7 days ago with no reply yet. Worth a chase call or a polite close-loop note."
-          />
-        )}
-        <HealthTile
-          label="Cold leads"
-          count={stuckLeads.length}
-          icon={<Activity className="w-4 h-4" />}
-          tone={stuckLeads.length === 0 ? "engaged" : "accent"}
-          hint="Leads in the pipeline that haven't been touched in 2+ weeks. Either the drip should have moved them, or you need to disposition them (won / lost / pass)."
-        />
-      </div>
+      <VerdictLine verdict={system.verdict} />
 
-      {/* ── Error events ────────────────────────────────────────── */}
+      <ComputerCard system={system} now={now} />
+      <GuardsCard system={system} now={now} />
+      <BackgroundCard system={system} now={now} />
 
-      {/* Outcome checks first. They answer "did a merchant actually receive
-          anything", which outranks "were there errors": during the ten-day SMS
-          outage there were no errors to show, and every tile below was green.
-          SunBiz only — the checks run for SUNBIZ_TENANT_ID alone, and the
-          merchant/lender vocabulary belongs to that tenant. */}
+      <section aria-label="Automation signals" className="space-y-3">
+        <h2 className="text-sm font-semibold text-fg">Automation signals</h2>
+        <p className="text-[13px] leading-5 text-fg-muted">
+          The buckets that might need you today. A tile that says Couldn&apos;t check could not be read; it is not a zero.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <HealthTile label="Errors today" count={a.errors} alarm hint="Things that broke in the last 24 hours: crashes, failed calls, anything an agent flagged as an error or critical." />
+          <HealthTile label="Warnings today" count={a.warnings} hint="Things that went wrong but kept running in the last 24 hours. Worth a look, not an emergency." />
+          <HealthTile label="Failed automations" count={a.cronFailures} alarm hint="Schedules whose run in the last 24 hours errored. Each one is listed under Background work with what to do." />
+          <HealthTile label="Workers down" count={a.workersDown} alarm hint="Background processes on your computer that stopped reporting or report themselves down." />
+          <HealthTile label="Cold leads" count={a.coldLeads} hint="Leads nobody has touched in 14 days or more. Move them forward or close them out (won, lost or pass)." />
+        </div>
+      </section>
+
       {outcome && (
-        <Card title="Are merchants actually being reached?">
+        <Card title={isOasisTenant ? "OASIS founder-booking health" : "Are merchants actually being reached?"}>
           <OutcomeChecksPanel
             rows={outcome.rows}
             openAlerts={outcome.openAlerts}
             readFailed={outcome.readFailed}
             readError={outcome.readError}
-            now={Date.now()}
+            now={now}
           />
         </Card>
       )}
 
       <Card
-        title="Recent errors / warnings"
-        subtitle="Anything that broke or threw a warning in the last 24 hours. Daemons, APIs, classifiers — they all report here when they fail."
+        title="Errors and warnings today"
+        subtitle="What broke or warned in the last 24 hours, newest first. The raw code is kept for looking it up in the logs."
       >
-        {recentErrors.length === 0 ? (
+        {system.events === null ? (
+          <div className="text-sm text-fg-muted">Couldn&apos;t check the event log just now. This does not mean nothing went wrong. Reload to try again.</div>
+        ) : system.events.rows.length === 0 ? (
           <div className="text-sm text-fg-muted">No errors or warnings in the last 24 hours.</div>
         ) : (
           <ul className="space-y-2 text-sm">
-            {recentErrors.map((ev) => (
-              <li key={ev.id} className="rounded-lg border border-bg-border bg-bg-deep/40 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Tag tone={ev.severity === "error" ? "warm" : "accent"}>{ev.severity}</Tag>
-                    {/* Pretty event type for scannability, raw token in the
-                        title so engineers can still copy-paste into logs.
-                        Health-page audience overlaps with engineering
-                        debugging more than the /agents page does, so the
-                        monospace style is preserved — it's still a
-                        diagnostic surface. */}
-                    <span
-                      className="font-mono text-[11px] text-fg-dim"
-                      title={ev.event_type}
-                    >
-                      {formatEventType(ev.event_type)}
+            {system.events.rows.map((ev) => (
+              <li key={ev.id} className="rounded-lg border border-hairline bg-bg-panel p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Tag tone={ev.severity === "warn" ? "accent" : "warm"}>
+                      {ev.severity === "critical" ? "Critical" : ev.severity === "error" ? "Error" : "Warning"}
+                    </Tag>
+                    <span className="font-mono text-[11px] text-fg-dim" title={ev.eventType}>
+                      {formatEventType(ev.eventType)}
                     </span>
-                    {ev.publisher_agent && (
-                      <span
-                        className="text-[10px] uppercase tracking-wider text-fg-dim"
-                        title={ev.publisher_agent}
-                      >
-                        {formatPublisher(ev.publisher_agent)}
+                    {ev.publisherAgent && (
+                      <span className="text-[11px] text-fg-dim" title={ev.publisherAgent}>
+                        {formatPublisher(ev.publisherAgent)}
                       </span>
                     )}
                   </div>
-                  <span className="text-[10px] text-fg-dim">
-                    {new Date(ev.published_at).toLocaleString()}
-                  </span>
+                  <span className="text-[11px] text-fg-dim">{formatAgo(ev.publishedAt, now)}</span>
                 </div>
                 {ev.payload && (
-                  <div className="mt-1 text-[11px] text-fg-muted font-mono break-words max-h-24 overflow-y-auto">
+                  <div className="mt-1 max-h-24 overflow-y-auto break-words font-mono text-[11px] text-fg-muted">
                     {JSON.stringify(ev.payload).slice(0, 400)}
                   </div>
                 )}
               </li>
             ))}
-          </ul>
-        )}
-      </Card>
-
-      {/* ── Failed crons ────────────────────────────────────────── */}
-      <Card
-        title="Failed automations"
-        subtitle="Scheduled jobs whose last run errored — either the script failed, the handler is missing, or an upstream service was down. Either fix it or pause the job from /automations."
-      >
-        {failedCrons.length === 0 ? (
-          <div className="text-sm text-fg-muted">Every cron&apos;s last run completed cleanly.</div>
-        ) : (
-          <ul className="space-y-2 text-sm">
-            {failedCrons.map((c) => (
-              <li key={`${c.source}-${c.id}`} className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-fg">{c.name}</span>
-                    <Tag tone={c.source === "empire" ? "accent" : "info"}>{c.source}</Tag>
-                    <span className="font-mono text-[11px] text-fg-dim">{c.schedule}</span>
-                  </div>
-                  <span className="text-[10px] text-fg-dim">
-                    {c.last_run_at ? new Date(c.last_run_at).toLocaleString() : "never"}
-                  </span>
-                </div>
-                {c.last_result && (
-                  <div className="mt-1 text-[11px] text-status-warm font-mono break-words">
-                    {c.last_result.slice(0, 300)}
-                  </div>
-                )}
+            {system.events.errors + system.events.warnings > system.events.rows.length && (
+              <li className="text-xs text-fg-dim">
+                Showing the newest {system.events.rows.length} of {system.events.errors + system.events.warnings}.
               </li>
-            ))}
+            )}
           </ul>
         )}
       </Card>
 
-      {/* ── Stuck lender threads (SunBiz funding workflow only) ──── */}
-      {isSunbizTenant && (
       <Card
-        title="Quiet shop-outs"
-        subtitle="Emails you sent to lenders more than a week ago that haven't gotten a reply. Worth a chase call or a polite 'still alive?' nudge — leaving them hanging burns the relationship."
+        title="Cold leads (14 days or more)"
+        subtitle="Leads nobody has touched in two weeks. Either a follow-up should have moved them, or it's time to close them out."
       >
-        {stuckThreads.length === 0 ? (
-          <div className="text-sm text-fg-muted">No shop-outs stuck past 7 days.</div>
+        {coldLeadRows === null ? (
+          <div className="text-sm text-fg-muted">Couldn&apos;t check the pipeline just now. Reload to try again.</div>
+        ) : coldLeadRows.length === 0 ? (
+          <div className="text-sm text-fg-muted">No lead has gone 14 days untouched.</div>
         ) : (
           <ul className="space-y-2 text-sm">
-            {stuckThreads.map((t) => {
-              const ageDays = t.sent_at
-                ? Math.floor((Date.now() - new Date(t.sent_at).getTime()) / 86400000)
-                : 0;
-              return (
-                <li key={t.id} className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 flex items-center justify-between gap-2">
-                  <div>
-                    <div className="text-fg">
-                      <Link
-                        href={`/t/${tenantSlug}/applications/${t.application_id}`}
-                        className="text-accent hover:underline"
-                      >
-                        App {t.application_id.slice(0, 8)}…
-                      </Link>{" "}
-                      → {t.recipient_email || <span className="text-fg-dim italic">no recipient</span>}
-                    </div>
-                    <div className="text-[11px] text-fg-dim mt-0.5">
-                      Sent {ageDays}d ago · status={t.status}
-                    </div>
-                  </div>
-                  <Tag tone="accent">{ageDays}d</Tag>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Card>
-      )}
-
-      {/* ── Stale leads ─────────────────────────────────────────── */}
-      <Card
-        title="Cold leads (>14d)"
-        subtitle="Leads in the pipeline you haven't touched in 2+ weeks. Either your drip sequence should have moved them along, or it's time to disposition them — won, lost, or pass."
-      >
-        {stuckLeads.length === 0 ? (
-          <div className="text-sm text-fg-muted">Pipeline is moving — no leads stale past 14 days.</div>
-        ) : (
-          <ul className="space-y-2 text-sm">
-            {stuckLeads.map((l) => {
-              const ageDays = Math.floor((Date.now() - new Date(l.updated_at).getTime()) / 86400000);
+            {coldLeadRows.map((l) => {
+              const ageDays = Math.floor((now - new Date(l.updated_at).getTime()) / 86400000);
               const stage =
                 (typeof l.data.stage === "string" && l.data.stage) ||
                 (typeof l.data.status === "string" && l.data.status) ||
-                "unset";
+                "no stage set";
               const name =
                 (typeof l.data.name === "string" && l.data.name) ||
                 (typeof l.data.company === "string" && l.data.company) ||
-                "—";
+                "Unnamed lead";
               return (
-                <li key={l.id} className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 flex items-center justify-between gap-2">
+                <li key={l.id} className="flex items-center justify-between gap-2 rounded-lg border border-hairline bg-bg-panel p-3">
                   <div>
-                    <Link
-                      href={`/pipeline/${l.id}`}
-                      className="font-bold text-fg hover:text-accent"
-                    >
+                    <Link href={`/pipeline/${l.id}`} className="font-semibold text-fg hover:text-accent">
                       {name}
                     </Link>
-                    <div className="text-[11px] text-fg-dim mt-0.5">
+                    <div className="mt-0.5 text-[11px] text-fg-dim">
                       Stage: <span className="text-fg-muted">{stage}</span>
                     </div>
                   </div>
-                  <Tag tone={ageDays > 30 ? "warm" : "accent"}>{ageDays}d</Tag>
+                  <Tag tone={ageDays > 30 ? "warm" : "accent"}>{ageDays} days</Tag>
                 </li>
               );
             })}
+            {a.coldLeads !== null && a.coldLeads > coldLeadRows.length && (
+              <li className="text-xs text-fg-dim">
+                Showing the {coldLeadRows.length} oldest of {a.coldLeads}.
+              </li>
+            )}
           </ul>
+        )}
+      </Card>
+
+      <Card
+        title="Integration heartbeats"
+        subtitle="The last check-in from each service your agents use. A check-in older than a day reads Stale; a key on file is not the same as a service that answered."
+      >
+        {visibleHeartbeats === null ? (
+          <div className="text-sm text-fg-muted">The heartbeats could not be read just now, so none is shown as down. Refresh to try again.</div>
+        ) : visibleHeartbeats.length === 0 ? (
+          <div className="text-sm text-fg-muted">No integrations are in use by this workspace&apos;s agents.</div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {visibleHeartbeats.map((h) => (
+              <IntegrationDot key={h.service} health={h} connection={{ hasCredentials: aiKeyOnFile(keyedAi, h.service) }} />
+            ))}
+          </div>
         )}
       </Card>
     </div>
   );
 }
 
+function VerdictLine({ verdict }: { verdict: SystemHealth["verdict"] }) {
+  const tone =
+    verdict.tone === "ok"
+      ? "border-status-engaged/40 text-status-engaged"
+      : verdict.tone === "warn"
+        ? "border-status-warm/40 text-status-warm"
+        : "border-hairline text-fg-muted";
+  return (
+    <p role="status" className={`rounded-xl border bg-bg-panel px-4 py-3 text-sm font-medium ${tone}`}>
+      {verdict.text}
+    </p>
+  );
+}
+
+function ComputerCard({ system, now }: { system: SystemHealth; now: number }) {
+  return (
+    <Card
+      title="Your computer"
+      subtitle="Your agents' tools and your local automations run on this computer through the bridge. While it is offline, they stop."
+    >
+      {system.machines === null ? (
+        <p className="text-sm text-fg-muted">Couldn&apos;t check your paired computers just now. This does not mean none is paired. Reload to try again.</p>
+      ) : system.machines.length === 0 ? (
+        <p className="text-sm text-fg-muted">
+          No computer is paired with this workspace. Pair one in{" "}
+          <Link href="/settings" className="text-accent hover:underline">Settings › Devices</Link>.
+        </p>
+      ) : (
+        <ul className="divide-y divide-hairline">
+          {system.machines.map((m, i) => (
+            <li key={`${m.label}-${i}`} className="flex items-center justify-between gap-3 py-2 text-sm">
+              <span className="text-fg">{m.label}</span>
+              <span className="flex items-center gap-2 text-xs text-fg-muted">
+                <Tag tone={m.state === "online" ? "engaged" : m.state === "idle" ? "accent" : "neutral"}>
+                  {m.state === "online" ? "Online" : m.state === "idle" ? "Idle" : "Offline"}
+                </Tag>
+                {m.lastSeenAt ? `checked in ${formatAgo(m.lastSeenAt, now)}` : "never checked in"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-3 text-sm text-fg-muted">
+        {system.cloud === null
+          ? "Couldn't check whether the Command Center can reach your computer."
+          : system.cloud.sentence}
+      </p>
+    </Card>
+  );
+}
+
+function guardTone(g: GuardStatus): "engaged" | "warm" | "accent" | "neutral" {
+  if (g.state === "on") return "engaged";
+  if (g.state === "off" || g.state === "failing") return "warm";
+  if (g.state === "watching") return "accent";
+  return "neutral";
+}
+
+function GuardsCard({ system, now }: { system: SystemHealth; now: number }) {
+  const report = system.guards;
+  return (
+    <Card
+      title="Safety guards"
+      subtitle="These run on your computer and stop the AI from doing damage there. This page shows only what your computer reports, and says so when it hasn't reported."
+    >
+      {report === null ? (
+        <p className="text-sm text-fg-muted">Couldn&apos;t check the guard report just now. This does not mean the guards are off. Reload to try again.</p>
+      ) : (
+        <div className="space-y-3">
+          {report.freshness === "missing" && (
+            <p className="text-sm text-fg-muted">
+              Not reported yet: the guards run on CC&apos;s PC, and its bridge doesn&apos;t send their status here yet.
+            </p>
+          )}
+          {report.freshness === "stale" && (
+            <p className="text-sm text-status-warm">
+              Not verified since {report.reportedAt ? formatAgo(report.reportedAt, now) : "an unknown time"}: the last guard report is too old to trust.
+            </p>
+          )}
+          {report.freshness === "failing" && (
+            <p className="text-sm text-status-warm">Your computer reported that it couldn&apos;t read its guard logs, so none of them can be verified.</p>
+          )}
+          <ul className="divide-y divide-hairline">
+            {report.guards.map((g) => (
+              <li key={g.key} className="py-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-fg">{g.name}</span>
+                  <Tag tone={guardTone(g)}>{g.state === "not_verified" ? "Not verified" : g.label}</Tag>
+                </div>
+                <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">{g.plain}</p>
+                {report.freshness === "fresh" && g.blocked24h !== null && (
+                  <p className="mt-0.5 text-xs text-fg-dim">
+                    Blocked {g.blocked24h} in the last 24 hours
+                    {g.wouldBlock24h ? `, and would have blocked ${g.wouldBlock24h} more` : ""}
+                    {g.lastBlockAt ? `. Last block ${formatAgo(g.lastBlockAt, now)}.` : "."}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function workerTone(w: WorkerHealth): "engaged" | "warm" | "accent" | "neutral" {
+  if (w.state === "running") return "engaged";
+  if (w.state === "down" || w.state === "stale") return "warm";
+  if (w.state === "trouble") return "accent";
+  return "neutral";
+}
+
+const WORKER_TAG: Record<WorkerHealth["state"], string> = {
+  running: "Running",
+  stopped_by_you: "Stopped by you",
+  trouble: "Having trouble",
+  down: "Down",
+  stale: "Stopped reporting",
+  no_report: "No report",
+};
+
+function BackgroundCard({ system, now }: { system: SystemHealth; now: number }) {
+  const reporter = system.reporter;
+  return (
+    <Card
+      title="Background work"
+      subtitle="The processes on your computer and the schedules that keep OASIS running while you're away."
+    >
+      <div className="space-y-4">
+        {reporter && (reporter.state === "failing" || reporter.state === "silent") && (
+          <p className="text-sm text-status-warm">
+            {reporter.state === "failing"
+              ? "Your computer is checking in but says it can't read its own process list, so the states below may be out of date."
+              : "Your computer is checking in but stopped sending its process list, so the states below may be out of date."}
+          </p>
+        )}
+        {system.workers === null ? (
+          <p className="text-sm text-fg-muted">Couldn&apos;t check the background processes just now. This does not mean they stopped. Reload to try again.</p>
+        ) : (
+          <ul className="divide-y divide-hairline">
+            {system.workers.map((w) => (
+              <li key={w.service} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                <span className="text-fg">{w.label}</span>
+                <span className="flex items-center gap-2 text-xs text-fg-muted">
+                  <Tag tone={workerTone(w)}>{WORKER_TAG[w.state]}</Tag>
+                  {w.state === "stale" && w.lastPingAt ? `last report ${formatAgo(w.lastPingAt, now)}` : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div>
+          <h3 className="text-xs font-semibold text-fg-muted">Schedules that failed in the last 24 hours</h3>
+          {system.cron === null ? (
+            <p className="mt-1 text-sm text-fg-muted">Couldn&apos;t check the schedules just now. This does not mean none failed. Reload to try again.</p>
+          ) : system.cron.rows.length === 0 ? (
+            <p className="mt-1 text-sm text-fg-muted">No schedule failed in the last 24 hours.</p>
+          ) : (
+            <ul className="mt-2 space-y-2 text-sm">
+              {system.cron.rows.map((c) => (
+                <li key={`${c.source}-${c.id}`} className="rounded-lg border border-status-warm/30 bg-bg-panel p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-fg">{c.name}</span>
+                    <span className="text-[11px] text-fg-dim">
+                      {c.source === "platform" ? "OASIS platform" : "This workspace"} · {c.lastRunAt ? formatAgo(c.lastRunAt, now) : "never ran"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[13px] text-fg">What to do: {c.whatToDo}</p>
+                  {c.lastResult && (
+                    <p className="mt-1 break-words font-mono text-[11px] text-fg-dim">{c.lastResult.slice(0, 300)}</p>
+                  )}
+                </li>
+              ))}
+              <li>
+                <Link href="/automations" className="text-xs text-accent hover:underline">
+                  Open Automations to fix or pause a schedule
+                </Link>
+              </li>
+            </ul>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function HealthTile({
   label,
   count,
-  icon,
-  tone,
   hint,
+  alarm = false,
 }: {
   label: string;
-  count: number;
-  icon: React.ReactNode;
-  tone: "engaged" | "warm" | "accent";
-  hint?: string;
+  /** null = the count could not be read: "Couldn't check", never a 0. */
+  count: number | null;
+  hint: string;
+  /** An alarm tile turns warm when above zero; a signal tile stays blue. */
+  alarm?: boolean;
 }) {
   const toneClasses =
-    tone === "engaged"
-      ? "border-status-engaged/40 bg-status-engaged/5 text-status-engaged"
-      : tone === "warm"
-        ? "border-status-warm/40 bg-status-warm/5 text-status-warm"
-        : "border-accent/40 bg-accent/5 text-accent";
+    count === null
+      ? "border-hairline bg-bg-panel text-fg-muted"
+      : count === 0
+        ? "border-status-engaged/40 bg-bg-panel text-status-engaged"
+        : alarm
+          ? "border-status-warm/40 bg-bg-panel text-status-warm"
+          : "border-accent/40 bg-bg-panel text-accent";
   return (
-    <div className={`rounded-xl border p-4 ${toneClasses}`} title={hint}>
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wider font-bold opacity-70">{label}</span>
-        {icon}
-      </div>
-      <div className="mt-2 text-3xl font-bold">{count}</div>
-      {hint && (
-        <div className="mt-2 text-[11px] leading-snug opacity-75 font-normal normal-case tracking-normal">
-          {hint}
-        </div>
+    <div className={`rounded-xl border p-4 ${toneClasses}`} title={count === null ? "This count could not be read; the error has been logged." : hint}>
+      <div className="text-xs font-semibold opacity-80">{label}</div>
+      {count === null ? (
+        <div className="mt-2 text-sm font-semibold">Couldn&apos;t check</div>
+      ) : (
+        <div className="mt-2 text-3xl font-bold tabular-nums">{count}</div>
       )}
+      <div className="mt-2 text-[11px] font-normal leading-snug text-fg-muted">{hint}</div>
     </div>
   );
 }

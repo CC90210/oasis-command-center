@@ -37,7 +37,16 @@ type ImportResult = {
   error?: string;
 };
 
-export function LeadsImportClient() {
+export type LeadAssignmentOption = {
+  id: string;
+  name: string;
+};
+
+export function LeadsImportClient({
+  assignmentOptions = null,
+}: {
+  assignmentOptions?: readonly LeadAssignmentOption[] | null;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const tenantPrefix = pathname.startsWith("/t/") ? pathname.split("/").slice(0, 3).join("/") : "";
@@ -49,6 +58,8 @@ export function LeadsImportClient() {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [assigneeUserId, setAssigneeUserId] = useState("");
+  const needsAssignee = assignmentOptions !== null;
 
   const parsed = useMemo(() => {
     if (!csv.trim()) return null;
@@ -68,7 +79,12 @@ export function LeadsImportClient() {
   }
 
   async function doImport() {
-    if (!parsed || parsed.mapped.length === 0 || recognizedColumns === 0) return;
+    if (
+      !parsed ||
+      parsed.mapped.length === 0 ||
+      recognizedColumns === 0 ||
+      (needsAssignee && !assigneeUserId)
+    ) return;
     setSubmitting(true);
     setError(null);
     setResult(null);
@@ -82,7 +98,9 @@ export function LeadsImportClient() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          rows: parsed.mapped,
+          rows: needsAssignee
+            ? parsed.mapped.map((row) => ({ ...row, assigned_to: assigneeUserId }))
+            : parsed.mapped,
           dedup_by,
           default_source: defaultSource.trim() || "csv_import",
         }),
@@ -309,6 +327,33 @@ export function LeadsImportClient() {
               </div>
             </div>
           </div>
+
+          {needsAssignee && (
+            <div className="pt-3 border-t border-bg-border">
+              <label className="block">
+                <span className="text-[10px] uppercase tracking-wider text-fg-dim block mb-1">
+                  Assign every imported lead to
+                </span>
+                <select
+                  value={assigneeUserId}
+                  onChange={(event) => setAssigneeUserId(event.target.value)}
+                  disabled={assignmentOptions.length === 0}
+                  className="w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-1.5 text-sm text-fg disabled:opacity-50"
+                  required
+                >
+                  <option value="">Choose CC or Adon</option>
+                  {assignmentOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.name}</option>
+                  ))}
+                </select>
+              </label>
+              <p className="mt-2 text-xs text-fg-muted">
+                {assignmentOptions.length > 0
+                  ? "The owner and active revenue cycle are stamped on every lead in this batch."
+                  : "The CC + Adon assignment roster is unavailable. Import is paused until it can be verified."}
+              </p>
+            </div>
+          )}
         </section>
       )}
 
@@ -317,7 +362,7 @@ export function LeadsImportClient() {
           <button
             type="button"
             onClick={doImport}
-            disabled={submitting}
+            disabled={submitting || (needsAssignee && !assigneeUserId)}
             className="btn-send inline-flex items-center gap-2 !px-5 !py-2 text-sm disabled:opacity-50"
           >
             {submitting ? (

@@ -62,6 +62,7 @@ import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 // (Codex review, 2026-08-23.)
 export { MODEL_VERSION } from "./tenant";
 import { MODEL_VERSION } from "./tenant";
+import { isParkedUrl, finalUrlFromSignals } from "./parked-domains";
 
 export type CheckResult = { code: string; label: string; points: number; has: boolean };
 
@@ -111,16 +112,17 @@ export type StoredProfile = {
  * `benchmark.mjs --set` run rather than trusting either figure blindly.
  */
 const OUR_BENCHMARK = {
-  measuredAt: "2026-08-21T17:49:34.449Z",
-  composite: 74,
+  // Model v2 measurement (benchmark.mjs --set under MODEL_VERSION 2).
+  measuredAt: "2026-09-02T19:59:29.009Z",
+  composite: 73,
   dimensions: [
-    { key: "conversion", label: "Turning visitors into calls", score: 64 },
-    { key: "trust", label: "Looking credible", score: 50 },
-    { key: "design", label: "Looking current", score: 86 },
-    { key: "mobile", label: "Working on a phone", score: 100 },
+    { key: "conversion", label: "Turning visitors into calls", score: 60 },
+    { key: "trust", label: "Looking credible", score: 61 },
+    { key: "design", label: "Looking current", score: 84 },
+    { key: "mobile", label: "Working on a phone", score: 80 },
     { key: "content", label: "Explaining the service", score: 84 },
     { key: "performance", label: "Speed and security", score: 100 },
-    { key: "discoverability", label: "Being found", score: 66 },
+    { key: "discoverability", label: "Being found", score: 64 },
   ],
 } as const;
 
@@ -134,6 +136,21 @@ export type AuditResult =
   | { state: "no_website" }
   | { state: "not_scored" }
   | { state: "unreachable"; reason: string; lastAttemptedAt: string }
+  /**
+   * The domain is FOR SALE. Added 2026-08-25.
+   *
+   * Distinct from `unreachable`, and the distinction is the whole point: we
+   * reached it perfectly and were served a domain broker's listing. Reporting
+   * that as "we could not check this site" swaps one false statement for
+   * another and discards the strongest opener a rep has -- their web address
+   * has lapsed and anyone can buy it.
+   *
+   * Distinct from `scored` for a harder reason: it WAS scored, at 82, because a
+   * parking page really is fast, HTTPS, mobile-friendly and full of CTAs. The
+   * 49 checks worked exactly as designed on a page that has nothing to do with
+   * the business.
+   */
+  | { state: "parked"; url: string; finalUrl: string; measuredAt: string }
   | {
       state: "scored";
       url: string;
@@ -232,6 +249,141 @@ export function coerceProfile(raw: unknown): StoredProfile | null {
 }
 
 /**
+ * The RAW measured signals behind the newest audit for one business, or null.
+ *
+ * WHY A SEPARATE READ RATHER THAN ANOTHER COLUMN ON fetchAudit(): every lead
+ * panel and every Call Mode card calls fetchAudit on open, and none of them
+ * render a single signal. The signals blob is the crawler's whole observation
+ * of a page -- fifty-odd fields -- and widening the hot path to carry it would
+ * make every panel open pay for a section only the battle card shows. The
+ * battle card is a full page a rep opens deliberately; one extra query there is
+ * the right place for the cost.
+ *
+ * SAME ROW AS fetchAudit(), by construction: identical tenant / business /
+ * version pin and identical `fetched_at desc limit 1` ordering. If those ever
+ * diverge, the evidence section would quote a different crawl than the score
+ * above it -- a rep reading "page weight 4.2MB" that belongs to last month's
+ * version of the site.
+ *
+ * `signals` is JSON TEXT (JARVIS migrations/001_leadgen.sql) and therefore
+ * arrives in BOTH shapes depending on the backend, exactly like `profile`: an
+ * already-decoded object through the Turso adapter, a raw string through
+ * supabase-js. See coerceProfile's doc comment for the outage that caused.
+ */
+export function coerceSignals(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function fetchAuditSignals(businessId: string): Promise<Record<string, unknown> | null> {
+  const bid = safeFilterValue(businessId);
+  if (!bid) return null;
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("leadgen_site_audits")
+    .select("signals")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("business_id", bid)
+    .eq("audit_version", MODEL_VERSION)
+    // Same predicate as the score read below: two writers share this
+    // audit_version with incompatible signals shapes (score-sites vs the
+    // contact-harvest worker), and an unpredicated "newest" here could hand
+    // back a foreign blob while the score came from an older row -- the
+    // measured evidence lines would then describe a different crawl than the
+    // score they explain. Scored rows only, so both reads land on the same
+    // measurement. (2026-09-01 integrity audit, finding 6.)
+    .not("profile", "is", null)
+    .order("fetched_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`signals_read_failed: ${error.message}`);
+  if (!data) return null;
+  return coerceSignals((data as { signals: unknown }).signals);
+}
+
+/**
+ * URL-ownership verification state for the business behind a lead, from
+ * leadgen_businesses (JARVIS ownership-verify.js writes it; migration
+ * 009_url_verification.sql). Until 2026-09-01 this NEVER reached the card --
+ * a rep could read a whole battle card about a website the system had only
+ * guessed belongs to this business. Absent row or absent column value reads
+ * as "unknown", which the card states in words; it is the honest default for
+ * the ~27k businesses verification has not covered yet.
+ */
+export type UrlVerification = {
+  verdict: "verified" | "review" | "rejected" | "unknown";
+  verifiedAt: string | null;
+};
+
+export async function fetchUrlVerification(businessId: string): Promise<UrlVerification> {
+  const bid = safeFilterValue(businessId);
+  if (!bid) return { verdict: "unknown", verifiedAt: null };
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("leadgen_businesses")
+    .select("url_verdict,url_verified_at")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("id", bid)
+    .maybeSingle();
+  if (error) throw new Error(`url_verification_read_failed: ${error.message}`);
+  const raw = (data as { url_verdict?: unknown; url_verified_at?: unknown } | null)?.url_verdict;
+  const verdict =
+    raw === "verified" || raw === "review" || raw === "rejected" ? raw : "unknown";
+  const at = (data as { url_verified_at?: unknown } | null)?.url_verified_at;
+  return { verdict, verifiedAt: typeof at === "string" ? at : null };
+}
+
+/**
+ * The latest per-lead re-check request, if any -- the card shows its state
+ * and polls while one is pending/running. Table written by the oasis recheck
+ * endpoint and drained by JARVIS services/leadgen/recheck-worker.mjs.
+ */
+export type RecheckStatus = {
+  status: "pending" | "running" | "done" | "failed";
+  requestedAt: string;
+  completedAt: string | null;
+  error: string | null;
+};
+
+export async function fetchRecheckStatus(leadId: string): Promise<RecheckStatus | null> {
+  const lid = safeFilterValue(leadId);
+  if (!lid) return null;
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("leadgen_recheck_requests")
+    .select("status,requested_at,completed_at,error")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("lead_id", lid)
+    .order("requested_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`recheck_read_failed: ${error.message}`);
+  if (!data) return null;
+  const row = data as { status: unknown; requested_at: string; completed_at: unknown; error: unknown };
+  const status =
+    row.status === "pending" || row.status === "running" || row.status === "done" || row.status === "failed"
+      ? row.status
+      : null;
+  if (!status) return null;
+  return {
+    status,
+    requestedAt: row.requested_at,
+    completedAt: typeof row.completed_at === "string" ? row.completed_at : null,
+    error: typeof row.error === "string" ? row.error : null,
+  };
+}
+
+/**
  * `lead` must already be the result of a tenant-pinned, viewer-scoped
  * fetchLead(id, viewer) call for this SAME id -- the route resolves it once
  * for its own 404 check and passes it through here so authorization happens
@@ -249,7 +401,11 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
   const db = getServiceSupabase();
 
   // Rule 2, checked BEFORE rule 3: a known failure to reach the site must
-  // never be reported as "not tried".
+  // never be reported as "not tried". PRECEDENCE BY TIME, not by table
+  // (2026-09-01, per-lead re-check): an unreachable marker only wins over a
+  // scored audit when the failed attempt is the NEWER fact. Without the
+  // comparison, one stale unreachable row would mask every fresh score a
+  // re-check writes -- the fix feature would be unable to fix anything.
   const unreachable = await db
     .from("leadgen_site_unreachable")
     .select("reason,last_attempted_at")
@@ -258,24 +414,102 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
     .eq("audit_version", MODEL_VERSION)
     .maybeSingle();
   if (unreachable.error) throw new Error(`unreachable_read_failed: ${unreachable.error.message}`);
+  let unreachableRow: { reason: string; last_attempted_at: string } | null = null;
   if (unreachable.data) {
-    const row = unreachable.data as { reason: string; last_attempted_at: string };
-    return { state: "unreachable", reason: row.reason, lastAttemptedAt: row.last_attempted_at };
+    unreachableRow = unreachable.data as { reason: string; last_attempted_at: string };
   }
 
-  const audit = await db
+  // TWO reads, because two WRITERS share this audit_version with incompatible
+  // rows (2026-09-01 integrity audit, finding 6): score-sites stores scored
+  // deep-signals rows; the contact-harvest worker stores profile-less rows
+  // with a foreign signals shape. The newest row OVERALL answers "is the
+  // domain parked / was anything measured at all"; the newest SCORED row
+  // carries the quality measurement. Reading only the newest row let a newer
+  // harvest row silently blank a lead's perfectly good score into
+  // `not_scored`.
+  const newest = await db
     .from("leadgen_site_audits")
-    .select("url,fetched_at,profile")
+    // `signals` joins the select so the parked check below reads the SAME row
+    // it judges. Fetching it separately would let a re-crawl land in between
+    // and score one row while judging another.
+    .select("url,fetched_at,profile,signals")
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("business_id", bid)
     .eq("audit_version", MODEL_VERSION)
     .order("fetched_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (audit.error) throw new Error(`audit_read_failed: ${audit.error.message}`);
-  if (!audit.data) return { state: "not_scored" }; // Rule 3: no audit row.
+  if (newest.error) throw new Error(`audit_read_failed: ${newest.error.message}`);
+  if (!newest.data) {
+    // No audit at all: an unreachable marker, if any, is the only fact.
+    if (unreachableRow) {
+      return { state: "unreachable", reason: unreachableRow.reason, lastAttemptedAt: unreachableRow.last_attempted_at };
+    }
+    return { state: "not_scored" }; // Rule 3: no audit row.
+  }
 
-  const row = audit.data as { url: string; fetched_at: string; profile: unknown };
+  let row = newest.data as { url: string; fetched_at: string; profile: unknown; signals: unknown };
+
+  // Unreachable wins only while it is the newest fact about this site.
+  if (unreachableRow && Date.parse(unreachableRow.last_attempted_at) >= Date.parse(row.fetched_at)) {
+    return { state: "unreachable", reason: unreachableRow.reason, lastAttemptedAt: unreachableRow.last_attempted_at };
+  }
+
+  // Parked is judged on the NEWEST row BEFORE any scored-row substitution: a
+  // newer crawl that saw the domain redirect to a parking lot is the current
+  // fact about this site, and swapping in an older scored row first would
+  // resurface a score for a domain now known to be dead. (Codex review,
+  // 2026-09-01.) The check runs again on the substituted row below, which is
+  // harmless and preserves the original behaviour when no substitution
+  // happened.
+  {
+    const newestFinal = finalUrlFromSignals(row.signals);
+    if (isParkedUrl(newestFinal)) {
+      return {
+        state: "parked",
+        url: row.url,
+        finalUrl: newestFinal as string,
+        measuredAt: row.fetched_at,
+      };
+    }
+  }
+
+  if (!row.profile) {
+    const scored = await db
+      .from("leadgen_site_audits")
+      .select("url,fetched_at,profile,signals")
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("business_id", bid)
+      .eq("audit_version", MODEL_VERSION)
+      .not("profile", "is", null)
+      .order("fetched_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (scored.error) throw new Error(`audit_read_failed: ${scored.error.message}`);
+    if (scored.data) {
+      // The score shown is the newest actual quality measurement, stamped
+      // with ITS OWN fetched_at -- never the harvest row's newer date worn by
+      // an older measurement.
+      row = scored.data as { url: string; fetched_at: string; profile: unknown; signals: unknown };
+    }
+  }
+
+  // Rule 3b: THE DOMAIN IS FOR SALE, so there is no site to score.
+  //
+  // Checked BEFORE the profile, because a parked page has a perfectly good
+  // profile -- that is the entire problem. All 53 in the corpus scored exactly
+  // 82 and every one landed in the top tier, which is what put two of them in
+  // front of a prospect as "best-scoring competitors" (2026-08-25).
+  const finalUrl = finalUrlFromSignals(row.signals);
+  if (isParkedUrl(finalUrl)) {
+    return {
+      state: "parked",
+      url: row.url,
+      finalUrl: finalUrl as string,
+      measuredAt: row.fetched_at,
+    };
+  }
+
   if (!row.profile) return { state: "not_scored" }; // Rule 4: scored before profiles existed.
 
   const profile = coerceProfile(row.profile);

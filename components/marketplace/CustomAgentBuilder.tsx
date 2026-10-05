@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   CheckCircle2,
@@ -10,7 +10,9 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
+import { builderPaths, type BuilderHome } from "./builder-paths";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
+import { templateDraft } from "@/components/os/aiteam/templates";
 
 type EditingAgent = {
   slug: string;
@@ -27,6 +29,12 @@ type EditingAgent = {
 type Props = {
   tenantSlug: string;
   editing: EditingAgent | null;
+  /**
+   * The page the builder is on, which decides where a save and a delete land
+   * (./builder-paths.ts). The marketplace pages leave it out; the AI team's
+   * /agents/new passes "ai-team".
+   */
+  home?: BuilderHome;
 };
 
 function slugifyClient(name: string): string {
@@ -38,14 +46,20 @@ function slugifyClient(name: string): string {
     .slice(0, 62) || "agent";
 }
 
-export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
+export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
+  const paths = builderPaths(tenantSlug, home);
   const router = useRouter();
   const isEdit = !!editing;
+  // "New teammate" templates on the AI Team link here with ?template=<key>
+  // (components/os/aiteam/templates.ts): a new agent starts from that
+  // template's name, category, one-line summary and brief. Editing ignores it.
+  const searchParams = useSearchParams();
+  const draft = isEdit ? null : templateDraft(searchParams?.get("template"));
 
-  const [name, setName] = useState(editing?.name || "");
-  const [category, setCategory] = useState<AgentCategory>(editing?.category || "custom");
-  const [intent, setIntent] = useState("");
-  const [shortDesc, setShortDesc] = useState(editing?.short_description || "");
+  const [name, setName] = useState(editing?.name || draft?.name || "");
+  const [category, setCategory] = useState<AgentCategory>(editing?.category || draft?.category || "custom");
+  const [intent, setIntent] = useState(draft?.brief || "");
+  const [shortDesc, setShortDesc] = useState(editing?.short_description || draft?.summary || "");
   const [description, setDescription] = useState(editing?.description || "");
   const [basePrompt, setBasePrompt] = useState(editing?.base_prompt || "");
   const [toolsText, setToolsText] = useState((editing?.required_tools || []).join(", "));
@@ -135,7 +149,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
         body: JSON.stringify(payload),
       });
       const data = (await res.json()) as
-        | { ok: true; agent: { slug: string } }
+        | { ok: true; agent: { slug: string }; bound?: boolean; message?: string }
         | { ok: false; error: string; message?: string; field?: string; reason?: string };
       if (!data.ok) {
         const detail =
@@ -145,8 +159,13 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
         setError(detail);
         return;
       }
-      setFlash(isEdit ? "Saved." : "Created. Redirecting to the marketplace...");
-      router.push(`/t/${tenantSlug}/marketplace/${data.agent.slug}`);
+      // Created, but its switch did not take: say where to finish, and stay.
+      if (!isEdit && data.bound === false) {
+        setError(data.message || "Created, but it could not be switched on. Turn it on from the AI Team page.");
+        return;
+      }
+      setFlash(isEdit ? "Saved." : paths.createdNote);
+      router.push(paths.saved(data.agent.slug));
     } catch (err) {
       setError(err instanceof Error ? err.message : "network_error");
     } finally {
@@ -169,7 +188,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
       // Invalidate the marketplace page's RSC cache; without this the
       // just-deleted agent reappears in the cached list.
       router.refresh();
-      router.push(`/t/${tenantSlug}/marketplace`);
+      router.push(paths.afterDelete);
     } catch (err) {
       setError(err instanceof Error ? err.message : "network_error");
     } finally {
@@ -194,7 +213,7 @@ export function CustomAgentBuilder({ tenantSlug, editing }: Props) {
 
         <Field
           label="URL slug"
-          hint={`Marketplace URL: /t/${tenantSlug}/marketplace/${slug || "<slug>"}`}
+          hint={paths.slugHint(slug || "<slug>")}
         >
           <input
             type="text"

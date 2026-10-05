@@ -1,7 +1,8 @@
 /**
  * Auth middleware — gates every page behind a Supabase session.
  *
- * Public routes: auth pages, public webhooks, install scripts, brand assets.
+ * Public routes: auth pages, public webhooks, brand assets, and routes that
+ * gate themselves inside (the operator-only install scripts among them).
  * Everything else redirects to /login when there's no session.
  */
 
@@ -9,21 +10,25 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
-import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
+import { destinationForClaim, onboardingGateApplies, shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
+import { OS_REDIRECTS } from "./lib/os/redirects";
 
 export const PUBLIC_PATH_PREFIXES = [
   // Public marketing site — /home (served at "/" via the rewrite below),
-  // /fleet, /work, /about, /contact, /start. Sourced from
+  // /fleet, /work, /about, /contact. Sourced from
   // lib/marketing/routes.ts so this list and the root layout's
   // FULL_BLEED_PREFIXES can never disagree about what is public. The three
   // legal pages are listed individually further down — they predate the
   // marketing site and their comments explain why each must stay public.
   ...MARKETING_PATHS,
-  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to /start, and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
-  "/download",             // public OASIS Desktop downloads
-  "/configure",            // public agent configurator (pre-signup)
-  "/demo/sun",             // public Sun Biz review shell; demo data only
+  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to "/", and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
+  "/download",             // OASIS Desktop page. Public, but the page decides what it shows: the release links for a verified platform operator, a "private beta" notice with no links for everyone else (the release repo is private).
+  // /configure, /start and /demo/sun removed 2026-09-29 (F0 containment): the
+  // developer install funnel and the retired SunBiz demo. Each page now calls
+  // notFound(); tests/f0-containment.test.ts pins both halves.
+  "/install.ps1",          // Operator-only install scripts. Public HERE only so a signed-out `irm | iex` or `curl | bash` gets the route's plain 404 instead of an HTML login page piped into a shell; the route itself (lib/install-scripts.ts) serves the script to a verified platform operator session and 404s everyone else.
+  "/install.sh",           // Same as /install.ps1.
   "/oasis-loop",           // public static OASIS Loop HTML deliverables under /public/oasis-loop
   "/unsubscribe",          // CASL-compliant email unsubscribe landing — reached from email footers (DEFAULT_UNSUBSCRIBE_BASE in BEA/scripts/casl_compliance.py). Recipients may not have an account; the confirmation page reads ?email=&brand=&token= from the URL and POSTs to /api/unsubscribe (also public, service-role insert into email_suppressions). MUST be public or every unsub link 401s before the form renders, which is itself a CASL violation.
   "/api/unsubscribe",      // companion API for /unsubscribe — POST records the suppression via service-role Supabase client. Token-validated INSIDE the route when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; otherwise email-only opt-out is accepted (matches the URL format casl_compliance.py emits today).
@@ -61,8 +66,8 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/auth/provision-cli", // setup-wizard operator-account creation, called by install/bootstrap.py — CLI_SIGNUP_SECRET bearer gated INSIDE the route, no session. MUST be public or installer account-creation 401s before its secret check ("/api/auth/provision" can't cover the "-cli" suffix — matchesPathPrefix needs prefix+"/").
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
   "/api/auth/pair-code/redeem", // machine-facing pair-code redemption — the CODE is the auth (no session); the route is IP-rate-limited + code-shape-validated + single-use + 15-min TTL. MUST be public or every machine pairing 401s before reaching the handler (matchesPathPrefix won't let the `/api/auth/pair` entry cover `pair-code`). NOTE: the mint endpoint `/api/auth/pair-code` stays session-gated — only `/redeem` is public.
-  "/api/demo/sun",         // sets Sun demo shell cookie; never exposes live tenant data
-  "/api/download/desktop", // public OS-aware desktop download redirect
+  // /api/demo/sun removed 2026-09-29 with /demo/sun (the route is deleted).
+  "/api/download/desktop", // OS-aware desktop download redirect. Public so a signed-out click lands somewhere; the route sends a verified platform operator to the release file and everyone else back to /download.
   "/api/bridge",           // local-bridge daemon heartbeat (Bearer token gated inside)
   "/api/cron-jobs/poll",   // local-bridge cron poll — Bearer bridge_pairings token gated + rate-limited INSIDE the route (resolveBridge), no session. MUST be public or the bridge's cron poll 401s before its bearer-auth runs (the `/api/cron` entry can't cover it — matchesPathPrefix needs prefix+"/", and it's `cron-jobs`). This is what blocks all cron automations from firing. Only `/poll` is public; the session-authed `/api/cron-jobs` CRUD stays gated.
   "/api/integrations/registry",  // canonical service+env_key list — used by the bridge to decide what to ping; non-sensitive (names only, no values), 5min Cache-Control
@@ -71,13 +76,18 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/outbound/log",     // outbound logging from local backend (HMAC auth inside)
   "/api/internal/apply-extraction", // VPS extraction daemon → applies extracted fields. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — MUST be public or the daemon's callback 401s here before its signature check ever runs, and no dropped application ever applies. The companion poll route /api/extraction-jobs/[job_id] stays session-gated (operator-facing).
   "/api/internal/live-subs/promote", // VPS scrubber bridge (ezra-telegram-bridge) → promotes an approved live-sub lead into a shoppable application. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — same rule as apply-extraction: MUST be public or the bridge's promote call 401s here before its signature check runs, and no live sub ever becomes an application. Only this exact path is public.
+  "/api/internal/finance/", // CFO agent (Atlas) -> FOUNDERS > Finances internal API (summary, stripe-reconcile, fx-refresh, transactions drafts, invoices/remind-overdue). Bearer FINANCE_AGENT_TOKEN checked with timingSafeEqual INSIDE each route (lib/founders-finances/internal-auth.ts), fail-closed 503 when unset. Atlas holds no session cookie, so without this entry middleware 401s before the bearer check runs — the same omission that broke apply-extraction twice. Trailing slash: covers only /api/internal/finance/*, never /api/internal itself.
+  "/api/internal/support/", // The support@ reader on CC's PC (BEA scripts/support/) -> ingest, heartbeat, pending-drafts, draft. Each route authenticates INSIDE with an HMAC over "<timestamp>.<raw body>", a 5-minute window and SUPPORT_INGEST_SECRET_BEA (lib/delivery/support-ingest-auth.ts), and answers 503 when the secret is unset. The reader holds no session cookie: without this entry middleware answers 401 before the signature is checked, which the reader reads as a bad signature and stops the desk. Trailing slash: covers only /api/internal/support/*, never /api/internal itself.
+  "/api/internal/extraction-doc-url", // VPS extraction daemon → asks for a short-lived URL for the ONE document its job references, because that box holds no R2 credential. HMAC (OASIS_OUTBOUND_HMAC_SECRET) gated INSIDE the route, no session — same rule as its sibling apply-extraction above. Missing this entry makes the route 401 here before the signature check, leaving every dropped application unreadable. Caught by Codex review 2026-08-26 AFTER the route shipped in #321 — the second time this exact omission has broken a machine-to-machine endpoint, so tests/middleware-prefix.test.ts now pins all three internal paths.
   // /api/event-feed removed from public allowlist 2026-05-18 (Codex
   // pass 4): payloads carry record IDs / lead context / command
   // summaries — not safe for unauthenticated callers. Route now
   // requires a session.
-  "/api/quests",           // OASIS Town Quest Log polls ACTIVE_TASKS.md mirror. Read-only, public for Phase 5 proof-of-life.
+  // /api/quests removed from public allowlist 2026-09-28 (P0-6): it served
+  // CC's ACTIVE_TASKS mirror (oasis_quests) to the whole internet. The route
+  // now requires a platform-operator session.
   "/api/track",            // Email-open tracking pixel (Phase 19 SunBiz CRM, 2026-05-17). Must be public — mail clients fetch the pixel without a session. Route resolves tenant_id by lookup against the interaction row (never trusts the URL parameter) and always returns a 1x1 GIF, so 401-gating it would silently break every operator's open-rate tracking. Migration 050 dedupes by (outbound_message_id, ip_hash) so a known reservation_id can't be replayed to inflate row counts.
-  "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. The route returns a static JSON status with no sensitive payload, so 401-gating it would silently break health monitoring across the deploy.
+  "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. Public callers get build info only; the per-secret presence map is added for a verified platform operator session alone (gated inside the route). 401-gating it would silently break health monitoring across the deploy.
   // /api/forms is intentionally NOT a public prefix — /api/forms (list),
   // /api/forms/[id] (CRUD), and /api/forms/[id]/mint-link are all
   // admin-only (session-authed). The two PUBLIC form endpoints below
@@ -93,7 +103,10 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/forms/upload-url", // POST HMAC-token file upload signer for public form direct-to-Storage uploads.
   "/api/forms/view",       // POST on form-page mount → records form_views + fires viewed_application drip.
   "/api/forms/address-autocomplete", // GET ?q=… → server-side address-autocomplete proxy for the public form. Public (the personalized form isn't session-authed) and IP rate-limited; returns only formatted-address strings, never provider keys (those stay server-side). See app/api/forms/address-autocomplete/route.ts.
+  "/api/client-errors",    // POST browser-crash report (app/error.tsx, app/global-error.tsx, components/ClientErrorReporter.tsx). Same rules as /api/perf/vitals below: sent from pages with no session (login, a public form), so it must not 401 here; the route self-gates on same-origin, a byte cap, a strict schema and a rate cap, and takes tenant/user from the session only. Exact path only.
+  "/api/perf/vitals",      // POST web-vitals beacon. The MERCHANT'S browser sends this from the public form, where no session exists, so middleware answered 401 and every merchant filling in an application collected console errors on a funding form — measured live 2026-09-14. The route is built to be a public surface and defends itself fail-closed BEFORE reading anything: same-origin gate on Origin/Referer vs Host (403, and false when any of them is missing or unparseable), a 1 KB cap enforced through a byte-limited reader rather than after buffering, an allowlisted key/metric/rating schema, and a per-instance 600/min cap that answers 204 so a flooder learns nothing. It is log-only — no database write, no PII, nothing echoed back. Same rule as the internal HMAC routes above: the route owns its own auth, so middleware must let it reach it.
   "/f/",                   // Public prospect-facing form pages. Two shapes: /f/<tenant>/<form>/<lead_token> (personalized, HMAC-signed via Solara mint) and /f/<tenant>/<form> (anonymous share — server creates a fresh lead on submit). Both must be reachable without a session cookie or every inbound form return 401 — verified failure mode 2026-05-18 (CC opened a copied link in incognito and landed on /login).
+  "/link-expired",         // Where /api/track/click sends a click it cannot attribute (an unsigned link, a tracking id that matches nothing). The visitor is a recipient of someone's email, usually with no account, so the page says what happened and belongs to no company. MUST be public or that visitor is sent to "Sign in to Command Center" for a product they do not use (U1-18). Exact path; full-bleed in lib/os/full-bleed.ts.
   "/sign/",                // Public e-signature signing page (/sign/<token>). The 32-byte token IS the auth boundary (sha256 looked up against esign_signers.token_sha256) — no session cookie exists for a signer, who may never have an OASIS account. MUST be public or every emailed signing link 401s before the page can even validate the token (same failure mode as /f/ above).
   "/api/sign/",            // Companion API for /sign/ — GET validates the token + returns the source PDF, POST records the signature/decline. Self-authenticates INSIDE the route via sha256(token) match (lib/esign/resolve-signing-session.ts); fails closed with one generic error shape on any bad/expired/consumed token (no enumeration oracle). MUST be public for the same reason as /api/forms/submit.
 
@@ -103,9 +116,13 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
   "/api/ingest/",          // machine ingest for n8n client automations — the Turso repoint target for automation_logs. Self-authenticates with a timing-safe X-Ingest-Secret compare INSIDE the route (no session exists for an n8n HTTP node), so the prefix must be public or every client-automation log write 401s before reaching its own check.
   "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
+  "/api/ledger/ingest",    // Business Ledger ingest for the Python harnesses (BEA, Maven, Atlas). Self-authenticates INSIDE the route with a per-producer HMAC over "<timestamp>.<raw body>" and a 5-minute window (lib/ledger/ingest.ts); no harness holds a session cookie, so without this entry every producer 401s here before its signature is checked. Exact path only: any future /api/ledger/* read route stays session-gated.
   "/_next",
   "/favicon",
 ];
+
+/** Marks the "/" -> "/home" internal rewrite; see isInternalHomeRewrite. */
+const HOME_REWRITE_HEADER = "x-oasis-home-rewrite";
 
 // Unauthed "/" is REWRITTEN (not redirected) to the marketing home, so
 // oasisai.work stays the canonical URL for the brand apex in the address
@@ -113,10 +130,11 @@ export const PUBLIC_PATH_PREFIXES = [
 // itself can never be added to PUBLIC_PATH_PREFIXES.
 
 // Public static-asset extensions. Anything served from /public with one of
-// these suffixes is allowed without auth — install scripts (curl|bash) and
-// brand assets MUST be reachable anonymously.
+// these suffixes is allowed without auth — brand assets MUST be reachable
+// anonymously. ".sh" and ".ps1" were here for the install one-liners until
+// 2026-09-29; those are operator-gated routes now, listed by exact path above,
+// so a blanket extension rule would only make the next *.sh route public.
 const PUBLIC_FILE_EXTENSIONS = [
-  ".sh", ".ps1",                              // install one-liners
   ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",  // images
   ".txt", ".webmanifest", ".xml", ".json",    // robots / manifests
   ".woff", ".woff2", ".ttf",                  // fonts
@@ -167,15 +185,12 @@ export function isPublic(pathname: string): boolean {
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Phase 6b/7 — redirect routes still folded into bigger surfaces.
-  // /playbook was restored in V6.8.5 (app/playbook/page.tsx is daily-use,
-  // not reference) so it no longer redirects. The remaining two really
-  // are merged elsewhere and shouldn't be reachable at their old URLs:
-  //   /feed → /operations         (Activity Tape is the same stream)
-  //   /integrations → /settings   (setup under Settings)
+  // Routes folded into bigger surfaces. The OASIS OS moves live in
+  // lib/os/redirects.ts (pure, so tests/os-redirects.test.ts can prove every
+  // target is a real route). /feed no longer redirects to /operations: Feed is
+  // a Team page again. /integrations now lands on Settings › Connections.
   const REDIRECT_MAP: Record<string, string> = {
-    "/feed": "/operations",
-    "/integrations": "/settings",
+    ...OS_REDIRECTS,
     // The marketing home is a real route so the rewrite below has
     // something to resolve to, which also makes it directly reachable —
     // two URLs serving one page. Collapse it here so "/" is the only
@@ -184,9 +199,22 @@ export async function middleware(req: NextRequest) {
     // rewrite further down never re-enters this map.
     [MARKETING_HOME_PATH]: "/",
   };
-  if (pathname in REDIRECT_MAP) {
+  // The "/" -> "/home" rewrite below marks its request. Next's own server does
+  // not re-run middleware on an internal rewrite, but the standalone Node
+  // server (next start / Docker self-host) does, and without this check the
+  // rewritten /home request hit the /home -> "/" redirect above and looped
+  // forever for every anonymous visitor (2026-09-30 audit,
+  // standalone-anon-root-loop). A browser that sends the header itself only
+  // gets the public marketing page at /home, which is what /home is.
+  const isInternalHomeRewrite =
+    pathname === MARKETING_HOME_PATH && req.headers.get(HOME_REWRITE_HEADER) === "1";
+  if (pathname in REDIRECT_MAP && !isInternalHomeRewrite) {
     return NextResponse.redirect(new URL(REDIRECT_MAP[pathname], req.url));
   }
+  // The AI Team's old builder and teammate-chat URLs are NOT moved here: who
+  // moves depends on the viewer, which this edge check cannot read. The old
+  // pages move the viewers the OS routes serve (lib/os/redirects.ts
+  // OS_VIEWER_MOVES).
 
   // Pass pathname through as a header so the root layout can decide whether
   // to render the dashboard shell vs full-bleed (marketing/auth) chrome.
@@ -208,6 +236,7 @@ export async function middleware(req: NextRequest) {
   const rewriteMarketingHome = () => {
     const rewriteHeaders = new Headers(req.headers);
     rewriteHeaders.set("x-pathname", MARKETING_HOME_PATH);
+    rewriteHeaders.set(HOME_REWRITE_HEADER, "1");
     return NextResponse.rewrite(new URL(MARKETING_HOME_PATH, req.url), {
       request: { headers: rewriteHeaders },
     });
@@ -225,6 +254,17 @@ export async function middleware(req: NextRequest) {
     const token = req.cookies.get("oasis_session")?.value;
     const session = await verifySessionEdge(token, process.env.AUTH_SESSION_SECRET);
     if (session) {
+      // Onboarding gate, Turso branch (2026-09-30). The decision was made when
+      // this cookie was minted (lib/onboarding-claim.ts) and rides in it as
+      // `onb`, so there is no database call here. Before this the Turso branch
+      // let every page through: a workspace owner whose workspace was not set
+      // up, or an invitee whose join failed, landed on screens that could not
+      // work for them. A cookie with no claim (minted before this change) is
+      // never redirected. Page requests only; /api/* and /onboarding/* pass.
+      const destination = destinationForClaim(session.onb);
+      if (destination && onboardingGateApplies(pathname)) {
+        return NextResponse.redirect(new URL(destination, req.url));
+      }
       return NextResponse.next({ request: { headers: requestHeaders } });
     }
     // Same rule the Supabase branch below applies, and for the same reason:
@@ -312,16 +352,16 @@ export async function middleware(req: NextRequest) {
   // chrome was wrong, but it routed `/api/sms/send` etc. as SunBiz which
   // is a real integrity hazard).
   //
-  // Rule: an authenticated user on a non-/demo path gets the cookie
-  // cleared on the response. /demo/sun itself is exempted so the
-  // anonymous preview keeps working. The layout has a defense-in-depth
+  // Rule: an authenticated user gets the cookie cleared on the response,
+  // on every path. /demo/sun was exempted while it was the anonymous
+  // preview; it is a 404 since 2026-09-29 (F0 containment), so the
+  // exemption went with it. The layout has a defense-in-depth
   // copy of this rule for the page render, but the middleware clear is
   // the durable one — Server Component cookie writes silently no-op in
   // some Next 15 contexts, so the layout-side clear can't be relied on.
   if (
     !error &&
     data.user &&
-    !pathname.startsWith("/demo/sun") &&
     req.cookies.get("oasis_demo_client_profile")?.value
   ) {
     res.cookies.set("oasis_demo_client_profile", "", {

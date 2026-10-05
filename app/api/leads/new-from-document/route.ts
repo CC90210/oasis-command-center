@@ -27,7 +27,27 @@ export const dynamic = "force-dynamic";
 
 const ALLOWED = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+/**
+ * Top-level catch. An uncaught throw in a Next route handler answers with a 500
+ * carrying an EMPTY body, and the dropzone then had nothing to show the rep but
+ * the status code — which is how "the drop keeps getting error-coded" happens
+ * without anyone being able to say why. Every exit is a named JSON error now.
+ * Pinned by tests/dropzone-plain-language-errors.test.ts on the client side.
+ */
 export async function POST(req: NextRequest) {
+  try {
+    return await handleNewFromDocument(req);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[leads/new-from-document] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "new_from_document_unhandled_error", detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleNewFromDocument(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (isReadOnlyRole(sess.teamRole)) {

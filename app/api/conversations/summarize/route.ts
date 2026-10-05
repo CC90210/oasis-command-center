@@ -24,6 +24,11 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { summarizeConversation } from "@/lib/ai-conversation-summarize";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
+import { MANAGED_RUNTIME_NOT_CONFIGURED } from "@/lib/ai/infer";
+import {
+  getReadableLeadTargetForSession,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,15 +61,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "thread_key_required" }, { status: 400 });
   }
 
+  const readPolicy = await resolveLeadReadPolicy(sess);
+  if (readPolicy.mode === "denied") {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+  }
   const thread = await loadThreadForAi(sess.tenantId, threadKey, { limit: 30 });
   if (!thread || thread.messages.length === 0) {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+  }
+  if (
+    readPolicy.mode === "oasis" &&
+    (!thread.lead_id ||
+      !(await getReadableLeadTargetForSession(
+        sess,
+        { tenantId: sess.tenantId, id: thread.lead_id },
+        readPolicy,
+      )))
+  ) {
     return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
   }
 
   try {
     // Subscription bridge (free) for eligible tenants; null → paid-API fallback.
     const bridgeTarget = await resolveBridgeForTenant(sess.tenantId);
-    const result = await summarizeConversation(thread.messages, { bridgeTarget });
+    const result = await summarizeConversation(thread.messages, {
+      bridgeTarget,
+      tenantId: sess.tenantId,
+    });
     return NextResponse.json({
       ok: true,
       summary: result.summary,
@@ -75,7 +98,10 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     let status = 500;
     let errorTag = "summarize_failed";
-    if (message === "anthropic_key_missing") {
+    if (
+      message === "anthropic_key_missing" ||
+      message.startsWith(MANAGED_RUNTIME_NOT_CONFIGURED)
+    ) {
       status = 503;
       errorTag = "ai_unavailable";
     } else if (message.startsWith("summarize_parse_failed")) {

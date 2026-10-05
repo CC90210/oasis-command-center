@@ -13,7 +13,9 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { findOrphanedVerificationLeadIds } from "@/lib/drips/phone-lookup-repair";
 import { evaluate, type CheckResult, type CheckRule } from "./checks-core";
+import type { TelegramLane } from "@/lib/notify/telegram";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -21,6 +23,29 @@ export type DripCheck = {
   id: string;
   severity: "critical" | "high" | "medium";
   rule: CheckRule;
+  /**
+   * Who gets paged. Omitted means `sunbiz-ops`, which is where every check in
+   * this file belongs and where all of them went before this field existed.
+   *
+   * It exists because the runner hardcoded that lane, and the estate stopped
+   * being only SunBiz: an OASIS check added in #334 would have announced an
+   * OASIS booking outage into the SunBiz ops channel — the client's lane, for a
+   * product they do not operate. Wrong-audience alerts are ignored alerts, and
+   * an ignored alert is the same as no alert.
+   */
+  /**
+   * One lane, or SEVERAL for a check that genuinely spans both companies.
+   *
+   * An ESTATE-WIDE check has no single owner. forms.submit_failures_open
+   * watches the dead-letter table, which its own comment calls estate-wide —
+   * "a blocked application is a blocked application" — and it deliberately
+   * ignores the tenantId the runner passes. Left undeclared it fell to the
+   * default lane, so an OASIS merchant's blocked submission re-asserted into
+   * SunBiz's channel every 15 minutes: Adon could not action it and CC, who
+   * could have recovered the prospect from the stored payload, never heard.
+   * Naming both lanes is the honest answer for a check that is honestly both.
+   */
+  lane?: TelegramLane | TelegramLane[];
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
@@ -336,6 +361,31 @@ export const DRIP_CHECKS: DripCheck[] = [
     describe: (r) =>
       `${r.observed} drip texts in 24h against a target of ${smsTargetPerDay()}. ` +
       `The cap is a ceiling, not a source: check working lines, enrolment, and the deal gate before raising it.`,
+  },
+  {
+    /**
+     * THE LOOKUP QUEUE CAN BE EMPTY BECAUSE NOTHING ENQUEUED THE WORK.
+     *
+     * Measured 2026-09-23: 343 distinct leads were held at
+     * sms_awaiting_verification and all 343 had zero phone_lookup_jobs. They
+     * were legacy June/July leads outside the post-2026-08-07 Live-Sub auto
+     * enrollment policy. `leads.phone_lookup_stalled` returned 0/green because
+     * it only asks how old the oldest PENDING job is; no jobs meant no age.
+     *
+     * This check watches the missing handoff separately from the drainer. One
+     * says "work was never queued"; the next says "queued work is not moving".
+     */
+    id: "leads.phone_lookup_unenqueued",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: async (db, tenantId) => {
+      const scan = await findOrphanedVerificationLeadIds(db, tenantId);
+      return scan.ok ? scan.orphanLeadIds.length : null;
+    },
+    describe: (r) =>
+      `${r.observed} SMS-held lead(s) have no phone lookup job. ` +
+      `An empty lookup queue is not healthy when verification holds exist; preview the ` +
+      `bounded orphan-repair enrollment before authorizing any queue writes.`,
   },
   {
     /**

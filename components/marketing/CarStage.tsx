@@ -28,9 +28,11 @@ import type * as ThreeNS from "three";
 /**
  * The 3D stage for the harness builder.
  *
- * Loads three.js dynamically, so ~150KB of WebGL runtime is fetched only
- * when this section actually scrolls into view — it is well below the
- * fold, and the homepage's first paint must not wait on it. Until then,
+ * Loads three.js dynamically and ONLY once this section is near the viewport
+ * (IntersectionObserver, 600px rootMargin) — 193KB gzip / 734KB raw of WebGL
+ * runtime that the homepage's first paint must not wait on. This comment used
+ * to claim that while the import actually ran on mount, so every visitor paid
+ * for it whether they scrolled or not. Until the fetch completes,
  * and forever on a machine without WebGL, the SVG blueprint underneath
  * stays visible.
  *
@@ -88,6 +90,14 @@ type Props = {
   launch?: boolean;
   /** Fires when the car has left frame, so the caller can navigate. */
   onLaunchComplete?: () => void;
+  /**
+   * Fires once when the 3D stage can never run — no WebGL, or the three chunk
+   * 404'd after a deploy. Distinct from "still loading": the caller should stop
+   * waiting, show the 2D diagram as the FINAL artwork rather than a ghosted
+   * placeholder, and navigate directly on Ignite instead of playing a curtain
+   * that has nothing behind it to finish.
+   */
+  onFail?: () => void;
 };
 
 /**
@@ -163,6 +173,7 @@ export function CarStage({
   focus,
   launch,
   onLaunchComplete,
+  onFail,
 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(onReady);
@@ -176,6 +187,15 @@ export function CarStage({
   launchRef.current = !!launch;
   const launchDoneRef = useRef(onLaunchComplete);
   launchDoneRef.current = onLaunchComplete;
+  // Called once when the 3D stage cannot run at all — no WebGL, or the three
+  // chunk failed to load. The caller needs to know, because the difference
+  // between "the car is still loading" and "there will never be a car" changes
+  // what it should show and whether Ignite can use the curtain.
+  const onFailRef = useRef(onFail);
+  onFailRef.current = onFail;
+  /** The intersection observer that gates the three.js fetch, so unmounting
+   *  before the section is reached cancels the fetch instead of leaking it. */
+  const observerRef = useRef<IntersectionObserver | null>(null);
   // Latest selection, readable from inside the animation loop without
   // tearing it down and rebuilding on every click.
   const sel = useRef({ bodyId, engineId, engineColor, dirtyBody: true, dirtyEngine: false });
@@ -195,16 +215,79 @@ export function CarStage({
     let disposed = false;
     let cleanup: (() => void) | undefined;
 
+    /**
+     * Wait until the stage is near the viewport before fetching three.js.
+     *
+     * The docstring at the top of this file has always said the runtime is
+     * "fetched only when this section actually scrolls into view". It was not.
+     * The import ran on mount, so every homepage visitor paid 193 KB gzip
+     * (734 KB raw) — 43% of the page's JavaScript — parsed on the main thread
+     * while they were still reading the hero. Most people who bounce from the
+     * hero paid the entire cost of a feature they never saw.
+     *
+     * 600px of rootMargin starts the fetch about a screen early, so anyone who
+     * scrolls toward the section still finds the car ready and sees no more of
+     * the blueprint than before. The capability probe below stays where it is:
+     * there is no point observing for a stage that can never run.
+     *
+     * No IntersectionObserver (old browser, jsdom) means load immediately —
+     * degrade to the previous behaviour rather than to a stage that never
+     * appears. A feature detection that fails closed would cost the car.
+     */
+    const nearViewport = () =>
+      new Promise<void>((resolve) => {
+        if (typeof IntersectionObserver === "undefined") return resolve();
+        const io = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((e) => e.isIntersecting)) {
+              io.disconnect();
+              resolve();
+            }
+          },
+          { rootMargin: "600px 0px" },
+        );
+        io.observe(mount);
+        // Disconnected on unmount via the cleanup below, so a visitor who
+        // never reaches the section never resolves and never fetches.
+        observerRef.current = io;
+      });
+
     (async () => {
-      // WebGL check before paying for the import.
+      // WebGL check before paying for the import. A miss is reported, not
+      // swallowed: the caller keeps the 2D diagram at full opacity (it is the
+      // final artwork for this visitor, not a placeholder) and makes Ignite a
+      // plain navigation with no curtain to get stuck behind.
       try {
         const probe = document.createElement("canvas");
-        if (!probe.getContext("webgl2") && !probe.getContext("webgl")) return;
+        if (!probe.getContext("webgl2") && !probe.getContext("webgl")) {
+          onFailRef.current?.();
+          return;
+        }
       } catch {
+        onFailRef.current?.();
         return;
       }
 
-      const THREE = await import("three");
+      // Nothing below the fold is fetched until the visitor is heading for it.
+      await nearViewport();
+      if (disposed) return;
+
+      // A failed chunk must not strand the page. After a deploy, a browser
+      // holding the previous build's HTML requests a hashed chunk that no
+      // longer exists and gets a 404 — with a bare `await import` that
+      // rejection escaped into an unhandled promise, the scene never built,
+      // the 2D blueprint stayed up for the whole session, and pressing Ignite
+      // went to a permanent black curtain because nothing was left running to
+      // finish it. Same shape as the no-WebGL early return above, which is why
+      // both now report through onFail rather than returning silently.
+      let THREE: typeof import("three");
+      try {
+        THREE = await import("three");
+      } catch (err) {
+        console.error("[CarStage] three.js chunk failed to load", err);
+        if (!disposed) onFailRef.current?.();
+        return;
+      }
       if (disposed) return;
 
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -2146,7 +2229,21 @@ export function CarStage({
       let announced = false;
       const tick = () => {
         raf = requestAnimationFrame(tick);
-        if (!visible) return;
+        // Idle when off-screen — EXCEPT while a launch is in flight.
+        //
+        // This was `if (!visible) return`. Reaching the Ignite button means
+        // scrolling down, which pushes the stage off-screen, so the launch
+        // sequence stopped advancing the moment it was started. The curtain is
+        // wall-clocked and the car is frame-counted, so the screen went fully
+        // black after ~5.35s and stayed black forever: no car, no navigation,
+        // no error, just a 10px "Skip" link on black. That is CC's first
+        // screenshot, and it is the default outcome for anyone who scrolls to
+        // the button rather than clicking it from the top of the section.
+        //
+        // The battery saving is the reason the gate exists and it is kept: at
+        // rest, off-screen, nothing renders. A launch is the one state where
+        // finishing matters more than idling, and it lasts six seconds.
+        if (!visible && launchFrame === 0 && !launchRef.current) return;
 
         if (sel.current.dirtyBody) {
           sel.current.dirtyBody = false;
@@ -2621,6 +2718,10 @@ export function CarStage({
 
     return () => {
       disposed = true;
+      // Stop waiting for the section. Without this, a visitor who leaves the
+      // page before scrolling down leaves an observer holding the mount node.
+      observerRef.current?.disconnect();
+      observerRef.current = null;
       cleanup?.();
     };
     // Built once. Selection changes flow through the `sel` ref so a click

@@ -1,55 +1,227 @@
-import { OASIS_LEAD_STAGES, type StageMeta } from "@/lib/oasis-stage-meta";
+import {
+  OASIS_LEAD_STAGES,
+  OASIS_PRE_HANDOFF_STAGE_KEYS,
+  type StageMeta,
+} from "@/lib/oasis-stage-meta";
 import { normalizeCollaborators } from "@/lib/lead-scope";
+import { factsFrom, isReleasedFromBook } from "@/lib/web-leads/claim";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 
-export const AGENT_PIPELINE_STAGE_KEYS = [
+/**
+ * Every sales seat retains its own complete deal history after a prospect is
+ * assigned. Stage controls still enforce the guided workflow; this list is a
+ * READ boundary only. `researched` stays out because it is the shared prospect
+ * pool, not anyone's assigned book.
+ */
+export const REP_PIPELINE_STAGE_KEYS = [
   "assigned",
   "attempting_contact",
   "connected",
   "qualified",
   "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
+  "won",
+  "lost",
+  "onboarding",
+  "in_build",
+  "client_review",
+  "launched",
+] as const;
+
+// Kept as named exports because call sites and tests describe the persona, but
+// visibility is deliberately identical across sales roles now.
+export const AGENT_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
+export const OPENER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
+export const CLOSER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
+
+/**
+ * Generic ownership handoff ends before the founder meeting. Later sales and
+ * delivery stages carry frozen attribution/workflow owners and must move only
+ * through their audited lifecycle actions.
+ */
+export const OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES: ReadonlySet<string> =
+  new Set(OASIS_PRE_HANDOFF_STAGE_KEYS);
+
+/**
+ * The manager coaches every assigned lead after it leaves the prospect pool.
+ * `researched` is deliberately absent: those are unworked directory prospects,
+ * not an assigned rep's pipeline. Assignment is enforced separately by the
+ * tenant sales-roster query, so lost and delivery history are safe to retain.
+ */
+export const MANAGER_PIPELINE_STAGE_KEYS: readonly string[] = OASIS_LEAD_STAGES
+  .map((stage) => stage.key)
+  .filter((stage) => stage !== "researched");
+
+export const BUILDER_DELIVERY_STAGE_KEYS = [
+  "won",
+  "onboarding",
+  "in_build",
+  "client_review",
+] as const;
+export const BUILDER_VISIBLE_STAGE_KEYS = [
+  ...BUILDER_DELIVERY_STAGE_KEYS,
+  "launched",
 ] as const;
 
 const AGENT_STAGE_SET = new Set<string>(AGENT_PIPELINE_STAGE_KEYS);
+const OPENER_STAGE_SET = new Set<string>(OPENER_PIPELINE_STAGE_KEYS);
+const CLOSER_STAGE_SET = new Set<string>(CLOSER_PIPELINE_STAGE_KEYS);
+const MANAGER_STAGE_SET = new Set<string>(MANAGER_PIPELINE_STAGE_KEYS);
+const BUILDER_DELIVERY_STAGE_SET = new Set<string>(BUILDER_DELIVERY_STAGE_KEYS);
+// CC, 2026-08-25: the builder/marketing hire sells too, so his board carries
+// BOTH jobs — the nine sales stages his claimed deals travel, plus the four
+// delivery stages his build work sits in. Union, not replacement: dropping the
+// delivery stages here would empty the pipeline half of his Today.
+const BUILDER_SALES_AND_DELIVERY_STAGE_SET = new Set<string>([
+  ...REP_PIPELINE_STAGE_KEYS,
+  ...BUILDER_VISIBLE_STAGE_KEYS,
+]);
+const EMPTY_STAGE_SET = new Set<string>();
+
+function stageSetForOasisRole(role: string): ReadonlySet<string> {
+  const normalized = role.trim().toLowerCase();
+  if (normalized === "opener") return OPENER_STAGE_SET;
+  if (normalized === "closer") return CLOSER_STAGE_SET;
+  if (normalized === "builder") return BUILDER_SALES_AND_DELIVERY_STAGE_SET;
+  if (normalized === "marketing") return AGENT_STAGE_SET;
+  if (normalized === "manager") return MANAGER_STAGE_SET;
+  if (normalized === "agent") return AGENT_STAGE_SET;
+  return EMPTY_STAGE_SET;
+}
 
 /**
  * ALLOWLIST. The OASIS sales titles added 2026-08-21 — manager, closer, opener,
  * builder — are deliberately ABSENT, and each absence is a decision:
  *
- *   closer / opener  correct and final. A rep sees their own book at the rep
- *                    stages. That is the whole design.
+ *   closer / opener  see their own complete assigned lifecycle, including
+ *                    won/lost and delivery history. Action gates stay
+ *                    separate, so visibility does not grant arbitrary moves.
  *
- *   manager          deliberately UNDER-permissive for now. A manager should see
- *                    their TEAM's book, which is a third scope this function
- *                    cannot express — `true` here would hand them the entire
- *                    tenant including CC's own leads, which is worse than
- *                    showing them too little. They see their own until the
- *                    team-scope read lands with the manager pages.
+ *   manager          receives a separate roster-scoped READ through
+ *                    canOpenOasisSalesRecord and oasis-pipeline-query. Keeping
+ *                    them false here is load-bearing: `true` would hand them
+ *                    unassigned, founder and system rows too. Cross-rep writes
+ *                    remain forbidden unless admin_access is explicitly on.
  *
- *   builder          not a sales role at all. They are scoped to their own rows
- *                    here, and because AGENT_STAGE_SET holds only the five REP
- *                    stages, a builder's board is EMPTY today — their work sits
- *                    at onboarding / in_build / client_review / launched. Empty
- *                    is not a leak, but it is not their tool either; the
- *                    delivery board is what fixes it.
+ *   builder          was delivery-only; CC, 2026-08-25 widened him to his OWN
+ *                    book at the full sales stage set (plus his delivery
+ *                    stages) because the builder/marketing hire now sells as
+ *                    well. Tenant-wide visibility stays false — the widening
+ *                    is ownership-scoped rows only.
  *
  * Do not "fix" a role into this list to make a screen populate. Widening here
- * widens `filterWebsiteSalesRows` to every program row in the tenant.
+ * turns that role into a whole-tenant pipeline administrator.
  */
 export function isOasisPipelineAdmin(role: string, isOwner = false, adminAccess = false): boolean {
-  return isOwner || role === "owner" || role === "admin" || role === "member" || adminAccess;
+  const normalized = role.trim().toLowerCase();
+  return (
+    isOwner ||
+    normalized === "owner" ||
+    normalized === "admin" ||
+    normalized === "member" ||
+    adminAccess
+  );
 }
 
 export function stagesForOasisRole(role: string, isOwner = false, adminAccess = false): StageMeta[] {
   return isOasisPipelineAdmin(role, isOwner, adminAccess)
     ? OASIS_LEAD_STAGES
-    : OASIS_LEAD_STAGES.filter((stage) => AGENT_STAGE_SET.has(stage.key));
+    : OASIS_LEAD_STAGES.filter((stage) => stageSetForOasisRole(role).has(stage.key));
 }
 
 type PipelineRow = { id: string; data: Record<string, unknown> };
 
-type OasisViewer = { role: string; userId: string | null; isOwner?: boolean; adminAccess?: boolean };
+/**
+ * A claim returned to Leads is no longer active Pipeline work for any role.
+ *
+ * Claim ageing applies only while the record is still in the pre-handoff
+ * prospect workflow. Once a founder meeting is booked, the stage itself proves
+ * active work; an old claimed_at must never hide a paid or delivery record.
+ * Lost keeps its separate 90-day recycle rule from claim.ts.
+ */
+export function isReleasedOasisPipelineRow(
+  row: PipelineRow,
+  now: number = Date.now(),
+): boolean {
+  const facts = factsFrom(row.data || {});
+  return isReleasedFromBook(facts, now);
+}
+
+type OasisViewer = {
+  role: string;
+  userId: string | null;
+  isOwner?: boolean;
+  adminAccess?: boolean;
+  /** Tenant-scoped rep ids resolved server-side for a manager READ. */
+  readableRepUserIds?: readonly string[];
+};
+
+export type OasisDeliveryQueueScope =
+  | { mode: "all" }
+  | { mode: "owned"; userId: string }
+  | { mode: "none" };
+
+/**
+ * Builders are outside delivery contractors, so their Today queue is their
+ * allocation rather than the tenant's client roster. Every other persona that
+ * reaches DeliveryToday keeps its existing tenant-wide view. A builder whose
+ * auth id did not resolve fails closed instead of widening to every client.
+ */
+export function resolveOasisDeliveryQueueScope(
+  teamRole: string | null | undefined,
+  userId: string | null | undefined,
+): OasisDeliveryQueueScope {
+  if ((teamRole || "").trim().toLowerCase() !== "builder") return { mode: "all" };
+  const normalizedUserId = (userId || "").trim().toLowerCase();
+  return normalizedUserId ? { mode: "owned", userId: normalizedUserId } : { mode: "none" };
+}
+
+/**
+ * Roles that may operate the OASIS sales file after ownership is proven.
+ *
+ * This is intentionally narrower than SELF_EDIT_LEAD_ROLES below. That older
+ * allowlist serves shared CRM surfaces where loan officers/processors/builders
+ * legitimately edit their own records. The OASIS pipeline is a sales surface:
+ * an attached delivery or read-only account may review a deal, but it must not
+ * send, pause nurture, add notes, or edit facts.
+ *
+ * `builder` joined on 2026-08-25 (CC): the builder/marketing hire sells, and
+ * the per-lead tools — notes, AI score, lifecycle actions on HIS claimed
+ * leads — are that job now. Ownership is still proven by every caller; this
+ * set only answers "does this role do sales work at all".
+ *
+ * `marketing` joined on 2026-08-26 (CC, 01461615 "enable lead access and
+ * cross-role transfers for openers, closers, builders, and marketing") for the
+ * same reason. The paragraph above used to list `marketing` among the roles
+ * that may only REVIEW, which flatly contradicted the set two lines below it
+ * from the day the role was added — so the prose said one thing, the code did
+ * another, and a reader had no way to know which was current. Corrected here
+ * rather than left as an open question about who may work a deal.
+ *
+ * `member` was added by that same commit and is removed again. It is the only
+ * role 01461615 granted that its own message never names, and it is not a job:
+ * it is the team_role COLUMN DEFAULT (45 live rows), the value an account
+ * carries when nobody chose one. Listing it here collapsed the distinction the
+ * paragraph above exists to state — this set answers "does this role do sales
+ * work at all", and for an unset seat the answer is no. `member` keeps
+ * everything it had before: SELF_EDIT_LEAD_ROLES on the shared CRM surfaces,
+ * CRM_WRITE_ROLES, and whole-board visibility via isOasisPipelineAdmin.
+ */
+export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "marketing",
+  "agent",
+]);
+
+/** Fails closed on null, unknown, or non-sales roles. */
+export function roleMayOperateOasisSalesLead(teamRole: string | null | undefined): boolean {
+  return OASIS_SALES_LEAD_OPERATOR_ROLES.has((teamRole || "").trim().toLowerCase());
+}
 
 /**
  * May this viewer OPEN this one record? Ownership only.
@@ -89,15 +261,70 @@ type OasisViewer = { role: string; userId: string | null; isOwner?: boolean; adm
  * editor treats it as a writable field. Omitting it would make this predicate
  * stricter than every other access path in the codebase — and would break the
  * two-party sale outright, where an opener hands a lead to a closer, stops
- * being `assigned_to`, and is still owed 20% on it. They must be able to open
+ * being `assigned_to`, and is still owed 15% on it. They must be able to open
  * the deal they are being paid for.
  *
  * Fail-closed: an unresolved identity, or a record nobody owns, opens nothing.
  */
 export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return true;
-  if (!viewer.userId) return false;
-  const me = viewer.userId.trim().toLowerCase();
+  if (viewer.role.trim().toLowerCase() === "manager") {
+    // A manager's ordinary owned/collaborating lead remains fully theirs after
+    // a handoff. The roster is an ADDITIVE coaching read, not a replacement
+    // for the normal assignment/collaborator contract.
+    if (ownsOasisSalesRecord(row, viewer.userId)) return true;
+    const assignedTo =
+      typeof row.data.assigned_to === "string"
+        ? row.data.assigned_to.trim().toLowerCase()
+        : "";
+    if (!assignedTo) return false;
+    const roster = new Set(
+      (viewer.readableRepUserIds || [])
+        .map((id) => id.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    return roster.has(assignedTo);
+  }
+  if (viewer.role.trim().toLowerCase() === "builder") {
+    // Read must never sit BELOW write. Since 2026-08-25 a builder may mutate
+    // rows he is a named collaborator on (ownsOasisSalesRecord), so the read
+    // predicate honours the same field — otherwise such a row opens as "Lead
+    // not found" while its owner edits it through tools that only ask
+    // assertMayWorkLead. Delivery allocation stays an independent OR.
+    return ownsOasisDeliveryRecord(row, viewer.userId) || ownsOasisSalesRecord(row, viewer.userId);
+  }
+  return ownsOasisSalesRecord(row, viewer.userId);
+}
+
+/** Builders can execute only the post-payment delivery edges they already see
+ * on their Today queue. They never gain prospecting, pricing, payment, notes,
+ * communication, or admin-correction powers from this predicate. */
+export function mayOperateOasisDeliveryStage(
+  teamRole: string | null | undefined,
+  stage: unknown,
+): boolean {
+  return (
+    (teamRole || "").trim().toLowerCase() === "builder" &&
+    typeof stage === "string" &&
+    BUILDER_DELIVERY_STAGE_SET.has(stage)
+  );
+}
+
+/**
+ * Is this record literally THIS person's — assigned to them, or shared with
+ * them as a collaborator? No role shortcut, by design.
+ *
+ * Split out of canOpenOasisSalesRecord because the two questions are not the
+ * same question, and answering a WRITE with the READ predicate quietly grants
+ * more than intended: canOpenOasisSalesRecord treats `member` as an admin (it
+ * is the wide "who may look at the board" role), and `member` is the team_role
+ * COLUMN DEFAULT — so gating an edit on it would have let any default-role
+ * account edit every lead in the tenant, not just their own. Ownership is the
+ * write question; keep them separate.
+ */
+export function ownsOasisSalesRecord(row: PipelineRow, userId: string | null): boolean {
+  if (!userId) return false;
+  const me = userId.trim().toLowerCase();
   const assignedTo =
     typeof row.data.assigned_to === "string" ? row.data.assigned_to.trim().toLowerCase() : "";
   // An unassigned lead belongs to nobody, so it is not "yours" by default —
@@ -107,6 +334,197 @@ export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): 
   // Reused, not reimplemented: normalizeCollaborators already tolerates the
   // field being absent / not-an-array / full of junk, and fails closed to [].
   return normalizeCollaborators(row.data).includes(me);
+}
+
+/**
+ * Delivery allocation may be stored in either the canonical fulfilment field
+ * or assigned_to on legacy/transitioning rows. This is the same OR used by the
+ * builder's database query, keeping every rendered link openable by the shared
+ * record-access predicate.
+ */
+export function ownsOasisDeliveryRecord(row: PipelineRow, userId: string | null): boolean {
+  if (!userId) return false;
+  const me = userId.trim().toLowerCase();
+  const assignedTo =
+    typeof row.data.assigned_to === "string" ? row.data.assigned_to.trim().toLowerCase() : "";
+  const fulfillmentOwner =
+    typeof row.data.fulfillment_owner_id === "string"
+      ? row.data.fulfillment_owner_id.trim().toLowerCase()
+      : "";
+  return Boolean(me && (assignedTo === me || fulfillmentOwner === me));
+}
+
+/**
+ * May this viewer MUTATE this OASIS lead?
+ *
+ * Read visibility is deliberately broader (canOpenOasisSalesRecord). Writes
+ * require an admin capability, or BOTH an OASIS sales role and ownership. Keep
+ * this pure predicate shared by the server-rendered detail page and API access
+ * helper so hidden controls and HTTP authorization cannot drift apart.
+ */
+export function canMutateOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
+  const role = viewer.role.trim().toLowerCase();
+  if (viewer.isOwner || viewer.adminAccess || role === "owner" || role === "admin") return true;
+  return roleMayOperateOasisSalesLead(role) && ownsOasisSalesRecord(row, viewer.userId);
+}
+
+/**
+ * What a non-admin rep may change on a lead they own (CC directive,
+ * 2026-08-24). The split is between the lead's FACTS and the pipeline's
+ * SHAPE: a rep on a call learns the real phone number, the real contact,
+ * what the website actually looks like — and should record it while it is
+ * in front of them rather than queue an admin request. What they must not
+ * do is move the deal or move themselves: stage, assignment, collaborators
+ * and sales_program decide whose board a lead sits on and who is paid for
+ * it, so they stay admin-only and keep their audited routes
+ * (/api/leads/[id]/set-stage, /api/leads/[id]/assign).
+ *
+ * Allowlist, not denylist: a field added to the seed later is non-editable
+ * by reps until someone decides it should be. The reverse default would
+ * silently hand every new field to every rep.
+ */
+export const REP_EDITABLE_LEAD_FIELDS = new Set<string>([
+  // contact facts a rep corrects mid-call
+  "name",
+  // The PERSON to ask for, distinct from `name` (which on the OASIS web-leads
+  // board is the business). Added 2026-09-08 with contactNameFor(): the
+  // pipeline's Contact name field now writes here instead of overwriting the
+  // business identity in `name`. Without it in this allowlist a rep's save is
+  // rejected wholesale — the field would render, accept typing, and 400 on
+  // save, which reads as the rep's mistake.
+  "contact_name",
+  "company",
+  "email",
+  "phone",
+  // the website-sales research a rep gathers or fixes
+  "website",
+  "website_condition",
+  "audit_findings",
+  "industry",
+  "business_city",
+  "state",
+  // call notes + the AI columns the rep's own tools write back
+  "notes",
+  "next_action_at",
+  "last_contacted_at",
+  "ai_score",
+  "ai_reasoning",
+  "ai_scored_at",
+  "ai_next_action",
+  "ai_next_action_rationale",
+  "ai_next_action_at",
+]);
+
+/**
+ * The keys in `patch` a rep is not allowed to set. Empty array = the patch
+ * is safe. Callers reject the whole patch when this is non-empty rather
+ * than silently dropping keys — a save that quietly discards half its
+ * fields is worse than one that explains itself.
+ */
+export function rejectedRepPatchKeys(patch: Record<string, unknown>): string[] {
+  return Object.keys(patch).filter((key) => !REP_EDITABLE_LEAD_FIELDS.has(key));
+}
+
+/**
+ * Fields that may only move through the audited OASIS lifecycle, assignment,
+ * or communication routes. Even an admin must not write these through the
+ * generic manifest editor: doing so would skip preconditions, attribution,
+ * touch timestamps, hooks, and the interaction ledger.
+ */
+export const OASIS_STRUCTURED_LEAD_FIELDS = new Set<string>([
+  "stage",
+  "stage_entered_at",
+  "assigned_to",
+  "assigned_agent",
+  "collaborators",
+  "sales_program",
+  "sales_motion",
+  "lead_source_track",
+  "sourced_by_user_id",
+  "attributed_rep_user_id",
+  "attribution_frozen_at",
+  "last_contact_at",
+  "last_contacted_at",
+  "last_call_at",
+  "last_disposition",
+  "last_handoff_note",
+  "last_handoff_note_at",
+  "qualification",
+  "qualified_at",
+  "booked_founder",
+  "audit_host_user_id",
+  "audit_host_role",
+  "audit_host_email",
+  "audit_duration_minutes",
+  "calendar_event_status",
+  "calendar_confirmed_at",
+  "calendar_confirmed_by",
+  "founder_meeting_at",
+  "founder_meeting_status",
+  "promised_demo",
+  "audit_completed_at",
+  "build_brief",
+  "build_handoff_status",
+  "recommended_tier",
+  "automation_interests",
+  "proposal_status",
+  "quoted_setup_amount",
+  "quoted_monthly_amount",
+  "payment_due_amount",
+  "proposal_payment_token",
+  "stripe_checkout_session_id",
+  "stripe_checkout_url",
+  "stripe_checkout_created_at",
+  "currency",
+  "closed_by",
+  "closed_at",
+  "collected_setup_amount",
+  "payment_provider",
+  "verified_payment_id",
+  "payment_verified_by",
+  "payment_verified_at",
+  "closed_by_user_id",
+  "deal_outcome",
+  "deal_outcome_at",
+  "fulfillment_owner_id",
+  "lost_at",
+  "loss_reason",
+  "drip_paused",
+]);
+
+export function rejectedOasisGenericPatchKeys(patch: Record<string, unknown>): string[] {
+  return Object.keys(patch).filter((key) => OASIS_STRUCTURED_LEAD_FIELDS.has(key));
+}
+
+/**
+ * Roles that may edit a lead of their OWN, given ownership is already proven.
+ *
+ * Ownership alone is not authority: a `read_only` account can legitimately be
+ * named in `assigned_to` or `collaborators` (that is how a read-only observer
+ * is attached to a deal), and gating the edit on ownership alone would have
+ * handed them write access they were explicitly denied before — the role name
+ * says exactly what it is. So the check is ownership AND a role floor.
+ *
+ * Allowlist, and `owner`/`admin` are absent because they never reach this
+ * branch — they are already admins upstream. Marketing is included under
+ * CC's 2026-08-26 own-lead/cross-role-transfer directive; callers still prove
+ * ownership before this role gate is consulted.
+ */
+export const SELF_EDIT_LEAD_ROLES = new Set<string>([
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "marketing",
+  "agent",
+  "member",
+  "loan_officer",
+  "processor",
+]);
+
+/** May this role edit a lead it owns? Fails closed on an unknown role. */
+export function roleMaySelfEditLead(teamRole: string | null | undefined): boolean {
+  return SELF_EDIT_LEAD_ROLES.has((teamRole || "").trim().toLowerCase());
 }
 
 /**
@@ -130,11 +548,22 @@ export function filterWebsiteSalesRows<T extends PipelineRow>(
   const programRows = (options.programScoped ?? true)
     ? rows.filter((row) => row.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM)
     : rows;
-  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return programRows;
+  const now = Date.now();
+  const activeProgramRows = programRows.filter((row) => !isReleasedOasisPipelineRow(row, now));
+  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return activeProgramRows;
   if (!viewer.userId) return [];
   const userId = viewer.userId.toLowerCase();
-  return programRows.filter((row) => {
+  const allowedStages = stageSetForOasisRole(viewer.role);
+  return activeProgramRows.filter((row) => {
     const assignedTo = typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : "";
-    return assignedTo === userId && AGENT_STAGE_SET.has(String(row.data.stage || ""));
+    const isBuilder = viewer.role.trim().toLowerCase() === "builder";
+    const deliveryOwned = isBuilder && ownsOasisDeliveryRecord(row, userId);
+    // Same predicate pair as canOpenOasisSalesRecord's builder branch: board,
+    // record read, and per-lead writes cannot disagree about whose row this is.
+    const owned =
+      isBuilder
+        ? deliveryOwned || ownsOasisSalesRecord(row, userId)
+        : assignedTo === userId;
+    return owned && allowedStages.has(String(row.data.stage || ""));
   });
 }

@@ -1,0 +1,477 @@
+/**
+ * lead-quick-email.test.ts — what the one-click email is allowed to say.
+ *
+ * This feature hands a rep a pre-written message and a Send button during a live
+ * call. The failure that matters is not a crash: it is a plausible sentence
+ * about a stranger's business that nobody ever verified, arriving in that
+ * business owner's inbox under our name. These tests pin the wording rules that
+ * stop it.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { appendSignatureAndFooter } from "../lib/config/email-signature";
+import {
+  INTERNAL_PLACEHOLDERS,
+  buildDraft,
+  defaultNextTouch,
+  firstNameOf,
+  prospectSafe,
+  TEMPLATES,
+  type QuickEmailLead,
+} from "../lib/leads/quick-email-draft";
+
+function run(name: string, fn: () => void) {
+  fn();
+  console.log(`  ok  ${name}`);
+}
+
+console.log("lead-quick-email:");
+
+const BOOKING = "https://calendar.app.google/EXAMPLE";
+
+function lead(over: Partial<QuickEmailLead> = {}): QuickEmailLead {
+  return {
+    name: "Marc Lefebvre",
+    company: "Coastline Auto Detailing",
+    email: "marc@coastline.ca",
+    industry: "Auto Detailing",
+    business_city: "Collingwood",
+    website: "https://coastline.ca",
+    website_condition: "",
+    audit_findings: "",
+    notes: "",
+    ...over,
+  };
+}
+
+run("every internal placeholder is stripped, not sent", () => {
+  // The exact strings the board stores on un-audited leads. Each one is honest
+  // internally and indefensible in a prospect's inbox.
+  for (const placeholder of [
+    "Not audited yet - confirm on the call",
+    "not audited yet",
+    "  Not Audited Yet  ",
+    "No website found yet, needs checking",
+    "Has a site, not yet reviewed",
+    "Not checked",
+    "site NOT audited (fetch failed at seed time)",
+    "no website finding on file, confirm on the call",
+  ]) {
+    assert.equal(prospectSafe(placeholder), "", `leaked: ${placeholder}`);
+  }
+});
+
+run("a placeholder MID-TEXT is caught, not just as a prefix", () => {
+  // Codex found this on review of the first version, which only checked
+  // startsWith(). It is not hypothetical: this is the notes value on a real
+  // lead on the board right now (the Vaughan HVAC record), and under a prefix
+  // check the whole sentence went to the business owner.
+  const realNote =
+    "Vaughan, Ontario | HVAC | site NOT audited (fetch failed at seed time; " +
+    "site confirmed reachable 2026-08-26) | no website finding on file, confirm on the call";
+  assert.equal(prospectSafe(realNote), "", "the live HVAC note leaked");
+
+  for (const mid of [
+    "Mobile is slow; not audited yet - confirm on the call",
+    "Owner keen. No website finding on file.",
+    "Spoke to Dave — site not audited, will revisit",
+    "Looks dated.  Not   audited   yet", // collapsed whitespace must not dodge it
+  ]) {
+    assert.equal(prospectSafe(mid), "", `leaked mid-text: ${mid}`);
+  }
+
+  // And through the full draft, on every template.
+  for (const t of TEMPLATES) {
+    const { body } = buildDraft(t.id, lead({ notes: realNote }), BOOKING);
+    assert.ok(
+      !/confirm on the call|not audited|no website finding/i.test(body),
+      `${t.id} leaked the live HVAC note`,
+    );
+  }
+});
+
+run("no em dash reaches a prospect, in any template or the sign-off", () => {
+  // CC, 2026-09-08: "remove all the m dashes from the actual email templates."
+  // An em dash is one of the loudest machine-written tells in a cold email, and
+  // the sign-off carried one on EVERY message this system has ever sent.
+  //
+  // Asserted on the GENERATED OUTPUT rather than by grepping the source, so a
+  // future template that reintroduces one fails here even if it is written in a
+  // different file. Code COMMENTS are untouched by this rule — they are not
+  // sent to anyone.
+  const withEverything = lead({
+    audit_findings: "Contact form 404s and the mobile layout collapses.",
+    notes: "Wants pricing before the end of the month.",
+  });
+  for (const t of TEMPLATES) {
+    for (const l of [withEverything, lead(), lead({ company: "" })]) {
+      const { subject, body } = buildDraft(t.id, l, BOOKING);
+      assert.ok(!subject.includes("—"), `em dash in ${t.id} subject: ${subject}`);
+      assert.ok(!body.includes("—"), `em dash in ${t.id} body`);
+      // The en dash is the same tell wearing a narrower hat.
+      assert.ok(!subject.includes("–"), `en dash in ${t.id} subject`);
+      assert.ok(!body.includes("–"), `en dash in ${t.id} body`);
+    }
+  }
+
+  // The sign-off appended to every outbound email, whatever composed it.
+  const signed = appendSignatureAndFooter("Body text.", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
+  });
+  assert.ok(!signed.includes("—"), "the sign-off still carries an em dash");
+  assert.match(signed, /\n\nAriel/, "the name should sign off on its own line");
+
+  // ...and it must still refuse to sign twice, in BOTH shapes — the legacy
+  // dashed one survives in bodies drafted before the change.
+  const legacy = appendSignatureAndFooter("Body text.\n\n— Ariel", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
+  });
+  assert.equal(
+    (legacy.match(/Ariel/g) || []).length,
+    1,
+    "a body already signed the old way got signed a second time",
+  );
+  const fresh = appendSignatureAndFooter("Body text.\n\nAriel", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
+  });
+  assert.equal(
+    (fresh.match(/Ariel/g) || []).length,
+    1,
+    "a body already signed the new way got signed a second time",
+  );
+});
+
+run("the AI email composer cannot reintroduce em dashes", () => {
+  // Fixing the STATIC templates is only half of it. compose-checkin hands the
+  // writing to a model, and that model was being taught to use em dashes by the
+  // prompt's own example phrasings — "…what actually moves the needle —",
+  // "No pressure either way — curious…", "— FirstName / OASIS AI Solutions".
+  // Twelve of them. An instruction not to use a character, written in prose
+  // full of that character, loses to the examples every time.
+  const prompt = readFileSync("lib/prompts/oasis-checkin-compose.txt", "utf8");
+  assert.ok(!prompt.includes("—"), "the composer prompt still demonstrates em dashes");
+  assert.ok(!prompt.includes("–"), "the composer prompt still demonstrates en dashes");
+  assert.match(
+    prompt,
+    /NEVER use an em dash or an en dash/,
+    "the prompt does not forbid the character outright",
+  );
+
+  // ...and the fallback used when the model call fails, which is a real send
+  // path, not a placeholder.
+  const fallback = readFileSync("app/api/leads/[id]/compose-checkin/route.ts", "utf8");
+  const proseLines = fallback
+    .split("\n")
+    .filter((l) => !/^\s*(\*|\/\/)/.test(l)); // comments are not sent to anyone
+  const offending = proseLines.filter((l) => l.includes("—") || l.includes("–"));
+  assert.deepEqual(offending, [], "the check-in fallback template still has a dash in its prose");
+});
+
+run("an OASIS email never carries SunBiz's legal footer", () => {
+  // appendSignatureAndFooter appended the SunBiz footer unconditionally: a
+  // Florida address, another company's name, and "you received this email
+  // because you submitted a funding inquiry" — false for a cold OASIS lead.
+  // It was harmless only because the paths that call it are inactive for
+  // OASIS today. Wiring a shared app-password mailbox (CC, 2026-09-08) turns
+  // them on, so this had to be brand-routed first.
+  const oasis = appendSignatureAndFooter("Body.", {
+    signer: { name: "Ariel" },
+    brand: "oasis",
+  });
+  assert.ok(!oasis.includes("SunBiz Funding LLC"), "SunBiz's name on an OASIS email");
+  assert.ok(!oasis.includes("Hallandale"), "SunBiz's address on an OASIS email");
+  assert.ok(
+    !oasis.includes("submitted a funding inquiry"),
+    "tells an OASIS prospect they applied for funding",
+  );
+  assert.match(oasis, /OASIS AI Solutions/, "no OASIS identification");
+  // The STREET too, not just the city. A CASL s.6(2) identification without a
+  // mailing address is incomplete, and that is exactly what shipped until
+  // 2026-09-09 while this assertion passed.
+  assert.match(oasis, /6993 Decarie Blvd/, "OASIS identification has no street address");
+  assert.match(oasis, /UNSUBSCRIBE/, "no opt-out instruction");
+  assert.ok(!oasis.includes("—"), "the OASIS footer carries an em dash");
+
+  // A SunBiz caller states SunBiz. This previously read "existing callers pass
+  // no brand and must be untouched" and asserted the unbranded default still
+  // produced SunBiz's footer -- pinning the fail-open that put the client's
+  // legal identity on OASIS mail. Omitting the brand now refuses.
+  const sunbiz = appendSignatureAndFooter("Body.", {
+    signer: { name: "Jordan" },
+    brand: "sunbiz",
+  });
+  assert.match(sunbiz, /SunBiz Funding LLC/, "a SunBiz email lost SunBiz's footer");
+  assert.throws(
+    () => appendSignatureAndFooter("Body.", { signer: { name: "Jordan" } } as never),
+    /brand is required|no footer for brand/,
+    "an unbranded caller must refuse, not inherit another company's identity",
+  );
+});
+
+run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'd", () => {
+  // CC, 2026-09-08: "use my app password, then just CC/forward the reps."
+  // One team mailbox, no per-rep Gmail setup. The bridge stays as the fallback
+  // because it only runs while a particular machine is on: five emails have sat
+  // queued since 2026-08-20 for that reason.
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  const sender = readFileSync("lib/integrations/oasis-shared-gmail-send.ts", "utf8");
+  const provision = readFileSync("scripts/provision-oasis-mailbox.mjs", "utf8");
+
+  // Tried BEFORE the bridge, or it never runs.
+  const sharedAt = route.indexOf("sendOasisSharedGmail(");
+  const bridgeAt = route.indexOf("return triggerImmediateSend(req, {");
+  assert.ok(sharedAt > 0, "the shared mailbox is not wired into the route");
+  assert.ok(
+    sharedAt < bridgeAt,
+    "the bridge is attempted before the shared mailbox, so the shared mailbox never runs",
+  );
+
+  // The rep is CC'd and replies come back to them, not into a shared inbox
+  // nobody watches. `copyList` replaced `repCopyAddress` on 2026-09-09: the old
+  // one copied whoever pressed send, so the rep the lead is ASSIGNED to was
+  // never copied and the shared mailbox copied itself. The behaviour is now
+  // asserted by execution in tests/lead-quick-email-delivery.test.ts; these two
+  // only pin that the route still threads a copy list at all.
+  assert.match(route, /cc: copyList/, "the rep is not CC'd on the shared-mailbox send");
+  assert.match(sender, /replyTo \? \{ replyTo \}/, "replies would land in the shared mailbox, not with the rep");
+
+  // OASIS footer, never the default.
+  assert.match(sender, /brand: "oasis"/, "the shared send would append SunBiz's footer");
+
+  // Suppression is checked FIRST and fails closed, and a suppressed recipient
+  // must NOT fall through to the bridge for a second attempt.
+  // Measured inside the FUNCTION BODY, not across the whole file: both symbols
+  // also appear in the import block at the top, where their order is
+  // alphabetical accident rather than execution order. The first version of
+  // this assertion compared those imports and failed against correct code.
+  const bodyStart = sender.indexOf("export async function sendOasisSharedGmail");
+  assert.ok(bodyStart > 0, "sendOasisSharedGmail not found");
+  const body = sender.slice(bodyStart);
+  const suppAt = body.indexOf("checkEmailSuppressed");
+  const credAt = body.indexOf("getTenantIntegrationBundle");
+  assert.ok(suppAt > 0 && credAt > 0, "expected both a suppression check and a credential read");
+  assert.ok(suppAt < credAt, "suppression is not checked before the credential work and the send");
+  assert.match(route, /shared\.reason === "suppressed"/, "a suppressed recipient falls through to the bridge");
+
+  // Unconfigured must be a silent fall-through, so behaviour is unchanged until
+  // the credential exists.
+  assert.match(sender, /reason: "not_configured"/, "an unconfigured mailbox does not degrade gracefully");
+
+  // THE OPT-OUT GATE MUST ACTUALLY FAIL CLOSED. checkEmailSuppressed catches
+  // its own errors and returns { suppressed: false, checkFailed: true } instead
+  // of throwing, so reading only `.suppressed` treats a FAILED LOOKUP as
+  // consent and emails someone who may have opted out. CodeRabbit caught this.
+  assert.match(sender, /supp\.checkFailed/, "a failed suppression lookup is read as 'not suppressed'");
+
+  // Explicit SMTP timeouts. This call runs BEFORE the bridge fallback and the
+  // route's maxDuration is 60s; nodemailer defaults to 120s connect / 600s
+  // socket, so a hung SMTP would burn the whole request and the fallback would
+  // never run.
+  assert.match(sender, /connectionTimeout: 10_000/, "no SMTP connection timeout");
+  assert.match(sender, /socketTimeout: 20_000/, "no SMTP socket timeout");
+
+  // The receipt is recorded, or the row cannot say which path sent it — the
+  // exact gap that made the 2026-09-08 incident hard to trace — and the CC'd
+  // copy arriving in monitored mail cannot be de-duplicated without the id.
+  assert.match(route, /gmailFrom = shared\.from_address/, "from_address is not persisted");
+  assert.match(route, /gmailMsgId = shared\.gmail_message_id/, "gmail_message_id is not persisted");
+
+  // The provisioning script must not report success on a failed write.
+  assert.match(provision, /if \(!result\?\.ok\)/, "an unchecked credential write reports success");
+
+  // The provisioning script must never print the secret.
+  assert.ok(
+    !/console\.log\([^)]*APP_PASSWORD(?!\.length)/.test(provision.replace(/masked/g, "")),
+    "the provisioning script logs the app password",
+  );
+  assert.match(provision, /"\*"\.repeat/, "the provisioning script does not mask the value");
+});
+
+run("real findings survive untouched", () => {
+  const real = "Your site takes 9 seconds to load on mobile and the contact form 404s.";
+  assert.equal(prospectSafe(real), real);
+});
+
+run("a lead with only placeholder findings produces an email naming none of them", () => {
+  const l = lead({
+    audit_findings: "Not audited yet - confirm on the call",
+    website_condition: "Has a site, not yet reviewed",
+  });
+  for (const t of TEMPLATES) {
+    const { body } = buildDraft(t.id, l, BOOKING);
+    const hay = body.toLowerCase();
+    for (const p of INTERNAL_PLACEHOLDERS) {
+      assert.ok(!hay.includes(p), `${t.id} leaked "${p}" into the prospect's email`);
+    }
+    // And it must not invent a replacement finding either — the paragraph is
+    // simply absent.
+    assert.ok(
+      !/what i noticed about your website/i.test(body),
+      `${t.id} kept the findings heading with nothing real behind it`,
+    );
+  }
+});
+
+run("a real finding IS included, with its heading", () => {
+  const l = lead({ audit_findings: "No mobile layout; the booking page is a PDF." });
+  const { body } = buildDraft("thanks_for_call", l, BOOKING);
+  assert.match(body, /What I noticed about your website:/);
+  assert.match(body, /No mobile layout; the booking page is a PDF\./);
+});
+
+run("findings beat the one-line condition when both are real", () => {
+  const l = lead({
+    audit_findings: "Contact form 404s.",
+    website_condition: "Dated site.",
+  });
+  const { body } = buildDraft("thanks_for_call", l, BOOKING);
+  assert.match(body, /Contact form 404s\./);
+  assert.ok(!body.includes("Dated site."), "the weaker signal should not also appear");
+});
+
+run("the booking link appears when given and is absent when suppressed", () => {
+  const withLink = buildDraft("info_request", lead(), BOOKING);
+  assert.ok(withLink.body.includes(BOOKING), "booking link missing");
+  assert.match(withLink.body, /15-minute/, "the ask must bound the time commitment");
+
+  // hasBookedMeeting passes "" — a second self-book link would let them book a
+  // conflicting time against an already-agreed meeting.
+  const suppressed = buildDraft("info_request", lead(), "");
+  assert.ok(!suppressed.body.includes("calendar.app.google"), "link leaked while suppressed");
+  assert.ok(!/pick whatever time/i.test(suppressed.body), "orphaned booking sentence remained");
+});
+
+run("a contact name that is really the company name never becomes a greeting", () => {
+  // The live shape on scraped rows: contact name == business name.
+  assert.equal(firstNameOf("HVAC Mechanical Systems Inc", "HVAC Mechanical Systems Inc"), "there");
+  assert.equal(firstNameOf("HVAC Mechanical Systems Inc.", "HVAC Mechanical Systems Inc"), "there");
+  assert.equal(firstNameOf("", "Coastline Auto Detailing"), "there");
+  assert.equal(firstNameOf("Marc Lefebvre", "Coastline Auto Detailing"), "Marc");
+
+  const { body } = buildDraft(
+    "thanks_for_call",
+    lead({ name: "HVAC Mechanical Systems Inc", company: "HVAC Mechanical Systems Inc" }),
+    BOOKING,
+  );
+  assert.match(body, /^Hi there,/, "greeted the prospect by their own company name");
+});
+
+run("the next-touch default is a business day, three days out, at 9am", () => {
+  // From a Friday, three business days is the following Wednesday.
+  const friday = new Date(2026, 8, 11, 14, 30);
+  assert.equal(new Date(defaultNextTouch(friday)).getDay(), 3, "landed off a business day");
+  assert.match(defaultNextTouch(friday), /T09:00$/);
+
+  // From a Monday it is Thursday, and never a weekend from any start day.
+  for (let i = 0; i < 7; i += 1) {
+    const start = new Date(2026, 8, 7 + i, 10, 0);
+    const day = new Date(defaultNextTouch(start)).getDay();
+    assert.ok(day !== 0 && day !== 6, `weekend follow-up scheduled from day ${i}`);
+  }
+});
+
+run("the send path is wired into the pipeline lead workspace, not just /leads", () => {
+  // CC's report was that the feature existed on one screen and not the one reps
+  // actually work. A unit test on the draft cannot see that, so assert the wiring.
+  const editor = readFileSync("components/leads/LeadContextEditor.tsx", "utf8");
+  assert.match(editor, /LeadQuickEmail/, "quick email is not rendered by the lead-details editor");
+  assert.match(
+    editor,
+    /audit_findings:\s*state\.audit_findings/,
+    "the draft must read the LIVE form state, not the saved row",
+  );
+
+  const page = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
+  assert.match(page, /bookingUrl=\{BOOKING_URL\}/, "booking url must be resolved server-side");
+  assert.match(page, /hasBookedMeeting=\{/, "booked-meeting suppression is not wired");
+
+  // NOT stage-gated: CC asked for this on every stage, so no stage condition may
+  // guard the component.
+  const quick = readFileSync("components/leads/LeadQuickEmail.tsx", "utf8");
+  assert.ok(
+    !/stage\s*===\s*["']connected["']/.test(quick),
+    "the quick email must not be restricted to one stage",
+  );
+
+  // The recipient must FOLLOW the editor above while untouched. Seeding `to`
+  // from lead.email once meant a rep who corrected the Email field kept sending
+  // to the stale address, in the one component that claims to track the live
+  // form. Codex caught it; this pins the sync.
+  assert.match(
+    quick,
+    /if \(!touched && upstreamEmail !== seenUpstream\)/,
+    "recipient no longer follows the live editor state",
+  );
+
+  // A send whose response we lost is NOT a failed send: the route commits the
+  // queued interaction row before it finishes, so "Send failed" is what makes a
+  // rep press the button again and email the owner twice.
+  assert.ok(
+    !/setStatus\(\s*err instanceof Error \? err\.message : "Send failed\."/.test(quick),
+    "the error path claims the send failed when it may already be queued",
+  );
+  assert.match(quick, /may already have been queued/, "the ambiguous-send warning is missing");
+
+  // ...and the retry is BLOCKED, not merely discouraged. A warning sentence
+  // beside a live Send button is not a control: the rep presses it again and
+  // the owner gets two identical emails. Codex and CodeRabbit both landed here.
+  assert.match(quick, /setUnconfirmed\(true\)/, "an unconfirmed send must latch");
+  assert.match(quick, /unconfirmed \?/, "the Send button is not gated on the unconfirmed state");
+  assert.match(quick, /Send anyway/, "no deliberate second action to override");
+  // ...and that control must actually SEND. It first only cleared the latch, so
+  // a rep pressing a button labelled "Send anyway" got nothing.
+  assert.match(
+    quick,
+    /setUnconfirmed\(false\);\s*void send\(\)/,
+    '"Send anyway" does not send — it only clears the latch',
+  );
+  // The outcome of an already-sent message is announced, not just painted.
+  assert.match(quick, /role="status" aria-live="polite"/, "send result is not announced");
+
+  // The /leads composer posts to the SAME route and needs the SAME guard —
+  // fixing one of two callers leaves the duplicate-send open on the other.
+  const file = readFileSync("components/leads/LeadFileBody.tsx", "utf8");
+  assert.match(file, /setUncertain\(true\)/, "the /leads composer has no uncertain-send latch");
+  // Asserted as separate fragments: the sentence is split across a line break by
+  // string concatenation, and a regex spanning that join pins the FORMATTING
+  // rather than the behaviour — it would go red on a prettier reflow that
+  // changed nothing a rep sees.
+  assert.match(file, /Couldn't confirm the send/, "missing the ambiguous-send wording");
+  assert.match(file, /have been queued/, "missing the may-still-be-delivered warning");
+  assert.match(file, /uncertain \? "Send again" : "Send"/, "the resend is not relabelled");
+
+  // THE REP MUST GET A COPY.
+  //
+  // Reported live 2026-09-08: a rep sent from this button and saw nothing, so
+  // she reported it as "never sent" and pressed it again, producing a duplicate
+  // row. The ledger says it went. She had no way to know: no rep on this tenant
+  // has a mailbox connected, so every send leaves from the BRAND mailbox — her
+  // Sent folder stays empty and her Inbox never sees it. A send a rep cannot
+  // observe is indistinguishable from a failure.
+  //
+  // The whole chain already supported CC and nobody had connected it:
+  // send_gateway.py takes --cc, bridge_tools._tool_send_email accepts `cc` and
+  // passes it through normalize_cc, and exec-tool forwards the payload verbatim.
+  //
+  // 2026-09-09: the copy is now keyed on ASSIGNMENT, not on who pressed the
+  // button. These greps only prove the wiring exists; what the header actually
+  // contains is asserted by running the real functions in
+  // tests/lead-quick-email-delivery.test.ts. That distinction matters — the
+  // regex below used to pin `sess.email !== toEmail`, which stayed green while
+  // the rep who owned the lead was never copied at all.
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  // Assigned rather than declared since 2026-09-11: the list is built only when
+  // the brand copies reps (OASIS). tests/sunbiz-restore-behaviour.test.ts pins
+  // the gate.
+  assert.match(route, /copyList = buildCopyList\(/, "the copy list is not resolved");
+  assert.match(route, /resolveAssigneeEmail\(/, "the lead's assigned rep is not looked up");
+  assert.match(route, /cc: copyList/, "the send does not CC the rep");
+  assert.match(
+    route,
+    /\.\.\.\(args\.cc && args\.cc\.length \? \{ cc: args\.cc \} : \{\}\)/,
+    "cc is not forwarded to the bridge tool",
+  );
+});

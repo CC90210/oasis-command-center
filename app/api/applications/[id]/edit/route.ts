@@ -31,6 +31,7 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { APPLICATION_FIELD_KEYS } from "@/lib/forms/application-upsert";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -208,6 +209,20 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ ok: false, error: "lookup_failed" }, { status: 500 });
   }
   if (!existing.data) {
+    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+  }
+  const existingData = (existing.data as { id: string; data?: Record<string, unknown> }).data || {};
+  if (
+    !canMutateGenericLeadForTenant(
+      {
+        teamRole: sess.teamRole,
+        userId: sess.userId,
+        isOwner: sess.isTrueAdmin,
+        adminAccess: sess.adminAccess,
+      },
+      { id: applicationId, data: existingData },
+    )
+  ) {
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
   }
 

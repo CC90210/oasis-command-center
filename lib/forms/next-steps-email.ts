@@ -47,9 +47,10 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveBridgeTarget, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getAgents } from "@/lib/config/agents";
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
@@ -319,14 +320,28 @@ async function resolveAssignedAgent(
   assignedTo: string | null,
   fallbackName: string,
 ): Promise<AssignedAgent> {
-  const safeName = (fallbackName || "").trim() || "the SunBiz team";
+  const teamSignature = "the SunBiz team";
+  const safeName = (fallbackName || "").trim() || teamSignature;
   if (assignedTo) {
     try {
-      const members = await getTenantMembers(tenantId);
+      // includeInactive: a deactivated agent still assigned to this lead must be
+      // RECOGNISED, not missed — missed, they would fall through to the cached
+      // assigned_agent_name below, which is the same retired person.
+      const members = await getTenantMembers(tenantId, { includeInactive: true });
       const member = members.find((x) => x.auth_user_id === assignedTo);
+      if (member && !isActiveMember(member)) {
+        // They have left: a new message is never signed by them, so the
+        // generic team signature signs instead (not fallbackName — that is the
+        // cached name of this same person), with no signer address, phone or
+        // CC, or the merchant's reply reaches someone no longer here. A null CC
+        // lets the SunBiz branch in loadHandoffContext copy the submissions
+        // inbox instead.
+        console.warn("[forms.handoff] assigned agent deactivated", { tenantId, assignedTo });
+        return { name: teamSignature, email: "", phone: "", ccEmail: null };
+      }
       const email = (member?.email || "").trim();
-      if (email) {
-        const name = (member?.display_name || member?.full_name || "").trim() || safeName;
+      if (member && email) {
+        const name = (member.display_name || member.full_name || "").trim() || safeName;
         // Phone isn't on the member row — pull it from the signing roster by
         // EMAIL match (member email is the canonical address). Best-effort.
         let phone = "";
@@ -339,8 +354,12 @@ async function resolveAssignedAgent(
         }
         return { name, email, phone, ccEmail: email };
       }
-    } catch {
-      // member lookup failed — fall through to name-only signer + no CC.
+    } catch (error) {
+      // Member lookup failed: standing is unknown, so do not sign as the
+      // cached assigned_agent_name — that can be a retired person. The team
+      // signature signs, with no CC.
+      console.error("[forms.handoff] assigned agent lookup failed", { tenantId, assignedTo, error });
+      return { name: teamSignature, email: "", phone: "", ccEmail: null };
     }
   }
   // Unassigned / unresolvable: display name only, never a guessed CC.
@@ -567,20 +586,21 @@ async function loadHandoffContext(
   const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
 
   // CC routing: the authoritatively-resolved assigned agent, else the
-  // submissions inbox — an unassigned lead's funnel email must still land in
-  // front of a human. The address comes from the same encrypted credential
-  // store the send authenticates with (never a guessed/hardcoded mailbox);
-  // if it can't be resolved the CC stays null and the send proceeds.
+  // submissions inbox — an unassigned lead's (or a deactivated agent's) funnel
+  // email must still land in front of a human. The address comes from the same
+  // encrypted credential store the send authenticates with (never a
+  // guessed/hardcoded mailbox); if it can't be resolved the CC stays null and
+  // the send proceeds.
   let ccEmail = agent.ccEmail;
   if (!ccEmail && brandSlug === "sunbiz") {
+    // A static import, like lib/notify/form-completion-email.ts: a dynamic
+    // import() here bypassed the module cache under Node 20 (CI), so harness
+    // stubs never applied there (2026-09-25).
     try {
-      // Lazy import (mirrors sendOnce's nodemailer pattern): loading the
-      // credential store at module scope drags server-only into non-Next
-      // harnesses that stub the -send module but not this one.
-      const { getSubmissionsCreds } = await import("@/lib/integrations/submissions-gmail");
       const creds = await getSubmissionsCreds(form.tenant_id, "sunbiz");
       ccEmail = (creds.fromAddress || "").trim() || null;
-    } catch {
+    } catch (error) {
+      console.error("[forms.handoff] submissions inbox lookup failed; sending without a CC", { tenantId: form.tenant_id, error });
       ccEmail = null;
     }
   }

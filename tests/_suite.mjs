@@ -18,12 +18,73 @@
 import { spawnSync } from "node:child_process";
 
 const TESTS = [
+  "tests/address-autocomplete-contract.test.ts",
+  "tests/address-field-turnkey.test.ts",
   "tests/alert-decay.test.ts",
+  "tests/connected-outcome.test.ts",
+  "tests/pipeline-own-book-chip.test.ts",
+  "tests/perf-instrumentation.test.ts",
+  "tests/perf-p1.test.ts",
+  "tests/perf-p2.test.ts",
+  "tests/perf-prefetch.test.ts",
+  "tests/lead-source-attribution.test.ts",
+  "tests/lead-source-rollup.test.ts",
   "tests/robots-tiers.test.ts",
   "tests/sunbiz-form-templates.test.ts",
   "tests/public-form-resolver.test.ts",
+  "tests/form-lead-identity.test.ts",
+  "tests/extraction-doc-url-guard.test.ts",
+  "tests/appdrop-dedupe.test.ts",
+  "tests/public-form-origin.test.ts",
   "tests/sunbiz-import-routing.test.ts",
+  "tests/lead-transfer-canonical.test.ts",
+  "tests/pipeline-turnkey-lifecycle.test.ts",
+  "tests/coderabbit-api-boundaries.test.ts",
+  "tests/pipeline-lead-workspace.test.ts",
+  "tests/founder-booking-ui.test.ts",
+  "tests/founder-meeting-calendar.test.ts",
+  "tests/founder-meeting-closed-loop.test.ts",
+  "tests/founder-meeting-service.test.ts",
+  "tests/google-workspace-calendar-readiness.test.ts",
+  "tests/oasis-mutation-bypass-guards.test.ts",
+  "tests/website-sales-build-brief.test.ts",
+  "tests/website-sales-payment-verification.test.ts",
+  "tests/website-sales-payment-reconciliation.test.ts",
+  "tests/commission-payout-workflow.test.ts",
+  "tests/atomic-pipeline-lifecycle.test.ts",
+  "tests/oasis-pipeline-query.test.ts",
+  "tests/oasis-sales-pipeline-policy.test.ts",
+  // Adding a lead (CC, 2026-09-10): the create form, both create routes and the
+  // board must agree on which stages a lead may start in, and every OASIS create
+  // is stamped so /pipeline and /web-leads actually show it. Drives the real
+  // records and quick-add route handlers against a local libSQL database.
+  "tests/oasis-create-stage-contract.test.ts",
+  // Phone matching (2026-09-11): a returning merchant is found by an
+  // all-digit phone, a phone shared by another business is not a match, and
+  // every matched-lead path in quick-add answers with a sentence. The guard
+  // keeps runtime values out of JSON-path .or() strings, where the adapter
+  // types digits as numbers and the comparison silently matches nothing.
+  "tests/find-existing-lead-phone.test.ts",
+  "tests/or-value-guard.test.ts",
+  // The new-lead form asks only for what a person types, and labels the region
+  // "Province / State" (portal audit, 2026-09-11).
+  "tests/oasis-new-lead-form.test.ts",
+  // These three pinned the create path and the two stage lists but ran in no
+  // suite, so a drift they catch could still ship. (Verifier, 2026-09-10.)
+  "tests/turnkey-access-boundaries.test.ts",
+  "tests/website-sales-contract.test.ts",
+  "tests/website-sales-surface.test.ts",
+  "tests/manifest-data-in-filter.test.ts",
+  "tests/oasis-sales-motion-split.test.ts",
+  "tests/oasis-claim-touch-cutover.test.ts",
+  "tests/canonical-touch-concurrency.test.ts",
+  "tests/pipeline-lead-mutation-access.test.ts",
+  "tests/bulk-email-canonical-touch.test.ts",
   "tests/auth-routing.test.ts",
+    "tests/invite-existing-account-recovery.test.ts",
+    "tests/turso-session-version.test.ts",
+    "tests/auth-oauth-continuation.test.ts",
+  "tests/auth-email-sender.test.ts",
   "tests/middleware-prefix.test.ts",
   "tests/pipeline-inline-stage.test.ts",
   "tests/onboarding-gate.test.ts",
@@ -39,8 +100,16 @@ const TESTS = [
   "tests/conversations-grouping.test.ts",
   "tests/dashboard-send-mode.test.ts",
   "tests/bridge-exec-tool-role-gate.test.ts",
+  "tests/settings-agent-roster.test.ts",
+  "tests/settings-persona-scope.test.ts",
+  "tests/sales-team-performance.test.ts",
+  "tests/settings-bridge-consistency.test.ts",
+  "tests/telegram-personal-status.test.ts",
+  "tests/workspace-connections-truth.test.ts",
+  "tests/local-cli-heartbeat-status.test.ts",
   "tests/intent-inquiry-lifecycle.test.ts",
   "tests/us-address.test.ts",
+  "tests/form-submit-error-copy.test.ts",
   "tests/application-disclosure.test.ts",
   "tests/application-pdf-rendered.test.ts",
   "tests/application-pdf.test.ts",
@@ -75,7 +144,14 @@ const TESTS = [
   "tests/live-sub-mapping.test.ts",
   "tests/crm-write-role-gate.test.ts",
   "tests/funmate-integration.test.ts",
+  "tests/shopping-out-lender-population.test.ts",
+  "tests/dropzone-plain-language-errors.test.ts",
+  "tests/agents-config-runtime-portable.test.ts",
+  "tests/shop-out-route-error-envelope.test.ts",
+  "tests/workers-no-runtime-fs.test.ts",
   "tests/agent-events-tenant-scope.test.ts",
+  "tests/activity-log-tenant-isolation.test.ts",
+  "tests/auth-email-sender.test.ts",
   "tests/drip-email-telemetry.test.ts",
   "tests/lender-reply-classify.test.ts",
   "tests/lender-auto-route.test.ts",
@@ -107,6 +183,10 @@ const TESTS = [
   "tests/email-sending-identity.test.ts",
   "tests/brand-registry.test.ts",
   "tests/shopout-brand-lock.test.ts",
+  // One message names exactly one company. Registered here deliberately: this
+  // list is explicit, not globbed, so a coherence guard that is not on it is a
+  // file that never runs.
+  "tests/brand-identity-coherence.test.ts",
   "tests/brand-routing.test.ts",
   "tests/drip-deal-state.test.ts",
   "tests/drip-board-parity.test.ts",
@@ -134,6 +214,25 @@ const TESTS = [
   // registered cron has something driving it, this one proves the one cron
   // that must NOT be driven can't be armed from the dashboard.
   "tests/daemon-backed-crons.test.ts",
+  "tests/automation-inventory-contract.test.ts",
+  // The three reliability gates for that tab, each pinning a way it reported
+  // health it could not see: an Empire lane omitted without saying so, a
+  // failure shape the Python watchdog flags and the tab drew green, and a
+  // next_run_at in the past rendered as a future commitment. Unlisted, they run
+  // nowhere and prove nothing.
+  "tests/automation-owner-partition.test.ts",
+  // Six public surfaces each picked a company from a module-level constant
+  // instead of from the tenant in front of them, and the constant was always
+  // the client's. Unlisted, this proves nothing.
+  "tests/tenant-public-identity.test.ts",
+  // Ignite must reach the funnel whatever the frame loop does, and nobody
+  // should meet the product through the old 2D placeholder.
+  "tests/marketing-car-launch.test.ts",
+  "tests/cron-result-shape-parity.test.ts",
+  "tests/automation-overdue-schedule.test.ts",
+  "tests/cron-owner-migration.test.ts",
+  "tests/atomic-cron-toggle.test.ts",
+  "tests/legacy-cron-toggle.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",
@@ -141,6 +240,13 @@ const TESTS = [
   "tests/sunbiz-application-chase.test.ts",
   "tests/form-handoff-copy.test.ts",
   "tests/email-idempotency-marker.test.ts",
+  "tests/lead-email-reservation-recovery.test.ts",
+  "tests/scheduled-send-delivery-safety.test.ts",
+  "tests/oasis-call-isolation.test.ts",
+  "tests/cloudflare-runtime-parity.test.ts",
+  "tests/oasis-worker-secret-boundary.test.ts",
+  "tests/oasis-deployment-boundary.test.ts",
+  "tests/client-surface-isolation.test.ts",
   "tests/watermark-large-pdf.test.ts",
   "tests/drip-activity.test.ts",
   "tests/template-interchange.test.ts",
@@ -153,6 +259,8 @@ const TESTS = [
   "tests/form-submit-failure-capture.test.ts",
   "tests/deploy-serves-main.test.ts",
   "tests/telegram-lane-fallback.test.ts",
+  "tests/health-recovery-delivery.test.ts",
+  "tests/extraction-queue-stalled.test.ts",
   "tests/rep-line-isolation.test.ts",
   "tests/email-drip-health.test.ts",
   "tests/ai-wire.test.ts",
@@ -176,16 +284,31 @@ const TESTS = [
   // migration; until then the registration pointed at nothing.
   // APEX's Web Leads browser (PR #242).
   "tests/web-leads-filters.test.ts",
+  "tests/web-leads-enrichment.test.ts",
   "tests/web-leads-queries.test.ts",
   "tests/web-leads-data.test.ts",
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
+  "tests/web-leads-client-cache.test.ts",
+  "tests/pipeline-web-lead-facts.test.ts",
+  "tests/web-leads-filter-memory.test.ts",
+  "tests/parked-domains.test.ts",
   "tests/web-leads-scope.test.ts",
+  "tests/web-leads-manager-battlecard.test.ts",
+  "tests/web-leads-manager-access.test.ts",
+  // Openers and closers. The 2026-08-21 job titles replaced `agent`, but the
+  // scoping predicate and the deal gate still only knew the legacy name --
+  // so a Closer could not close and an Opener saw the whole tenant.
+  "tests/rep-role-capabilities.test.ts",
   // 2026-08-23 sales pass: the score now appears in the LIST as well as the
   // detail panel, read from a different table by a different query. This proves
   // the two can never contradict each other about a stranger's website -- and
   // that Call Mode cannot advance past a call it failed to record.
   "tests/web-leads-scores.test.ts",
+  // 2026-08-23 ownership pass: who holds a lead, and when that stops being
+  // true. Guards the two failures that are invisible on a screen -- two reps
+  // dialling the same business, and a pool that only ever drains.
+  "tests/web-leads-claim.test.ts",
   // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
   // from JARVIS's services/leadgen/lib/remedies.js.
   "tests/web-leads-remedies.test.ts",
@@ -202,16 +325,144 @@ const TESTS = [
   // is the constrained, pure stage-advance function -- see
   // lib/web-leads/outcome.ts's header for the full reasoning.
   "tests/web-leads-outcome.test.ts",
+  "tests/web-leads-outcome-idempotency.test.ts",
   "tests/web-leads-outcome-guards.test.ts",
-  // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
-  // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
-  // the pipeline route's read-only auth spine, agent-role scoping wiring,
-  // and that an unrecognised stage value is bucketed and shown, not dropped.
-  "tests/web-leads-pipeline.test.ts",
+  // (The shared pipeline board and its tests were removed 2026-08-23. It
+  // showed every rep's leads mixed together, which answers a manager's
+  // question on a screen only reps use -- Adon: "I don't see any use for
+  // that." Replaced by the per-rep My Leads view, covered by
+  // web-leads-claim.test.ts. CC's WEBSITE_SALES_STAGES remain the single
+  // lifecycle; nothing about that changed.)
   // Build B (2026-08-21): territory -> rep assignment. Admin-only enforcement,
   // tenant mismatch, propagation to the right leads, and the rule that an
   // unassign must never strip a lead's own data.assigned_to.
   "tests/web-leads-territory-assign.test.ts",
+  // Per-lead assignment + the Assign tab (PRs #378-#382). NOT PREVIOUSLY IN
+  // THIS LIST -- five PRs' worth of regression guards were passing only because
+  // they were run by hand, and CI had never once executed them. The list is
+  // explicit by design (see the header), which is exactly why a new file has to
+  // be added here or it silently never runs.
+  "tests/web-leads-assign-to-rep.test.ts",
+  // The assignment-destination rule itself, exercised against real inputs
+  // rather than asserted against route source.
+  "tests/web-leads-assign-target.test.ts",
+  // The battle card (2026-08-24). Guards the numbers a rep says out loud: the
+  // percentile understates on a tie, the peer group is never quoted below
+  // MIN_SLICE and never silently widened, the evidence never prints a
+  // measurement the crawler did not take, and a non-scored site gets a sentence
+  // rather than a radar with seven axes at the origin. Plus the auth gate on
+  // the new endpoint, and the rule that a competitor is a measurement of a
+  // public business, never a lead out of another rep's book.
+  "tests/web-leads-battlecard.test.ts",
+  // Opening hours and the CRTC calling window (2026-08-24). Canada has six time
+  // zones, Saskatchewan refuses daylight saving, Newfoundland is offset by half
+  // an hour, and Rule 23 measures the legal calling window in the RECIPIENT's
+  // local time -- so a Toronto rep dialling Vancouver at 9am is calling at 6am,
+  // which is a violation at up to $15,000 per call. This pins all four of those
+  // against fixed instants on both sides of a DST transition.
+  "tests/web-leads-hours.test.ts",
+  // The ONLY web-leads test that touches a database. Everything else here
+  // covers a pure rule module, so the read/filter/sort/page path that decides
+  // what a rep actually sees had no coverage at all until 2026-08-25. Runs
+  // against a real in-memory libSQL file, and was watched to fail against both
+  // a dead phase-2 read and a reverted selectCol().
+  "tests/web-leads-list-read.test.ts",
+  // The PostgREST adapter's own conformance suite, against a real in-memory
+  // libSQL database. It existed since the adapter was written and was never in
+  // this list, so nothing ran it but a human remembering to.
+  //
+  // Added 2026-08-25 because the Web Leads list read now depends on one of its
+  // guarantees: lib/web-leads/data.ts projects JSON paths in `select()`, and
+  // that is only safe because selectCol() names the output column the way
+  // PostgREST does. Unpinned, a change to the select compiler would break the
+  // leads list on the supabase-js path only -- silently, and nowhere near the
+  // file that got edited. This is the same failure shape as
+  // `.is("profile","not.null")` (lib/web-leads/scores.ts), which is exactly the
+  // bug class the adapter tests exist to catch.
+  // Task 7 (2026-09-03 owner-verified-dialing plan): pins the "Confirmed"
+  // badge to the literal confirmed state and proves the evidence sentence
+  // renders -- see lib/web-leads/data.ts's owner_verification_state mapping.
+  "tests/web-leads-owner-verification.test.ts",
+  "lib/__tests__/turso-postgrest.test.mjs",
+  // 2026-09-11: three OASIS changes (#401, #405, #421) had also changed what
+  // SunBiz users get. Pins SunBiz's restored behaviour and OASIS's kept one.
+  "tests/sunbiz-restore-behaviour.test.ts",
+  // 2026-09-28: SunBiz retired (runbook C-6a). Every cron, health lane,
+  // webhook and snapshot producer must write nothing for a retired tenant
+  // while its data is exported and deleted, and keep writing for OASIS.
+  "tests/retired-tenant-producers.test.ts",
+  // 2026-09-29 (F0 release gate): the files below were in no suite, so CI had
+  // never run one of them. Each was run before it was listed here, and
+  // tests/test-suite-coverage.test.ts now fails the build when a tests/ file is
+  // in nothing CI runs. Four needed their assertions brought up to date with
+  // intended changes (document-rendering, guard-audit, shopout-high-risk-confirm,
+  // sunbiz-runtime); the reasons are in each file.
+  //
+  // The bridge, and the RPC shim the bridge and the TextTorrent runtime call.
+  "tests/bridge-agent-validation.test.ts",
+  "tests/bridge-dropdown-state.test.ts",
+  "tests/bridge-effective-online.test.ts",
+  "tests/bridge-health-reasons.test.ts",
+  "tests/bridge-target-resolution.test.ts",
+  "tests/bridge-rpc-registry.test.ts",
+  "tests/turso-rpc-texttorrent.test.mjs",
+  "tests/turso-contains.test.ts",
+  // Drips and SMS sending: which line a text leaves from, whether the
+  // destination can receive it, and what a delivery receipt means.
+  "tests/blast-safety.test.ts",
+  "tests/destination-health.test.ts",
+  "tests/destination-gate-wired.test.ts",
+  "tests/verified-mobile.test.ts",
+  "tests/line-health.test.ts",
+  "tests/line-health-wired.test.ts",
+  "tests/hold-not-skip.test.ts",
+  "tests/resolve-send-number.test.ts",
+  "tests/thread-match-platform.test.ts",
+  "tests/receipt-resolution-checks.test.ts",
+  "tests/receipt-wire-account.test.ts",
+  "tests/drip-stage-buffer.test.ts",
+  "tests/drip-template-inventory.test.ts",
+  "tests/scoreboard-core.test.ts",
+  "tests/phone-lookup-repair.test.ts",
+  "tests/guard-audit.test.ts",
+  // Lenders, shop-out and the TextTorrent reply runtime.
+  "tests/jordan-submission.test.ts",
+  "tests/restricted-states.test.ts",
+  "tests/restricted-state-preview-visible.test.ts",
+  "tests/shop-out-email-templates.test.ts",
+  "tests/shopout-high-risk-confirm.test.ts",
+  "tests/shopout-watermark-fallback.test.ts",
+  "tests/clair-tenant-access.test.ts",
+  "tests/sunbiz-runtime.test.ts",
+  // Lead documents and the public form upload path.
+  "tests/document-rendering.test.ts",
+  "tests/lead-document-path.test.ts",
+  "tests/forms-upload-bootstrap.test.ts",
+  // Renewals.
+  "tests/renewals-core.test.ts",
+  "tests/renewals-picker-interaction.test.ts",
+  "tests/renewal-outreach-contract.test.ts",
+  // Records platform (field permissions, schema, views, workflow steps) and
+  // the background-worker inventory on the Automations tab.
+  "tests/role-gates-field-perms.test.ts",
+  "tests/schema-introspector.test.ts",
+  "tests/views-loader.test.ts",
+  "tests/workflow-steps.test.ts",
+  "tests/background-workers-contract.test.ts",
+  // The /schedule week model: protected time and the editable blocks.
+  "tests/schedule-model.test.ts",
+  // The support inbox (support@ -> the Command Center): the four HMAC routes
+  // the reader on CC's PC calls, email intake and threading, the instant
+  // acknowledgement, reply drafts and their approval, and the reader's
+  // heartbeat. Registered here, not in package.json's test:delivery, because
+  // package.json was held by three other build tracks when this landed.
+  "tests/support-inbox-wire.test.ts",
+  "tests/support-inbox-ingest.test.ts",
+  "tests/support-inbox-drafts.test.ts",
+  "tests/support-inbox-health.test.ts",
+  "tests/support-inbox-rules.test.ts",
+  // Two requests for one message or one draft, released together: one state.
+  "tests/support-inbox-races.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

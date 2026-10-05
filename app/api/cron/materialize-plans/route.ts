@@ -11,6 +11,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorDateKey } from "@/lib/dates";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +31,21 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: profiles.error.message }, { status: 500 });
   }
 
+  // A plan belongs to the profile's tenant (materialize_today_plan stamps
+  // user_profiles.tenant_id). Profiles in a retired tenant get no new
+  // daily_plans rows: that tenant's data is being exported and deleted.
+  const profileIds = [...new Set((profiles.data || []).map((row) => (row as { profile_id: string }).profile_id))];
+  const retiredProfiles = new Set<string>();
+  if (profileIds.length) {
+    const owners = await db.from("user_profiles").select("id, tenant_id").in("id", profileIds);
+    if (owners.error) {
+      return NextResponse.json({ error: owners.error.message }, { status: 500 });
+    }
+    for (const o of (owners.data || []) as Array<{ id: string; tenant_id: string | null }>) {
+      if (isRetiredTenant(o.tenant_id)) retiredProfiles.add(o.id);
+    }
+  }
+
   const seen = new Set<string>();
   const results: Array<{ profile_id: string; plan_id: string | null; error?: string }> = [];
   const targetDate = operatorDateKey(new Date(), 1);
@@ -38,6 +54,7 @@ export async function GET(req: NextRequest) {
     const pid = (row as { profile_id: string }).profile_id;
     if (seen.has(pid)) continue;
     seen.add(pid);
+    if (retiredProfiles.has(pid)) continue;
     const r = await db.rpc("materialize_today_plan", {
       p_profile_id: pid,
       p_target_date: targetDate,

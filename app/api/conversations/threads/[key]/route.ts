@@ -34,6 +34,13 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadMessages } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import type { ThreadStatus } from "@/lib/conversation-threading";
+import {
+  getReadableLeadTargetForSession,
+  getWritableLead,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import { MEMBER_DEACTIVATED_MESSAGE, memberStanding, type MemberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,6 +54,10 @@ const VALID_STATUSES: ThreadStatus[] = [
   "snoozed",
   "triage",
 ];
+
+function emptyThreadResponse() {
+  return NextResponse.json({ ok: true, messages: [], tt_chat_id: null });
+}
 
 function isMissingTableError(err: unknown): boolean {
   const msg = (err as { message?: string } | null)?.message || "";
@@ -73,9 +84,24 @@ export async function GET(
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
+  const readPolicy = await resolveLeadReadPolicy(sess);
+  if (readPolicy.mode === "denied") {
+    return emptyThreadResponse();
+  }
   const thread = await loadThreadMessages(sess.tenantId, key);
   if (!thread) {
-    return NextResponse.json({ ok: true, messages: [], tt_chat_id: null });
+    return emptyThreadResponse();
+  }
+  if (
+    readPolicy.mode === "oasis" &&
+    (!thread.lead_id ||
+      !(await getReadableLeadTargetForSession(
+        sess,
+        { tenantId: sess.tenantId, id: thread.lead_id },
+        readPolicy,
+      )))
+  ) {
+    return emptyThreadResponse();
   }
   return NextResponse.json({ ok: true, messages: thread.messages, tt_chat_id: thread.tt_chat_id });
 }
@@ -167,21 +193,28 @@ export async function PATCH(
   }
 
   // Membership check mirrors app/api/leads/[id]/assign/route.ts — prevent
-  // assigning a thread to a UUID that isn't actually on this tenant.
+  // assigning a thread to a UUID that isn't actually on this tenant, or to a
+  // deactivated teammate (refused below, once the current assignee is known).
   const db = getServiceSupabase();
+  let targetDeactivated = false;
   if (typeof patch.assigned_to === "string") {
-    const member = await db
-      .from("user_profiles")
-      .select("auth_user_id")
-      .eq("tenant_id", tenantId)
-      .eq("auth_user_id", patch.assigned_to)
-      .maybeSingle();
-    if (!member.data) {
+    let standing: MemberStanding;
+    try {
+      ({ standing } = await memberStanding(tenantId, patch.assigned_to));
+    } catch (err) {
+      console.error("[conversations.threads.PATCH] member check failed", err);
+      return NextResponse.json(
+        { ok: false, error: "member_check_failed", message: "Couldn't verify that teammate. Try again." },
+        { status: 503 },
+      );
+    }
+    if (standing === "not_member") {
       return NextResponse.json(
         { ok: false, error: "not_a_tenant_member", message: "That user isn't on this tenant." },
         { status: 400 },
       );
     }
+    targetDeactivated = standing === "deactivated";
   }
 
   patch.updated_at = new Date().toISOString();
@@ -189,18 +222,43 @@ export async function PATCH(
   try {
     const existing = await db
       .from("conversation_threads")
-      .select("id, lead_id")
+      .select("id, lead_id, assigned_to")
       .eq("tenant_id", tenantId)
       .eq("thread_key", key)
       .maybeSingle();
     if (existing.error) throw existing.error;
-    const row = existing.data as { id: string; lead_id: string | null } | null;
+    const row = existing.data as { id: string; lead_id: string | null; assigned_to: string | null } | null;
     // A thread row only exists once at least one lead_interactions insert has
     // fired the conv_thread_upsert trigger — a workflow-ops PATCH on a thread
     // that was never on the spine list is a client/data bug, not a valid
     // "create on demand" case. Fail closed (404), don't fabricate a row.
     if (!row) {
       return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+    }
+    if (!sess.isAdmin && roleMayOperateOasisSalesLead(sess.teamRole)) {
+      if (!row.lead_id) {
+        return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+      }
+      const writable = await getWritableLead(
+        {
+          teamRole: sess.teamRole,
+          userId: sess.userId,
+          isOwner: sess.isTrueAdmin,
+          adminAccess: sess.adminAccess,
+        },
+        { tenantId, id: row.lead_id },
+      );
+      if (!writable.ok) {
+        return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+      }
+    }
+    // A deactivated teammate keeps the threads they already hold, so re-saving
+    // the same assignee is allowed; handing them this thread is not.
+    if (targetDeactivated && patch.assigned_to !== (row.assigned_to || "").trim().toLowerCase()) {
+      return NextResponse.json(
+        { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE },
+        { status: 400 },
+      );
     }
 
     const update = await db.from("conversation_threads").update(patch).eq("id", row.id);

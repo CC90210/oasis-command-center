@@ -4,43 +4,95 @@
  * QuickInviteCard — inline invite-mint affordance for the Settings page.
  *
  * The Settings card has a "Manage team & invites →" link to /team for
- * the full mint/revoke/list UI. This component adds a quick role +
- * Generate path so an admin doesn't have to navigate away to send one
- * link. After mint, shows the URL with a Copy button — the operator
- * pastes it into Slack/email and is done. Matches CC's literal ask:
- * 'create a personalized link without leaving Settings'.
+ * the full mint/revoke/list UI. This component uses the SAME server-resolved
+ * email + role contract as /team, so Settings cannot drift into a second role
+ * model or mint an unpinned bearer link. After mint, it shows the URL with a
+ * Copy button.
  *
- * Heavy lifting (active invite list, email field, revoke) stays at
- * /team — this is the 80% path for the most common use.
+ * Heavy lifting (active invite list and revoke) stays at /team.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, Loader2, Link as LinkIcon, AlertCircle } from "lucide-react";
-
-const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
-  { value: "agent", label: "Agent" },
-];
+import {
+  isInvitableRole,
+  type InvitableRole,
+  type RoleOption,
+} from "@/lib/team-roles";
 
 export function QuickInviteCard() {
-  const [role, setRole] = useState("member");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<InvitableRole | null>(null);
+  const [roleOptions, setRoleOptions] = useState<readonly RoleOption[]>([]);
+  const [rolesLoading, setRolesLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [issuedUrl, setIssuedUrl] = useState<string | null>(null);
   const [issuedExpiry, setIssuedExpiry] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailIsValid =
+    normalizedEmail.length <= 254 &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
+  const selectedRole = roleOptions.find((option) => option.value === role);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/team/invites", { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok || !data.ok || !Array.isArray(data.role_options)) {
+          throw new Error(data.error || "Invite roles are unavailable.");
+        }
+        const options = data.role_options.filter(
+          (option: unknown): option is RoleOption => {
+            if (!option || typeof option !== "object") return false;
+            const row = option as Record<string, unknown>;
+            return (
+              isInvitableRole(row.value) &&
+              typeof row.label === "string" &&
+              typeof row.description === "string"
+            );
+          },
+        );
+        if (options.length === 0) throw new Error("No invite roles are available.");
+        if (!active) return;
+        setRoleOptions(options);
+        setRole(options[0].value);
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Invite roles are unavailable.");
+        }
+      } finally {
+        if (active) setRolesLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function generate() {
     setBusy(true);
     setError(null);
     setIssuedUrl(null);
     setCopied(false);
+    if (!emailIsValid) {
+      setError("Enter the teammate's valid work email.");
+      setBusy(false);
+      return;
+    }
+    if (!role || !roleOptions.some((option) => option.value === role)) {
+      setError("Choose an available role.");
+      setBusy(false);
+      return;
+    }
     try {
       const res = await fetch("/api/team/invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, email: null }),
+        body: JSON.stringify({ role, email: normalizedEmail }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok || !data.invite?.raw_token) {
@@ -50,6 +102,7 @@ export function QuickInviteCard() {
       const url = `${window.location.origin}/invite/${data.invite.raw_token}`;
       setIssuedUrl(url);
       setIssuedExpiry(data.invite.expires_at);
+      setEmail("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create invite.");
     } finally {
@@ -70,28 +123,50 @@ export function QuickInviteCard() {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="flex-1 min-w-[12rem]">
+      <div className="grid grid-cols-1 items-end gap-3 md:grid-cols-[1fr_14rem_auto]">
+        <label>
+          <span className="block text-[11px] uppercase tracking-wider text-fg-dim font-bold mb-1">
+            Work email
+          </span>
+          <input
+            type="email"
+            required
+            maxLength={254}
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            disabled={busy}
+            placeholder="teammate@company.com"
+            className="w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg disabled:opacity-50"
+          />
+        </label>
+        <label>
           <span className="block text-[11px] uppercase tracking-wider text-fg-dim font-bold mb-1">
             Role
           </span>
           <select
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            disabled={busy}
+            value={role ?? ""}
+            onChange={(e) => {
+              if (isInvitableRole(e.target.value)) setRole(e.target.value);
+            }}
+            disabled={busy || rolesLoading}
             className="w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg disabled:opacity-50"
           >
-            {ROLE_OPTIONS.map((r) => (
+            {roleOptions.map((r) => (
               <option key={r.value} value={r.value}>
                 {r.label}
               </option>
             ))}
           </select>
+          {selectedRole && (
+            <span className="mt-1 block text-[11px] leading-4 text-fg-dim">
+              {selectedRole.description}
+            </span>
+          )}
         </label>
         <button
           type="button"
           onClick={generate}
-          disabled={busy}
+          disabled={busy || rolesLoading || !emailIsValid || !role}
           className="inline-flex items-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2 text-sm font-bold hover:bg-accent-bright disabled:opacity-50"
         >
           {busy ? (

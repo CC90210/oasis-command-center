@@ -12,8 +12,9 @@
  * so a misconfigured bucket policy can't leak across tenants.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { sanitizeStorageFilename } from "@/lib/storage-helpers";
+import { resolveSessionContext } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,27 +37,11 @@ async function resolveOwnerTenant(): Promise<{
   tenantId: string;
   canManage: boolean;
 } | { error: string; status: number }> {
-  const user = await getSessionUser().catch(() => null);
-  if (!user) return { error: "unauthorized", status: 401 };
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id, is_owner, team_role, admin_access")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const row = profile.data as
-    | { tenant_id: string | null; is_owner: boolean | null; team_role: string | null; admin_access: boolean | null }
-    | null;
-  const tenantId = row?.tenant_id;
-  if (!tenantId) return { error: "no_tenant", status: 403 };
+  const session = await resolveSessionContext();
+  if (!session.ok) return { error: "unauthorized", status: 401 };
   // Branding (logo) is a full-admin capability — honors the admin_access grant.
-  const canManage =
-    !!row?.is_owner ||
-    row?.team_role === "owner" ||
-    row?.team_role === "admin" ||
-    row?.admin_access === true;
-  if (!canManage) return { error: "forbidden", status: 403 };
-  return { tenantId, canManage: true };
+  if (!session.isAdmin) return { error: "forbidden", status: 403 };
+  return { tenantId: session.tenantId, canManage: true };
 }
 
 export async function POST(req: NextRequest) {

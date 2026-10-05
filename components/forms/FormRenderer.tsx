@@ -47,6 +47,11 @@ type Props = {
   uploadToken?: string | null;
   /** Lazily initializes an anonymous upload session when step 0 is an upload. */
   ensureUploadToken?: () => Promise<string | null>;
+  /** Raised/cleared while an address field is fetching a selected suggestion's
+   *  full address. The public form holds Continue until every address field has
+   *  cleared, so a merchant cannot be rejected for a ZIP that is still in
+   *  flight — the select→Continue race that PR #426 named but did not close. */
+  onAddressResolvingChange?: (fieldName: string, resolving: boolean) => void;
 };
 
 export function FormRenderer({
@@ -63,8 +68,31 @@ export function FormRenderer({
   ctaLabelOverride,
   uploadToken,
   ensureUploadToken,
+  onAddressResolvingChange,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
+
+  /**
+   * Can the merchant satisfy `business_address`'s state requirement RIGHT NOW,
+   * from a dedicated field, without the completion row's own picker?
+   *
+   * Two ways in, and both are about reachability rather than the schema at
+   * large. Asking "does the form contain a business_state field anywhere" is
+   * the wrong question: one that lives on a LATER step, or is hidden by a
+   * `show_if`, cannot help with the gate that runs on THIS step — hiding the
+   * picker for it strands the merchant with a rule they have no way to meet.
+   *
+   *   1. The field is on this step and visible. True from the FIRST render,
+   *      before it is answered, which is what stops the row from injecting a
+   *      state that later contradicts the dropdown. This is the SunBiz layout.
+   *   2. It already holds a usable code — it was answered on an earlier step.
+   *
+   * Otherwise the picker stays. An extra control is a cosmetic redundancy; a
+   * missing one is a merchant who cannot finish. (Codex P1/P2 ×3, 2026-09-10.)
+   */
+  const hasBusinessStateField =
+    step.fields.some((f) => f.name === "business_state" && isFieldVisible(f, values)) ||
+    (typeof values.business_state === "string" && /^[A-Za-z]{2}$/.test(values.business_state.trim()));
   const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
 
   return (
@@ -96,6 +124,27 @@ export function FormRenderer({
               onChange={(v) => onFieldChange(field.name, v)}
               uploadToken={uploadToken}
               ensureUploadToken={ensureUploadToken}
+              // Only business_address has a separate state dropdown to lean on;
+              // owner/partner home addresses are judged on their string alone,
+              // which is exactly what the server gate does.
+              fallbackState={
+                field.name === "business_address"
+                  ? typeof values.business_state === "string"
+                    ? values.business_state
+                    : undefined
+                  : undefined
+              }
+              // Never inferred from the field's NAME alone. Forms are
+              // author-editable, so a `business_address` is not proof that a
+              // reachable `business_state` exists — see hasBusinessStateField.
+              hasExternalStateField={
+                field.name === "business_address" && hasBusinessStateField
+              }
+              onResolvingChange={
+                field.type === "address"
+                  ? (resolving) => onAddressResolvingChange?.(field.name, resolving)
+                  : undefined
+              }
             />
           ))}
       </div>
@@ -152,6 +201,9 @@ function FieldRow({
   onChange,
   uploadToken,
   ensureUploadToken,
+  fallbackState,
+  hasExternalStateField,
+  onResolvingChange,
 }: {
   field: FormField;
   value: unknown;
@@ -159,6 +211,9 @@ function FieldRow({
   onChange: (v: unknown) => void;
   uploadToken?: string | null;
   ensureUploadToken?: () => Promise<string | null>;
+  fallbackState?: string;
+  hasExternalStateField?: boolean;
+  onResolvingChange?: (resolving: boolean) => void;
 }) {
   const inputId = useId();
 
@@ -175,7 +230,18 @@ function FieldRow({
         {field.required && <span className="text-rose-400 ml-1">*</span>}
       </label>
 
-      {renderInput(field, inputId, value, onChange, uploadToken, ensureUploadToken)}
+      {renderInput(
+        field,
+        inputId,
+        value,
+        onChange,
+        uploadToken,
+        ensureUploadToken,
+        error,
+        fallbackState,
+        onResolvingChange,
+        hasExternalStateField,
+      )}
 
       {field.help && <p className="text-[11px] text-fg-dim">{field.help}</p>}
       {error && <p className="text-[11px] text-rose-400">{error}</p>}
@@ -190,6 +256,12 @@ function renderInput(
   onChange: (v: unknown) => void,
   uploadToken?: string | null,
   ensureUploadToken?: () => Promise<string | null>,
+  // Address-only extras. Kept off the front of the positional list so every
+  // existing call shape is untouched.
+  error?: string,
+  fallbackState?: string,
+  onResolvingChange?: (resolving: boolean) => void,
+  hasExternalStateField?: boolean,
 ): React.ReactNode {
   const base =
     "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
@@ -212,15 +284,25 @@ function renderInput(
       );
 
     case "address":
-      // Predictive address autocomplete (US/CA/global). Stores the selected
+      // Predictive address autocomplete (US only). Stores the selected
       // formatted address as a plain string, so downstream (PDF, lead record)
       // is unaffected — identical to a text field's value.
+      //
+      // `fallbackState` mirrors the server gate in app/api/forms/submit/route.ts
+      // exactly: business_address alone may satisfy its state requirement from
+      // the separate business_state dropdown. Passing it keeps the field's
+      // completion row from asking for a state the merchant has already given
+      // — and keeps client and server from disagreeing about what is complete.
       return (
         <AddressAutocompleteField
           inputId={inputId}
           value={typeof value === "string" ? value : ""}
           onChange={(v) => onChange(v)}
           placeholder={field.placeholder}
+          fallbackState={fallbackState}
+          hasExternalStateField={Boolean(hasExternalStateField)}
+          invalid={Boolean(error)}
+          onResolvingChange={onResolvingChange}
         />
       );
 

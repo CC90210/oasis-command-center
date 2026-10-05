@@ -38,12 +38,18 @@ import {
   EyeOff,
 } from "lucide-react";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
+import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Props = {
-  /** Set of services-with-key resolved server-side via aiServicesWithKey(). */
-  connectedServices: Set<string>;
-  bridgeOnline: boolean;
+  /** Set of services-with-key resolved server-side via aiServicesWithKey().
+   *  null = that read failed: a card with no key known says "Couldn't check",
+   *  never "Not connected". */
+  connectedServices: Set<string> | null;
+  /** null = the bridge heartbeat could not be read. */
+  bridgeOnline: boolean | null;
   canManageTeam: boolean;
+  /** The server's verified platform-operator verdict. Only the operator is offered the bridge install. */
+  canInstallBridge: boolean;
 };
 
 // Providers that get a card on this surface. Ollama is intentionally hidden
@@ -55,22 +61,30 @@ export function ProviderAccountsCard({
   connectedServices: initialServices,
   bridgeOnline,
   canManageTeam,
+  canInstallBridge,
 }: Props) {
   const router = useRouter();
-  // Server-rendered set, but track in state so connecting flips the UI
-  // immediately without waiting for the router refresh round-trip.
-  const [services, setServices] = useState<Set<string>>(initialServices);
+  // What the cards draw is the server's latest answer (the prop, which every
+  // router.refresh() hands back fresh) with this page's own connects and
+  // disconnects laid over it, so a click flips its card at once instead of
+  // waiting for the refresh round-trip. It is derived on every render, never
+  // copied into state: after a failed read the copy stayed empty, so the
+  // refresh that followed a connect showed the providers already on file as
+  // "Not connected". When the server read failed, `keysKnown` is false and a
+  // provider this page has not just connected reads "Couldn't check".
+  const keysKnown = initialServices !== null;
+  const [changedHere, setChangedHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const services = new Set(initialServices ?? []);
+  for (const [svc, connectedNow] of changedHere) {
+    if (connectedNow) services.add(svc);
+    else services.delete(svc);
+  }
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
 
   function markConnected(p: Provider) {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
-    setServices((prev) => {
-      if (prev.has(svc)) return prev;
-      const next = new Set(prev);
-      next.add(svc);
-      return next;
-    });
+    setChangedHere((prev) => new Map(prev).set(svc, true));
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -118,9 +132,13 @@ export function ProviderAccountsCard({
           >
             <Cloud className="w-3 h-3" />
             Cloud:{" "}
-            {anyConnected
-              ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected`
-              : "no provider connected"}
+            {/* After a failed read, a count can only come from this page's own
+                connects: it is a floor, not the total. */}
+            {!keysKnown && !anyConnected
+              ? "couldn't check"
+              : anyConnected
+                ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected${keysKnown ? "" : ", couldn't check the rest"}`
+                : "no provider connected"}
           </span>
           <span className="text-fg-dim">·</span>
           <span
@@ -129,7 +147,7 @@ export function ProviderAccountsCard({
             }`}
           >
             <Cpu className="w-3 h-3" />
-            Local bridge: {bridgeOnline ? "online" : "offline"}
+            Local bridge: {bridgeOnline === null ? "couldn't check" : bridgeOnline ? "online" : "offline"}
           </span>
         </div>
       </div>
@@ -172,6 +190,10 @@ export function ProviderAccountsCard({
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-status-engaged shrink-0">
                     <Check className="w-3 h-3" /> Connected
                   </span>
+                ) : !keysKnown ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-muted shrink-0">
+                    <AlertCircle className="w-3 h-3" /> Couldn&apos;t check
+                  </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-dim shrink-0">
                     <AlertCircle className="w-3 h-3" /> Not connected
@@ -191,7 +213,7 @@ export function ProviderAccountsCard({
                       : "text-accent hover:text-accent-bright"
                   }`}
                 >
-                  {connected ? "Replace key" : "Connect"} →
+                  {connected ? "Replace key" : keysKnown ? "Connect" : "Set key"} →
                 </button>
                 <span className="text-fg-dim text-[10px]">·</span>
                 <a
@@ -219,14 +241,10 @@ export function ProviderAccountsCard({
                         <DisconnectButton
                           provider={p}
                           onDisconnected={() => {
-                            // Optimistically clear from local state; the
+                            // Optimistically clear it on this page; the
                             // server source-of-truth will catch up on the
                             // next refresh.
-                            setServices((prev) => {
-                              const next = new Set(prev);
-                              next.delete(PROVIDER_TO_SERVICE[p]);
-                              return next;
-                            });
+                            setChangedHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
                             if (typeof window !== "undefined") {
                               window.dispatchEvent(
                                 new CustomEvent("oasis:agent-configs-changed"),
@@ -245,23 +263,9 @@ export function ProviderAccountsCard({
         })}
       </div>
 
-      {!anyConnected && !bridgeOnline && (
-        <div className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3 text-xs text-fg flex items-start gap-2">
-          <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span className="font-bold">No provider wired yet.</span> Your
-            agents can&apos;t think until you connect at least one — connect a
-            cloud provider above (recommended for client tenants) OR{" "}
-            <Link
-              href="/settings/devices/install"
-              className="text-accent hover:text-accent-bright underline"
-            >
-              install the local bridge
-            </Link>{" "}
-            to use your own Claude Code subscription.
-          </div>
-        </div>
-      )}
+      {/* Only a KNOWN "no key and no bridge" earns this warning; a read that
+          failed is not evidence that nothing is wired. */}
+      {keysKnown && !anyConnected && bridgeOnline === false && <NoProviderNotice canInstallBridge={canInstallBridge} />}
 
       {activeProvider && (
         <ConnectProviderDialog
@@ -626,10 +630,12 @@ function DisconnectButton({
 }
 
 /**
- * TestConnectionButton — pings the provider's `list models` endpoint
- * using the key on file and reports latency or the provider's error
- * back inline. Operator-facing health check for already-saved keys;
- * complements validate-on-save at the connect step.
+ * TestConnectionButton — sends a one-token message with the key on file
+ * (/api/agent-config/test-connection) and reports latency, or why the
+ * provider refused, inline. A model-list call would pass a drained or bad
+ * key; a real completion fails exactly when a chat would. Operator-facing
+ * health check for already-saved keys; complements validate-on-save at the
+ * connect step.
  */
 function TestConnectionButton({ provider }: { provider: Provider }) {
   const [busy, setBusy] = useState(false);
@@ -681,7 +687,7 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
         onClick={go}
         disabled={busy}
         className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1 disabled:opacity-50"
-        title="Ping the provider with the saved key. No charge — just a list-models call."
+        title="Sends a one-word test message with the saved key. Costs a fraction of a cent."
       >
         {busy ? (
           <Loader2 className="w-3 h-3 animate-spin" />
@@ -703,5 +709,35 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
         </span>
       )}
     </>
+  );
+}
+
+/**
+ * Shown when no provider is connected and no bridge is online. The bridge
+ * route installs for the verified platform operator only (F0 containment,
+ * 2026-09-29), so only the operator is offered it as the alternative; for
+ * everyone else the one way forward is a cloud provider above. No hooks, so
+ * tests/f0-containment.test.ts renders both versions.
+ */
+export function NoProviderNotice({ canInstallBridge }: { canInstallBridge: boolean }) {
+  return (
+    <div className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3 text-xs text-fg flex items-start gap-2">
+      <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
+      <div className="flex-1">
+        <span className="font-bold">No provider wired yet.</span> Your
+        agents can&apos;t think until you connect at least one
+        {canInstallBridge === true ? (
+          <>
+            {" "}— connect a cloud provider above (recommended for client tenants) OR{" "}
+            <BridgeInstallLink canInstallBridge className="text-accent hover:text-accent-bright underline">
+              install the local bridge
+            </BridgeInstallLink>{" "}
+            to use your own Claude Code subscription.
+          </>
+        ) : (
+          <> — connect a cloud provider above.</>
+        )}
+      </div>
+    </div>
   );
 }

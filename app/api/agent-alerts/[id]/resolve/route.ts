@@ -18,6 +18,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +30,9 @@ export async function POST(
   const session = await resolveSessionContext();
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(session))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
   const { id } = await ctx.params;
   if (!id || typeof id !== "string") {

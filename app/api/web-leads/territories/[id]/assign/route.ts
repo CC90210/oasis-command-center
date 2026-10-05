@@ -22,6 +22,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { assignTerritory } from "@/lib/web-leads/assign";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,10 +40,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (session.tenantId !== WEBDEV_TENANT_ID) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
-  // ADMIN ONLY. `agent` is the commission-only outside-contractor role and
   // lives INSIDE this tenant (#237) — passing the tenant check above is not
   // proof this caller may hand out books of business.
-  if (!session.isAdmin) {
+  const isManager = session.teamRole?.trim().toLowerCase() === "manager";
+  if (!session.isAdmin && !isManager) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
@@ -57,10 +59,59 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (raw !== null && raw !== undefined && typeof raw !== "string") {
     return NextResponse.json({ ok: false, error: "invalid_assigned_to" }, { status: 400 });
   }
-  const assignedTo = typeof raw === "string" && raw.trim() ? raw : null;
+  let assignedTo = typeof raw === "string" && raw.trim() ? raw : null;
+
+  // THE TARGET IS VALIDATED, not just the caller. Until now this route checked
+  // who may assign and then accepted any non-empty string as the destination,
+  // so a whole city+industry sheet could be parked on:
+  //
+  //   - anyone outside the separate CC+Adon assignment roster, or
+  //   - an id belonging to no profile at all. That is the bad one: the write
+  //     SUCCEEDS, the sheet's leads propagate to an owner who does not exist,
+  //     and they are then out of the pool and invisible to every rep. Nothing
+  //     reports an error, because nothing ever asked.
+  //
+  // The per-lead claim route has always checked roster membership. These two
+  // controls sit on the SAME tab and disagreed about whether the destination
+  // matters. Same function on both sides now, so they cannot drift.
+  //
+  // Audited before the change: 1 assigned territory, owner valid. The hole was
+  // latent, not exploited.
+  if (assignedTo) {
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+    } catch (error) {
+      console.error("[web-leads.territory-assign] pipeline assignment roster unavailable", {
+        tenantId: session.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "sales_roster_unavailable" },
+        { status: 503 },
+      );
+    }
+    // Take the id FROM THE ROSTER, not from the request. Matching leniently and
+    // then persisting what the client sent is how a lenient comparison becomes
+    // a data-integrity bug: " 8f3a-REP-ariel " passes the check and is stored
+    // verbatim, producing an owner that matches the roster nowhere else -- the
+    // ghost owner this check exists to prevent. (CodeRabbit, PR #383.)
+    const resolved = resolveAssignableTarget(roster, assignedTo);
+    if (!resolved) {
+      return NextResponse.json(
+        { ok: false, error: "target_not_on_sales_roster" },
+        { status: 400 },
+      );
+    }
+    assignedTo = resolved;
+  }
 
   try {
-    const result = await assignTerritory({ territoryId: id, assignedTo });
+    const result = await assignTerritory({
+      territoryId: id,
+      assignedTo,
+      actorUserId: session.userId,
+    });
     if (!result.ok) {
       return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
     }

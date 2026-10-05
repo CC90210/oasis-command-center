@@ -61,18 +61,42 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, MODEL_VERSION, assertCompleteRead } from "./tenant";
+import { memo, TTL } from "./cache";
+import { parkedSignalsOrFilter, confirmParked } from "./parked-domains";
 
-/** The four honest states, identical to audit.ts's AuditResult discriminant. */
-export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
+/** The five honest states. The first four match audit.ts's AuditResult
+ *  discriminant; `parked` was added 2026-08-25 -- see ScoreIndex.parked. */
+export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website" | "parked";
 
 export type ScoreIndex = {
   /** business_id -> composite, newest audit only, profile-backed rows only. */
   scored: Map<string, number>;
   /** business_id of every site we tried and failed to reach. NEVER a score. */
   unreachable: Set<string>;
+  /**
+   * business_id of every "site" that turned out to be a domain FOR SALE.
+   *
+   * Added 2026-08-25, after a rep-facing battle card offered two competitors
+   * whose links opened hugedomains.com. The links were the symptom; the SCORE
+   * was the defect. All 53 parking pages in the corpus scored EXACTLY 82, and
+   * every one of them landed in the top tier. A parking page is one template,
+   * so it scores once and repeats, and it scores WELL because it genuinely is
+   * fast, HTTPS, mobile-friendly, and has a phone link, a form and testimonials
+   * -- the very things the 49 checks measure. The crawler was not broken. It
+   * faithfully measured a page belonging to a domain broker.
+   *
+   * Competitor selection takes the BEST-scoring peers in a city and industry,
+   * so an 82 outranked almost every real site: parked domains were not merely
+   * included, they were preferentially surfaced. NEVER a score, never a peer.
+   */
+  parked: Set<string>;
 };
 
-export const EMPTY_SCORE_INDEX: ScoreIndex = { scored: new Map(), unreachable: new Set() };
+export const EMPTY_SCORE_INDEX: ScoreIndex = {
+  scored: new Map(),
+  unreachable: new Set(),
+  parked: new Set(),
+};
 
 /**
  * Both score tables for this tenant, in two narrow reads.
@@ -86,9 +110,214 @@ export const EMPTY_SCORE_INDEX: ScoreIndex = { scored: new Map(), unreachable: n
  * list route surfaces it, rather than serving a plausible wrong queue.
  */
 export async function fetchScoreIndex(): Promise<ScoreIndex> {
+  // Memoised: three whole-table reads (~50,000 rows) that change only when a
+  // scoring RUN writes -- a batch job measured in hours, not a per-request
+  // event. See lib/web-leads/cache.ts for why this is safe here.
+  return memo("web-leads:scores", TTL.SCORES, loadScoreIndex);
+}
+
+type AuditStampRow = { business_id: string; fetched_at: string };
+type ScoredAuditRow = {
+  business_id: string;
+  quality_score: number | null;
+  fetched_at: string;
+};
+type UnreachableRow = { business_id: string };
+type ParkedCandidateRow = { business_id: string; signals: unknown };
+
+function assembleScoreIndex(
+  allRows: AuditStampRow[],
+  scoredRows: ScoredAuditRow[],
+  unreachableRows: UnreachableRow[],
+  parkedCandidates: ParkedCandidateRow[],
+): ScoreIndex {
+  const newestAt = new Map<string, string>();
+  for (const row of allRows) {
+    const previous = newestAt.get(row.business_id);
+    if (!previous || row.fetched_at > previous) newestAt.set(row.business_id, row.fetched_at);
+  }
+  const parked = confirmParked(parkedCandidates);
+  const scored = new Map<string, number>();
+  for (const row of scoredRows) {
+    if (newestAt.get(row.business_id) !== row.fetched_at) continue;
+    if (typeof row.quality_score !== "number") continue;
+    if (parked.has(row.business_id)) continue;
+    scored.set(row.business_id, row.quality_score);
+  }
+  return {
+    scored,
+    unreachable: new Set(unreachableRows.map((row) => row.business_id)),
+    parked,
+  };
+}
+
+/**
+ * Pipeline boards render at most a few hundred rows and do not filter/sort by
+ * score. Querying only those indexed business ids avoids the tenant-wide audit
+ * and leading-wildcard parked-domain scans used by the 31K-row prospect pool,
+ * while assembling the result through the exact same newest-row precedence.
+ */
+export async function fetchScoreIndexForBusinessIds(
+  businessIds: readonly string[],
+): Promise<ScoreIndex> {
+  const ids = [...new Set(businessIds.map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return EMPTY_SCORE_INDEX;
+  if (ids.length > 600) throw new Error("targeted_score_index_exceeds_safe_window");
+
+  const db = getServiceSupabase();
+  const [allAudits, scoredAudits, unreachable, parkedStamped, parkedUnstamped] = await Promise.all([
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,fetched_at", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,quality_score,fetched_at", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .not("profile", "is", null)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_unreachable")
+      .select("business_id", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .limit(LEAD_READ_CAP),
+    // Same two-tier shape as loadParkedCandidates (see its P2 header):
+    // stamped verdict rows + the LIKE net over only unstamped rows. This
+    // read previously pulled the signals BLOB for every requested id; now
+    // signals transfer only for actual candidates.
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,signals", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .eq("is_parked", 1)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,signals", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .is("is_parked", null)
+      .or(parkedSignalsOrFilter())
+      .limit(LEAD_READ_CAP),
+  ]);
+
+  if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
+  if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
+  if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
+  if (parkedStamped.error) throw new Error(`parked_index_read_failed: ${parkedStamped.error.message}`);
+  if (parkedUnstamped.error) throw new Error(`parked_index_read_failed: ${parkedUnstamped.error.message}`);
+
+  const allRows = (allAudits.data || []) as AuditStampRow[];
+  const scoredRows = (scoredAudits.data || []) as ScoredAuditRow[];
+  const unreachableRows = (unreachable.data || []) as UnreachableRow[];
+  const stampedRows = (parkedStamped.data || []) as ParkedCandidateRow[];
+  const unstampedRows = (parkedUnstamped.data || []) as ParkedCandidateRow[];
+  assertCompleteRead("audit_index_targeted", allRows, allAudits.count);
+  assertCompleteRead("audit_index_scored_targeted", scoredRows, scoredAudits.count);
+  assertCompleteRead("unreachable_index_targeted", unreachableRows, unreachable.count);
+  assertCompleteRead("parked_index_stamped_targeted", stampedRows, parkedStamped.count);
+  assertCompleteRead("parked_index_unstamped_targeted", unstampedRows, parkedUnstamped.count);
+  return assembleScoreIndex(allRows, scoredRows, unreachableRows, [...stampedRows, ...unstampedRows]);
+}
+
+/**
+ * The parked-domain candidate net, on its OWN cache entry.
+ *
+ * WHY IT IS SPLIT OUT (measured live, 2026-08-26): this read takes 2,125 ms to
+ * return 57 rows / 0.07 MB. It is the slowest query on the Leads page per row
+ * returned, by a wide margin, and the cost is the SCAN not the transfer --
+ * sixteen leading-wildcard LIKE patterns over the `signals` blob of all 23,222
+ * audit rows. A leading-wildcard LIKE cannot use an index, so this is a full
+ * scan by construction.
+ *
+ * Folded into loadScoreIndex() it was re-paid on every SCORES rebuild (five
+ * minutes, per instance) to recompute something that only changes when the
+ * audit worker writes. On its own TTL it is paid about once per half hour.
+ *
+ * STILL FAILS LOUD, AND STILL PROVES COMPLETENESS. Both were already true here
+ * and neither may be traded for speed: a parked read that quietly returned
+ * short leaves the for-sale pages it missed sitting in `scored` at 82, back at
+ * the top of every peer group, being offered to a prospect as their best
+ * competitor -- and nothing on screen would look wrong. Throwing inside the memo
+ * means the failure is not cached, so the next request retries rather than
+ * inheriting a bad index for half an hour.
+ *
+ * `signals` comes back too, because the SQL filter is a NET, not a verdict:
+ * `signals.like.*dan.com*` also matches `chezjordan.com`, and LIKE cannot
+ * express "on a hostname label boundary". confirmParked() re-checks each
+ * candidate properly. ~57 rows, so the extra column costs nothing; getting this
+ * wrong strips a real business of its score.
+ */
+/**
+ * ═══ P2 (2026-09-01): THE STORED COLUMN LANDED — TWO-TIER READ ══════════════
+ *
+ * `is_parked` is now stamped by the JARVIS audit worker at write time
+ * (services/leadgen migration 012 + lib/parked-domains.js port of THIS
+ * repo's detector) and backfilled across the corpus. The read is two cheap
+ * queries instead of one full scan:
+ *
+ *   tier 1  is_parked = 1        indexed point lookup — the verdict rows
+ *   tier 2  is_parked IS NULL    the ORIGINAL LIKE net, over ONLY unstamped
+ *                                rows (a writer older than the migration, or
+ *                                rows written between backfill and worker
+ *                                restart). Converges to ~zero rows.
+ *
+ * This shape is correct in EVERY deploy state: before the backfill tier 2 IS
+ * the old query (cost unchanged), after it tier 2 is near-free. No cross-repo
+ * deploy ordering required.
+ *
+ * confirmParked() REMAINS THE VERDICT on the union. A 1-stamp is JARVIS's
+ * list; the net is ours; re-checking ~57 rows costs nothing and protects
+ * against a bad backfill AND cross-repo list drift.
+ *
+ * 🚨 IF PARKING_HOSTS GROWS: rows stamped 0 under the OLD list stay excluded
+ * until re-stamped. Growing the list REQUIRES re-running the JARVIS backfill
+ * with --all (services/leadgen/backfill-parked.mjs) in the same change.
+ */
+async function loadParkedCandidates(): Promise<{ business_id: string; signals: unknown }[]> {
+  return memo("web-leads:parked", TTL.PARKED, async () => {
+    const db = getServiceSupabase();
+    const [stamped, unstamped] = await Promise.all([
+      db
+        .from("leadgen_site_audits")
+        .select("business_id,signals", { count: "exact" })
+        .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("audit_version", MODEL_VERSION)
+        .eq("is_parked", 1)
+        .limit(LEAD_READ_CAP),
+      db
+        .from("leadgen_site_audits")
+        .select("business_id,signals", { count: "exact" })
+        .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("audit_version", MODEL_VERSION)
+        .is("is_parked", null)
+        .or(parkedSignalsOrFilter())
+        .limit(LEAD_READ_CAP),
+    ]);
+    if (stamped.error) throw new Error(`parked_index_read_failed: ${stamped.error.message}`);
+    if (unstamped.error) throw new Error(`parked_index_read_failed: ${unstamped.error.message}`);
+    const stampedRows = (stamped.data || []) as unknown as { business_id: string; signals: unknown }[];
+    const unstampedRows = (unstamped.data || []) as unknown as { business_id: string; signals: unknown }[];
+    assertCompleteRead("parked_index_stamped", stampedRows, stamped.count);
+    assertCompleteRead("parked_index_unstamped", unstampedRows, unstamped.count);
+    return [...stampedRows, ...unstampedRows];
+  });
+}
+
+async function loadScoreIndex(): Promise<ScoreIndex> {
   const db = getServiceSupabase();
 
-  const [allAudits, scoredAudits, unreachable] = await Promise.all([
+  const [allAudits, scoredAudits, unreachable, parkedRes] = await Promise.all([
     // EVERY audit row, so the newest one per business can be identified before
     // anything is filtered out -- see the newest-row comment below for why that
     // order matters. `profile` is never selected: it is the full 49-check
@@ -125,15 +354,22 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .limit(LEAD_READ_CAP),
+    // PARKED DOMAINS. Memoised SEPARATELY and for far longer than the rest of
+    // this index -- see loadParkedCandidates() and TTL.PARKED in ./cache.
+    loadParkedCandidates(),
   ]);
 
   if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
   if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
   if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
+  // The parked read's own error check and completeness proof moved INTO
+  // loadParkedCandidates() when it got its own cache entry, so that a failure
+  // is never memoised -- see its doc comment. Both guarantees still hold; they
+  // are just enforced one level down now.
 
-  const allRows = (allAudits.data || []) as { business_id: string; fetched_at: string }[];
-  const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
-  const unreachableRows = (unreachable.data || []) as { business_id: string }[];
+  const allRows = (allAudits.data || []) as AuditStampRow[];
+  const scoredRows = (scoredAudits.data || []) as ScoredAuditRow[];
+  const unreachableRows = (unreachable.data || []) as UnreachableRow[];
 
   // Completeness is PROVED against each read's own match count, not inferred
   // from whether our cap was hit -- see assertCompleteRead() in tenant.ts for
@@ -144,6 +380,11 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
   assertCompleteRead("audit_index", allRows, allAudits.count);
   assertCompleteRead("audit_index_scored", scoredRows, scoredAudits.count);
   assertCompleteRead("unreachable_index", unreachableRows, unreachable.count);
+  // parked_index is proved complete inside loadParkedCandidates(), for the same
+  // reason as its siblings and with the sharpest consequence of the four: a
+  // truncated parked read leaves the parking pages it missed sitting in `scored`
+  // at 82, back at the top of every peer group, offered to prospects as their
+  // best competitor, with nothing on screen looking wrong.
 
   /**
    * NEWEST ROW FIRST, THEN ASK WHETHER IT IS SCORED -- NOT THE OTHER WAY ROUND.
@@ -162,37 +403,30 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
    * query, which is precisely why it would have sat here unnoticed until the
    * next re-crawl wrote a profile-less row and quietly re-dated an old score.
    */
-  const newestAt = new Map<string, string>();
-  for (const r of allRows) {
-    const prev = newestAt.get(r.business_id);
-    if (!prev || r.fetched_at > prev) newestAt.set(r.business_id, r.fetched_at);
-  }
-
-  const scored = new Map<string, number>();
-  for (const r of scoredRows) {
-    // Only if THIS row is the business's newest audit. Anything older is a
-    // superseded crawl and the panel would not show it either.
-    if (newestAt.get(r.business_id) !== r.fetched_at) continue;
-    if (typeof r.quality_score !== "number") continue; // never invent a 0
-    scored.set(r.business_id, r.quality_score);
-  }
-
-  return { scored, unreachable: new Set(unreachableRows.map((r) => r.business_id)) };
+  return assembleScoreIndex(allRows, scoredRows, unreachableRows, parkedRes);
 }
 
 /**
  * The state and number for one lead, applying audit.ts's precedence EXACTLY:
  *
  *   1. no website on the lead        -> no_website
- *   2. a site we could not reach     -> unreachable   (never a number)
- *   3. no profile-backed audit row   -> not_scored    (never a zero)
- *   4. otherwise                     -> scored
+ *   2. the domain is FOR SALE        -> parked        (never a number)
+ *   3. a site we could not reach     -> unreachable   (never a number)
+ *   4. no profile-backed audit row   -> not_scored    (never a zero)
+ *   5. otherwise                     -> scored
  *
  * `unreachable` is checked BEFORE `not_scored` for audit.ts's stated reason: a
  * known failure to reach a site must not be reported as "we haven't tried yet"
  * (reads as neutral) OR as a score (reads as a verdict about the business).
  * Both are wrong in different ways; only naming the failure is honest. A site
  * our crawler was blocked from may be perfectly good.
+ *
+ * `parked` is checked FIRST of the three, and it outranks `unreachable` on
+ * purpose. We did not fail to reach a parked domain -- we reached it perfectly
+ * and got a domain broker's sales page. Reporting that as "we could not check
+ * this site" would be a second false statement in place of the first, and it
+ * would throw away the strongest opener a rep has: their domain has lapsed and
+ * is currently for sale to anyone with a credit card.
  */
 export function resolveScore(
   websiteUrl: string | null,
@@ -201,6 +435,7 @@ export function resolveScore(
 ): { score: number | null; scoreState: ScoreState } {
   if (!websiteUrl) return { score: null, scoreState: "no_website" };
   if (!businessId) return { score: null, scoreState: "not_scored" };
+  if (index.parked.has(businessId)) return { score: null, scoreState: "parked" };
   if (index.unreachable.has(businessId)) return { score: null, scoreState: "unreachable" };
   const score = index.scored.get(businessId);
   if (typeof score !== "number") return { score: null, scoreState: "not_scored" };

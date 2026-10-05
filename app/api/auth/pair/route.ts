@@ -48,7 +48,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, checkBearerSecret, sha256, isUniqueViolationError } from "@/lib/api-helpers";
+import { bad, checkBearerSecret, sha256, isUniqueViolationError, publicAppBaseUrl } from "@/lib/api-helpers";
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
@@ -348,7 +348,7 @@ export async function POST(req: NextRequest) {
   // Idempotent by (tenant_id, machine_fingerprint). The DB enforces the
   // invariant via the partial unique index from migration 030
   // (idx_bridge_pairings_unique_live_machine, WHERE revoked_at IS NULL).
-  // Without this, every restart of `bravo bridge serve` minted a NEW row
+  // Without this, every restart of `oasis bridge serve` minted a NEW row
   // — CC saw four Mac rows for the same fingerprint after setup attempts.
   //
   // Strategy: try INSERT first. On unique-constraint violation (Postgres
@@ -404,9 +404,7 @@ export async function POST(req: NextRequest) {
     return bad(500, `pair insert failed: ${ins.error?.message || "unknown"}`);
   }
 
-  const baseUrl =
-    process.env.BRAVO_DASHBOARD_URL ||
-    "https://agent-dashboard-cc90210.vercel.app";
+  const baseUrl = process.env.BRAVO_DASHBOARD_URL || publicAppBaseUrl();
 
   // Log the successful pair attempt. Uses the resolved profile_id (which
   // is canonical — operator may have hit either the bearer or HMAC path,

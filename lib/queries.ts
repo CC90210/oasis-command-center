@@ -21,23 +21,18 @@ import type {
   AgentEvent,
   AgentStateSnapshot,
   UserProfile,
-  DailyPlan,
   IntegrationHealth,
   Tenant,
-  PlanTemplate,
 } from "./supabase";
 import { KNOWN_INTEGRATIONS } from "./integrations-registry";
-import { operatorDateKey, operatorDayStartIso } from "./dates";
 import { getDbBackend } from "./db";
 import { isMissingTableError } from "./api-helpers";
-import { getTenantEnabledAgents } from "./manifest/tenant-scope";
-import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "./profile-custom-fields";
 import type { TenantRecord } from "./manifest/data";
 import {
-  getTodayPlanTurso,
   recentLeadsTurso,
   pipelineBreakdownTurso,
 } from "./turso-queries";
+import { resolveActiveProfileForUser } from "./active-profile-resolver";
 
 // ============================================================================
 // Profile + Tenant
@@ -48,15 +43,10 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   const user = await getSessionUser();
 
   if (user?.id) {
-    const r = await db.from("user_profiles").select("*").eq("auth_user_id", user.id).limit(20);
-    const rows = ((r.data || []) as ActiveUserProfile[]) || [];
-    if (rows.length > 0) return chooseActiveProfile(rows, user.email);
+    const active = await resolveActiveProfileForUser(user);
+    if (active.error) console.error("[queries.getActiveProfile]", active.error);
+    if (active.profile) return active.profile;
     // Auth user exists but no profile yet — try by email (post-migration link case)
-    if (user.email) {
-      const e = await db.from("user_profiles").select("*").eq("email", user.email).limit(20);
-      const emailRows = ((e.data || []) as ActiveUserProfile[]) || [];
-      if (emailRows.length > 0) return chooseActiveProfile(emailRows, user.email);
-    }
   }
 
   // OPERATOR_EMAIL fallback is single-tenant only. On a multi-tenant
@@ -69,9 +59,9 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   }
   const fallbackEmail = process.env.OPERATOR_EMAIL;
   if (!fallbackEmail) return null;
-  const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).maybeSingle();
-  if (r.error || !r.data) return null;
-  return r.data as UserProfile;
+  const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).limit(20);
+  if (r.error || !r.data?.length) return null;
+  return chooseActiveProfile(r.data as ActiveUserProfile[], fallbackEmail);
 }
 
 type ActiveUserProfile = UserProfile & {
@@ -117,94 +107,52 @@ export const getTenant = cache(
 /**
  * Tenant bridge status — canonical single-query source of truth.
  *
- * Returns the freshest non-revoked bridge_pairings row for the tenant
- * plus computed fields. Consumed by three thin wrappers below; every
- * UI surface that talks about "is the bridge online" should bottom out
- * here so freshness rules + label resolution + tool-capabilities
- * filtering all stay consistent.
+ * Reads the freshest non-revoked bridge_pairings row for the tenant. Consumed
+ * by the two thin wrappers below; every UI surface that talks about "is the
+ * bridge online" should bottom out here so the freshness rule and the
+ * tool-capabilities filtering stay consistent.
  *
- * Consolidated 2026-05-23 from three near-duplicate queries
- * (getBridgeOnline / getBridgeToolCapabilities / getTenantBridgeOwner).
- * Each was doing the same SELECT-freshest-pairing + different
- * post-processing. Now one query, one freshness check.
+ * Consolidated 2026-05-23 from three near-duplicate queries. The third
+ * wrapper, getTenantBridgeOwner, and the owner-name lookup that fed it were
+ * removed 2026-09-29: nothing called them.
  *
- * Best-effort: returns the all-null shape on any error so callers can
- * gate optional features without try/catch noise.
+ * Throws when bridge_pairings cannot be read. It used to answer "offline" on
+ * any error, so a failed read told the operator their computer was not
+ * connected. A caller that shows the state renders "Couldn't check"; one that
+ * only gates tools on it (/api/chat) logs and fails closed.
  */
 export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
   online: boolean;
-  machine_label: string | null;
-  owner_user_id: string | null;
-  owner_display_name: string | null;
   tools: string[] | null;
-  last_seen_at: string | null;
 }> {
-  const empty = {
-    online: false,
-    machine_label: null,
-    owner_user_id: null,
-    owner_display_name: null,
-    tools: null,
-    last_seen_at: null,
-  };
-  if (!tenantId) return empty;
-  try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("bridge_pairings")
-      .select("last_seen_at, label, user_id, tool_capabilities")
-      .eq("tenant_id", tenantId)
-      .is("revoked_at", null)
-      .order("last_seen_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const row = r.data as
-      | {
-          last_seen_at?: string | null;
-          label?: string | null;
-          user_id?: string | null;
-          tool_capabilities?: string[] | null;
-        }
-      | null;
-    if (!row?.last_seen_at) return empty;
-    const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
-    // Owner name lookup — best-effort. Failure leaves owner_display_name
-    // null and consumers fall back to the machine label.
-    let ownerName: string | null = null;
-    if (row.user_id) {
-      try {
-        const p = await db
-          .from("user_profiles")
-          .select("display_name, full_name")
-          .eq("auth_user_id", row.user_id)
-          .maybeSingle();
-        const pd = p.data as
-          | { display_name?: string | null; full_name?: string | null }
-          | null;
-        ownerName = pd?.display_name || pd?.full_name || null;
-      } catch {
-        ownerName = null;
+  if (!tenantId) return { online: false, tools: null };
+  const db = getServiceSupabase();
+  const r = await db
+    .from("bridge_pairings")
+    .select("last_seen_at, tool_capabilities")
+    .eq("tenant_id", tenantId)
+    .is("revoked_at", null)
+    .order("last_seen_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (r.error) throw new Error(`getTenantBridgeStatus: bridge_pairings read failed: ${r.error.message}`);
+  const row = r.data as
+    | {
+        last_seen_at?: string | null;
+        tool_capabilities?: string[] | null;
       }
-    }
-    // tools[] processing — empty array means "bridge online but never
-    // ran the new daemon (pre-Phase-F)". Fall back to null so /api/chat
-    // treats as "no filter, use the TOOL_DEFINITIONS hardcoded defaults."
-    // Preserves backwards-compat with existing pairings.
-    const toolsRaw = Array.isArray(row.tool_capabilities)
-      ? row.tool_capabilities.filter((t): t is string => typeof t === "string")
-      : [];
-    const tools = online && toolsRaw.length > 0 ? toolsRaw : null;
-    return {
-      online,
-      machine_label: row.label || null,
-      owner_user_id: row.user_id || null,
-      owner_display_name: ownerName,
-      tools,
-      last_seen_at: row.last_seen_at,
-    };
-  } catch {
-    return empty;
-  }
+    | null;
+  if (!row?.last_seen_at) return { online: false, tools: null };
+  const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
+  // tools[] processing — empty array means "bridge online but never
+  // ran the new daemon (pre-Phase-F)". Fall back to null so /api/chat
+  // treats as "no filter, use the TOOL_DEFINITIONS hardcoded defaults."
+  // Preserves backwards-compat with existing pairings.
+  const toolsRaw = Array.isArray(row.tool_capabilities)
+    ? row.tool_capabilities.filter((t): t is string => typeof t === "string")
+    : [];
+  const tools = online && toolsRaw.length > 0 ? toolsRaw : null;
+  return { online, tools };
 }
 
 /**
@@ -212,32 +160,12 @@ export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
  * last 5 minutes — same freshness rule the layout's header dot uses. Thin
  * wrapper around getTenantBridgeStatus.
  *
- * Returns false on missing tenant, missing pair, stale pair, or any DB error.
- * Never throws — best-effort signal that callers gate optional features on.
+ * False on a missing tenant, a missing pair or a stale pair. Throws when the
+ * pairings cannot be read: that is "Couldn't check", not "offline".
  */
 export async function getBridgeOnline(tenantId: string | null): Promise<boolean> {
   const status = await getTenantBridgeStatus(tenantId);
   return status.online;
-}
-
-/**
- * Owner-attributed status — { online, machine_label, owner_display_name }.
- * Used by ChatWidget to render "Bridge runs on <Owner>'s machine" when this
- * browser's localhost probe fails but the tenant has a bridge online
- * elsewhere (multi-employee scenario per ADR-0006). Thin wrapper around
- * getTenantBridgeStatus.
- */
-export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
-  online: boolean;
-  machine_label: string | null;
-  owner_display_name: string | null;
-}> {
-  const status = await getTenantBridgeStatus(tenantId);
-  return {
-    online: status.online,
-    machine_label: status.machine_label,
-    owner_display_name: status.owner_display_name,
-  };
 }
 
 /**
@@ -247,7 +175,8 @@ export async function getTenantBridgeOwner(tenantId: string | null): Promise<{
  *
  * Used by /api/chat to filter the bridge tools sent to Anthropic: dashboard
  * shouldn't advertise read_file if the operator's bridge version doesn't
- * ship that tool yet. Thin wrapper around getTenantBridgeStatus.
+ * ship that tool yet. Thin wrapper around getTenantBridgeStatus; throws when
+ * it does.
  */
 export async function getBridgeToolCapabilities(
   tenantId: string | null,
@@ -256,36 +185,8 @@ export async function getBridgeToolCapabilities(
   return { online: status.online, tools: status.tools };
 }
 
-export async function getTodayPlan(profileId: string): Promise<DailyPlan | null> {
-  // Tenant data sovereignty: when EMPIRE_DATA_BACKEND=turso_local + TURSO_DB_PATH
-  // is set, read from the client's local libSQL file instead of Supabase. Falls
-  // back to Supabase on any Turso failure so the dashboard never blank-screens.
-  if (getDbBackend() === "turso") {
-    const tursoRow = await getTodayPlanTurso(profileId);
-    if (tursoRow) return tursoRow;
-    // Fall through to Supabase on null (Turso miss OR Turso error already logged)
-  }
-  const db = getServiceSupabase();
-  const today = operatorDateKey();
-  const r = await db
-    .from("daily_plans")
-    .select("*")
-    .eq("profile_id", profileId)
-    .eq("plan_date", today)
-    .maybeSingle();
-  if (r.error || !r.data) return null;
-  return r.data as DailyPlan;
-}
-
-export async function getPlanTemplates(profileId: string): Promise<PlanTemplate[]> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("plan_templates")
-    .select("*")
-    .eq("profile_id", profileId)
-    .order("kind");
-  return (r.data as PlanTemplate[]) || [];
-}
+// getTodayPlan and getPlanTemplates are gone (2026-09-29): nothing called
+// them, and each turned a failed read into "no plan" / "no templates".
 
 /**
  * Convert a tenant_records row (entity_type='lead') to the Lead shape
@@ -339,85 +240,18 @@ function tenantRecordToLead(row: TenantRecord): Lead {
   };
 }
 
-export async function getLeadById(leadId: string): Promise<Lead | null> {
-  // R3-2: read from tenant_records. Legacy public.leads stays writable
-  // for now (no one writes there anymore) but is no longer the source
-  // of truth for any reader.
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("id, tenant_id, created_at, updated_at, data")
-    .eq("id", leadId)
-    .eq("entity_type", "lead")
-    .maybeSingle();
-  if (r.error || !r.data) return null;
-  return tenantRecordToLead(r.data as TenantRecord);
-}
-
-// ============================================================================
-// Today's high-level counters (tenant-scoped)
-// ============================================================================
-
-export async function todayCounts(tenantId: string) {
-  const db = getServiceSupabase();
-  // Operator-TZ midnight (not server-local) — without this, Toronto users
-  // hitting Vercel UTC after 8pm see TOMORROW's counts instead of today's.
-  const dayStart = operatorDayStartIso();
-
-  // Decisions + hot-alerts come from agent_decisions + agent_events,
-  // both of which are PRE-multi-tenant tables (no tenant_id column —
-  // tracked schema debt; see migration 017's docstring). Until the
-  // tenant_id columns + RLS land, scope by the tenant's enabled-agent
-  // set so a SunBiz operator never sees OASIS HQ Bravo's decision /
-  // alert counts on their stat cards.
-  //
-  // Empty agentNames → return 0 (safer than leaking — same posture
-  // recentDecisions / recentEvents already take).
-  const enabledAgents = await getTenantEnabledAgents(tenantId);
-
-  const [outbound, inbound, decisions, hot] = await Promise.all([
-    db
-      .from("lead_interactions")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .in("type", ["email_sent", "dm_sent", "linkedin_sent", "call_made"])
-      .gte("created_at", dayStart),
-    db
-      .from("lead_interactions")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .in("type", ["email_received", "email_reply", "dm_received"])
-      .gte("created_at", dayStart),
-    enabledAgents.length === 0
-      ? Promise.resolve({ count: 0 })
-      : db
-          .from("agent_decisions")
-          .select("id", { count: "exact", head: true })
-          .in("agent_name", enabledAgents)
-          .gte("created_at", dayStart),
-    enabledAgents.length === 0
-      ? Promise.resolve({ count: 0 })
-      : db
-          .from("agent_events")
-          .select("id", { count: "exact", head: true })
-          .in("publisher_agent", enabledAgents)
-          .eq("event_type", "inbound.classified")
-          .eq("severity", "warn")
-          .gte("published_at", dayStart),
-  ]);
-
-  return {
-    outbound: outbound.count ?? 0,
-    inbound: inbound.count ?? 0,
-    decisions: decisions.count ?? 0,
-    hot: hot.count ?? 0,
-  };
-}
+// getLeadById and todayCounts are gone (2026-09-29): nothing called them,
+// and both turned a failed read into "no lead" / a row of zeros.
 
 // ============================================================================
 // Pipeline (tenant-scoped)
 // ============================================================================
 
+/**
+ * Throws when tenant_records cannot be read. It used to answer an empty
+ * funnel, which /analytics drew as 0 won, 0 lost and "No source data yet".
+ * /analytics now says "Couldn't check" for the pipeline numbers instead.
+ */
 export async function pipelineBreakdown(tenantId: string, includeArchived = false) {
   // Tenant data sovereignty: route to Turso for the SunBiz pipeline stat band
   // when the client opted into local libSQL. Falls back on null.
@@ -435,7 +269,7 @@ export async function pipelineBreakdown(tenantId: string, includeArchived = fals
     .select("data")
     .eq("tenant_id", tenantId)
     .eq("entity_type", "lead");
-  if (r.error || !r.data) return { stages: {}, total: 0, sources: {} };
+  if (r.error) throw new Error(`pipelineBreakdown: tenant_records read failed: ${r.error.message}`);
   // Don't pre-allocate stage keys — the prior shape hard-coded the legacy
   // OASIS 6-stage names (new/contacted/qualified/proposal/won/lost), which
   // polluted both the funnel chart and the chevron-bar counts with phantom
@@ -445,7 +279,7 @@ export async function pipelineBreakdown(tenantId: string, includeArchived = fals
   const stages: Record<string, number> = {};
   const sources: Record<string, number> = {};
   let total = 0;
-  for (const row of r.data as Array<{ data: Record<string, unknown> | null }>) {
+  for (const row of (r.data || []) as Array<{ data: Record<string, unknown> | null }>) {
     const d = row.data || {};
     // Prefer `stage` (the post-migration field) over `status` (legacy).
     // Falls back to "unset" (not an OASIS or SunBiz key) when both are
@@ -487,6 +321,10 @@ export async function pipelineBreakdown(tenantId: string, includeArchived = fals
  *
  *   The tenantId param is plumbed through now so callers stop changing
  *   shape when the migration lands.
+ *
+ * Throws when agent_decisions cannot be read (2026-09-29): an empty tape from
+ * a failed read said "No decisions yet". AgentDecisionsCard renders the
+ * caller's null as "Couldn't check".
  */
 export async function recentDecisions(
   tenantId: string | null,
@@ -506,9 +344,16 @@ export async function recentDecisions(
     .in("agent_name", agentNames)
     .order("created_at", { ascending: false })
     .limit(limit);
+  if (r.error) throw new Error(`recentDecisions: agent_decisions read failed: ${r.error.message}`);
   return (r.data as AgentDecision[]) || [];
 }
 
+/**
+ * Throws when lead_interactions cannot be read. It used to answer `[]`, which
+ * the Today brief could not tell from "no inbound": a failed read printed as
+ * "no hot replies" (2026-09-29 audit). Its one caller, priorityInbound → the
+ * Today loader, turns the throw into "Couldn't check inbound replies".
+ */
 export async function recentInbound(tenantId: string, limit = 20): Promise<LeadInteraction[]> {
   const db = getServiceSupabase();
   const r = await db
@@ -518,6 +363,7 @@ export async function recentInbound(tenantId: string, limit = 20): Promise<LeadI
     .in("type", ["email_received", "email_reply", "dm_received"])
     .order("created_at", { ascending: false })
     .limit(limit);
+  if (r.error) throw new Error(`recentInbound: lead_interactions read failed: ${r.error.message}`);
   return (r.data as LeadInteraction[]) || [];
 }
 
@@ -650,17 +496,8 @@ export async function momentumMetrics(
   };
 }
 
-export async function recentOutbound(tenantId: string, limit = 20): Promise<LeadInteraction[]> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("lead_interactions")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .in("type", ["email_sent", "dm_sent", "linkedin_sent", "call_made"])
-    .order("created_at", { ascending: false })
-    .limit(limit);
-  return (r.data as LeadInteraction[]) || [];
-}
+// recentOutbound is gone (2026-09-29): nothing called it, and it turned a
+// failed read into "no outbound".
 
 export async function recentLeads(
   tenantId: string,
@@ -704,6 +541,9 @@ export async function recentLeads(
  * tenant. Filter by the tenant's enabled agent set so a client tenant
  * doesn't see CC's Bravo heartbeats and vice versa. Empty agentNames →
  * empty result (safer than leaking).
+ *
+ * Throws when agent_state_snapshot cannot be read (2026-09-29): an empty
+ * list from a failed read drew every worker as "not running".
  */
 export async function agentStates(agentNames: string[] = []): Promise<AgentStateSnapshot[]> {
   if (agentNames.length === 0) return [];
@@ -713,6 +553,7 @@ export async function agentStates(agentNames: string[] = []): Promise<AgentState
     .select("*")
     .in("agent_name", agentNames)
     .order("last_tick_at", { ascending: false });
+  if (r.error) throw new Error(`agentStates: agent_state_snapshot read failed: ${r.error.message}`);
   return (r.data as AgentStateSnapshot[]) || [];
 }
 
@@ -761,6 +602,9 @@ export async function agentStates(agentNames: string[] = []): Promise<AgentState
  *   production callers never pass this — it defaults to the real service-role
  *   client — but it lets tests/agent-events-tenant-scope.test.ts assert the
  *   exact filters this function applies without hitting live Supabase.
+ *
+ *   Throws when agent_events cannot be read (2026-09-29). The empty list it
+ *   used to answer drew "No events recorded yet" on /operations.
  */
 export async function recentEvents(
   limit = 25,
@@ -804,6 +648,7 @@ export async function recentEvents(
   }
   q = q.order("published_at", { ascending: false }).limit(limit);
   const r = await q;
+  if (r.error) throw new Error(`recentEvents: agent_events read failed: ${r.error.message}`);
   return (r.data as AgentEvent[]) || [];
 }
 
@@ -811,6 +656,9 @@ export async function recentEvents(
  * A6: Recent dashboard-action mutations for the /runs page. Filters
  * agent_events to event_type='dashboard_action' published by this tenant
  * (correlation_id == tenant_id, see lib/action-log.ts).
+ *
+ * Throws when agent_events cannot be read (2026-09-29): an empty log from a
+ * failed read said "No agent mutations recorded yet".
  */
 export async function recentActions(
   tenantId: string,
@@ -824,45 +672,27 @@ export async function recentActions(
     .eq("correlation_id", tenantId)
     .order("published_at", { ascending: false })
     .limit(limit);
+  if (r.error) throw new Error(`recentActions: agent_events read failed: ${r.error.message}`);
   return (r.data as AgentEvent[]) || [];
 }
 
-// ============================================================================
-// Channel caps (tenant-scoped)
-// ============================================================================
-
-const DAILY_CAPS: Record<string, number> = {
-  email: 50,
-  instagram: 30,
-  linkedin: 20,
-  phone: 15,
-};
-
-export async function channelUtilization(tenantId: string) {
-  const db = getServiceSupabase();
-  // Operator-TZ midnight — see todayCounts() for the bug this fixes.
-  const dayStart = operatorDayStartIso();
-  const rows = await db
-    .from("lead_interactions")
-    .select("channel")
-    .eq("tenant_id", tenantId)
-    .gte("created_at", dayStart);
-  const counts: Record<string, number> = {};
-  for (const row of rows.data || []) {
-    const c = (row as { channel: string }).channel;
-    counts[c] = (counts[c] || 0) + 1;
-  }
-  return Object.entries(DAILY_CAPS).map(([channel, cap]) => ({
-    channel,
-    used: counts[channel] || 0,
-    cap,
-    pct: Math.round(((counts[channel] || 0) / cap) * 100),
-  }));
-}
+// channelUtilization (and its hardcoded DAILY_CAPS) is gone (2026-09-29):
+// nothing called it, and a failed read came back as every channel at 0%.
 
 // ============================================================================
 // Integrations health (tenant-scoped)
 // ============================================================================
+
+/**
+ * Providers OASIS no longer runs on: Supabase (Turso replaced it 2026-08-09),
+ * Vercel (Cloudflare Workers) and n8n (deprecated; two client webhooks remain,
+ * which no heartbeat here describes). Their registry entries stay for the
+ * settings history, but no heartbeat card is drawn for them: a stale green or
+ * red dot for a host we left is a claim about nothing.
+ */
+export const RETIRED_INTEGRATION_SERVICES: ReadonlySet<string> = new Set(["supabase", "vercel", "n8n_inbound"]);
+
+const LIVE_INTEGRATIONS = KNOWN_INTEGRATIONS.filter((i) => !RETIRED_INTEGRATION_SERVICES.has(i.service));
 
 export async function integrationsHealth(
   tenantId: string | null
@@ -877,7 +707,7 @@ export async function integrationsHealth(
     // Synthesize placeholders for every known integration so the UI
     // still has something to render. Caller's behavior is preserved
     // (every service shows "unconfigured") without scanning all tenants.
-    return KNOWN_INTEGRATIONS.map((integration) => ({
+    return LIVE_INTEGRATIONS.map((integration) => ({
       id: `placeholder-${integration.service}`,
       profile_id: null,
       tenant_id: null,
@@ -892,12 +722,23 @@ export async function integrationsHealth(
     .from("integrations_health")
     .select("*")
     .eq("tenant_id", tenantId)
-    .order("service", { ascending: true });
+    .order("service", { ascending: true })
+    .order("last_ping_at", { ascending: false });
+  // A failed read is unknown, not "every service unconfigured": the
+  // placeholders below are for services a SUCCESSFUL read did not list.
+  if (r.error) throw new Error(`integrations_health read failed: ${r.error.message}`);
 
-  const expected = KNOWN_INTEGRATIONS.map((integration) => integration.service);
-  const existing = new Map(
-    (r.data as IntegrationHealth[] | null)?.map((row) => [row.service, row]) || []
-  );
+  // The NEWEST row per service (2026-09-30). A service can hold several rows
+  // (integrations_health is keyed profile_id + service): OASIS carries 94
+  // profile_id NULL rows from 2026-08-11..21 beside the bridge's live ones. A
+  // Map built from every row kept whichever came LAST, so a month-old
+  // duplicate could hide a heartbeat from a minute ago. Rows arrive newest
+  // first within a service; the first one wins.
+  const expected = LIVE_INTEGRATIONS.map((integration) => integration.service);
+  const existing = new Map<string, IntegrationHealth>();
+  for (const row of (r.data as IntegrationHealth[] | null) || []) {
+    if (!existing.has(row.service)) existing.set(row.service, row);
+  }
   return expected.map((service) => {
     const found = existing.get(service);
     if (found) return found;
@@ -915,187 +756,20 @@ export async function integrationsHealth(
   });
 }
 
-// ============================================================================
-// Top-client concentration risk — % of MRR from a single client
-// ============================================================================
-
-/**
- * Returns the % of MRR concentrated in the operator's biggest client.
- * Reads `profile.custom_fields.top_client_name` + `top_client_mrr_usd`
- * (operators set these in Settings or via scripts/seed_profile.py); for
- * other tenants without those fields, falls back to the top-1 won client
- * by score from the leads table.
- *
- * Future-friendly: when revenue_events table lands, swap to that.
- */
-export async function topClientConcentration(tenantId: string): Promise<{
-  client_name: string;
-  pct_of_mrr: number;
-  is_at_risk: boolean;
-}> {
-  const profile = await getActiveProfile();
-  const totalMrr = Number(profile?.mrr_current_usd) || 0;
-  if (totalMrr === 0) {
-    return { client_name: "—", pct_of_mrr: 0, is_at_risk: false };
-  }
-
-  // R3-2: read from tenant_records. Pull leads with status="won"
-  // (or stage="funded" — Phase 2 enum equivalent), pick the highest
-  // scoring as the fallback name.
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("data")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .order("updated_at", { ascending: false })
-    .limit(200);
-  let topWonName: string | null = null;
-  let topWonScore = -Infinity;
-  for (const row of (r.data || []) as Array<{ data: Record<string, unknown> | null }>) {
-    const d = row.data || {};
-    const status = (typeof d.status === "string" ? d.status : null);
-    const stage = (typeof d.stage === "string" ? d.stage : null);
-    const isWon = status === "won" || stage === "funded";
-    if (!isWon) continue;
-    const score = typeof d.score === "number" ? d.score : 0;
-    if (score > topWonScore) {
-      topWonScore = score;
-      topWonName =
-        (typeof d.name === "string" ? d.name : null) ||
-        (typeof d.company === "string" ? d.company : null);
-    }
-  }
-
-  if (!topWonName) return { client_name: "—", pct_of_mrr: 0, is_at_risk: false };
-
-  // Read from profile.custom_fields.top_client_mrr_usd. Operators set this
-  // in Settings or via scripts/seed_profile.py. No magic numbers.
-  const customFields = (profile?.custom_fields || {}) as Record<string, unknown>;
-  const configuredName = getCustomFieldString(customFields, PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_NAME);
-  const configuredMrr = Number(customFields[PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_MRR_USD]) || 0;
-
-  const name = configuredName || topWonName || "Top client";
-  const pct = configuredMrr > 0 ? (configuredMrr / totalMrr) * 100 : 0;
-  return {
-    client_name: name,
-    pct_of_mrr: Math.round(pct * 10) / 10,
-    is_at_risk: pct >= 60,
-  };
-}
-
-// ============================================================================
-// Outreach reply rate — last 7 days
-// ============================================================================
-
-export async function outreachReplyRate(
-  tenantId: string,
-  days = 7
-): Promise<{ replies: number; sends: number; rate_pct: number }> {
-  const db = getServiceSupabase();
-  const since = new Date();
-  since.setDate(since.getDate() - days);
-  const sinceIso = since.toISOString();
-
-  const [sends, replies] = await Promise.all([
-    db
-      .from("lead_interactions")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .in("type", ["email_sent", "dm_sent", "linkedin_sent"])
-      .gte("created_at", sinceIso),
-    db
-      .from("lead_interactions")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .in("type", ["email_received", "email_reply", "dm_received"])
-      .gte("created_at", sinceIso),
-  ]);
-
-  const sendsCount = sends.count ?? 0;
-  const repliesCount = replies.count ?? 0;
-  const rate = sendsCount > 0 ? (repliesCount / sendsCount) * 100 : 0;
-  return {
-    replies: repliesCount,
-    sends: sendsCount,
-    rate_pct: Math.round(rate * 10) / 10,
-  };
-}
-
-// ============================================================================
-// Active pipeline value — leads at qualified or proposal stage
-// ============================================================================
-
-export async function activePipeline(tenantId: string): Promise<{
-  qualified: number;
-  proposal: number;
-  total_active: number;
-}> {
-  // R3-2: read leads from tenant_records. Same filter (status in
-  // qualified/proposal), but applied post-load over the jsonb data.
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("data")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead");
-  if (r.error || !r.data) return { qualified: 0, proposal: 0, total_active: 0 };
-  let qualified = 0;
-  let proposal = 0;
-  for (const row of r.data as Array<{ data: Record<string, unknown> | null }>) {
-    const status = (row.data?.status as string) || (row.data?.stage as string) || "";
-    if (status === "qualified") qualified += 1;
-    else if (status === "proposal") proposal += 1;
-  }
-  return { qualified, proposal, total_active: qualified + proposal };
-}
-
-// ============================================================================
-// Top open lead — single highest-score non-won/lost/archived lead
-// ============================================================================
-
-export async function topOpenLead(tenantId: string): Promise<Lead | null> {
-  // R3-2: read from tenant_records. Pull the recent rows ordered by
-  // updated_at, then sort in-memory by score and pick the first
-  // non-terminal-status entry. Tenants typically have <500 active
-  // leads so in-memory sort is fine.
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("id, tenant_id, created_at, updated_at, data")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .order("updated_at", { ascending: false })
-    .limit(500);
-  if (r.error || !r.data) return null;
-  const TERMINAL: ReadonlySet<string> = new Set(["won", "lost", "archived"]);
-  const leads = (r.data as TenantRecord[])
-    .map(tenantRecordToLead)
-    .filter((lead) => !lead.status || !TERMINAL.has(lead.status));
-  leads.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
-  return leads[0] ?? null;
-}
+// outreachReplyRate, activePipeline and topOpenLead are gone (2026-09-29):
+// nothing called them, and each turned a failed read into zeros or "no lead".
 
 // ============================================================================
 // MRR
+// ----------------------------------------------------------------------------
+// mrrSnapshot / mrrHistory are gone (2026-09-29). They fed /analytics for any
+// workspace outside OASIS from user_profiles.mrr_current_usd — a typed number
+// nobody may edit since 2026-09-24 — with a $5,000 target invented when none
+// was set and, when fewer than two snapshots existed, a synthetic decline
+// curve drawn back from that typed number. OASIS reads live Stripe through
+// lib/goals/oasis-money; every other workspace's /analytics says "Not
+// connected" until its own Stripe feeds MRR.
 // ============================================================================
-
-export async function mrrSnapshot(): Promise<{ current: number; target: number; pct: number }> {
-  const profile = await getActiveProfile();
-  if (!profile) return { current: 0, target: 5000, pct: 0 };
-  const target = Number(profile.mrr_target_usd) || 5000;
-  const current = Number(profile.mrr_current_usd) || 0;
-  return {
-    current,
-    target,
-    pct: target > 0 ? Math.round((current / target) * 1000) / 10 : 0,
-  };
-}
-
-/**
- * MRR history is **NOT REAL DATA** yet — there is no `mrr_history` table.
- * Returns synthetic trajectory tagged synthetic: true.
- */
 
 /**
  * Which AI provider services have credentials on file for this tenant?
@@ -1105,6 +779,10 @@ export async function mrrSnapshot(): Promise<{ current: number; target: number; 
  * and enabled=true. The /integrations and /settings pages use this to mark
  * provider cards as "Connected" instead of "Not connected" when a key exists
  * but no successful API call has been pinged yet.
+ *
+ * Throws when agent_model_config cannot be read (2026-09-29). The empty set it
+ * used to answer drew every provider "Not connected" and told the owner to
+ * paste keys that were already on file; callers now say "Couldn't check".
  */
 // PROVIDER_TO_SERVICE moved to lib/providers.ts (client-safe pure-data
 // home) so client components can import the mapping without dragging
@@ -1121,10 +799,11 @@ export async function aiServicesWithKey(tenantId: string | null): Promise<Set<st
   if (!tenantId) return out;
   const db = getServiceSupabase();
   const user = await getSessionUser().catch(() => null);
-  const { data } = await db
+  const { data, error } = await db
     .from("agent_model_config")
     .select("provider, encrypted_api_key, enabled, user_id")
     .eq("tenant_id", tenantId);
+  if (error) throw new Error(`aiServicesWithKey: agent_model_config read failed: ${error.message}`);
   for (const row of (data || []) as Array<{ provider: string; encrypted_api_key: string | null; enabled: boolean; user_id: string | null }>) {
     if (row.user_id && row.user_id !== user?.id) continue;
     if (!row.encrypted_api_key || !row.enabled) continue;
@@ -1134,74 +813,17 @@ export async function aiServicesWithKey(tenantId: string | null): Promise<Set<st
   return out;
 }
 
-export async function mrrHistory(days = 30): Promise<
-  Array<{ date: string; mrr: number; synthetic: boolean }>
-> {
-  const profile = await getActiveProfile();
-  const current = Number(profile?.mrr_current_usd) || 0;
-  const tenantId = profile?.tenant_id || null;
+const AI_KEY_SERVICES: ReadonlySet<string> = new Set(Object.values(PROVIDER_TO_SERVICE));
 
-  // Try real snapshots first (migration 021). If we have at least 2 days
-  // of data, use it as-is — synthetic flag false. Anything missing in the
-  // window gets back-filled with the most-recent known value (so the chart
-  // doesn't drop to zero on days the cron hadn't run yet).
-  let real: Array<{ snapshot_date: string; mrr_usd: number }> = [];
-  if (tenantId) {
-    try {
-      const db = getServiceSupabase();
-      const since = new Date();
-      since.setDate(since.getDate() - days + 1);
-      const { data } = await db
-        .from("mrr_snapshots")
-        .select("snapshot_date, mrr_usd")
-        .eq("tenant_id", tenantId)
-        .gte("snapshot_date", since.toISOString().slice(0, 10))
-        .order("snapshot_date", { ascending: true });
-      real = ((data as Array<{ snapshot_date: string; mrr_usd: string | number }>) || [])
-        .map((r) => ({ snapshot_date: r.snapshot_date, mrr_usd: Number(r.mrr_usd) }));
-    } catch {
-      real = [];
-    }
-  }
-
-  if (real.length >= 2) {
-    const byDate = new Map(real.map((r) => [r.snapshot_date, r.mrr_usd] as const));
-    const out: Array<{ date: string; mrr: number; synthetic: boolean }> = [];
-    let lastKnown = real[0].mrr_usd;
-    const today = new Date();
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const iso = d.toISOString().slice(0, 10);
-      const v = byDate.get(iso);
-      const hasReal = v != null;
-      if (hasReal) lastKnown = v;
-      // Tag back-filled days as synthetic so the chart can style them
-      // distinctly. Without this every point reads as "real data" and
-      // the operator thinks the cron has been running for 60 days when
-      // only 3 days of snapshots actually exist.
-      out.push({
-        date: iso.slice(5, 10),
-        mrr: Math.round(lastKnown),
-        synthetic: !hasReal,
-      });
-    }
-    return out;
-  }
-
-  // Fallback: synthetic decline curve, tagged so the UI can label it.
-  const out: Array<{ date: string; mrr: number; synthetic: boolean }> = [];
-  const today = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    out.push({
-      date: d.toISOString().slice(5, 10),
-      mrr: Math.round(current - i * (current * 0.005)),
-      synthetic: true,
-    });
-  }
-  return out;
+/**
+ * What an integration card may say about a key, given aiServicesWithKey's
+ * answer (null = that read failed). The read only answers for the AI provider
+ * slugs, so its failure makes only those cards "Couldn't check"; Stripe,
+ * Gmail and the rest never depended on it and keep the `false` they always get.
+ */
+export function aiKeyOnFile(keyedAi: Set<string> | null, service: string): boolean | null {
+  if (keyedAi) return keyedAi.has(service);
+  return AI_KEY_SERVICES.has(service) ? null : false;
 }
 
 // ============================================================================
@@ -1407,23 +1029,8 @@ export async function getSmsHistory(
   }
 }
 
-/** Applications count — drives the sidebar badge on /applications. */
-export async function getApplicationsCount(tenantId: string): Promise<number> {
-  const db = getServiceSupabase();
-  try {
-    const r = await db
-      .from("applications")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId);
-    if (r.error) {
-      if (_isMissingTable(r.error)) return 0;
-      return 0;
-    }
-    return r.count || 0;
-  } catch {
-    return 0;
-  }
-}
+// getApplicationsCount is gone (2026-09-29): nothing called it, and every
+// failed read, missing table or not, came back as a silent 0.
 
 /**
  * Convenience helper for the /leads page. Just wraps recentLeads with

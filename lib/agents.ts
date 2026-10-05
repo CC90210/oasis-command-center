@@ -81,7 +81,9 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
     textClass: "text-accent",
     description:
       "Your CEO, COO, and CTO in one — your right hand and second brain. Bravo runs the day: ranks the leads worth calling first, drafts your outbound, finalizes today's plan, runs the daily briefing, ships the code, and keeps the whole agent family rowing in the same direction.",
-    askMeAbout: "Run the daily briefing · Draft a follow-up to Jonathan · What's blocking $5K?",
+    // Generic on purpose (2026-09-30): the old line named a real prospect
+    // and a revenue figure that went stale; this copy renders on the fleet.
+    askMeAbout: "Run the daily briefing · Draft a follow-up to a warm lead · What's blocking this week's goal?",
     setup_questions: [
       {
         id: "primary_business",
@@ -91,15 +93,9 @@ export const AGENT_REGISTRY: Record<string, AgentInfo> = {
         required: true,
         placeholder: "OASIS AI Solutions — AI agents for SMBs",
       },
-      {
-        id: "mrr_target_usd",
-        label: "Current MRR target (USD)",
-        description: "Bravo uses this as the daily north-star metric.",
-        type: "number",
-        required: true,
-        placeholder: "10000",
-        default: 10000,
-      },
+      // No MRR-target question (2026-09-30): it pre-filled an invented
+      // 10000 that then rode into the agent's prompt as a target. Revenue
+      // goals live in the revenue_goals table, from real numbers only.
       {
         id: "tone",
         label: "Outreach voice",
@@ -355,6 +351,20 @@ export const FAMILY_AGENT_KEYS = ALL_AGENT_KEYS.filter(
 );
 
 /**
+ * The house agents OASIS's own bridge runs: the ones the bridge's cron runner
+ * maps to a repo (bravo_cli/cron_runner.py SIBLING_ROOT_BY_AGENT_KEY: bravo,
+ * atlas, maven, aura; its solara and helios rows are the retired SunBiz pair).
+ * OASIS's operator surfaces (a tenant cron's agent, /operations, /health) list
+ * these for OASIS's own workspace (lib/manifest/tenant-scope.ts
+ * oasisOperatorAgents). Its business roster is its department leads now, and
+ * sdr and customer-support are library templates no bridge root maps; CC's own
+ * agents left that roster for Admin > Fleet (decision 21) without leaving his
+ * machine (W4a review R4). The whole family is not the answer: /operations
+ * lists only what is wired up (CC, 2026-05-14), and Hermes, Lex and Lumen are not.
+ */
+export const OASIS_RUNTIME_AGENT_KEYS: readonly string[] = ["bravo", "atlas", "maven", "aura"];
+
+/**
  * Backward-compatibility aliases. Legacy DB rows + integration registries
  * may still carry slugs like "sunbiz" (the old key for Solara) or "suga_sean"
  * (the old Suga client agent). Resolve them transparently so chat + UI keep
@@ -375,6 +385,17 @@ export const AGENT_KEY_ALIASES: Record<string, string> = {
 
 export function resolveAgentKey(key: string): string {
   return AGENT_KEY_ALIASES[key] || key;
+}
+
+/**
+ * True for an OASIS house agent: any AGENT_REGISTRY slug, or a legacy alias of
+ * one. These are the personas that run OASIS and CC's own agents. They live in
+ * OASIS's workspace and in Admin > Fleet; a client workspace never binds one
+ * (lib/os/teammates.ts, POST /api/tenant/agents/toggle).
+ */
+export function isHouseAgentSlug(slug: string | null | undefined): boolean {
+  const key = resolveAgentKey(String(slug ?? "").trim().toLowerCase());
+  return key !== "" && Object.prototype.hasOwnProperty.call(AGENT_REGISTRY, key);
 }
 
 export function getAgentInfo(key: string): AgentInfo {

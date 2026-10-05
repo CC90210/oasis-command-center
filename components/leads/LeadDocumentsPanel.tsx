@@ -27,9 +27,11 @@ type LeadDocumentRow = {
 export async function LeadDocumentsPanel({
   tenantId,
   leadId,
+  canMutate = true,
 }: {
   tenantId: string;
   leadId: string;
+  canMutate?: boolean;
 }) {
   const db = getServiceSupabase();
   const { data, error } = await db
@@ -92,6 +94,7 @@ export async function LeadDocumentsPanel({
                   filename={doc.filename}
                   mimeType={doc.mime_type}
                   docType={doc.doc_type}
+                  canMutate={canMutate}
                 />
               </li>
             );

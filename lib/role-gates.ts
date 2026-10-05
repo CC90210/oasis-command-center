@@ -20,6 +20,7 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   "create_record",
   "update_record",
   "delete_record",
+  "import_leads_from_attachment",
   "send_email",
   "send_sms",
   "write_file",
@@ -37,6 +38,10 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   "texttorrent_add_contact",
   "texttorrent_block",
   "texttorrent_unblock",
+  // OASIS OS approvals (2026-09-28). propose_email sends nothing, but it puts
+  // a card in front of the team on the member's behalf: a write, and a
+  // read_only member makes none.
+  "propose_email",
 ]);
 
 /**
@@ -103,6 +108,11 @@ export function isReadOnlyRole(teamRole: string | null | undefined): boolean {
 export const CRM_WRITE_ROLES: ReadonlySet<string> = new Set([
   "owner",
   "admin",
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "marketing",
   "member",
   "agent",
   "loan_officer",

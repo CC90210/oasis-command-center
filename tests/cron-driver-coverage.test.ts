@@ -6,7 +6,8 @@
  * Vercel's scheduler stopped executing for this project on 2026-08-06.
  * .github/workflows/cron-driver.yml replaced it, but only for the four routes
  * whose absence was noticed at the time. The other eighteen registered in
- * vercel.json stayed dead for five days.
+ * vercel.json stayed dead for five days. The oasis-cc-cron Worker is now the
+ * live minute scheduler; GitHub remains a manual rollback path only.
  *
  * That gap is invisible by construction: a cron that never fires emits no
  * error, no log line and no alert. It is only detectable by comparing the two
@@ -21,20 +22,45 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 
-const vercelJson = JSON.parse(readFileSync("vercel.json", "utf8")) as {
+// 2026-08-30 (PR #347): the crons moved OUT of vercel.json into an inert
+// registry. Vercel's scheduler died silently on 08-06 while reporting the
+// registrations enabled; leaving them in vercel.json meant every deploy
+// re-armed a zombie that would double-fire the moment Vercel fixed itself.
+// The registry carries the same intent with nothing to resurrect.
+//
+// Deliberately NOT derived from cron-driver.yml: this test exists to compare
+// two INDEPENDENT lists (intent vs driver). Deriving intent from the driver
+// would make the comparison a tautology - everything the driver drives is
+// driven - which is the exact presence-not-contribution blindness that let
+// eighteen crons die invisibly the first time.
+const vercelJson = JSON.parse(readFileSync("config/cron-registry.json", "utf8")) as {
   crons?: Array<{ path: string; schedule: string }>;
 };
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
+const workerConfig = readFileSync("workers/oasis-cc-cron/wrangler.jsonc", "utf8");
 
 const crons = vercelJson.crons ?? [];
-assert.ok(crons.length > 0, "vercel.json must register at least one cron");
+assert.ok(crons.length > 0, "the cron registry must carry at least one cron");
+
+// ── 0. The disarm itself is pinned: vercel.json must stay cron-free ─────────
+//
+// The registrations were removed because Vercel re-registers whatever this
+// file carries on every deploy, and its scheduler already failed silently
+// once in each direction. If a crons block ever reappears here, that is the
+// zombie coming back - fail naming it, before a deploy re-arms it.
+const liveVercel = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons?: unknown[] };
+assert.ok(
+  !liveVercel.crons || liveVercel.crons.length === 0,
+  "vercel.json must not register crons: Vercel's scheduler is retired here. Add routes to config/cron-registry.json + the driver instead.",
+);
 
 /** "/api/cron/scan-bounces?write=1" -> "/api/cron/scan-bounces" */
 const basePathOf = (p: string) => p.split("?")[0];
 
-// ── 1. Every registered cron is driven, query string included ──────────────
+// ── 1. The inert registry and live Worker table must match exactly ─────────
 //
 // The FULL path is compared, not the base path. An earlier version of this
 // test stripped the query string, which made it pass while
@@ -43,15 +69,10 @@ const basePathOf = (p: string) => p.split("?")[0];
 // ran. A query string is not decoration — it selects a different code path,
 // and two registrations that differ only by query are two different jobs.
 // (Codex review, 2026-08-11.)
-const undriven: string[] = [];
-for (const cron of crons) {
-  if (!driver.includes(cron.path)) undriven.push(cron.path);
-}
 assert.deepEqual(
-  undriven,
-  [],
-  `these crons are registered in vercel.json but nothing drives them, so they will never run:\n` +
-    undriven.map((p) => `  - ${p}`).join("\n"),
+  [...CRON_TABLE],
+  crons,
+  "config/cron-registry.json and the oasis-cc-cron Worker table must match path-for-path and schedule-for-schedule",
 );
 
 // ── 2. Cron expressions must be valid ──────────────────────────────────────
@@ -85,36 +106,47 @@ for (const cron of crons) {
   });
 }
 
-// ── 3. Every registered SCHEDULE has a workflow trigger and a route branch ─
+// ── 3. Cloudflare is live; GitHub is manual-only ───────────────────────────
 //
-// Presence of a path is not enough: it must be driven at the right time. The
-// driver keys off github.event.schedule, so each distinct expression in
-// vercel.json needs both an `on.schedule` entry and a matching `case` arm.
-// Without this, a route can appear in the file under the wrong cadence and
-// still pass — which is how materialize-plans silently moved from 03:00 to
-// 13:00 and tps-backlog-watch dropped from 6-hourly to daily.
-const schedules = [...new Set(crons.map((c) => c.schedule.trim()))];
-for (const s of schedules) {
-  assert.ok(
-    driver.includes(`- cron: "${s}"`),
-    `vercel.json registers the schedule "${s}" but the workflow has no matching trigger, ` +
-      `so nothing fires at that time`,
-  );
-  assert.ok(
-    driver.includes(`"${s}")`),
-    `the workflow triggers on "${s}" but has no case arm naming its routes`,
-  );
-}
+// One Cloudflare minute tick evaluates every expression in CRON_TABLE. Keeping
+// GitHub schedule triggers armed at the same time double-fires every due job.
+assert.match(
+  workerConfig,
+  /"crons"\s*:\s*\[\s*"\* \* \* \* \*"\s*\]/,
+  "oasis-cc-cron must retain its every-minute trigger",
+);
+assert.match(
+  workerConfig,
+  /"global_fetch_strictly_public"/,
+  "oasis-cc-cron must route Worker-to-Worker fetches through Cloudflare's public front door",
+);
+const workflowTriggers = driver.slice(driver.indexOf("on:"), driver.indexOf("concurrency:"));
+assert.ok(
+  workflowTriggers.includes("workflow_dispatch:"),
+  "cron-driver.yml must remain manually runnable as the rollback path",
+);
+assert.ok(
+  !/^\s*schedule:\s*$/m.test(workflowTriggers),
+  "cron-driver.yml must not retain schedule triggers after the Cloudflare Worker is live",
+);
+assert.match(
+  driver,
+  /ATTEST:\s*\$\{\{\s*secrets\.OASIS_CRON_ATTEST_SECRET\s*\}\}/,
+  "the manual rollback driver must load the independent cron attestation secret",
+);
+assert.match(
+  driver,
+  /-H "x-oasis-cron-attest: \$\{ATTEST\}"/,
+  "the manual rollback driver must send both cron auth proofs",
+);
 
-// Each cron's path must be reachable from its OWN schedule's branch, not merely
-// present somewhere in the file.
+// Keep the full historical mapping in the manual fallback so a rollback does
+// not require reconstructing route/cadence pairings under pressure.
 for (const cron of crons) {
-  const arm = driver.indexOf(`"${cron.schedule.trim()}")`);
-  const next = driver.indexOf(";;", arm);
+  assert.ok(driver.includes(cron.path), `${cron.path} is missing from the manual rollback driver`);
   assert.ok(
-    arm >= 0 && next > arm && driver.slice(arm, next).includes(cron.path),
-    `${cron.path} is not driven by its own schedule "${cron.schedule}" — it may be running ` +
-      `at the wrong cadence`,
+    driver.includes(`"${cron.schedule.trim()}")`),
+    `the manual rollback driver lost the ${cron.schedule} schedule mapping`,
   );
 }
 
@@ -165,6 +197,41 @@ assert.ok(
   "health-check MUST be driven — without it no check in the fleet can alert",
 );
 
+// ── 7. Every cron route on disk is registered, or deliberately not ──────────
+//
+// The inverse of §1-§4. Those prove a REGISTERED cron has a driver and a
+// handler; nothing proved a HANDLER had a registration. When SunBiz was retired
+// (2026-09-28) its thirteen routes were unscheduled and left on disk, where
+// each stayed reachable by URL with the shared cron secrets: a retired tenant's
+// writers, stopped on paper, one call away from running. They were deleted
+// 2026-10-01 (OS plan W0). A route under app/api/cron that is not in the
+// registry fails here by name unless it is listed below with the reason it is
+// unscheduled.
+const UNSCHEDULED_BY_DESIGN: Record<string, string> = {
+  // OASIS client usage roll-up (lib/os/customers/usage.ts reads client_roi_snapshots).
+  // Not in the registry today; outside W0's scope, so it is named rather than deleted.
+  "roi-snapshot": "OASIS client ROI roll-up; no schedule registered yet",
+  // OASIS MRR snapshot (user_profiles.mrr_current_usd -> mrr_snapshots). Same.
+  "snapshot-mrr": "OASIS MRR snapshot; no schedule registered yet",
+};
+const registeredRoutes = new Set(crons.map((c) => basePathOf(c.path).replace(/^\/api\/cron\//, "")));
+const onDisk = readdirSync("app/api/cron", { withFileTypes: true })
+  .filter((d) => d.isDirectory())
+  .map((d) => d.name)
+  .sort();
+assert.ok(onDisk.length >= 10, `only ${onDisk.length} cron route folders found; the walk is broken`);
+const unregistered = onDisk.filter((name) => !registeredRoutes.has(name) && !(name in UNSCHEDULED_BY_DESIGN));
+assert.deepEqual(
+  unregistered,
+  [],
+  "cron routes on disk with no registration and no stated reason: register them in config/cron-registry.json + the Worker table, or delete them",
+);
+for (const name of Object.keys(UNSCHEDULED_BY_DESIGN)) {
+  assert.ok(onDisk.includes(name), `UNSCHEDULED_BY_DESIGN names ${name}, which no longer exists; delete the entry`);
+  assert.ok(!registeredRoutes.has(name), `${name} is registered now; delete it from UNSCHEDULED_BY_DESIGN`);
+}
+
 console.log(
-  `cron-driver-coverage.test.ts — ${crons.length} crons registered, all driven, all schedules valid ✓`,
+  `cron-driver-coverage.test.ts — ${crons.length} crons registered, Worker-driven, GitHub manual-only, all schedules valid, ` +
+    `${onDisk.length} route folders accounted for ✓`,
 );

@@ -20,6 +20,7 @@ import { loadSourcePdf, sha256OfBytes } from "@/lib/esign/pdf";
 import { uploadEsignSourcePdf, loadExistingLeadDocumentAsSource } from "@/lib/esign/storage";
 import { createEnvelope, createSigners, listEnvelopes, logEvent } from "@/lib/esign/db";
 import { mintSigningToken } from "@/lib/esign/tokens";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,7 @@ type SignerInput = { email: string; name: string; order?: number };
 export async function GET() {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   const res = await listEnvelopes(sess.tenantId);
   if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 500 });
@@ -42,6 +44,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   let body: {
     title?: unknown;

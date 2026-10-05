@@ -30,7 +30,6 @@ import {
   renderGmailTemplate,
   updateGmailTemplate,
   type GmailTemplate,
-  type GmailTemplateVariant,
 } from "@/lib/gmail-templates";
 import {
   Check,
@@ -312,7 +311,7 @@ function PreviewModal({
   const [genError, setGenError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
-  const variants = template.variants ?? [];
+  const variants = useMemo(() => template.variants ?? [], [template.variants]);
   const active: { subject: string; body: string; label: string } = useMemo(() => {
     const v = variants.find((x) => x.id === activeVariantId);
     return v

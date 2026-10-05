@@ -29,15 +29,27 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
-import { getActiveProfile } from "@/lib/queries";
-import { listRecords, type TenantRecord } from "@/lib/manifest/data";
-import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
-import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
-import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { getTenant } from "@/lib/queries";
+import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
+import { buildMemberDirectory, withAssignedName } from "@/lib/assigned-names";
+import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
+import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
+import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
+import {
+  creatableOasisStages,
+  oasisBoardProgramFilter,
+  oasisBoardStages,
+} from "@/lib/oasis-lead-create";
+import {
+  listOasisPipelineWindow,
+  resolveOasisPipelineAssigneeScope,
+} from "@/lib/oasis-pipeline-query";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 
 export const dynamic = "force-dynamic";
 
@@ -58,25 +70,31 @@ const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENA
 export default async function PipelinePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ stage?: string; q?: string; rep?: string }>;
+  searchParams?: Promise<{ stage?: string; q?: string; rep?: string; page?: string }>;
 }) {
   // Tenant-aware redirect. Non-OASIS operators land in their own
   // tenant's leads view rather than seeing CC's OASIS personal stages.
   // Try/catch so an unexpected DB hiccup falls through to the OASIS
   // render — strictly no worse than the pre-redirect behavior.
-  // Captured for the query below: only the website-sales tenant filters rows
-  // down to the website_sales_v1 program.
+  // Captured for the query below: every OASIS sales tenant is narrowed to the
+  // cold-outbound motion, and oasis-webdev also retains its program predicate.
+  const session = await resolveSessionContext();
+  const tenantId = session.ok ? session.tenantId : "";
   let tenantSlug: string | null = null;
+  let tenantScopeError: Error | null = null;
   try {
-    const sessionResult = await resolveSessionContext();
-    if (sessionResult.ok) {
-      const db = getServiceSupabase();
-      const tenantRow = await db
-        .from("tenants")
-        .select("slug")
-        .eq("id", sessionResult.tenantId)
-        .maybeSingle();
-      const slug = (tenantRow.data as { slug: string | null } | null)?.slug;
+    if (session.ok) {
+      // P1 instant-load (2026-09-01): read through the React-cache()d
+      // getTenant() the layout already resolved this render, instead of a
+      // second raw `tenants` round trip. getTenant collapses "read failed"
+      // and "row missing" into null; both threw to the same catch below
+      // before, so the failure behavior is unchanged — only the label is
+      // shared now.
+      const tenant = await getTenant(session.tenantId);
+      const slug = tenant?.slug;
+      if (!slug) {
+        throw new Error("pipeline_tenant_lookup_failed_or_slug_missing");
+      }
       tenantSlug = slug ?? null;
       if (slug && !OASIS_PIPELINE_SLUGS.has(slug)) {
         redirect(`/t/${slug}/leads`);
@@ -91,6 +109,8 @@ export default async function PipelinePage({
     if (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT")) {
       throw err;
     }
+    tenantScopeError = err instanceof Error ? err : new Error("pipeline_tenant_lookup_failed");
+    console.error("[pipeline.tenant]", tenantScopeError);
   }
 
   const sp = (await searchParams) || {};
@@ -99,10 +119,7 @@ export default async function PipelinePage({
   // ?rep=<auth_user_id> narrows the board to one person; ?rep=unassigned shows
   // the pool nobody owns yet.
   const repFilter = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : null;
-
-  const profile = await safe("pipeline.profile", getActiveProfile(), null);
-  const tenantId = profile?.tenant_id || "";
-  const session = await resolveSessionContext();
+  const requestedPage = typeof sp.page === "string" ? sp.page : null;
 
   if (!tenantId) {
     return (
@@ -115,53 +132,32 @@ export default async function PipelinePage({
     );
   }
 
-  // Fetch every OASIS lead row in the canonical shape SunBizPipelineView
-  // expects ({ id, data, updated_at, created_at }). listRecords returns
-  // exactly that. Query-filter is applied client-side in the component
-  // via PageSearchBar; stage filter is applied server-side here so the
-  // initial render doesn't ship rows we're going to discard.
-  // On oasis-webdev the program filter runs IN THE QUERY, not after the fetch:
-  // that tenant holds 31k+ raw prospect rows alongside the real sales leads, so
-  // capping at 500 and filtering in JS would silently drop working leads off the
-  // board. Other OASIS tenants (oasis-ai-cc) have no program stamp at all and
-  // must not be filtered, or their board renders empty.
-  const isWebsiteSalesTenant = tenantSlug === OASIS_WEBSITE_TENANT_SLUG;
-  const allRows: TenantRecord[] = await safe(
-    "pipeline.rows",
-    listRecords({
-      tenant_id: tenantId,
-      entity: "lead",
-      limit: 500,
-      ...(isWebsiteSalesTenant
-        ? { where: { sales_program: OASIS_WEBSITE_SALES_PROGRAM } }
-        : {}),
-    }).then((r) => r.rows),
-    [] as TenantRecord[],
-  );
+  if (tenantScopeError) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Pipeline unavailable" subtitle="We could not verify this workspace's access boundary." />
+        <Card>
+          <EmptyState message="Refresh to try again. No reduced or partial lead view was shown." />
+        </Card>
+      </div>
+    );
+  }
+
+  // Only oasis-webdev consistently carries the legacy sales_program marker.
+  // sales_motion is now the cross-tenant boundary between cold Pipeline work
+  // and warm Form submissions.
+  // The predicate lives in lib/oasis-lead-create.ts beside the create stamp,
+  // because the stamp must satisfy it or a lead someone adds is invisible here.
+  const boardFilter = oasisBoardProgramFilter(tenantSlug);
 
   // Optional ?q= filter — match across the operator-relevant fields.
-  // Kept server-side so /pipeline?q=acme returns ~5 rows instead of
-  // shipping 500 and filtering in the browser.
-  const namedRows = await attachAssignedNames(allRows, tenantId);
-  const scopedRows = session.ok
-    ? filterWebsiteSalesRows(
-        namedRows,
-        {
-          role: session.teamRole,
-          userId: session.userId,
-          isOwner: session.isTrueAdmin,
-          adminAccess: session.adminAccess,
-        },
-        // The program constraint already ran in the DB query above.
-        { programScoped: false },
-      )
-    : [];
-  // WHO IS ON THE BOARD. Built from the tenant's own members, and applied
-  // AFTER filterWebsiteSalesRows — never instead of it. That ordering is the
-  // security property: a rep who hand-types ?rep=<someone-else> has already
-  // been narrowed to their own rows, so the filter can only ever subtract from
-  // what they were allowed to see. It cannot be used to look sideways.
-  const repRoster = session.ok && session.isAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  // Search is applied by the database before the bounded working-set read.
+  // WHO IS ON THE BOARD. Admins use the tenant member directory. Managers use
+  // only the server-resolved OASIS sales roster, and that same allowlist is
+  // applied in the database query. A forged ?rep= id, `unassigned`, founder or
+  // system id is rejected before any lead query runs.
+  // The board's write surfaces (inline edits, bulk actions) post to
+  // /api/manifest/<slug>/... — send the slug this tenant owns, not "oasis".
   // RESEARCHED IS THE PROSPECT POOL, NOT PIPELINE WORK.
   //
   // CC, 2026-08-21: the board showed 30,847 untouched directory rows as a
@@ -173,53 +169,234 @@ export default async function PipelinePage({
   // oasis-ai-cc). Deleting the researched leads would empty the Leads browser
   // too — there is no second copy. So the board starts at `assigned`, and
   // assigning a lead is what puts it on the pipeline.
-  const workingRows = scopedRows.filter((r) => String(r.data.stage || '') !== 'researched');
-
-  const repScopedRows = repFilter
-    ? workingRows.filter((r) => {
-        const owner = typeof r.data.assigned_to === "string" ? r.data.assigned_to.toLowerCase() : "";
-        return repFilter === "unassigned" ? !owner : owner === repFilter;
-      })
-    : workingRows;
-
-  const rows = query
-    ? repScopedRows.filter((r) => {
-        const d = r.data;
-        const hay = [
-          d.name,
-          d.company,
-          d.email,
-          d.phone,
-          d.notes,
-          // Added with the leadgen fields: a rep hunting "dentists in Montreal"
-          // should not have to leave the board to do it. Searching only
-          // name/company/email/phone made every geographic or vertical query
-          // silently return nothing, which reads as an empty pipeline rather
-          // than an unsupported search.
-          d.industry,
-          d.business_city,
-          d.website,
-        ]
-          .filter((v): v is string => typeof v === "string")
-          .join(" ")
-          .toLowerCase();
-        return hay.includes(query.toLowerCase());
-      })
-    : scopedRows;
   // The STAGE LIST has to drop researched too, not just the rows. Filtering one
   // without the other leaves a permanently-empty "Researched" column on the
   // board — which reads as "we have no prospects" when the truth is the
   // opposite: 30,847 of them, deliberately parked in /web-leads until a rep
   // picks one up. An empty column is a worse lie than no column.
-  const stages = (session.ok
-    ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
-    : []
-  ).filter((stage) => stage.key !== "researched");
+  //
+  // oasisBoardStages is that filtered list, defined once in
+  // lib/oasis-lead-create.ts so the stages a lead may be CREATED in are carved
+  // out of exactly the stages this board draws.
+  const stages = session.ok
+    ? oasisBoardStages({
+        teamRole: session.teamRole,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      })
+    : [];
+  // The columns this viewer may add a lead to. Each gets a "+" (D9); the create
+  // route enforces the same list, so a "+" never opens a form it would refuse.
+  // Intersected with the drawn columns, so a "+" can never exist without its
+  // column, even if this page ever narrows `stages` further.
+  const drawnStageKeys = new Set(stages.map((stage) => stage.key));
+  const creatableStageKeys = session.ok
+    ? creatableOasisStages({ isAdmin: session.isAdmin, teamRole: session.teamRole })
+        .map((stage) => stage.key)
+        .filter((key) => drawnStageKeys.has(key))
+    : [];
 
-  const repChip = (label: string, value: string | null, count: number) => {
+  const pipelineAdmin = session.ok
+    ? isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
+    : false;
+  const managerTeamRead =
+    session.ok &&
+    canReadOasisSalesTeamPipeline({
+      teamRole: session.teamRole,
+      tenantSlug,
+    });
+  // ═══ START THE INDEPENDENT READ BEFORE AWAITING THE ROSTER ═══════════════
+  //
+  // The roster read gates the pipeline query (it supplies the assignee
+  // allowlist), so it genuinely cannot be parallelised with it. resolveOwnedSlug
+  // does NOT depend on it and used to sit inside the Promise.all *after* it,
+  // which serialised two independent round trips behind one another.
+  //
+  // Measured on production, logged in as a manager (the role that actually
+  // takes this branch): /pipeline has a ~1.6 s floor even when the search
+  // matches nothing, so the fixed per-request work — not row volume — is what
+  // this page costs. Every round trip removed from that chain is ~125-300 ms.
+  //
+  // Kicked off WITHOUT await so it overlaps the roster read; awaited in the
+  // Promise.all below. Rejections stay attached to the promise and surface
+  // there, exactly as before.
+  const ownedSlugPromise = resolveOwnedSlug(tenantId);
+  // A manager's board is a READ of their team's book. A deactivated rep's
+  // closed and in-delivery leads keep assigned_to for history
+  // (lib/team-activation-rules.ts "keep"), so the board scope and the names
+  // include inactive reps; only the filter chips (activeIds) are active-only.
+  const managerRoster = managerTeamRead
+    ? await getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true })
+    : [];
+  const managerRepRoster = new Map(
+    managerRoster.map((member) => [
+      member.auth_user_id!.trim().toLowerCase(),
+      (member.display_name || member.full_name || member.email).trim(),
+    ]),
+  );
+  const managerActiveRepIds = new Set(
+    managerRoster
+      .filter(isActiveMember)
+      .map((member) => member.auth_user_id!.trim().toLowerCase()),
+  );
+  const assigneeScope = resolveOasisPipelineAssigneeScope({
+    isAdmin: pipelineAdmin,
+    userId: session.ok ? session.userId : null,
+    repFilter,
+    canReadTeam: managerTeamRead,
+    teamRepUserIds: [...managerRepRoster.keys()],
+  });
+
+  // Resolve the directory once. The former path fetched it once to label rows
+  // and again to build the rep chips, after resolving the same session/profile
+  // three times above. Start this read alongside the pipeline query instead.
+  // Names cover every teammate (old rows keep a deactivated rep's name); the
+  // active set decides who gets a filter chip. See buildMemberDirectory.
+  const memberDirectoryPromise = managerTeamRead
+    ? Promise.resolve({ names: managerRepRoster, activeIds: managerActiveRepIds })
+    : buildMemberDirectory(tenantId);
+  const memberNameMapPromise = memberDirectoryPromise.then((directory) => directory.names);
+  // The manager's default roster and an explicit rep chip use the same bounded
+  // one-read path. Treating ?rep= as a scalar scope fell back to one query per
+  // lifecycle stage even though it is simply a one-member roster.
+  const teamAssigneeUnion = assigneeScope.allowed
+    ? assigneeScope.assignedToAny
+      ?? (managerTeamRead && typeof assigneeScope.assignedTo === "string"
+        ? [assigneeScope.assignedTo]
+        : undefined)
+    : undefined;
+  const directAssignee = assigneeScope.allowed && !teamAssigneeUnion
+    ? assigneeScope.assignedTo
+    : undefined;
+
+  // Read the complete bounded sales scope, then remove released claims before
+  // calculating exact stage totals and the selected 100-row page. Program,
+  // role/rep, working stages, and search stay server-side. Reaching the 2,000
+  // row safety ceiling fails loudly instead of rendering partial counts.
+  let pipelineWindow;
+  let memberNameMap: Map<string, string>;
+  let ownedSlug: string | null;
+  try {
+    [pipelineWindow, memberNameMap, ownedSlug] = await Promise.all([
+      listOasisPipelineWindow({
+        tenantId,
+        stageKeys: assigneeScope.allowed ? stages.map((stage) => stage.key) : [],
+        requestedStage: stageFilter,
+        requestedPage,
+        salesProgram: boardFilter.salesProgram,
+        salesMotion: boardFilter.salesMotion,
+        assignedTo: assigneeScope.allowed ? directAssignee : undefined,
+        assignedToAny: assigneeScope.allowed ? teamAssigneeUnion : undefined,
+        viewerUserId:
+          assigneeScope.allowed && !pipelineAdmin && !managerTeamRead
+            ? session.ok
+              ? session.userId
+              : null
+            : null,
+        fulfillmentOwnerId:
+          session.ok && session.teamRole.trim().toLowerCase() === "builder"
+            ? session.userId
+            : null,
+        cycle: CURRENT_OASIS_PIPELINE_CYCLE,
+        query,
+      }),
+      memberNameMapPromise,
+      ownedSlugPromise,
+    ]);
+  } catch (error) {
+    console.error("[pipeline.rows]", error);
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Pipeline unavailable" subtitle="The live lead query failed; no counts were guessed." />
+        <Card>
+          <EmptyState message="Refresh to retry. If this continues, check the Turso data connection." />
+        </Card>
+      </div>
+    );
+  }
+
+  const named = pipelineWindow.rows.map((row) => ({
+    ...row,
+    data: withAssignedName(row.data, memberNameMap),
+  }));
+  /**
+   * The website score, joined server-side.
+   *
+   * Every other business fact -- address, city, industry, website, the
+   * condition sentence -- was already on these rows and simply never read by
+   * the board's row model. The SCORE is the one exception: it lives in
+   * leadgen_site_audits keyed by webdev_source_business_id, not on the lead.
+   *
+    * Resolved through the SAME score-index assembler /web-leads uses, but with
+    * indexed reads for only this page's business ids. The number and precedence
+    * stay identical without scanning ~50K audit rows on every cold board.
+   *
+   * GATED ON THE TENANT. Three slugs render this page (`oasis`, `oasis-ai-cc`,
+    * `oasis-webdev`) but every query inside the score resolver is pinned to
+   * WEBDEV_TENANT_ID, which is `oasis-ai-cc`. Ungated, another tenant's board
+   * would resolve its rows against a DIFFERENT tenant's audit index: a miss
+   * renders "Not scored yet" on a lead that may be scored, and a colliding
+   * business id would show one tenant a number measured from another tenant's
+   * website. `oasis-webdev` holds 53 real leads, so this was live, not
+   * theoretical. A positive check on the id we know, never a denylist.
+   *
+   * Applied to `pipelineWindow.rows`, which the database has already scoped,
+   * de-researched, rep-filtered and paged -- so this resolves one screen of
+   * rows rather than thirty-one thousand.
+   */
+  const rows =
+    tenantId === WEBDEV_TENANT_ID
+      ? await attachWebsiteScores(named)
+      : named;
+  // Counts on the old rep chips came from the current row slice and looked
+  // exact while omitting old deals. Keep the filters, but show the selected
+  // board's exact total in the pipeline itself.
+  const { activeIds: activeMemberIds } = await memberDirectoryPromise;
+  // Both audiences' name maps carry deactivated people; a chip is a live
+  // control, so only active ones get one.
+  const repRoster = new Map(
+    [...(session.ok && pipelineAdmin ? memberNameMap : managerRepRoster)].filter(([id]) =>
+      activeMemberIds.has(id),
+    ),
+  );
+
+  // A manager who also carries a book had to spot their own name in a row of
+  // ten colleagues to see just their leads. Their chip is pinned first and
+  // marked "(you)" instead.
+  //
+  // Matched case-INSENSITIVELY on purpose: the two roster paths key
+  // differently. managerRepRoster lowercases auth_user_id; buildMemberNameMap
+  // (the admin path, lib/assigned-names.ts:34) stores it raw. A lookup on
+  // either spelling alone would render the chip for one audience and silently
+  // never render it for the other — and a control that is simply absent gives
+  // nobody anything to report. The roster's OWN key is what the chip then
+  // sends, so the filter it produces is byte-identical to the name chip it
+  // replaces.
+  const viewerId = session.ok ? String(session.userId || "").trim() : "";
+  const viewerRepEntry = viewerId
+    ? [...repRoster.entries()].find(
+        ([id]) => id.trim().toLowerCase() === viewerId.toLowerCase(),
+      )
+    : undefined;
+
+  const hrefWith = (changes: { stage?: string | null; page?: number | null; rep?: string | null }) => {
+    const params = new URLSearchParams();
+    const nextStage = changes.stage === undefined ? pipelineWindow.activeStage : changes.stage;
+    const nextRep = changes.rep === undefined ? repFilter : changes.rep;
+    if (nextStage) params.set("stage", nextStage);
+    if (query) params.set("q", query);
+    if (nextRep) params.set("rep", nextRep);
+    if (changes.page && changes.page > 1) params.set("page", String(changes.page));
+    return `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
+  };
+  const stageHrefs = Object.fromEntries(
+    stages.map((stage) => [stage.key, hrefWith({ stage: stage.key, page: null })]),
+  );
+
+  const repChip = (label: string, value: string | null) => {
     const active = (value ?? null) === repFilter;
     const params = new URLSearchParams();
-    if (stageFilter) params.set("stage", stageFilter);
+    if (pipelineWindow.activeStage) params.set("stage", pipelineWindow.activeStage);
     if (query) params.set("q", query);
     if (value) params.set("rep", value);
     const href = `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
@@ -233,7 +410,7 @@ export default async function PipelinePage({
             : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg hover:border-fg-dim"
         }`}
       >
-        {label} <span className="tabular-nums opacity-70">{count}</span>
+        {label}
       </Link>
     );
   };
@@ -248,32 +425,51 @@ export default async function PipelinePage({
       {repRoster.size > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
-          {repChip("Everyone", null, workingRows.length)}
-          {[...repRoster.entries()].map(([id, name]) =>
-            repChip(
-              name,
-              id,
-              workingRows.filter(
-                (r) => typeof r.data.assigned_to === "string" && r.data.assigned_to.toLowerCase() === id.toLowerCase(),
-              ).length,
-            ),
-          )}
-          {repChip("Unassigned", "unassigned", workingRows.filter((r) => !r.data.assigned_to).length)}
+          {repChip("Everyone", null)}
+          {viewerRepEntry && repChip(`${viewerRepEntry[1]} (you)`, viewerRepEntry[0])}
+          {[...repRoster.entries()]
+            // Not rendered twice: the pinned chip above IS this person's chip.
+            .filter(([id]) => id !== viewerRepEntry?.[0])
+            .map(([id, name]) => repChip(name, id))}
+          {pipelineAdmin && repChip("Unassigned", "unassigned")}
         </div>
       )}
 
       <LeadPipelineView
-        slug="oasis"
+        slug={ownedSlug || "oasis"}
         entityName="lead"
         entityLabel="Lead"
         stages={stages}
         stageField="stage"
         rows={rows}
-        stageFilter={stageFilter}
+        stageFilter={pipelineWindow.activeStage}
         query={query}
         basePath="/pipeline"
         variant="oasis"
         canManage={session.ok && session.isAdmin}
+        // Every sales role may ADD a lead they sourced; the lead is stamped to
+        // whoever created it, server-side. Administering other people's leads
+        // (bulk assign, new-from-application) stays on canManage above.
+        canCreateLead={creatableStageKeys.length > 0}
+        creatableStageKeys={creatableStageKeys}
+        resultWindow={{
+          exactStageCounts: pipelineWindow.stageCounts,
+          exactTotal: pipelineWindow.total,
+          activeStage: pipelineWindow.activeStage,
+          page: pipelineWindow.page,
+          pageSize: pipelineWindow.pageSize,
+          shownFrom: pipelineWindow.shownFrom,
+          shownTo: pipelineWindow.shownTo,
+          hasPrevious: pipelineWindow.hasPrevious,
+          hasNext: pipelineWindow.hasNext,
+          truncatedStages: pipelineWindow.truncatedStages,
+          stageHrefs,
+          allStagesHref: hrefWith({ stage: null, page: null }),
+          previousHref: pipelineWindow.hasPrevious
+            ? hrefWith({ page: pipelineWindow.page - 1 })
+            : null,
+          nextHref: pipelineWindow.hasNext ? hrefWith({ page: pipelineWindow.page + 1 }) : null,
+        }}
       />
     </div>
   );

@@ -38,6 +38,7 @@ import {
 } from "@/lib/sunbiz-templates-library";
 import { isLeadChannelEnabled } from "@/lib/leads/channel-registry";
 import { clairEnabledForTenantSlug } from "@/lib/clair/tenant-access";
+import { savesTypedRecipient, typedRecipientNote } from "@/lib/leads/typed-recipient";
 
 export type DocRow = {
   id: string;
@@ -438,6 +439,7 @@ export function LeadFileBody({
           </div>
 
           <DrawerFooter
+            tenantSlug={tenantSlug}
             recordId={recordId}
             entity={entity}
             recordData={record}
@@ -2305,11 +2307,13 @@ function CallButton({ recordId, phone }: { recordId: string; phone: string | nul
 }
 
 function DrawerFooter({
+  tenantSlug,
   recordId,
   entity,
   recordData,
   onChange,
 }: {
+  tenantSlug: string;
   recordId: string;
   entity: "lead" | "application";
   recordData: Record<string, unknown>;
@@ -2379,6 +2383,7 @@ function DrawerFooter({
           drawer without compacting the merchant info / tabs above. */}
       {mode === "email" && (
         <EmailComposer
+          tenantSlug={tenantSlug}
           recordId={recordId}
           entity={entity}
           toEmail={str(recordData.email)}
@@ -2433,13 +2438,18 @@ function DrawerFooter({
 
 function EmailComposer({
   recordId,
-  entity,
+  // Was read only by the removed "No email on this {entity}." early return.
+  // Kept in the signature because every call site passes it and the prop is
+  // meaningful; underscored so the linter knows the disuse is deliberate.
+  entity: _entity,
+  tenantSlug,
   toEmail,
   leadName,
   leadCompany,
   onClose,
   onChange,
 }: {
+  tenantSlug: string;
   recordId: string;
   entity: "lead" | "application";
   toEmail: string | null;
@@ -2448,10 +2458,39 @@ function EmailComposer({
   onClose: () => void;
   onChange?: () => void | Promise<void>;
 }) {
+  // The recipient is EDITABLE (CC 2026-09-06). It used to be fixed to whatever
+  // address was on the record, and when there was none this composer refused to
+  // open at all — it rendered "No email on this {entity}." and nothing else.
+  //
+  // Two things that cost reps real sends:
+  //   1. 749 of 2769 SunBiz pipeline records (27%) carry no email address, so
+  //      "Send Email" was a dead end on better than one lead in four.
+  //   2. The case CC actually described — a prospect on the phone saying "just
+  //      email me at ..." — was impossible even on the 2020 records that DO
+  //      have an address, because the rep could not send anywhere else.
+  //
+  // The API route already accepted an arbitrary `to_email` and validated it
+  // (app/api/leads/[id]/email/route.ts:167), checked suppression and enforced
+  // lead access. Nothing on the server needed to change; the UI was the whole
+  // blocker.
+  const [to, setTo] = useState((toEmail || "").trim());
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  /** A send whose outcome we could not confirm — see the catch block below.
+   *  Relabels Send to "Send again" so a resend is a deliberate act rather than
+   *  a reflex against a message that may already be on its way. */
+  const [uncertain, setUncertain] = useState(false);
+  // Mirrors EMAIL_RE in the route. Client-side it only gates the Send button —
+  // the server re-validates, because a client check is a convenience, never a
+  // boundary.
+  const toValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to.trim());
+  const isNewAddress = to.trim().toLowerCase() !== (toEmail || "").trim().toLowerCase();
+  // Whether a send to a new address also saves it onto the record: OASIS yes
+  // (#401), SunBiz no, as before #401. The note under the recipient box is
+  // chosen from this same answer so it cannot promise what won't happen.
+  const savesTyped = savesTypedRecipient(tenantSlug);
   // Manual SunBiz template picker (CC 2026-06-23). Selecting a template fills
   // subject + body, personalized to this lead; the operator edits before
   // sending. send_gateway appends the brand signature, so templates carry no
@@ -2470,19 +2509,41 @@ function EmailComposer({
     setSubject(r.subject);
     setBody(r.body);
   }
-  if (!toEmail) {
-    return (
-      <ComposerShell title="Email" onClose={onClose}>
-        <div className="text-xs text-fg-dim italic">No email on this {entity}.</div>
-      </ComposerShell>
-    );
-  }
+  // NOTE: there is deliberately no early return for a missing address any more.
+  // A rep with a prospect on the phone needs to be able to type one in.
+  //
   // POSTs to /api/leads/[id]/email which queues the send via
   // lead_interactions(status=queued) + emits the dashboard-queued event
   // for send_gateway.py to pick up. The drawer is fully decoupled from
   // SMTP credentials — the daemon side does the actual delivery.
   return (
-    <ComposerShell title={`Email · ${toEmail}`} onClose={onClose}>
+    <ComposerShell title={to.trim() ? `Email · ${to.trim()}` : "Email"} onClose={onClose}>
+      <div>
+        <input
+          type="email"
+          inputMode="email"
+          autoComplete="off"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          placeholder="name@company.com"
+          aria-label="Recipient email address"
+          aria-invalid={to.trim().length > 0 && !toValid}
+          title="Who this goes to. Pre-filled from the lead when we have an address; type one in when they give it to you on a call."
+          className={`w-full text-xs px-2 py-1.5 rounded-md bg-bg-deep border text-fg ${
+            to.trim().length > 0 && !toValid ? "border-red-500/60" : "border-bg-border"
+          }`}
+        />
+        {to.trim().length > 0 && !toValid && (
+          <div className="mt-1 text-[11px] text-red-400">
+            That address doesn&apos;t look right — check for a typo before sending.
+          </div>
+        )}
+        {toValid && isNewAddress && (
+          <div className="mt-1 text-[11px] text-fg-dim">
+            {typedRecipientNote({ saves: savesTyped, hasAddressOnFile: Boolean(toEmail) })}
+          </div>
+        )}
+      </div>
       <select
         value={templateId}
         onChange={(e) => applyTemplate(e.target.value)}
@@ -2531,17 +2592,18 @@ function EmailComposer({
         </div>
         <button
           type="button"
-          disabled={pending || !subject.trim() || !body.trim()}
+          disabled={pending || !toValid || !subject.trim() || !body.trim()}
           onClick={async () => {
             setPending(true);
             setStatus(null);
+            const recipient = to.trim();
             try {
               const r = await fetch(`/api/leads/${recordId}/email`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "include",
                 body: JSON.stringify({
-                  to_email: toEmail,
+                  to_email: recipient,
                   subject,
                   body,
                 }),
@@ -2552,30 +2614,91 @@ function EmailComposer({
                 // when available (send_status.via === 'gmail_oauth'), else it
                 // queues to the submissions@ daemon. Reflect the real outcome.
                 const ss = j.send_status as
-                  | { status?: string; via?: string; from_address?: string }
+                  | { status?: string; via?: string; from_address?: string; reason?: string }
                   | undefined;
+                setUncertain(ss?.status === "delivery_unknown");
+                if (ss?.status === "delivery_unknown") {
+                  setStatus(
+                    "Delivery could not be confirmed. Do not resend yet; check the timeline or recipient mailbox first",
+                  );
+                  if (onChange) await onChange();
+                  return;
+                }
+                if (ss?.status === "blocked") {
+                  setStatus(
+                    `Send blocked: ${ss.reason || "review the mailbox configuration or recipient consent"}`,
+                  );
+                  if (onChange) await onChange();
+                  return;
+                }
                 let base = "Queued";
                 if (ss?.status === "sent" && ss?.via === "gmail_oauth" && ss?.from_address) {
                   base = `Sent from ${ss.from_address}`;
                 } else if (ss?.status === "sent") {
                   base = "Sent";
                 }
-                setStatus(j.stage_bumped ? `${base} · stage → ${j.stage_bumped}` : base);
+                // Save the address onto the lead when the rep typed a new one.
+                // AFTER a successful send, never before: persisting an address
+                // we failed to deliver to would quietly overwrite a good record
+                // with a typo. Best-effort — a failed save must not turn a sent
+                // email into an error the rep thinks means "not sent".
+                // OASIS only: on SunBiz the typed address is used for this send
+                // and the merchant's email of record is left alone, as it was
+                // before #401 (set-field would also mirror it onto the linked
+                // application). See lib/leads/typed-recipient.ts.
+                let savedNote = "";
+                if (isNewAddress && savesTyped) {
+                  try {
+                    const sf = await fetch(`/api/leads/${recordId}/set-field`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      credentials: "include",
+                      body: JSON.stringify({ key: "email", value: recipient }),
+                    });
+                    const sj = await sf.json().catch(() => ({}));
+                    savedNote = sf.ok && sj.ok ? " · saved to lead" : " · (address not saved)";
+                  } catch {
+                    savedNote = " · (address not saved)";
+                  }
+                }
+                setStatus(
+                  (j.stage_bumped ? `${base} · stage → ${j.stage_bumped}` : base) + savedNote,
+                );
                 setSubject("");
                 setBody("");
                 if (onChange) await onChange();
+              } else if (j?.delivery_state === "not_started") {
+                setUncertain(false);
+                setStatus(j.message || j.error || `Failed (${r.status})`);
               } else {
-                setStatus(j.error || `Failed (${r.status})`);
+                setUncertain(true);
+                setStatus(
+                  j?.message ||
+                    "Delivery could not be confirmed. Check the timeline before resending.",
+                );
               }
             } catch (e) {
-              setStatus(String((e as Error).message || e));
+              // NOT a plain failure message. This composer posts to the SAME
+              // /api/leads/[id]/email route as LeadQuickEmail, which commits the
+              // queued interaction row before it finishes its own work and
+              // carries no idempotency key — so a thrown error or a lost
+              // response can leave a message that still gets delivered. Saying
+              // "Failed" here is what makes an operator press Send again and
+              // mail the owner twice. Same wording and same latch as the
+              // pipeline composer; CodeRabbit flagged that only one of the two
+              // had the guard.
+              setUncertain(true);
+              setStatus(
+                `Couldn't confirm the send (${String((e as Error).message || e)}). It may already ` +
+                  "have been queued and may still go out. Check the timeline before resending.",
+              );
             } finally {
               setPending(false);
             }
           }}
           className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
         >
-          {pending ? "Sending…" : "Send"}
+          {pending ? "Sending…" : uncertain ? "Send again" : "Send"}
         </button>
       </div>
     </ComposerShell>

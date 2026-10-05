@@ -26,7 +26,7 @@
  *   }
  */
 
-import { inferText } from "./subscription-infer";
+import { inferForTenant } from "./ai/infer";
 
 const MAX_TOKENS = 2400;
 
@@ -86,12 +86,11 @@ export async function draftAutomation(
     `Generate the automation. Be specific about the cron schedule — if they said "every morning" pick 0 8 * * *, if "weekly" pick a sensible day + time, etc.`;
 
   // Subscription, not the paid API. See lib/subscription-infer.ts.
-  const inf = await inferText({
+  const inf = await inferForTenant(opts.tenantId, {
     source: "automation-drafter",
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

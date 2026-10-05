@@ -19,6 +19,37 @@
  * existed there.
  */
 
+import { torontoToday } from "@/lib/founders-finances/fx";
+import { quarterOf } from "@/lib/founders-finances/tax";
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/** "2026-07-01" → "July 1, 2026". */
+function longDay(iso: string): string {
+  return `${MONTH_NAMES[Number(iso.slice(5, 7)) - 1]} ${Number(iso.slice(8, 10))}, ${iso.slice(0, 4)}`;
+}
+
+/**
+ * The tax quick action's prompt for the calendar quarter containing `today`
+ * (Montreal's date, YYYY-MM-DD). OASIS is in Quebec: GST and QST, both filed
+ * with Revenu Québec on one combined return (FPZ-500), never "GST/HST". It
+ * asks the agent to check registration rather than assume it, and to say
+ * what the books do not cover rather than estimate around it.
+ */
+export function taxQuarterPrompt(today: string): string {
+  const q = quarterOf(today);
+  const [year, n] = q.label.split("-Q");
+  const lastDay = new Date(`${q.to}T00:00:00Z`);
+  lastDay.setUTCDate(lastDay.getUTCDate() - 1);
+  const span = `${longDay(q.from)} to ${longDay(lastDay.toISOString().slice(0, 10))}`;
+  return (
+    `What does OASIS owe in Quebec sales tax for Q${n} ${year} (${span})? ` +
+    "First check whether OASIS is registered for GST and QST; if it is not, show where it stands against the CA$30,000 small-supplier threshold instead, and say which revenue the books do not count yet. " +
+    "If it is registered, give GST (5%) and QST (9.975%) collected on sales, the input tax credits (ITC) and refunds (ITR) on purchases, and the net to remit on the combined GST/QST return (FPZ-500) to Revenu Québec. " +
+    "Tell me what to set aside this week, and do not estimate anything the books do not record."
+  );
+}
+
 export type AgentSlug =
   | "bravo"
   | "atlas"
@@ -79,8 +110,12 @@ export const QUICK_ACTIONS: QuickAction[] = [
   },
   {
     agent: "atlas", title: "What's owing on tax?", category: "Money", icon: "FileText",
-    description: "Quarterly tax obligation, estimated GST/HST, deductible spend so far.",
-    prompt: "Calculate my Q2 2026 tax obligation. Include GST/HST, income tax, deductibles I haven't claimed yet, and tell me what to set aside this week.",
+    description: "This quarter's Quebec GST/QST position, and what to set aside.",
+    // Computed on every read, so the quarter is always the current one (it
+    // said "Q2 2026" and "GST/HST", the other provinces' tax, into Q3).
+    get prompt() {
+      return taxQuarterPrompt(torontoToday());
+    },
   },
   {
     agent: "atlas", title: "FIRE projection", category: "Money", icon: "TrendingUp",
@@ -221,5 +256,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
 
 export function quickActionsFor(agentSlugs: string[]): QuickAction[] {
   const set = new Set(agentSlugs);
-  return QUICK_ACTIONS.filter((q) => set.has(q.agent));
+  // Plain copies: a computed prompt (the tax quarter) is read now, so a page
+  // hands the client plain data, never a getter.
+  return QUICK_ACTIONS.filter((q) => set.has(q.agent)).map((q) => ({ ...q }));
 }

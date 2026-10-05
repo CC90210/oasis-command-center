@@ -18,6 +18,9 @@
  * "/"; the layout and the auth gate both see "/home".
  */
 
+import { resolveBookingUrl } from "@/lib/booking-link";
+import { OASIS_SUPPORT_EMAIL } from "@/lib/legal/constants";
+
 /** Where an anonymous "/" is rewritten to. Never redirect — a redirect
  *  would move the brand apex to /home in the address bar and in search. */
 /**
@@ -45,6 +48,7 @@
  *
  * Pinned by tests/shell-boundary.test.ts.
  */
+
 export const SHELL_AMBIGUOUS_PATHS: readonly string[] = ["/"];
 
 export const MARKETING_HOME_PATH = "/home";
@@ -56,7 +60,9 @@ export const MARKETING_PATHS = [
   "/work",
   "/about",
   "/contact",
-  "/start", // the former /welcome entry-path page
+  // "/start" (the former /welcome entry-path page) was removed 2026-09-29 (F0
+  // containment): it fed the developer install funnel (/configure, /download),
+  // which cloned a repo that is now private. The page calls notFound().
 ] as const;
 
 /**
@@ -75,23 +81,31 @@ export const ALL_MARKETING_PATHS: readonly string[] = [
 /** Canonical origin, used for metadata/sitemap/OG absolute URLs. */
 export const SITE_ORIGIN = "https://oasisai.work";
 
-/** CC's booking link — the one CTA that leaves the site. */
-export const BOOKING_URL = "https://calendar.app.google/tpfvJYBGircnGu8G8";
+/**
+ * CC's booking link — the one CTA that leaves the site. MAY BE EMPTY.
+ *
+ * It used to fall back to a hardcoded calendar.app.google URL. That schedule
+ * was deleted at some point and the site kept serving it, so "Book a call" on
+ * /contact and /work sent every visitor to "Appointment not found" — verified
+ * live on 2026-09-09. A default cannot promise that a resource owned outside
+ * this repo still exists, so there is no default any more: callers render the
+ * CTA only when there is a link, and offer email when there is not.
+ *
+ * Resolution lives in lib/booking-link.ts so the site, the quick email and the
+ * qualified-lead email cannot drift onto different values again.
+ */
+export const BOOKING_URL = resolveBookingUrl();
 
 /**
- * The address a prospect should actually write to.
+ * The address a prospect or a client should write to: support@oasisai.work.
  *
- * NOT lib/legal/constants.ts's LEGAL_CONTACTS.support. Those four role
- * aliases (privacy@ / legal@ / dmca@ / support@) are what the legal pages
- * publish, and at least support@ has no mailbox behind it — a contact
- * route on the marketing site that silently bounces is worse than no
- * contact route at all. This is the founder's real, monitored inbox.
- *
- * The legal pages deliberately still use their own constants: those
- * addresses appear in an audited policy document and changing them is a
- * change to a published legal commitment, not a copy tweak.
+ * Re-exported from lib/legal/constants.ts (OASIS_SUPPORT_EMAIL), never retyped,
+ * so the marketing site, the error pages, the setup page, the opt-out page and
+ * the legal pages cannot publish two different addresses. Until 2026-10-01 this
+ * was the founder's own inbox; since support@ exists as its own Workspace user,
+ * the founder's address is an identity (his login, his calendar), not a contact.
  */
-export const CONTACT_EMAIL = "conaugh@oasisai.work";
+export const CONTACT_EMAIL = OASIS_SUPPORT_EMAIL;
 
 /** The live B2B qualification funnel the inline CTA form feeds. */
 export const AUDIT_FUNNEL = {

@@ -19,6 +19,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { aiServicesWithKey } from "@/lib/queries";
 import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
+import { connectorHref } from "@/lib/os/connectors";
 import type { ManifestRequiredService } from "@/lib/manifest/schema";
 
 export type ReadinessItem = {
@@ -109,7 +110,7 @@ export async function loadReadinessReport(args: {
           : "Not connected — outbound mail will fall back to the shared address.",
         cta: hasGmail
           ? undefined
-          : { href: "/settings#integrations", label: "Connect Gmail" },
+          : { href: connectorHref("google-workspace"), label: "Connect Gmail" },
       });
     }
   }
@@ -143,7 +144,14 @@ export async function loadReadinessReport(args: {
           .in("service", credentialServices)
           .then((r) => (r.data || []) as { service: string }[])
       : Promise.resolve([] as { service: string }[]),
-    needsAiCheck ? aiServicesWithKey(tenantId) : Promise.resolve(new Set<string>()),
+    // null = the key read failed (aiServicesWithKey throws): the item says
+    // "Couldn't check", never "No AI provider key on file".
+    needsAiCheck
+      ? aiServicesWithKey(tenantId).catch((err) => {
+          console.error("[setup-readiness] AI key read failed", err instanceof Error ? err.message : err);
+          return null;
+        })
+      : Promise.resolve(new Set<string>()),
   ]);
 
   const credentialPresent = new Set<string>();
@@ -163,6 +171,15 @@ export async function loadReadinessReport(args: {
     }
 
     if (kind === "ai_provider") {
+      if (aiKeySet === null) {
+        tenant.push({
+          key: `tenant.${req.service}`,
+          label: req.label,
+          status: "info",
+          detail: "Couldn't check the AI provider keys just now. This is not the same as none on file; reload to try again.",
+        });
+        continue;
+      }
       const haveAny = aiKeySet.size > 0;
       tenant.push({
         key: `tenant.${req.service}`,
@@ -187,7 +204,7 @@ export async function loadReadinessReport(args: {
       detail: present ? "Key on file." : req.detail || "Not yet wired.",
       cta: present
         ? undefined
-        : req.cta || { href: "/settings#integrations", label: "Add key" },
+        : req.cta || { href: "/settings/connections", label: "Add key" },
     });
   }
 
@@ -206,6 +223,14 @@ export async function loadReadinessReport(args: {
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lender");
     const lenderCount = lendersRes.count || 0;
+    // The workspace's own lender table (/t/<slug>/<path>), when its manifest
+    // has one. The CTA used to go to top-level /lenders, a Coming Soon
+    // placeholder that could not add a lender and is now retired.
+    const lenderPage = (manifest?.pages || []).find((p) => p.entity === "lender");
+    const lendersHref =
+      lenderPage && manifest?.tenant_slug
+        ? `/t/${manifest.tenant_slug}/${lenderPage.path.replace(/^\/+/, "")}`
+        : null;
     tenant.push({
       key: "tenant.lenders",
       label: "Lender catalog",
@@ -217,8 +242,8 @@ export async function loadReadinessReport(args: {
             ? `${lenderCount} lender(s) — add 2+ more for meaningful ranking.`
             : `${lenderCount} lenders.`,
       cta:
-        lenderCount < 3
-          ? { href: "/lenders", label: "Add lenders" }
+        lenderCount < 3 && lendersHref
+          ? { href: lendersHref, label: "Add lenders" }
           : undefined,
     });
   }

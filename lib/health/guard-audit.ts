@@ -15,6 +15,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { auditInstruments, summarize, type AuditFinding, type InstrumentReading } from "./guard-audit-core";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -187,6 +188,9 @@ export async function announceGuardAudit(
   result: GuardAuditResult,
   opts: { nowMs?: number } = {},
 ): Promise<{ alerted: string[] }> {
+  // A retired tenant's guards have nothing left to guard; paging about them
+  // would also write health_alert_state for a tenant being deleted.
+  if (isRetiredTenant(tenantId)) return { alerted: [] };
   const nowMs = opts.nowMs ?? Date.now();
   const db: Db = getServiceSupabase();
   const alerted: string[] = [];

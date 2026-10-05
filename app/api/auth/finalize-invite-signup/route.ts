@@ -13,9 +13,10 @@
  * This route:
  *   1. Auto-confirms the user's email via service-role admin
  *      (idempotent — harmless if already confirmed)
- *   2. Redeems the invite via the existing service-role redeemInvite
- *      helper (which validates token + email-matches-pinned + atomic
- *      RPC)
+ *   2. Redeems the invite via the service-role redeemInvite helper, which
+ *      validates token + email-matches-pinned, decides the member's profile
+ *      and claims the invite and writes that profile in ONE batch
+ *      (2026-09-30; see app/api/auth/redeem-invite/route.ts).
  *
  * Caller then redirects to /login?invite=...&email=... so the invitee
  * signs in with the password they just created.
@@ -23,19 +24,16 @@
  * Security model:
  *   - Unauthed by design — the user has no session yet.
  *   - redeemInvite() validates the raw_token is still valid AND that
- *     the user_id's email matches the invite's pinned email (when
- *     pinned), so an attacker holding a stale token can't redeem it
- *     onto an unrelated account.
- *   - For non-pinned invites the security floor is the same as the
- *     existing /signup flow: anyone with the raw token can sign up.
- *     This route does not widen that surface.
+ *     the user_id's email matches the invite's pinned email. Legacy
+ *     email-less invites fail closed and cannot reach this path.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { redeemInvite } from "@/lib/team";
-import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { previewInvite, redeemInvite } from "@/lib/team";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { adminConfirmEmail } from "@/lib/turso-auth-admin";
+import { adminConfirmEmail, adminGetUser } from "@/lib/turso-auth-admin";
+import { confirmInviteBoundEmail } from "@/lib/invite-account-recovery";
+import { inviteRedeemFailure } from "@/lib/invite-redeem-errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,90 +66,57 @@ export async function POST(req: NextRequest) {
 
   const db = getServiceSupabase();
 
-  // 1. Auto-confirm the email. The invitee clicked a personalized link
-  //    sent to this address — that's already proof of possession.
-  //
-  //    adminConfirmEmail replaces auth.admin.updateUserById: under Turso it
-  //    stamps _supabase_auth_users.email_confirmed_at, under Supabase it still
-  //    calls GoTrue. It fails — rather than reporting a no-op success — when
-  //    the user id does not resolve to a live account, which is the guard that
-  //    keeps step 2 from redeeming an invite onto a phantom user.
-  const confirmed = await adminConfirmEmail(db, userId);
-  if (!confirmed.ok) {
+  // 1. Bind the active, email-pinned invite to this exact auth identity before
+  //    making the privileged email-confirmation mutation. This route is
+  //    intentionally unauthenticated, so neither a bare user UUID nor an invite
+  //    for a different mailbox is sufficient authority to confirm an account.
+  const confirmation = await confirmInviteBoundEmail(
+    { rawToken, userId },
+    {
+      previewInvite: async (token) => {
+        const preview = await previewInvite(token);
+        return preview ? { emailPinned: preview.email_pinned } : null;
+      },
+      getUserEmail: async (authUserId) => {
+        const authUser = await adminGetUser(db, authUserId);
+        return authUser.ok ? authUser.value.email : null;
+      },
+      confirmUserEmail: async (authUserId) => {
+        const confirmed = await adminConfirmEmail(db, authUserId);
+        return confirmed.ok ? { ok: true } : { ok: false, error: confirmed.error };
+      },
+    },
+  );
+  if (!confirmation.ok && confirmation.stage === "preflight") {
     return NextResponse.json(
-      { ok: false, error: "email_confirm_failed", message: confirmed.error },
+      { ok: false, error: "redeem_failed", message: "invalid invite or account binding" },
+      { status: 400 },
+    );
+  }
+  if (!confirmation.ok) {
+    return NextResponse.json(
+      { ok: false, error: "email_confirm_failed", message: confirmation.error },
       { status: 500 },
     );
   }
 
-  // 2. Redeem the invite. redeemInvite() validates the token + checks
-  //    the user's email matches the invite's pinned email (when set).
+  // 2. Redeem the invite. redeemInvite() re-validates the token, checks the
+  //    user's email matches the invite's pinned email, and applies the same
+  //    role/manifest roster policy as authenticated redemption, in the same
+  //    write as the claim. A failure leaves the invite unclaimed.
   const result = await redeemInvite(rawToken, userId);
   if (!result.ok) {
+    const failure = inviteRedeemFailure(result.error);
     return NextResponse.json(
-      { ok: false, error: "redeem_failed", message: result.error },
-      { status: 400 },
+      { ok: false, error: failure.code, message: failure.message },
+      { status: failure.status },
     );
-  }
-
-  // 3. Set primary_agent + agents_enabled from the tenant manifest. The
-  //    redeem RPC stamps platform defaults (primary_agent='bravo',
-  //    agents_enabled=['bravo']) on new profile rows; for tenants like
-  //    SunBiz whose actual agent package is [solara, helios], that leaves
-  //    the new invitee chatting with the wrong persona AND with Bravo
-  //    surfacing in the /agent chat picker (which reads agents_enabled).
-  //
-  //    BOTH columns must be overwritten — fixing primary_agent alone left
-  //    agents_enabled stuck at ['bravo'], so the chat shell still rendered
-  //    Bravo as the user's enabled agent. Caught 2026-06-01 when a SunBiz
-  //    user was about to ship without this fix.
-  //
-  //    Soft-fail — if the manifest is missing or carries no enabled agents,
-  //    leave the profile as-is (default 'bravo' is at least functional).
-  try {
-    const { data: manifestRow } = await db
-      .from("tenant_manifests")
-      .select("manifest")
-      .eq("tenant_id", result.tenantId)
-      .maybeSingle();
-    const manifest = manifestRow?.manifest as { agents?: Array<{ slug: string; primary?: boolean; enabled?: boolean }> } | null;
-    const enabledSlugs = (manifest?.agents || [])
-      .filter((a) => a.enabled !== false)
-      .map((a) => a.slug);
-    const primarySlug = manifest?.agents?.find((a) => a.primary && a.enabled !== false)?.slug;
-    const patch: Record<string, unknown> = {};
-    if (primarySlug) patch.primary_agent = primarySlug;
-    if (enabledSlugs.length > 0) patch.agents_enabled = enabledSlugs;
-    if (Object.keys(patch).length > 0) {
-      await db
-        .from("user_profiles")
-        .update(patch)
-        .eq("auth_user_id", userId);
-    }
-  } catch {
-    // Manifest lookup is best-effort; default 'bravo' is a safe fallback.
-  }
-
-  // Resolve the tenant's Command Center profile slug so the signup page
-  // can route the invitee directly to /t/<slug> after the bounce through
-  // /login. Skips the redundant new-tenant wizard (2026-05-29 fix).
-  let tenantSlug: string | null = null;
-  try {
-    const { data: tenant } = await db
-      .from("tenants")
-      .select("slug, custom_fields")
-      .eq("id", result.tenantId)
-      .maybeSingle();
-    if (tenant) tenantSlug = resolveClientProfileSlug(tenant);
-  } catch {
-    // Soft-fail — null slug just routes through "/" which the welcome
-    // page's own redirect (added in this same commit) catches.
   }
 
   return NextResponse.json({
     ok: true,
     tenant_id: result.tenantId,
     team_role: result.teamRole,
-    tenant_slug: tenantSlug,
+    tenant_slug: result.tenantSlug,
   });
 }

@@ -13,7 +13,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveTenantId } from "@/lib/api-auth";
 import { clearUserIntegration } from "@/lib/user-integration-store";
 
 export const runtime = "nodejs";
@@ -36,13 +37,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "missing_service" }, { status: 400 });
   }
 
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }

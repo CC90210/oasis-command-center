@@ -1,0 +1,255 @@
+/**
+ * One definition of what a website-sales lead is made of, and one rule for
+ * when it belongs to the OASIS board.
+ *
+ * WHY THIS EXISTS. Six different code paths write leads into tenant_records
+ * — the manifest form, /api/leads/import, the chat importer, the import
+ * wizard, cold-list promotion, and public form intake — and each had grown
+ * its own field mapping. Only one of them (lib/leads-import-service.ts)
+ * carried the website research and stamped sales_program. The board query
+ * for the website-sales tenant filters on exactly that stamp, so leads that
+ * arrived through any other door were invisible at the database level: the
+ * row existed, the website was in it, and no screen would ever show it.
+ * "Transferring leads doesn't work" is that filter, seen from the outside.
+ *
+ * Import a field set or a stamping rule from here rather than restating it.
+ * A seventh writer that forgets the stamp is the same outage again.
+ */
+
+import { OASIS_LEAD_STAGE_KEYS } from "@/lib/oasis-stage-meta";
+import { OASIS_WEBSITE_SALES_PROGRAM } from "@/lib/oasis-sales-pipeline-policy";
+
+// Re-exported, not redeclared. This module tells other writers not to restate
+// its rules; declaring a second copy of the program string here would have
+// been the same mistake in miniature — two spellings of the marker the board
+// filters on, free to drift apart.
+export { OASIS_WEBSITE_SALES_PROGRAM };
+export const OASIS_COLD_OUTBOUND_MOTION = "cold_outbound";
+export const OASIS_INBOUND_WARM_MOTION = "inbound_warm";
+
+/**
+ * The research fields that make a lead a website-sales lead. Presence of ANY
+ * of these is what marks a row as belonging to that program — a scraped lead
+ * with only a URL is still a website-sales lead, and gets the stamp.
+ */
+export const WEBSITE_SALES_KEYS = [
+  "website",
+  "website_condition",
+  "audit_findings",
+  "icp_track",
+] as const;
+
+/** Context fields a rep wants on the call. Not program markers on their own. */
+export const LEAD_CONTEXT_KEYS = ["industry", "business_city", "state"] as const;
+
+/** Every website/context key, for importers deciding what to carry across. */
+export const WEBSITE_SALES_FIELD_KEYS = [...WEBSITE_SALES_KEYS, ...LEAD_CONTEXT_KEYS] as const;
+
+function hasValue(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === "string") return v.trim().length > 0;
+  return true;
+}
+
+/** True when this lead carries website-sales research. */
+export function isWebsiteSalesLead(data: Record<string, unknown>): boolean {
+  return WEBSITE_SALES_KEYS.some((k) => hasValue(data[k]));
+}
+
+/**
+ * The sales_program stamp for a lead, or {} when it isn't one.
+ *
+ * Spread into the data object at write time:
+ *   data: { ...fields, ...stampSalesProgram(fields) }
+ *
+ * Never overwrites a program already set — an explicitly-classified lead
+ * outranks our inference from its fields.
+ */
+export function stampSalesProgram(data: Record<string, unknown>): Record<string, string> {
+  if (hasValue(data.sales_program)) return {};
+  return isWebsiteSalesLead(data) ? { sales_program: OASIS_WEBSITE_SALES_PROGRAM } : {};
+}
+
+/**
+ * Tenants whose leads belong to the website-sales program.
+ *
+ * WHY A TENANT CHECK GUARDS THE STAMP. Field presence alone is not enough on
+ * the routes SunBiz and OASIS share. "This merchant has a website" is ordinary,
+ * unremarkable information on a funding application — so inferring the program
+ * from a `website` column would take a SunBiz MCA lead imported at `uw_sheet`,
+ * reclassify it as website-sales, and move it to `researched`, walking it out
+ * of the Live Subs workflow it was filed into. The website columns are only a
+ * program signal on a tenant that RUNS that program.
+ *
+ * Matches the OASIS portal's tenantSlugs (lib/portals/registry.ts) plus
+ * oasis-webdev, the scraped-prospect workspace where the reps work.
+ */
+const WEBSITE_SALES_TENANT_SLUGS = new Set(["oasis", "oasis-ai-cc", "oasis-webdev"]);
+
+/** Does this tenant run the website-sales program? Fails closed on null. */
+export function isWebsiteSalesTenantSlug(slug: string | null | undefined): boolean {
+  return !!slug && WEBSITE_SALES_TENANT_SLUGS.has(slug.trim().toLowerCase());
+}
+
+/**
+ * The program stamp for a lead on a KNOWN tenant — the form every shared
+ * import path should use. Returns {} on any tenant that doesn't run the
+ * program, whatever the row happens to contain.
+ */
+export function stampSalesProgramForTenant(
+  data: Record<string, unknown>,
+  tenantSlug: string | null | undefined,
+): Record<string, string> {
+  return isWebsiteSalesTenantSlug(tenantSlug) ? stampSalesProgram(data) : {};
+}
+
+/**
+ * Pull the website/context fields out of an arbitrary source object
+ * (a parsed CSV row, an extraction result, a cold_leads.raw blob), keeping
+ * only non-empty strings. Returns {} when the source has none.
+ *
+ * Reads `webdev_industry` as `industry`: the OSM importer writes the former,
+ * every UI reads the latter, and lib/web-leads/data.ts already collapses them.
+ * Without this the same lead shows an industry on /web-leads and a blank on
+ * the lead profile.
+ */
+export function pickWebsiteSalesFields(source: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of WEBSITE_SALES_FIELD_KEYS) {
+    const raw = source[key];
+    if (typeof raw === "string" && raw.trim()) out[key] = raw.trim();
+  }
+  if (!out.industry && typeof source.webdev_industry === "string" && source.webdev_industry.trim()) {
+    out.industry = source.webdev_industry.trim();
+  }
+  return out;
+}
+
+/**
+ * Stage normalization across two pipelines that share these routes.
+ *
+ * SunBiz leads move through imported → uw_sheet → … ; OASIS website-sales
+ * leads move through researched → assigned → … . The two sets have zero
+ * keys in common, so a stage written by the wrong vocabulary produces a row
+ * the board cannot place in any column — present in the database, absent
+ * from every screen.
+ *
+ * `intake` is the entry stage for each: an unworked OASIS lead is
+ * "researched", an unworked SunBiz lead is "imported".
+ */
+export const OASIS_INTAKE_STAGE = "researched";
+export const SUNBIZ_INTAKE_STAGE = "imported";
+
+/** Stage keys that mean "arrived, nobody has worked it yet". */
+const GENERIC_NEW_STAGES = new Set(["", "new", "new_contact", "new_lead", "intake"]);
+
+/**
+ * Resolve the stage an imported lead should land on.
+ *
+ * Pass `isWebsiteSales: true` for OASIS website-sales rows. A stage that is
+ * already valid for that pipeline is kept; a generic/blank one becomes the
+ * intake stage; a stage borrowed from the OTHER pipeline's vocabulary is
+ * replaced with intake rather than written through, because writing it
+ * through is what strands the row off-board.
+ */
+export function normalizeStageForTenant(
+  rawStage: string | null | undefined,
+  opts: { isWebsiteSales: boolean; validStageKeys: readonly string[] },
+): string {
+  const intake = opts.isWebsiteSales ? OASIS_INTAKE_STAGE : SUNBIZ_INTAKE_STAGE;
+  const stage = (rawStage || "").trim().toLowerCase();
+  if (GENERIC_NEW_STAGES.has(stage)) return intake;
+  return opts.validStageKeys.includes(stage) ? stage : intake;
+}
+
+/**
+ * The stage a website-sales lead should land on — the OASIS vocabulary
+ * applied for you.
+ *
+ * Callers get this instead of the generic function above so that importers
+ * don't each have to import the OASIS stage list. That matters beyond tidiness:
+ * lib/import/ is SunBiz-portal-owned and the portal-boundary rule forbids it
+ * reaching into lib/oasis-*. This module is unclassified shared ground, so the
+ * knowledge lives here once and both pipelines call in.
+ */
+export function stageForWebsiteSalesLead(rawStage: string | null | undefined): string {
+  return normalizeStageForTenant(rawStage, {
+    isWebsiteSales: true,
+    validStageKeys: OASIS_LEAD_STAGE_KEYS,
+  });
+}
+
+/**
+ * The name of the PERSON to ask for on this lead — never the business.
+ *
+ * THE DEFECT THIS EXISTS TO FIX (measured live 2026-09-08). The pipeline's
+ * "Contact name" field, and the contact seeded into the founder-meeting
+ * Calendar invite, both read `data.name`. On the OASIS web-leads board
+ * `data.name` IS the business name: the OSM promoter writes
+ * name = company = business_name. So 1,684 of the 1,685 owner-named leads on
+ * the board displayed the COMPANY where we were holding a real person, while
+ * `contact_name` — the field the rest of this codebase already prefers
+ * (lib/agent-actions.ts, daily-plan, cold-leads) — sat empty on all 1,853 of
+ * them. Nothing was missing; it was never surfaced. A rep reading "HVAC
+ * Mechanical Systems Inc" in a field labelled Contact name reasonably concluded
+ * we had no owner, and asked to re-scrape data we already had.
+ *
+ * PRECEDENCE, and why `name` is last and conditional:
+ *   contact_name  a human corrected it here. Always wins.
+ *   owner_name    read off the company's own About/Team page, stored with the
+ *                 URL that proved it (owner_evidence_url).
+ *   name          ONLY when it differs from the company. On SunBiz leads
+ *                 `name` really is a person and must keep working; on OASIS
+ *                 leads it equals the company, and returning it is the bug.
+ *
+ * Returns "" rather than a business name when we genuinely know nobody. An
+ * empty contact field is honest and reads as "find out on the call"; a company
+ * name sitting in a person-shaped field is a sentence a rep says out loud.
+ */
+export function contactNameFor(data: Record<string, unknown>): string {
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const contact = str(data.contact_name);
+  if (contact) return contact;
+  const owner = str(data.owner_name);
+  if (owner) return owner;
+  const name = str(data.name);
+  if (!name) return "";
+  // Compared on alphanumerics only, so "Coastline Auto Detailing Ltd." and
+  // "coastline auto detailing" collide rather than slipping through on
+  // punctuation or a suffix.
+  const letters = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const company = str(data.company) || str(data.business_name);
+  if (company && letters(name) === letters(company)) return "";
+  return name;
+}
+
+/**
+ * True when this lead names a person a rep can ask for. Kept beside
+ * contactNameFor so no caller drifts into its own emptiness test.
+ */
+export function hasNamedContact(data: Record<string, unknown>): boolean {
+  return contactNameFor(data).length > 0;
+}
+
+/**
+ * The name a Kixie PowerList entry carries, per company.
+ *
+ * #405 moved the PowerList onto contactNameFor for OASIS, whose board keeps the
+ * business in `name` and leaves contact_name empty, so the dialer was showing
+ * "HVAC" as a first name. The route is shared, so SunBiz's dialer changed too:
+ * a merchant with no contact name, which used to show as the business, reached
+ * Kixie as a bare number.
+ *
+ * SunBiz gets its pre-#405 rule back exactly: contact_name, else business_name.
+ * It never read owner_name or name, so neither does this. OASIS keeps
+ * contactNameFor. A brand the fail-closed map does not know (null) also keeps
+ * the pre-#405 rule, because #405 was only ever about OASIS's board.
+ */
+export function powerlistContactNameFor(
+  data: Record<string, unknown>,
+  brand: string | null | undefined,
+): string {
+  if (brand === "oasis") return contactNameFor(data);
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return str(data.contact_name) || str(data.business_name);
+}

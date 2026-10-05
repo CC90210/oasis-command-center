@@ -43,7 +43,7 @@
  * from the environment here.
  */
 
-import type { BrandKey } from "@/lib/email/brands";
+import { isDripBrand, type BrandKey, type DripBrandKey } from "@/lib/email/brands";
 
 /** Every outbound carrier/mailbox we can address. */
 export type ProviderId = "gws" | "gws_bluerise" | "texttorrent" | "twilio";
@@ -82,8 +82,15 @@ export type RoutingDecision =
   | { send: true; provider: ProviderId; brand: BrandKey; channel: OutboundChannel; reason: string }
   | { send: false; hold: true; reason: string; blockedBy: ProviderId | "policy" };
 
-/** The lane table. Purpose-specific overrides are applied before this. */
-const EMAIL_BY_BRAND: Record<BrandKey, ProviderId> = {
+/** The lane table. Purpose-specific overrides are applied before this.
+ *
+ *  DRIP BRANDS ONLY. OASIS became a BrandKey on 2026-09-09 so its mail would
+ *  stop resolving to the client's sending identity, but it does not route
+ *  through this table — OASIS email leaves via the shared team mailbox
+ *  (lib/integrations/oasis-shared-gmail-send.ts, credential "oasis_gmail").
+ *  Giving it a row here would point it at "gws", which is SunBiz's Google
+ *  Workspace credential, and re-create the defect one layer down. */
+const EMAIL_BY_BRAND: Record<DripBrandKey, ProviderId> = {
   sunbiz: "gws",
   bluerise: "gws_bluerise",
 };
@@ -93,7 +100,7 @@ const EMAIL_BY_BRAND: Record<BrandKey, ProviderId> = {
  * naming the intended provider makes the hold self-explanatory and means turning
  * Bluerise SMS on is a provisioning task, not a code change.
  */
-const SMS_BY_BRAND: Record<BrandKey, ProviderId> = {
+const SMS_BY_BRAND: Record<DripBrandKey, ProviderId> = {
   sunbiz: "texttorrent",
   bluerise: "twilio",
 };
@@ -124,6 +131,22 @@ export function routeOutbound(input: RoutingInput): RoutingDecision {
     return usable(available, "gws")
       ? { send: true, provider: "gws", brand: "sunbiz", channel: "email", reason: "lender shop-out is always SunBiz" }
       : { send: false, hold: true, reason: "SunBiz mailbox unavailable and shop-out may not use another brand", blockedBy: "gws" };
+  }
+
+  // A brand outside the drip lane has no provider row here, and must HOLD
+  // rather than borrow one. OASIS joined BrandKey on 2026-09-09; its mail
+  // leaves through the shared team mailbox, not this router. Indexing the lane
+  // table with it would have yielded undefined and, before these tables were
+  // narrowed, would have been "fixed" by giving it SunBiz's "gws" credential —
+  // sending OASIS mail from the client's Google Workspace account, which is the
+  // shape of the original incident.
+  if (!isDripBrand(brand)) {
+    return {
+      send: false,
+      hold: true,
+      reason: `${brand} does not route through the drip/SMS lane — it has no provider here`,
+      blockedBy: "policy",
+    };
   }
 
   if (channel === "email") {

@@ -17,22 +17,28 @@
  *   5. Operator clicks Done; the parent component reloads its device
  *      list to show the new pairing
  *
- * Why a shared component: identical flow ships from Settings → Devices
- * AND from /onboarding step 3. Wrapping the logic in one place means
- * any future improvement (Linux flavour detection, installer download
- * link, etc.) lands in both surfaces with one edit.
+ * Operator only: the one mount is DevicesEditor, inside the Settings ›
+ * Devices section that SettingsContent renders for a verified platform
+ * operator alone, and `installRepo` (the private harness repo the full
+ * install pulls) is required so it cannot mount without that server-side
+ * verdict. The old /onboarding step-3 mount was dead code and was deleted
+ * with it on 2026-09-29 (F0 containment).
  */
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2, Check, Copy, X, Clock, AlertCircle, Apple, Monitor, Terminal } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import { operatorBridgeCommand } from "@/lib/bridge-install-command";
+import { bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 
-export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
+export function InstallBridgeModal({ onClose, installRepo }: { onClose: () => void; installRepo: string }) {
   // All pairing state + side effects (mint, countdown, polling, retry)
   // live in the shared hook. This file is now render-only.
-  const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing();
+  const { os, setOs, mode, setMode, code, secondsLeft, phase, error, retryMint } = useBridgePairing();
+  // The operator's command: pair-only, or the full install from the private
+  // repo passed in by the operator-gated server component.
+  const oneLiner = code ? operatorBridgeCommand(os, code, mode, installRepo) : "";
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -59,9 +65,9 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-bg-border">
           <div>
-            <h2 className="text-lg font-bold text-fg">Install Claude Code CLI bridge</h2>
+            <h2 className="text-lg font-bold text-fg">Connect this computer</h2>
             <p className="text-xs text-fg-muted mt-0.5">
-              One command on your machine — your dashboard chat will use your local Claude Code subscription.
+              Installs the OASIS AI Command Center bridge so your agents can use this computer&apos;s files, tools and scheduled jobs.
             </p>
           </div>
           <button
@@ -101,10 +107,10 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
 
           {(phase === "command" || phase === "watching") && code && (
             <>
-              {/* Mode: full install (new machine) vs pair-only (already set up) */}
+              {/* Mode: full install (new computer) vs pair-only (already installed) */}
               <div className="space-y-2">
                 <div className="text-[11px] uppercase tracking-wider font-bold text-fg-dim">
-                  This machine
+                  This computer
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -116,7 +122,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                         : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                     }`}
                   >
-                    New machine — full install
+                    New computer: full install
                   </button>
                   <button
                     type="button"
@@ -127,14 +133,25 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                         : "border-bg-border text-fg-muted hover:border-bg-border-strong"
                     }`}
                   >
-                    Already set up — pair only
+                    Already installed: connect only
                   </button>
                 </div>
                 <p className="text-[11px] text-fg-dim leading-relaxed">
                   {mode === "install"
-                    ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
-                    : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
+                    ? "Installs the OASIS bridge on this computer, then connects it. Use it on a computer that has never had the bridge."
+                    : "Connects a computer that already has the OASIS bridge. Nothing is installed. After it runs, restart the bridge so it picks up its new token."}
                 </p>
+                {/* The full install clones a private repository, which only
+                    OASIS's own computers can read today. Collapsed, so nobody
+                    else is asked to sign in to GitHub. */}
+                {mode === "install" && (
+                  <details className="text-[11px] text-fg-dim leading-relaxed">
+                    <summary className="cursor-pointer hover:text-fg-muted">OASIS team computers only</summary>
+                    <p className="mt-1.5">
+                      {"The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."}
+                    </p>
+                  </details>
+                )}
               </div>
 
               {/* OS picker */}
@@ -210,20 +227,20 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
               <div className="rounded-lg border border-status-engaged/40 bg-status-engaged/10 p-4 flex items-start gap-3">
                 <Check className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
                 <div>
-                  <div className="font-bold text-fg">{mode === "pair" ? "Paired ✓" : "Bridge is online."}</div>
+                  <div className="font-bold text-fg">
+                    {mode === "pair"
+                      ? "This computer is paired with OASIS AI Command Center."
+                      : "This computer is connected to OASIS AI Command Center."}
+                  </div>
                   <div className="text-sm text-fg-muted mt-1">
                     {mode === "pair" ? (
                       <>
                         Token issued and written to{" "}
                         <span className="font-mono">~/.oasis/bridge_token</span>. Start (or restart) your bridge daemon —
-                        e.g. <span className="font-mono">pm2 restart claude-bridge-ping</span> — and it&apos;ll connect with the new token.
+                        e.g. <span className="font-mono">{bridgeRestartCommand(os)}</span> — and it&apos;ll connect with the new token.
                       </>
                     ) : (
-                      <>
-                        Refresh the chat header on /agents — the agent badge should flip to{" "}
-                        <span className="text-accent font-mono">local bridge · Claude Code CLI</span>.
-                        Your chat now runs through your machine&apos;s Claude subscription, with full file + script access.
-                      </>
+                      <>Agents can now use this computer for files, tools and scheduled jobs.</>
                     )}
                   </div>
                 </div>

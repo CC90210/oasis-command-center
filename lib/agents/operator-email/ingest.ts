@@ -14,6 +14,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { findExistingLead } from "@/lib/forms/agent-routing";
+import { memberStanding } from "@/lib/team";
 import { classifyDealEmail } from "./classify";
 import { classifyLenderReply } from "@/lib/lenders/classify-reply";
 import type { MonitoredMessage } from "./gmail-read";
@@ -66,6 +67,12 @@ function toISO(dateHeader: string): string | null {
  *      auth_user_id the lead drawer's "Assign to" writes), else
  *   2. the monitored-mailbox owner (this reply arrived in THEIR inbox).
  *
+ * Each candidate must be an ACTIVE member of this tenant (2026-09-24). A won
+ * or in-delivery lead keeps a retired rep's assigned_to for history, so
+ * without this a client's reply landed in a deactivated rep's queue. A
+ * deactivated, non-member or unverifiable candidate is skipped (logged, never
+ * thrown); if neither qualifies the thread stays unassigned for the team.
+ *
  * Only fills a NULL assigned_to — a manual assignment (threads/[key] PATCH)
  * is never clobbered. Best-effort + fail-open, same philosophy as the
  * trigger: thread routing must never break ingest.
@@ -75,7 +82,6 @@ async function autoAssignThreadForInbound(
   args: { tenantId: string; leadId: string; mailboxOwnerUserId: string },
 ): Promise<void> {
   try {
-    let assignee = "";
     const rec = await db
       .from("tenant_records")
       .select("data")
@@ -83,8 +89,38 @@ async function autoAssignThreadForInbound(
       .eq("id", args.leadId)
       .maybeSingle();
     const data = (rec.data as { data?: Record<string, unknown> } | null)?.data;
-    if (data && typeof data.assigned_to === "string") assignee = data.assigned_to.trim();
-    if (!assignee) assignee = (args.mailboxOwnerUserId || "").trim();
+    const leadOwner = data && typeof data.assigned_to === "string" ? data.assigned_to : "";
+    let assignee = "";
+    // Lowercased: user_profiles and the thread columns hold auth ids lowercased,
+    // and the membership read below is an exact match.
+    for (const [role, candidate] of [
+      ["lead_owner", leadOwner.trim().toLowerCase()],
+      ["mailbox_owner", (args.mailboxOwnerUserId || "").trim().toLowerCase()],
+    ] as const) {
+      if (!candidate) continue;
+      try {
+        const { standing } = await memberStanding(args.tenantId, candidate);
+        if (standing === "active") {
+          assignee = candidate;
+          break;
+        }
+        console.warn("[operator-email] thread assignee skipped", {
+          tenantId: args.tenantId,
+          leadId: args.leadId,
+          role,
+          userId: candidate,
+          standing,
+        });
+      } catch (err) {
+        console.warn("[operator-email] thread assignee check failed", {
+          tenantId: args.tenantId,
+          leadId: args.leadId,
+          role,
+          userId: candidate,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     if (!assignee) return;
 
     await db

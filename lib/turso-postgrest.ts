@@ -65,7 +65,7 @@ async function foreignKeysOf(client: Client, table: string): Promise<FkEdge[]> {
   if (hit) return hit;
   const res = await client.execute(`PRAGMA foreign_key_list("${table.replace(/"/g, '""')}")`);
   const byId = new Map<number, FkEdge>();
-  for (const row of res.rows as any[]) {
+  for (const row of res.rows) {
     const id = Number(row.id);
     const e = byId.get(id) ?? { fromTable: table, fromCols: [], toTable: String(row.table), toCols: [] };
     e.fromCols.push(String(row.from));
@@ -167,6 +167,68 @@ function q(col: string): string {
   return `"${bare}"`;
 }
 
+/**
+ * Compile ONE entry of a `select()` column list, aliased the way PostgREST
+ * names it.
+ *
+ * WHY THIS EXISTS, and why it is not cosmetic. `q()` compiles `data->>name` to
+ * `json_extract("data", '$.name')`, which is correct SQL — but libSQL then
+ * names the OUTPUT COLUMN after the expression text, so the row comes back as
+ * `{ 'json_extract("data", \'$.name\')': "Acme" }`. Real PostgREST names that
+ * same column `name`. Selecting a JSON path therefore produced rows whose KEYS
+ * DEPENDED ON THE BACKEND: code written against one silently read `undefined`
+ * on the other. That is the same class of defect as `.is("profile","not.null")`
+ * (see lib/web-leads/scores.ts) — it works here, 500s or returns nulls there —
+ * and it is why no call site could safely project JSON paths until now.
+ *
+ * PostgREST's naming rule, mirrored exactly:
+ *   `data->>name`        -> column `name`      (last path segment)
+ *   `label:data->>name`  -> column `label`     (explicit alias wins)
+ *   `id`                 -> column `id`        (plain identifier, no alias)
+ *
+ * The explicit `alias:` form is accepted for plain columns too, again because
+ * PostgREST accepts it; `q()` alone rejected the whole token as a hostile
+ * identifier.
+ *
+ * Aliases are validated against the same identifier charset as column names
+ * before being interpolated — a select list is caller-controlled, but so is a
+ * column name, and the existing guard on the latter exists for a reason.
+ *
+ * Proven by the "json path select" cases in lib/__tests__/turso-postgrest.test.mjs,
+ * each of which was watched to fail against the unaliased compiler first.
+ */
+function selectCol(col: string): string {
+  // Split a leading `alias:` off, but ONLY when what follows is a column or
+  // JSON path — never when the colon is part of something else.
+  const m = col.match(/^([\w$]+):([\w$.]+(?:->>?[\w$]+)*)$/);
+  const alias = m ? m[1] : null;
+  const expr = m ? m[2] : col;
+  const sql = q(expr);
+  if (alias) return `${sql} AS "${alias}"`;
+  if (!expr.includes("->")) return sql; // plain column already carries its name
+  const last = expr.split(/->>?/).pop()!;
+  return `${sql} AS "${last}"`;
+}
+
+/**
+ * Decode a string that is really JSON, leave every other string alone.
+ *
+ * Callers reach `.contains()` both ways: some pass a real array, some pass
+ * `JSON.stringify([...])` because that is what PostgREST's wire format wants.
+ * Treating the second as an opaque scalar is what made the collaborator read
+ * match nothing. A string that is not JSON stays a string and is matched as a
+ * single element, which is the only reading that cannot surprise a caller.
+ */
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 function compileOp(col: string, op: string, value: unknown): Cond {
   if (op === "in") {
     const arr = Array.isArray(value) ? value : String(value).replace(/^\(|\)$/g, "").split(",");
@@ -182,11 +244,75 @@ function compileOp(col: string, op: string, value: unknown): Cond {
     throw new Error(`unsupported is. value: ${String(value)}`);
   }
   if (op === "cs" || op === "contains") {
-    // array/jsonb containment on a JSON-encoded TEXT column
-    const items = Array.isArray(value) ? value : [value];
-    const conds = items.map(() =>
-      `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`);
-    return { sql: `(${conds.join(" AND ")})`, args: items.map(toSql) };
+    // jsonb containment on a JSON-encoded TEXT column.
+    //
+    // THIS USED TO SILENTLY MATCH NOTHING FOR TWO OF ITS THREE CALLERS, and a
+    // query that matches nothing is indistinguishable from data that is not
+    // there. Both live cases were measured 2026-09-02:
+    //
+    //   .contains("data->collaborators", JSON.stringify([id]))
+    //     A STRING, so Array.isArray was false and the whole literal
+    //     '["<id>"]' was compared against each element. 0 rows where 1 exists.
+    //     Effect: an opener lost every lead the moment it was handed off,
+    //     because the collaborator read behind their board returned empty.
+    //
+    //   .contains("payload", { lead_id })
+    //     An OBJECT. Array-element matching cannot express "this object has
+    //     this key with this value", so it compared each of payload's VALUES
+    //     against the filter object's JSON. 0 rows where json_extract finds 74.
+    //     Effect: lead timelines and open-tracking rendered empty.
+    //
+    // Three shapes now, and anything else THROWS rather than degrading to a
+    // false negative — the whole class of bug above came from returning [] for
+    // an operation this compiler did not implement.
+    const parsed = typeof value === "string" ? tryParseJson(value) : value;
+
+    // 1. Object → subset containment: every key must match at that JSON path.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const entries = Object.entries(parsed as Record<string, unknown>);
+      if (entries.length === 0) return { sql: "1=1", args: [] };
+      const args: InValue[] = [];
+      const conds = entries.map(([k, v]) => {
+        if (!/^[\w$]+$/.test(k)) throw new Error(`unsafe contains key: ${k}`);
+        // A JSON null needs json_type, not equality. `json_extract(...) = ?`
+        // with a bound NULL is never true in SQL — NULL = NULL is NULL — so
+        // { lead_id: null } would match nothing while looking like a filter
+        // that ran. That is the same silent false negative this whole change
+        // exists to remove, so it does not get to survive inside the fix.
+        // json_type also distinguishes a PRESENT null from a MISSING key,
+        // which equality cannot do either. (CodeRabbit, PR #375.)
+        if (v === null) return `json_type(${q(col)}, '$.${k}') = 'null'`;
+        args.push(toSql(v));
+        return `json_extract(${q(col)}, '$.${k}') = ?`;
+      });
+      return { sql: `(${conds.join(" AND ")})`, args };
+    }
+
+    // 2. Array (or a JSON string that decodes to one) → element containment.
+    if (Array.isArray(parsed)) {
+      if (parsed.length === 0) return { sql: "1=1", args: [] };
+      const conds = parsed.map(() =>
+        `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`);
+      return { sql: `(${conds.join(" AND ")})`, args: parsed.map(toSql) };
+    }
+
+    // 3. A bare scalar is a single element. Enumerated rather than written as
+    //    `typeof !== "object"`, which lets a function or a symbol through as a
+    //    "scalar" and puts us back where we started: a value the compiler does
+    //    not understand, quietly turned into a query that matches nothing.
+    if (
+      parsed === null
+      || typeof parsed === "string"
+      || typeof parsed === "number"
+      || typeof parsed === "boolean"
+    ) {
+      return {
+        sql: `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`,
+        args: [toSql(parsed)],
+      };
+    }
+
+    throw new Error(`unsupported contains value: ${typeof value}`);
   }
   const sqlOp = OPS[op];
   if (!sqlOp) throw new Error(`unsupported operator: ${op}`);
@@ -250,8 +376,9 @@ function compileOrGroup(expr: string, joiner: "OR" | "AND" = "OR"): Cond {
 // ------------------------------------------------------------------ builder
 
 type Row = Record<string, unknown>;
+type QueryData = Row | Row[];
 
-export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
+export class TursoQueryBuilder implements PromiseLike<PgResponse<QueryData>> {
   private mode: "select" | "insert" | "update" | "upsert" | "delete" = "select";
   private selectStr = "*";
   private conds: Cond[] = [];
@@ -339,8 +466,8 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
   throwOnError() { return this; } // errors already reject nothing; kept for API compat
 
   // ---- execution
-  then<R1 = PgResponse<any>, R2 = never>(
-    onfulfilled?: ((value: PgResponse<any>) => R1 | PromiseLike<R1>) | null,
+  then<R1 = PgResponse<QueryData>, R2 = never>(
+    onfulfilled?: ((value: PgResponse<QueryData>) => R1 | PromiseLike<R1>) | null,
     onrejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
   ): PromiseLike<R1 | R2> {
     return this.run().then(onfulfilled, onrejected);
@@ -354,7 +481,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     };
   }
 
-  private async run(): Promise<PgResponse<any>> {
+  private async run(): Promise<PgResponse<QueryData>> {
     try {
       switch (this.mode) {
         case "select": return await this.runSelect();
@@ -363,12 +490,13 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
         case "update": return await this.runUpdate();
         case "delete": return await this.runDelete();
       }
-    } catch (e: any) {
-      return { data: null, error: err(e?.message ?? String(e)), count: null, status: 400, statusText: "Bad Request" };
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      return { data: null, error: err(message), count: null, status: 400, statusText: "Bad Request" };
     }
   }
 
-  private finalizeRows(rows: Row[], count: number | null): PgResponse<any> {
+  private finalizeRows(rows: Row[], count: number | null): PgResponse<QueryData> {
     if (this.singleMode) {
       if (rows.length > 1)
         return { data: null, error: err("JSON object requested, multiple (or no) rows returned", "PGRST116"), count, status: 406, statusText: "Not Acceptable" };
@@ -382,7 +510,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     return { data: rows, error: null, count, status: 200, statusText: "OK" };
   }
 
-  private async runSelect(): Promise<PgResponse<any>> {
+  private async runSelect(): Promise<PgResponse<QueryData>> {
     const { base, embeds } = parseSelect(this.selectStr);
     const where = this.whereSql();
 
@@ -390,7 +518,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     if (this.countMode) {
       const res = await this.client.execute({
         sql: `SELECT count(*) AS n FROM "${this.table}"${where.sql}`, args: where.args });
-      count = Number((res.rows[0] as any).n);
+      count = Number(res.rows[0]?.n ?? 0);
       if (this.headMode)
         return { data: null, error: null, count, status: 200, statusText: "OK" };
     }
@@ -398,7 +526,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     const colSql = !base.length || base.includes("*")
       ? "*"
       : [...new Set([...base, ...(embeds.length ? await this.embedKeyCols(embeds) : [])])]
-          .map(q).join(", ");
+          .map(selectCol).join(", ");
     let sql = `SELECT ${colSql} FROM "${this.table}"${where.sql}`;
     if (this.orderBys.length)
       sql += " ORDER BY " + this.orderBys.map((o) => `${q(o.col)} ${o.asc ? "ASC" : "DESC"}`).join(", ");
@@ -406,7 +534,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     if (this.offsetN != null) sql += ` OFFSET ${Number(this.offsetN)}`;
 
     const res = await this.client.execute({ sql, args: where.args });
-    let rows = (res.rows as any[]).map(rowOut);
+    let rows = res.rows.map(rowOut);
     if (embeds.length && rows.length) rows = await this.attachEmbeds(rows, embeds);
     else if (embeds.length) rows = [];
     return this.finalizeRows(rows, count);
@@ -459,7 +587,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
             sql: `SELECT ${e.columns === "*" ? "*" : splitTop(e.columns).map(q).join(", ") + `, ${q(refCol)}`} FROM "${e.table}" WHERE ${q(refCol)} IN (${ph})`,
             args: keys.map(toSql),
           });
-          for (const r of (sub.rows as any[]).map(rowOut)) map.set(r[refCol], r);
+          for (const r of sub.rows.map(rowOut)) map.set(r[refCol], r);
         }
         rows = rows.flatMap((r) => {
           const hit = r[keyCol] != null ? map.get(r[keyCol]) ?? null : null;
@@ -489,7 +617,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
           sql: `SELECT ${e.columns === "*" ? "*" : splitTop(e.columns).map(q).join(", ") + `, ${q(childCol)}`} FROM "${e.table}" WHERE ${q(childCol)} IN (${ph})`,
           args: keys.map(toSql),
         });
-        for (const r of (sub.rows as any[]).map(rowOut)) {
+        for (const r of sub.rows.map(rowOut)) {
           const g = groups.get(r[childCol]) ?? [];
           g.push(r);
           groups.set(r[childCol], g);
@@ -537,7 +665,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
         args: [this.table],
       });
       const wanted = [...targetCols].map((c) => c.toLowerCase()).sort().join(",");
-      for (const row of res.rows as any[]) {
+      for (const row of res.rows) {
         const ddl: string = String(row.sql ?? "");
         if (!/CREATE\s+UNIQUE\s+INDEX/i.test(ddl)) continue;
         const open = ddl.indexOf("(");
@@ -573,7 +701,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     return resolved;
   }
 
-  private async runWrite(): Promise<PgResponse<any>> {
+  private async runWrite(): Promise<PgResponse<QueryData>> {
     const rows = this.payload!;
     if (!rows.length)
       return { data: [], error: null, count: null, status: 201, statusText: "Created" };
@@ -617,11 +745,11 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
       (this.returning ? " RETURNING *" : "");
     const args = rows.flatMap((r) => cols.map((c) => toSql(r[c])));
     const res = await this.client.execute({ sql, args });
-    const data = this.returning ? (res.rows as any[]).map(rowOut) : null;
+    const data = this.returning ? res.rows.map(rowOut) : null;
     return this.finalizeRows(data ?? [], null);
   }
 
-  private async runUpdate(): Promise<PgResponse<any>> {
+  private async runUpdate(): Promise<PgResponse<QueryData>> {
     const values = this.payload![0];
     const cols = Object.keys(values);
     const where = this.whereSql();
@@ -630,16 +758,16 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
       (this.returning ? " RETURNING *" : "");
     const res = await this.client.execute({
       sql, args: [...cols.map((c) => toSql(values[c])), ...where.args] });
-    const rows = this.returning ? (res.rows as any[]).map(rowOut) : [];
+    const rows = this.returning ? res.rows.map(rowOut) : [];
     return this.finalizeRows(rows, this.affectedCount(res, rows));
   }
 
-  private async runDelete(): Promise<PgResponse<any>> {
+  private async runDelete(): Promise<PgResponse<QueryData>> {
     const where = this.whereSql();
     if (!where.sql) throw new Error("delete without filters refused — it would empty the table");
     const sql = `DELETE FROM "${this.table}"${where.sql}` + (this.returning ? " RETURNING *" : "");
     const res = await this.client.execute({ sql, args: where.args });
-    const rows = this.returning ? (res.rows as any[]).map(rowOut) : [];
+    const rows = this.returning ? res.rows.map(rowOut) : [];
     return this.finalizeRows(rows, this.affectedCount(res, rows));
   }
 

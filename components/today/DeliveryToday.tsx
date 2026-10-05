@@ -6,11 +6,11 @@
  * "what is our MRR". So this page carries the four post-sale stages —
  * onboarding, in_build, client_review, launched — and nothing about money.
  *
- * SCOPED BY QUERY, LIKE THE REP PAGE. Four `where: { stage }` reads, one per
- * delivery stage. The prospecting pipeline is never fetched, so "no prospecting
- * pipeline for fulfilment" is a property of the request rather than a rule
- * someone has to remember when adding the next card. Company financials are not
- * imported here at all.
+ * SCOPED BY QUERY, LIKE THE REP PAGE. Internal viewers read one tenant-stage
+ * window per delivery stage. Builders read two narrower windows (assigned_to
+ * OR fulfillment_owner_id), so another builder's clients never enter their RSC
+ * payload. The prospecting pipeline is never fetched, and company financials
+ * are not imported here at all.
  *
  * Client names ARE shown. That is deliberate and it is the difference between
  * this persona and the sales one: a builder cannot build a website for a
@@ -22,9 +22,14 @@
  */
 
 import Link from "next/link";
-import { Card, EmptyState, PageHeader, Stat, Tag } from "@/components/Card";
+import { Card, EmptyState, Stat, Tag } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { LiveClock } from "@/components/LiveClock";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
+import {
+  resolveOasisDeliveryQueueScope,
+  type OasisDeliveryQueueScope,
+} from "@/lib/oasis-sales-pipeline-policy";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
@@ -62,19 +67,67 @@ function who(row: TenantRecord): string {
  * the prospecting stages are never in the result set to begin with.
  */
 type StageRead =
-  | { ok: true; stage: DeliveryStageKey; rows: TenantRecord[] }
+  | { ok: true; stage: DeliveryStageKey; rows: TenantRecord[]; total: number }
   | { ok: false; stage: DeliveryStageKey };
 
-async function loadStage(tenantId: string, stage: DeliveryStageKey): Promise<StageRead> {
+async function loadStage(
+  tenantId: string,
+  stage: DeliveryStageKey,
+  scope: OasisDeliveryQueueScope,
+): Promise<StageRead> {
+  if (scope.mode === "none") return { ok: true, stage, rows: [], total: 0 };
   try {
-    const result = await listRecords({
-      tenant_id: tenantId,
-      entity: "lead",
-      where: { stage },
-      sort: "-updated_at",
-      limit: 200,
-    });
-    return { ok: true, stage, rows: result.rows };
+    if (scope.mode === "all") {
+      const result = await listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage },
+        sort: "-updated_at",
+        limit: 200,
+      });
+      return { ok: true, stage, rows: result.rows, total: result.total };
+    }
+
+    // Two narrow reads implement assigned_to OR fulfillment_owner_id without
+    // loading the tenant-wide stage. The third count-only read measures the
+    // overlap so the tile stays exact when both fields name the same builder.
+    const [assigned, fulfilled, overlap] = await Promise.all([
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage, assigned_to: scope.userId },
+        sort: "-updated_at",
+        limit: 200,
+      }),
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage, fulfillment_owner_id: scope.userId },
+        sort: "-updated_at",
+        limit: 200,
+      }),
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: {
+          stage,
+          assigned_to: scope.userId,
+          fulfillment_owner_id: scope.userId,
+        },
+        limit: 1,
+      }),
+    ]);
+    const unique = new Map<string, TenantRecord>();
+    for (const row of [...assigned.rows, ...fulfilled.rows]) unique.set(row.id, row);
+    const rows = [...unique.values()].sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+    return {
+      ok: true,
+      stage,
+      rows,
+      total: assigned.total + fulfilled.total - overlap.total,
+    };
   } catch (err) {
     console.error(`[delivery-today.${stage}]`, err);
     return { ok: false, stage };
@@ -86,10 +139,12 @@ export async function DeliveryToday({
   viewerName,
   readOnly,
   teamRole,
+  viewerUserId,
 }: {
   tenantId: string;
   viewerName: string;
   readOnly: boolean;
+  viewerUserId: string | null;
   /**
    * Shown in the footer line, and it earns its place.
    *
@@ -102,7 +157,8 @@ export async function DeliveryToday({
    */
   teamRole: string;
 }) {
-  const reads = await Promise.all(DELIVERY_STAGE_KEYS.map((s) => loadStage(tenantId, s)));
+  const scope = resolveOasisDeliveryQueueScope(teamRole, viewerUserId);
+  const reads = await Promise.all(DELIVERY_STAGE_KEYS.map((s) => loadStage(tenantId, s, scope)));
   const byStage = new Map<DeliveryStageKey, StageRead>(reads.map((r) => [r.stage, r]));
 
   const countOf = (stage: DeliveryStageKey): number | "—" => {
@@ -110,7 +166,7 @@ export async function DeliveryToday({
     // Em dash, never 0, on a failed read: "there is no work in build" and
     // "I could not find out" are different facts and only one of them means
     // the builder can go home.
-    return r && r.ok ? r.rows.length : "—";
+    return r && r.ok ? r.total : "—";
   };
 
   const active = reads
@@ -146,193 +202,195 @@ export async function DeliveryToday({
   dueToday.sort((a, b) => a.at - b.at);
 
   const anyReadFailed = reads.some((r) => !r.ok);
-  const totalActive = active.length;
+  const totalActive = reads
+    .filter((r): r is Extract<StageRead, { ok: true }> => r.ok)
+    .filter((r) => r.stage !== "launched")
+    .reduce((sum, r) => sum + r.total, 0);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Today"
-        subtitle={
-          <>
-            <LiveClock initialDateKey={operatorDateKey()} /> · {viewerName} · delivery
-          </>
-        }
-        action={
-          readOnly ? (
-            <Tag tone="neutral">view only</Tag>
-          ) : (
-            <Tag tone={blocked.length > 0 ? "warm" : "accent"}>
-              {blocked.length > 0 ? `${blocked.length} need a nudge` : "clear"}
-            </Tag>
-          )
-        }
-      />
+    <PageFrame
+      title="Today"
+      subtitle={
+        <>
+          <LiveClock initialDateKey={operatorDateKey()} /> · {viewerName} · delivery
+        </>
+      }
+      actions={
+        readOnly ? (
+          <Tag tone="neutral">view only</Tag>
+        ) : (
+          <Tag tone={blocked.length > 0 ? "warm" : "neutral"}>
+            {blocked.length > 0 ? `${blocked.length} need a nudge` : "clear"}
+          </Tag>
+        )
+      }
+    >
+      <div className="space-y-6">
+        {anyReadFailed && (
+          <Card title="Partial read">
+            <EmptyState message="At least one delivery queue could not be loaded. The tiles showing an em dash are unknown, not empty — reload before concluding there is no work." />
+          </Card>
+        )}
 
-      {anyReadFailed && (
-        <Card title="Partial read">
-          <EmptyState message="At least one delivery queue could not be loaded. The tiles showing an em dash are unknown, not empty — reload before concluding there is no work." />
-        </Card>
-      )}
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {DELIVERY_STAGE_KEYS.map((stage) => (
+            <Stat
+              key={stage}
+              label={labelFor(stage)}
+              value={countOf(stage)}
+              hint={
+                byStage.get(stage)?.ok === false
+                  ? "could not read this queue"
+                  : stage === "launched"
+                    ? "shipped"
+                    : stage === "client_review"
+                      ? "waiting on the client"
+                      : stage === "in_build"
+                        ? "yours to move"
+                        : "kickoff pending"
+              }
+            />
+          ))}
+        </section>
 
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {DELIVERY_STAGE_KEYS.map((stage) => (
-          <Stat
-            key={stage}
-            label={labelFor(stage)}
-            value={countOf(stage)}
-            accent={stage === "in_build"}
-            hint={
-              byStage.get(stage)?.ok === false
-                ? "could not read this queue"
-                : stage === "launched"
-                  ? "shipped"
-                  : stage === "client_review"
-                    ? "waiting on the client"
-                    : stage === "in_build"
-                      ? "yours to move"
-                      : "kickoff pending"
+        <section className="grid lg:grid-cols-2 gap-6">
+          <Card
+            title="Needs a nudge"
+            subtitle={
+              blocked.length > 0
+                ? `${blocked.length} past due or stalled · oldest first`
+                : "overdue and stalled builds"
             }
-          />
-        ))}
-      </section>
+          >
+            {blocked.length === 0 ? (
+              <EmptyState message="Nothing is overdue and nothing has gone quiet for a week. Work the build queue." />
+            ) : (
+              <ul className="divide-y divide-hairline">
+                {blocked.slice(0, 8).map(({ row, stage, why, at }) => (
+                  <li key={row.id} className="py-3">
+                    <Link
+                      href={`/pipeline/${row.id}`}
+                      className="block -mx-2 px-2 py-1 rounded-md transition-colors duration-150 hover:bg-bg-hover"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Tag tone="warm">{why}</Tag>
+                        <span className="text-xs font-medium text-fg-dim">
+                          {labelFor(stage)}
+                        </span>
+                        <span className="ml-auto text-xs text-fg-dim">
+                          {timeAgo(new Date(at).toISOString())}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 text-sm font-semibold text-fg">
+                        {truncate(who(row), 60)}
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
 
-      <section className="grid lg:grid-cols-2 gap-6">
+          <Card
+            title="Due today"
+            subtitle={dueToday.length > 0 ? `${dueToday.length} scheduled` : "scheduled for today"}
+          >
+            {dueToday.length === 0 ? (
+              <EmptyState message="Nothing is scheduled for today. Set dates on the builds you are working so they land here." />
+            ) : (
+              <ul className="divide-y divide-hairline">
+                {dueToday.slice(0, 8).map(({ row, stage }) => (
+                  <li key={row.id} className="py-3">
+                    <Link
+                      href={`/pipeline/${row.id}`}
+                      className="block -mx-2 px-2 py-1 rounded-md transition-colors duration-150 hover:bg-bg-hover"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: colorFor(stage) }}
+                          aria-hidden
+                        />
+                        <span className="text-xs font-medium text-fg-dim">
+                          {labelFor(stage)}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 text-sm font-semibold text-fg">
+                        {truncate(who(row), 60)}
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        </section>
+
         <Card
-          title="Needs a nudge"
-          subtitle={
-            blocked.length > 0
-              ? `${blocked.length} past due or stalled · oldest first`
-              : "overdue and stalled builds"
+          title="The build queue"
+          subtitle={`${totalActive} active · launched work is not listed`}
+          action={
+            <Link href="/pipeline" className="text-xs font-medium text-accent hover:underline">
+              Open pipeline →
+            </Link>
           }
         >
-          {blocked.length === 0 ? (
-            <EmptyState message="Nothing is overdue and nothing has gone quiet for a week. Work the build queue." />
+          {totalActive === 0 ? (
+            <EmptyState message="No websites are in delivery right now. New builds arrive here once a deal is won and moves to onboarding." />
           ) : (
-            <ul className="divide-y divide-bg-border">
-              {blocked.slice(0, 8).map(({ row, stage, why, at }) => (
-                <li key={row.id} className="py-3">
-                  <Link
-                    href={`/pipeline/${row.id}`}
-                    className="block -mx-2 px-2 py-1 rounded-md hover:bg-bg-elev transition-colors"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Tag tone="warm">{why}</Tag>
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
-                        {labelFor(stage)}
-                      </span>
-                      <span className="ml-auto text-xs text-fg-dim">
-                        {timeAgo(new Date(at).toISOString())}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 text-sm font-semibold text-fg">
-                      {truncate(who(row), 60)}
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card
-          title="Due today"
-          subtitle={dueToday.length > 0 ? `${dueToday.length} scheduled` : "scheduled for today"}
-        >
-          {dueToday.length === 0 ? (
-            <EmptyState message="Nothing is scheduled for today. Set dates on the builds you are working so they land here." />
-          ) : (
-            <ul className="divide-y divide-bg-border">
-              {dueToday.slice(0, 8).map(({ row, stage }) => (
-                <li key={row.id} className="py-3">
-                  <Link
-                    href={`/pipeline/${row.id}`}
-                    className="block -mx-2 px-2 py-1 rounded-md hover:bg-bg-elev transition-colors"
-                  >
+            <div className="grid gap-4 md:grid-cols-3">
+              {DELIVERY_STAGE_KEYS.filter((s) => s !== "launched").map((stage) => {
+                const read = byStage.get(stage);
+                const rows = read && read.ok ? read.rows : [];
+                return (
+                  <div key={stage} className="rounded-lg border border-hairline bg-bg-raised p-4">
                     <div className="flex items-center gap-2">
                       <span
                         className="h-2 w-2 rounded-full"
                         style={{ backgroundColor: colorFor(stage) }}
                         aria-hidden
                       />
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
+                      <span className="text-[12.5px] font-medium text-fg-muted">
                         {labelFor(stage)}
                       </span>
+                      <span className="ml-auto text-xs font-semibold tabular-nums text-fg">
+                        {read && read.ok ? rows.length : "—"}
+                      </span>
                     </div>
-                    <div className="mt-1.5 text-sm font-semibold text-fg">
-                      {truncate(who(row), 60)}
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+                    {read && !read.ok ? (
+                      <p className="mt-3 text-xs text-fg-dim">Could not read this queue.</p>
+                    ) : rows.length === 0 ? (
+                      <p className="mt-3 text-xs text-fg-dim">Empty.</p>
+                    ) : (
+                      <ul className="mt-3 space-y-1.5">
+                        {rows.slice(0, 6).map((row) => (
+                          <li key={row.id}>
+                            <Link
+                              href={`/pipeline/${row.id}`}
+                              className="block truncate text-xs text-fg-muted transition-colors duration-150 hover:text-fg"
+                            >
+                              {truncate(who(row), 34)}
+                            </Link>
+                          </li>
+                        ))}
+                        {rows.length > 6 && (
+                          <li className="text-xs text-fg-dim">+{rows.length - 6} more</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </Card>
-      </section>
 
-      <Card
-        title="The build queue"
-        subtitle={`${totalActive} active · launched work is not listed`}
-        action={
-          <Link href="/pipeline" className="text-xs text-fg-muted hover:text-accent transition-colors">
-            Open pipeline →
-          </Link>
-        }
-      >
-        {totalActive === 0 ? (
-          <EmptyState message="No websites are in delivery right now. New builds arrive here once a deal is won and moves to onboarding." />
-        ) : (
-          <div className="grid gap-4 md:grid-cols-3">
-            {DELIVERY_STAGE_KEYS.filter((s) => s !== "launched").map((stage) => {
-              const read = byStage.get(stage);
-              const rows = read && read.ok ? read.rows : [];
-              return (
-                <div key={stage} className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="h-2 w-2 rounded-full"
-                      style={{ backgroundColor: colorFor(stage) }}
-                      aria-hidden
-                    />
-                    <span className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-                      {labelFor(stage)}
-                    </span>
-                    <span className="ml-auto text-xs font-bold tabular-nums text-fg">
-                      {read && read.ok ? rows.length : "—"}
-                    </span>
-                  </div>
-                  {read && !read.ok ? (
-                    <p className="mt-3 text-xs text-fg-dim">Could not read this queue.</p>
-                  ) : rows.length === 0 ? (
-                    <p className="mt-3 text-xs text-fg-dim">Empty.</p>
-                  ) : (
-                    <ul className="mt-3 space-y-1.5">
-                      {rows.slice(0, 6).map((row) => (
-                        <li key={row.id}>
-                          <Link
-                            href={`/pipeline/${row.id}`}
-                            className="block truncate text-xs text-fg-muted transition-colors hover:text-accent"
-                          >
-                            {truncate(who(row), 34)}
-                          </Link>
-                        </li>
-                      ))}
-                      {rows.length > 6 && (
-                        <li className="text-[10px] text-fg-dim">+{rows.length - 6} more</li>
-                      )}
-                    </ul>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-
-      <p className="text-xs text-fg-faint">
-        You are seeing the delivery view because your team role is{" "}
-        <span className="font-mono text-fg-dim">{teamRole}</span>. If that is wrong, ask CC to
-        correct it — revenue and pipeline surfaces are scoped to the role on your profile.
-      </p>
-    </div>
+        <p className="text-xs text-fg-dim">
+          You are seeing the delivery view because your team role is{" "}
+          <span className="font-mono text-fg-dim">{teamRole}</span>. If that is wrong, ask CC to
+          correct it — revenue and pipeline surfaces are scoped to the role on your profile.
+        </p>
+      </div>
+    </PageFrame>
   );
 }

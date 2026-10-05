@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { isActiveMember } from "@/lib/team";
 import { buildSunbizEventMessage, type SunbizEventKind } from "@/lib/notify/sunbiz-events-format";
 
 /**
@@ -21,10 +22,13 @@ type ProfileRow = {
   team_role: string | null;
   is_owner: boolean | null;
   custom_fields: Record<string, unknown> | null;
+  deactivated_at: string | null;
 };
 
 /** Resolve recipient chat ids: the owning agent (if linked) + every admin (if
- *  linked). Returns the distinct chat-id set. */
+ *  linked). Returns the distinct chat-id set. A deactivated teammate is neither:
+ *  they have left, so a deactivated owner or admin gets no alerts (an owner
+ *  skipped here reads as unlinked, which callers already handle). */
 export async function resolveSunbizRecipients(
   db: SupabaseClient,
   tenantId: string,
@@ -32,7 +36,7 @@ export async function resolveSunbizRecipients(
 ): Promise<{ chatIds: string[]; ownerLinked: boolean }> {
   const res = await db
     .from("user_profiles")
-    .select("auth_user_id, team_role, is_owner, custom_fields")
+    .select("auth_user_id, team_role, is_owner, custom_fields, deactivated_at")
     .eq("tenant_id", tenantId);
   const rows = (res.data || []) as ProfileRow[];
   const chatOf = (r: ProfileRow): string | null => {
@@ -43,6 +47,7 @@ export async function resolveSunbizRecipients(
   const chatIds = new Set<string>();
   let ownerLinked = false;
   for (const r of rows) {
+    if (!isActiveMember(r)) continue;
     const isAdmin = !!r.is_owner || r.team_role === "admin" || r.team_role === "owner";
     const isOwner = !!owner && !!r.auth_user_id && r.auth_user_id.toLowerCase() === owner;
     if (isAdmin || isOwner) {

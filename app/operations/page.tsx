@@ -9,22 +9,28 @@
  * No new schema. Surfaces what's already in motion so the operator can see
  * the back end at a glance: cron jobs that just ran, agents that ticked,
  * inbound events that landed.
+ *
+ * OPERATOR ONLY (2026-09-30): requireOperator() is the first statement. It used
+ * requireSystemSurface, which let a client workspace's owner open it by URL.
+ * The tiles at the top come from lib/admin/attention.ts, the same definition
+ * of "needs you" /health uses, so the two pages cannot disagree.
  */
 
 import Link from "next/link";
 import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
-import { agentStates, getActiveProfile, recentDecisions, recentEvents } from "@/lib/queries";
+import { agentStates, getActiveProfile, getTenant, recentDecisions, recentEvents } from "@/lib/queries";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { ALL_AGENT_KEYS, FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
+import { getTenantAwareEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { requireOperator } from "@/lib/role-surfaces-session";
+import { loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou } from "@/lib/admin/attention";
 
 export const dynamic = "force-dynamic";
 
@@ -61,41 +67,33 @@ export default async function OperationsPage({
 }: {
   searchParams?: Promise<{ showOlder?: string }>;
 }) {
-  // System surface — the agent fleet, cron tape and bridge pairings. Not a
-  // contractor's screen. 404 before any read; see lib/role-surfaces.ts.
-  await requireSystemSurface();
+  await requireOperator();
   const profile = await safe("operations.profile", getActiveProfile(), null);
-  const user = await getSessionUser().catch(() => null);
-  const isOperator = isOperatorEmail(user?.email || undefined);
   const db = getServiceSupabase();
   const sp = (await searchParams) || {};
   const showOlder = sp.showOlder === "1";
 
-  // Cross-tenant scoping for agent_state_snapshot + agent_events: resolve
-  // the tenant's enabled agents up front and pass to the helpers. Both
-  // tables predate the tenant_manifests system and have no tenant_id
-  // column today; the helpers proxy-filter by agent_name / publisher_agent
-  // to keep client tenants from seeing CC's OASIS heartbeats + activity.
-  // Operator (CC) bypasses via isOperator: true on the recentEvents call
-  // and explicit ALL_AGENT_KEYS fan-out on agentStates.
-  const manifestEnabledSlugs = await getTenantEnabledAgents(profile?.tenant_id ?? null);
-  const agentNamesForOps = isOperator
-    ? ALL_AGENT_KEYS
-    : (manifestEnabledSlugs.length > 0
-        ? manifestEnabledSlugs
-        : (profile?.agents_enabled || []).map(resolveAgentKey));
+  // This is a workspace surface, including for the OASIS operator. Resolve the
+  // current tenant's enabled roster with no empire-wide operator bypass; an
+  // operator debugging another workspace must first switch into that tenant.
+  // OASIS's own workspace lists the agents its bridge runs, which since W4a is
+  // not its business roster of department leads (review R4).
+  const agentNamesForOps =
+    oasisOperatorAgents(profile?.tenant_id) ??
+    (await getTenantAwareEnabledAgents({
+      userTenantId: profile?.tenant_id ?? null,
+      profileAgentsEnabled: profile?.agents_enabled || [],
+    }));
 
-  // Health banner counts (4 tiles at the top). Phase 3 merge: the dedicated
-  // /health page still exists for drill-down, but the operator gets a
-  // glance-able summary right where they're already looking. Each is a
-  // pure count query — no payloads pulled — so the round-trip cost is
-  // ~5ms per table.
+  // The tiles at the top: lib/admin/attention.ts, the one definition of
+  // "needs you" (/health draws the same numbers with their lists).
   const tenantId = profile?.tenant_id || null;
-  const now24Ago = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const now7Ago = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const now14Ago = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [snaps, pairings, events, decisions, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
+  // Every read below throws on a failed read, the lib/queries ones and the
+  // inline ones alike; safe() turns that into null, which each card and tile
+  // draws as "Couldn't check", never as an empty tape, a fleet of stopped
+  // workers, "0 bridges online" or a green 0 under "All clear".
+  const [snaps, pairings, events, decisions, attention, outcome] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
       agentStates(agentNamesForOps).then((rows) =>
@@ -107,7 +105,7 @@ export default async function OperationsPage({
           health_status: r.health_status ?? null,
         })) as AgentSnap[]
       ),
-      [] as AgentSnap[]
+      null
     ),
     profile?.tenant_id
       ? safe(
@@ -119,9 +117,10 @@ export default async function OperationsPage({
               .eq("tenant_id", profile.tenant_id)
               .is("revoked_at", null)
               .order("last_seen_at", { ascending: false });
+            if (r.error) throw new Error(`bridge_pairings read failed: ${r.error.message}`);
             return (r.data as BridgePair[]) || [];
           })(),
-          [] as BridgePair[]
+          null
         )
       : Promise.resolve([] as BridgePair[]),
     // Activity tape default: most recent N events regardless of age.
@@ -132,9 +131,9 @@ export default async function OperationsPage({
         sinceDays: 0,
         tenantId: profile?.tenant_id || null,
         agentNames: agentNamesForOps,
-        isOperator,
+        isOperator: false,
       }),
-      []
+      null
     ),
     // Agent decisions tape — moved here from /reasoning 2026-08-04 when that
     // page was dropped from CC's nav. Scoping is deliberately IDENTICAL to
@@ -146,96 +145,21 @@ export default async function OperationsPage({
     safe(
       "operations.recent_decisions",
       recentDecisions(profile?.tenant_id ?? null, agentNamesForOps, 20),
-      []
+      null
     ),
-    // Health tile #1: ERROR events in last 24h (tenant-scoped via enabled
-    // agents — same posture as the activity tape above).
-    //
-    // 'warn' was dropped from this count 2026-08-04. Routine warnings are
-    // high-volume and non-actionable, so bundling them made the tile read
-    // ~1600 on a day nothing was actually broken — a number that big stops
-    // being a signal and starts being wallpaper. Warnings are NOT suppressed:
-    // they still publish to agent_events, still render in the Activity Tape,
-    // and still show on the /health drill-down. They just don't inflate the
-    // tile that's supposed to answer "is something broken right now."
-    safe(
-      "operations.errors_24h",
-      (async () => {
-        if (agentNamesForOps.length === 0 && !isOperator) return 0;
-        let q = db
-          .from("agent_events")
-          .select("id", { count: "exact", head: true })
-          .in("severity", ["error"])
-          .gte("published_at", now24Ago);
-        if (!isOperator) q = q.in("publisher_agent", agentNamesForOps);
-        const r = await q;
-        return r.count || 0;
-      })(),
-      0
-    ),
-    // Health tile #2: crons whose last run errored — both empire SEED_JOBS
-    // (cron_jobs.last_result starts with ERROR/FAILED/unknown_action_type)
-    // and tenant crons (last_run_status='error').
-    safe(
-      "operations.failed_crons",
-      (async () => {
-        const empireRes = await db
-          .from("cron_jobs")
-          .select("id", { count: "exact", head: true })
-          .or(
-            "last_result.like.ERROR%,last_result.like.FAILED%,last_result.like.unknown_action_type%",
-          );
-        let tenantCount = 0;
-        if (tenantId) {
-          const r = await db
-            .from("tenant_cron_jobs")
-            .select("id", { count: "exact", head: true })
-            .eq("tenant_id", tenantId)
-            .eq("last_run_status", "error");
-          tenantCount = r.count || 0;
-        }
-        return (empireRes.count || 0) + tenantCount;
-      })(),
-      0
-    ),
-    // Health tile #3: lender threads stuck at sent for >7d.
+    // null tenant: every tile says Couldn't check (nothing was read).
     tenantId
-      ? safe(
-          "operations.stuck_threads",
-          (async () => {
-            const r = await db
-              .from("application_lender_threads")
-              .select("id", { count: "exact", head: true })
-              .eq("tenant_id", tenantId)
-              .eq("status", "sent")
-              .lt("sent_at", now7Ago);
-            return r.count || 0;
-          })(),
-          0
-        )
-      : Promise.resolve(0),
-    // Health tile #4: leads whose updated_at is >14d ago.
+      ? loadAttentionSummary(tenantId)
+      : Promise.resolve({ errors: null, warnings: null, cronFailures: null, workersDown: null, coldLeads: null }),
+    // The outcome checks (OASIS: the founder-booking check) count into "All
+    // clear" exactly as they count into /health's header. Never throws.
     tenantId
-      ? safe(
-          "operations.stale_leads",
-          (async () => {
-            const r = await db
-              .from("tenant_records")
-              .select("id", { count: "exact", head: true })
-              .eq("tenant_id", tenantId)
-              .eq("entity_type", "lead")
-              .lt("updated_at", now14Ago);
-            return r.count || 0;
-          })(),
-          0
+      ? safe("operations.tenant", getTenant(tenantId), null).then((tenant) =>
+          loadWorkspaceOutcome(tenantId, tenant ? resolveClientProfileSlug(tenant) : null, Date.now()),
         )
-      : Promise.resolve(0),
-    // Overrides feature was deleted 2026-05-22 — CC's call: "I don't
-    // want to be an approval bot. The block IS the protection."
-    // exec_guard still refuses destructive commands; it just doesn't
-    // create approval-request rows anymore. No more badge.
+      : Promise.resolve(null),
   ]);
-  const snapByName = new Map(snaps.map((s) => [s.agent_name, s] as const));
+  const snapByName = new Map((snaps ?? []).map((s) => [s.agent_name, s] as const));
 
   // Resolve lead/record UUIDs in event payloads to human names in one batch
   // query. Without this the Activity Tape renders lines like
@@ -244,7 +168,7 @@ export default async function OperationsPage({
   // identifiable.
   const recordResolver = await safe(
     "operations.record_resolver",
-    buildRecordResolver(db, events, { tenantId }),
+    buildRecordResolver(db, events ?? [], { tenantId }),
     new Map<string, string>(),
   );
 
@@ -259,15 +183,13 @@ export default async function OperationsPage({
   // (2026-05-14): only show what's actually wired up; idle subscribed
   // agents are useful, hallucinated subscribed agents are noise.
   const familySet = new Set(FAMILY_AGENT_KEYS);
-  const enabledSource =
-    manifestEnabledSlugs.length > 0
-      ? manifestEnabledSlugs
-      : profile?.agents_enabled || [];
-  const enabled = enabledSource.filter((k) => familySet.has(resolveAgentKey(k)));
+  const enabled = agentNamesForOps.filter((key) => familySet.has(resolveAgentKey(key)));
   const now = Date.now();
 
-  const totalHealthSignals = errorsCount + failedCronsCount + stuckThreadsCount + staleLeadsCount;
-  const allClear = totalHealthSignals === 0;
+  // "All clear" is /health's "Nothing needs you" (lib/admin/attention.ts
+  // needsYouCount): every alarm count read and zero, and no outcome-check
+  // signal. A count that could not be read is not a zero.
+  const allClear = nothingNeedsYou(attention, outcome);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -275,73 +197,86 @@ export default async function OperationsPage({
         title="Operations"
         subtitle="Background workers, paired machines, and the live event tape — what's running right now."
         action={
-          <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
-            {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
-          </Tag>
+          pairings === null ? (
+            <Tag tone="neutral">Bridges: couldn&apos;t check</Tag>
+          ) : (
+            <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
+              {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
+            </Tag>
+          )
         }
       />
 
-      {/* Health banner — phase 3 merge of /health into /operations.
-          Compact 4-tile glance + a fifth pill for pending overrides.
-          /health still exists for the full row-level drill-down; this
-          shows just the counts so CC can see "do I have anything to look
-          at right now" without leaving Operations. */}
+      {/* What needs you: the same counts /health lists row by row. */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        <HealthMiniTile label="Errors today" count={errorsCount} tone={errorsCount === 0 ? "engaged" : "warm"} href="/health" hint="Errors in the last 24h. Warnings are excluded — see the Activity Tape or /health for those." />
-        <HealthMiniTile label="Failed automations" count={failedCronsCount} tone={failedCronsCount === 0 ? "engaged" : "warm"} href="/automations" hint="Scheduled jobs whose last run errored." />
-        <HealthMiniTile label="Quiet shop-outs" count={stuckThreadsCount} tone={stuckThreadsCount === 0 ? "engaged" : "accent"} href="/health" hint="Lender emails sent >7d ago with no reply yet." />
-        <HealthMiniTile label="Cold leads" count={staleLeadsCount} tone={staleLeadsCount === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads you haven't touched in 2+ weeks." />
+        <HealthMiniTile label="Errors today" count={attention.errors} tone={attention.errors === 0 ? "engaged" : "warm"} href="/health" hint="Errors in the last 24 hours. System health lists each one." />
+        <HealthMiniTile label="Warnings today" count={attention.warnings} tone={attention.warnings === 0 ? "engaged" : "accent"} href="/health" hint="Warnings in the last 24 hours: things that went wrong but kept running." />
+        <HealthMiniTile label="Failed automations" count={attention.cronFailures} tone={attention.cronFailures === 0 ? "engaged" : "warm"} href="/health" hint="Schedules whose run in the last 24 hours errored. System health says what to do about each." />
+        <HealthMiniTile label="Workers down" count={attention.workersDown} tone={attention.workersDown === 0 ? "engaged" : "warm"} href="/health" hint="Background processes on your computer that stopped reporting or report themselves down." />
+        <HealthMiniTile label="Cold leads" count={attention.coldLeads} tone={attention.coldLeads === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads nobody has touched in 14 days or more." />
       </div>
       {allClear && (
         <div className="text-xs text-status-engaged">All clear — nothing needs your attention.</div>
+      )}
+      {outcome && outcome.signalCount > 0 && (
+        <div className="text-xs text-status-warm">
+          Outcome checks: {outcome.signalCount} need{outcome.signalCount === 1 ? "s" : ""} you.{" "}
+          <Link href="/health" className="underline">System health</Link> lists them.
+        </div>
       )}
 
       <Card
         title="Agent workers"
         subtitle="Each agent runs an autonomous reasoning loop on its own machine. A green dot means it cycled within the last 15 min."
       >
-        <div className="grid sm:grid-cols-2 gap-3">
-          {enabled.map((key) => {
-            const info = getAgentInfo(key);
-            const snap = snapByName.get(key);
-            const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
-            return (
-              <div
-                key={key}
-                className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
-                  fresh ? "border-status-engaged/30" : "border-bg-border"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${
-                      fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
-                    }`} />
-                    <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
-                      {info.label}
+        {snaps === null ? (
+          <EmptyState message="Couldn't check the agent heartbeats. The read failed and has been logged; this does not mean the workers stopped. Reload to try again." />
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3">
+            {enabled.map((key) => {
+              const info = getAgentInfo(key);
+              const snap = snapByName.get(key);
+              const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
+              return (
+                <div
+                  key={key}
+                  className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
+                    fresh ? "border-status-engaged/30" : "border-bg-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${
+                        fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
+                      }`} />
+                      <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
+                        {info.label}
+                      </span>
+                    </div>
+                    <span
+                      className="text-xs text-fg-dim font-mono"
+                      title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
+                    >
+                      {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
                     </span>
                   </div>
-                  <span
-                    className="text-xs text-fg-dim font-mono"
-                    title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
-                  >
-                    {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
-                  </span>
+                  <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
+                  <div className="text-[10px] text-fg-dim mt-2 font-mono">
+                    {snap?.last_tick_at
+                      ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
+                      : "worker not running on any paired machine"}
+                  </div>
                 </div>
-                <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
-                <div className="text-[10px] text-fg-dim mt-2 font-mono">
-                  {snap?.last_tick_at
-                    ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
-                    : "worker not running on any paired machine"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Card title="Paired machines" subtitle="Local installs heartbeating to this dashboard. Add a new one from Settings → Devices.">
-        {pairings.length === 0 ? (
+        {pairings === null ? (
+          <EmptyState message="Couldn't check the paired machines. The read failed and has been logged; this does not mean none are paired. Reload to try again." />
+        ) : pairings.length === 0 ? (
           <EmptyState
             message="No machines paired yet."
             cta={
@@ -394,24 +329,27 @@ export default async function OperationsPage({
 
       <Card
         title="Local CLI status"
-        subtitle="Per-CLI install probe on your local bridge. Green = the bridge found the binary and could run --version. Red = chat-via-CLI will fall back to API-key mode for that provider."
+        subtitle="Which AI command-line tools your computer's bridge found, and whether each is signed in, as the bridge last reported."
       >
-        <BridgeCliPanel serverBridgeOnline={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
+        <BridgeCliPanel serverBridgeOnline={pairings === null ? null : pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
       </Card>
 
       <Card
         title="Warm process pool"
-        subtitle="Live state of the bridge's persistent claude processes. Each entry skips the cold-start (5–30s) on its next chat turn. Only visible when the local bridge is online."
+        subtitle="The chat processes your computer keeps warm, so the next Coding harness turn skips a 5 to 30 second start. Read through the Command Center, never from this browser."
       >
         <WarmPoolPanel />
       </Card>
 
       <Card
+        id="activity-tape"
         title="Activity tape"
         subtitle={
-          showOlder
-            ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
-            : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
+          events === null
+            ? "Couldn't check the event tape just now."
+            : showOlder
+              ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
+              : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
         }
         action={
           <a
@@ -422,9 +360,11 @@ export default async function OperationsPage({
           </a>
         }
       >
-        {events.length === 0 ? (
+        {events === null ? (
+          <EmptyState message="Couldn't check the activity tape. The read failed and has been logged; this does not mean nothing ran. Reload to try again." />
+        ) : events.length === 0 ? (
           <EmptyState
-            message="No events recorded yet. The event bus writes when crons fire (MRR snapshot, plan materialize), inbound webhooks land (n8n classifies email), or agents emit dashboard-action mutations."
+            message="No events recorded yet. Events land here when a schedule runs, an inbound email is classified, or an agent changes dashboard data."
           />
         ) : (
           <ul className="divide-y divide-bg-border">
@@ -481,27 +421,34 @@ function HealthMiniTile({
   hint,
 }: {
   label: string;
-  count: number;
+  /** null = the count could not be read: a neutral "Couldn't check", never a 0. */
+  count: number | null;
   tone: "engaged" | "warm" | "accent" | "hot";
   href: string;
   hint?: string;
 }) {
   const toneClass =
-    tone === "engaged"
-      ? "border-status-engaged/30 bg-status-engaged/5 text-status-engaged"
-      : tone === "warm"
-        ? "border-status-warm/40 bg-status-warm/5 text-status-warm"
-        : tone === "hot"
-          ? "border-status-hot/40 bg-status-hot/5 text-status-hot"
-          : "border-accent/40 bg-accent/5 text-accent";
+    count === null
+      ? "border-bg-border bg-bg-elev text-fg-muted"
+      : tone === "engaged"
+        ? "border-status-engaged/30 bg-status-engaged/5 text-status-engaged"
+        : tone === "warm"
+          ? "border-status-warm/40 bg-status-warm/5 text-status-warm"
+          : tone === "hot"
+            ? "border-status-hot/40 bg-status-hot/5 text-status-hot"
+            : "border-accent/40 bg-accent/5 text-accent";
   return (
     <a
       href={href}
-      title={hint}
+      title={count === null ? "This count could not be read; the error has been logged. Reload to try again." : hint}
       className={`rounded-lg border px-3 py-2 transition-opacity hover:opacity-80 ${toneClass}`}
     >
       <div className="text-[10px] uppercase tracking-wider font-bold opacity-70">{label}</div>
-      <div className="text-2xl font-bold mt-0.5">{count}</div>
+      {count === null ? (
+        <div className="text-sm font-bold mt-1.5">Couldn&apos;t check</div>
+      ) : (
+        <div className="text-2xl font-bold mt-0.5">{count}</div>
+      )}
     </a>
   );
 }

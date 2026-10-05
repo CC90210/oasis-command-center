@@ -30,6 +30,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import type { ResolvedRep } from "./kixie-attribution";
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -38,6 +39,8 @@ export type AutomationResult = {
   action: string;
   ok: boolean;
   detail?: string;
+  /** Core inbound lead/ledger failure: webhook should return non-2xx and retry. */
+  retryable?: boolean;
 };
 
 export type KixieAutomationConfig = {
@@ -114,6 +117,7 @@ async function leadStage(
     .eq("id", leadId)
     .eq("tenant_id", tenantId)
     .maybeSingle();
+  if (r.error) throw new Error(`lead_stage_read_failed:${r.error.message}`);
   const data = (r.data as { data?: Record<string, unknown> } | null)?.data;
   return String(data?.stage || "").toLowerCase();
 }
@@ -227,6 +231,7 @@ export async function handleMissedInbound(
       fname?: string;
       lname?: string;
       email?: string;
+      occurredAt: string;
     };
     leadId: string | null;
     leadData: Record<string, unknown> | null;
@@ -313,13 +318,20 @@ export async function handleMissedInbound(
       })
       .select("id")
       .single();
-    if (ins.error) return { action, ok: false, detail: `lead_create_failed:${ins.error.message}` };
+    if (ins.error) {
+      return {
+        action,
+        ok: false,
+        detail: `lead_create_failed:${ins.error.message}`,
+        retryable: true,
+      };
+    }
     const newLeadId = (ins.data as { id: string }).id;
 
     // Backfill the call row (persist skipped it — there was no lead yet).
     // Duration rides along (Codex P2 2026-07-21) so metrics count this as a
     // connected call; an answered talk backfills as call_ended, not incoming.
-    await db.from("lead_interactions").upsert(
+    const interaction = await db.from("lead_interactions").upsert(
       {
         tenant_id: tenantId,
         lead_id: newLeadId,
@@ -336,17 +348,35 @@ export async function handleMissedInbound(
       },
       { onConflict: "kixie_call_id" },
     );
-    await db.from("agent_events").insert({
+    if (interaction.error) {
+      throw new Error(`interaction_backfill_failed:${interaction.error.message}`);
+    }
+    await persistCanonicalLeadTouch(db, {
+      tenantId,
+      leadId: newLeadId,
+      occurredAt: evt.occurredAt,
+      isCall: true,
+    });
+    const eventWrite = await db.from("agent_events").insert({
       event_type: "BRAVO_KIXIE_NEW_INBOUND_LEAD",
       publisher_agent: "kixie",
       severity: "warn",
       payload: { tenant_id: tenantId, lead_id: newLeadId, call_id: callId, phone_last4: ten.slice(-4) },
       correlation_id: tenantId,
     });
+    if (eventWrite.error) {
+      throw new Error(`new_lead_event_failed:${eventWrite.error.message}`);
+    }
     return { action, ok: true, detail: `lead_created:${newLeadId}` };
   } catch (err) {
     console.error("[kixie-automations] missed inbound failed", err);
-    return { action, ok: false, detail: err instanceof Error ? err.message : "unknown" };
+    const detail = err instanceof Error ? err.message : "unknown";
+    return {
+      action,
+      ok: false,
+      detail,
+      retryable: /interaction_backfill_failed|canonical_touch_/.test(detail),
+    };
   }
 }
 
@@ -394,10 +424,13 @@ export async function handleDispositionActions(
       .eq("lead_id", leadId)
       .eq("status", "scheduled")
       .select("id");
-    const pausedCount = paused.error ? -1 : (paused.data || []).length;
+    if (paused.error) {
+      return { action, ok: false, detail: `pause_failed:${paused.error.message}` };
+    }
+    const pausedCount = (paused.data || []).length;
 
     if (mapped === "callback" && rep) {
-      await db.from("call_appointments").insert({
+      const appointment = await db.from("call_appointments").insert({
         tenant_id: tenantId,
         lead_id: leadId,
         entity_type: "lead",
@@ -406,8 +439,11 @@ export async function handleDispositionActions(
         pre_call_note: `Kixie disposition "${d.slice(0, 120)}" — follow up.`,
         created_by: rep.userId,
       });
+      if (appointment.error) {
+        return { action, ok: false, detail: `appointment_failed:${appointment.error.message}` };
+      }
     }
-    await db.from("agent_events").insert({
+    const eventWrite = await db.from("agent_events").insert({
       event_type: "BRAVO_KIXIE_DISPOSITION_ACTION",
       publisher_agent: "kixie",
       severity: mapped === "pause_drips" ? "warn" : "info",
@@ -420,6 +456,9 @@ export async function handleDispositionActions(
       },
       correlation_id: tenantId,
     });
+    if (eventWrite.error) {
+      return { action, ok: false, detail: `event_failed:${eventWrite.error.message}` };
+    }
     return { action, ok: true, detail: `${mapped}:drips_paused=${pausedCount}` };
   } catch (err) {
     console.error("[kixie-automations] disposition action failed", err);

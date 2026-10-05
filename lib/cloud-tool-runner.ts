@@ -36,6 +36,24 @@
 import { fetchWithRetry } from "./retry";
 import { getServiceSupabase } from "./supabase-server";
 import { getManifest } from "./manifest/loader";
+import { resolveAgentToolPalette } from "./manifest/schema";
+import { isClientSafeTool, isOasisInternalTenant } from "./ai/tools/client-safe-registry";
+import { getTursoClient, tursoConfigured } from "./turso";
+import {
+  DEPARTMENT_KEYS,
+  canonicalJson,
+  departmentForAgent,
+  effectiveStatus,
+  isOneOf,
+  validateSendEmailPayload,
+  agentReadScope,
+  workspaceReadScope,
+  type ApprovalScope,
+} from "./os/approvals/rules";
+import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
+import { openDepartmentsFor } from "./os/approvals/scope";
+import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
+import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
 import { resolveClientProfileSlug } from "./client-profiles";
 import {
   getRecord as dataGet,
@@ -50,12 +68,11 @@ import {
 } from "./lead-scope";
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
-import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
-import type { OasisLeadStageEvent } from "./oasis-lead-stage-engine";
 import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
+import { deploymentRuntimeLabel } from "./deployment-surface";
 import {
   type ChatPlanMode,
   composeSystemPrompt as composePlanSystemPrompt,
@@ -88,8 +105,11 @@ import {
   unblockContact as ttUnblockContact,
 } from "./integrations/texttorrent";
 import { resolveTextTorrentSenderId } from "./integrations/texttorrent-sender";
+import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "./ai/usage";
+import { meterRefusalCode } from "./ai/usage-codes";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+const utf8 = new TextEncoder();
 const MAX_TOOL_ITERATIONS = 8; // safety cap — prevents runaway tool loops
 const HTTP_BODY_CAP_BYTES = 5 * 1024 * 1024; // 5 MB max external response
 const HTTP_TIMEOUT_MS = 15_000;
@@ -99,6 +119,14 @@ const HTTP_TIMEOUT_MS = 15_000;
 // ============================================================================
 
 export type ToolContext = {
+  /**
+   * The SESSION's tenant — resolved server-side from the signed-in user
+   * (resolveChatContext in /api/chat and /api/chat/resume), never from
+   * anything the model wrote. It decides both the data scope and which tools
+   * this turn may be offered (lib/ai/tools/client-safe-registry.ts).
+   * executeTool strips any tenant key the model puts in a tool's input, so a
+   * tool can only ever read this value.
+   */
   tenantId: string;
   userId: string;
   agentKey: string;
@@ -341,37 +369,6 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
     },
   },
   {
-    name: "advance_lead_stage",
-    description:
-      "Move a lead through its lifecycle by firing a stage-engine event. " +
-      "Use this (NOT update_record with a stage patch) when the operator " +
-      "says things like 'mark Bennett as lost', 'I got off the phone with " +
-      "Windsor — they signed the contract', or 'kickoff is done, start the " +
-      "build'. The engine validates the transition, emits the proper " +
-      "timeline event, and invalidates the dashboard cache so the kanban " +
-      "refreshes immediately. " +
-      "Event types (OASIS, 14-stage lifecycle): manual_outreach_started " +
-      "(-> attempting_contact), discovery_call_scheduled (-> " +
-      "founder_meeting_booked), lead_qualified (-> qualified), " +
-      "proposal_sent (-> proposal_sent), proposal_viewed (-> proposal_sent, " +
-      "lag-repair), contract_signed (-> won), onboarding_complete (-> " +
-      "in_build), lead_replied_negative (-> lost), contract_ended (-> lost, " +
-      "only from launched; reason code marks it as churn), manual_archive " +
-      "(-> lost, operator cleanup from any non-lost stage). " +
-      "Find the lead's UUID first via search_records or list_records.",
-    input_schema: {
-      type: "object",
-      properties: {
-        lead_id: { type: "string", description: "Lead UUID." },
-        event_type: {
-          type: "string",
-          description: "One of: manual_outreach_started, discovery_call_scheduled, lead_qualified, proposal_sent, proposal_viewed, contract_signed, onboarding_complete, lead_replied_negative, contract_ended, manual_archive.",
-        },
-      },
-      required: ["lead_id", "event_type"],
-    },
-  },
-  {
     name: "http_get",
     description:
       "Fetch a public URL via HTTP GET. Use for reading public web pages, public JSON APIs, or any URL the operator pastes. Returns the response body (truncated to 5MB) plus status code and content-type. Do NOT use for authenticated requests that require operator-scoped credentials — those need an integration connector instead.",
@@ -465,9 +462,61 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   },
 
   // ──────────────────────────────────────────────────────────────────
+  // Approval-gated drafts (OASIS OS, 2026-09-28; docs/os-revamp/03 §d.4
+  // "draft" class). These NEVER send. propose_email writes one `approvals`
+  // row (lib/os/approvals/store.ts) in the SESSION's workspace; a person
+  // approves or sends it back in Needs you, and only then does the server
+  // execute the stored payload, once, through the workspace's own sender.
+  // Client-safe (lib/ai/tools/client-safe-registry.ts), so a department agent
+  // in any workspace can only ever PROPOSE an outward action.
+  // ──────────────────────────────────────────────────────────────────
+  {
+    name: "propose_email",
+    description:
+      "Draft an email for a person on the team to approve. NOTHING IS SENT by this tool: it puts an approval card in Needs you, and the email goes out only after a teammate approves it, through this workspace's own sender with its opt-out and brand checks. Use it for any email that leaves the business. Tell the operator it is waiting for approval; never say it was sent. To revise a draft someone sent back, pass revises_approval_id with the new text (see list_proposals for their note).",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient email address." },
+        subject: { type: "string", description: "Subject line (one line, at most 200 characters)." },
+        body: { type: "string", description: "Plain-text body, exactly as it should be sent." },
+        cc: { type: "array", items: { type: "string" }, description: "Optional addresses to copy." },
+        department: {
+          type: "string",
+          // The department list's only copy (lib/os/departments.ts via rules.ts).
+          enum: [...DEPARTMENT_KEYS],
+          description: "The department this email is for. Defaults to your own department.",
+        },
+        lead_id: { type: "string", description: "Optional id of the lead this email is about." },
+        revises_approval_id: {
+          type: "string",
+          description: "When revising a draft that was sent back: the id of that approval.",
+        },
+      },
+      required: ["to", "subject", "body"],
+    },
+  },
+  {
+    name: "list_proposals",
+    description:
+      "List the drafts you proposed for approval and where each stands: waiting, sent back (with the reviewer's note to revise against), sent, or failed (with the reason). Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        view: {
+          type: "string",
+          enum: ["pending", "decided", "all"],
+          description: "pending = still waiting; decided = the last 7 days of decisions; all = everything. Default all.",
+        },
+        limit: { type: "number", description: "Max rows, default 20, max 50." },
+      },
+    },
+  },
+
+  // ──────────────────────────────────────────────────────────────────
   // SunBiz comms tools (Phase 3d, 2026-06-02) — Kixie click-to-call/SMS +
   // TextTorrent SMS / blasts / list management. defer:false — they run
-  // server-side on Vercel via the typed clients (lib/integrations/*), same
+  // server-side on Cloudflare via the typed clients (lib/integrations/*), same
   // as the drawer Call button. Every send respects the dashboard dry-run
   // gate (lib/integrations/send-mode.ts). Send-capable tools are in
   // READ_ONLY_DENIED_TOOLS and only reach Helios via HELIOS_TOOL_PALETTE.
@@ -845,17 +894,64 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
 // Server-side tool execution
 // ============================================================================
 
+/**
+ * Keys a model might use to name a tenant in a tool's input. No tool reads
+ * them (every tool scopes to ctx.tenantId), and they are removed before
+ * dispatch so a future tool cannot start trusting one by accident.
+ */
+const MODEL_TENANT_KEYS = ["tenant_id", "tenantId", "tenant"] as const;
+
+/** The tool input with any model-supplied tenant key removed. Exported for
+ *  tests/os-tool-sandbox.test.ts. */
+export function stripModelSuppliedTenant(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(input && typeof input === "object" ? input : {}) };
+  for (const key of MODEL_TENANT_KEYS) delete out[key];
+  return out;
+}
+
+function refusedToolResult(name: string, error: string): ToolResultBlock {
+  return {
+    content: JSON.stringify({ error, tool: name }),
+    is_error: true,
+    summary: `${name} refused: ${error}`,
+  };
+}
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   ctx: ToolContext
 ): Promise<ToolResultBlock> {
+  // The tenant comes from the session. A context without one is a wiring bug
+  // upstream, and a tool scoped to "" must not run.
+  if (typeof ctx.tenantId !== "string" || ctx.tenantId.trim() === "") {
+    console.error("[cloud-tool-runner] refused a tool call with no session tenant", { tool: name });
+    return refusedToolResult(name, "tool_context_missing_tenant");
+  }
+  // Dispatch-time sandbox (docs/os-revamp/03 F2, §d.4). The loop only OFFERS a
+  // client tenant the client-safe registry, but the offer is not the boundary:
+  // a replayed or malformed tool_use, a future provider adapter, or a new
+  // caller of executeTool must still be unable to run get_credential, http_post
+  // or any other OASIS-only tool for a client tenant.
+  if (!isOasisInternalTenant(ctx.tenantId) && !isClientSafeTool(name)) {
+    console.error("[cloud-tool-runner] refused a tool outside the client-safe registry", {
+      tool: name,
+      tenantId: ctx.tenantId,
+    });
+    return refusedToolResult(name, "tool_not_available_in_this_workspace");
+  }
+  if (input && typeof input === "object" && MODEL_TENANT_KEYS.some((k) => k in input)) {
+    console.warn("[cloud-tool-runner] ignored a tenant the model put in a tool input; the session tenant applies", {
+      tool: name,
+    });
+  }
+  const safeInput = stripModelSuppliedTenant(input);
   try {
-    const data = await dispatch(name, input, ctx);
+    const data = await dispatch(name, safeInput, ctx);
     return {
       content: JSON.stringify(data),
       is_error: false,
-      summary: humanSummary(name, input, data),
+      summary: humanSummary(name, safeInput, data),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "tool_threw";
@@ -903,6 +999,8 @@ async function dispatch(
       const r = await runAction({ type: name, payload: input }, {
         tenantId: ctx.tenantId,
         authUserId: ctx.authUserId,
+        userId: ctx.userId,
+        isAdmin: ctx.isAdmin,
       });
       if (!r.ok) throw new Error(r.error);
       return { ok: true, summary: r.summary };
@@ -924,8 +1022,10 @@ async function dispatch(
       return await toolListLeadDocuments(input, ctx);
     case "import_leads_from_attachment":
       return await toolImportLeadsFromAttachment(input, ctx);
-    case "advance_lead_stage":
-      return await toolAdvanceLeadStage(input, ctx);
+    case "propose_email":
+      return await toolProposeEmail(input, ctx);
+    case "list_proposals":
+      return await toolListProposals(input, ctx);
     case "kixie_call":
       return await toolKixieCall(input, ctx);
     case "kixie_send_sms":
@@ -947,84 +1047,6 @@ async function dispatch(
     default:
       throw new Error(`unknown_tool:${name}`);
   }
-}
-
-/**
- * NL-CRM bridge: operator says "Bennett's contract ended" -> Bravo
- * calls this with {lead_id, event_type: "contract_ended"} -> engine
- * moves the lead's stage, emits BRAVO_LEAD_AUTO_BUMPED, revalidates
- * the dashboard cache.
- *
- * This is preferred over update_record({stage: "..."}) because it
- * runs through the engine: archived-lead bypass kicks in, from-set
- * gates protect against accidental backflow on regular leads, and
- * the timeline gets a row with the canonical reason code (not just
- * a generic field-changed entry).
- *
- * The tool is OASIS-tenant aware via dispatchOasisOnlyEvent — on
- * SunBiz / other tenants it returns no_rule, which is the correct
- * shape (those tenants use a different lifecycle and have their
- * own dispatcher entry points).
- */
-async function toolAdvanceLeadStage(
-  input: unknown,
-  ctx: { tenantId: string },
-): Promise<unknown> {
-  const args = (input || {}) as { lead_id?: string; event_type?: string };
-  const leadId = String(args.lead_id || "").trim();
-  const eventType = String(args.event_type || "").trim();
-  if (!leadId) throw new Error("missing_lead_id");
-  if (!eventType) throw new Error("missing_event_type");
-
-  // Whitelist matches the API route's OASIS_OPERATOR_TRIGGERABLE so
-  // the agent can't synthesize a transition the operator UI couldn't
-  // also fire. Keeps webhook-only events (outbound_email_sent, etc.)
-  // off the table.
-  const ALLOWED: ReadonlySet<OasisLeadStageEvent["type"]> = new Set([
-    "discovery_call_scheduled",
-    "lead_qualified",
-    "proposal_sent",
-    "proposal_viewed",
-    "contract_signed",
-    "onboarding_complete",
-    "lead_replied_negative",
-    "contract_ended",
-    "manual_outreach_started",
-    "manual_archive",
-  ]);
-  if (!ALLOWED.has(eventType as OasisLeadStageEvent["type"])) {
-    throw new Error(`event_type_not_allowed:${eventType}`);
-  }
-
-  // Dispatcher owns cache invalidation now (lib/lead-stage-dispatcher
-  // → invalidateLeadStagePaths) so both the UI button path and this
-  // chat-driven path get the same kanban refresh without duplicating
-  // the revalidatePath calls in two places.
-  const result = await dispatchOasisOnlyEvent({
-    type: eventType as OasisLeadStageEvent["type"],
-    tenantId: ctx.tenantId,
-    leadId,
-  });
-
-  return {
-    fired: result.fired,
-    ...(result.fired
-      ? {
-          from: result.from,
-          to: result.to,
-          reason: result.reasonCode,
-          summary: `Lead moved from ${result.from} -> ${result.to} (${result.reasonCode}).`,
-        }
-      : {
-          reason: result.reason,
-          summary:
-            result.reason === "stage_blocked"
-              ? "No-op: that transition isn't allowed from the lead's current stage."
-              : result.reason === "not_found"
-                ? "No-op: lead not found (already deleted or wrong tenant)."
-                : "No-op: stage engine declined the event.",
-        }),
-  };
 }
 
 // ----------------------------------------------------------------------------
@@ -1120,6 +1142,153 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
   if (upd.error) throw new Error(upd.error.message);
 
   return { ok: true, saved: bullet, total_chars: next.length };
+}
+
+/**
+ * propose_email — the approval-gated wrapper for email (docs/os-revamp/01
+ * §(f)). Writes ONE approvals row in the session's workspace (ctx.tenantId,
+ * which executeTool already stripped of anything the model wrote) and sends
+ * nothing. The row's idempotency key is the agent, the UTC day and the payload
+ * hash, so a model that retries the same call gets the same card back instead
+ * of a second one, while the same text proposed on another day is a new card.
+ */
+async function toolProposeEmail(input: Record<string, unknown>, ctx: ToolContext) {
+  if (!tursoConfigured()) throw new Error("approvals_unavailable: the database is not configured on this deployment");
+  const payload = validateSendEmailPayload({
+    to: input.to,
+    cc: input.cc,
+    subject: input.subject,
+    body: input.body,
+    lead_id: input.lead_id,
+  });
+  if (!payload.ok) throw new Error(payload.error);
+  const dept = typeof input.department === "string" && input.department.trim() ? input.department.trim() : null;
+  if (dept !== null && !isOneOf(DEPARTMENT_KEYS, dept)) throw new Error("department_invalid");
+  const departmentKey = dept ?? departmentForAgent(ctx.agentKey);
+  const revises = typeof input.revises_approval_id === "string" && input.revises_approval_id.trim() ? input.revises_approval_id.trim() : null;
+  const db = getTursoClient();
+  if (revises) {
+    // An agent revises only ITS OWN card. createApproval checks the tenant and
+    // the kind, not the requester, so without this any agent in the workspace
+    // could withdraw a teammate's or another agent's pending card by
+    // "revising" it with its own text. An agent with no key owns nothing: a
+    // missing key must not match another keyless card as "the same agent".
+    if (!ctx.agentKey) throw new Error("supersedes_not_yours: this agent has no key, so it cannot revise a draft");
+    const old = await getApprovalInTenant(db, ctx.tenantId, revises);
+    if (!old) throw new Error("supersedes_not_found");
+    if (old.requested_by_type !== "agent" || old.requested_by_id !== ctx.agentKey) {
+      throw new Error("supersedes_not_yours: only the agent that proposed a draft can revise it");
+    }
+  }
+  const hash = payloadHashOf(canonicalJson(payload.value));
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+
+  const r = await createApproval(
+    db,
+    {
+      tenantId: ctx.tenantId,
+      departmentKey,
+      requestedBy: { type: "agent", id: ctx.agentKey || null },
+      actionKind: "send_email",
+      title: `Email to ${payload.value.to}: ${payload.value.subject}`.slice(0, 200),
+      targetRef: payload.value.lead_id ? `lead:${payload.value.lead_id}` : null,
+      payload: payload.value,
+      idempotencyKey: `agent:${ctx.agentKey || "unknown"}:${day}:${revises ?? "new"}:${hash}`,
+      supersedesId: revises,
+    },
+    now,
+  );
+  if (!r.ok) throw new Error(r.error + (r.status ? `: approval is ${r.status}` : "") + (r.successorId ? `: already revised as ${r.successorId}` : ""));
+  const a = r.approval;
+  return {
+    ok: true,
+    sent: false,
+    status: a.status,
+    approval_id: a.id,
+    revision: a.revision,
+    department: a.department_key,
+    deduplicated: !r.created,
+    // The tool itself never sends, so this reports the CARD's state, whatever it is.
+    note:
+      a.status === "pending"
+        ? "Waiting for a teammate's approval in Needs you. Nothing has been sent."
+        : `This exact email was already proposed today and is now ${a.status.replace("_", " ")}. Nothing new was created.`,
+  };
+}
+
+/** list_proposals — this agent's own approvals in the session's workspace, with the reviewer's notes. */
+async function toolListProposals(input: Record<string, unknown>, ctx: ToolContext) {
+  if (!tursoConfigured()) throw new Error("approvals_unavailable: the database is not configured on this deployment");
+  // A keyless agent owns no proposals (propose_email stores its id as null),
+  // so there is nothing of its own to read back: the same rule as revise.
+  if (!ctx.agentKey) throw new Error("agent_key_required: this agent has no key, so it has no proposals of its own to read back");
+  const rawView = typeof input.view === "string" ? input.view : "all";
+  const view = rawView === "pending" || rawView === "decided" ? rawView : "all";
+  const limit = Math.max(1, Math.min(Number(input.limit) || 20, 50));
+  // A read-only server scope over the SESSION's workspace, narrowed below to
+  // this agent's own proposals. It can decide nothing. Any member may chat
+  // with any workspace agent, so through it a member reads exactly the
+  // departments they may decide on screen, never more.
+  const scope = await proposalReadScope(ctx);
+  // A reviewer's note and a provider's failure text are other people's words
+  // on their way into the next model request: they get the same scrub as
+  // everything else the model or the transcript sees (lib/secret-redaction.ts,
+  // chat-persistence.ts), env secrets and this workspace's vault values alike.
+  const vault = await fetchTenantVaultSecretsForRedaction(ctx.tenantId);
+  const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+  const now = new Date();
+  const { rows, truncated } = await listApprovals(
+    getTursoClient(),
+    scope,
+    { view, limit, requestedBy: { type: "agent", id: ctx.agentKey } },
+    now,
+  );
+  const nowIso = now.toISOString();
+  return {
+    count: rows.length,
+    truncated,
+    proposals: rows.map((a) => ({
+      approval_id: a.id,
+      kind: a.action_kind,
+      title: a.title,
+      revision: a.revision,
+      // A pending card past its expiry is expired, as every card shows it.
+      status: effectiveStatus(a, nowIso),
+      department: a.department_key,
+      created_at: a.created_at,
+      decided_at: a.decided_at,
+      reviewer_note: a.decision_note === null ? null : scrub(a.decision_note),
+      outcome: a.execution_result === null ? null : scrubStrings(a.execution_result, scrub),
+    })),
+  };
+}
+
+/** Owners/admins read every department; anyone else what their own seats and rail give them. */
+async function proposalReadScope(ctx: ToolContext): Promise<ApprovalScope> {
+  if (ctx.isAdmin === true) return workspaceReadScope(ctx.tenantId, ctx.userId);
+  // Loaded here, not at the top: the viewer module brings the session and
+  // navigation chain, which only this branch needs.
+  const { resolveMemberNavInput } = await import("../components/os/department/viewer");
+  const member = await resolveMemberNavInput(ctx.tenantId, ctx.authUserId);
+  // An unknown seat is not "every seat": read nothing and say why.
+  if (!member.ok) throw new Error("approvals_unavailable: could not confirm which departments you sit in, so nothing was read");
+  return agentReadScope({
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    persona: member.persona,
+    openDepartments: openDepartmentsFor(member.navInput),
+  });
+}
+
+/** Every string inside a JSON-shaped value, passed through `scrub`. */
+function scrubStrings<T>(value: T, scrub: (text: string) => string): T {
+  if (typeof value === "string") return scrub(value) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubStrings(v, scrub)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubStrings(v, scrub)])) as T;
+  }
+  return value;
 }
 
 /**
@@ -1365,7 +1534,9 @@ async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext)
   // non-admin operator only sees their own + collaborated rows (admins see all).
   // The arbitrary `where` is dropped for scoped entities (security > filter).
   // (2026-06-22 audit.)
-  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const scoped =
+    SCOPED_ENTITIES.has(entity.toLowerCase()) &&
+    (!ctx.isAdmin || leadScopingEnabled());
   const result = scoped
     ? await listByAssignedScope({
         tenant_id: ctx.tenantId,
@@ -1400,7 +1571,12 @@ async function toolGetRecord(input: Record<string, unknown>, ctx: ToolContext) {
   // book exactly as before (filtered-view mode opens the human UI, not the agent).
   if (
     SCOPED_ENTITIES.has(entity.toLowerCase()) &&
-    !recordMatchesViewer(row.data, { isAdmin: ctx.isAdmin, userId: ctx.userId }, leadScopingEnabled(), "isolate")
+    !recordMatchesViewer(
+      row.data,
+      { isAdmin: ctx.isAdmin, userId: ctx.userId },
+      !ctx.isAdmin || leadScopingEnabled(),
+      "isolate",
+    )
   ) {
     throw new Error("record_not_found");
   }
@@ -1413,6 +1589,22 @@ async function toolListLeadDocuments(
 ) {
   const leadId = String(input.lead_id || "").trim();
   if (!leadId) throw new Error("lead_id_required");
+  const lead = await dataGet({
+    tenant_id: ctx.tenantId,
+    entity: "lead",
+    id: leadId,
+  }).catch(() => null);
+  if (
+    !lead ||
+    !recordMatchesViewer(
+      lead.data,
+      { isAdmin: ctx.isAdmin, userId: ctx.userId },
+      !ctx.isAdmin || leadScopingEnabled(),
+      "isolate",
+    )
+  ) {
+    throw new Error("record_not_found");
+  }
   const docTypeFilter =
     typeof input.doc_type === "string" && input.doc_type.trim()
       ? input.doc_type.trim().toLowerCase()
@@ -1522,7 +1714,9 @@ async function toolSearchRecords(input: Record<string, unknown>, ctx: ToolContex
   // is fixed; if the operator has more, they should narrow via filter.
   // Per-agent scope for SCOPED_ENTITIES so search can't reach another rep's
   // leads/applications/funded-deals. (2026-06-22 audit.)
-  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const scoped =
+    SCOPED_ENTITIES.has(entity.toLowerCase()) &&
+    (!ctx.isAdmin || leadScopingEnabled());
   const result = scoped
     ? await listByAssignedScope({
         tenant_id: ctx.tenantId,
@@ -2095,6 +2289,17 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
         ? `parsed ${d.parsed_rows || 0} lead rows from attachment`
         : `imported ${d.inserted || 0} lead rows from attachment`;
     }
+    case "propose_email": {
+      const d = data as { deduplicated?: boolean; revision?: number; status?: string };
+      const to = String(input.to || "").slice(0, 80);
+      return d.deduplicated
+        ? `email to ${to} was already proposed today (${String(d.status || "pending").replace("_", " ")}; nothing new sent)`
+        : `drafted an email to ${to} for approval${d.revision && d.revision > 1 ? ` (v${d.revision})` : ""} (not sent)`;
+    }
+    case "list_proposals": {
+      const d = data as { count?: number };
+      return `listed ${d.count || 0} proposal${d.count === 1 ? "" : "s"}`;
+    }
     case "kixie_call": {
       const d = data as { dry_run?: boolean; target?: string };
       return `${d.dry_run ? "(dry-run) " : ""}calling ${d.target || String(input.target || input.lead_id || "")} via Kixie`;
@@ -2149,7 +2354,14 @@ export type StreamYield =
       input: Record<string, unknown>;
       resume_state: ResumeState;
     }
-  | { type: "done"; inputTokens: number; outputTokens: number }
+  /**
+   * The turn ended. inputTokens / outputTokens are the SUM of its provider
+   * requests' own usage reports. unreportedCalls counts the requests that
+   * finished with no usage report: their tokens are unknown, so while it is
+   * above 0 the sums are only the other requests' (a floor) and a caller must
+   * not show or store them as the turn's tokens.
+   */
+  | { type: "done"; inputTokens: number; outputTokens: number; unreportedCalls: number }
   | { type: "error"; message: string };
 
 type ContentBlock =
@@ -2167,11 +2379,9 @@ type AnthropicMessage =
  * the pre-pause state intact. Contains everything resumeAnthropicTurn()
  * needs to continue the model's session without re-running prior iterations.
  *
- * Security note: this state passes through the browser. v1 trusts the
- * authed dashboard session (replay attacks only let an operator mess with
- * their OWN chat, no cross-tenant blast radius). If /api/chat/resume ever
- * becomes a multi-tenant or public surface, add HMAC signing here so a
- * malicious page can't synthesize states the server didn't issue.
+ * Security note: this state passes through the browser, so the routes sign
+ * it (lib/resume-hmac.ts) bound to the tenant, user and agent it was issued
+ * to, and /api/chat/resume refuses any state the server did not issue.
  */
 export type ResumeState = {
   /** Anthropic model ID — must match the model that was streaming the pause. */
@@ -2189,6 +2399,10 @@ export type ResumeState = {
    *  of resetting to zero. */
   totalIn: number;
   totalOut: number;
+  /** Calls before the pause that finished with no usage report (see the
+   *  done event's unreportedCalls), carried so the resumed turn's done event
+   *  still says its totals are a floor. Absent = none. */
+  unreportedCalls?: number;
   /** Echo of the original request's maxTokens / enableTools — applied to
    *  the resumed call so the second half of the conversation behaves
    *  identically to what would have happened without the pause. */
@@ -2214,6 +2428,12 @@ export type ResumeState = {
    *  sees the same bridge tool set the original call resolved.
    *  null = no advertisement on record (older bridges). */
   bridgeAdvertisedTools?: string[] | null;
+  /** The chat session the paused turn belongs to. The loop never sets it:
+   *  the route that signs the state stamps it, so it is signed with the
+   *  rest, and /api/chat/resume files the resumed half under it rather than
+   *  under a session id from the request body (which the browser can send
+   *  stale). */
+  sessionId?: string;
 };
 
 export type ToolLoopRequest = {
@@ -2233,11 +2453,12 @@ export type ToolLoopRequest = {
    *  model up front that those tools don't exist this turn. */
   excludeDeferredTools?: boolean;
   /**
-   * Per-agent tool allowlist from the tenant's manifest (Phase D).
-   * Undefined → no filter; agent gets the full palette (preserves
-   * pre-Phase-D behavior for existing tenants).
-   * Empty array → agent is chat-only, no tools.
-   * Populated → only these tool names get advertised to the model.
+   * Per-agent tool allowlist from the tenant's manifest (Phase D), resolved
+   * against ctx.tenantId by resolveAgentToolPalette (lib/manifest/schema.ts):
+   *   OASIS tenant: undefined → full palette; [] → chat-only; populated →
+   *     only these tool names get advertised to the model.
+   *   Any other tenant: undefined → NO tools; populated → only the names on
+   *     the client-safe registry. Bridge-routed tools are never offered.
    *
    * Applied AFTER excludeDeferredTools — bridge-routed tools still get
    * filtered out when bridge is offline, even if they're in the palette.
@@ -2254,7 +2475,7 @@ export type ToolLoopRequest = {
    * used here — null is the "no filter" signal.
    *
    * Only narrows defer:true tools. Cloud tools (defer:false) are
-   * unaffected — they execute server-side on Vercel, not the bridge.
+   * unaffected — they execute server-side on Cloudflare, not the bridge.
    */
   bridgeAdvertisedTools?: string[] | null;
   /**
@@ -2270,6 +2491,13 @@ export type ToolLoopRequest = {
    * upstream because its safety contract is the most restrictive.
    */
   chatMode?: ChatPlanMode;
+  /**
+   * REQUIRED: meters every model call the loop makes (lib/ai/usage.ts). Each
+   * iteration is its own call: it reserves against the tenant's monthly AI
+   * budget before it is sent and records its own ai_usage_events row, so a
+   * loop that reaches the cap on iteration 3 stops there with the budget code.
+   */
+  meter: ModelCallMeter;
 };
 
 export async function* streamAnthropicWithTools(
@@ -2303,7 +2531,9 @@ export async function* streamAnthropicWithTools(
     startIter: 0,
     startTotalIn: 0,
     startTotalOut: 0,
+    startUnreportedCalls: 0,
     ctx,
+    meter: req.meter,
   });
 }
 
@@ -2315,7 +2545,8 @@ export async function* streamAnthropicWithTools(
  * Takes the ResumeState the runner emitted before pausing + the
  * tool_result the client produced. Appends the tool_result block onto
  * the message history and continues the iteration loop from where it
- * left off — same iteration cap, same running token totals.
+ * left off — same iteration cap, same running token totals. `meter` meters
+ * the resumed calls exactly as ToolLoopRequest.meter meters the first half.
  */
 export async function* resumeAnthropicTurn(
   resume: ResumeState,
@@ -2323,6 +2554,7 @@ export async function* resumeAnthropicTurn(
   toolResult: { content: string; is_error: boolean },
   ctx: ToolContext,
   apiKey: string,
+  meter: ModelCallMeter,
 ): AsyncGenerator<StreamYield> {
   const history: AnthropicMessage[] = [...resume.history];
   // Append the user-side tool_result block that the browser produced.
@@ -2358,7 +2590,9 @@ export async function* resumeAnthropicTurn(
     startIter: resume.iteration + 1,
     startTotalIn: resume.totalIn,
     startTotalOut: resume.totalOut,
+    startUnreportedCalls: resume.unreportedCalls ?? 0,
     ctx,
+    meter,
   });
 }
 
@@ -2395,14 +2629,21 @@ export async function* streamOpenAICompatibleWithTools(
   const mode = normalizeMode(req.chatMode);
   const system = composePlanSystemPrompt(req.system, mode);
   const activeTools = resolveActiveTools({
+    tenantId: ctx.tenantId,
     toolPalette: req.toolPalette,
     chatMode: mode,
     // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
     // Keep this path cloud-safe instead of advertising tools it cannot resume.
     forceExcludeDeferred: true,
   });
+  // The turn's tokens: the SUM of every step's own report. Each step is its
+  // own provider request (its own ai_usage_events row), and each reports only
+  // its own usage, so keeping the last report under-counted every tool turn.
+  // A step with no usage report adds nothing to the sums and is counted here
+  // instead, so the done event never passes a partial sum off as the turn's.
   let totalIn = 0;
   let totalOut = 0;
+  let unreportedCalls = 0;
 
   for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
     const body: Record<string, unknown> = {
@@ -2428,58 +2669,94 @@ export async function* streamOpenAICompatibleWithTools(
       body.tool_choice = "auto";
     }
 
-    const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
-      method: "POST",
-      headers: openAICompatibleHeaders(req.provider, req.apiKey),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok || !res.body) {
-      const detail = await safeText(res);
-      yield {
-        type: "error",
-        message:
-          res.status >= 500 || res.status === 429
-            ? `provider_temporarily_unavailable:${req.provider}_${res.status}`
-            : `${req.provider}_${res.status}:${detail}`,
-      };
+    const json = JSON.stringify(body);
+    // Each iteration is its own metered call: reserve before sending.
+    let modelCall: ModelCall;
+    try {
+      modelCall = await req.meter.begin({
+        provider: req.provider,
+        model: req.model,
+        maxOutputTokens: req.maxTokens ?? 4096,
+        promptBytes: utf8.encode(json).length,
+      });
+    } catch (err) {
+      yield { type: "error", message: meterRefusalCode(err) };
       return;
     }
 
     let assistantText = "";
     let finishReason: string | null = null;
     const toolBuffers = new Map<number, { id: string; name: string; args: string }>();
+    let ledger: ModelUsage | null = null;
+    let end: CallEnd | null = null;
+    // This step's own usage report; if a provider repeats it, the last one stands.
+    let stepIn = 0;
+    let stepOut = 0;
 
-    for await (const ev of parseSSE(res.body)) {
-      const data = asSSERecord(ev.data);
-      if (!data) continue;
-      const choice = firstSSERecord(data.choices);
-      const delta = asSSERecord(choice?.delta);
-      const text = delta?.content;
-      if (typeof text === "string" && text.length > 0) {
-        assistantText += text;
-        yield { type: "delta", text };
+    try {
+      const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
+        method: "POST",
+        headers: openAICompatibleHeaders(req.provider, req.apiKey),
+        body: json,
+      });
+      if (!res.ok || !res.body) {
+        const detail = await safeText(res);
+        end = res.ok
+          ? { outcome: "error", errorCode: "empty_body" }
+          : { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+        yield {
+          type: "error",
+          message:
+            res.status >= 500 || res.status === 429
+              ? `provider_temporarily_unavailable:${req.provider}_${res.status}`
+              : `${req.provider}_${res.status}:${detail}`,
+        };
+        return;
       }
-      for (const rawCall of asSSEArray(delta?.tool_calls)) {
-        const call = asSSERecord(rawCall);
-        if (!call) continue;
-        const index = typeof call.index === "number" ? call.index : toolBuffers.size;
-        const fn = asSSERecord(call.function);
-        const prev = toolBuffers.get(index) || { id: "", name: "", args: "" };
-        toolBuffers.set(index, {
-          id: typeof call.id === "string" && call.id ? call.id : prev.id,
-          name: typeof fn?.name === "string" && fn.name ? fn.name : prev.name,
-          args: prev.args + (typeof fn?.arguments === "string" ? fn.arguments : ""),
-        });
+
+      for await (const ev of parseSSE(res.body)) {
+        const data = asSSERecord(ev.data);
+        if (!data) continue;
+        const choice = firstSSERecord(data.choices);
+        const delta = asSSERecord(choice?.delta);
+        const text = delta?.content;
+        if (typeof text === "string" && text.length > 0) {
+          assistantText += text;
+          yield { type: "delta", text };
+        }
+        for (const rawCall of asSSEArray(delta?.tool_calls)) {
+          const call = asSSERecord(rawCall);
+          if (!call) continue;
+          const index = typeof call.index === "number" ? call.index : toolBuffers.size;
+          const fn = asSSERecord(call.function);
+          const prev = toolBuffers.get(index) || { id: "", name: "", args: "" };
+          toolBuffers.set(index, {
+            id: typeof call.id === "string" && call.id ? call.id : prev.id,
+            name: typeof fn?.name === "string" && fn.name ? fn.name : prev.name,
+            args: prev.args + (typeof fn?.arguments === "string" ? fn.arguments : ""),
+          });
+        }
+        if (typeof choice?.finish_reason === "string") {
+          finishReason = choice.finish_reason;
+        }
+        const usage = asSSERecord(data.usage);
+        if (usage) {
+          stepIn = numberOr(usage.prompt_tokens, stepIn);
+          stepOut = numberOr(usage.completion_tokens, stepOut);
+          ledger = openAICompatibleLedgerUsage(usage);
+        }
       }
-      if (typeof choice?.finish_reason === "string") {
-        finishReason = choice.finish_reason;
-      }
-      const usage = asSSERecord(data.usage);
-      if (usage) {
-        totalIn = numberOr(usage.prompt_tokens, totalIn);
-        totalOut = numberOr(usage.completion_tokens, totalOut);
-      }
+      end = { outcome: "ok", usage: ledger };
+    } catch (err) {
+      end = { outcome: "error", errorCode: "stream_failed", usage: null };
+      throw err;
+    } finally {
+      await modelCall.finish(end ?? { outcome: "cancelled", usage: null });
     }
+    totalIn += stepIn;
+    totalOut += stepOut;
+    // The step's usage as the ledger recorded it: none means its tokens are unknown.
+    if (ledger === null) unreportedCalls += 1;
 
     const toolUses = [...toolBuffers.values()]
       .filter((tu) => tu.name.length > 0)
@@ -2490,7 +2767,7 @@ export async function* streamOpenAICompatibleWithTools(
         rawArgs: tu.args || "{}",
       }));
     if (toolUses.length === 0 || finishReason !== "tool_calls") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -2563,6 +2840,26 @@ function openAICompatibleHeaders(
   return headers;
 }
 
+/**
+ * One OpenAI-compatible usage report, for the ledger: prompt_tokens includes
+ * the cached prefix, so the ledger's input is the uncached part; OpenRouter
+ * adds usage.cost (USD, what it charged) and cache_write_tokens. null when the
+ * report lacks either count.
+ */
+function openAICompatibleLedgerUsage(usage: Record<string, unknown>): ModelUsage | null {
+  if (typeof usage.prompt_tokens !== "number" || typeof usage.completion_tokens !== "number") return null;
+  const details = asSSERecord(usage.prompt_tokens_details);
+  const cached = numberOr(details?.cached_tokens, 0);
+  const written = numberOr(details?.cache_write_tokens, 0);
+  return {
+    inputTokens: Math.max(usage.prompt_tokens - cached - written, 0),
+    outputTokens: usage.completion_tokens,
+    cacheReadTokens: cached,
+    cacheWriteTokens: written,
+    providerCostUsd: typeof usage.cost === "number" ? usage.cost : null,
+  };
+}
+
 function parseToolArgs(raw: string): Record<string, unknown> {
   if (!raw.trim()) return {};
   try {
@@ -2602,25 +2899,44 @@ type IterationLoopArgs = {
   startIter: number;
   startTotalIn: number;
   startTotalOut: number;
+  /** Calls already finished with no usage report (0 for fresh). */
+  startUnreportedCalls: number;
   ctx: ToolContext;
+  /** Meters each iteration's model call (ToolLoopRequest.meter). */
+  meter: ModelCallMeter;
 };
 
-function resolveActiveTools(args: {
+/**
+ * The tools a turn OFFERS the model. Shared by the Anthropic loop and the
+ * OpenAI-compatible loop, so the tenant sandbox cannot exist on one path and
+ * not the other. Exported for tests/os-tool-sandbox.test.ts.
+ *
+ * Filter 0 (tenant, 2026-09-28, docs/os-revamp/03 F2) runs first and cannot be
+ * widened by anything after it: a tenant that is not OASIS's own starts from
+ * the client-safe registry with every bridge-routed (defer:true) tool removed,
+ * and its manifest palette is resolved default-deny (a missing palette means
+ * no tools). `tenantId` must be the session's (ToolContext.tenantId).
+ */
+export function resolveActiveTools(args: {
+  tenantId: string;
   excludeDeferredTools?: boolean;
   bridgeAdvertisedTools?: string[] | null;
   toolPalette?: string[];
   chatMode?: ChatPlanMode;
   forceExcludeDeferred?: boolean;
 }): ToolDef[] {
-  let activeTools: ToolDef[] = TOOL_DEFINITIONS;
+  let activeTools: ToolDef[] = isOasisInternalTenant(args.tenantId)
+    ? TOOL_DEFINITIONS
+    : TOOL_DEFINITIONS.filter((t) => !t.defer && isClientSafeTool(t.name));
+  const toolPalette = resolveAgentToolPalette(args.toolPalette, args.tenantId);
   if (args.forceExcludeDeferred || args.excludeDeferredTools) {
     activeTools = activeTools.filter((t) => !t.defer);
   } else if (args.bridgeAdvertisedTools !== undefined && args.bridgeAdvertisedTools !== null) {
     const advertised = new Set(args.bridgeAdvertisedTools);
     activeTools = activeTools.filter((t) => !t.defer || advertised.has(t.name));
   }
-  if (args.toolPalette !== undefined) {
-    const allow = new Set(args.toolPalette);
+  if (toolPalette !== undefined) {
+    const allow = new Set(toolPalette);
     activeTools = activeTools.filter((t) => allow.has(t.name));
   }
   if (args.chatMode === "plan") {
@@ -2646,8 +2962,15 @@ async function* runIterationLoop(
 ): AsyncGenerator<StreamYield> {
   const { apiKey, model, system, maxTokens, ctx, history } = args;
   const enableTools = args.enableTools !== false;
-  // Resolve which tools the model sees this turn. Four filters compose
-  // in order — most-restrictive last so the operator's intent wins:
+  // Resolve which tools the model sees this turn (resolveActiveTools). The
+  // filters compose in order — most-restrictive last so the operator's
+  // intent wins:
+  //
+  //   0. tenant (ctx.tenantId, from the session)
+  //      A tenant that is not OASIS's own is offered only the client-safe
+  //      registry, never a bridge-routed tool, and a missing palette means
+  //      no tools. Nothing below can widen it. Re-applied on every resume
+  //      because the resumed loop receives the resuming session's ctx.
   //
   //   1. excludeDeferredTools (bridge offline)
   //      Drops every bridge-routed tool. Set by /api/chat when no
@@ -2662,30 +2985,28 @@ async function* runIterationLoop(
   //
   //   3. toolPalette (Phase D — manifest per-agent allowlist)
   //      Operator's intent: "what's this agent allowed to call?"
-  //      Undefined = no filter; empty array = chat-only.
+  //      OASIS: undefined = no filter; empty array = chat-only.
   //
   //   4. Cloud tools (defer:false) are unaffected by 1+2 — they
-  //      execute server-side on Vercel, not the bridge.
-  let activeTools: ToolDef[] = TOOL_DEFINITIONS;
-  if (args.excludeDeferredTools) {
-    activeTools = activeTools.filter((t) => !t.defer);
-  } else if (args.bridgeAdvertisedTools !== undefined && args.bridgeAdvertisedTools !== null) {
-    const advertised = new Set(args.bridgeAdvertisedTools);
-    activeTools = activeTools.filter((t) => !t.defer || advertised.has(t.name));
-  }
-  if (args.toolPalette !== undefined) {
-    const allow = new Set(args.toolPalette);
-    activeTools = activeTools.filter((t) => allow.has(t.name));
-  }
-  // Filter 5 (LAST — most-restrictive wins): plan mode. Strips every write
-  // tool to the read/search allowlist. Plan mode also re-shapes the system
-  // prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY), applied where
-  // `system` is composed by streamAnthropicWithTools before this loop runs.
-  if (args.chatMode === "plan") {
-    activeTools = filterToolsForMode(activeTools, "plan");
-  }
+  //      execute server-side on Cloudflare, not the bridge.
+  //
+  //   5. (LAST — most-restrictive wins) plan mode. Strips every write
+  //      tool to the read/search allowlist. Plan mode also re-shapes the
+  //      system prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY),
+  //      applied where `system` is composed by streamAnthropicWithTools
+  //      before this loop runs.
+  const activeTools: ToolDef[] = resolveActiveTools({
+    tenantId: ctx.tenantId,
+    excludeDeferredTools: args.excludeDeferredTools,
+    bridgeAdvertisedTools: args.bridgeAdvertisedTools,
+    toolPalette: args.toolPalette,
+    chatMode: args.chatMode,
+  });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;
+  // Iterations whose call finished with no complete usage report: their
+  // tokens are unknown, so the done event says the sums are a floor.
+  let unreportedCalls = args.startUnreportedCalls;
 
   for (let iter = args.startIter; iter < MAX_TOOL_ITERATIONS; iter++) {
     // Output tokens for THIS iteration only. Anthropic's message_delta
@@ -2700,7 +3021,10 @@ async function* runIterationLoop(
       system,
       messages: history,
     };
-    if (enableTools) {
+    // An empty palette (a chat-only agent, or a client tenant's agent with no
+    // palette under default-deny) sends no `tools` key at all, the same as the
+    // OpenAI-compatible loop, rather than an empty array.
+    if (enableTools && activeTools.length > 0) {
       // Strip `defer` — it's our internal flag that tells the runner this
       // tool round-trips to the operator's local bridge instead of executing
       // server-side. Anthropic's tools[] schema only accepts name +
@@ -2715,24 +3039,19 @@ async function* runIterationLoop(
       }));
     }
 
-    const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok || !res.body) {
-      const detail = await safeText(res);
-      yield {
-        type: "error",
-        message:
-          res.status >= 500 || res.status === 429
-            ? `provider_temporarily_unavailable:anthropic_${res.status}`
-            : `anthropic_${res.status}:${detail}`,
-      };
+    const json = JSON.stringify(body);
+    // Each iteration is its own metered call: it reserves against the
+    // tenant's month before it is sent, and a refusal ends the loop here.
+    let call: ModelCall;
+    try {
+      call = await args.meter.begin({
+        provider: "anthropic",
+        model,
+        maxOutputTokens: maxTokens ?? 4096,
+        promptBytes: utf8.encode(json).length,
+      });
+    } catch (err) {
+      yield { type: "error", message: meterRefusalCode(err) };
       return;
     }
 
@@ -2743,73 +3062,118 @@ async function* runIterationLoop(
     const blockBuffers = new Map<number, { kind: "text" | "tool_use"; partial: string }>();
     let stopReason: string | null = null;
     let iterOut = 0;
+    // For the ledger: message_start carries the prompt side (input_tokens is
+    // uncached; cache reads and writes are their own counts), message_delta
+    // the cumulative output. Complete once a message_delta reported output.
+    const ledger: ModelUsage = { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null };
+    let end: CallEnd | null = null;
 
-    for await (const ev of parseSSE(res.body)) {
-      // content_block_*, message_delta, etc.) — each branch reads
-      const data = asSSERecord(ev.data);
-      if (!data) continue;
-      if (ev.event === "message_start") {
-        const usage = asSSERecord(asSSERecord(data.message)?.usage);
-        if (usage) totalIn += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-      } else if (ev.event === "content_block_start") {
-        const block = asSSERecord(data.content_block);
-        const idx = typeof data.index === "number" ? data.index : -1;
-        if (idx < 0) continue;
-        if (block?.type === "text") {
-          blockBuffers.set(idx, { kind: "text", partial: "" });
-          blocks[idx] = { type: "text", text: "" };
-        } else if (block?.type === "tool_use") {
-          blockBuffers.set(idx, { kind: "tool_use", partial: "" });
-          blocks[idx] = {
-            type: "tool_use",
-            id: typeof block.id === "string" ? block.id : "",
-            name: typeof block.name === "string" ? block.name : "",
-            input: {},
-          };
-        }
-      } else if (ev.event === "content_block_delta") {
-        const idx = typeof data.index === "number" ? data.index : -1;
-        const buf = blockBuffers.get(idx);
-        if (!buf) continue;
-        const delta = asSSERecord(data.delta);
-        if (delta?.type === "text_delta" && typeof delta.text === "string") {
-          buf.partial += delta.text;
-          const b = blocks[idx];
-          if (b?.type === "text") b.text += delta.text;
-          yield { type: "delta", text: delta.text };
-        } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
-          buf.partial += delta.partial_json;
-        }
-      } else if (ev.event === "content_block_stop") {
-        const idx = typeof data.index === "number" ? data.index : -1;
-        const buf = blockBuffers.get(idx);
-        if (!buf) continue;
-        if (buf.kind === "tool_use") {
-          // Finalize the tool_use input — parse the accumulated JSON
-          const b = blocks[idx];
-          if (b?.type === "tool_use") {
-            try {
-              b.input = buf.partial ? JSON.parse(buf.partial) : {};
-            } catch {
-              b.input = {};
+    try {
+      const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+        },
+        body: json,
+      });
+      if (!res.ok || !res.body) {
+        const detail = await safeText(res);
+        end = res.ok
+          ? { outcome: "error", errorCode: "empty_body" }
+          : { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+        yield {
+          type: "error",
+          message:
+            res.status >= 500 || res.status === 429
+              ? `provider_temporarily_unavailable:anthropic_${res.status}`
+              : `anthropic_${res.status}:${detail}`,
+        };
+        return;
+      }
+
+      for await (const ev of parseSSE(res.body)) {
+        // content_block_*, message_delta, etc.) — each branch reads
+        const data = asSSERecord(ev.data);
+        if (!data) continue;
+        if (ev.event === "message_start") {
+          const usage = asSSERecord(asSSERecord(data.message)?.usage);
+          if (usage) {
+            totalIn += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+            ledger.inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
+            ledger.cacheReadTokens = numberOr(usage.cache_read_input_tokens, 0);
+            ledger.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, 0);
+          }
+        } else if (ev.event === "content_block_start") {
+          const block = asSSERecord(data.content_block);
+          const idx = typeof data.index === "number" ? data.index : -1;
+          if (idx < 0) continue;
+          if (block?.type === "text") {
+            blockBuffers.set(idx, { kind: "text", partial: "" });
+            blocks[idx] = { type: "text", text: "" };
+          } else if (block?.type === "tool_use") {
+            blockBuffers.set(idx, { kind: "tool_use", partial: "" });
+            blocks[idx] = {
+              type: "tool_use",
+              id: typeof block.id === "string" ? block.id : "",
+              name: typeof block.name === "string" ? block.name : "",
+              input: {},
+            };
+          }
+        } else if (ev.event === "content_block_delta") {
+          const idx = typeof data.index === "number" ? data.index : -1;
+          const buf = blockBuffers.get(idx);
+          if (!buf) continue;
+          const delta = asSSERecord(data.delta);
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            buf.partial += delta.text;
+            const b = blocks[idx];
+            if (b?.type === "text") b.text += delta.text;
+            yield { type: "delta", text: delta.text };
+          } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+            buf.partial += delta.partial_json;
+          }
+        } else if (ev.event === "content_block_stop") {
+          const idx = typeof data.index === "number" ? data.index : -1;
+          const buf = blockBuffers.get(idx);
+          if (!buf) continue;
+          if (buf.kind === "tool_use") {
+            // Finalize the tool_use input — parse the accumulated JSON
+            const b = blocks[idx];
+            if (b?.type === "tool_use") {
+              try {
+                b.input = buf.partial ? JSON.parse(buf.partial) : {};
+              } catch {
+                b.input = {};
+              }
             }
           }
+          blockBuffers.delete(idx);
+        } else if (ev.event === "message_delta") {
+          const delta = asSSERecord(data.delta);
+          if (delta?.stop_reason) stopReason = String(delta.stop_reason);
+          // Cumulative for THIS message — overwrite, don't add. Final
+          // message_delta has the total; we add to totalOut after the loop.
+          const usage = asSSERecord(data.usage);
+          if (typeof usage?.output_tokens === "number") {
+            iterOut = usage.output_tokens;
+            ledger.outputTokens = usage.output_tokens;
+          }
+        } else if (ev.event === "message_stop") {
+          break;
         }
-        blockBuffers.delete(idx);
-      } else if (ev.event === "message_delta") {
-        const delta = asSSERecord(data.delta);
-        if (delta?.stop_reason) stopReason = String(delta.stop_reason);
-        // Cumulative for THIS message — overwrite, don't add. Final
-        // message_delta has the total; we add to totalOut after the loop.
-        const usage = asSSERecord(data.usage);
-        if (typeof usage?.output_tokens === "number") {
-          iterOut = usage.output_tokens;
-        }
-      } else if (ev.event === "message_stop") {
-        break;
       }
+      end = { outcome: "ok", usage: ledger.inputTokens !== null && ledger.outputTokens !== null ? ledger : null };
+    } catch (err) {
+      end = { outcome: "error", errorCode: "stream_failed", usage: null };
+      throw err;
+    } finally {
+      await call.finish(end ?? { outcome: "cancelled", usage: null });
     }
     totalOut += iterOut;
+    // The same test the ledger's usage above uses: both sides reported.
+    if (ledger.inputTokens === null || ledger.outputTokens === null) unreportedCalls += 1;
 
     // If the model didn't ask to call any tools, we're done. Filter
     // tool_use blocks defensively: a block with no id or name would
@@ -2822,7 +3186,7 @@ async function* runIterationLoop(
         b?.type === "tool_use" && typeof b.id === "string" && b.id.length > 0 && typeof b.name === "string" && b.name.length > 0
     );
     if (toolUses.length === 0 || stopReason !== "tool_use") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -2902,6 +3266,8 @@ async function* runIterationLoop(
           iteration: iter,
           totalIn,
           totalOut,
+          // Only when there are any, so an ordinary state carries no new key.
+          ...(unreportedCalls > 0 ? { unreportedCalls } : {}),
           maxTokens,
           enableTools,
           toolPalette: args.toolPalette,
@@ -2962,14 +3328,29 @@ async function* runIterationLoop(
 // the API contract and this block is unused.
 // ============================================================================
 
-export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): string {
-  const cloudTools = TOOL_DEFINITIONS.filter((t) => !t.defer);
+export function cloudToolsPromptBlockV2(
+  opts: {
+    bridgeOnline?: boolean;
+    /**
+     * The session's tenant. When it is not an OASIS tenant the block describes
+     * only the client-safe tools and never the bridge tools, matching what
+     * resolveActiveTools offers. Omitted → the OASIS catalog (prior behaviour),
+     * so a caller that does not pass it only over-describes; the tools[] array
+     * and executeTool still enforce the sandbox.
+     */
+    tenantId?: string;
+  } = {},
+): string {
+  const clientTenant = opts.tenantId !== undefined && !isOasisInternalTenant(opts.tenantId);
+  const cloudTools = TOOL_DEFINITIONS.filter(
+    (t) => !t.defer && (!clientTenant || isClientSafeTool(t.name)),
+  );
   // Hide bridge tools from the persona block when the bridge is offline.
   // The Anthropic tools[] array sent on the API call is already filtered
   // by excludeDeferredTools in runIterationLoop; the persona block
   // following the same rule keeps the model from being told it has tools
-  // it can't actually call this turn.
-  const bridgeTools = opts.bridgeOnline === false
+  // it can't actually call this turn. A client tenant never has them.
+  const bridgeTools = opts.bridgeOnline === false || clientTenant
     ? []
     : TOOL_DEFINITIONS.filter((t) => t.defer);
   const lines: string[] = [];
@@ -2981,7 +3362,7 @@ export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): 
     "You're running in cloud mode with a real tool_use loop. The runtime exposes two tiers of tools — call them like any native Claude tool. All are tenant-scoped to the current operator and audit-logged."
   );
   lines.push("");
-  lines.push("Cloud tools (always available, execute server-side on Vercel):");
+  lines.push(`Cloud tools (always available, execute server-side on the ${deploymentRuntimeLabel()}):`);
   for (const t of cloudTools) {
     lines.push(`- ${t.name} — ${t.description}`);
   }
@@ -2997,8 +3378,10 @@ export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): 
   lines.push("- Prefer get_record over list_records once you have an ID.");
   lines.push("- Confirm with the operator before delete_record (no undo).");
   lines.push("- Don't use http_get/http_post for the operator's own integrations — that needs a connector.");
-  lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to start it (pm2 restart claude-bridge) instead of retrying.");
-  lines.push("- For send_email / send_sms: always confirm content with the operator before sending. Include opt-out language on first-touch SMS.");
+  if (!clientTenant) {
+    lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to open Settings → Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the paired machine, instead of retrying.");
+    lines.push("- For send_email / send_sms: always confirm content with the operator before sending. Include opt-out language on first-touch SMS.");
+  }
   lines.push("- Tool results return JSON; quote relevant fields in your reply.");
   if (bridgeTools.length > 0) {
     lines.push("");

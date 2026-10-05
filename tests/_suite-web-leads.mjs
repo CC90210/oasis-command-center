@@ -1,0 +1,170 @@
+/**
+ * Runs the web-leads suite, one node process per test.
+ *
+ * WHY THIS EXISTS
+ * On 2026-09-08, 26 of the 27 tests/web-leads-*.test.ts files were in no npm
+ * script, so CI had never executed a single one of them. That is not a
+ * bookkeeping detail: it is why the owner-tier filters shipped returning zero
+ * rows against 1,668 owner-named leads and stayed that way for two weeks. The
+ * tier logic HAD unit tests, they were green, and nothing ran them — and even
+ * run, they passed, because they fed enrichmentTier objects that already
+ * carried an owner name. The projection that dropped the field was never
+ * exercised. A guard nothing executes is documentation.
+ *
+ * WHY IT DOES NOT STOP AT THE FIRST FAILURE, unlike tests/_suite.mjs.
+ * That file's fail-fast is inherited from the `&&` chain it replaced, and this
+ * repo has twice paid for it — the 2026-08-07 server-only import killed the
+ * 12th of 48 tests and the 37 after it never ran for a full day behind one
+ * generic error. For a suite being switched on for the first time, the useful
+ * question is "what is broken", not "what broke first". Every file runs; every
+ * failure is named; the exit code is still non-zero if any failed.
+ *
+ * The list stays EXPLICIT rather than globbed, same reasoning as _suite.mjs:
+ * membership is deliberate, and a glob would silently adopt a future file that
+ * needs credentials or a live database.
+ *
+ * Adding a test: put it in the list. There is no other step.
+ */
+import { spawnSync } from "node:child_process";
+
+const TESTS = [
+  // The projection/filter seam — the regression this suite was switched on for.
+  "tests/web-leads-due.test.ts",
+  "tests/web-leads-next-action.test.ts",
+  "tests/web-leads-do-not-call.test.ts",
+  "tests/call-disposition.test.ts",
+  "tests/web-leads-projection-covers-filters.test.ts",
+  "tests/web-leads-enrichment.test.ts",
+  "tests/web-leads-filters.test.ts",
+  "tests/web-leads-filter-memory.test.ts",
+  "tests/web-leads-data.test.ts",
+  // The read cache shares one load without sharing its promise (2026-10-01).
+  "tests/web-leads-cache-single-flight.test.ts",
+  "tests/web-leads-queries.test.ts",
+  "tests/web-leads-list-read.test.ts",
+  "tests/web-leads-counters.test.ts",
+  "tests/web-leads-scores.test.ts",
+  "tests/web-leads-hours.test.ts",
+  "tests/web-leads-audit.test.ts",
+  "tests/web-leads-remedies.test.ts",
+  "tests/web-leads-automations.test.ts",
+  "tests/web-leads-automations-match.test.ts",
+  // The catalogue COMPONENTS (2026-09-14). Spawns
+  // web-leads-automations-catalogue.render.ts as a plain node process to
+  // server-render them, because this suite runs under
+  // --conditions=react-server and a client component with hooks cannot be
+  // rendered in that process at all. No credentials, no network.
+  "tests/web-leads-automations-catalogue.test.ts",
+  "tests/web-leads-battlecard.test.ts",
+  "tests/web-leads-manager-battlecard.test.ts",
+  "tests/web-leads-url-safety.test.ts",
+  "tests/web-leads-client-cache.test.ts",
+  // Access, scoping and ownership — the cross-rep boundaries.
+  "tests/web-leads-scope.test.ts",
+  "tests/web-leads-guards.test.ts",
+  "tests/web-leads-manager-access.test.ts",
+  "tests/web-leads-claim.test.ts",
+  "tests/web-leads-release-tracking.test.ts",
+  "tests/web-leads-assign-target.test.ts",
+  "tests/web-leads-assign-to-rep.test.ts",
+  "tests/web-leads-territory-assign.test.ts",
+  "tests/web-leads-owner-verification.test.ts",
+  // Who holds a lead, and who is allowed to be told. The badge everyone sees
+  // and the name only an owner/manager/admin sees are gated separately.
+  "tests/web-leads-owner-badge.test.ts",
+  // Call outcomes.
+  "tests/web-leads-outcome.test.ts",
+  "tests/web-leads-outcome-guards.test.ts",
+  "tests/web-leads-outcome-idempotency.test.ts",
+  // The rep-facing send path that hangs off a worked lead.
+  "tests/lead-quick-email.test.ts",
+  "tests/lead-quick-email-delivery.test.ts",
+  // The field labelled "Contact name" must hold a person, not the business.
+  "tests/lead-contact-name.test.ts",
+  // A rep may add a lead they sourced, and it lands in their own book.
+  "tests/rep-creates-own-lead.test.ts",
+  "tests/oasis-admin-create-assignee.test.ts",
+  // An OASIS email must name OASIS, in the signature as well as the footer.
+  "tests/oasis-email-branding.test.ts",
+  // Operator copy on the Automations tab must match a real job name.
+  "tests/cron-descriptions-render.test.ts",
+  // The objection engine (2026-09-10). ranking is pure; the other two need no
+  // credentials either -- they exercise validation and projection only.
+  "tests/objection-ranking.test.ts",
+  "tests/objection-catalog.test.ts",
+  // The copy rules for every sentence a rep says out loud, plus the alternate
+  // coverage that makes ObjectionCard's posture picker render at all. Listed
+  // here deliberately: tests/industry-automations.test.ts sat in NO suite and
+  // never ran, which is the failure mode this line avoids.
+  "tests/objection-copy.test.ts",
+  // The battle card's per-industry automations. Registered 2026-09-29; until
+  // then it was the file the comment above names as never having run.
+  "tests/industry-automations.test.ts",
+  // The authoring surface: dedup, batch parsing, write-path copy rules, and
+  // the approval gate. Pure decisions only; the SQL is not covered and the
+  // test says so in its own header.
+  "tests/objection-admin.test.ts",
+  // Model-drafted answers: every rejection path, and the structural proof that
+  // nothing generated can reach a rep without a human approving it.
+  "tests/objection-draft-answers.test.ts",
+  // The rep practice trainer: drill construction and what a typed answer is
+  // checked against. The invariant that matters is exactly one right answer.
+  "tests/objection-practice.test.ts",
+  // The Training curriculum and its drills. The invariant that matters is
+  // exactly one right answer, plus: no drill answer states a price, because the
+  // source documents disagree and one says no approved price exists.
+  "tests/training-drills.test.ts",
+  // The practice call. The two rules that matter: the model plays a CUSTOMER
+  // so its turns are NOT copy-rule checked, while the debrief IS; and the
+  // persona never leaves the server.
+  "tests/training-roleplay.test.ts",
+  "tests/objection-events.test.ts",
+  "tests/objection-facts.test.ts",
+  // The auth gate and the tenant pins on both objection routes and both data
+  // modules, to the same convention as web-leads-outcome-guards above. Source
+  // reads only; no credentials.
+  "tests/objection-guards.test.ts",
+  // Call Mode sends a callback date the outcome route accepts. Keys 1-3 had
+  // returned 400 next_action_required since #488; this runs the client's date
+  // through the server's own validator.
+  "tests/web-leads-callmode-next-action.test.ts",
+  // The four qualification gates: new wording, unchanged stored keys, legacy
+  // records still read as qualified (book-the-meet plan, Task 2).
+  "tests/sales-qualification.test.ts",
+  // Meeting times in the prospect's own zone; DST gaps refused, not shifted
+  // (book-the-meet plan, Task 3).
+  "tests/meeting-time-zones.test.ts",
+  // Booking from the call screen: lapsed claims refused; do-not-call booked
+  // only on the rep's "owner asked" confirmation (book-the-meet plan, Task 4).
+  "tests/book-meet-route.test.ts",
+  // What the call-screen booking panel reads first; "may book" must agree
+  // with the booking route (book-the-meet plan, Task 5).
+  "tests/web-leads-booking-context-route.test.ts",
+  // The call-screen booking flow: call order, failures, request ids, copy,
+  // and do-not-call as a box to tick (book-the-meet plan, Task 6).
+  "tests/book-meet-flow.test.ts",
+  // The Book the Meet form in every state a rep sees, including the
+  // do-not-call "owner asked" box (book-the-meet plan, Task 7).
+  "tests/book-meet-panel.test.ts",
+  // Book the Meet wired onto the battle card: a Hero button, and the form
+  // above the call outcomes, never collapsible (book-the-meet plan, Task 8).
+  "tests/book-meet-wiring.test.ts",
+];
+
+const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
+
+const failures = [];
+for (const file of TESTS) {
+  const r = spawnSync(process.execPath, [...NODE_ARGS, file], { stdio: "inherit" });
+  if (r.status !== 0) failures.push({ file, status: r.status, signal: r.signal });
+}
+
+if (failures.length) {
+  console.error(`\n[test:web-leads] ${failures.length} of ${TESTS.length} test files FAILED:`);
+  for (const f of failures) {
+    console.error(`  - ${f.file}` + (f.signal ? ` (signal ${f.signal})` : ` (exit ${f.status})`));
+  }
+  process.exit(1);
+}
+
+console.log(`\n[test:web-leads] ${TESTS.length} test files passed.`);

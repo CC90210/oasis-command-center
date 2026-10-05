@@ -11,7 +11,8 @@
  * /api/leads/[id]/assign route enforces owner-or-admin server-side.
  *
  * Data flow:
- *   - GET /api/team/members → populates the dropdown options
+ *   - GET /api/team/members?include_inactive=1 → populates the dropdown
+ *     options (deactivated teammates only as a disabled current owner)
  *   - POST /api/leads/[id]/assign → writes the new assigned_to (UUID
  *     or null to clear)
  *
@@ -29,7 +30,27 @@ type Member = {
   auth_user_id: string;
   full_name: string | null;
   display_name: string | null;
+  /** false for a deactivated teammate (only sent with ?include_inactive=1). */
+  active?: boolean;
 };
+
+export type OwnerOption = { value: string; label: string; disabled: boolean };
+
+/**
+ * The owner menu's options. Only ACTIVE teammates can be picked as a new owner.
+ * A deactivated teammate appears only while they ARE the current owner, as a
+ * disabled "(inactive)" option: without it the <select> has no option matching
+ * its value and reads "— Unassigned —" for a lead that is assigned.
+ */
+export function ownerOptions(members: Member[], currentValue: string): OwnerOption[] {
+  return members
+    .filter((m) => m.active !== false || m.auth_user_id === currentValue)
+    .map((m) => {
+      const name = m.display_name || m.full_name || m.auth_user_id.slice(0, 8);
+      const inactive = m.active === false;
+      return { value: m.auth_user_id, label: inactive ? `${name} (inactive)` : name, disabled: inactive };
+    });
+}
 
 export function AssignmentControl({
   recordId,
@@ -55,7 +76,8 @@ export function AssignmentControl({
   // crashing the drawer.
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/team/members", { cache: "no-store" })
+    // include_inactive: a deactivated current owner must still render by name.
+    fetch("/api/team/members?include_inactive=1", { cache: "no-store" })
       .then(async (r) => {
         if (!r.ok) return;
         const body = (await r.json().catch(() => ({}))) as {
@@ -128,9 +150,9 @@ export function AssignmentControl({
           className="w-full bg-bg-deep border border-bg-border rounded-md px-2 py-1.5 text-[12.5px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
         >
           <option value="">— Unassigned —</option>
-          {(members || []).map((m) => (
-            <option key={m.auth_user_id} value={m.auth_user_id}>
-              {m.display_name || m.full_name || m.auth_user_id.slice(0, 8)}
+          {ownerOptions(members || [], value).map((o) => (
+            <option key={o.value} value={o.value} disabled={o.disabled}>
+              {o.label}
             </option>
           ))}
         </select>

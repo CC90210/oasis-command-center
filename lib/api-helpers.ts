@@ -6,6 +6,8 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { getServiceSupabase, getSessionUser } from "./supabase-server";
+import { deploymentPlatform } from "./health/runtime-environment";
+import { teamInviteOrigin } from "./team-invite-email";
 
 export function bad(status: number, error: string) {
   return NextResponse.json({ ok: false, error }, { status });
@@ -106,28 +108,40 @@ export function checkBearerSecret(req: NextRequest, envVar: string): boolean {
   return mismatch === 0;
 }
 
-/**
- * Best-effort client IP extraction. Walks x-forwarded-for first
- * entry, then x-real-ip, then "unknown" so the caller doesn't have
- * to null-check. Used as a key for rate limiters + forensic logs.
- * Don't treat the value as identity — the headers are operator-
- * controllable on a self-hosted deploy.
- *
- * Single source of truth so a future "trust nginx-proxied real-ip
- * over xff" tweak lands in one place instead of six.
- */
-export function getClientIp(req: NextRequest): string {
-  // Prefer Vercel's platform-set header — a client request cannot forge it,
-  // whereas raw X-Forwarded-For's leftmost entry IS client-suppliable. This
-  // matters beyond rate-limit keys: the e-sign flow burns this value into the
-  // signer's legal Certificate of Completion + audit as non-repudiation
-  // evidence, so trust the verified header first, then fall back off-Vercel.
-  const vercel = (req.headers.get("x-vercel-forwarded-for") || "").split(",")[0]?.trim();
-  if (vercel) return vercel;
-  const xff = req.headers.get("x-forwarded-for") || "";
+type HeaderReader = { get(name: string): string | null };
+
+/** Cross-platform client-IP extraction for rate limits and audit evidence.
+ * Each host's own verified header wins on that host; raw XFF is fallback only. */
+export function clientIpFromHeaders(headers: HeaderReader): string {
+  const vercel = (headers.get("x-vercel-forwarded-for") || "").split(",")[0]?.trim();
+  const cloudflare = (headers.get("cf-connecting-ip") || "").trim();
+
+  // Trust an infrastructure header only when the runtime identifies the edge
+  // that overwrote it. A caller can invent either header on an unknown host.
+  // Missing trusted evidence collapses to one conservative bucket instead of
+  // accepting a spoofable fallback and bypassing per-IP limits.
+  const platform = deploymentPlatform();
+  if (platform === "vercel") return vercel || "unknown";
+  if (platform === "cloudflare") return cloudflare || "unknown";
+  if (process.env.NODE_ENV === "production") return "unknown";
+
+  // Local/test reverse proxies have no platform identity. These fallbacks are
+  // intentionally unavailable in production.
+  const xff = headers.get("x-forwarded-for") || "";
   const first = xff.split(",")[0]?.trim();
   if (first) return first;
-  return req.headers.get("x-real-ip") || "unknown";
+  return headers.get("x-real-ip") || "unknown";
+}
+
+export function getClientIp(req: NextRequest): string {
+  return clientIpFromHeaders(req.headers);
+}
+
+/** Stable public dashboard URL for desktop pairing and auth callbacks. */
+export function publicAppBaseUrl(): string {
+  // Pairing responses cross a trust boundary. Never derive their destination
+  // from req.url / Host: use the same HTTPS-only canonical origin as invites.
+  return teamInviteOrigin();
 }
 
 /**
@@ -282,13 +296,22 @@ export function isUniqueViolationError(
  * is set only for an error that is NOT a duplicate, and the caller decides
  * whether that is fatal.
  */
+type InsertFailure = { message?: string; code?: string };
+type InsertResponse = { data: unknown[] | null; error: InsertFailure | null };
+type InsertTable = {
+  insert: (value: unknown) => {
+    select: (columns: string) => PromiseLike<InsertResponse>;
+  };
+};
+
 export async function insertChunkSalvagingDuplicates<T>(
-  db: { from: (t: string) => any },
+  db: { from: (table: string) => unknown },
   table: string,
   chunk: T[],
   select = "id",
 ): Promise<{ inserted: number; duplicates: number; failure: { message?: string } | null }> {
-  const bulk = await db.from(table).insert(chunk).select(select);
+  const target = () => db.from(table) as InsertTable;
+  const bulk = await target().insert(chunk).select(select);
   if (!bulk.error) {
     return { inserted: bulk.data?.length ?? 0, duplicates: 0, failure: null };
   }
@@ -300,7 +323,7 @@ export async function insertChunkSalvagingDuplicates<T>(
   let inserted = 0;
   let duplicates = 0;
   for (const row of chunk) {
-    const one = await db.from(table).insert(row).select(select);
+    const one = await target().insert(row).select(select);
     if (!one.error) inserted += one.data?.length ?? 0;
     else if (isUniqueViolationError(one.error)) duplicates += 1;
     else return { inserted, duplicates, failure: one.error };

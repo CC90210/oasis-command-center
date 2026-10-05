@@ -15,15 +15,25 @@ import {
   getTenantIntegrationBundle,
   recordIntegrationTest,
 } from "@/lib/tenant-integration-store";
-import { findIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { publicAppBaseUrl } from "@/lib/api-helpers";
+import { probeTwilioConnection } from "@/lib/twilio/connection";
+import { twilioWebhookUrls } from "@/lib/twilio/shared";
+import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type ProbeResult = { ok: boolean; error?: string; detail?: string; state?: string; message?: string };
 
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(sess))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
   let body: { service?: unknown };
@@ -33,13 +43,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
   const service = typeof body.service === "string" ? body.service.toLowerCase() : "";
-  const schema = findIntegrationSchema(service);
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
   if (!schema) {
-    return NextResponse.json({ ok: false, error: "unknown_service" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "service_not_tenant_editable" },
+      { status: 400 },
+    );
   }
 
   const bundle = await getTenantIntegrationBundle(sess.tenantId, service);
-  let result: { ok: boolean; error?: string; detail?: string };
+  let result: ProbeResult;
   try {
     result = await runProbe(service, bundle);
   } catch (err) {
@@ -60,18 +73,27 @@ export async function POST(req: NextRequest) {
     ),
   );
 
+  // Twilio: the test also writes the workspace's webhook routing row, which
+  // picks up OASIS's own deployment number too (never stored, so never saved).
+  const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "tested") : undefined;
+
   return NextResponse.json({
     ok: result.ok,
     service,
     error: result.ok ? null : result.error || "unknown_error",
     detail: result.detail || null,
+    // Twilio: one plain state ("needs_number", ...) and the sentence the owner
+    // reads; the card turns the stored state back into the same words.
+    state: result.state ?? null,
+    message: result.message ?? null,
+    ...(routing ? { routing } : {}),
   });
 }
 
 async function runProbe(
   service: string,
   bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
+): Promise<ProbeResult> {
   switch (service) {
     case "twilio":
       return probeTwilio(bundle);
@@ -83,7 +105,6 @@ async function runProbe(
       return probeN8n(bundle);
     case "texttorrent":
     case "kixie":
-    case "gws":
     case "smtp":
     case "late":
       // Side-effect-free verifications for these aren't trivial:
@@ -95,15 +116,65 @@ async function runProbe(
       //     default_agent_email, webhook_secret) the badge doubles as a
       //     live setup checklist: it names exactly which fields are still
       //     missing instead of the cryptic no_probe_for_kixie failure.
-      //   - GWS: App Password verification = attempt SMTP STARTTLS
-      //   - SMTP: same
+      //   - Custom SMTP: connecting to an operator-supplied host would make
+      //     this authenticated route an internal-network probe (SSRF). Presence
+      //     is the only safe generic test until hosts are allowlisted.
+      //   - GWS: fixed-host App Password verification uses smtp.gmail.com
       //   - Late: no read endpoint
       // For now, "presence" is the test — every required field set
       // counts as a pass; the real verification is the first real
       // send. Better than a fake test that always returns ok.
       return probePresence(service, bundle);
+    case "gws":
+      return probeSmtp({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        user: bundle.from_address,
+        password: bundle.app_password,
+      });
     default:
       return { ok: false, error: `no_probe_for_${service}` };
+  }
+}
+
+async function probeSmtp(input: {
+  host?: string;
+  port?: number;
+  secure: boolean;
+  user?: string;
+  password?: string;
+}): Promise<{ ok: boolean; error?: string; detail?: string }> {
+  if (
+    !input.host ||
+    !Number.isInteger(input.port) ||
+    !input.port ||
+    !input.user ||
+    !input.password
+  ) {
+    return { ok: false, error: "missing_smtp_fields" };
+  }
+  try {
+    const nodemailer = await import("nodemailer");
+    const transport = nodemailer.createTransport({
+      host: input.host,
+      port: input.port,
+      secure: input.secure,
+      requireTLS: !input.secure,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+      auth: { user: input.user, pass: input.password },
+    });
+    try {
+      await transport.verify();
+    } finally {
+      transport.close();
+    }
+    return { ok: true, detail: `SMTP authenticated as ${input.user}` };
+  } catch (error) {
+    console.error("[integration-test.smtp]", error);
+    return { ok: false, error: "smtp_auth_failed" };
   }
 }
 
@@ -111,7 +182,7 @@ async function probePresence(
   service: string,
   bundle: Record<string, string>,
 ): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  const schema = findIntegrationSchema(service);
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
   if (!schema) return { ok: false, error: "unknown_service" };
   const missing = schema.fields
     .filter((f) => !f.label.toLowerCase().includes("(optional)"))
@@ -123,37 +194,33 @@ async function probePresence(
   return { ok: true, detail: "all required fields present (no live probe available)" };
 }
 
-async function probeTwilio(
-  bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  const sid = bundle.account_sid;
-  const token = bundle.auth_token;
-  if (!sid || !token) {
-    return { ok: false, error: "missing_sid_or_token" };
-  }
-  // Account-info GET — costs nothing, no side effect, returns 401 on
-  // bad creds and 200 on good. Auth = Basic(sid:token).
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`;
-  try {
-    const r = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: "Basic " + Buffer.from(`${sid}:${token}`).toString("base64"),
-        Accept: "application/json",
-      },
-    });
-    if (r.status === 200) {
-      const j = (await r.json().catch(() => ({}))) as { friendly_name?: string; status?: string };
-      return {
-        ok: true,
-        detail: `Twilio account "${j.friendly_name || sid}" — ${j.status || "active"}`,
-      };
-    }
-    if (r.status === 401) return { ok: false, error: "invalid_credentials" };
-    return { ok: false, error: `twilio_http_${r.status}` };
-  } catch (err) {
-    return { ok: false, error: `network_error: ${(err as Error).message}` };
-  }
+/**
+ * Twilio: read-only calls to the workspace's own account (lib/twilio/connection.ts
+ * probeTwilioConnection): the account's status, the saved number (on the
+ * account, able to text) or messaging service (exists, has a sender), and
+ * whether either already points at OASIS. A sender is not needed to run it:
+ * "needs a number" is an answer, not a refusal. The stored error is the state
+ * code, which the Connections card turns back into the same plain words.
+ */
+async function probeTwilio(bundle: Record<string, string>): Promise<ProbeResult> {
+  const probe = await probeTwilioConnection(bundle, { webhookUrls: twilioWebhookUrls(publicAppBaseUrl()) });
+  return {
+    ok: probe.ok,
+    error: probe.ok ? undefined : probe.state,
+    state: probe.state,
+    message: probe.message,
+    detail: twilioWebhookSentence(probe),
+  };
+}
+
+function twilioWebhookSentence(probe: Awaited<ReturnType<typeof probeTwilioConnection>>): string | undefined {
+  const sender = probe.sender;
+  if (!sender) return undefined;
+  const where = sender.incoming === "oasis" ? "reach OASIS" : sender.incoming === "elsewhere" ? "go to another address set in Twilio" : "are not sent anywhere yet";
+  const inbound = `Incoming texts ${where}.`;
+  return probe.inboundVerifiable
+    ? inbound
+    : `${inbound} OASIS cannot verify incoming texts without the Auth Token, so it refuses them.`;
 }
 
 async function probeStripe(
@@ -189,7 +256,9 @@ async function probeTelegram(
   bundle: Record<string, string>,
 ): Promise<{ ok: boolean; error?: string; detail?: string }> {
   const token = bundle.bot_token;
+  const chatId = bundle.chat_id;
   if (!token) return { ok: false, error: "missing_bot_token" };
+  if (!chatId) return { ok: false, error: "missing_chat_id" };
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
       method: "GET",
@@ -202,9 +271,23 @@ async function probeTelegram(
       result?: { username?: string; first_name?: string };
     };
     if (!j.ok) return { ok: false, error: "telegram_returned_not_ok" };
+    const chatResponse = await fetch(
+      `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(chatId)}`,
+      { method: "GET" },
+    );
+    if (chatResponse.status !== 200) {
+      return { ok: false, error: `telegram_chat_http_${chatResponse.status}` };
+    }
+    const chat = (await chatResponse.json().catch(() => ({}))) as {
+      ok?: boolean;
+      result?: { title?: string; username?: string; first_name?: string };
+    };
+    if (!chat.ok) return { ok: false, error: "telegram_chat_returned_not_ok" };
+    const destination =
+      chat.result?.title || chat.result?.username || chat.result?.first_name || "chat";
     return {
       ok: true,
-      detail: `@${j.result?.username || j.result?.first_name || "bot"}`,
+      detail: `@${j.result?.username || j.result?.first_name || "bot"} → ${destination}`,
     };
   } catch (err) {
     return { ok: false, error: `network_error: ${(err as Error).message}` };

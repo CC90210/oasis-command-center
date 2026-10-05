@@ -71,13 +71,23 @@ export type AddressCompleteness = {
   parts: SplitAddress;
 };
 
-const STATE_CODES = new Set([
-  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
-  "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
-  "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
-  "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR",
-  "VI", "GU", "AS", "MP",
-]);
+/**
+ * Every USPS code the parser recognises, sorted, as an array. Exported so the
+ * merchant form's address-completion dropdown offers exactly the set this file
+ * will accept — a picker that can produce a value the gate then refuses is the
+ * closed loop this whole module exists to prevent.
+ */
+export const US_STATE_CODES: readonly string[] = [
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID",
+  "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO",
+  "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA",
+  "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+  // US territories — funded far less often, listed last so the 50 states + DC
+  // stay at the top of the picker.
+  "PR", "VI", "GU", "AS", "MP",
+];
+
+const STATE_CODES = new Set(US_STATE_CODES);
 
 const STATE_NAMES: Record<string, string> = {
   alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",

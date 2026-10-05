@@ -38,10 +38,19 @@
  * lead lands on the exact same panel.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ENRICHMENT_LABELS } from "@/lib/web-leads/enrichment";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/Card";
-import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
+import {
+  parseFilters, filtersToParams, LEAD_COUNTRY_NAMES, type LeadCountry, type WebLeadFilters, type WebLeadView,
+} from "@/lib/web-leads/filters";
+import { hasNoFilters, readRememberedFilters, rememberFilters } from "@/lib/web-leads/filter-memory";
+import {
+  fetchCachedWebLeadsJson,
+  invalidateWebLeadsClientCache,
+  webLeadsRequestUrls,
+} from "@/lib/web-leads/client-cache";
 import type { Facets } from "@/lib/web-leads/queries";
 // TYPE-ONLY. `lib/web-leads/data.ts` imports getServiceSupabase() -> next/headers
 // (server-only). A *value* import of PAGE_SIZE from there -- as a prior draft of
@@ -50,34 +59,49 @@ import type { Facets } from "@/lib/web-leads/queries";
 // read from the /api/web-leads response body instead, which is the same source
 // of truth without crossing the server/client line.
 import type { WebLeadRow } from "@/lib/web-leads/data";
-import { FilterRail } from "./FilterRail";
+import { activeFilterCount, CountrySwitch, FilterRail, FilterSheet } from "./FilterRail";
+
 import { LeadsTable } from "./LeadsTable";
 import { LeadsToolbar } from "./LeadsToolbar";
 import { WebLeadDetail } from "./WebLeadDetail";
 import { TerritoryAssignment } from "./TerritoryAssignment";
-import { PipelineBoard } from "./PipelineBoard";
 import { CallMode } from "./CallMode";
 
-const VIEWS: { key: WebLeadView; label: string }[] = [
+const BASE_VIEWS: { key: WebLeadView; label: string }[] = [
   { key: "leads", label: "Leads" },
-  { key: "pipeline", label: "Pipeline" },
-  { key: "territories", label: "Territories" },
+  { key: "mine", label: "My leads" },
 ];
 
 /** A segmented control, not browser tabs -- one bordered pill, active state
  *  filled with the accent wash, matching ListTabs.tsx's own active treatment
  *  but sized for a primary nav role rather than a secondary filter. */
-function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v: WebLeadView) => void }) {
+function ViewSwitcher({
+  active,
+  onChange,
+  canSeeTeamAndAssign,
+}: {
+  active: WebLeadView;
+  onChange: (v: WebLeadView) => void;
+  canSeeTeamAndAssign: boolean;
+}) {
+  const views = useMemo(() => [
+    ...BASE_VIEWS,
+    ...(canSeeTeamAndAssign ? [{ key: "team" as WebLeadView, label: "Team leads" }, { key: "territories" as WebLeadView, label: "Assign" }] : []),
+  ], [canSeeTeamAndAssign]);
+
   return (
     <div role="tablist" aria-label="View" className="inline-flex items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
-      {VIEWS.map((v) => (
+      {views.map((v) => (
         <button
           key={v.key}
           type="button"
           role="tab"
           aria-selected={active === v.key}
           onClick={() => onChange(v.key)}
-          className={`rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+          // 44px until `xl`. This is the control that decides whether a rep is
+          // looking at the shared pool or their own book, and getting it wrong
+          // on a phone means claiming out of the wrong list.
+          className={`inline-flex min-h-11 items-center rounded-md px-3.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:py-1.5 ${
             active === v.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
           }`}
         >
@@ -88,7 +112,13 @@ function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v:
   );
 }
 
-export function WebLeadsBrowser() {
+export function WebLeadsBrowser({
+  canMutate,
+  canSeeTeamAndAssign = false,
+}: {
+  canMutate: boolean;
+  canSeeTeamAndAssign?: boolean;
+}) {
   const router = useRouter();
   const sp = useSearchParams();
   const filters = useMemo(() => parseFilters(new URLSearchParams(sp.toString())), [sp]);
@@ -116,6 +146,13 @@ export function WebLeadsBrowser() {
   const [pageSize, setPageSize] = useState<number>(Number.POSITIVE_INFINITY);
   const [listError, setListError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /**
+   * How many of the book's leads sit on each country board, from the same
+   * response as `leads`. My leads and Team leads only (null on the pool): the
+   * switch on those tabs shows them, so a lead on the other board is never out
+   * of sight.
+   */
+  const [boards, setBoards] = useState<Record<LeadCountry, number> | null>(null);
 
   /**
    * Call Mode is LOCAL state, not a URL param, on purpose. A `?calling=1` link
@@ -126,6 +163,88 @@ export function WebLeadsBrowser() {
    */
   const [calling, setCalling] = useState(false);
 
+  /**
+   * The filter sheet, below `2xl`. LOCAL state and not a URL param, for the
+   * same reason Call Mode is: a `?filters=1` link would open a modal over
+   * somebody else's screen, and these links get pasted into chat. What the
+   * sheet SETS is entirely URL-driven, so the shareable part still travels.
+   *
+   * IT DELIBERATELY DOES NOT CLOSE ON A URL CHANGE, unlike `selected` below.
+   * Every tick inside it pushes a new URL, so closing on `sp` would slam the
+   * sheet shut the instant a rep chose their first province -- they would get
+   * exactly one filter per open. It closes on Escape, the backdrop, the footer
+   * button, and by unmounting when the view switches to My Leads (which has no
+   * rail; see `listBlock`).
+   */
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  /**
+   * Ticked lead ids, and the result of the last claim.
+   *
+   * Selection lives HERE rather than inside LeadsTable so the toolbar's
+   * "Claim N" button and the table's checkboxes cannot disagree about what is
+   * selected. A button that claims a different set than the one highlighted is
+   * the kind of bug a rep only discovers after the calls are made.
+   */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  /**
+   * Who the ticked leads go to, for an admin or manager. Empty string means
+   * "me", which is the ordinary claim every rep already does -- assignment is
+   * an extra destination for the same action, not a separate mode.
+   */
+  const [assignTo, setAssignTo] = useState<string>("");
+  const [reps, setReps] = useState<Array<{ id: string; name: string }>>([]);
+  const [claiming, setClaiming] = useState(false);
+  const [claimNote, setClaimNote] = useState<string | null>(null);
+  /**
+   * Bumped after any successful claim or release, to force a refetch.
+   *
+   * The list effect keys off `filters`. After a claim the URL is unchanged, so
+   * pushing the same filters does not change that dependency and the effect
+   * never re-runs; router.refresh() does not help either, since this is a
+   * client component holding its own state. The claimed rows therefore stayed
+   * sitting in the pool until the rep navigated away -- looking exactly as
+   * though the claim had failed. (Codex review, 2026-08-24.)
+   */
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // A selection is only meaningful against the rows it was made on. When the
+  // filters, page or view change, the ticked ids may no longer be on screen --
+  // and claiming rows a rep cannot see is exactly the surprise this feature
+  // exists to prevent.
+  useEffect(() => { setSelected(new Set()); setClaimNote(null); }, [sp]);
+
+  // Roster for the assign picker.
+  //
+  // NOT /api/team/members, which is every profile on the tenant. The claim
+  // route validates the target against getOasisSalesRepRoster, which excludes
+  // owners, admin_access holders and non-rep roles -- so the members list
+  // offered names the server then refused with target_not_on_sales_roster. On
+  // the live tenant that was 8 names for 6 valid targets: picking CC or Adon
+  // failed, on a name the picker had just presented as a choice.
+  //
+  // /api/web-leads/assignable-reps serves the SAME roster function the claim
+  // route checks, so the dropdown cannot offer an id the server will reject.
+  //
+  // Best-effort: if it fails the picker stays empty and plain self-claim still
+  // works, because losing the roster must not take the Claim button down.
+  useEffect(() => {
+    if (!canSeeTeamAndAssign) return;
+    let alive = true;
+    fetch("/api/web-leads/assignable-reps", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { reps: [] }))
+      .then((m) => { if (alive) setReps(Array.isArray(m.reps) ? m.reps : []); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [canSeeTeamAndAssign]);
+
+  /** Name a rep for a message. Falls back to the id so a missing roster entry
+   *  still produces a sentence an operator can act on. */
+  const repLabel = useCallback((id: string) => {
+    const m = reps.find((r) => r.id.toLowerCase() === id.toLowerCase());
+    return (m?.name || id).trim();
+  }, [reps]);
+
   // Local draft for the search box, synced from the URL. See LeadsToolbar's
   // input for why this exists instead of defaultValue.
   const [queryDraft, setQueryDraft] = useState(filters.query);
@@ -135,6 +254,49 @@ export function WebLeadsBrowser() {
     const qs = filtersToParams(f).toString();
     router.push(qs ? `/web-leads?${qs}` : "/web-leads", { scroll: false });
   }, [router]);
+
+  /**
+   * ═══ FILTERS SURVIVE LEAVING THE PAGE (Adon, 2026-08-25) ══════════════════
+   *
+   * "once you click the filters until you un-click the filters, it's going to
+   * stay on that filter no matter where you go."
+   *
+   * Filters live in the URL, which makes them exact and shareable and also
+   * makes them die the moment a rep opens a battle card or any sidebar tab.
+   * Coming back lands on a bare /web-leads, so a rep claiming fifty Toronto
+   * salons re-picked province, city and industry after every single lead.
+   *
+   * TWO EFFECTS, IN THIS ORDER, AND THE ORDER MATTERS.
+   *
+   * The restore runs ONCE, on mount, and only when the URL carries no filters
+   * -- so it can never fight a rep who is actively filtering, and never
+   * overrides a link somebody was sent. `router.replace`, not `push`, so the
+   * bare URL does not become a back-button stop that bounces them straight
+   * forward again.
+   *
+   * The remember runs on every change AFTER that, never before: writing on the
+   * first render would overwrite a real memory with the empty URL we are about
+   * to replace, which is the whole bug in miniature.
+   */
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const current = sp.toString();
+    if (!hasNoFilters(current)) return;
+    const remembered = readRememberedFilters();
+    if (!remembered) return;
+    // Carry an open drawer through: a rep who deep-linked to one lead keeps it
+    // open, with the filters it was found under restored around it.
+    const leadId = new URLSearchParams(current).get("lead");
+    const target = leadId ? `${remembered}&lead=${encodeURIComponent(leadId)}` : remembered;
+    router.replace(`/web-leads?${target}`, { scroll: false });
+  }, [sp, router]);
+
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    rememberFilters(sp.toString());
+  }, [sp]);
 
   // Switching views keeps every other field (filters, page, an open lead)
   // intact -- Leads' own filters simply go unread by Pipeline/Territories, so a
@@ -153,33 +315,25 @@ export function WebLeadsBrowser() {
   // the same invariant for their own fetches.
   useEffect(() => {
     let alive = true;
-    const qs = filtersToParams({ ...filters, page: 1, leadId: null }).toString();
-    fetch(`/api/web-leads/facets?${qs}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((body) => {
-        if (!alive) return;
-        setFacets(body);
-        setFacetError(null);
-      })
-      .catch((e) => {
-        if (!alive) return;
-        setFacetError(e instanceof Error ? e.message : "failed");
-      });
-    return () => { alive = false; };
-  }, [filters]);
-
-  useEffect(() => {
-    let alive = true;
+    // The Assign view fetches the pool like every other list. It used to blank
+    // the list here and render only the sheet control, which is why "assign"
+    // could only ever mean "hand someone an entire city+industry sheet" --
+    // 1,158 leads or nothing. Assigning ONE lead was not expressible.
     setLoading(true);
     const qs = filtersToParams({ ...filters, leadId: null }).toString();
-    fetch(`/api/web-leads?${qs}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        return r.json();
-      })
+    // scope=mine asks for the caller's own book; the default pool excludes
+    // every lead somebody currently holds. `view` is already in `qs` (it is a
+    // filter), but the server reads scope explicitly rather than inferring it
+    // from a presentation concern.
+    const url = webLeadsRequestUrls(qs).list;
+    fetchCachedWebLeadsJson<{
+      leads: WebLeadRow[];
+      total: number;
+      page: number;
+      pageSize: number;
+      facets: Facets | null;
+      boards?: Record<LeadCountry, number> | null;
+    }>(url)
       .then((body) => {
         if (!alive) return;
         setLeads(body.leads);
@@ -189,15 +343,22 @@ export function WebLeadsBrowser() {
         setLeadsKey(qs);
         setTotal(body.total);
         setPageSize(body.pageSize);
+        setFacets(body.facets);
+        setBoards(body.boards ?? null);
+        setFacetError(null);
         setListError(null);
       })
       .catch((e) => {
         if (!alive) return;
-        setListError(e instanceof Error ? e.message : "failed");
+        const message = e instanceof Error ? e.message : "failed";
+        setListError(message);
+        setFacets(null);
+        setBoards(null);
+        setFacetError(message);
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [filters]);
+  }, [filters, refreshKey, view]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
   const emptyHint = useMemo(() => {
@@ -206,6 +367,14 @@ export function WebLeadsBrowser() {
     if (filters.cities.length) parts.push(`in ${filters.cities.join(" or ")}`);
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
+    if (filters.ownerOnly) parts.push("where we know the owner's name");
+    if (filters.enrichment !== "all") {
+      parts.push(`we know at least this much: ${ENRICHMENT_LABELS[filters.enrichment].toLowerCase()}`);
+    }
+    // Named explicitly because this is the filter most likely to have emptied
+    // the page for a reason that has nothing to do with the rep's targeting:
+    // it is 7am where they are, or the directory holds no hours for any of them.
+    if (filters.openNow) parts.push("open right now in their own time zone");
     if (filters.band === "under40") parts.push("scoring under 40");
     if (filters.band === "mid") parts.push("scoring 40 to 59");
     if (filters.band === "sixty_plus") parts.push("scoring 60 and up");
@@ -239,51 +408,308 @@ export function WebLeadsBrowser() {
     [filters],
   );
 
+  const assignView = view === "territories";
+  const mine = view === "mine";
+  const team = view === "team";
+  const canOperateCurrentView = canMutate && !team;
+  const actionableLeads = useMemo(
+    () => (mine ? leads.filter((lead) => !lead.released) : leads),
+    [mine, leads],
+  );
+  const actionableIds = useMemo(
+    () => new Set(actionableLeads.map((lead) => lead.id)),
+    [actionableLeads],
+  );
+
+  // A book shows one board at a time. When this board is empty and the other
+  // is not, say so -- "nothing in your book" would be false.
+  const otherCountry: LeadCountry = filters.country === "ca" ? "us" : "ca";
+  const onOtherBoard = boards?.[otherCountry] ?? 0;
+  const bookEmptyHint =
+    onOtherBoard > 0
+      ? `None on the ${LEAD_COUNTRY_NAMES[filters.country]} board. ${onOtherBoard.toLocaleString()} ${onOtherBoard === 1 ? "is" : "are"} on the ${LEAD_COUNTRY_NAMES[otherCountry]} board: switch boards above.`
+      : team
+        ? "No roster-assigned team leads yet."
+        : "Nothing in your book yet. Go to Leads, tick the ones you want and claim them.";
+
+  /**
+   * Claim the ticked leads into my book, or (in My Leads) release them back to
+   * the pool.
+   *
+   * REPORTS WHAT ACTUALLY HAPPENED, not what was attempted. A rep ticks 60,
+   * two were taken by someone else in the last minute and one is over their
+   * cap: saying "claimed 60" would be a lie the rep only discovers when three
+   * of their calls turn out to belong to someone else. The server returns the
+   * granted, refused and lost-race sets separately and this renders the
+   * difference. Same discipline assign.ts documents: "a half-assigned territory
+   * that reports success is worse than an error".
+   */
+  const runClaim = useCallback(async () => {
+    if (!canOperateCurrentView) return;
+    const ids = Array.from(selected).filter((id) => !mine || actionableIds.has(id));
+    if (ids.length === 0) return;
+    setClaiming(true);
+    setClaimNote(null);
+    try {
+      const r = await fetch(`/api/web-leads/claim${mine ? "?release=1" : ""}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // `assignTo` only when one is chosen: an empty string would be a
+        // named target the server must reject, rather than "claim for me".
+        body: JSON.stringify(assignTo ? { leadIds: ids, assignTo } : { leadIds: ids }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setClaimNote(body?.error ? `Could not do that: ${body.error}` : "Could not do that. Try again.");
+        return;
+      }
+      invalidateWebLeadsClientCache();
+      if (mine) {
+        const n = (body.released || []).length;
+        const failed = (body.refused || []).length;
+        const trackingFailed = (body.trackingFailed || []).length;
+        setClaimNote(
+          `Released ${n} back to the pool.` +
+            (failed ? ` ${failed} could not be released.` : "") +
+            (trackingFailed ? ` ${trackingFailed} releases saved, but their activity tracking needs an admin check.` : ""),
+        );
+      } else {
+        const got = (body.claimed || []).length;
+        const lost = (body.lostRace || []).length;
+        const capped = (body.refused || []).filter((x: { reason: string }) => x.reason === "at_capacity").length;
+        const gone = (body.refused || []).length - capped;
+        const trackingFailed = (body.trackingFailed || []).length;
+        setClaimNote(
+          [
+            `Claimed ${got}.`,
+            lost ? `${lost} were taken by someone else just now.` : "",
+            gone ? `${gone} were already held.` : "",
+            capped ? `${capped} would put you over your ${body.cap} lead limit.` : "",
+            trackingFailed ? `${trackingFailed} claims saved, but their activity tracking needs an admin check.` : "",
+            // Named, not just counted: a manager who mis-picks a rep needs to
+            // see WHOSE board the leads landed on.
+            assignTo
+              ? `Assigned to ${repLabel(assignTo)} - they now hold ${body.held} of ${body.cap}.`
+              : `You now hold ${body.held} of ${body.cap}.`,
+          ].filter(Boolean).join(" "),
+        );
+      }
+      setSelected(new Set());
+      // Re-read so the claimed leads leave the pool (or the released ones leave
+      // my book) at once, rather than lingering until the next navigation.
+      setRefreshKey((n) => n + 1);
+    } catch {
+      setClaimNote("Could not confirm whether the server finished. Refresh before trying again so you do not act on stale ownership.");
+    } finally {
+      setClaiming(false);
+    }
+  }, [canOperateCurrentView, selected, mine, actionableIds, assignTo, repLabel]);
+
+  /**
+   * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
+   *
+   * Call Mode used to open straight off the shared pool. That quietly defeated
+   * the entire claim system: two reps on the same filtered view -- "Toronto
+   * salons under 40", the obvious Monday queue -- both pressed Start calling
+   * and dialled the same businesses, because nothing about calling a pool lead
+   * assigned it to anyone. Every guarantee elsewhere in this feature was intact
+   * and the one path a rep actually uses went around all of it. (Codex review,
+   * 2026-08-23.)
+   *
+   * From the pool, Start calling now CLAIMS this page first and enters Call
+   * Mode on what was actually granted. From My leads it opens directly -- those
+   * are already yours.
+   *
+   * Claiming the page rather than all 3,760 matches is deliberate: a rep works
+   * a page at a time, and locking thousands of leads behind one button press
+   * would drain the pool for everyone else in a single click.
+   */
+  const startCalling = useCallback(async () => {
+    if (!canOperateCurrentView) return;
+    if (mine) {
+      if (actionableLeads.length === 0) {
+        setClaimNote("Nothing active to call. Released leads remain here for history and must be claimed again before anyone works them.");
+        return;
+      }
+      setCalling(true);
+      return;
+    }
+    const ids = leads.map((l) => l.id);
+    if (ids.length === 0) return;
+    setClaiming(true);
+    setClaimNote(null);
+    try {
+      const r = await fetch("/api/web-leads/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadIds: ids }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setClaimNote(body?.error ? `Could not start: ${body.error}` : "Could not start calling. Try again.");
+        return;
+      }
+      invalidateWebLeadsClientCache();
+      const got: string[] = body.claimed || [];
+      const trackingFailed = (body.trackingFailed || []).length;
+      if (got.length === 0) {
+        // Never open an empty queue and let the rep discover it. Say why.
+        setClaimNote(
+          `Nothing to call — these were all taken by someone else, or you are at your ${body.cap} lead limit. You hold ${body.held}.`,
+        );
+        return;
+      }
+      setClaimNote(
+        `Claimed ${got.length} of ${ids.length}. You now hold ${body.held} of ${body.cap}. They are yours until you release them.` +
+          (trackingFailed ? ` ${trackingFailed} activity records need an admin check.` : ""),
+      );
+      // Land in My leads: the queue a rep works is their own book, and the
+      // claimed leads have by definition just left the pool this view shows.
+      push({ ...filters, view: "mine", page: 1 });
+      setCalling(true);
+    } catch {
+      setClaimNote("Could not confirm whether the claims finished. Refresh before calling so you only work leads shown in your book.");
+    } finally {
+      setClaiming(false);
+    }
+  }, [canOperateCurrentView, mine, leads, actionableLeads.length, push, filters]);
+
+  const toggle = useCallback((id: string) => {
+    if (mine && !actionableIds.has(id)) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, [mine, actionableIds]);
+
+  const toggleAll = useCallback((ids: string[], select: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (mine && !actionableIds.has(id)) continue;
+        if (select) next.add(id); else next.delete(id);
+      }
+      return next;
+    });
+  }, [mine, actionableIds]);
+
+  const listBlock = (
+    // `2xl:flex` rather than `flex`: below 1536 the rail is a sheet, so there
+    // is no second column to lay out and the results take the full content box.
+    // See FilterRail.tsx for the arithmetic -- at 1280 a persistent rail leaves
+    // the pool 692px for a 730px table and clips a control out of an
+    // `overflow-hidden` wrapper, which is happening in production today.
+    <div className="2xl:flex 2xl:gap-7">
+      {/* The rail narrows the shared pool. A rep's own book is small enough to
+          scan and is not narrowed by province, city or industry -- filtering
+          your own 100 leads by province is a question nobody has. It IS shown
+          one country board at a time (the server applies the country to every
+          tab), so the book tabs carry the country switch below. */}
+      {!mine && !team && (
+        <>
+          <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
+          <FilterSheet
+            open={filtersOpen}
+            onClose={() => setFiltersOpen(false)}
+            facets={facets}
+            filters={filters}
+            onChange={push}
+            loading={!facets && !facetError}
+            error={facetError}
+            total={loading ? undefined : total}
+          />
+        </>
+      )}
+
+      <div className="min-w-0 flex-1 space-y-4">
+        {/* THE BOOK'S COUNTRY SWITCH (2026-09-10). Without it a lead on the
+            other board -- CC's Florida lead, in a book that opened on Canada --
+            could not be reached from this page. The rail's own control, with
+            the server's per-board counts. */}
+        {(mine || team) && (
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Board</span>
+            <CountrySwitch filters={filters} onChange={push} counts={boards} className="w-full sm:w-80" />
+          </div>
+        )}
+        <LeadsToolbar
+          filters={filters}
+          onChange={push}
+          total={total}
+          loading={loading}
+          queryDraft={queryDraft}
+          onQueryDraft={setQueryDraft}
+          onStartCalling={startCalling}
+          canStartCalling={!loading && actionableLeads.length > 0 && !claiming}
+          selectedCount={selected.size}
+          onClaim={runClaim}
+          claiming={claiming}
+          claimLabel={mine ? "Release" : "Claim"}
+          // Only on the pool: "assigning" a lead already in someone's book is
+          // a transfer, which is a different decision with different rules.
+          assignOptions={!mine && !team ? reps : []}
+          assignTo={assignTo}
+          onAssignTo={setAssignTo}
+          canMutate={canOperateCurrentView}
+          filterCount={activeFilterCount(filters)}
+          onOpenFilters={mine || team ? null : () => setFiltersOpen(true)}
+        />
+
+        {claimNote && (
+          <p className="rounded-lg border border-bg-border bg-bg-panel px-3.5 py-2.5 text-sm text-fg-muted">
+            {claimNote}
+          </p>
+        )}
+
+        <LeadsTable
+          leads={leads} total={total} page={filters.page} pageSize={pageSize}
+          onPage={(n) => push({ ...filters, page: n })}
+          onOpen={openLead}
+          loading={loading} error={listError}
+          emptyHint={mine || team ? bookEmptyHint : emptyHint}
+          selected={selected} onToggle={toggle} onToggleAll={toggleAll}
+          showStage={mine || team}
+          canSelect={canOperateCurrentView}
+        />
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Leads"
-        subtitle="Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
-        action={<ViewSwitcher active={view} onChange={setView} />}
+        title={team ? "Team leads" : mine ? "My leads" : "Leads"}
+        subtitle={
+          team
+            ? "Read-only roster view of every lead assigned to the OASIS sales team."
+            : mine
+            ? "Active claims are yours to work. Released rows stay visible here for history."
+            : "Unassigned prospect pool. Qualify here; Claim or Assign moves a lead into Pipeline at Assigned."
+        }
+        action={<ViewSwitcher active={view} onChange={setView} canSeeTeamAndAssign={canSeeTeamAndAssign} />}
       />
 
-      {view === "leads" && (
-        <div className="flex gap-7">
-          <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
+      {(view === "leads" || mine || team || assignView) && listBlock}
 
-          <div className="min-w-0 flex-1 space-y-4">
-            <LeadsToolbar
-              filters={filters}
-              onChange={push}
-              total={total}
-              loading={loading}
-              queryDraft={queryDraft}
-              onQueryDraft={setQueryDraft}
-              onStartCalling={() => setCalling(true)}
-              canStartCalling={!loading && leads.length > 0}
-            />
-
-            <LeadsTable
-              leads={leads} total={total} page={filters.page} pageSize={pageSize}
-              onPage={(n) => push({ ...filters, page: n })}
-              onOpen={openLead}
-              loading={loading} error={listError} emptyHint={emptyHint}
-            />
+      {assignView && (
+        // Kept, demoted. Handing a rep a whole sheet is still occasionally the
+        // right move when a territory is genuinely one person's patch, but it
+        // is the exception -- so it sits below the list, closed, instead of
+        // being the only thing the tab could do.
+        <details className="max-w-3xl rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-fg-muted">
+            Bulk: give a rep an entire sheet
+          </summary>
+          <div className="mt-4">
+            <TerritoryAssignment />
           </div>
-        </div>
+        </details>
       )}
 
-      {view === "pipeline" && <PipelineBoard />}
-
-      {view === "territories" && (
-        <div className="max-w-3xl">
-          <TerritoryAssignment />
-        </div>
-      )}
-
-      {calling && (
+      {calling && canOperateCurrentView && (
         <CallMode
-          leads={leads}
+          leads={actionableLeads}
           // Page AND filter identity: a rep who changes a filter in another tab
           // and comes back is working a different queue even at the same page
           // number, and the cursor should start over rather than land mid-list.
@@ -294,15 +720,16 @@ export function WebLeadsBrowser() {
           // disposition buttons while the next page is still in flight.
           ready={!loading && leadsKey === queueKey}
           onExit={() => setCalling(false)}
-          // Leaving Call Mode to open the drawer, rather than stacking two
-          // full-screen overlays on top of each other.
-          onOpenDetail={(id) => { setCalling(false); openLead(id); }}
+          // No onOpenDetail any more: Call Mode's "Full detail" is now a link
+          // to /web-leads/[id] (the battle card) in a new tab, so a rep reading
+          // the deep view keeps their place in the queue instead of dropping
+          // out of Call Mode to open a narrower drawer behind it.
           hasMore={filters.page < pages}
           onLoadMore={() => push({ ...filters, page: filters.page + 1 })}
         />
       )}
 
-      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} />}
+      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} canMutate={canOperateCurrentView && mine} />}
     </div>
   );
 }

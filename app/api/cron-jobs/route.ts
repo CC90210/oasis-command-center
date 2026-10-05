@@ -1,7 +1,8 @@
 /**
- * /api/cron-jobs — operator-facing CRUD for tenant cron jobs (Phase I).
+ * /api/cron-jobs — tenant-scoped scheduled-job inventory and creation.
  *
- * GET  → list this tenant's jobs (RLS-scoped via the authed user).
+ * GET  → list tenant jobs plus the operator-only Empire lane. Service-role
+ *        reads are explicitly constrained by the session tenant ID.
  * POST → create a new job. Body: { agent_key, name, description?, schedule,
  *        action_type, action_payload, enabled? }
  *
@@ -15,8 +16,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
-import { isOperatorEmail } from "@/lib/operator-credentials";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
   daemonBackedCronForName,
@@ -24,14 +25,23 @@ import {
   type DaemonHealthRow,
   type DaemonState,
 } from "@/lib/automations/daemon-backed-crons";
-import { normalizeEmpireRow, type EmpireCronRow } from "@/lib/cron-empire-row";
+import {
+  normalizeEmpireRow,
+  normalizeTenantCronRow,
+  type EmpireCronRow,
+} from "@/lib/cron-empire-row";
+import {
+  AutomationInventoryError,
+  buildAutomationInventoryMetadata,
+  type CronInventoryJob,
+} from "@/lib/automations/cron-inventory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Action types we accept on create. Discriminator + payload-shape validation
 // done in code (vs JSON-schema) because the shapes are small and clear.
-const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "agent_prompt", "webhook_post"] as const;
+const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "webhook_post"] as const;
 type ActionType = (typeof VALID_ACTION_TYPES)[number];
 
 /**
@@ -43,8 +53,8 @@ type ActionType = (typeof VALID_ACTION_TYPES)[number];
  * bridge daemon polls. Operators (CC) need visibility into BOTH on the
  * Automations page; client tenants only see their own tenant_cron_jobs.
  *
- * The two schemas differ — empire uses is_active + action_config + no
- * agent_key, tenant uses enabled + action_payload + agent_key. The GET
+ * The two schemas differ — empire uses is_active + action_config +
+ * owner_agent_key, tenant uses enabled + action_payload + agent_key. The GET
  * normalizes both to a single shape with a `source` discriminator and the
  * UI surfaces an "Empire" tag on cron_jobs rows.
  */
@@ -102,32 +112,57 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
     return NextResponse.json({ ok: false, error: tenantQuery.error.message }, { status: 500 });
   }
-  const tenantJobs = (tenantQuery.data || []).map((j) => ({ ...j, source: "tenant" as const }));
+  const tenantJobs = (tenantQuery.data || []).map((j) =>
+    normalizeTenantCronRow(j as Record<string, unknown>),
+  ) as CronInventoryJob[];
 
   // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
   // 084), so the operator's tenantId is the canonical filter. Pre-084 we
   // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
   // to suppress tenant-scoped rows that leaked in; the column makes both
   // unnecessary.
+  //
+  // Evaluated ONCE and reported on the wire, because every Empire guarantee in
+  // this route is armed by this one predicate: the query itself, the fail-loud
+  // 500 on an Empire read error, and the non-empty contract in
+  // buildAutomationInventoryMetadata. An identity the predicate does not cover
+  // — a new @oasisai.work alias, a Google-linked session whose email differs, an
+  // OPERATOR_EMAIL regression in the environment — does not trip any of them. It
+  // disarms all three at once and returns a tenant-only 200 that is
+  // indistinguishable from "every Empire schedule was deleted", which is the
+  // exact shape of the 4-of-41 outage. Three separate calls to the predicate
+  // could also drift apart under an edit; one binding cannot.
+  //
+  // The predicate is the VERIFIED check (alias AND owner/admin OASIS membership
+  // by auth id): the email alone was registrable by anyone. A failed membership
+  // lookup answers false — and the verdict on the wire says so, as above.
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
-  if (isOperatorEmail(user.email)) {
+  if (isOperator) {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
-        "id, name, description, schedule, action_type, action_config, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
+        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, fail_count, created_at",
       )
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });
-    if (!empireQuery.error && empireQuery.data) {
-      // The daemon field is decorated HERE, not in lib/cron-empire-row.ts —
-      // the shared normalizer stays daemon-agnostic; only this route knows
-      // which parked rows a PM2 daemon has taken over. Null for the ordinary
-      // rows the shared scheduler still runs; filled in below.
-      empireJobs = (empireQuery.data as EmpireCronRow[]).map((row) => ({
-        ...normalizeEmpireRow(row),
-        daemon: null as DaemonState | null,
-      }));
+    if (empireQuery.error) {
+      // A tenant-only list is plausible but dangerously incomplete for the
+      // operator. The previous silent fallback produced the exact 4/1 outage:
+      // the page looked healthy while hiding every Empire schedule.
+      return NextResponse.json(
+        { ok: false, error: "empire_inventory_unavailable", message: empireQuery.error.message },
+        { status: 500 },
+      );
     }
+    // The daemon field is decorated HERE, not in lib/cron-empire-row.ts —
+    // the shared normalizer stays daemon-agnostic; only this route knows
+    // which parked rows a PM2 daemon has taken over. Null for the ordinary
+    // rows the shared scheduler still runs; filled in below.
+    empireJobs = ((empireQuery.data || []) as EmpireCronRow[]).map((row) => ({
+      ...normalizeEmpireRow(row),
+      daemon: null as DaemonState | null,
+    }));
   }
 
   // Daemon-backed rows: attach what the process is ACTUALLY doing.
@@ -168,37 +203,41 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
   }
 
-  return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs] });
+  try {
+    const inventory = buildAutomationInventoryMetadata({
+      tenantJobs,
+      empireJobs,
+      empireQueried: isOperator,
+      requireEmpireRows: isOperator,
+      isOperator,
+    });
+    return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
+    // Bound as `cause`, not `error`: this is the catch binding for a contract
+    // violation, never a destructured driver error. tests/db-error-contract
+    // counts every bare `throw error` in a file that destructures `error` off a
+    // query result anywhere (POST does, below), so reusing the name here would
+    // report debt that does not exist -- and set this file's ratchet to 1, so a
+    // genuine bare driver throw appearing later would pass unnoticed.
+  } catch (cause) {
+    if (cause instanceof AutomationInventoryError) {
+      console.error("[api/cron-jobs GET] inventory contract failed", {
+        error: cause.code,
+        message: cause.message,
+        tenantCount: tenantJobs.length,
+        empireCount: empireJobs.length,
+      });
+      return NextResponse.json(
+        { ok: false, error: cause.code, message: cause.message },
+        { status: cause.status },
+      );
+    }
+    throw cause;
+  }
 });
 
-/**
- * Map a public.cron_jobs row to the UI's CronJob shape with `source: "empire"`.
- *
- * Column translation:
- *   is_active     → enabled
- *   action_config → action_payload
- *   last_result   → last_run_status + last_run_output (best-effort parse)
- *   (no agent_key) → "bravo-scheduler" so the UI's per-row tag is honest
- *
- * Empire rows are read-only from the UI — the SEED_JOBS array in
- * scripts/cron_engine.py is the source of truth, edits there are how CC
- * adds/removes empire automations. The UI gates edit/delete on the source
- * tag.
- */
-/**
- * Empire cron_jobs has no agent_key column — every row was historically
- * "Bravo's empire scheduler". Infer the owning agent from the job name
- * for UI grouping (CEO/CFO/CMO sections). Tenant scoping is handled by
- * the .eq("tenant_id", ...) filter on the query, not by this function.
- *
- *   - "Atlas *" name OR action_type starting with "atlas_" → atlas (CFO)
- *   - "Maven *" name OR action_type starting with "maven_" → maven (CMO)
- *   - "Aura *" / "Morning Pow Wow" → aura (life-coach)
- *   - everything else → bravo (CEO — business ops)
- */
 export async function POST(req: NextRequest) {
-  // Admin-only: creating a scheduled job (script_run / agent_prompt /
-  // webhook_post / snapshot_run). Non-admin members can view (GET) only.
+  // Admin-only: creating a scheduled job (script_run / webhook_post /
+  // snapshot_run). Non-admin members can view (GET) only.
   const ctx = await getSessionContext();
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
@@ -267,8 +306,9 @@ export async function POST(req: NextRequest) {
   // Same privilege-escalation class as action_payload.root: the bridge
   // maps agent_key → repo root via SIBLING_ROOT_BY_AGENT_KEY, so an
   // unfiltered agent_key lets a tenant operator pick which sibling
-  // repo runs.
-  const allowedAgents = await getTenantEnabledAgents(tenantId);
+  // repo runs. OASIS's own workspace: the agents its bridge runs, not its
+  // business roster of department leads (W4a review R4).
+  const allowedAgents = oasisOperatorAgents(tenantId) ?? (await getTenantEnabledAgents(tenantId));
   if (allowedAgents.length > 0 && !allowedAgents.includes(agentKey)) {
     return NextResponse.json(
       {
@@ -374,11 +414,6 @@ function validateActionPayload(type: ActionType, payload: Record<string, unknown
     case "snapshot_run":
       if (typeof payload.snapshot !== "string" || !payload.snapshot.trim()) {
         return "snapshot_run requires action_payload.snapshot (string)";
-      }
-      return null;
-    case "agent_prompt":
-      if (typeof payload.prompt !== "string" || !payload.prompt.trim()) {
-        return "agent_prompt requires action_payload.prompt (string)";
       }
       return null;
     case "webhook_post": {

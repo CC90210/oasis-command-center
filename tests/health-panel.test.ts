@@ -15,6 +15,7 @@ import {
   failingForHours,
   ladderLabel,
 } from "../lib/health/panel-core";
+import { ensureExpectedChecks } from "../lib/health/outcome-panel-data";
 
 // ── check_broken is NOT ok ────────────────────────────────────────────────
 // A check that could not run must never render green. Treating an errored
@@ -37,6 +38,24 @@ assert.equal(freshness({ ranAt: null, nowMs: 1_000 }), "never_run");
 assert.equal(freshness({ ranAt: 0, nowMs: 2 * 60 * 60 * 1000 }), "stale");
 assert.equal(freshness({ ranAt: 0, nowMs: 5 * 60 * 1000 }), "fresh");
 assert.equal(freshness({ ranAt: Number.NaN, nowMs: 0 }), "never_run");
+
+{
+  const filled = ensureExpectedChecks([], ["calendar.workspace_credential_usable"]);
+  assert.deepEqual(
+    filled,
+    [{
+      checkId: "calendar.workspace_credential_usable",
+      verdict: "never_run",
+      observed: null,
+      baseline: null,
+      reason: "No run has been recorded for this required check.",
+      ranAt: null,
+    }],
+    "an expected check with no row must become an explicit non-green result",
+  );
+  const panel = toPanelRows(filled, Date.now());
+  assert.equal(panel[0].needsAttention, true);
+}
 
 // ── A stale GREEN check still needs attention ─────────────────────────────
 // A green verdict from two days ago describes a world that no longer exists.

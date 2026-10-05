@@ -31,7 +31,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { canManageTeam, type TeamRole } from "@/lib/team";
 import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
@@ -55,20 +54,6 @@ function normalizeKey(raw: unknown): string | null {
   return k;
 }
 
-async function canManageTenant(tenantId: string, userId: string): Promise<boolean> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("team_role, is_owner")
-    .eq("auth_user_id", userId)
-    .eq("tenant_id", tenantId)
-    .maybeSingle();
-  const row = r.data as { team_role: TeamRole | null; is_owner: boolean | null } | null;
-  if (!row) return false;
-  if (row.is_owner) return true;
-  return canManageTeam(row.team_role || "member");
-}
-
 type CustomCredentialRow = {
   key: string;
   has_value: boolean;
@@ -80,7 +65,7 @@ export async function GET() {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
   const db = getServiceSupabase();
@@ -132,7 +117,7 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
@@ -226,7 +211,7 @@ export async function DELETE(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canManageTenant(sess.tenantId, sess.userId))) {
+  if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
   let body: { key?: unknown };

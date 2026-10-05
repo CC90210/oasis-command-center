@@ -293,6 +293,18 @@ export function LeadTimelinePanel({
   const [error, setError] = useState<string | null>(null);
   const [feedErrors, setFeedErrors] = useState<{ feed: string; message: string }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    const onTouch = (event: Event) => {
+      const detail = (event as CustomEvent<{ leadId?: string }>).detail;
+      if (!detail?.leadId || detail.leadId === leadId) {
+        setRevision((value) => value + 1);
+      }
+    };
+    window.addEventListener("oasis:lead-touch", onTouch);
+    return () => window.removeEventListener("oasis:lead-touch", onTouch);
+  }, [leadId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -321,7 +333,7 @@ export function LeadTimelinePanel({
     return () => {
       cancelled = true;
     };
-  }, [leadId, entity]);
+  }, [leadId, entity, revision]);
 
   return (
     <div className="rounded-2xl border border-bg-border bg-bg-deep/40 p-5">

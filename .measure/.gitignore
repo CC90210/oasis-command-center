@@ -1,0 +1,8 @@
+# Build artifacts of the geometry harness. The SOURCES are committed so the
+# next session can rebuild in ~4 seconds; these are regenerated every run and
+# a 700kb bundle plus a folder of screenshots in git history helps nobody.
+harness.js
+harness.css
+shots/
+results-*.json
+*.txt

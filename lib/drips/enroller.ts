@@ -44,6 +44,8 @@ import { ensureInitialBrand } from "./brand-store";
 import { loadDealGates } from "./deal-state-store";
 import { stageDripsOffBoard } from "./offboard-stages-core";
 import { applyLeadsBoardFilter, isOnLeadsBoard } from "@/lib/leads/board-visibility";
+import { memberStanding } from "@/lib/team";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -555,6 +557,50 @@ export async function wasShoppedRecently(
   return false;
 }
 
+/**
+ * Is the lead's assigned rep a DEACTIVATED teammate of this tenant?
+ *
+ * A retired rep keeps the leads they worked (assigned_to and any stored
+ * rep_name are history), but a NEW drip must not be signed by them, sent from
+ * their line, or land its replies in their inbox. Shared by this file's
+ * rep_name backfill and the executor's signing identity so the two cannot
+ * disagree about who has left.
+ *
+ * `cache` is per pass, keyed (tenant, rep): one read per rep, not per lead. A
+ * failed read is not cached, so a blip costs one row rather than the pass.
+ *
+ * READ ERROR → false, i.e. TODAY'S behaviour (the rep is treated as active),
+ * plus a tagged warning. Drips are SunBiz revenue automation that runs for
+ * active reps every day; a standing read that hiccups must not change who signs
+ * or which line a text leaves from. Every dispatched step asks again, so a
+ * genuinely retired rep is caught by the next step that reads cleanly.
+ * "not_member" also keeps today's behaviour: only a deactivated member is
+ * withheld.
+ */
+export async function assignedRepDeactivated(
+  tenantId: string,
+  assignedTo: unknown,
+  cache: Map<string, boolean>,
+): Promise<boolean> {
+  const rep = typeof assignedTo === "string" ? assignedTo.trim() : "";
+  if (!rep) return false;
+  const key = `${tenantId}::${rep}`;
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  try {
+    const deactivated = (await memberStanding(tenantId, rep)).standing === "deactivated";
+    cache.set(key, deactivated);
+    return deactivated;
+  } catch (err) {
+    console.warn("[drips] rep standing unavailable", {
+      tenantId,
+      assignedTo: rep,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 /** Best-effort display-name lookup for a rep by user_profiles.auth_user_id. */
 async function lookupRepName(db: Db, assignedTo: string): Promise<string | null> {
   try {
@@ -580,7 +626,9 @@ async function lookupRepName(db: Db, assignedTo: string): Promise<string | null>
  */
 async function backfillLeadMetadata(
   db: Db,
+  tenantId: string,
   lead: LeadRow,
+  repDeactivated: Map<string, boolean>,
 ): Promise<Record<string, unknown> | null> {
   const data = lead.data || {};
   const patch: Record<string, unknown> = {};
@@ -592,7 +640,15 @@ async function backfillLeadMetadata(
       if (!tz.usedFallback) patch.timezone = tz.timeZone;
     }
   }
-  if (!data.rep_name && typeof data.assigned_to === "string" && data.assigned_to) {
+  // Never stamp a DEACTIVATED rep's name onto a lead that does not already
+  // carry it: rep_name is what every drip signs with, so the backfill would
+  // write a retired teammate into the live signature. The lead stays theirs.
+  if (
+    !data.rep_name &&
+    typeof data.assigned_to === "string" &&
+    data.assigned_to &&
+    !(await assignedRepDeactivated(tenantId, data.assigned_to, repDeactivated))
+  ) {
     const name = await lookupRepName(db, data.assigned_to);
     if (name) patch.rep_name = name;
   }
@@ -638,10 +694,13 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
     if (used >= 0) enrollBudget = Math.max(0, enrollDailyCap - used);
   }
 
+  // A retired tenant's sequences never enrol anyone, even if a row is
+  // re-enabled by hand: its leads are being exported and deleted.
   const seqRes = await db
     .from("drip_sequences")
     .select("id, tenant_id, name, enabled, trigger_filter, steps")
-    .eq("enabled", true);
+    .eq("enabled", true)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST);
   if (seqRes.error) {
     return { live, sequencesScanned: 0, perSequence: [], totals: { candidates: 0, enrolled: 0, skipped: 0 } };
   }
@@ -654,6 +713,8 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   });
 
   const perSequence: SequenceEnrollSummary[] = [];
+  // Rep standing for the rep_name backfill, one read per (tenant, rep) per pass.
+  const repDeactivated = new Map<string, boolean>();
   let totalCandidates = 0;
   let totalEnrolled = 0;
   let totalSkipped = 0;
@@ -783,7 +844,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       enrolled++;
       enrollBudget--; // consume from the global rolling-24h intake ceiling
 
-      const patch = await backfillLeadMetadata(db, lead);
+      const patch = await backfillLeadMetadata(db, seq.tenant_id, lead, repDeactivated);
       if (patch) {
         await db.from("tenant_records").update({ data: patch }).eq("id", lead.id).eq("tenant_id", seq.tenant_id);
       }

@@ -1,0 +1,257 @@
+/**
+ * cache.ts — a short-lived in-process memo for this feature's whole-table reads.
+ *
+ * ═══ THE PROBLEM ════════════════════════════════════════════════════════════
+ *
+ * Opening the Leads tab took 5-7 seconds. Not mysteriously: every single load
+ * pulls FOUR whole tables across HTTP and then filters them in memory --
+ *
+ *   ~31,000 tenant_records rows, each carrying its full `data` JSON blob
+ *   ~23,000 audit rows (twice: once for newest-per-business, once for scored)
+ *    ~4,300 unreachable rows
+ *
+ * -- to render fifty. The in-memory filtering is not the cost; the transfer is.
+ *
+ * It cannot simply be pushed server-side. Territory, city and industry live
+ * inside a JSON blob and are free text ("Québec", "Restaurants & Bars"), and
+ * this feature's standing rule is that such values never enter a PostgREST
+ * filter string. That rule is a real injection defence and is not being traded
+ * away for latency.
+ *
+ * ═══ WHY A CACHE IS SAFE HERE SPECIFICALLY ══════════════════════════════════
+ *
+ * Caching a lead list would normally be alarming: a rep could see a lead in the
+ * pool that somebody else already claimed. What makes it safe is that claiming
+ * is a compare-and-swap (see claim-ops.ts). A stale pool cannot cause a
+ * duplicate call -- it can only cause a claim that fails, and failing tells the
+ * rep the truth: "these were taken by someone else just now." The cache can
+ * therefore only ever cost a rep one wasted click, never a wasted phone call.
+ *
+ * That is the entire argument. If the swap is ever removed, this cache must go
+ * with it, because the guarantee is the swap's and not this module's.
+ *
+ * Writes invalidate in-process immediately, so the rep who just claimed sees
+ * their own change at once on that instance. Another serverless instance can
+ * still hold up to TTL of staleness -- which is why the TTLs are seconds, and
+ * why the swap, not the TTL, is what makes it correct.
+ *
+ * ═══ WHAT IS NOT CACHED ═════════════════════════════════════════════════════
+ *
+ * Single-lead reads (fetchLead) and every write path go straight to the
+ * database. Authorization decisions are never served from here.
+ */
+
+type Entry<T> = { value: T; expires: number };
+
+/** A load in flight in SOME request on this isolate. A marker only: never its promise. */
+type Flight = { startedAt: number };
+
+/** Settled values only. Never a pending promise (see memo()). */
+const store = new Map<string, Entry<unknown>>();
+const flights = new Map<string, Flight>();
+
+/**
+ * Cache TTLs, in milliseconds.
+ *
+ * LEADS is deliberately short. It is the table ownership changes on, and a rep
+ * watching a lead they just released linger for half a minute would reasonably
+ * conclude the button is broken.
+ *
+ * SCORES is longer because it changes only when a scoring run writes, which is
+ * a batch job measured in hours, not a per-request event.
+ *
+ * CORPUS backs lib/web-leads/competitors.ts and is deliberately NOT folded into
+ * LEADS even though both derive from the same tenant_records scan. They answer
+ * questions with different staleness budgets: the leads table must show a lead
+ * returning to the pool within seconds of a rep releasing it, while a
+ * percentile against 23,195 scored sites changes only when a scoring run
+ * writes. One shared TTL would either re-transfer ~31,000 rows every ten
+ * seconds to answer a question whose answer changes daily, or leave a released
+ * lead on screen for five minutes.
+ *
+ * ═══ LEADS: 10s -> 90s, 2026-08-26 ══════════════════════════════════════════
+ *
+ * THE OPERATOR COMPLAINT THIS FIXES (Adon): "when you click it for the first
+ * time it takes over 10 seconds", and "when we change the preference in terms
+ * of province or industry ... it takes a significant amount of time".
+ *
+ * The second half was this constant. Measured against live production
+ * 2026-08-26, the projected lead read is 2,703 ms for 31,086 rows / 15.27 MB.
+ * At a 10-second TTL, a rep who spends more than ten seconds reading the screen
+ * before touching a filter pays that 2,703 ms AGAIN -- and reading the screen is
+ * the entire job. So the common case was a cache that had already expired by the
+ * time it was next needed. It was doing the work of a cache without the benefit
+ * of one.
+ *
+ * WHY 90 SECONDS IS SAFE, and it is the SAME argument the module header makes:
+ * claiming is a compare-and-swap (claim-ops.ts). A stale pool cannot produce a
+ * duplicate call. It can only produce a claim that FAILS, and failing tells the
+ * rep the truth -- "taken by someone else just now". The ceiling on staleness is
+ * therefore one wasted CLICK, never a wasted phone call, at 10 seconds or at 90.
+ *
+ * WHY NOT LONGER: the release case is the one a human actually watches. A rep
+ * who releases a lead and does not see it return to the pool concludes the
+ * button is broken. Writes invalidate in-process immediately (invalidate()
+ * below), so the rep who acted sees their own change AT ONCE on that instance;
+ * 90s bounds only what a DIFFERENT serverless instance can still be showing.
+ * That is a bound on someone else's screen, not on the actor's.
+ *
+ * THIS DOES NOT FIX THE COLD FIRST CLICK. A cold serverless instance has an
+ * empty map and pays every read regardless of TTL. That is a separate problem
+ * with a separate fix (server-side filtering and paging), and raising this
+ * number must not be mistaken for having solved it.
+ *
+ * ═══ PARKED: its own TTL, 2026-08-26 ════════════════════════════════════════
+ *
+ * The parked-domain read is the most expensive query on this page PER ROW
+ * RETURNED by an enormous margin. Measured live 2026-08-26:
+ *
+ *   parked net (business_id, signals)   2,125 ms   57 rows   0.07 MB
+ *
+ * Two seconds to move seventy kilobytes. The cost is not transfer, it is the
+ * SCAN: sixteen `LIKE '%...%'` patterns over the `signals` blob of all 23,222
+ * audit rows. A leading-wildcard LIKE cannot use an index, so this is a full
+ * table scan by construction and no index will fix it.
+ *
+ * It was folded into loadScoreIndex(), so it was re-paid on every SCORES
+ * rebuild -- every five minutes, per instance -- to recompute an answer that
+ * changes only when the audit worker writes a new row. Given its own longer TTL
+ * it is paid roughly once per half hour instead, taking ~2.1s off five of every
+ * six score-index rebuilds.
+ *
+ * THE DURABLE FIX IS A STORED COLUMN, NOT A LONGER TTL. `is_parked` computed
+ * once at audit-write time and indexed turns this into a point lookup and
+ * removes the scan from a cold start too, which no TTL can do. That needs a
+ * migration plus a JARVIS audit-worker change and is deliberately NOT bundled
+ * here.
+ */
+export const TTL = { LEADS: 90_000, SCORES: 300_000, CORPUS: 300_000, PARKED: 1_800_000 } as const;
+
+/**
+ * How old a load in flight may get before it is presumed dead and ONE waiter
+ * takes it over. Above the normal cold reads (the leads read measured 2.7 s,
+ * the parked scan 2.1 s), so a live load is almost always waited for; bounded,
+ * so a load whose request died costs this much once, never a hang.
+ */
+export const FLIGHT_WAIT_MS = 10_000;
+const POLL_MS = 50;
+
+/**
+ * How many flight budgets any one caller waits for someone else's load before
+ * giving up with CacheWaitTimeout (30 s in production): room for a dead load
+ * and one recovery, never an open-ended wait while the database is down.
+ */
+const WAIT_BUDGETS = 3;
+
+/** Thrown to a caller that waited WAIT_BUDGETS flight budgets for another request's load. Retryable. */
+export class CacheWaitTimeout extends Error {
+  constructor(readonly key: string) {
+    super("These leads are still loading for another request. Try again in a few seconds.");
+    this.name = "CacheWaitTimeout";
+  }
+}
+
+/**
+ * The time source memo() waits on. Production uses the real clock; tests pass a
+ * virtual one so the takeover race is exercised deterministically instead of
+ * depending on how busy the machine running them is.
+ */
+export type MemoClock = { now: () => number; sleep: (ms: number) => Promise<void> };
+
+const REAL_CLOCK: MemoClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
+type MemoOptions = { flightWaitMs?: number; pollMs?: number; maxWaitMs?: number; clock?: MemoClock };
+
+function fresh<T>(key: string, now: number): Entry<T> | null {
+  const e = store.get(key);
+  return e && e.expires > now ? (e as Entry<T>) : null;
+}
+
+/**
+ * Run `load` and memoise its RESULT for `ttlMs`, keyed by `key`.
+ *
+ * CONCURRENT CALLERS STILL SHARE ONE LOAD, WITHOUT SHARING ITS PROMISE.
+ * Five reps opening the page in the same second must trigger ONE 31,000-row
+ * (15 MB) read, not five: five at once would also crowd a Worker isolate's
+ * memory. This used to work by putting the load's promise in the map. On
+ * Cloudflare Workers that is only safe while the request that started the load
+ * stays alive: the load's I/O belongs to that request, and if it is canceled
+ * mid-load the promise never settles, so every caller until the TTL expires
+ * waits on it (up to 30 minutes for the parked read). Reviewed after the
+ * 2026-10-01 pipeline incident (PR #509; lib/runtime/settled-once.ts); a local
+ * workerd run did not cancel a loader whose client disconnected, so this is a
+ * latent risk rather than a demonstrated cause, removed on principle. The map
+ * now holds only a marker that a load is in flight. A second caller polls for
+ * the SETTLED value on its own timers.
+ *
+ * A DEAD LOAD GETS EXACTLY ONE RECOVERY. A flight older than FLIGHT_WAIT_MS is
+ * presumed dead, and the first waiter to see that takes it over: the check and
+ * the new marker happen with no await between them, so no second waiter can
+ * take over the same dead flight. Every other waiter sees the new, live marker
+ * and keeps waiting for it. (Before this, every waiter whose own budget ran out
+ * started a load, and a hung database turned one 15 MB read into one per
+ * waiter: Codex review of #511, 2026-10-01.) A caller that has waited
+ * WAIT_BUDGETS flight budgets gives up with CacheWaitTimeout instead of adding load, even if
+ * the flight it waited on is dead by then: the next caller recovers it, so the
+ * number of loads per key stays bounded however late the waiters wake up.
+ *
+ * A REJECTED LOAD IS NEVER CACHED. A transient bridge error cannot pin a broken
+ * read for the whole TTL; a caller that was waiting on the failed load runs its
+ * own. Failing loudly on the next request is correct; failing quietly for ten
+ * seconds is not.
+ *
+ * A WRITE DURING A LOAD WINS. invalidate() clears in-flight markers too, and a
+ * load whose marker is gone returns its rows to its own caller but does not
+ * cache them, because they may predate the write.
+ */
+export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T>, opts: MemoOptions = {}): Promise<T> {
+  const waitMs = opts.flightWaitMs ?? FLIGHT_WAIT_MS;
+  const pollMs = opts.pollMs ?? POLL_MS;
+  const clock = opts.clock ?? REAL_CLOCK;
+  const giveUpAt = clock.now() + (opts.maxWaitMs ?? WAIT_BUDGETS * waitMs);
+  for (;;) {
+    const hit = fresh<T>(key, clock.now());
+    if (hit) return hit.value;
+    const other = flights.get(key);
+    // Nobody is loading this key: load it.
+    if (other === undefined) break;
+    // Waited long enough: give up rather than add load.
+    if (clock.now() >= giveUpAt) throw new CacheWaitTimeout(key);
+    // The load in flight is presumed dead: take it over. Nothing awaits
+    // between this check and flights.set below, so only one waiter can.
+    if (clock.now() - other.startedAt >= waitMs) break;
+    await clock.sleep(pollMs);
+  }
+
+  const mine: Flight = { startedAt: clock.now() };
+  flights.set(key, mine);
+  try {
+    const value = await load();
+    if (flights.get(key) === mine) store.set(key, { value, expires: mine.startedAt + ttlMs });
+    return value;
+  } finally {
+    if (flights.get(key) === mine) flights.delete(key);
+  }
+}
+
+/**
+ * Drop cached entries whose key starts with `prefix`.
+ *
+ * Called by every write path in this feature. It is deliberately blunt: after a
+ * claim, re-reading one extra table is far cheaper than reasoning about which
+ * derived views a single lead's ownership change invalidates, and getting that
+ * reasoning subtly wrong is how a rep ends up staring at a lead they know they
+ * released.
+ */
+export function invalidate(prefix: string): void {
+  for (const key of store.keys()) {
+    if (key.startsWith(prefix)) store.delete(key);
+  }
+  // A load already in flight may have read the table before this write.
+  for (const key of flights.keys()) {
+    if (key.startsWith(prefix)) flights.delete(key);
+  }
+}

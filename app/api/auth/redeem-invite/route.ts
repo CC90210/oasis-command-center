@@ -1,30 +1,34 @@
 /**
  * POST /api/auth/redeem-invite — atomic invite redemption.
  *
- * Phase A of the master multi-tenant infra plan (2026-05-17). Called by
- * the signup form and the login form after Supabase auth succeeds, when
- * the URL carried an `?invite=<token>` param. Wraps the existing
- * `redeem_tenant_invite` RPC (migration 037) and stamps onboarding
- * state so the welcome wizard (Phase C) knows this is a fresh invitee.
+ * Called by the signup form and the login form after sign-in succeeds, when
+ * the URL carried an `?invite=<token>` param.
  *
  * Body: { raw_token: string }
  *
- * Response 200: { ok: true, tenant_id, team_role, first_login: boolean }
- * Response 4xx: { ok: false, error, message? }
+ * Response 200: { ok: true, tenant_id, team_role, first_login, tenant_slug }
+ * Response 4xx/5xx: { ok: false, error: <code>, message: <a sentence for a person> }
  *
- * Why not pass the raw token through the existing /auth/provision route:
- * provision is overloaded — it creates a new tenant for fresh signups.
- * Mixing redeem + provision in one endpoint makes the success-path logic
- * hard to read. Keeping them separate means each route has one job.
+ * ONE WRITE (2026-09-30). lib/team.ts redeemInvite decides the joining member's
+ * profile first (lib/invite-profile-finalization.ts) and redeem_tenant_invite
+ * claims the invite and writes that profile in one batch. It used to claim the
+ * invite, commit, and only then finish the profile in a second step here; when
+ * that step failed (every invite into a client workspace, since 5c374a19), the
+ * invite was used up, the person was half-joined, the screen showed the raw
+ * code "profile_finalize_failed", and a retry failed the same way. Now a
+ * failure leaves the invite unclaimed and a retry can succeed.
+ *
+ * Under Turso auth the session cookie is re-minted here with the onboarding
+ * gate's new answer (lib/onboarding-claim.ts): the person's state just changed.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
-import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { getManifest } from "@/lib/manifest/loader";
-import { defaultAgentsForRole } from "@/lib/role-agent-defaults";
-import type { TeamRole } from "@/lib/team";
+import { reissueWithOnboardingClaim } from "@/lib/onboarding-claim";
+import { getTursoClient } from "@/lib/turso";
+import { SESSION_COOKIE, tursoAuthActive, verifySessionAgainstDb } from "@/lib/turso-auth";
+import { inviteRedeemFailure } from "@/lib/invite-redeem-errors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,83 +54,41 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Redeem — atomic in the SECURITY DEFINER RPC. Attaches the user_profile
-  // to the inviter's tenant + assigns the invite's team_role.
   const result = await redeemInvite(rawToken, user.id);
   if (!result.ok) {
+    const failure = inviteRedeemFailure(result.error);
     return NextResponse.json(
-      { ok: false, error: "redeem_failed", message: result.error },
-      { status: 400 },
+      { ok: false, error: failure.code, message: failure.message },
+      { status: failure.status },
     );
   }
 
-  // First-login signal: did the user have onboarding_completed_at set
-  // already? If not, the welcome wizard used to fire post-redirect.
-  // After the 2026-05-29 fix, invitees skip the wizard regardless and
-  // land directly in their tenant workspace — the first_login flag is
-  // kept for callers that want to differentiate (e.g. show a brief
-  // first-time toast) but it no longer gates the redirect path.
+  // First-login signal for callers that want a first-time toast. Not a gate.
   let firstLogin = true;
-  try {
-    const db = getServiceSupabase();
-    const { data } = await db
-      .from("user_profiles")
-      .select("onboarding_completed_at")
-      .eq("auth_user_id", user.id)
-      .maybeSingle();
-    firstLogin = !data?.onboarding_completed_at;
-  } catch {
-    // Soft-fail — default to first_login=true.
-  }
-
-  // Resolve the tenant's Command Center profile slug so the client can
-  // route directly to /t/<slug> instead of bouncing through the welcome
-  // wizard. resolveClientProfileSlug handles the SunBiz mapping (slug
-  // 'submissions' OR custom_fields.command_center_profile_slug='sun')
-  // along with any future client-tenant mappings.
-  let tenantSlug: string | null = null;
-  try {
-    const db = getServiceSupabase();
-    const { data: tenant } = await db
-      .from("tenants")
-      .select("slug, custom_fields")
-      .eq("id", result.tenantId)
-      .maybeSingle();
-    if (tenant) tenantSlug = resolveClientProfileSlug(tenant);
-  } catch {
-    // Soft-fail — null tenantSlug just routes the caller through "/" which
-    // the layout will handle.
-  }
-
-  // Stamp role-based default agents on the newly-redeemed profile (the
-  // SQL redeem_tenant_invite function leaves agents_enabled NULL).
-  // Existing profiles keep whatever they had — `is null` clause means
-  // re-redeem doesn't overwrite explicit user choices. Soft-fail: a
-  // missing manifest or unresolvable slug shouldn't block the redeem.
-  try {
-    const db = getServiceSupabase();
-    const manifest = tenantSlug ? await getManifest(tenantSlug).catch(() => null) : null;
-    const defaults = defaultAgentsForRole({
-      tenantSlug,
-      role: (result.teamRole as TeamRole) || null,
-      manifest,
+  const profileRead = await getServiceSupabase()
+    .from("user_profiles")
+    .select("onboarding_completed_at")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+  if (profileRead.error) {
+    console.error("[auth.redeem-invite] first-login read failed; reporting first_login=true", {
+      userId: user.id,
+      error: profileRead.error.message,
     });
-    if (defaults.length > 0) {
-      await db
-        .from("user_profiles")
-        .update({ agents_enabled: defaults })
-        .eq("auth_user_id", user.id)
-        .is("agents_enabled", null);
-    }
-  } catch {
-    // soft-fail
+  } else {
+    firstLogin = !profileRead.data?.onboarding_completed_at;
   }
 
-  return NextResponse.json({
+  const res = NextResponse.json({
     ok: true,
     tenant_id: result.tenantId,
     team_role: result.teamRole,
     first_login: firstLogin,
-    tenant_slug: tenantSlug,
+    tenant_slug: result.tenantSlug,
   });
+  if (tursoAuthActive()) {
+    const session = await verifySessionAgainstDb(getTursoClient(), req.cookies.get(SESSION_COOKIE)?.value);
+    if (session) await reissueWithOnboardingClaim(res, getTursoClient(), session);
+  }
+  return res;
 }

@@ -5,8 +5,9 @@
  * sender emails so the operator can confirm the RIGHT account is linked.
  */
 import { NextResponse } from "next/server";
-import { resolveTenantId, resolveSessionContext } from "@/lib/api-auth";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { ccIsConnected, ccCredentials, getConstantContactClient } from "@/lib/integrations/constant-contact/store";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,9 +15,12 @@ export const dynamic = "force-dynamic";
 type SenderEmail = { email_address?: string; confirm_status?: string };
 
 export async function GET() {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const session = await resolveSessionContext();
+  if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(session))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
+  const tenantId = session.tenantId;
   const [connected, creds] = await Promise.all([ccIsConnected(tenantId), ccCredentials(tenantId)]);
 
   let account: { org: string | null; emails: { email: string; status: string }[] } | null = null;
@@ -49,7 +53,7 @@ export async function GET() {
     ok: true,
     connected,
     configured: !!creds,
-    can_connect: session.ok ? session.isAdmin : false,
+    can_connect: session.isAdmin,
     token_ok,
     account,
   });

@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLeadTarget } from "@/lib/lead-access";
+import { getReadableLeadTargetForSession } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -124,8 +124,8 @@ export async function GET(
   // timeline by id, and the drawer opens for BOTH lead and application records.
   // For an application, the feeds are keyed by the LINKED lead id (Codex
   // 2026-06-19 MEDIUM — a lead-only gate 404'd every application drawer).
-  const target = await getAccessibleLeadTarget(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  const target = await getReadableLeadTargetForSession(
+    sess,
     { tenantId, id: recordId, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });

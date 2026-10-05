@@ -13,6 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,8 @@ async function handle(req: NextRequest) {
   const now = new Date();
   const nowIso = now.toISOString();
 
+  // Retired tenants are excluded from both updates: their rows are being
+  // exported and deleted, so this sweep must not keep rewriting them.
   // 1. Stamp reminded_at on calls that just came due (Calls tab highlights these).
   const due = await db
     .from("scheduled_calls")
@@ -35,6 +38,7 @@ async function handle(req: NextRequest) {
     .eq("status", "pending")
     .is("reminded_at", null)
     .lte("scheduled_for", nowIso)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .select("id");
 
   // 2. Mark long-overdue, still-pending calls as missed.
@@ -44,6 +48,7 @@ async function handle(req: NextRequest) {
     .update({ status: "missed" })
     .eq("status", "pending")
     .lt("scheduled_for", missedCutoff)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .select("id");
 
   // Fail LOUD: if either update errored, return 500 so the run is visibly failed

@@ -45,33 +45,38 @@ assert.equal(applyBps(400_000, 3_000), 120_000, "30% of $4,000 is exactly $1,200
 assert.equal(applyBps(50_000, 7_000), 35_000, "70% of $500 is exactly $350");
 assert.equal(applyBps(1, 5_000), 1, "rounds half-up, never truncates toward zero");
 
-/* ── 2. the $500 deal that migration 147 could not book ────────────────────
- * 147 raised 'collected setup below commission floor' under $2,000, so CC's
- * $500 websites could not close AT ALL. The floor is now a SPLIT threshold. */
-assert.equal(isFullStackOnly(50_000), true, "$500 is below the specialist-split floor");
-assert.equal(isFullStackOnly(SPECIALIST_SPLIT_FLOOR_CENTS), false, "$2,000 exactly is NOT below it");
+/* ── 2. the $500 offer and exact v4 ladder ───────────────────────────
+ * $500 is the actual Starter book price, not a discounted exception. It must
+ * support either an opener/closer split or one person finding and closing. */
+assert.equal(SPECIALIST_SPLIT_FLOOR_CENTS, 50_000, "the split threshold is the Starter book price");
+assert.equal(isFullStackOnly(49_999), true, "a founder-approved sub-Starter deal remains full-stack only");
+assert.equal(isFullStackOnly(50_000), false, "$500 supports separate opener and closer accruals");
+assert.deepEqual(
+  COMPANY_TRACK_BPS,
+  { opener: 1_500, closer: 2_500 },
+  "a company-fed lead never earns the find-and-close premium",
+);
+assert.equal(SELF_TRACK_BPS.opener, 1_500, "opening is 15% on either provenance track");
+assert.equal(SELF_TRACK_BPS.open_close, 3_500, "finding and closing is exactly 35%");
+assert.equal(SELF_TRACK_BPS.full_stack, 7_000, "the sourced + closed + built special remains 70%");
+assert.equal(PRICE_BOOK.starter.floorCents, 50_000);
+assert.equal(PRICE_BOOK.starter.bookCents, 50_000, "$500 is book, so no discount penalty applies");
 
 const starter = computePayout({
   collectedCents: 50_000,
   packageId: "starter",
   track: "self",
-  parties: [{ userId: "rep-1", role: "full_stack", builtItToo: true }],
+  parties: [{ userId: "rep-1", role: "full_stack" }],
 });
-assertAllIntegers(starter, "$500 self-sourced full-stack");
-/* 65%, not the headline 70% — and that is the model working, not a bug.
- * starter books at $1,500 with a $500 floor, so a $500 sale is the DEEPEST
- * legal discount and carries the below-book step-down (7000 - 500 = 6500bps).
- * "Lower is lower, but set terms" is a term the rep feels, which is what stops
- * discounting to the floor from becoming the default close. Worth CC knowing:
- * every sale at exactly $500 is permanently a discounted sale under this book. */
+assertAllIntegers(starter, "$500 self-sourced find-and-close");
 assert.equal(
   line(starter, "full_stack")?.amountCents,
-  32_500,
-  "self-sourced full-stack on a $500 site: 70% base less the 5-point below-book step-down = $325",
+  17_500,
+  "self-sourced find-and-close on a $500 Starter accrues 35% = $175",
 );
-assert.equal(starter.oasisRetainedCents, 17_500, "OASIS keeps $175 on a $500 site");
+assert.equal(starter.oasisRetainedCents, 32_500, "OASIS retains $325 before any builder fee");
 assert.ok(starter.totalHumanCents > 0, "the deal BOOKS — this is the whole point of the change");
-/* Sold AT book, the same rep gets the undiscounted 70%. */
+/* The explicitly retained build special is separate from the three-role ladder. */
 const starterAtBook = computePayout({
   collectedCents: PRICE_BOOK.starter.bookCents,
   packageId: "starter",
@@ -84,8 +89,7 @@ assert.equal(
   "at book price there is no step-down — the rep earns the full contract rate",
 );
 
-/* A small ticket must not be split between specialists: $100 and $150 is not
- * worth either person's time, and it leaves OASIS nothing. */
+/* A Starter ticket may be split: the opener and closer both did payable work. */
 const starterSplitAttempt = computePayout({
   collectedCents: 50_000,
   packageId: "starter",
@@ -95,11 +99,26 @@ const starterSplitAttempt = computePayout({
     { userId: "closer-1", role: "closer" },
   ],
 });
-assert.equal(
-  starterSplitAttempt.lines.length,
-  0,
-  "under the split floor, specialist lines are not produced at all",
+assert.equal(starterSplitAttempt.lines.length, 2, "$500 writes one accrual per credited specialist");
+assert.equal(line(starterSplitAttempt, "opener")?.amountCents, 7_500, "15% opener = $75");
+assert.equal(line(starterSplitAttempt, "closer")?.amountCents, 12_500, "25% closer = $125");
+
+const companyCloserWhoBuilds = computePayout({
+  collectedCents: 50_000,
+  packageId: "starter",
+  track: "company",
+  parties: [
+    { userId: "closer-builder-1", role: "closer" },
+    { userId: "closer-builder-1", role: "builder" },
+  ],
+});
+assert.deepEqual(
+  companyCloserWhoBuilds.lines.map((entry) => entry.role).sort(),
+  ["builder", "closer"],
+  "one person may receive the 25% company-close line and the legitimate flat build line",
 );
+assert.equal(line(companyCloserWhoBuilds, "closer")?.amountCents, 12_500);
+assert.equal(line(companyCloserWhoBuilds, "builder")?.amountCents, 15_000);
 
 /* ── 3. the $8,000 company-sourced deal, four ways ─────────────────────────
  * The worked example from the plan. */
@@ -115,12 +134,13 @@ const eightK = computePayout({
   managerUserId: "mgr-1",
 });
 assertAllIntegers(eightK, "$8,000 four-way");
-assert.equal(line(eightK, "opener")?.amountCents, 160_000, "opener 20% of $8,000 = $1,600");
+assert.equal(line(eightK, "opener")?.amountCents, 120_000, "opener 15% of $8,000 = $1,200");
+assert.equal(line(eightK, "closer")?.amountCents, 200_000, "closer 25% of $8,000 = $2,000");
 assert.equal(line(eightK, "builder")?.amountCents, 100_000, "builder flat $1,000 for authority");
 assert.ok(line(eightK, "manager"), "the manager is paid on a team deal");
 assert.equal(
   line(eightK, "manager")!.basisCents,
-  eightK.collectedCents - (160_000 + line(eightK, "closer")!.amountCents + 100_000),
+  eightK.collectedCents - (line(eightK, "opener")!.amountCents + line(eightK, "closer")!.amountCents + 100_000),
   "the manager's basis is what OASIS RETAINS, never gross",
 );
 assert.ok(
@@ -141,6 +161,15 @@ const stacked = computePayout({
   ],
   managerUserId: "mgr-1",
 });
+const stackedWithoutManager = computePayout({
+  collectedCents: 300_000,
+  packageId: "growth",
+  track: "self",
+  parties: [
+    { userId: "rep-1", role: "full_stack", builtItToo: true, trailing30dCollectedCents: 5_000_00 },
+    { userId: "builder-1", role: "builder" },
+  ],
+});
 assertAllIntegers(stacked, "stacked");
 assert.ok(
   stacked.oasisRetainedCents >= 0,
@@ -153,6 +182,55 @@ assert.ok(
   humansOnly <= applyBps(stacked.collectedCents, MAX_HUMAN_PAYOUT_BPS),
   "pre-manager payout must respect the 85% ceiling",
 );
+assert.deepEqual(
+  stacked.lines.filter((entry) => entry.role !== "manager").map((entry) => entry.amountCents),
+  stackedWithoutManager.lines.map((entry) => entry.amountCents),
+  "a clipped manager override never reduces teammate lines to fund itself",
+);
+assert.ok(
+  stacked.totalHumanCents <= applyBps(stacked.collectedCents, MAX_HUMAN_PAYOUT_BPS),
+  "the 85% ceiling includes the manager override, not only the lines computed before it",
+);
+assert.ok(
+  stacked.oasisRetainedCents >= applyBps(stacked.collectedCents, BPS_SCALE - MAX_HUMAN_PAYOUT_BPS),
+  "OASIS retains at least 15% after the manager override",
+);
+
+/* Rounding boundary: teammates take 92,870c of a 114,300c sale. The 85%
+ * ceiling is 97,155c, leaving 4,285c of headroom; a literal 20% override rounds
+ * to 4,286c. The manager loses that one cent, never the teammates. */
+const managerBoundaryInput = {
+  collectedCents: 114_300,
+  packageId: "starter",
+  track: "company" as const,
+  parties: [
+    { userId: "opener-boundary", role: "opener" as const },
+    { userId: "closer-boundary", role: "closer" as const },
+    { userId: "builder-boundary", role: "builder" as const },
+  ],
+};
+const managerBoundaryBase = computePayout(managerBoundaryInput);
+const managerBoundary = computePayout({ ...managerBoundaryInput, managerUserId: "manager-boundary" });
+const managerBoundaryCeiling = applyBps(managerBoundary.collectedCents, MAX_HUMAN_PAYOUT_BPS);
+assert.deepEqual(
+  managerBoundary.lines.filter((entry) => entry.role !== "manager").map((entry) => entry.amountCents),
+  managerBoundaryBase.lines.map((entry) => entry.amountCents),
+  "the manager cap never takes a cent back from teammates",
+);
+assert.equal(managerBoundary.totalHumanCents, managerBoundaryCeiling);
+assert.equal(
+  line(managerBoundary, "manager")?.amountCents,
+  managerBoundaryCeiling - managerBoundaryBase.totalHumanCents,
+);
+assert.equal(managerBoundary.guardrailApplied, true, "clipping the manager marks the payout guardrail");
+assert.ok(
+  line(managerBoundary, "manager")?.notes.some((note) => note.includes("guardrail: manager override clipped")),
+  "a clipped override explains why it is below the nominal formula",
+);
+assert.ok(
+  managerBoundary.oasisRetainedCents >= applyBps(managerBoundary.collectedCents, BPS_SCALE - MAX_HUMAN_PAYOUT_BPS),
+  "the manager rounding boundary cannot dip below OASIS's 15% floor",
+);
 
 /* A case that DEMONSTRABLY breaches the ceiling, not one that merely might.
  *
@@ -161,14 +239,13 @@ assert.ok(
  * raising MAX_HUMAN_PAYOUT_BPS to 200% kept the whole suite green. A guard
  * with no failing case is documentation, so the arithmetic is pinned here:
  *
- *   $1,000 collected on starter (book $1,500, floor $500)
- *   external-harness base            8500bps
- *   below book                        -500      -> 8000
- *   accelerator ($25k trailing)       +500      -> 8500  = $850
- *   builder flat fee (starter)                     $150
- *   ----------------------------------------------------------
- *   humans want                                  $1,000 = 100% of collected
- *   ceiling is 8500bps                             $850
+ *   $1,000 collected on starter (book/floor $500)
+ *   external-harness base            8500bps                 = $850
+ *   upsell share (50% of $500 over book)                      = $250
+ *   builder flat fee (starter)                               = $150
+ *   ----------------------------------------------------------------
+ *   humans want                                             $1,250
+ *   ceiling is 8500bps                                        $850
  *
  * So the guardrail MUST fire, and must scale both lines proportionally. */
 const breached = computePayout({
@@ -176,7 +253,7 @@ const breached = computePayout({
   packageId: "starter",
   track: "self",
   parties: [
-    { userId: "rep-1", role: "full_stack", externalHarness: true, trailing30dCollectedCents: 2_500_00 },
+    { userId: "rep-1", role: "full_stack", externalHarness: true, trailing30dCollectedCents: 25_000_00 },
     { userId: "builder-1", role: "builder" },
   ],
 });
@@ -210,12 +287,12 @@ assert.ok(
   "and so does the rep",
 );
 
-/* ── 5. both ladders are MONOTONIC — doing more always pays more ───────────
- * The inconsistency CC's note appeared to contain. It resolves only if the two
- * ladders are separate tracks; assert that separation holds. */
-assert.ok(
-  SELF_TRACK_BPS.opener > COMPANY_TRACK_BPS.opener,
-  "self-sourcing must out-earn working a company-fed lead, or nobody hunts",
+/* ── 5. the standard ladder is MONOTONIC — doing more always pays more ───────────
+ * Opening is 15%, closing is 25%, and finding + closing is 35%. */
+assert.equal(
+  SELF_TRACK_BPS.opener,
+  COMPANY_TRACK_BPS.opener,
+  "opening pays the single published 15% base rate regardless of provenance",
 );
 assert.ok(
   SELF_TRACK_BPS.open_close > SELF_TRACK_BPS.opener,
@@ -229,9 +306,10 @@ assert.ok(
   SELF_TRACK_BPS.external_harness > SELF_TRACK_BPS.full_stack,
   "your own client on our tooling is the top of the ladder",
 );
-assert.ok(
-  COMPANY_TRACK_BPS.full_stack > COMPANY_TRACK_BPS.closer,
-  "doing both halves of a company deal beats doing one",
+assert.equal(
+  baseRateBps({ track: "company", role: "full_stack" }),
+  0,
+  "full_stack is reserved for a genuinely self-sourced sale, never a company-fed close",
 );
 
 /* ── 6. price adjustments, both directions ────────────────────────────────
@@ -266,9 +344,10 @@ assert.equal(upliftBeyondRate, 50_000, "the closer keeps 50% of the $1,000 sold 
 
 /* ── 7. the volume accelerator ─────────────────────────────────────────────*/
 assert.equal(acceleratorBps(0), 0);
-assert.equal(acceleratorBps(999_99), 0, "just under $10k earns nothing extra");
-assert.equal(acceleratorBps(1_000_00), 200, "$10k earns +2 points");
-assert.equal(acceleratorBps(2_500_00), 500, "$25k earns +5 points");
+assert.equal(acceleratorBps(9_999_99), 0, "one cent below $10,000 earns nothing extra");
+assert.equal(acceleratorBps(10_000_00), 200, "exactly $10,000 earns +2 points");
+assert.equal(acceleratorBps(24_999_99), 200, "one cent below $25,000 remains at +2 points");
+assert.equal(acceleratorBps(25_000_00), 500, "exactly $25,000 earns +5 points");
 assert.equal(acceleratorBps(-5), 0, "a nonsense negative total cannot earn a bonus");
 
 /* It must NOT touch a builder's flat fee or the manager override. */
@@ -277,8 +356,8 @@ const accelDeal = computePayout({
   packageId: "authority",
   track: "company",
   parties: [
-    { userId: "c", role: "closer", trailing30dCollectedCents: 2_500_00 },
-    { userId: "b", role: "builder", trailing30dCollectedCents: 2_500_00 },
+    { userId: "c", role: "closer", trailing30dCollectedCents: 25_000_00 },
+    { userId: "b", role: "builder", trailing30dCollectedCents: 25_000_00 },
   ],
   managerUserId: "m",
 });
@@ -318,7 +397,7 @@ const zero = computePayout({ collectedCents: 0, packageId: "starter", track: "se
 assert.equal(zero.totalHumanCents, 0, "nothing collected, nothing owed");
 assert.ok(zero.oasisRetainedCents >= 0, "and no negative retainer");
 
-assert.equal(COMP_VERSION, 3, "every ledger row records which model produced it");
+assert.equal(COMP_VERSION, 4, "every new ledger row records the v4 arithmetic that produced it");
 assert.equal(BPS_SCALE, 10_000);
 assert.equal(baseRateBps({ track: "company", role: "builder" }), 0, "builders are flat, not rated");
 assert.equal(baseRateBps({ track: "company", role: "manager" }), 0, "managers are paid off the retainer");

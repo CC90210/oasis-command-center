@@ -7,27 +7,30 @@
  * load and threads them to the single persistent ChatWidget instance — the
  * page itself no longer mounts a ChatWidget.
  *
- * Single source of truth: this is the SAME resolution the /agent page used,
- * minus the ?agent= URL override (the client ChatWidget already honours the
- * URL param on its own, and the layout has no searchParams). Keeping it here
- * avoids drift between the layout and any other caller.
+ * THE CODING HARNESS (2026-09-30). That persistent chat is Admin › Coding
+ * harness: Claude Code / Codex in a department's repo on the operator's
+ * computer, through the bridge. So:
+ *   - it resolves for the verified platform operator only. Everyone else gets
+ *     null, and /agent sends them to Chief of Staff;
+ *   - no tenant means no chat. The old no-tenant fallback handed any profile
+ *     without a tenant a working "bravo" chat;
+ *   - the picker lists the harness targets (lib/admin/harness-targets.ts:
+ *     Chief of Staff & Operations = Business-Empire-Agent, Marketing =
+ *     CMO-Agent, Finance = CFO-Agent), not the workspace's agent personas,
+ *     which duplicated the department channels;
+ *   - only an OASIS workspace has the bridge the harness runs through.
  *
  * Resolved against the OPERATOR'S OWN tenant (profile.tenant_id) — never a
- * previewed/demo tenant — so the persistent chat always speaks as the
- * operator's own agent even while they're previewing another tenant's shell.
+ * previewed/demo tenant.
  */
 
 import "server-only";
 import { safe } from "@/lib/api-helpers";
-import { getTenant, integrationsHealth } from "@/lib/queries";
-import { isOperatorEmail } from "@/lib/operator-credentials";
-import { operatorNameOverride } from "@/lib/operator-name";
+import { getTenant } from "@/lib/queries";
 import { resolveAgentKey } from "@/lib/agents";
-import {
-  getTenantAwareEnabledAgents,
-  getTenantManifestForUser,
-} from "@/lib/manifest/tenant-scope";
-import type { IntegrationHealth } from "@/lib/supabase";
+import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { HARNESS_TARGETS, harnessTargetLabels } from "@/lib/admin/harness-targets";
 
 export type ChatShellProps = {
   agentKeys: string[];
@@ -35,6 +38,8 @@ export type ChatShellProps = {
   isAdmin: boolean;
   welcomeMessages?: Partial<Record<string, string>>;
   advancedPicker: boolean;
+  /** Picker labels per agent key; the harness names its repos, not personas. */
+  targetLabels?: Record<string, string>;
 };
 
 type ProfileLike = {
@@ -46,90 +51,52 @@ type ProfileLike = {
   email?: string | null;
 } | null;
 
-function firstNameOf(name: string | null | undefined, fallback = "Jordan"): string {
-  const raw = (name || "").trim();
-  if (!raw) return fallback;
-  return raw.split(/\s+/)[0] || fallback;
-}
-
 /**
- * Resolve the persistent ChatWidget's props for an operator. When there's no
- * tenant (fresh signup pre-provisioning, or an unlinked profile) it returns a
- * Bravo fallback rather than null, so the persistent chat still mounts instead
- * of leaving /agent stuck on its loading fallback. Never throws; each side
- * query is safe()-wrapped so one failure degrades gracefully. (The layout call
- * site still treats the result as nullable because its safe() wrapper yields
- * null if resolution itself throws.)
+ * The Coding harness's props for the verified operator, or null (not an
+ * operator, no tenant, not an OASIS workspace, or the workspace read failed —
+ * logged). Never throws.
  */
 export async function resolveChatShellProps(args: {
   profile: ProfileLike;
   userEmail: string | null | undefined;
+  /**
+   * The VERIFIED platform-operator verdict (lib/platform-operator.ts), computed
+   * by the caller on the server. It gates the whole harness and drives
+   * `isAdmin`. Required, not derived from `userEmail` here: an email match
+   * alone is what a registered alias squatter holds.
+   */
+  isPlatformOperator: boolean;
 }): Promise<ChatShellProps | null> {
-  const { profile, userEmail } = args;
+  const { profile, isPlatformOperator } = args;
+  if (!isPlatformOperator) return null;
   const tenantId = profile?.tenant_id ?? null;
-  if (!tenantId) {
-    // No tenant yet (fresh signup pre-provisioning, or a profile that isn't
-    // tenant-linked). The OLD /agent page rendered a working Bravo chat here
-    // rather than a dead screen — preserve that so the persistent ChatWidget
-    // still mounts. (Returning null would leave /agent stuck on its fallback.)
-    return {
-      agentKeys: ["bravo"],
-      defaultAgent: "bravo",
-      isAdmin: isOperatorEmail(userEmail),
-      welcomeMessages: undefined,
-      advancedPicker: false,
-    };
-  }
+  if (!tenantId) return null;
 
-  const [healthRows, manifest, tenant] = await Promise.all([
-    safe("chatshell.health", integrationsHealth(tenantId), [] as IntegrationHealth[]),
+  const [manifest, tenant] = await Promise.all([
     safe("chatshell.manifest", getTenantManifestForUser(tenantId), null),
     safe("chatshell.tenant", getTenant(tenantId), null),
   ]);
+  // getTenant answers null for a failed read as well as a missing row, and
+  // throws for neither, so safe() above logs nothing. Log it here: the /agent
+  // fallback tells the operator the reason is in the server log.
+  if (!tenant) {
+    console.error("[chatshell.tenant_unread] the workspace row could not be read or does not exist; the harness is not mounted", { tenantId });
+    return null;
+  }
+  if (!isOasisSurfaceTenant((tenant.slug || "").trim().toLowerCase())) return null;
 
-  // Manifest-first precedence; falls through to profile.agents_enabled, else
-  // empty (never silently "bravo" — that was the cross-tenant leak we sealed).
-  const enabledRaw = await getTenantAwareEnabledAgents({
-    userTenantId: tenantId,
-    profileAgentsEnabled: profile?.agents_enabled ?? null,
-  });
-  const enabled = enabledRaw.map(resolveAgentKey);
+  const enabled = HARNESS_TARGETS.map((t) => t.agent as string);
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
-  // Family default keyed off the authoritative tenants.slug column:
-  //   SunBiz (slug 'submissions') → 'solara'; OASIS / unknown → 'bravo'.
-  const tenantFamily = (tenant?.slug || "").toLowerCase();
-  const familyDefault = tenantFamily === "submissions" ? "solara" : "bravo";
-  const primary = resolveAgentKey(
-    manifestPrimary || profile?.primary_agent || enabled[0] || familyDefault,
-  );
-  const agentKeys = Array.from(new Set([primary, ...enabled])).filter(Boolean);
-
-  // Hardwired per-account override (lib/operator-name.ts) wins over the
-  // profile name — e.g. the Matt account's greeting reads "Uri".
-  const clientName =
-    operatorNameOverride({ email: profile?.email ?? userEmail }) ||
-    firstNameOf(profile?.display_name || profile?.full_name);
-  const formsHealthy =
-    primary === "solara" &&
-    healthRows.some((row) => row.service === "lead_forms" && row.status === "healthy");
-  const welcomeMessages =
-    primary === "solara"
-      ? {
-          solara: formsHealthy
-            ? `Hello ${clientName}, I'm Solara. Your lead-intake forms are live and I'm ready to begin processing your funding pipeline.`
-            : `Hello ${clientName}, I'm Solara. I'm in your Command Center and ready to help with leads, follow-up, applications, offers, and renewals.`,
-        }
-      : primary === "helios"
-        ? {
-            helios: `Hello ${clientName}, I'm Helios. I'll draft your outreach, run the follow-up cadence, and bring expired offers back to the table — just tell me which lead to open with.`,
-          }
-        : undefined;
+  const requestedPrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || "");
+  // A primary outside the harness targets never becomes the default.
+  const primary = enabled.includes(requestedPrimary) ? requestedPrimary : enabled[0];
 
   return {
-    agentKeys,
+    agentKeys: enabled,
     defaultAgent: primary,
-    isAdmin: isOperatorEmail(userEmail),
-    welcomeMessages,
+    isAdmin: isPlatformOperator,
+    welcomeMessages: undefined,
     advancedPicker: manifest?.ui?.advanced_picker ?? false,
+    targetLabels: harnessTargetLabels(),
   };
 }

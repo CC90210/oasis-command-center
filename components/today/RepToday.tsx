@@ -27,7 +27,8 @@
  */
 
 import Link from "next/link";
-import { Card, EmptyState, PageHeader, Stat, Tag } from "@/components/Card";
+import { Card, EmptyState, Stat, Tag } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { LiveClock } from "@/components/LiveClock";
 import { LayoutList, PhoneCall } from "lucide-react";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -42,24 +43,22 @@ import {
   COMPANY_TRACK_BPS,
   SELF_TRACK_BPS,
   PRICE_BOOK,
-  SPECIALIST_SPLIT_FLOOR_CENTS,
 } from "@/lib/website-sales-comp";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
+import {
+  formatCommissionAmounts,
+  loadWebsiteSalesCommissionSummary,
+  type CommissionAmountStatus,
+  type WebsiteSalesCommissionSummary,
+} from "@/lib/website-sales-commission-summary";
+import { dispositionLabel } from "@/lib/call-disposition";
 
 type LeadData = Record<string, unknown>;
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 type Read<T> = { ok: true; value: T } | { ok: false };
-
-type CommissionRow = {
-  id: string;
-  amount: number | null;
-  rate: number | null;
-  status: string | null;
-  collected_setup_amount: number | null;
-  created_at: string | null;
-};
 
 function str(data: LeadData, key: string): string {
   const v = data[key];
@@ -119,21 +118,15 @@ async function loadMyQueue(
 async function loadMyCommissions(
   tenantId: string,
   userId: string,
-): Promise<Read<CommissionRow[]>> {
+): Promise<Read<WebsiteSalesCommissionSummary>> {
   try {
-    const db = getServiceSupabase();
-    const result = await db
-      .from("website_sales_commissions")
-      .select("id,amount,rate,status,collected_setup_amount,created_at")
-      .eq("tenant_id", tenantId)
-      .eq("rep_user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(200);
-    if (result.error) {
-      console.error("[rep-today.commissions]", result.error);
-      return { ok: false };
-    }
-    return { ok: true, value: (result.data || []) as CommissionRow[] };
+    return {
+      ok: true,
+      value: await loadWebsiteSalesCommissionSummary(getServiceSupabase(), {
+        tenantId,
+        repUserId: userId,
+      }),
+    };
   } catch (err) {
     console.error("[rep-today.commissions]", err);
     return { ok: false };
@@ -195,310 +188,316 @@ export async function RepToday({
 
   const meetingsBooked = byStage.get("founder_meeting_booked") || 0;
 
-  const commissions = commissionRead.ok ? commissionRead.value : [];
-  const sumOf = (statuses: string[]) =>
-    commissions
-      .filter((c) => statuses.includes((c.status || "").toLowerCase()))
-      .reduce((n, c) => n + (Number(c.amount) || 0), 0);
-  const accrued = sumOf(["accrued"]);
-  const approved = sumOf(["approved"]);
-  const paid = sumOf(["paid"]);
   // Em dash on a failed read. See the file header: a zero here is a claim about
   // this person's pay, and we do not make claims we could not verify.
-  const commissionValue = (n: number) => (commissionRead.ok ? money(n) : "—");
+  const commissionValue = (statuses: CommissionAmountStatus[]) =>
+    commissionRead.ok ? formatCommissionAmounts(commissionRead.value.totals, statuses) : "—";
+  const accruedValue = commissionValue(["accrued"]);
+  const approvedValue = commissionValue(["approved"]);
+  const paidValue = commissionValue(["paid"]);
+  const hasAccrued = commissionRead.ok && commissionRead.value.totals.some((total) => total.accruedCents > 0);
 
   // From the payout engine, not retyped. This card is what a rep believes
   // they earn; a number here the engine does not pay is a promise broken to
   // the person least able to audit it.
   const openerPct = Math.round(COMPANY_TRACK_BPS.opener / 100);
   const closerPct = Math.round(COMPANY_TRACK_BPS.closer / 100);
+  const finderCloserPct = Math.round(SELF_TRACK_BPS.open_close / 100);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Today"
-        subtitle={
-          <>
-            <LiveClock initialDateKey={todayKey} /> · {repName} · your book only
-          </>
-        }
-        action={
-          <Tag tone={overdue.length > 0 ? "hot" : "accent"}>
-            {overdue.length > 0 ? `${overdue.length} overdue` : "on time"}
-          </Tag>
-        }
-      />
+    <PageFrame
+      title="Today"
+      subtitle={
+        <>
+          <LiveClock initialDateKey={todayKey} /> · {repName} · your book only
+        </>
+      }
+      actions={
+        <Tag tone={overdue.length > 0 ? "hot" : "neutral"}>
+          {overdue.length > 0 ? `${overdue.length} overdue` : "on time"}
+        </Tag>
+      }
+    >
+      <div className="space-y-6">
+        {!queueRead.ok && (
+          <Card title="Queue unavailable">
+            <EmptyState message="Your queue could not be loaded just now — this is a system fault, not an empty book. Reload in a minute; if it persists, tell CC." />
+          </Card>
+        )}
 
-      {!queueRead.ok && (
-        <Card title="Queue unavailable">
-          <EmptyState message="Your queue could not be loaded just now — this is a system fault, not an empty book. Reload in a minute; if it persists, tell CC." />
-        </Card>
-      )}
-
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat
-          label="Calls waiting"
-          value={queueRead.ok ? overdue.length + dueToday.length : "—"}
-          accent={overdue.length > 0}
-          hint={
-            !queueRead.ok
-              ? "could not read your queue"
-              : overdue.length > 0
-                ? `${overdue.length} past due · ${dueToday.length} scheduled today`
-                : dueToday.length > 0
-                  ? `${dueToday.length} scheduled today`
-                  : "nothing promised for today"
-          }
-        />
-        <Stat
-          label="My open leads"
-          value={queueRead.ok ? rows.length : "—"}
-          hint={queueRead.ok ? "assigned to you, still workable" : "could not read your queue"}
-        />
-        <Stat
-          label="Meetings booked"
-          value={queueRead.ok ? meetingsBooked : "—"}
-          hint={
-            meetingsBooked > 0
-              ? "waiting on the founder call"
-              : "book one and it shows here"
-          }
-        />
-        <Stat
-          label="Commission accrued"
-          value={commissionValue(accrued)}
-          hint={
-            !commissionRead.ok
-              ? "could not read your commission"
-              : accrued > 0
-                ? "awaiting founder approval"
-                : "nothing accrued yet"
-          }
-        />
-      </section>
-
-      <section className="grid lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <Card
-            title="Call these first"
-            subtitle={
-              callList.length > 0
-                ? `${overdue.length} past due · ${dueToday.length} due today · worked top to bottom`
-                : "your callback list"
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <Stat
+            label="Calls waiting"
+            value={queueRead.ok ? overdue.length + dueToday.length : "—"}
+            hint={
+              !queueRead.ok
+                ? "could not read your queue"
+                : overdue.length > 0
+                  ? `${overdue.length} past due · ${dueToday.length} scheduled today`
+                  : dueToday.length > 0
+                    ? `${dueToday.length} scheduled today`
+                    : "nothing promised for today"
             }
-            action={
-              <Link
-                href="/pipeline"
-                className="text-xs text-fg-muted hover:text-accent transition-colors"
-              >
-                Full queue →
-              </Link>
+          />
+          <Stat
+            label="My open leads"
+            value={queueRead.ok ? rows.length : "—"}
+            hint={queueRead.ok ? "assigned to you, still workable" : "could not read your queue"}
+          />
+          <Stat
+            label="Meetings booked"
+            value={queueRead.ok ? meetingsBooked : "—"}
+            hint={
+              meetingsBooked > 0
+                ? "waiting on the founder call"
+                : "book one and it shows here"
             }
-          >
-            {callList.length === 0 ? (
-              queueRead.ok && rows.length === 0 ? (
-                <EmptyState
-                  message="No leads are assigned to you yet. That is normal on day one — CC and Adon assign researched leads into your queue, and they appear here the moment they do. Nothing is expected of you until then except reading the call guide."
-                  cta={
-                    <Link
-                      href="/playbook/script"
-                      className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-xs font-bold uppercase tracking-wider text-accent transition-colors hover:bg-accent/15"
-                    >
-                      <PhoneCall className="h-3.5 w-3.5" />
-                      Read the call guide
-                    </Link>
-                  }
-                />
+          />
+          <Stat
+            label="Commission accrued"
+            value={accruedValue}
+            hint={
+              !commissionRead.ok
+                ? "could not read your commission"
+                : hasAccrued
+                  ? "awaiting founder approval"
+                  : "nothing accrued yet"
+            }
+          />
+        </section>
+
+        <section className="grid lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <Card
+              title="Call these first"
+              subtitle={
+                callList.length > 0
+                  ? `${overdue.length} past due · ${dueToday.length} due today · worked top to bottom`
+                  : "your callback list"
+              }
+              action={
+                <Link
+                  href="/pipeline"
+                  className="text-xs font-medium text-accent hover:underline"
+                >
+                  Full queue →
+                </Link>
+              }
+            >
+              {callList.length === 0 ? (
+                queueRead.ok && rows.length === 0 ? (
+                  <EmptyState
+                    message="No leads are assigned to you yet. That is normal on day one — CC and Adon assign researched leads into your queue, and they appear here the moment they do. Nothing is expected of you until then except reading the call guide."
+                    cta={
+                      <Link
+                        href="/playbook/script"
+                        className="btn-secondary inline-flex items-center gap-2"
+                      >
+                        <PhoneCall className="h-3.5 w-3.5" />
+                        Read the call guide
+                      </Link>
+                    }
+                  />
+                ) : (
+                  <EmptyState message="Nothing is past due and nothing is promised for today. Pick anyone from your queue and set a callback when you hang up." />
+                )
               ) : (
-                <EmptyState message="Nothing is past due and nothing is promised for today. Pick anyone from your queue and set a callback when you hang up." />
-              )
-            ) : (
-              <ul className="divide-y divide-bg-border">
-                {callList.map(({ row, at, late }) => {
-                  const data = row.data as LeadData;
-                  const stage = str(data, "stage");
-                  const meta = stages.find((s) => s.key === stage);
-                  const who =
-                    str(data, "company") || str(data, "name") || str(data, "email") || "unnamed lead";
-                  const disposition = str(data, "last_disposition");
-                  return (
-                    <li key={row.id} className="py-3">
-                      <Link
-                        href={`/pipeline/${row.id}`}
-                        className="block -mx-2 px-2 py-1 rounded-md hover:bg-bg-elev transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          {late ? (
-                            <Tag tone="hot">past due</Tag>
-                          ) : at === null ? (
-                            <Tag tone="neutral">no callback set</Tag>
-                          ) : (
-                            <Tag tone="accent">today</Tag>
-                          )}
-                          {meta && (
-                            <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
-                              {meta.label}
+                <ul className="divide-y divide-hairline">
+                  {callList.map(({ row, at, late }) => {
+                    const data = row.data as LeadData;
+                    const stage = str(data, "stage");
+                    const meta = stages.find((s) => s.key === stage);
+                    // The BUSINESS is the headline; the PERSON gets its own line
+                    // below. They used to share one ladder, so `name` — the
+                    // business name on this board — filled a slot a rep reads as
+                    // a contact, and the owner we hold on 1,853 leads never
+                    // appeared on the first screen of the day at all.
+                    const who =
+                      str(data, "company") || str(data, "name") || str(data, "email") || "unnamed lead";
+                    const askFor = contactNameFor(data as Record<string, unknown>);
+                    // Legacy rows carry whichever raw vocabulary wrote them, so this
+                    // normalises on READ rather than requiring a backfill: an old
+                    // "attempted" and a new "no_answer" both read "No answer".
+                    const disposition = dispositionLabel(str(data, "last_disposition"));
+                    return (
+                      <li key={row.id} className="py-3">
+                        <Link
+                          href={`/pipeline/${row.id}`}
+                          className="block -mx-2 px-2 py-1 rounded-md transition-colors duration-150 hover:bg-bg-hover"
+                        >
+                          <div className="flex items-center gap-2">
+                            {late ? (
+                              <Tag tone="hot">past due</Tag>
+                            ) : at === null ? (
+                              <Tag tone="neutral">no callback set</Tag>
+                            ) : (
+                              <Tag tone="neutral">today</Tag>
+                            )}
+                            {meta && (
+                              <span className="text-xs font-medium text-fg-dim">
+                                {meta.label}
+                              </span>
+                            )}
+                            <span className="text-xs text-fg-dim ml-auto">
+                              {at === null ? "never contacted" : timeAgo(new Date(at).toISOString())}
                             </span>
-                          )}
-                          <span className="text-xs text-fg-dim ml-auto">
-                            {at === null ? "never contacted" : timeAgo(new Date(at).toISOString())}
+                          </div>
+                          <div className="text-fg mt-1.5 text-sm font-semibold">
+                            {truncate(who, 60)}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-3 text-xs text-fg-muted">
+                            {str(data, "phone") && (
+                              <span className="font-mono text-fg-dim">{str(data, "phone")}</span>
+                            )}
+                            {/* Who to ask for, in the same words the pipeline row
+                                and the battle card use. Replaces a line that
+                                printed data.name whenever a company existed —
+                                which on this board is the company again, shown
+                                twice. */}
+                            {askFor && <span className="text-fg">Ask for {truncate(askFor, 24)}</span>}
+                            {disposition && <span>last: {disposition}</span>}
+                          </div>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </Card>
+          </div>
+
+          <div className="space-y-6">
+            <Card title="My queue" subtitle="where your leads currently sit">
+              {queueRead.ok && rows.length === 0 ? (
+                <EmptyState message="Empty until leads are assigned to you." />
+              ) : (
+                <ul className="space-y-2">
+                  {stages.map((stage) => {
+                    const n = byStage.get(stage.key) || 0;
+                    return (
+                      <li key={stage.key}>
+                        <Link
+                          href={`/pipeline?stage=${stage.key}`}
+                          className="flex items-center justify-between gap-3 rounded-lg border border-hairline bg-bg-raised px-3 py-2 transition-colors duration-150 hover:border-bg-border-strong"
+                        >
+                          <span className="flex items-center gap-2 text-xs text-fg-muted">
+                            <span
+                              className="h-2 w-2 rounded-full"
+                              style={{ backgroundColor: stage.bg }}
+                              aria-hidden
+                            />
+                            {stage.label}
                           </span>
-                        </div>
-                        <div className="text-fg mt-1.5 text-sm font-semibold">
-                          {truncate(who, 60)}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-3 text-xs text-fg-muted">
-                          {str(data, "phone") && (
-                            <span className="font-mono text-fg-dim">{str(data, "phone")}</span>
-                          )}
-                          {str(data, "name") && str(data, "company") && (
-                            <span>{truncate(str(data, "name"), 28)}</span>
-                          )}
-                          {disposition && <span>last: {disposition.replace(/_/g, " ")}</span>}
-                        </div>
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Card>
-        </div>
+                          <span className="text-sm font-bold tabular-nums text-fg">
+                            {queueRead.ok ? n : "—"}
+                          </span>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </Card>
 
-        <div className="space-y-6">
-          <Card title="My queue" subtitle="where your leads currently sit">
-            {queueRead.ok && rows.length === 0 ? (
-              <EmptyState message="Empty until leads are assigned to you." />
-            ) : (
-              <ul className="space-y-2">
-                {stages.map((stage) => {
-                  const n = byStage.get(stage.key) || 0;
-                  return (
-                    <li key={stage.key}>
-                      <Link
-                        href={`/pipeline?stage=${stage.key}`}
-                        className="flex items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-elev/40 px-3 py-2 transition-colors hover:border-accent/40"
-                      >
-                        <span className="flex items-center gap-2 text-xs text-fg-muted">
-                          <span
-                            className="h-2 w-2 rounded-full"
-                            style={{ backgroundColor: stage.bg }}
-                            aria-hidden
-                          />
-                          {stage.label}
-                        </span>
-                        <span className="text-sm font-bold tabular-nums text-fg">
-                          {queueRead.ok ? n : "—"}
-                        </span>
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Card>
+            <Card
+              title="What you have earned"
+              subtitle={commissionRead.ok ? "your complete ledger · currencies shown separately" : "read failed"}
+            >
+              {!commissionRead.ok ? (
+                <EmptyState message="Your commission ledger could not be read. This is a fault on our side — it does not mean nothing was recorded." />
+              ) : commissionRead.value.entryCount === 0 ? (
+                <EmptyState message="No commission recorded yet. A credited deal accrues when its full setup payment is verified and it enters Won." />
+              ) : (
+                <dl className="space-y-2.5">
+                  {[
+                    { label: "Accrued", value: accruedValue, note: "awaiting founder approval" },
+                    { label: "Approved", value: approvedValue, note: "cleared, not yet paid" },
+                    { label: "Paid", value: paidValue, note: "in your pocket" },
+                  ].map((line) => (
+                    <div key={line.label} className="flex items-baseline justify-between gap-3">
+                      <dt className="text-xs text-fg-muted">
+                        {line.label}
+                        <span className="block text-xs text-fg-dim">{line.note}</span>
+                      </dt>
+                      <dd className="text-lg font-semibold tabular-nums text-fg">{line.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </Card>
+          </div>
+        </section>
 
-          <Card
-            title="What you have earned"
-            subtitle={commissionRead.ok ? "your rows only" : "read failed"}
-          >
-            {!commissionRead.ok ? (
-              <EmptyState message="Your commission ledger could not be read. This is a fault on our side — it does not mean nothing was recorded." />
-            ) : commissions.length === 0 ? (
-              <EmptyState message="No commission recorded yet. It starts accruing the moment a deal you opened collects its setup payment." />
-            ) : (
-              <dl className="space-y-2.5">
-                {[
-                  { label: "Accrued", value: accrued, note: "awaiting founder approval" },
-                  { label: "Approved", value: approved, note: "cleared, not yet paid" },
-                  { label: "Paid", value: paid, note: "in your pocket" },
-                ].map((line) => (
-                  <div key={line.label} className="flex items-baseline justify-between gap-3">
-                    <dt className="text-xs text-fg-muted">
-                      {line.label}
-                      <span className="block text-[10px] text-fg-dim">{line.note}</span>
-                    </dt>
-                    <dd className="text-lg font-bold tabular-nums text-fg">{money(line.value)}</dd>
-                  </div>
-                ))}
-              </dl>
-            )}
-          </Card>
-        </div>
-      </section>
-
-      {/*
-        The comp plan, stated rather than implied. Rates and floor are read from
-        lib/website-sales-comp.ts — the same module close_website_deal pays from — so
-        this card cannot drift away from what actually gets paid. The example is
-        arithmetic on the published floor, clearly labelled as such; it is a
-        worked formula, not a claim about any deal.
-      */}
-      <Card
-        title="How you get paid"
-        subtitle="the whole plan, no small print"
-        action={
-          <Link
-            href="/playbook/deals"
-            className="text-xs text-fg-muted hover:text-accent transition-colors"
-          >
-            Full offer sheet →
-          </Link>
-        }
-      >
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-            <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              You open it
+        {/*
+          The comp plan, stated rather than implied. Rates are read from
+          lib/website-sales-comp.ts — the same module close_website_deal pays from — so
+          this card cannot drift away from what actually gets paid. The example is
+          arithmetic on the published floor, clearly labelled as such; it is a
+          worked formula, not a claim about any deal.
+        */}
+        <Card
+          title="How you get paid"
+          subtitle="the whole plan, no small print"
+          action={
+            <Link
+              href="/playbook/deals"
+              className="text-xs font-medium text-accent hover:underline"
+            >
+              Full offer sheet →
+            </Link>
+          }
+        >
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-lg border border-hairline bg-bg-raised p-4">
+              <div className="text-[12.5px] font-medium text-fg-muted">
+                You open it
+              </div>
+              <div className="mt-1.5 text-2xl font-semibold tabular-nums text-fg">{openerPct}%</div>
+              <p className="mt-1 text-xs text-fg-dim">
+                You qualify and book the meeting; another closer or founder closes. On collected setup revenue.
+              </p>
             </div>
-            <div className="mt-1.5 text-2xl font-bold tabular-nums text-accent">{openerPct}%</div>
-            <p className="mt-1 text-xs text-fg-dim">
-              You book the founder meeting, CC or Adon closes. On collected setup revenue.
-            </p>
+            <div className="rounded-lg border border-hairline bg-bg-raised p-4">
+              <div className="text-[12.5px] font-medium text-fg-muted">
+                You close it
+              </div>
+              <div className="mt-1.5 text-2xl font-semibold tabular-nums text-fg">{closerPct}%</div>
+              <p className="mt-1 text-xs text-fg-dim">
+                You close a company-provided lead. Any separately credited opener gets their own 15%.
+              </p>
+            </div>
+            <div className="rounded-lg border border-hairline bg-bg-raised p-4">
+              <div className="text-[12.5px] font-medium text-fg-muted">
+                You find and close it
+              </div>
+              <div className="mt-1.5 text-2xl font-semibold tabular-nums text-fg">{finderCloserPct}%</div>
+              <p className="mt-1 text-xs text-fg-dim">
+                You sourced the lead yourself and ran the close. On verified collected setup revenue.
+              </p>
+            </div>
           </div>
-          <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-            <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              You open and close it
-            </div>
-            <div className="mt-1.5 text-2xl font-bold tabular-nums text-accent">{closerPct}%</div>
-            <p className="mt-1 text-xs text-fg-dim">
-              You run the deal end to end. Same collected setup revenue, half again the rate.
-            </p>
-          </div>
-          <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-            <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              Solo threshold
-            </div>
-            <div className="mt-1.5 text-2xl font-bold tabular-nums text-fg">
-              {money(SPECIALIST_SPLIT_FLOOR_CENTS / 100)}
-            </div>
-            <p className="mt-1 text-xs text-fg-dim">
-              Under this, one person works the deal end to end instead of splitting it. It still
-              pays in full.
-            </p>
-          </div>
-        </div>
-        <p className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
-          <LayoutList className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-dim" aria-hidden />
-          <span>
-            A {money(PRICE_BOOK.growth.bookCents / 100)} Growth build pays{" "}
-            <strong className="text-fg">
-              {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.opener / 10000)}
-            </strong>{" "}
-            if you opened it,{" "}
-            <strong className="text-fg">
-              {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.closer / 10000)}
-            </strong>{" "}
-            if you closed it, and{" "}
-            <strong className="text-status-engaged">
-              {money((PRICE_BOOK.growth.bookCents / 100) * SELF_TRACK_BPS.open_close / 10000)}
-            </strong>{" "}
-            if you found the client yourself and closed it. Commission is on setup only, never on
-            the monthly. Every deal accrues first and a founder approves the payout — nothing pays
-            itself.
-          </span>
-        </p>
-      </Card>
-    </div>
+          <p className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
+            <LayoutList className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-dim" aria-hidden />
+            <span>
+              A {money(PRICE_BOOK.growth.bookCents / 100)} Growth build pays{" "}
+              <strong className="text-fg">
+                {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.opener / 10000)}
+              </strong>{" "}
+              if you opened it,{" "}
+              <strong className="text-fg">
+                {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.closer / 10000)}
+              </strong>{" "}
+              if you closed it, and{" "}
+              <strong className="text-status-engaged">
+                {money((PRICE_BOOK.growth.bookCents / 100) * SELF_TRACK_BPS.open_close / 10000)}
+              </strong>{" "}
+              if you found the client yourself and closed it. Commission is on setup only, never on
+              the monthly. Every deal accrues first and a founder approves the payout — nothing pays
+              itself.
+            </span>
+          </p>
+        </Card>
+      </div>
+    </PageFrame>
   );
 }

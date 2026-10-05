@@ -50,7 +50,16 @@ type Props = {
    */
   token: string | null;
   // rep flows straight into submitBody.anonymous_init (per-agent routing).
-  anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string };
+  // `source` is the raw ?source= value (text | dial) from the shared link.
+  // Sent through verbatim; the submit route normalizes it and a bad value
+  // degrades to "unknown" rather than failing the submission.
+  anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string; source?: string };
+  /** ?source= on a TOKEN link (drip / rep-sent application). Distinct from
+   *  anonymousInit.source, which only exists on the new-lead path. */
+  submissionSource?: string;
+  /** Path the merchant landed on, token segment included — redacted before it
+   *  reaches any email. Used only for the operator notification. */
+  submissionPath?: string;
   /**
    * Cross-form pre-fill (2026-06-20 — Ethan/Alex). When the form is opened from
    * a personalized lead link, the server loads the lead's existing data (name,
@@ -69,12 +78,122 @@ type SubmitResponse = {
   lead_stage?: string | null;
   redirect_url?: string | null;
   error?: string;
+  /** Human sentence the route already wrote for this rejection. Preferred over
+   *  any copy on the client, because it can name the specific problem. */
+  message?: string;
+  /** Field the rejection belongs to, so it can be shown inline. */
+  field?: string;
   /** Set on the first anonymous-flow submit so subsequent steps re-use it. */
   minted_token?: string | null;
   /** Personalized "continue now" links — present on the interest form's
    *  completion only; the thank-you screen renders them as buttons. */
   next_forms?: Array<{ slug: string; label: string; url: string }> | null;
 };
+
+/**
+ * MERCHANT-FACING COPY FOR EVERY REJECTION `/api/forms/submit` CAN RETURN.
+ *
+ * WHY THIS EXISTS (2026-09-08). This map used to hold two entries,
+ * `rate_limited` and `server_error`, and the fallback chain was
+ * `friendly[code] || data.error || <generic sentence>`. That middle term is the
+ * bug: for the other eighteen codes the route can return, the merchant was
+ * shown the RAW CODE. A business owner who hit the size cap on their bank
+ * statements read the words `request_payload_too_large` on the screen, and one
+ * who reopened a half-finished application read `prior_step_incomplete`.
+ *
+ * Measured live on 2026-09-08 against production, all four merchant hosts: a
+ * step-0 submission with a street-only address returned
+ * `{error:"incomplete_address", field:"business_address", message:"Include the
+ * state and ZIP code..."}` and the merchant was shown the literal string
+ * "incomplete_address" while that perfectly good sentence was discarded.
+ *
+ * That is what "the link gives merchants an error code" was. It reads as random
+ * and geographic because which code you hit depends on how you typed an
+ * address, how big your statements are, and whether you finished in one sitting.
+ *
+ * THE RULE: a merchant must never see an identifier. Server `message` first
+ * (it can name the specific field), this map second, the generic sentence last.
+ * Adding a rejection to the route means adding its copy here — pinned by
+ * `tests/form-submit-error-copy.test.ts`, which reads the codes straight out of
+ * the route and fails on any that is unmapped.
+ */
+/**
+ * How long Continue may wait for a selected address to finish resolving.
+ *
+ * It has to cover the WORST case, not the typical one, or the safety valve
+ * becomes the bug: /api/forms/address-autocomplete aborts an upstream call at
+ * 4s (UPSTREAM_TIMEOUT_MS) and AddressAutocompleteField makes up to TWO
+ * attempts, so a first-attempt timeout followed by a retry can legitimately run
+ * past 8s. A 5s bound gave up mid-retry and validated the ZIP-less label —
+ * showing the merchant exactly the missing-ZIP rejection this change exists to
+ * remove. (Codex P2, 2026-09-10.)
+ *
+ * If it does expire, the merchant is not stranded: validation fails, which
+ * forces the City/State/ZIP completion row open and lets them finish by hand.
+ */
+const ADDRESS_RESOLVE_WAIT_MS = 10_000;
+
+export const SUBMIT_ERROR_COPY: Record<string, string> = {
+  // Merchant can fix these by changing what they entered.
+  incomplete_address: "That address needs the street, state and ZIP code.",
+  missing_required_field: "Some required answers are still blank. Check the highlighted boxes.",
+  missing_required_file: "A required document is missing. Attach it and try again.",
+  too_many_files: "That is more files than this step accepts. Send fewer, or combine them into one PDF.",
+  request_payload_too_large:
+    "Those files are too large to send together. Try uploading them a few at a time.",
+  invalid_json: "Something went wrong sending your answers. Please try again.",
+
+  // Merchant can fix these by changing how they got here.
+  prior_step_incomplete:
+    "An earlier step is not finished yet. Go back and complete it, then continue.",
+  anonymous_init_requires_step_0:
+    "This form needs to be started from the beginning. Please reopen your link.",
+
+  /*
+   * THE LINK ITSELF IS BAD. `/api/forms/submit` builds these as
+   * `token_${sigResult.reason}` from lib/form-links.ts, so they are assembled at
+   * runtime and are easy to miss when reading the route for string literals —
+   * Codex caught exactly that (P2, 2026-09-08).
+   *
+   * These matter more than their obscurity suggests. `token_expired` is what a
+   * merchant gets when they come back to a rep's link a few days later, and
+   * before this change the word they saw on screen was "token_expired". That is
+   * indistinguishable, from the merchant's side, from "this company's software
+   * is broken" — and it is link-dependent, which is precisely the shape of the
+   * reports that started this investigation.
+   */
+  token_expired: "This link has expired. Ask your contact to send you a fresh one.",
+  token_invalid: "This link is not valid. Ask your contact to send you a fresh one.",
+  token_malformed:
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
+  token_missing_signature:
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
+  token_version_mismatch: "This link is out of date. Ask your contact to send you a fresh one.",
+  token_server_misconfigured:
+    "Something went wrong on our end. We have been notified, please try again shortly.",
+
+  no_auth_provided: "This link is missing its access code. Ask your contact to resend it.",
+  not_found: "This link is no longer valid. Ask your contact to send a fresh one.",
+  form_not_found: "This link is no longer valid. Ask your contact to send a fresh one.",
+  form_disabled: "This form is no longer accepting responses. Please contact us directly.",
+  rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
+
+  // Nothing the merchant did. Say so, and do not make them re-type anything.
+  server_error: "Something went wrong on our end. Please try submitting again.",
+  form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  form_definition_corrupt:
+    "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  form_links_misconfigured:
+    "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  tenant_mismatch: "This link does not match this form. Ask your contact to resend it.",
+  initialization_not_required: "Something went wrong starting this form. Please refresh and try again.",
+  invalid_step_index: "Something went wrong moving between steps. Please refresh and try again.",
+  step_index_out_of_range: "Something went wrong moving between steps. Please refresh and try again.",
+};
+
+/** Shown when the route returns a code this build has never heard of. */
+export const SUBMIT_ERROR_FALLBACK =
+  "We couldn't process that just now. Please try submitting again in a moment.";
 
 /** One key per form session. A retried submit is the SAME affirmative action and
  *  must resolve to the same evidence row, not a duplicate. */
@@ -96,6 +215,8 @@ export function FormPublicClient({
   redirectUrl,
   token: initialToken,
   anonymousInit,
+  submissionSource,
+  submissionPath,
   prefill,
   brand,
 }: Props) {
@@ -140,6 +261,22 @@ export function FormPublicClient({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [currentStep, setCurrentStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // Address fields whose selected suggestion is still being resolved to a full
+  // address (the ZIP arrives on a second round trip). Validating one of these
+  // NOW would reject an address that is about to be correct — the
+  // select-then-Continue race. Holding for the resolution is the fix; the
+  // component clears its flag in a `finally` and on unmount, so a hung network
+  // request cannot strand Continue disabled.
+  // A ref, not state: nothing RENDERS from this, and `submit()` reads it from
+  // inside an async wait loop where a state value captured by the closure would
+  // be permanently stale and the loop would never see the resolution land.
+  // (Holding it in state and mutating the ref inside the updater would also put
+  // a side effect somewhere React's StrictMode deliberately runs twice.)
+  const addressResolvingRef = useRef<Set<string>>(new Set());
+  const setAddressResolving = useCallback((fieldName: string, resolving: boolean) => {
+    if (resolving) addressResolvingRef.current.add(fieldName);
+    else addressResolvingRef.current.delete(fieldName);
+  }, []);
   const [done, setDone] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
@@ -303,6 +440,27 @@ export function FormPublicClient({
     return Object.keys(next).length === 0;
   }, [step.fields, values, mergedValues]);
 
+  /**
+   * `submit()` can await an in-flight address resolution before it validates.
+   * Execution then resumes inside the closure of the render that STARTED the
+   * submit, where `values` still holds the pre-resolution address — so calling
+   * the captured `validate`/`buildSubmitPayload` would judge and send stale
+   * answers and reject the address the wait just repaired.
+   *
+   * These refs are re-pointed on every render, so anything read AFTER an await
+   * sees the current render's data. (Codex P1, 2026-09-10.)
+   */
+  const validateRef = useRef(validate);
+  validateRef.current = validate;
+  const buildSubmitPayloadRef = useRef<typeof buildSubmitPayload>(buildSubmitPayload);
+  buildSubmitPayloadRef.current = buildSubmitPayload;
+  /** Claimed before the first await in `submit()` so a second click cannot
+   *  start a second submission while the first is waiting. */
+  const submitGuard = useRef(false);
+  /** The step on screen right now, readable after an await. */
+  const currentStepRef = useRef(currentStep);
+  currentStepRef.current = currentStep;
+
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -412,11 +570,52 @@ export function FormPublicClient({
   }
 
   async function submit() {
-    if (!validate()) return;
+    // HOLD FOR AN ADDRESS STILL RESOLVING. A merchant who picks a Google
+    // suggestion and clicks Continue immediately would otherwise be rejected
+    // for a ZIP that is mid-flight: Google's autocomplete label carries no
+    // postal code, and the complete address only arrives on a second Place
+    // Details round trip. Bounded so a hung provider costs a short pause and
+    // then falls through to normal validation — never an unclickable button.
+    // Which step this submit is FOR. The Back button stays live while the wait
+    // below runs, and going back unmounts the address field, which clears the
+    // resolving set and lets this old call proceed — with validateRef and
+    // buildSubmitPayloadRef now pointing at the newly displayed step while
+    // `currentStep` in the request body is still the one captured here. That
+    // posts one step's answers under another step's index. Abort instead.
+    // (Codex P1, 2026-09-10.)
+    const stepAtStart = currentStep;
+    if (addressResolvingRef.current.size > 0) {
+      // Claim the submit BEFORE the first await. Without this the button stays
+      // enabled for the whole wait, and a merchant who clicks again because
+      // nothing visibly happened starts a second wait loop — two independent
+      // submissions of the same step once the resolution lands. (Codex P1.)
+      if (submitGuard.current) return;
+      submitGuard.current = true;
+      setSubmitting(true);
+      try {
+        const waitStarted = Date.now();
+        while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < ADDRESS_RESOLVE_WAIT_MS) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      } finally {
+        submitGuard.current = false;
+        setSubmitting(false);
+      }
+    }
+    // The merchant navigated away from the step this submit belongs to. Sending
+    // now would mismatch payload and step_index.
+    if (currentStepRef.current !== stepAtStart) return;
+    // Validate through a REF, not the `validate` captured by this render. After
+    // the await above, execution resumes in the old closure, where `values`
+    // still holds Google's ZIP-less label — so calling the captured `validate`
+    // would reject the very address the wait just finished resolving, leaving
+    // the race exactly as open as before. (Codex P1.)
+    if (!validateRef.current()) return;
     setSubmitting(true);
     setServerError(null);
     try {
-      const built = await buildSubmitPayload();
+      // Through the ref, for the same stale-closure reason as validateRef.
+      const built = await buildSubmitPayloadRef.current();
       if ("error" in built) {
         setServerError(built.error);
         return;
@@ -429,6 +628,13 @@ export function FormPublicClient({
         payload: built.payload,
         file_attachments: built.file_attachments,
       };
+
+      // Channel of THIS submission. Sent on every step so the operator
+      // notification (which fires on the LAST step) still knows how the
+      // merchant arrived, even though the query string was only present when
+      // they first landed. Anonymous links carry it in anonymous_init instead.
+      if (submissionSource) submitBody.submission_source = submissionSource;
+      if (submissionPath) submitBody.submission_path = submissionPath;
 
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API
@@ -537,15 +743,32 @@ export function FormPublicClient({
             built.payload,
           );
         }
-        const friendly: Record<string, string> = {
-          rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
-          server_error: "Something went wrong on our end. Please try submitting again.",
-        };
+        // An error code we have no copy for is itself a defect: it means the
+        // route grew a rejection nobody wrote a sentence for. The merchant
+        // still gets a plain sentence (below), but beacon it so it surfaces
+        // instead of being discovered by a merchant giving up.
+        if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+          reportSubmitFailure(`unmapped_submit_error:${data.error}`, built.payload);
+        }
+        // The route writes a specific sentence for the rejections that can
+        // name their own problem (which field, what is missing). Prefer it;
+        // fall back to our copy for the code; never show the bare code.
         setServerError(
-          (data?.error && friendly[data.error]) ||
-            data?.error ||
-            "We couldn't process that just now. Please try submitting again in a moment.",
+          data?.message ||
+            (data?.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
+            SUBMIT_ERROR_FALLBACK,
         );
+        // When the route names the offending field, put the message on the
+        // input too. A sentence at the bottom of a ten-field step does not
+        // tell a merchant WHICH box to fix.
+        if (data?.field) {
+          const fieldName = data.field;
+          const inlineCopy =
+            data.message ||
+            (data.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
+            SUBMIT_ERROR_FALLBACK;
+          setErrors((prev) => ({ ...prev, [fieldName]: inlineCopy }));
+        }
         return;
       }
       // Capture the freshly-signed token from an anonymous step 0 so
@@ -638,14 +861,7 @@ export function FormPublicClient({
           {branding.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
-          ) : (
-            <div
-              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl"
-              style={{ background: `${primary}1f`, border: `1px solid ${primary}55` }}
-            >
-              <SunMark color={primary} />
-            </div>
-          )}
+          ) : null}
           <div className="space-y-2">
             <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
             <div
@@ -781,6 +997,7 @@ export function FormPublicClient({
                 }
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
+                onAddressResolvingChange={setAddressResolving}
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,
@@ -833,29 +1050,20 @@ export function FormPublicClient({
   );
 }
 
-/** Gold SunBiz sun glyph — rendered in the form header when the tenant
- *  hasn't uploaded a logo, so the form still reads as the brand. */
-function SunMark({ color }: { color: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="30"
-      height="30"
-      fill="none"
-      stroke={color}
-      strokeWidth="2"
-      strokeLinecap="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="4" fill={color} stroke="none" />
-      <line x1="12" y1="2.5" x2="12" y2="5" />
-      <line x1="12" y1="19" x2="12" y2="21.5" />
-      <line x1="2.5" y1="12" x2="5" y2="12" />
-      <line x1="19" y1="12" x2="21.5" y2="12" />
-      <line x1="5.4" y1="5.4" x2="7" y2="7" />
-      <line x1="17" y1="17" x2="18.6" y2="18.6" />
-      <line x1="5.4" y1="18.6" x2="7" y2="17" />
-      <line x1="17" y1="7" x2="18.6" y2="5.4" />
-    </svg>
-  );
-}
+/* REMOVED 2026-09-18: SunMark, "Gold SunBiz sun glyph".
+ *
+ * It was the header mark for ANY tenant whose form had no logo_url, on a
+ * multi-tenant public route. One company's brand asset as the universal
+ * default is a tenant decision sitting in a field check.
+ *
+ * The asymmetry is what hid it: all four SunBiz forms set branding.logo_url,
+ * so SunBiz took the <img> branch and never rendered the glyph. Only tenants
+ * WITHOUT a logo reached it — and those were exactly the two OASIS funnels.
+ * The mark was visible only to the company it did not belong to.
+ *
+ * The header now renders the tenant's own mark or NO mark. The fallback chain
+ * lives server-side in app/f/[tenant_slug]/[form_slug]/page.tsx, which resolves
+ * through lib/tenant/public-identity.ts and fails closed. A blank header looks
+ * like a bug and the wrong logo does not, which is precisely why the wrong logo
+ * survived from commit 1ee47b6e until CC noticed it on his own funnel.
+ */

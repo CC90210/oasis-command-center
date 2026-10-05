@@ -11,13 +11,18 @@ import Link from "next/link";
 import { Tag } from "@/components/Card";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { PhoneFrame, PhoneTextCard } from "@/components/founders/PhoneFrame";
+import { TileVideo } from "@/components/founders/TileVideo";
 import {
+  assetHref,
   channelLabel,
   isRenderableCarousel,
   lifecycleLabel,
   lifecycleOf,
   type Lifecycle,
+  type LibraryView,
   parsePlatforms,
+  phoneChromeFor,
   platformLabel,
   fmtDuration,
   type AssetStatus,
@@ -142,9 +147,111 @@ const FRAME: Record<string, string> = {
   "16:9": "aspect-video",
 };
 
+/** What the phone screen says for an asset with nothing to show yet. */
+const NO_VISUAL: Record<string, string> = {
+  copy: "Text post",
+  article: "Article",
+  html: "HTML page",
+  audio: "Audio",
+  video: "Video - no render on file yet",
+  image: "Image - no file on record",
+  carousel: "Carousel - slides not on file",
+};
+
+/**
+ * What a tile shows inside its frame, for BOTH presentations.
+ *
+ * NOTHING HERE LOADS VIDEO. A video is a cover until the viewer presses play
+ * (TileVideo mounts the <video> then, preload="none"); images and carousel
+ * covers are lazy, async <img>s with their measured width and height, so only
+ * the tiles near the viewport fetch anything at all. On 2026-10-01 a Library
+ * page fetched every carousel cover and the metadata of every video on arrival.
+ */
+function TileMedia({
+  format,
+  assetType,
+  slides,
+  playbackUrl,
+  posterUrl,
+  mediaW,
+  mediaH,
+  title,
+  hook,
+  phone,
+}: {
+  format: string;
+  assetType?: string | null;
+  slides: string[];
+  playbackUrl?: string | null;
+  posterUrl?: string | null;
+  mediaW?: number | null;
+  mediaH?: number | null;
+  title: string;
+  hook?: string | null;
+  phone: boolean;
+}) {
+  if (isRenderableCarousel(assetType, slides)) {
+    // One card, N slides. Before the slides were registered this row
+    // rendered as an isolated image whose artwork said "01/05 · swipe →".
+    return <CarouselFrame slides={slides} title={title} width={mediaW} height={mediaH} className="h-full w-full" />;
+  }
+  if (playbackUrl && format === "video") {
+    return (
+      <TileVideo
+        src={playbackUrl}
+        posterUrl={posterUrl}
+        width={mediaW}
+        height={mediaH}
+        title={title}
+        variant={phone ? "phone" : "native"}
+      />
+    );
+  }
+  if (posterUrl) {
+    return (
+      // Plain <img> on purpose. next/image would need a matching
+      // remotePatterns entry for the Storage host, and it re-fetches the
+      // source server-side through the optimizer — an extra round trip on a
+      // URL that is deliberately short-lived. The optimizer CAN read the
+      // object (the signature is in the query string), but its cached
+      // derivative outlives the signature, so a re-optimize after expiry
+      // fails while the tile still looks cached. Not worth it for a poster.
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={posterUrl}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        width={mediaW ?? undefined}
+        height={mediaH ?? undefined}
+        className="h-full w-full object-contain"
+      />
+    );
+  }
+  // No picture: a text post, an HTML page, or a render that is not on file.
+  // On the phone the copy itself is the screen, so a chat-drafted caption is
+  // previewable before any media exists.
+  if (phone) {
+    return <PhoneTextCard kicker={NO_VISUAL[format] ?? "No preview"} text={hook || title} />;
+  }
+  return (
+    <div className="px-4 text-center text-xs text-fg-dim">
+      {format === "html"
+        ? "HTML page"
+        : format === "video"
+          ? "no render on file yet"
+          : "no preview"}
+    </div>
+  );
+}
+
 /**
  * One library tile. `playbackUrl` is a short-lived signed Storage URL resolved
  * server-side — the browser never receives a service key.
+ *
+ * `presentation="phone"` (the Library's default) draws the asset inside a
+ * PhoneFrame the way it lands on Instagram or TikTok; `"grid"` is the plain
+ * card. Both use the same media switch and the same verdict controls.
  */
 export function AssetTile({
   id,
@@ -165,6 +272,8 @@ export function AssetTile({
   assetType,
   slideUrls,
   openReviews = 0,
+  presentation = "grid",
+  returnTo,
 }: {
   id: string;
   title: string;
@@ -185,57 +294,112 @@ export function AssetTile({
   /** Signed URLs, already in slide order. */
   slideUrls?: string[];
   openReviews?: number;
+  presentation?: LibraryView;
+  /** The Library view this tile is drawn in, so the asset page can link back to it. */
+  returnTo?: string;
 }) {
   const duration = fmtDuration(durationS);
-  const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   const platforms = parsePlatforms(platformsRaw);
   const slides = slideUrls ?? [];
+  const phone = presentation === "phone";
+  const hasVisual = isRenderableCarousel(assetType, slides) || Boolean(posterUrl) || Boolean(playbackUrl && format === "video");
+  const media = (
+    <TileMedia
+      format={format}
+      assetType={assetType}
+      slides={slides}
+      playbackUrl={playbackUrl}
+      posterUrl={posterUrl}
+      mediaW={mediaW}
+      mediaH={mediaH}
+      title={title}
+      hook={hook}
+      phone={phone}
+    />
+  );
+
+  const details = (
+    <div className={phone ? "flex flex-col gap-1.5 pt-3" : "flex flex-col gap-2 p-4"}>
+      <span className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
+        {brandName}
+        {phone && openReviews > 0 && (
+          <span
+            className="h-2 w-2 rounded-full bg-accent"
+            aria-label={`${openReviews} unread review${openReviews === 1 ? "" : "s"}`}
+          />
+        )}
+      </span>
+      {/* A link again: /founders/marketing/asset/[id] now EXISTS. It was
+          specified, linked, and never built, so every title in this grid was a
+          404 — the link was removed to stop it lying. The page imports
+          mediaFrame() from this file rather than restating it, which was the
+          condition attached to restoring this. */}
+      <Link
+        href={assetHref(id, returnTo)}
+        className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
+      >
+        {title}
+      </Link>
+      {/* On the phone the hook is already the caption on screen. */}
+      {hook && !phone && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
+      <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+        <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
+          {/* The real distribution when we have it, the primary channel when we
+              do not. Showing `channel` alone is what made every tile read
+              INSTAGRAM regardless of where the piece actually went. */}
+          {platforms.length > 0
+            ? platforms.map(platformLabel).join(" · ")
+            : channelLabel(channel)}
+        </span>
+        <StatusTag status={status} publishedAt={publishedAt} />
+      </div>
+      {phone && (aspect || duration) && (
+        <span className="text-[10px] tabular-nums text-fg-dim">
+          {[aspect, duration].filter(Boolean).join(" · ")}
+        </span>
+      )}
+      {/* The verdict lives on the tile. Sending the operator somewhere else to approve
+          something they are already looking at is how 39 assets ended up sitting in
+          review with no way to clear them. */}
+      <AssetActions id={id} status={status} title={title} />
+    </div>
+  );
+
+  if (phone) {
+    return (
+      <article className="group flex flex-col rounded-xl border border-bg-border bg-bg-panel p-3 shadow-card transition-all hover:border-accent/40">
+        <PhoneFrame
+          mediaW={mediaW}
+          mediaH={mediaH}
+          aspect={aspect}
+          handle={brandName}
+          caption={hasVisual ? hook : null}
+          chrome={phoneChromeFor(null, channel)}
+          label={title}
+          className="mx-auto max-w-[320px]"
+        >
+          {media}
+        </PhoneFrame>
+        {details}
+      </article>
+    );
+  }
+
+  const { className: frame, style: frameStyle } = mediaFrame(mediaW, mediaH, aspect);
   return (
-    <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
+    <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-raised group">
       <div
         className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
         style={frameStyle}
       >
-        {isRenderableCarousel(assetType, slides) ? (
-          // One card, N slides. Before the slides were registered this row
-          // rendered as an isolated image whose artwork said "01/05 · swipe →".
-          <CarouselFrame slides={slides} title={title} className="h-full w-full" />
-        ) : playbackUrl && format === "video" ? (
-          // preload="metadata" so a 200-tile library does not pull 200 videos.
-          <video
-            src={playbackUrl}
-            poster={posterUrl || undefined}
-            controls
-            playsInline
-            preload="metadata"
-            className="h-full w-full object-contain"
-          />
-        ) : posterUrl ? (
-          // Plain <img> on purpose. next/image would need a matching
-          // remotePatterns entry for the Storage host, and it re-fetches the
-          // source server-side through the optimizer — an extra round trip on a
-          // URL that is deliberately short-lived. The optimizer CAN read the
-          // object (the signature is in the query string), but its cached
-          // derivative outlives the signature, so a re-optimize after expiry
-          // fails while the tile still looks cached. Not worth it for a poster.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={posterUrl} alt="" className="h-full w-full object-contain" />
-        ) : (
-          <div className="px-4 text-center text-xs text-fg-dim">
-            {format === "html"
-              ? "HTML page"
-              : format === "video"
-                ? "no render on file yet"
-                : "no preview"}
-          </div>
-        )}
+        {media}
         {aspect && (
-          <span className="absolute left-2 top-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tracking-wider text-fg-muted">
+          <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tracking-wider text-fg-muted">
             {aspect}
           </span>
         )}
         {duration && (
-          <span className="absolute bottom-2 right-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tabular-nums text-fg-muted">
+          <span className="pointer-events-none absolute bottom-2 right-2 rounded-full bg-bg-deep/80 px-2 py-0.5 text-[9px] font-bold tabular-nums text-fg-muted">
             {duration}
           </span>
         )}
@@ -246,39 +410,7 @@ export function AssetTile({
           />
         )}
       </div>
-
-      <div className="flex flex-col gap-2 p-4">
-        <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-accent">
-          {brandName}
-        </span>
-        {/* A link again: /founders/marketing/asset/[id] now EXISTS. It was
-            specified, linked, and never built, so every title in this grid was a
-            404 — the link was removed to stop it lying. The page imports
-            mediaFrame() from this file rather than restating it, which was the
-            condition attached to restoring this. */}
-        <Link
-          href={`/founders/marketing/asset/${id}`}
-          className="text-sm font-medium text-fg line-clamp-2 hover:text-accent transition-colors"
-        >
-          {title}
-        </Link>
-        {hook && <p className="text-xs text-fg-muted line-clamp-2 italic">{hook}</p>}
-        <div className="mt-auto flex items-center justify-between gap-2 pt-1">
-          <span className="text-[10px] uppercase tracking-[0.12em] text-fg-dim font-bold">
-            {/* The real distribution when we have it, the primary channel when we
-                do not. Showing `channel` alone is what made every tile read
-                INSTAGRAM regardless of where the piece actually went. */}
-            {platforms.length > 0
-              ? platforms.map(platformLabel).join(" · ")
-              : channelLabel(channel)}
-          </span>
-          <StatusTag status={status} publishedAt={publishedAt} />
-        </div>
-        {/* The verdict lives on the tile. Sending the operator somewhere else to approve
-            something they are already looking at is how 39 assets ended up sitting in
-            review with no way to clear them. */}
-        <AssetActions id={id} status={status} title={title} />
-      </div>
+      {details}
     </article>
   );
 }

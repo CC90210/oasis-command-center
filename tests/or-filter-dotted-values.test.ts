@@ -51,7 +51,7 @@ function conds(expr: string): Cond[] {
   assert.deepEqual(c.args, ["echelonx.aisolutions+canary@gmail.com"]);
 }
 
-// ── The exact production shape findExistingLead builds ─────────────────────
+// ── The shape findExistingLead built until 2026-09-11 (it binds now) ───────
 {
   const [c] = conds("data->>email.eq.jane.q.doe@sub.domain.co.uk,data->>phone.eq.+15145550188");
   assert.equal(
@@ -59,6 +59,18 @@ function conds(expr: string): Cond[] {
     `(json_extract("data", '$.email') = ? OR json_extract("data", '$.phone') = ?)`,
   );
   assert.deepEqual(c.args, ["jane.q.doe@sub.domain.co.uk", "+15145550188"]);
+}
+
+// ── An all-digit literal is a NUMBER in this grammar ───────────────────────
+// Pinned so no lookup splices a phone in here again: json_extract returns a
+// stored phone as TEXT and SQLite never equals TEXT to an INTEGER, so
+// `data->>phone.eq.3055550100` matches nothing. That was the phone-match
+// defect. Bind the value with .eq("data->>phone", v) instead.
+{
+  const [c] = conds("data->>phone.eq.3055550100");
+  assert.deepEqual(c.args, [3055550100]);
+  const [q] = conds('data->>phone.eq."3055550100"');
+  assert.deepEqual(q.args, ["3055550100"], "a double-quoted literal stays text");
 }
 
 // ── A value whose first dotted token is uppercase must also parse ──────────

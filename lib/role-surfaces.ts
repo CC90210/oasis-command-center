@@ -92,22 +92,11 @@ export type SurfaceCapabilities = {
   /** Every lead in the tenant, at every stage. */
   canSeeAllPipeline: boolean;
   /**
-   * Leads belonging to the reps who roll up to this viewer
-   * (user_profiles.manager_user_id = me), plus their own. A THIRD scope, between
-   * "all" and "own" — a sales manager coaches a book they do not personally own,
-   * but the rest of the tenant is still none of their business.
-   *
-   * ⚠ DECLARED, NOT YET ENFORCED (2026-08-21). No read path consults this flag.
-   * A manager therefore sees only their OWN leads today, because
-   * isOasisPipelineAdmin excludes them and filterWebsiteSalesRows falls to the
-   * own-rows branch. That is the fail-closed direction — too little, not too
-   * much — and it is why the flag ships ahead of its consumer: the alternative
-   * was `canSeeAllPipeline: true`, which is the failure this whole flag exists
-   * to prevent.
-   *
-   * Wiring it means a team-scoped read (profiles WHERE tenant_id = ? AND
-   * manager_user_id = me, then leads assigned to those ids). Until that exists,
-   * do NOT describe a manager as seeing their team — the screen does not.
+   * Leads assigned to a known OASIS sales rep in the viewer's tenant. This is a
+   * THIRD scope between "all" and "own": a manager may coach the active sales
+   * book, but unassigned, founder, admin and system records stay outside it.
+   * The OASIS pipeline list and detail reads enforce this through a server-side
+   * sales-roster lookup; generic manifest surfaces do not consume this flag.
    */
   canSeeTeamPipeline: boolean;
   /** Only leads assigned to this viewer, only at the rep-workable stages. */
@@ -115,14 +104,10 @@ export type SurfaceCapabilities = {
   /** This viewer's own commission rows (website_sales_commissions.rep_user_id = me). */
   canSeeOwnCommissionOnly: boolean;
   /**
-   * Commission rows for this viewer's direct reports — what a manager needs to
-   * verify the override they are paid on. NOT the tenant-wide ledger.
-   *
-   * ⚠ DECLARED, NOT YET ENFORCED (2026-08-21). Same status as
-   * canSeeTeamPipeline above, and additionally blocked on the multi-party
-   * commission ledger: website_sales_commissions is still one row per deal
-   * keyed on a single rep_user_id, so there is no manager-override row for this
-   * flag to reveal even once a reader exists.
+   * Commission rows for the OASIS sales roster this viewer coaches — what a
+   * manager needs to verify the override they are paid on. NOT the tenant-wide
+   * ledger. The commission API enforces this with the same canonical,
+   * manager-scoped roster used by Today and the Pipeline.
    */
   canSeeTeamCommission: boolean;
   /** Every rep's commission — the payout ledger a founder approves from. */
@@ -135,8 +120,12 @@ export type SurfaceCapabilities = {
   canSeeInboundTape: boolean;
   /** The founders marketing portal. Also gated by FOUNDERS_TENANT_IDS. */
   canSeeMarketing: boolean;
-  /** /operations, /automations, /health, /analytics, /settings, /agents. */
+  /** /operations, /automations, /health, /analytics, /agents and admin-only settings. */
   canSeeSystemSurfaces: boolean;
+  /** Their own profile, password and personal provider connections. */
+  canSeePersonalSettings: boolean;
+  /** Read-only sales-team activity and performance inside safe Settings cards. */
+  canSeeTeamPerformance: boolean;
   /** May take actions at all. read_only is the one persona that may not. */
   canAct: boolean;
 };
@@ -183,7 +172,10 @@ export function invitableRoleOptionsFor(
   tenantSlug: string | null | undefined,
 ): ReadonlyArray<RoleOption> {
   return isOasisSurfaceTenant(tenantSlug)
-    ? [...PLATFORM_ROLE_OPTIONS, ...OASIS_SALES_ROLE_OPTIONS]
+    ? [
+        ...PLATFORM_ROLE_OPTIONS.filter((option) => option.value === "admin"),
+        ...OASIS_SALES_ROLE_OPTIONS,
+      ]
     : PLATFORM_ROLE_OPTIONS;
 }
 
@@ -255,6 +247,8 @@ const FOUNDER: SurfaceCapabilities = {
   canSeeInboundTape: true,
   canSeeMarketing: true,
   canSeeSystemSurfaces: true,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: true,
   canAct: true,
 };
 
@@ -290,6 +284,8 @@ const MANAGER: SurfaceCapabilities = {
   canSeeInboundTape: false,
   canSeeMarketing: false,
   canSeeSystemSurfaces: false,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: true,
   canAct: true,
 };
 
@@ -311,6 +307,8 @@ const SALES: SurfaceCapabilities = {
   canSeeInboundTape: false,
   canSeeMarketing: false,
   canSeeSystemSurfaces: false,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: false,
   canAct: true,
 };
 
@@ -329,6 +327,8 @@ const WORKER: SurfaceCapabilities = {
   canSeeInboundTape: false,
   canSeeMarketing: false,
   canSeeSystemSurfaces: true,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: false,
   canAct: true,
 };
 
@@ -341,9 +341,9 @@ const WORKER: SurfaceCapabilities = {
  * commission ledger, every client name and the whole pipeline — or hiring them
  * and giving them no access to the thing they were hired to do.
  *
- * canSeeMarketing is TRUE and every money flag is FALSE. They are also not a
- * sales persona: no pipeline of their own, no commission, no delivery board.
- * Marketing produces demand; it does not work leads.
+ * canSeeMarketing is TRUE and every company-money flag is FALSE. CC's
+ * 2026-08-26 directive also lets this seat work its own assigned sales leads;
+ * that does not grant tenant-wide visibility or the commission ledger.
  *
  * canSeeClientIdentities is TRUE because a case study, a testimonial or a logo
  * wall is client work by name — that is the job. It is scoped by the same
@@ -353,7 +353,7 @@ const MARKETING: SurfaceCapabilities = {
   canSeeCompanyFinancials: false,
   canSeeAllPipeline: false,
   canSeeTeamPipeline: false,
-  canSeeOwnPipelineOnly: false,
+  canSeeOwnPipelineOnly: true,
   canSeeOwnCommissionOnly: false,
   canSeeTeamCommission: false,
   canSeeCommissionLedger: false,
@@ -362,6 +362,8 @@ const MARKETING: SurfaceCapabilities = {
   canSeeInboundTape: false,
   canSeeMarketing: true,
   canSeeSystemSurfaces: false,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: false,
   canAct: true,
 };
 
@@ -393,7 +395,10 @@ const BUILDER: SurfaceCapabilities = {
   canSeeCompanyFinancials: false,
   canSeeAllPipeline: false,
   canSeeTeamPipeline: false,
-  canSeeOwnPipelineOnly: false,
+  // CC, 2026-08-25: this hire now sells as well as builds and markets. Still
+  // OWN-book only — "all" stays false below, so what widened is his reach into
+  // his own claimed deals, never a view of anyone else's.
+  canSeeOwnPipelineOnly: true,
   canSeeOwnCommissionOnly: true,
   canSeeTeamCommission: false,
   canSeeCommissionLedger: false,
@@ -406,6 +411,8 @@ const BUILDER: SurfaceCapabilities = {
   // gated by tenant in capabilitiesFor.
   canSeeMarketing: true,
   canSeeSystemSurfaces: false,
+  canSeePersonalSettings: true,
+  canSeeTeamPerformance: false,
   canAct: true,
 };
 
@@ -425,7 +432,12 @@ const READONLY: SurfaceCapabilities = { ...WORKER, canAct: false };
  * SunBiz role that somehow landed on an OASIS workspace would not see OASIS's
  * revenue. Grandfathering behaviour is not the same as grandfathering a leak.
  */
-const LEGACY: SurfaceCapabilities = { ...FOUNDER, canSeeMarketing: false };
+const LEGACY: SurfaceCapabilities = {
+  ...FOUNDER,
+  canSeeMarketing: false,
+  // Grandfathered SunBiz access does not turn into OASIS sales-team reporting.
+  canSeeTeamPerformance: false,
+};
 
 export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   founder: FOUNDER,
@@ -437,6 +449,13 @@ export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   readonly: READONLY,
   legacy: LEGACY,
 };
+
+/** One shared gate for the page, API, and navigation entry to commissions. */
+export function maySeeCommissionSurface(capabilities: SurfaceCapabilities): boolean {
+  return capabilities.canSeeCommissionLedger ||
+    capabilities.canSeeTeamCommission ||
+    capabilities.canSeeOwnCommissionOnly;
+}
 
 /**
  * The capability record for a persona STANDING IN A PARTICULAR WORKSPACE.
@@ -461,7 +480,76 @@ export function capabilitiesFor(
     ...base,
     canSeeCompanyFinancials: base.canSeeCompanyFinancials && oasisWorkspace,
     canSeeMarketing: base.canSeeMarketing && oasisWorkspace,
+    // Founders retain their tenant settings everywhere. A manager's team view
+    // is an OASIS product capability and must fail closed on a foreign/unknown
+    // workspace even if a row there happens to carry team_role="manager".
+    canSeeTeamPerformance:
+      base.canSeeTeamPerformance && (persona === "founder" || oasisWorkspace),
   };
+}
+
+/**
+ * Canonical invite menu after both workspace eligibility and actor escalation
+ * rules are applied. A temporary admin_access grant may invite teammates but
+ * cannot mint a permanent Administrator, so that option is removed rather
+ * than displayed as a button the API will reject.
+ */
+export function invitableRoleOptionsForActor(
+  tenantSlug: string | null | undefined,
+  canGrantAdmin: boolean,
+): ReadonlyArray<RoleOption> {
+  return invitableRoleOptionsFor(tenantSlug).filter(
+    (option) => option.value !== "admin" || canGrantAdmin,
+  );
+}
+
+/**
+ * Narrow manager read gate used by the OASIS pipeline query and detail page.
+ * This is NOT an admin check and conveys no mutation, assignment, unassigned,
+ * founder, or system-record access.
+ */
+export function canReadOasisSalesTeamPipeline(input: {
+  teamRole: string | null | undefined;
+  tenantSlug: string | null | undefined;
+}): boolean {
+  return (
+    (input.teamRole || "").trim().toLowerCase() === "manager" &&
+    isOasisSurfaceTenant(input.tenantSlug)
+  );
+}
+
+/**
+ * Is `assignedTo` a seat inside this manager's server-resolved roster?
+ *
+ * ONE definition, because two are how surfaces drift apart. This was
+ * implemented twice as of 2026-09-01 — once as managerCanReadAssignment() in
+ * lib/web-leads/data.ts for the prospecting surface, and once inline in
+ * app/pipeline/[id]/page.tsx for the lead workspace. Two independent answers to
+ * "may this manager act on this assignment" is exactly the failure that put a
+ * manager's Leads list and Leads detail out of sync in the first place; keeping
+ * a second copy to fix the first one would have been the same bug one layer up.
+ *
+ * Fails closed on every degenerate input: a non-manager role, an unassigned
+ * lead, or an unresolved roster all return false. Callers that mean "unassigned
+ * is fine" must say so themselves — that is a different question, and folding it
+ * in here would silently grant the pool to any caller that only wanted the
+ * roster.
+ *
+ * Comparison is trimmed and lowercased on both sides: assigned_to is written
+ * from an already-lowercased auth user id, but this must not start failing
+ * quietly if that ever stops being true on some row.
+ */
+export function managerRosterCoversAssignment(input: {
+  teamRole: string | null | undefined;
+  assignedTo: string | null | undefined;
+  readableAssigneeIds: readonly string[] | null | undefined;
+}): boolean {
+  if ((input.teamRole || "").trim().toLowerCase() !== "manager") return false;
+  const assignee = (input.assignedTo || "").trim().toLowerCase();
+  if (!assignee) return false;
+  return (input.readableAssigneeIds || []).some(
+    (candidate) => (candidate || "").trim().toLowerCase() === assignee,
+  );
 }
 
 /**
@@ -481,6 +569,8 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  "/commissions",
+  "/settings",
   // The Leads browser (CC, 2026-08-21): "those sales reps should be able to
   // access the leads page so they can import leads themselves."
   //
@@ -488,31 +578,69 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // of Canadian businesses with website status, filtered by province, city and
   // industry. Nothing in it is assigned to anyone, so opening it to reps
   // exposes no colleague's pipeline. It is what makes self-sourcing possible,
-  // which is the track that pays them 25/40/70 rather than 20/30.
+  // which pays 35% for finding and closing; company-supplied work pays 15%
+  // for opening or 25% for closing (70% is the separate build-it-too special).
   "/web-leads",
+  // Training, and the objection library and trainer it leans on.
+  //
+  // `/objections` is listed as a FIX, not a new grant. The library and the
+  // practice trainer shipped on 2026-09-15 and 2026-09-16 with no nav entry and
+  // no allowlist row, which meant no rep could reach either one: the feature
+  // was live, correct, and invisible. A surface a rep cannot navigate to may as
+  // well not have been built.
+  //
+  // Prefix matching (see `matchesAllowlist` below) means "/training" also
+  // covers "/training/opening" and "/objections" covers "/objections/practice",
+  // so each surface needs one row rather than one per page.
+  //
+  // Both routes still prove their own permission server-side. This file's own
+  // header says it: HIDING IS NOT ENFORCING.
+  "/training",
+  "/objections",
+  // OASIS OS departments (lib/os/departments.ts). A rep works in Sales and asks
+  // Chief of Staff; the department page scopes what each one shows to the
+  // viewer's own book. Marketing, Client Success, Finance and Operations stay
+  // off a rep's rail — the same line the capability rows above draw.
+  "/team/chief-of-staff",
+  "/team/sales",
+  // OASIS OS Feed, a Team row for everyone (lib/os/nav.ts). A rep gets its
+  // Needs-you tab only: the event tape is canSeeSystemSurfaces, which this
+  // persona does not have, so app/feed never reads agent_events for them
+  // (components/os/landings/feed-model.ts).
+  "/feed",
 ];
 
 /**
  * The sales manager's nav: the rep's rows plus the leads board they coach from.
  *
- * DELIBERATELY NOT YET the full set in the plan (Analytics, Commissions, a
- * team-scoped Settings). Those pages do not exist in a manager-scoped form yet,
- * and `requireSystemSurface()` 404s /analytics and /settings for any persona
- * whose canSeeSystemSurfaces is false — which a manager's is. Listing them now
- * would put a visible row over a page that 404s.
+ * Settings is present for the personal profile/integration cards and the
+ * manager's read-only team activity/performance cards. Analytics, operations,
+ * automations and health remain absent: those are system surfaces, and the
+ * manager capability does not turn into system administration.
  *
- * A hidden tab over a live page is a rehearsal for a leak; a visible tab over a
- * dead page is just a broken product. Neither is shipped. The rows arrive in the
- * same change that builds the manager-scoped pages behind them.
+ * `/leads` is deliberately absent. That generic manifest surface can express
+ * only all-vs-own scope, while the manager boundary is "assigned to a known
+ * OASIS sales rep". `/pipeline` is the canonical, roster-scoped team board.
  */
 export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   "/",
   "/schedule",
   "/pipeline",
   "/playbook",
-  "/leads",
+  "/commissions",
+  "/settings",
   // Managers assign from the same pool their reps source from.
   "/web-leads",
+  // A manager coaches against the same material a rep trains on, so they need
+  // to have seen it. `/objections` also carries the APPROVAL gate: approving an
+  // answer needs deal-closing rights, which a manager has.
+  "/training",
+  "/objections",
+  // The rep's departments: a manager coaches inside Sales, not Finance.
+  "/team/chief-of-staff",
+  "/team/sales",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 /**
@@ -524,19 +652,26 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
  * of them the way an unmatched `if (persona !== "sales")` did.
  */
 /**
- * Marketing's nav. Today, their own week, the playbook (brand voice and offer
- * language live there), and the marketing studio itself.
+ * Marketing's nav. Today, their own week, assigned pipeline, playbook, and the
+ * marketing studio itself.
  *
- * NOT /pipeline and NOT /leads: marketing does not work leads, and putting the
- * book in front of them is exactly the client-data exposure the role exists to
- * avoid. NOT the system surfaces either — /operations and /health are
- * machinery, not a content tool.
+ * /pipeline is own-only under the shared OASIS policy. /leads and the system
+ * surfaces remain excluded.
  */
 export const MARKETING_NAV_ALLOWLIST: readonly string[] = [
   "/",
   "/schedule",
+  "/pipeline",
   "/playbook",
+  "/settings",
   "/founders/marketing",
+  // OASIS OS: their department, the Ask target, and the ads surface the
+  // Marketing department operates. /forms stays absent, as before.
+  "/team/chief-of-staff",
+  "/team/marketing",
+  "/growth/ads",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 /**
@@ -549,7 +684,22 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  "/commissions",
+  "/settings",
   "/founders/marketing",
+  // CC, 2026-08-25: the builder/marketing hire also sells, so he sources from
+  // the same prospecting pool the reps do and claims into his own book.
+  "/web-leads",
+  // OASIS OS: the two departments his two jobs sit in, plus Chief of Staff.
+  // Client Success is absent: inside OASIS, delivery is founder-only
+  // (lib/delivery/access.ts), and a department over data he cannot read is a
+  // dead tab.
+  "/team/chief-of-staff",
+  "/team/sales",
+  "/team/marketing",
+  "/growth/ads",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {

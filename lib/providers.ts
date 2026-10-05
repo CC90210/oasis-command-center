@@ -11,10 +11,21 @@
  * Provider 5xx / 429 errors auto-retry via fetchWithRetry (3 attempts,
  * 2s/4s/8s with jitter) so a single Anthropic/OpenRouter blip doesn't
  * kill the chat. Once we have an open stream we don't retry mid-stream.
+ *
+ * METERED (OASIS OS plan v2 §F2.6). Every request carries a ModelCallMeter
+ * (lib/ai/usage.ts) built by the route from the session's tenant. streamChat
+ * reserves the call against the tenant's monthly AI budget before it is sent
+ * (a refusal is an error event whose message is the budget code) and writes
+ * the call's ai_usage_events row from the provider's final usage report after,
+ * whatever way the stream ends. The meter is a TYPE import here: this file is
+ * imported by client components for PROVIDER_REGISTRY, so it must never pull
+ * the server-only recorder into a browser bundle.
  */
 
 import { fetchWithRetry } from "./retry";
 import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
+import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "./ai/usage";
+import { meterRefusalCode } from "./ai/usage-codes";
 
 export type ChatRole = "system" | "user" | "assistant";
 export type ChatMessage = { role: ChatRole; content: string };
@@ -32,6 +43,8 @@ export type ChatRequest = {
    *  endpoint isn't on the public internet) and useful for self-hosted
    *  OpenAI-compatible endpoints (LM Studio, vLLM, llama.cpp server). */
   baseUrl?: string;
+  /** REQUIRED: meters this call for the tenant it serves (lib/ai/usage.ts modelCallMeter). */
+  meter: ModelCallMeter;
 };
 
 export type StreamEvent =
@@ -131,8 +144,8 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
   {
     value: "google",
     label: "Google Gemini",
-    tagline: "Free tier available via AI Studio",
-    hint: "Direct to Gemini via AI Studio. Free tier available.",
+    tagline: "Paid tier only. The free AI Studio tier may train on your data.",
+    hint: "Direct to Gemini via AI Studio. Paid tier only: the free AI Studio tier may train on your data, so it is not for a workspace's clients.",
     signup: "https://aistudio.google.com/",
     apiKey: "https://aistudio.google.com/apikey",
     docs: "https://ai.google.dev/gemini-api/docs",
@@ -268,6 +281,126 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent>
 }
 
 /* ============================================================================
+ * The metered request, shared by every adapter.
+ *
+ * Each adapter says WHAT to send and HOW to read its stream; this owns the
+ * order that makes the ledger exact: reserve (meter.begin) → send → read →
+ * `done` → one ai_usage_events row. The row is written in `finally`, so a
+ * request that is refused (non-2xx: nothing billed), breaks off (usage
+ * unknown), or is abandoned by its consumer (cancelled) still gets exactly one.
+ * ============================================================================ */
+
+/** What a stream reader fills in as the provider reports it. */
+type UsageAcc = {
+  /** The `done` event's numbers, as each adapter has always reported them. */
+  doneIn: number;
+  doneOut: number;
+  /** For the ledger. null until the provider reports it. */
+  ledger: ModelUsage;
+  /** The provider's final usage report arrived (the message completed). */
+  complete: boolean;
+};
+
+type MeteredSpec = {
+  provider: Provider;
+  model: string;
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  maxOutputTokens: number;
+  /** The error message for a non-2xx answer (each adapter's historical shape). */
+  refusal: (status: number, detail: string) => string;
+  read: (body: ReadableStream<Uint8Array>, acc: UsageAcc) => AsyncGenerator<StreamEvent>;
+};
+
+const utf8 = new TextEncoder();
+
+async function* metered(meter: ModelCallMeter, spec: MeteredSpec): AsyncGenerator<StreamEvent> {
+  const json = JSON.stringify(spec.body);
+  let call: ModelCall;
+  try {
+    call = await meter.begin({
+      provider: spec.provider,
+      model: spec.model,
+      maxOutputTokens: spec.maxOutputTokens,
+      promptBytes: utf8.encode(json).length,
+    });
+  } catch (err) {
+    // A budget refusal (or a budget that could not be read): nothing was sent.
+    yield { type: "error", message: meterRefusalCode(err) };
+    return;
+  }
+  const acc: UsageAcc = {
+    doneIn: 0,
+    doneOut: 0,
+    ledger: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null },
+    complete: false,
+  };
+  let end: CallEnd | null = null;
+  try {
+    const res = await fetchWithRetry(spec.url, { method: "POST", headers: spec.headers, body: json });
+    if (!res.ok || !res.body) {
+      const detail = await safeText(res);
+      // A provider that refused the request generated nothing, so billed nothing.
+      end = res.ok
+        ? { outcome: "error", errorCode: "empty_body" }
+        : { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+      yield { type: "error", message: spec.refusal(res.status, detail) };
+      return;
+    }
+    yield* spec.read(res.body, acc);
+    end = { outcome: "ok", usage: acc.complete ? acc.ledger : null };
+    yield { type: "done", inputTokens: acc.doneIn, outputTokens: acc.doneOut };
+  } catch (err) {
+    end = { outcome: "error", errorCode: "stream_failed", usage: null };
+    throw err;
+  } finally {
+    await call.finish(end ?? { outcome: "cancelled", usage: null });
+  }
+}
+
+/** The historical error shapes, which lib/os/channel/outcome.ts classifies. */
+function hostedRefusal(tag: string) {
+  return (status: number, detail: string) =>
+    status >= 500 || status === 429 ? `provider_temporarily_unavailable:${tag}_${status}` : `${tag}_${status}:${detail}`;
+}
+
+/**
+ * OpenAI-compatible usage (OpenAI, OpenRouter, Ollama / LM Studio). prompt_tokens
+ * includes the cached prefix; the ledger's input is the uncached part.
+ * OpenRouter adds usage.cost (USD, what it charged) and cache_write_tokens.
+ */
+function readOpenAIUsage(usage: Record<string, unknown>, acc: UsageAcc): void {
+  acc.doneIn = numberOr(usage.prompt_tokens, acc.doneIn);
+  acc.doneOut = numberOr(usage.completion_tokens, acc.doneOut);
+  const prompt = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null;
+  const completion = typeof usage.completion_tokens === "number" ? usage.completion_tokens : null;
+  const details = asSSERecord(usage.prompt_tokens_details);
+  const cached = numberOr(details?.cached_tokens, 0);
+  const written = numberOr(details?.cache_write_tokens, 0);
+  acc.ledger = {
+    inputTokens: prompt === null ? null : Math.max(prompt - cached - written, 0),
+    outputTokens: completion,
+    cacheReadTokens: cached,
+    cacheWriteTokens: written,
+    providerCostUsd: typeof usage.cost === "number" ? usage.cost : null,
+  };
+  acc.complete = prompt !== null && completion !== null;
+}
+
+async function* readOpenAICompatible(body: ReadableStream<Uint8Array>, acc: UsageAcc): AsyncGenerator<StreamEvent> {
+  for await (const event of parseSSE(body)) {
+    const data = asSSERecord(event.data);
+    if (!data) continue;
+    const choice = firstSSERecord(data.choices);
+    const delta = asSSERecord(choice?.delta)?.content;
+    if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
+    const usage = asSSERecord(data.usage);
+    if (usage) readOpenAIUsage(usage, acc);
+  }
+}
+
+/* ============================================================================
  * Ollama / LM Studio / any OpenAI-compatible local endpoint.
  *
  * baseUrl points at the operator's local model server. Defaults to the
@@ -284,19 +417,13 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent>
  * /v1/chat/completions). Same code path as streamOpenAI minus the bearer
  * auth (Ollama doesn't require one for local installs).
  * ============================================================================ */
-async function* streamOllama(req: ChatRequest): AsyncGenerator<StreamEvent> {
+function streamOllama(req: ChatRequest): AsyncGenerator<StreamEvent> {
   const base = (req.baseUrl || "http://localhost:11434/v1").replace(/\/+$/, "");
   const messages: Array<{ role: ChatRole; content: string }> = [];
   if (req.system) messages.push({ role: "system", content: req.system });
   messages.push(...req.messages);
 
-  const body = {
-    model: req.model,
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    max_tokens: req.maxTokens ?? 4096,
-  };
+  const maxTokens = req.maxTokens ?? 4096;
   const headers: Record<string, string> = { "content-type": "application/json" };
   // LM Studio honors a Bearer key when configured; Ollama ignores it.
   // Pass through whatever the operator stored (often "ollama" or
@@ -304,202 +431,154 @@ async function* streamOllama(req: ChatRequest): AsyncGenerator<StreamEvent> {
   if (req.apiKey && req.apiKey !== "ollama") {
     headers.authorization = `Bearer ${req.apiKey}`;
   }
-
-  const res = await fetchWithRetry(`${base}/chat/completions`, {
-    method: "POST",
+  return metered(req.meter, {
+    provider: "ollama",
+    model: req.model,
+    url: `${base}/chat/completions`,
     headers,
-    body: JSON.stringify(body),
+    body: {
+      model: req.model,
+      messages,
+      stream: true,
+      stream_options: { include_usage: true },
+      max_tokens: maxTokens,
+    },
+    maxOutputTokens: maxTokens,
+    refusal: (status, detail) =>
+      status >= 500 || status === 429 ? `local_model_temporarily_unavailable:${status}` : `ollama_${status}:${detail}`,
+    read: readOpenAICompatible,
   });
-  if (!res.ok || !res.body) {
-    const detail = await safeText(res);
-    yield {
-      type: "error",
-      message:
-        res.status >= 500 || res.status === 429
-          ? `local_model_temporarily_unavailable:${res.status}`
-          : `ollama_${res.status}:${detail}`,
-    };
-    return;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const event of parseSSE(res.body)) {
-    const data = asSSERecord(event.data);
-    if (!data) continue;
-    const choice = firstSSERecord(data.choices);
-    const delta = asSSERecord(choice?.delta)?.content;
-    if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    const usage = asSSERecord(data.usage);
-    if (usage) {
-      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
-      outputTokens = numberOr(usage.completion_tokens, outputTokens);
-    }
-  }
-  yield { type: "done", inputTokens, outputTokens };
 }
 
 /* ============================================================================
  * OpenRouter — OpenAI-compatible /api/v1/chat/completions
  * One key, hundreds of models. Recommended onboarding path.
  * ============================================================================ */
-async function* streamOpenRouter(req: ChatRequest): AsyncGenerator<StreamEvent> {
+function streamOpenRouter(req: ChatRequest): AsyncGenerator<StreamEvent> {
   const messages: Array<{ role: ChatRole; content: string }> = [];
   if (req.system) messages.push({ role: "system", content: req.system });
   messages.push(...req.messages);
 
-  const body = {
+  const maxTokens = req.maxTokens ?? 4096;
+  return metered(req.meter, {
+    provider: "openrouter",
     model: req.model,
-    messages,
-    stream: true,
-    max_tokens: req.maxTokens ?? 4096,
-  };
-  const res = await fetchWithRetry("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
+    url: "https://openrouter.ai/api/v1/chat/completions",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${req.apiKey}`,
       "HTTP-Referer": "https://oasisai.work",
       "X-Title": "OASIS Agent Command Center",
     },
-    body: JSON.stringify(body),
+    body: {
+      model: req.model,
+      messages,
+      stream: true,
+      max_tokens: maxTokens,
+    },
+    maxOutputTokens: maxTokens,
+    refusal: hostedRefusal("openrouter"),
+    read: readOpenAICompatible,
   });
-  if (!res.ok || !res.body) {
-    const detail = await safeText(res);
-    yield {
-      type: "error",
-      message:
-        res.status >= 500 || res.status === 429
-          ? `provider_temporarily_unavailable:openrouter_${res.status}`
-          : `openrouter_${res.status}:${detail}`,
-    };
-    return;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const event of parseSSE(res.body)) {
-    const data = asSSERecord(event.data);
-    if (!data) continue;
-    const choice = firstSSERecord(data.choices);
-    const delta = asSSERecord(choice?.delta)?.content;
-    if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    const usage = asSSERecord(data.usage);
-    if (usage) {
-      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
-      outputTokens = numberOr(usage.completion_tokens, outputTokens);
-    }
-  }
-  yield { type: "done", inputTokens, outputTokens };
 }
 
 /* ============================================================================
  * Anthropic — /v1/messages with stream:true SSE
  * ============================================================================ */
-async function* streamAnthropic(req: ChatRequest): AsyncGenerator<StreamEvent> {
-  const body = {
+function streamAnthropic(req: ChatRequest): AsyncGenerator<StreamEvent> {
+  const maxTokens = req.maxTokens ?? 4096;
+  return metered(req.meter, {
+    provider: "anthropic",
     model: req.model,
-    max_tokens: req.maxTokens ?? 4096,
-    stream: true,
-    system: req.system,
-    messages: req.messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role, content: m.content })),
-  };
-  const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
-    method: "POST",
+    url: "https://api.anthropic.com/v1/messages",
     headers: {
       "content-type": "application/json",
       "x-api-key": req.apiKey,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify(body),
+    body: {
+      model: req.model,
+      max_tokens: maxTokens,
+      stream: true,
+      system: req.system,
+      messages: req.messages
+        .filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role, content: m.content })),
+    },
+    maxOutputTokens: maxTokens,
+    refusal: hostedRefusal("anthropic"),
+    read: readAnthropic,
   });
-  if (!res.ok || !res.body) {
-    const detail = await safeText(res);
-    yield {
-      type: "error",
-      message:
-        res.status >= 500 || res.status === 429
-          ? `provider_temporarily_unavailable:anthropic_${res.status}`
-          : `anthropic_${res.status}:${detail}`,
-    };
-    return;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const event of parseSSE(res.body)) {
+}
+
+/**
+ * message_start carries the prompt side (input_tokens is uncached; cache reads
+ * and writes are their own counts); message_delta carries the CUMULATIVE
+ * output count, so the last one is the total. The message is complete, for the
+ * ledger, once a message_delta reported its output.
+ */
+async function* readAnthropic(body: ReadableStream<Uint8Array>, acc: UsageAcc): AsyncGenerator<StreamEvent> {
+  for await (const event of parseSSE(body)) {
     const data = asSSERecord(event.data);
     if (!data) continue;
     if (event.event === "message_start") {
       const usage = asSSERecord(asSSERecord(data.message)?.usage);
-      if (usage) inputTokens = numberOr(usage.input_tokens, 0);
+      if (usage) {
+        acc.doneIn = numberOr(usage.input_tokens, 0);
+        acc.ledger.inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
+        acc.ledger.cacheReadTokens = numberOr(usage.cache_read_input_tokens, 0);
+        acc.ledger.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, 0);
+      }
     } else if (event.event === "content_block_delta") {
       const text = asSSERecord(data.delta)?.text;
       if (typeof text === "string") yield { type: "delta", text };
     } else if (event.event === "message_delta") {
       const usage = asSSERecord(data.usage);
-      if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
+      if (typeof usage?.output_tokens === "number") {
+        acc.doneOut = usage.output_tokens;
+        acc.ledger.outputTokens = usage.output_tokens;
+        acc.complete = acc.ledger.inputTokens !== null;
+      }
     } else if (event.event === "message_stop") {
       break;
     }
   }
-  yield { type: "done", inputTokens, outputTokens };
 }
 
 /* ============================================================================
  * OpenAI — /v1/chat/completions stream:true (works for gpt-5.x)
  * ============================================================================ */
-async function* streamOpenAI(req: ChatRequest): AsyncGenerator<StreamEvent> {
+function streamOpenAI(req: ChatRequest): AsyncGenerator<StreamEvent> {
   const messages: Array<{ role: ChatRole; content: string }> = [];
   if (req.system) messages.push({ role: "system", content: req.system });
   messages.push(...req.messages);
 
-  const body = {
+  const maxTokens = req.maxTokens ?? 4096;
+  return metered(req.meter, {
+    provider: "openai",
     model: req.model,
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    max_completion_tokens: req.maxTokens ?? 4096,
-  };
-  const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
+    url: "https://api.openai.com/v1/chat/completions",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${req.apiKey}`,
     },
-    body: JSON.stringify(body),
+    body: {
+      model: req.model,
+      messages,
+      stream: true,
+      stream_options: { include_usage: true },
+      max_completion_tokens: maxTokens,
+    },
+    maxOutputTokens: maxTokens,
+    refusal: hostedRefusal("openai"),
+    read: readOpenAICompatible,
   });
-  if (!res.ok || !res.body) {
-    const detail = await safeText(res);
-    yield {
-      type: "error",
-      message:
-        res.status >= 500 || res.status === 429
-          ? `provider_temporarily_unavailable:openai_${res.status}`
-          : `openai_${res.status}:${detail}`,
-    };
-    return;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const event of parseSSE(res.body)) {
-    const data = asSSERecord(event.data);
-    if (!data) continue;
-    const choice = firstSSERecord(data.choices);
-    const delta = asSSERecord(choice?.delta)?.content;
-    if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
-    const usage = asSSERecord(data.usage);
-    if (usage) {
-      inputTokens = numberOr(usage.prompt_tokens, inputTokens);
-      outputTokens = numberOr(usage.completion_tokens, outputTokens);
-    }
-  }
-  yield { type: "done", inputTokens, outputTokens };
 }
 
 /* ============================================================================
  * Google Gemini — :streamGenerateContent SSE
  * ============================================================================ */
-async function* streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
+function streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
   // Pass the API key in the `x-goog-api-key` header instead of the URL
   // query string. Google supports both, but URL params can leak via
   // server logs, error response bodies that echo the request URL, and
@@ -510,39 +589,41 @@ async function* streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
       req.model
     )}:streamGenerateContent?alt=sse`;
 
+  const maxTokens = req.maxTokens ?? 4096;
   const contents = req.messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
   const body: Record<string, unknown> = {
     contents,
-    generationConfig: { maxOutputTokens: req.maxTokens ?? 4096 },
+    generationConfig: { maxOutputTokens: maxTokens },
   };
   if (req.system) {
     body.systemInstruction = { role: "user", parts: [{ text: req.system }] };
   }
-  const res = await fetchWithRetry(url, {
-    method: "POST",
+  return metered(req.meter, {
+    provider: "google",
+    model: req.model,
+    url,
     headers: {
       "content-type": "application/json",
       "x-goog-api-key": req.apiKey,
     },
-    body: JSON.stringify(body),
+    body,
+    maxOutputTokens: maxTokens,
+    refusal: hostedRefusal("google"),
+    read: readGoogle,
   });
-  if (!res.ok || !res.body) {
-    const detail = await safeText(res);
-    yield {
-      type: "error",
-      message:
-        res.status >= 500 || res.status === 429
-          ? `provider_temporarily_unavailable:google_${res.status}`
-          : `google_${res.status}:${detail}`,
-    };
-    return;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  for await (const event of parseSSE(res.body)) {
+}
+
+/**
+ * usageMetadata repeats, cumulative, on every chunk: the last one is the total.
+ * promptTokenCount includes the cached prefix (cachedContentTokenCount), and
+ * thinking tokens (thoughtsTokenCount) are billed as output but are not in
+ * candidatesTokenCount, so the ledger adds them.
+ */
+async function* readGoogle(body: ReadableStream<Uint8Array>, acc: UsageAcc): AsyncGenerator<StreamEvent> {
+  for await (const event of parseSSE(body)) {
     const data = asSSERecord(event.data);
     if (!data) continue;
     const candidate = firstSSERecord(data.candidates);
@@ -557,11 +638,20 @@ async function* streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
     }
     const usageMetadata = asSSERecord(data.usageMetadata);
     if (usageMetadata) {
-      inputTokens = numberOr(usageMetadata.promptTokenCount, inputTokens);
-      outputTokens = numberOr(usageMetadata.candidatesTokenCount, outputTokens);
+      acc.doneIn = numberOr(usageMetadata.promptTokenCount, acc.doneIn);
+      acc.doneOut = numberOr(usageMetadata.candidatesTokenCount, acc.doneOut);
+      const prompt = typeof usageMetadata.promptTokenCount === "number" ? usageMetadata.promptTokenCount : null;
+      const candidates = typeof usageMetadata.candidatesTokenCount === "number" ? usageMetadata.candidatesTokenCount : null;
+      const cached = numberOr(usageMetadata.cachedContentTokenCount, 0);
+      acc.ledger = {
+        inputTokens: prompt === null ? null : Math.max(prompt - cached, 0),
+        outputTokens: candidates === null ? null : candidates + numberOr(usageMetadata.thoughtsTokenCount, 0),
+        cacheReadTokens: cached,
+        cacheWriteTokens: 0,
+      };
+      acc.complete = prompt !== null && candidates !== null;
     }
   }
-  yield { type: "done", inputTokens, outputTokens };
 }
 
 function firstSSERecord(value: unknown): Record<string, unknown> | null {

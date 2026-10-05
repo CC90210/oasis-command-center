@@ -126,6 +126,12 @@ const nextConfig = {
     // 1, not 2 — see note 5 above. Two workers each entitled to a multi-GB heap
     // is what exhausted the container; one worker cannot race itself.
     cpus: 1,
+    // NOT staleTimes.dynamic > 0 (considered 2026-09-29 for tab switching).
+    // Many client components save with fetch() and update their own state
+    // without router.refresh(); with a client router cache, clicking away and
+    // back would show the page as it was BEFORE the save. Wrong data is worse
+    // than a slow tab. Speed comes from loading.tsx boundaries, warm-on-intent
+    // prefetch and faster server renders instead.
   },
   outputFileTracingRoot: path.join(__dirname),
   // lib/prompts/index.ts reads the .txt + .json prompt files at module init
@@ -133,6 +139,24 @@ const nextConfig = {
   // so without an explicit include the prompts don't ship and the AI scoring
   // routes 500 on cold start with "ENOENT".
   outputFileTracingIncludes: {
+    // 2026-08-29 (Cloudflare migration): the OpenNext bundle step needs the
+    // COMPLETE @libsql/client family in the traced tree — the default trace
+    // copies it partially ("lib-esm/web.js not found") and hrana's ws shim
+    // not at all. Gated on CF_MIGRATION_BUILD (set by wrangler_tool.py builds
+    // only): a global include participates in VERCEL function packaging too
+    // and would bloat every function there (codex audit 2026-08-30).
+    ...(process.env.CF_MIGRATION_BUILD === "1"
+      ? {
+          "/**/*": [
+            "./node_modules/@libsql/client/**/*",
+            "./node_modules/@libsql/core/**/*",
+            "./node_modules/@libsql/hrana-client/**/*",
+            "./node_modules/@libsql/isomorphic-ws/**/*",
+            "./node_modules/@libsql/isomorphic-fetch/**/*",
+            "./node_modules/js-base64/**/*",
+          ],
+        }
+      : {}),
     "/api/leads/*/score": ["./lib/prompts/**/*"],
     "/api/leads/*/next-action": ["./lib/prompts/**/*"],
     // Added 2026-06-07 after Playwright UI sweep caught the new
@@ -181,6 +205,8 @@ const nextConfig = {
         // the includes are cheap insurance if branding is ever re-added there.
         "/api/leads/*/documents",
         "/api/forms/submit",
+        // 2026-08-30: signature-crop consumer (extract-signature flow).
+        "/api/internal/apply-extraction",
       ].map((route) => [
         route,
         [
@@ -191,6 +217,22 @@ const nextConfig = {
           // The watermark tiles this logo + registers LiberationSans-Bold (above)
           // so canvas text renders on Vercel (no system fonts there).
           "./public/brand/sunbiz-logo.png",
+          // 2026-08-30 (codex audit): lib/forms/native-raster.ts now loads the
+          // native raster stack via a bundler-opaque dynamic import, which
+          // hides the dependency edge from output tracing too — without these
+          // the packaged Vercel functions would lack the packages entirely and
+          // watermark/signature-crop would silently regress to ok:false.
+          // Excluded from CF builds (unreachable there; @napi-rs store entries
+          // also EPERM on the Windows OpenNext copy step).
+          ...(process.env.CF_MIGRATION_BUILD === "1"
+            ? []
+            : [
+                "./node_modules/@napi-rs/**",
+                "./node_modules/sharp/**",
+                "./node_modules/@img/**",
+                "./node_modules/pdfjs-dist/legacy/**",
+                "./node_modules/pdfjs-dist/package.json",
+              ]),
         ],
       ]),
     ),
@@ -209,14 +251,17 @@ const nextConfig = {
       {
         // The entry-path page moved off the brand apex when the marketing
         // site took over "/" (2026-07-31). /welcome had been shared
-        // directly, so the old URL has to keep resolving.
+        // directly, so the old URL has to keep resolving. It pointed at
+        // /start until 2026-09-29, when /start was retired (F0 containment);
+        // "/" is where /start itself sent a signed-in visitor, and it is the
+        // marketing home for everyone else.
         source: "/welcome",
-        destination: "/start",
+        destination: "/",
         permanent: true,
       },
       {
         source: "/command-centre-explained",
-        destination: "/start",
+        destination: "/",
         permanent: true,
       },
       // Inbound links from the previous marketing site

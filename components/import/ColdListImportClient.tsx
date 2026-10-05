@@ -687,10 +687,6 @@ export function ColdListImportClient({ tenantSlug }: { tenantSlug: string }) {
     [mappedRows],
   );
 
-  async function handleFileUpload(file: File) {
-    await handleFilesUpload([file]);
-  }
-
   // Multi-file (2026-06-19): operators drag/select several CSVs at once; combine
   // them into the textarea buffer (repeated headers dropped) as one batch.
   async function handleFilesUpload(files: File[]) {

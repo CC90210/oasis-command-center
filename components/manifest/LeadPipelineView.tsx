@@ -12,9 +12,11 @@ import {
   type ReactNode,
 } from "react";
 import {
+  BarChart3,
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   History,
   Loader2,
   Mail,
@@ -25,6 +27,11 @@ import {
   Zap,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
+// Shared with the /web-leads list so one hardening rule covers both surfaces:
+// 217 stored websites have no scheme (a bare domain in an href navigates inside
+// our own dashboard) and these values come from OpenStreetMap, which anyone can
+// edit, so a `javascript:` href would run in our origin.
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { AcceleratedToggle } from "@/components/manifest/AcceleratedToggle";
 import {
   SUNBIZ_BULK_SAFE_TEMPLATES,
@@ -63,6 +70,7 @@ import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 import { QuickAddLeadModal } from "@/components/manifest/QuickAddLeadModal";
 import { isAcceleratedEligible } from "@/lib/drips/accelerated-eligibility";
 import { isLeadListVisible } from "@/lib/lead-list-visibility";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
 
@@ -107,6 +115,44 @@ type Props = {
    * agents, so there is zero change to the non-manager view.
    */
   canManage?: boolean;
+  /**
+   * May this viewer ADD a lead they found themselves?
+   *
+   * Separate from `canManage` on purpose. Creating a lead and administering
+   * other people's leads are different powers: every sales role (opener,
+   * closer, manager, builder, marketing) sources prospects and needs to enter
+   * them, while bulk-assigning a lead to a named rep stays with admins. Reusing
+   * canManage for both is what hid the button from every rep. CC, 2026-09-08.
+   */
+  canCreateLead?: boolean;
+  /**
+   * OASIS stage keys this viewer may add a lead to. Each matching column gets
+   * a "+" that opens the new-lead form with that stage preselected. Computed
+   * server-side by lib/oasis-lead-create.ts — the same rule the create route
+   * enforces — so a "+" never opens a form the server will refuse.
+   */
+  creatableStageKeys?: readonly string[];
+  /**
+   * Exact server-side totals + navigation for a bounded result window.
+   * Omitted by legacy/SunBiz callers, which continue to render their complete
+   * in-memory row set exactly as before.
+   */
+  resultWindow?: {
+    exactStageCounts: Record<string, number>;
+    exactTotal: number;
+    activeStage: string | null;
+    page: number;
+    pageSize: number;
+    shownFrom: number;
+    shownTo: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+    truncatedStages: string[];
+    stageHrefs: Record<string, string>;
+    allStagesHref: string;
+    previousHref: string | null;
+    nextHref: string | null;
+  };
 };
 
 type TenantMember = {
@@ -120,9 +166,20 @@ const SUN_GRID_STYLE: CSSProperties = {
     "minmax(150px,1.6fr) minmax(92px,.9fr) minmax(108px,.9fr) 30px 56px 38px minmax(104px,1fr) 68px 112px 34px 42px 76px 58px",
 };
 
+// Seven columns as of 2026-08-25. `Email` became `Address` and a `Website`
+// column was added -- see PipelineWebsiteCell and the Lead-cell comment for the
+// measurements behind both. Website is the widest new slot because it carries
+// two controls plus either a number or a full sentence; the sentence is the
+// point (a non-scored state must never render as a dash), and wrapping it to
+// three lines would make the row heights ragged.
 const OASIS_GRID_STYLE: CSSProperties = {
   gridTemplateColumns:
-    "minmax(160px,1.6fr) minmax(140px,1.2fr) minmax(110px,1fr) 56px 100px 88px",
+    // Six columns. `Email` became `Address` on evidence -- measured 2026-08-25,
+    // 4 of 31,034 leads carry an email and 26,800 carry an address -- and the
+    // AI-score column stays dropped (origin/main, #295): on a website-sales
+    // board the WEBSITE score is the qualifier, and it lives in the Website
+    // cell rather than competing with a second number beside it.
+    "minmax(170px,1.5fr) minmax(140px,1.1fr) minmax(110px,.9fr) minmax(170px,1.2fr) 100px 88px",
 };
 
 // Tenant-variant config struct picked at the top of the component.
@@ -196,6 +253,11 @@ export function LeadPipelineView({
   basePath,
   variant = "sunbiz",
   canManage = false,
+  // Defaults to canManage so any caller that has not been updated keeps its
+  // current behaviour rather than silently gaining a button.
+  canCreateLead,
+  creatableStageKeys,
+  resultWindow,
 }: Props) {
   const router = useRouter();
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
@@ -265,8 +327,26 @@ export function LeadPipelineView({
       if (t > mostRecentUpdate) mostRecentUpdate = t;
     }
 
+    // A bounded server window cannot derive global totals from the rows it
+    // happens to carry. Stage totals are exact DB counts; active/hot/ready are
+    // exact sums of those counts. Cold remains a row-level calculation and is
+    // explicitly labelled as the loaded-window value below when truncated.
+    if (resultWindow) {
+      const exactStageCounts = resultWindow.exactStageCounts;
+      active = Object.entries(exactStageCounts).reduce(
+        (sum, [stage, count]) => sum + (cfg.active.has(stage) ? count : 0),
+        0,
+      );
+      hot = exactStageCounts[hotStageKey] || 0;
+      ready = Object.entries(exactStageCounts).reduce(
+        (sum, [stage, count]) => sum + (cfg.readyToAdvance.has(stage) ? count : 0),
+        0,
+      );
+      return { stageCounts: exactStageCounts, active, hot, cold, ready, mostRecentUpdate };
+    }
+
     return { stageCounts, active, hot, cold, ready, mostRecentUpdate };
-  }, [rows, stageField, cfg, hotStageKey]);
+  }, [rows, stageField, cfg, hotStageKey, resultWindow]);
 
   const renderedRows = stageFilter
     ? rows.filter((r) => String(r.data[stageField] || "") === stageFilter)
@@ -283,6 +363,12 @@ export function LeadPipelineView({
       ? rowsIn.filter((r) => rowMissing(r).some((t) => docFilter.has(t)))
       : rowsIn;
   const touchFirst = pickTouchFirst(renderedRows, stageField, stages, cfg);
+  const windowIsIncomplete = Boolean(
+    resultWindow &&
+      (resultWindow.truncatedStages.length > 0 ||
+        (resultWindow.activeStage &&
+          (resultWindow.exactStageCounts[resultWindow.activeStage] || 0) > renderedRows.length)),
+  );
 
   useEffect(() => {
     setCollapsedStages({});
@@ -419,6 +505,7 @@ export function LeadPipelineView({
         updated?: number;
         skipped?: number;
         failed?: number;
+        trackingFailed?: number;
         error?: string;
       };
       if (!r.ok || !body.ok) {
@@ -428,6 +515,7 @@ export function LeadPipelineView({
       const bits = [`${body.updated ?? 0} ${verb}`];
       if (body.skipped) bits.push(`${body.skipped} skipped`);
       if (body.failed) bits.push(`${body.failed} failed`);
+      if (body.trackingFailed) bits.push(`${body.trackingFailed} tracking alerts`);
       setBulkMsg(bits.join(" · "));
       setSelected(new Set());
       router.refresh();
@@ -465,7 +553,7 @@ export function LeadPipelineView({
             <span className={stats.cold > 0 ? "font-semibold text-red-300" : "text-fg-muted"}>
               {stats.cold}
             </span>{" "}
-            going cold
+            {windowIsIncomplete ? "going cold in shown rows" : "going cold"}
             <span className="mx-1.5 text-fg-dim">/</span>
             <span className="font-semibold text-emerald-300">{stats.ready}</span> ready to advance
           </div>
@@ -502,7 +590,10 @@ export function LeadPipelineView({
               {selectMode ? "Done" : "Select"}
             </button>
           )}
-          {(variant !== "oasis" || canManage) && <Link
+          {/* Gated on canCreateLead, NOT canManage: every sales role sources
+              their own prospects and must be able to enter one. Bulk assign
+              above and "New Form Application" below stay admin-only. */}
+          {(variant !== "oasis" || (canCreateLead ?? canManage)) && <Link
             href={newHref}
             className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
           >
@@ -511,8 +602,12 @@ export function LeadPipelineView({
           </Link>}
           {/* Drop-in autofill — drop a merchant's existing application (any
               company's PDF) to create a NEW SunBiz lead + application from it. */}
-          {isLeads && (variant !== "oasis" || canManage) && (
-            <AutofillDropzone mode="new" tenantSlug={slug} label="New from application" />
+          {/* SunBiz only. "New Form Application" files a lead at a SunBiz
+              underwriting stage with no OASIS stamp, so on the OASIS board it
+              made a lead the board can never draw: the "I added it and it isn't
+              there" defect, by a third door. (Verifier, 2026-09-10.) */}
+          {isLeads && variant !== "oasis" && (
+            <AutofillDropzone mode="new" tenantSlug={slug} label="New Form Application" />
           )}
         </div>
       </div>
@@ -538,7 +633,13 @@ export function LeadPipelineView({
           <PageSearchBar entityLabel={entityLabel} />
         </div>
         <div className="whitespace-nowrap text-[10.5px] text-fg-dim">
-          {stages.length} stages / {renderedRows.length} visible
+          {resultWindow
+            ? `${stages.length} stages / ${renderedRows.length} shown / ${
+                resultWindow.activeStage
+                  ? resultWindow.exactStageCounts[resultWindow.activeStage] || 0
+                  : resultWindow.exactTotal
+              } matches`
+            : `${stages.length} stages / ${renderedRows.length} visible`}
         </div>
         <div className="whitespace-nowrap font-mono text-[10.5px] text-fg-dim">
           updated{" "}
@@ -551,19 +652,16 @@ export function LeadPipelineView({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         {stages.map((stage) => {
           const count = stats.stageCounts[stage.key] || 0;
-          const collapsed = collapsedStages[stage.key] ?? true;
+          const collapsed =
+            collapsedStages[stage.key] ?? (resultWindow?.activeStage === stage.key ? false : true);
           const selected = stageFilter === stage.key;
-          return (
-            <button
-              key={stage.key}
-              type="button"
-              onClick={() => toggleStage(stage.key)}
-              className={`min-h-[56px] min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
-                selected
-                  ? "border-accent bg-accent/10"
-                  : "border-bg-border bg-bg-deep/45 hover:border-fg-dim hover:bg-bg-elev/40"
-              }`}
-            >
+          const className = `min-h-[56px] min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
+            selected
+              ? "border-accent bg-accent/10"
+              : "border-bg-border bg-bg-deep/45 hover:border-fg-dim hover:bg-bg-elev/40"
+          }`;
+          const content = (
+            <>
               <div className="flex items-center gap-2">
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: stage.bg }} />
                 <span className="min-w-0 flex-1 text-[11px] font-bold uppercase leading-tight tracking-wide text-fg-muted">
@@ -576,6 +674,15 @@ export function LeadPipelineView({
                 )}
               </div>
               <div className="mt-1 font-mono text-[12px] text-fg">{count}</div>
+            </>
+          );
+          return resultWindow?.activeStage ? (
+            <Link key={stage.key} href={resultWindow.stageHrefs[stage.key] || basePath} className={className}>
+              {content}
+            </Link>
+          ) : (
+            <button key={stage.key} type="button" onClick={() => toggleStage(stage.key)} className={className}>
+              {content}
             </button>
           );
         })}
@@ -640,7 +747,7 @@ export function LeadPipelineView({
         >
           <div className="flex flex-wrap items-center gap-3">
             <span className="rounded bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
-              Touch first
+              {windowIsIncomplete ? "Touch first in shown rows" : "Touch first"}
             </span>
             <span className="text-[13px] font-medium text-fg">{touchFirst.name}</span>
             <span className="text-[12px] text-amber-200/90">
@@ -698,7 +805,15 @@ export function LeadPipelineView({
             entityName={entityName}
             stage={stage}
             rows={stageRows}
-            collapsed={collapsedStages[stage.key] ?? true}
+            totalCount={resultWindow ? resultWindow.exactStageCounts[stage.key] || 0 : stageRows.length}
+            browseHref={
+              resultWindow?.truncatedStages.includes(stage.key)
+                ? resultWindow.stageHrefs[stage.key] || null
+                : null
+            }
+            collapsed={
+              collapsedStages[stage.key] ?? (resultWindow?.activeStage === stage.key ? false : true)
+            }
             onToggle={() => toggleStage(stage.key)}
             variant={variant}
             cfg={cfg}
@@ -708,9 +823,65 @@ export function LeadPipelineView({
             selected={selected}
             onToggleSelect={toggleSelect}
             onAddLead={() => setAddLeadOpen(true)}
+            addLeadHref={
+              variant === "oasis" && creatableStageKeys?.includes(stage.key)
+                ? `${newHref}?stage=${encodeURIComponent(stage.key)}`
+                : null
+            }
           />
         );
       })}
+
+      {resultWindow?.activeStage && (
+        <nav
+          aria-label="Pipeline result pages"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-deep/35 px-4 py-3 text-[11px] text-fg-muted"
+        >
+          <Link href={resultWindow.allStagesHref} className="font-semibold text-accent hover:text-accent/80">
+            All stages
+          </Link>
+          <span className="tabular-nums">
+            {resultWindow.shownFrom > 0
+              ? `Showing ${resultWindow.shownFrom}-${resultWindow.shownTo} of ${
+                  resultWindow.exactStageCounts[resultWindow.activeStage] || 0
+                }`
+              : "No matches"}
+          </span>
+          <span className="flex items-center gap-2">
+            {resultWindow.previousHref ? (
+              <Link
+                href={resultWindow.previousHref}
+                className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
+              >
+                Previous
+              </Link>
+            ) : (
+              <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
+                Previous
+              </span>
+            )}
+            <span className="font-mono text-fg-dim">Page {resultWindow.page}</span>
+            {resultWindow.nextHref ? (
+              <Link
+                href={resultWindow.nextHref}
+                className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
+              >
+                Next
+              </Link>
+            ) : (
+              <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
+                Next
+              </span>
+            )}
+          </span>
+        </nav>
+      )}
+
+      {resultWindow && !resultWindow.activeStage && resultWindow.truncatedStages.length > 0 && (
+        <p className="text-center text-[10.5px] text-fg-dim">
+          Showing the newest {resultWindow.pageSize} matches per busy stage. Use View all to reach every older deal.
+        </p>
+      )}
 
       <BulkEmailDialog
         open={emailDialogOpen}
@@ -735,9 +906,13 @@ export function LeadPipelineView({
           onRetryMembers={retryMembers}
           busy={bulkBusy}
           onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
-          onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
+          onStage={
+            variant === "oasis"
+              ? undefined
+              : (stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")
+          }
           onDecline={
-            entityName === "lead"
+            variant !== "oasis" && entityName === "lead"
               ? () => {
                   if (
                     window.confirm(
@@ -790,7 +965,7 @@ function BulkActionBar({
   onRetryMembers: () => void;
   busy: boolean;
   onAssign: (assignedTo: string | null) => void;
-  onStage: (stageKey: string) => void;
+  onStage?: (stageKey: string) => void;
   onDecline?: () => void;
   onOpenEmail: () => void;
   onCcBlast: (templateId: string) => void;
@@ -815,7 +990,7 @@ function BulkActionBar({
             onClick={onRetryMembers}
             className="rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/20"
           >
-            Couldn't load agents — retry
+            Couldn&apos;t load agents — retry
           </button>
         ) : (
           <select
@@ -840,8 +1015,9 @@ function BulkActionBar({
         )}
       </label>
 
-      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
-        Move to
+      {onStage && (
+        <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+          Move to
         <select
           defaultValue=""
           disabled={busy}
@@ -849,7 +1025,7 @@ function BulkActionBar({
             const v = e.target.value;
             e.currentTarget.selectedIndex = 0;
             if (v === "__decline") onDecline?.();
-            else if (v) onStage(v);
+            else if (v) onStage?.(v);
           }}
           className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
         >
@@ -863,7 +1039,8 @@ function BulkActionBar({
             <option value="__decline">Decline → Applications</option>
           )}
         </select>
-      </label>
+        </label>
+      )}
 
       {/* Bulk email. Opens the full composer (preflight + template or
           write-your-own + live send status) rather than firing from a bare
@@ -961,6 +1138,8 @@ function StageSection({
   entityName,
   stage,
   rows,
+  totalCount,
+  browseHref,
   collapsed,
   onToggle,
   variant,
@@ -971,11 +1150,14 @@ function StageSection({
   selected,
   onToggleSelect,
   onAddLead,
+  addLeadHref = null,
 }: {
   slug: string;
   entityName: "lead" | "application";
   stage: StageMeta;
   rows: Row[];
+  totalCount: number;
+  browseHref: string | null;
   collapsed: boolean;
   onToggle: () => void;
   variant: PipelineVariant;
@@ -988,6 +1170,9 @@ function StageSection({
   /** When set (only the sent_application section passes it), renders a "+ Add
    *  lead" button in the section header that opens the manual quick-add modal. */
   onAddLead?: () => void;
+  /** OASIS: the new-lead form with this column's stage preselected. Set only
+   *  for columns the viewer may create in; absent, no "+" renders. */
+  addLeadHref?: string | null;
 }) {
   const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
@@ -1010,7 +1195,7 @@ function StageSection({
             <span className="truncate text-[11px] font-bold uppercase tracking-wider" style={{ color: stage.bg }}>
               {stage.label}
             </span>
-            <span className="font-mono text-[11px] text-fg-dim">{rows.length}</span>
+            <span className="font-mono text-[11px] text-fg-dim">{totalCount}</span>
           </div>
           {targetLabel && (
             <span className="shrink-0 rounded bg-bg-deep/60 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-fg-dim">
@@ -1018,6 +1203,24 @@ function StageSection({
             </span>
           )}
         </button>
+        {browseHref && (
+          <Link
+            href={browseHref}
+            className="mr-3 shrink-0 rounded-md border border-bg-border bg-bg-deep/50 px-2 py-1 text-[10px] font-semibold text-accent hover:border-accent/50"
+          >
+            View all {totalCount}
+          </Link>
+        )}
+        {addLeadHref && (
+          <Link
+            href={addLeadHref}
+            title={`Add a lead to ${stage.label}`}
+            aria-label={`Add a lead to ${stage.label}`}
+            className="mr-3 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-deep/50 text-accent hover:border-accent/50"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Link>
+        )}
         {onAddLead && stage.key === "sent_application" && (
           <button
             type="button"
@@ -1044,9 +1247,9 @@ function StageSection({
               {variant === "oasis" ? (
                 <>
                   <HeaderCell>Lead</HeaderCell>
-                  <HeaderCell>Email</HeaderCell>
+                  <HeaderCell>Address</HeaderCell>
                   <HeaderCell>Phone</HeaderCell>
-                  <HeaderCell>Score</HeaderCell>
+                  <HeaderCell>Website</HeaderCell>
                   <HeaderCell>Last Touch</HeaderCell>
                   <HeaderCell>Created</HeaderCell>
                 </>
@@ -1417,34 +1620,203 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // "Lead <id-prefix>". Avoids the bare "Untitled" — anything we can show
   // beats a blank label.
   const emailLocal = (str(d.email) || "").split("@")[0] || "";
-  const name =
-    str(d.name) ||
-    str(d.contact_name) ||
-    company ||
-    emailLocal ||
-    `Lead ${row.id.slice(0, 6)}`;
+  // The BUSINESS, which is what the "Lead" column is. contact_name is no longer
+  // in this ladder: it now holds a PERSON (see contactNameFor), so leaving it
+  // here would print an owner's name in the business slot on any lead missing
+  // `name`. The person gets its own line below instead.
+  const name = str(d.name) || company || emailLocal || `Lead ${row.id.slice(0, 6)}`;
+  /**
+   * Who to ask for. This row model previously had NO person field at all —
+   * /pipeline forces variant="oasis" and early-returns here, so the ownerName
+   * line further down (in the SunBiz row model) was never reached on this
+   * board. 1,853 leads carry an owner_name and a rep scanning the pipeline
+   * could not see a single one of them.
+   */
+  const contactName = contactNameFor(d);
   const email = str(d.email) || "";
   const phone = formatPhone(str(d.phone) || "");
   const assignedRep = str(d.assigned_to_name) || (str(d.assigned_to) ? "Assigned agent" : "Unassigned");
-  const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
-  const scoreRaw = typeof d.score === "number" ? d.score : null;
-  const scoreNum = aiScoreRaw ?? scoreRaw;
-  const touchIso = lastTouchIso(row);
-  const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchIso);
-  const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
+  const touchAnchorIso = lastTouchIso(row);
+  const explicitTouchIso = lastTouchIso({ data: d, created_at: null });
+  const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchAnchorIso);
+  const lastTouchLabel = explicitTouchIso ? relTime(explicitTouchIso) : "Never";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
+  // ═══ THE WEB-LEAD HALF (2026-08-25) ═════════════════════════════════════
+  //
+  // Adon: "you can see [it] on the leads tab but you should also be able to
+  // click and view the website as well as see all of the leads information...
+  // on the pipeline tab, which is our CRM."
+  //
+  // These fields were already on every row and simply never read here. The CRM
+  // board and the /web-leads list are the same `tenant_records` rows in the
+  // same tenant, so this reads the lead's own stored values rather than
+  // deriving anything new. `industry` falls back across the two spellings the
+  // ingest writes; `webdev_industry` is the rep-facing collapse of 212 raw OSM
+  // categories into 18, so it is preferred when present.
+  const websiteUrl = str(d.website);
+  const city = str(d.business_city);
+  const province = str(d.state);
+  const industry = str(d.webdev_industry) || str(d.industry);
+  const address = str(d.business_address);
+  // VERBATIM, both of them, in every state. These once rendered only in the
+  // non-scored branch, which meant a scored lead showed neither -- exactly when
+  // a rep has a confident number and most needs the hedge. Never shortened,
+  // re-worded, or turned into a badge.
+  const websiteCondition = str(d.website_condition);
+  const auditFindings = str(d.audit_findings);
+  // Resolved server-side by lib/web-leads/attach-scores.ts against the same
+  // memoised index the leads tab uses, so the two screens cannot disagree.
+  // Absent (undefined) means nobody attached it -- a caller that did not opt in
+  // -- which is NOT the same as "not scored" and must not render as a number.
+  // Is this row actually a web-lead? Caught by review 2026-08-25: the battle
+  // card lives at /web-leads/<id>, whose fetchLead is pinned to WEBDEV_TENANT_ID,
+  // so linking there from any other tenant's row -- or from an ordinary CRM lead
+  // typed in by hand -- hands a rep a button that always 404s. `oasis-webdev`
+  // holds 53 real leads, so this was live. Keyed on the business id the score
+  // join already needs, which is the same thing that makes a row a web-lead.
+  const webLeadBusinessId = str(d.webdev_source_business_id);
+  const webScoreRaw = d.derived_website_score;
+  const webScore = typeof webScoreRaw === "number" ? webScoreRaw : null;
+  const webScoreState =
+    typeof d.derived_website_score_state === "string"
+      ? (d.derived_website_score_state as WebScoreState)
+      : null;
+  // Hostname only, kept from origin/main (#295). On a website-sales board the
+  // site IS the qualifier, and a rep triaging thirty rows should see WHICH
+  // domain without opening anything. A full URL would swamp the cell.
+  const websiteHost = hostOf(websiteUrl || "");
+  // "City, PROV · Industry" -- whichever parts exist, never a lone separator.
+  const place = [city, province].filter(Boolean).join(", ");
+  const businessLine = [place, industry].filter(Boolean).join(" · ");
   return {
     name,
+    contactName,
     company,
     email,
     phone,
     assignedRep,
-    score: scoreNum,
     cold,
     lastTouchLabel,
     createdLabel,
+    websiteUrl,
+    websiteHost,
+    city,
+    province,
+    industry,
+    address,
+    websiteCondition,
+    auditFindings,
+    webScore,
+    webScoreState,
+    businessLine,
+    isWebLead: Boolean(webLeadBusinessId),
   };
+}
+
+/** "https://www.expertvelo.com/x" -> "expertvelo.com". "" when unparseable. */
+function hostOf(raw: string): string {
+  if (!raw.trim()) return "";
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`;
+    return new URL(withScheme).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+/** Mirrors ScoreState in lib/web-leads/scores.ts. Declared locally rather than
+ *  imported so this client component does not pull in the server-only score
+ *  module (it reaches getServiceSupabase) just to name a union. */
+type WebScoreState = "scored" | "unreachable" | "not_scored" | "no_website" | "parked";
+
+/**
+ * The website block on a CRM row: open the site, open the battle card, and the
+ * honest state of what we know about it.
+ *
+ * ═══ NO COLOUR IS KEYED TO THE SCORE, ANYWHERE IN HERE ═══
+ * Not on the number, not on a bar, not on a marker. A red 22 renders a
+ * judgement the measurement does not support, and a rep who sees red says
+ * something on a live call they cannot back up. The number is `text-fg` and the
+ * track is one neutral fill whether the score is 4 or 94. Pinned by
+ * tests/web-leads-guards.test.ts, which bans the colour utilities on every
+ * audit-rendering component by name -- this one included.
+ */
+function PipelineWebsiteCell({
+  m,
+  leadId,
+}: {
+  m: ReturnType<typeof oasisRowModel>;
+  leadId: string;
+}) {
+  const href = preferredSiteUrl(m.websiteUrl);
+  // THE NON-SCORED STATES RENDER AS SENTENCES, never a zero, a dash, a blank or
+  // an empty chart. `no_website` uses the lead's OWN stored wording, which is
+  // OpenStreetMap's hedge -- absence of a website tag means nobody mapped one,
+  // not that no site exists.
+  const sentence =
+    m.webScoreState === "parked"
+      ? "Domain listed for sale, no live site"
+      : m.webScoreState === "unreachable"
+        ? "We could not check this site"
+        : m.webScoreState === "not_scored"
+          ? "Not scored yet"
+          : m.webScoreState === "no_website"
+            ? m.websiteCondition || "No website found yet, needs checking"
+            : null;
+  return (
+    <div className="flex min-w-0 flex-col items-start gap-1.5">
+      {/* WHICH domain, at a glance, before any control. Kept from origin/main
+          (#295): on a website-sales board the site is the qualifier. */}
+      {m.websiteHost && (
+        <span className="block max-w-full truncate text-[11px] text-fg-muted" title={m.websiteUrl || m.websiteHost}>
+          {m.websiteHost}
+        </span>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {/* Real links, so they middle-click and cmd-click into a new tab -- a
+            rep queueing three sites before a call block is the normal case.
+            z-10 lifts them above the row's stretched overlay link. */}
+        {href && (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open ${m.name}'s website in a new tab`}
+            className="relative z-10 inline-flex shrink-0 items-center gap-1 rounded-md border border-bg-border/70 px-2 py-1 text-[10px] font-semibold text-fg-dim opacity-80 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+          >
+            <ExternalLink className="h-3 w-3" />View site
+          </a>
+        )}
+        {/* Only for rows that ARE web-leads. The battle card lives at
+            /web-leads/<id>, whose lookup is pinned to WEBDEV_TENANT_ID, so
+            linking there from any other tenant's row -- or from an ordinary CRM
+            lead typed in by hand -- is a button that always 404s. */}
+        {m.isWebLead && (
+          <Link
+            href={`/web-leads/${encodeURIComponent(leadId)}`}
+            title={`Open the full battle card for ${m.name}`}
+            className="relative z-10 inline-flex shrink-0 items-center gap-1 rounded-md border border-bg-border/70 px-2 py-1 text-[10px] font-semibold text-fg-dim opacity-80 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+          >
+            <BarChart3 className="h-3 w-3" />Battle card
+          </Link>
+        )}
+      </div>
+      {m.webScoreState === "scored" && m.webScore != null ? (
+        <div className="flex w-full items-center gap-2">
+          <span className="text-sm font-bold leading-none tabular-nums text-fg">{m.webScore}</span>
+          <span className="block h-1.5 w-full max-w-[4rem] overflow-hidden rounded-full bg-bg-border/80" aria-hidden>
+            <span
+              className="block h-full rounded-full bg-fg-muted"
+              style={{ width: `${Math.min(100, Math.max(0, m.webScore))}%` }}
+            />
+          </span>
+        </div>
+      ) : sentence ? (
+        <span className="block text-[10px] italic leading-snug text-fg-dim">{sentence}</span>
+      ) : null}
+    </div>
+  );
 }
 
 function OasisDesktopRow({
@@ -1460,11 +1832,35 @@ function OasisDesktopRow({
 }) {
   const m = oasisRowModel(row, cfg, stage);
   return (
-    <Link
-      href={`${basePath}/${row.id}`}
-      className="grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
+    // ═══ WHY THIS IS NO LONGER A <Link> WRAPPING THE WHOLE ROW ═════════════
+    //
+    // It used to be, and that made the row a single anchor. The moment this row
+    // gained its own "View site" and "Battle card" links, that shape became an
+    // anchor inside an anchor -- which is invalid HTML, and browsers do not
+    // render it as written: the parser closes the outer <a> early and the row
+    // silently comes apart. React will happily emit it and nothing throws.
+    //
+    // The fix is the stretched-link pattern: the row is a plain grid, and ONE
+    // absolutely-positioned link covers it. The row still behaves exactly as
+    // before, including middle-click and cmd-click into a new tab, which a
+    // router.push on a div would have thrown away -- and reps queue leads that
+    // way before a call block. The inner links sit at z-10, above the overlay.
+    <div
+      className="group relative grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
       style={cfg.gridStyle}
     >
+      <Link
+        href={`${basePath}/${row.id}`}
+        aria-label={`Open ${m.name}`}
+        // The overlay paints above the static cells, so THEIR `title` tooltips
+        // no longer fire -- the topmost element under the cursor owns the
+        // tooltip and this is it. The cell titles are left in place (they work
+        // again if this ever stops being an overlay), and the facts a rep would
+        // have hovered for are gathered here instead, so the row now yields
+        // MORE on hover than it did as a plain link, not less.
+        title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
+        className="absolute inset-0 z-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      />
       <Cell>
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
@@ -1474,32 +1870,55 @@ function OasisDesktopRow({
             <span className="block truncate font-semibold text-fg" title={m.name}>
               {m.name}
             </span>
-            {m.company && (
+            {m.company && m.company !== m.name && (
               <span className="block truncate text-[10px] text-fg-dim" title={m.company}>
                 {m.company}
+              </span>
+            )}
+            {/* WHO TO ASK FOR. The single most useful thing on the row for a
+                rep about to dial, and it was absent entirely — this board's row
+                model had no person field, so 1,853 known owners were invisible
+                here. Same "Ask for" wording as the leads-board card so a rep
+                reads one phrase across both screens. Rendered only when we
+                actually know somebody; contactNameFor returns "" rather than
+                the company, and an absent line is honest where a company name
+                in a person slot is not. */}
+            {m.contactName && (
+              <span className="block truncate text-[10px] font-medium text-accent" title={`Ask for ${m.contactName}`}>
+                Ask for {m.contactName}
+              </span>
+            )}
+            {/* The business itself: where it is and what it does. A rep opening
+                a CRM row should not have to leave for the one fact that decides
+                how the call opens. */}
+            {m.businessLine && (
+              <span className="block truncate text-[10px] text-fg-muted" title={m.address ? `${m.businessLine} — ${m.address}` : m.businessLine}>
+                {m.businessLine}
+              </span>
+            )}
+            {/* The Email COLUMN was replaced by Address on this board, measured
+                2026-08-25: 4 of 31,034 leads carry an email, 26,800 carry an
+                address. A column empty for 99.99% of rows was holding the
+                second-widest slot on the grid. The four are not lost -- an
+                email renders here whenever one exists, and the detail page
+                shows it unconditionally. */}
+            {m.email && (
+              <span className="block truncate text-[10px] text-fg-dim" title={m.email}>
+                {m.email}
               </span>
             )}
             <span className="block truncate text-[10px] text-accent/80" title={m.assignedRep}>Assigned: {m.assignedRep}</span>
           </span>
         </div>
       </Cell>
-      <Cell title={m.email}>{m.email || "-"}</Cell>
+      <Cell title={m.address || ""}>{m.address || "-"}</Cell>
       <Cell title={m.phone} mono>{m.phone || "-"}</Cell>
       <Cell>
-        {m.score != null ? (
-          <span
-            className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-bold text-accent"
-            title="AI score (0-100)"
-          >
-            {m.score}
-          </span>
-        ) : (
-          "-"
-        )}
+        <PipelineWebsiteCell m={m} leadId={row.id} />
       </Cell>
       <Cell className={m.cold ? "font-semibold text-red-300" : ""}>{m.lastTouchLabel}</Cell>
       <Cell>{m.createdLabel}</Cell>
-    </Link>
+    </div>
   );
 }
 
@@ -1515,8 +1934,17 @@ function OasisMobileRow({
   basePath: string;
 }) {
   const m = oasisRowModel(row, cfg, stage);
+  // Same stretched-link restructure as the desktop row, and for the same
+  // reason: the website and battle-card links are real anchors, so the card can
+  // no longer BE one. See OasisDesktopRow's comment.
   return (
-    <Link href={`${basePath}/${row.id}`} className="block px-4 py-3 transition-colors hover:bg-bg-elev/40">
+    <div className="group relative px-4 py-3 transition-colors hover:bg-bg-elev/40">
+      <Link
+        href={`${basePath}/${row.id}`}
+        aria-label={`Open ${m.name}`}
+        title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
+        className="absolute inset-0 z-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      />
       <div className="flex items-start gap-3">
         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
           {initialsOf(m.name)}
@@ -1525,21 +1953,37 @@ function OasisMobileRow({
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-fg">{m.name}</div>
-              <div className="truncate text-[11px] text-fg-dim">{m.company || m.email || "-"}</div>
+              {/* Where it is and what it does, ahead of the contact details --
+                  on a phone this is the line that tells a rep whether to call
+                  now, and it used to be absent entirely. */}
+              <div className="truncate text-[11px] text-fg-muted">{m.businessLine || m.company || m.email || "-"}</div>
+              {/* Who to ask for — same line the desktop row and the leads-board
+                  card show. On a phone this is the fact a rep needs most before
+                  the number connects. */}
+              {m.contactName && (
+                <div className="truncate text-[11px] font-medium text-accent">Ask for {m.contactName}</div>
+              )}
               <div className="truncate text-[10px] text-accent/80">Assigned: {m.assignedRep}</div>
             </div>
             <StageChip stage={stage} />
           </div>
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
-            <MiniMetric label="Email" value={m.email || "-"} />
             <MiniMetric label="Phone" value={m.phone || "-"} mono />
-            <MiniMetric label="Score" value={m.score != null ? String(m.score) : "-"} mono />
+            <MiniMetric label="Address" value={m.address || "-"} />
+            <MiniMetric label="Website" value={m.websiteHost || "-"} />
             <MiniMetric label="Last touch" value={m.lastTouchLabel} />
             <MiniMetric label="Created" value={m.createdLabel} />
+            {m.email && <MiniMetric label="Email" value={m.email} />}
+          </div>
+          {/* The whole website block, controls and all. Sits below the metrics
+              rather than inside the two-column grid because the non-scored
+              sentence is a full clause and would be crushed into a 50% column. */}
+          <div className="mt-2.5">
+            <PipelineWebsiteCell m={m} leadId={row.id} />
           </div>
         </div>
       </div>
-    </Link>
+    </div>
   );
 }
 
@@ -1677,16 +2121,6 @@ function leadPotentialUsd(row: Row): number | null {
   return null;
 }
 
-/** OASIS qualification proxy — used when value_estimate isn't populated
- *  yet (most cold-outreach leads). Prefers ai_score over the manual
- *  score; both are 0-100 so they're directly comparable. */
-function leadQualificationScore(row: Row): number {
-  const d = row.data;
-  if (typeof d.ai_score === "number") return d.ai_score;
-  if (typeof d.score === "number") return d.score;
-  return 0;
-}
-
 function pickTouchFirst(
   rows: Row[],
   stageField: string,
@@ -1702,15 +2136,9 @@ function pickTouchFirst(
     if (r.data.docs_on_file === true || !isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
     const days = daysSince(lastTouch) - (cfg.slaDays[stageKey] ?? 7);
     const potential = leadPotentialUsd(r);
-    // Ranking tuple — highest wins, evaluated left to right:
-    //   1. dollar potential (when known)
-    //   2. qualification score (the meaningful signal for OASIS pre-revenue)
-    //   3. days overdue (longer overdue = more urgent tie-break)
-    const rank: [number, number, number] = [
-      potential ?? 0,
-      leadQualificationScore(r),
-      days,
-    ];
+    // The banner says "Touch first": longest overdue wins. Estimated
+    // potential only breaks a tie; retired score fields never shape the queue.
+    const rank: [number, number, number] = [days, potential ?? 0, 0];
     if (!best || !bestRank || rankGreater(rank, bestRank)) {
       best = {
         id: r.id,

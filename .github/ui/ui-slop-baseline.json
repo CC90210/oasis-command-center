@@ -1,0 +1,351 @@
+{
+  "_comment": "Known AI-tell visual patterns. Each entry is a reason a business owner reads our software as generated. Shrink, never grow.",
+  "root": "C:\\Users\\echel\\oasis-compact-card",
+  "known": [
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 305,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 315,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 325,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 361,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/download/page.tsx",
+      "line": 305,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/playbook/drills/page.tsx",
+      "line": 266,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/calls/CallsClient.tsx",
+      "line": 53,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/calls/CallsClient.tsx",
+      "line": 206,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 173,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 430,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 459,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/charts/LeadSourceBreakdown.tsx",
+      "line": 45,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AIDraftBanner.tsx",
+      "line": 21,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AIDraftBanner.tsx",
+      "line": 42,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 174,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 181,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 192,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 25,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 27,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 36,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 43,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 44,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 259,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 279,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 337,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 394,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 398,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 424,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 464,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 478,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 277,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 283,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 323,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 324,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 361,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 363,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 364,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 420,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 428,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 449,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 516,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 517,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 532,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 539,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 558,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 606,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/Composer.tsx",
+      "line": 280,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/Composer.tsx",
+      "line": 372,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/GhostTextSuggestion.tsx",
+      "line": 27,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 28,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 34,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 37,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 39,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 46,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 47,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 61,
+      "rule": "ai-accent-scoped"
+    },
+    {
+      "file": "components/forms/SunBizFormsClient.tsx",
+      "line": 342,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/forms/SunBizFormsClient.tsx",
+      "line": 392,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/leads/LeadTimelinePanel.tsx",
+      "line": 61,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/leads/ScheduleCallControl.tsx",
+      "line": 192,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/offers/OffersByDealClient.tsx",
+      "line": 75,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/renewals/RecordFundedDeal.tsx",
+      "line": 348,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/shopping-out/ShoppingOutClient.tsx",
+      "line": 110,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/sunbiz/SunBizDashboard.tsx",
+      "line": 235,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 29,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 32,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 50,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "lib/agents.ts",
+      "line": 145,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "lib/agents.ts",
+      "line": 292,
+      "rule": "ai-accent"
+    }
+  ]
+}

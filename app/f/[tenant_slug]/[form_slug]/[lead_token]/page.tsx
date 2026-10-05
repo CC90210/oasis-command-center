@@ -17,6 +17,7 @@ import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -42,9 +43,21 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { tenant_slug, form_slug } = await params;
   const title = decodeURIComponent(form_slug).replace(/-/g, " ");
+  // The tab belongs to the tenant here too — and this is the route that matters
+  // most for it. The anonymous link is what an operator pastes into Slack; THIS
+  // is the personalised link Solara mints and texts a merchant, and it is where
+  // the full application and the bank-statement upload live. Resolving the icon
+  // on the other route and not this one would have left the wrong mark on the
+  // most sensitive page in the flow, which is the page CC was worried about.
+  //
+  // Slug only: generateMetadata does not do the DB lookup that loadAndVerify
+  // does, and the slug map covers both of SunBiz's ("submissions" and the "sun"
+  // profile alias). Unmapped tenants keep the platform default.
+  const icon = faviconForTenant({ tenantSlug: tenant_slug });
   return {
     title: tenant_slug ? `${title} · ${tenant_slug}` : title,
     robots: { index: false, follow: false },
+    ...(icon ? { icons: { icon } } : {}),
   };
 }
 
@@ -184,6 +197,19 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   if (branding.logo_url == null && tenantRow.logo_url) {
     branding = { ...branding, logo_url: tenantRow.logo_url };
   }
+  // Rung 3 of the chain, identical to the anonymous route: the tenant -> brand
+  // registry. Both routes render the same FormPublicClient, so both fell
+  // through to the same hardcoded SunBiz glyph. Fixing one and not the other
+  // would leave the leak alive on every personalised merchant link.
+  // Fails closed — an unmapped tenant gets a brandless header, never someone
+  // else's mark.
+  if (branding.logo_url == null) {
+    const mark = publicMarkForTenant({
+      tenantId: form.tenant_id,
+      tenantSlug: tenantRow.slug,
+    });
+    if (mark) branding = { ...branding, logo_url: mark };
+  }
 
   // Cross-form pre-fill (2026-06-20): load the lead's existing data so the full
   // application seeds name / phone / business / revenue the merchant already gave
@@ -231,10 +257,20 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
 
 export default async function PublicFormPage({
   params,
+  searchParams,
 }: {
   params: Promise<RouteParams>;
+  // ?source=<text|dial|email> — which link the merchant actually clicked.
+  // The drip engine and rep-sent applications both arrive here, so without this
+  // every emailed application was attributed to nothing. Untrusted: normalized
+  // server-side on submit, where a bad value becomes "unknown" and never
+  // rejects the application.
+  searchParams?: Promise<{ source?: string }>;
 }) {
   const resolved = await params;
+  const sp = (await searchParams) || {};
+  const source =
+    typeof sp.source === "string" && sp.source.trim() ? sp.source.trim() : undefined;
   const result = await loadAndVerify(resolved);
 
   if (!result.ok) {
@@ -256,6 +292,11 @@ export default async function PublicFormPage({
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}
+      // Channel + the path they landed on, so the operator notification can say
+      // HOW this application arrived. The token segment is redacted before it
+      // ever reaches an email (lib/forms/lead-source.ts describeSubmissionLink).
+      submissionSource={source}
+      submissionPath={`/f/${resolved.tenant_slug}/${resolved.form_slug}/${resolved.lead_token}`}
       // Same brand resolution as the anonymous page. Omitting it here would seal
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.

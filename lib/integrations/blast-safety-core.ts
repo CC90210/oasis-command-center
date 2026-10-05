@@ -4,7 +4,7 @@
  * The DB-backed wrapper (reads the tenant's lender list) lives in blast-safety.ts.
  */
 
-const DASHES = /[—–]/g; // em dash, en dash → hyphen (no em dashes in customer copy)
+const DASHES = /[\u2014\u2013]/g; // em dash, en dash → hyphen (no em dashes in customer copy)
 
 export function stripDashes(s: string): string {
   return s.replace(DASHES, "-");
@@ -65,7 +65,7 @@ const POSITIONING_PATTERNS: { re: RegExp; label: string }[] = [
   { re: /\blender\s+programs?\b/i, label: "lender programs" },
   { re: /\bfunding\s+partners?\b/i, label: "funding partners" },
   { re: /\bfunders?\s+we\s+work\s+with\b/i, label: "funders we work with" },
-  { re: /\b\d\s*(?:-|–|to)\s*\d\s+lender\s+offers?\b/i, label: "N-N lender offers" },
+  { re: /\b\d\s*(?:-|\u2013|to)\s*\d\s+lender\s+offers?\b/i, label: "N-N lender offers" },
   { re: /\bto\s+(?:the\s+|our\s+)?lenders?\b/i, label: "to lenders" },
   { re: /\bno\s+lenders?\s+can\b/i, label: "no lender can" },
   { re: /\bshop\s+(?:your\s+)?(?:file|deal|it)\b/i, label: "shop your file" },

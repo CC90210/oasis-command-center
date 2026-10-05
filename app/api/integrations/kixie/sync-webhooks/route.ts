@@ -19,15 +19,16 @@
  */
 
 import { NextResponse } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { getKixieCredentials, registerAllWebhooks } from "@/lib/integrations/kixie";
+import { resolveSessionContext } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST() {
-  const user = await getSessionUser();
-  if (!user) {
+  const session = await resolveSessionContext();
+  if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
@@ -35,19 +36,10 @@ export async function POST() {
   // workspace owner is the right authority for that, not every team
   // member.
   const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id,is_owner")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
-  const isOwner = (profile.data as { is_owner?: boolean } | null)?.is_owner === true;
-  if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
-  }
-  if (!isOwner) {
+  const tenantId = session.tenantId;
+  if (!session.isAdmin) {
     return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only the workspace owner can register webhooks." },
+      { ok: false, error: "forbidden", message: "Administrator access is required to register webhooks." },
       { status: 403 },
     );
   }
@@ -94,7 +86,7 @@ export async function POST() {
 
   // Webhook destination — uses the dashboard's public URL.
   const baseUrl =
-    (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app").replace(/\/$/, "");
+    (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(/\/$/, "");
   const webhookUrl = `${baseUrl}/api/webhooks/kixie`;
 
   // Attach the static auth header Kixie sends back on every delivery — this

@@ -16,7 +16,9 @@ export type IntegrationFieldDef = {
   /** Render as a password input (masked). */
   sensitive: boolean;
   /** Server-side pattern check applied at upsert. */
-  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase";
+  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase" | "twilio_sid";
+  /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
+  sidPrefix?: "AC" | "SK" | "MG";
 };
 
 export type IntegrationSchema = {
@@ -42,6 +44,11 @@ export type IntegrationSchema = {
    */
   scope?: "tenant" | "user_only";
   /**
+   * How credentials are provisioned. OAuth-managed credentials are written by
+   * their callback route and must never be pasted into the tenant key editor.
+   */
+  setup?: "manual" | "oauth";
+  /**
    * 2026-06-08 — collapse advanced/edge-case integrations behind a
    * "Show advanced" toggle so the default view is clean for non-
    * technical operators. CC pass: Custom SMTP creates redundancy with
@@ -55,11 +62,18 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "twilio",
     label: "Twilio",
-    description: "SMS dispatch via Twilio. Required for the Send SMS button on the lead drawer.",
+    description:
+      "Your own Twilio account. Texting stays off until the Account SID, the Auth Token (or an API key), and a From Number or Messaging Service SID are saved and pass Test.",
     fields: [
-      { key: "account_sid", label: "Account SID", sensitive: false, validation: "alphanum_uppercase" },
-      { key: "auth_token", label: "Auth Token", sensitive: true, hint: "Find this under Twilio → Account Info." },
-      { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212" },
+      // Twilio SIDs are two letters and 32 hex characters, usually lower case
+      // (^AC[0-9a-fA-F]{32}$ in Twilio's API spec). alphanum_uppercase refused
+      // every real one pasted from Twilio's console.
+      { key: "account_sid", label: "Account SID", sensitive: false, validation: "twilio_sid", sidPrefix: "AC", hint: "Starts with AC. In Twilio: Account Info on the console home page." },
+      { key: "auth_token", label: "Auth Token", sensitive: true, hint: "Account Info in Twilio. Needed for incoming texts: Twilio signs each one with it, and OASIS refuses any it cannot verify." },
+      { key: "api_key_sid", label: "API key SID (optional)", sensitive: false, validation: "twilio_sid", sidPrefix: "SK", hint: "Starts with SK. With its secret below, OASIS sends with the key instead of the Auth Token." },
+      { key: "api_key_secret", label: "API key secret (optional)", sensitive: true, hint: "Shown once when the key is created in Twilio (API keys & tokens)." },
+      { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "A number on this Twilio account that can text. E.164 format, e.g. +14165551212" },
+      { key: "messaging_service_sid", label: "Messaging Service SID", sensitive: false, validation: "twilio_sid", sidPrefix: "MG", hint: "Optional MG... SID. When set, it replaces From Number for outbound sends." },
     ],
   },
   {
@@ -90,10 +104,11 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "gws",
     label: "Google Workspace (Gmail)",
-    description: "Outbound email via Gmail App Password. Consumed by send_gateway.py on the operator machine.",
+    description:
+      "Shared outbound email through the Google Workspace mailbox that owns the App Password. Environment setup requires GMAIL_USER + GMAIL_APP_PASSWORD.",
     fields: [
       { key: "app_password", label: "App Password", sensitive: true, hint: "Generate at myaccount.google.com/apppasswords" },
-      { key: "from_address", label: "From Address", sensitive: false, validation: "email" },
+      { key: "from_address", label: "Workspace email / SMTP user", sensitive: false, validation: "email", hint: "The Google Workspace address that generated this App Password (GMAIL_USER in environment-based setup)." },
     ],
   },
   {
@@ -136,8 +151,11 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "telegram",
     label: "Telegram Bridge",
-    description: "Mobile notifications via BotFather.",
-    fields: [{ key: "bot_token", label: "Bot Token", sensitive: true, hint: "Format: <digits>:<base64>" }],
+    description: "Shared operational notifications through a BotFather bot and one destination chat.",
+    fields: [
+      { key: "bot_token", label: "Bot Token", sensitive: true, hint: "Format: <digits>:<base64>" },
+      { key: "chat_id", label: "Destination Chat ID", sensitive: false, hint: "The numeric user, group, or channel ID that receives workspace notifications (often starts with -100 for channels)." },
+    ],
   },
   // Per-user OAuth integration. Migration 076 added the
   // user_integration_credentials table that backs this; the OAuth
@@ -154,6 +172,7 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     label: "Constant Contact",
     description:
       "Email blasts (templates, lists, open/click/bounce tracking). Connect once via OAuth; the API key + app secret come from the server env.",
+    setup: "oauth",
     fields: [
       { key: "access_token", label: "Access Token", sensitive: true, hint: "Auto-populated by the OAuth flow." },
       { key: "refresh_token", label: "Refresh Token", sensitive: true, hint: "Auto-populated; rotates on each refresh." },
@@ -166,6 +185,7 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     description:
       "Connect your own Gmail so outbound emails from the dashboard go from your address, not the workspace owner. Required scope: gmail.send (we cannot read your inbox).",
     scope: "user_only",
+    setup: "oauth",
     fields: [
       { key: "refresh_token", label: "Refresh Token", sensitive: true, hint: "Auto-populated by the OAuth flow." },
       { key: "access_token", label: "Access Token", sensitive: true, hint: "Short-lived, refreshed on demand." },
@@ -178,6 +198,28 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
 
 export function findIntegrationSchema(service: string): IntegrationSchema | null {
   return INTEGRATION_SCHEMAS.find((s) => s.service === service) || null;
+}
+
+/**
+ * The tenant paste-and-save editor is only for shared, manually provisioned
+ * credentials. Personal credentials and OAuth-owned tokens have dedicated
+ * flows whose storage and rotation rules must not be bypassed by this API.
+ */
+export function isTenantManuallyEditableIntegrationSchema(
+  schema: IntegrationSchema,
+): boolean {
+  return (schema.scope ?? "tenant") === "tenant" && (schema.setup ?? "manual") === "manual";
+}
+
+export const TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS = INTEGRATION_SCHEMAS.filter(
+  isTenantManuallyEditableIntegrationSchema,
+);
+
+export function findTenantManuallyEditableIntegrationSchema(
+  service: string,
+): IntegrationSchema | null {
+  const schema = findIntegrationSchema(service);
+  return schema && isTenantManuallyEditableIntegrationSchema(schema) ? schema : null;
 }
 
 /**
@@ -205,6 +247,12 @@ export function validateIntegrationValue(
       return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? null : "invalid email";
     case "alphanum_uppercase":
       return /^[A-Z0-9_]+$/.test(value) ? null : "expected uppercase letters / digits / underscore";
+    case "twilio_sid": {
+      const prefix = field.sidPrefix ?? "";
+      return /^(AC|SK|MG)[0-9a-fA-F]{32}$/.test(value.trim()) && value.trim().startsWith(prefix)
+        ? null
+        : `expected a Twilio SID: ${prefix || "two letters"} followed by 32 letters and digits (0-9, a-f)`;
+    }
     default:
       return null;
   }

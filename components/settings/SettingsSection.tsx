@@ -6,10 +6,12 @@
  * on. For example, when I click on Team, it opens up all of the capabilities and
  * features… That's all I'm asking for."*
  *
- * Visually identical to `<Card>` when open — same rounded-xl panel, same
- * uppercase-tracked header, same 20px body — because this replaces Card on the
- * settings page and the page should not appear to have been rebuilt. The only
- * additions are a chevron and the fact that the header is now a button.
+ * Visually identical to `<Card>` when open — same rounded-xl panel on a
+ * hairline, same sentence-case 14px header — so a section and a card side by
+ * side read as one system. The only additions are a chevron and the fact that
+ * the header is now a button. (OASIS OS, 2026-09-28: the uppercase-tracked title
+ * and the `card-glow` / `shadow-card` chrome went with Card's; a section sits on
+ * the canvas's plane, and only overlays carry a shadow.)
  *
  * NATIVE <details>, so this stays a SERVER component: no "use client", no
  * hydration cost for a disclosure the browser has implemented for a decade, and
@@ -62,27 +64,30 @@ export function SettingsSection({
 }) {
   const shell =
     tone === "panel"
-      ? "rounded-xl border border-bg-border bg-bg-panel shadow-card card-glow"
-      : "rounded-xl border border-bg-border bg-bg-deep/30 open:bg-bg-deep/50";
+      ? "rounded-xl border border-hairline bg-bg-panel"
+      : "rounded-xl border border-hairline bg-bg-deep/30 open:bg-bg-deep/50";
   return (
-    <details id={id} open={defaultOpen} className={`group relative transition-all ${shell}`}>
+    // scroll-mt: a fragment link (#providers) lands the header clear of the
+    // top edge instead of flush against it.
+    <details id={id} open={defaultOpen} className={`group relative scroll-mt-6 transition-colors duration-150 ${shell}`}>
       <summary
-        className="cursor-pointer select-none list-none flex items-start gap-3 px-5 py-3.5
+        className="cursor-pointer select-none list-none flex items-start gap-3 px-4 py-3
                    pr-44 rounded-xl group-open:rounded-b-none
-                   hover:bg-bg-hover/40 transition-colors"
+                   hover:bg-bg-hover/40 transition-colors duration-150
+                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
       >
         <span
           aria-hidden
-          className="mt-[3px] shrink-0 text-fg-dim text-[10px] transition-transform duration-200
-                     group-open:rotate-90"
+          className="mt-[3px] shrink-0 text-fg-dim text-[10px] transition-transform duration-150
+                     group-open:rotate-90 motion-reduce:transition-none"
         >
           ▸
         </span>
         <span className="min-w-0">
-          <span className="block text-xs font-bold uppercase tracking-[0.14em] text-fg">
+          <span className="block text-sm font-semibold text-fg">
             {title}
           </span>
-          {subtitle && <span className="mt-1 block text-xs text-fg-muted">{subtitle}</span>}
+          {subtitle && <span className="mt-0.5 block text-[13px] leading-5 text-fg-muted">{subtitle}</span>}
         </span>
       </summary>
 
@@ -90,14 +95,14 @@ export function SettingsSection({
         // Sibling of <summary>, not a child — see the note above. `top-3` lines
         // it up with the first row of the title rather than the block's centre,
         // which drifts as subtitles wrap to two and three lines.
-        <div className="absolute right-5 top-3 z-10">{action}</div>
+        <div className="absolute right-4 top-2.5 z-10">{action}</div>
       )}
 
       {/* The divider belongs to the OPEN state. Rendering it always would draw a
           line under a closed section and make it look like an empty panel.
           A nested fold skips it — inside an already-bordered panel it reads as
           clutter rather than as structure. */}
-      <div className={tone === "panel" ? "border-t border-bg-border p-5" : "px-4 pb-4 pt-1"}>
+      <div className={tone === "panel" ? "border-t border-hairline p-4" : "px-4 pb-4 pt-1"}>
         {children}
       </div>
     </details>

@@ -14,12 +14,16 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isMissingTableError } from "@/lib/api-helpers";
 import {
+  BRAND_GROUPS,
   DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
+  LIBRARY_PAGE_SIZE,
+  LIFECYCLE,
   brandFilterAllowed,
   brandGroup,
   claimedBrandSlugs,
-  lifecycleOf,
+  libraryPageCount,
+  parseSlideUrls,
   type AssetFormat,
   type AssetStatus,
   type BrandGroupKey,
@@ -58,6 +62,61 @@ function scopeToBrandGroup<T extends {
   const g = brandGroup(group);
   if (g.slugs) return q.in("brand_slug", [...g.slugs]);
   return q.not("brand_slug", "in", `(${claimedBrandSlugs().join(",")})`);
+}
+
+/**
+ * The lifecycle buckets as a filter the database runs - for the grid AND the
+ * pill counts, and for Studio's "awaiting your verdict" line, which links to
+ * the Needs review grid and counts it through getLifecycleCounts().
+ *
+ * The grid used to filter with its own SQL while the pills bucketed rows in JS
+ * through lifecycleOf(), and the two disagreed: "Needs review" counted the
+ * scheduled assets nobody had posted (status 'scheduled', no published_at) and
+ * the grid behind it did not show them, and "Posted" showed archived rows that
+ * the pill filed under Archived. One definition, used by both, ends that.
+ *
+ * NEEDS REVIEW IS DRAFT OR IN REVIEW, NOT YET POSTED - the grid's meaning since
+ * the pills shipped. A scheduled asset is not waiting on a verdict: it has its
+ * own place (Studio's Scheduled stage, ?status=scheduled, and the All view), so
+ * it is in no lifecycle bucket, and neither is a status 'published' row with no
+ * published_at. The pill now counts what the grid shows instead of folding them in.
+ *
+ * Otherwise the precedence of lifecycleOf(): shelved first, then published_at
+ * (the world outranks our bookkeeping), then the approved verdict.
+ * tests/library-paging.test.ts runs every status x published_at pair through
+ * this against real SQLite and compares it with lifecycleOf().
+ */
+type LifecycleFilterable = {
+  eq: (column: string, value: string) => LifecycleFilterable;
+  in: (column: string, values: string[]) => LifecycleFilterable;
+  is: (column: string, value: null) => LifecycleFilterable;
+  not: (column: string, op: string, value: unknown) => LifecycleFilterable;
+};
+
+/** The statuses the working grid hides; the Archived pill is where they live. */
+const ARCHIVED_STATUSES = ["archived", "rejected"];
+
+/**
+ * The working grid's rule: archived and rejected assets are hidden. ONE
+ * definition, used by the All grid, the Live bucket and the tab counts, so a
+ * tab's number is always what clicking it shows.
+ */
+function hideArchived<T>(q: T): T {
+  return (q as unknown as LifecycleFilterable).not("status", "in", `(${ARCHIVED_STATUSES.join(",")})`) as unknown as T;
+}
+
+function scopeToLifecycle<T>(q: T, lifecycle: Lifecycle): T {
+  const f = q as unknown as LifecycleFilterable;
+  switch (lifecycle) {
+    case "archived":
+      return f.in("status", ARCHIVED_STATUSES) as unknown as T;
+    case "live":
+      return hideArchived(f).not("published_at", "is", null) as unknown as T;
+    case "approved":
+      return f.eq("status", "approved").is("published_at", null) as unknown as T;
+    case "needs_review":
+      return f.in("status", ["draft", "in_review"]).is("published_at", null) as unknown as T;
+  }
 }
 
 export type MarketingMediaRow = {
@@ -126,8 +185,9 @@ export type MarketingSummary = {
   by_status: Record<string, number>;
   open_reviews: number;
   open_requests: number;
-  corpus_indexed: number;
-  corpus_pending: number;
+  // No corpus counts since 2026-10-01: the training material is the Training
+  // tab's own read (getCorpusStats), so the Library's numbers neither wait on
+  // it nor degrade when it fails.
   /**
    * True when a query FAILED, as opposed to returning nothing.
    *
@@ -159,8 +219,6 @@ export const DEGRADED_MARKETING_SUMMARY: MarketingSummary = {
   by_status: {},
   open_reviews: 0,
   open_requests: 0,
-  corpus_indexed: 0,
-  corpus_pending: 0,
   degraded: true,
 };
 
@@ -170,8 +228,6 @@ export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
   by_status: {},
   open_reviews: 0,
   open_requests: 0,
-  corpus_indexed: 0,
-  corpus_pending: 0,
   degraded: false,
 };
 
@@ -271,16 +327,6 @@ async function pageAll<T>(
     consume(rows);
     if (rows.length < PAGE_SIZE) return "ok";
   }
-}
-
-/**
- * The LIST readers (assets, media, corpus rows) return [] on any error, so
- * "absent" and "broken" are the same decision to them: stop. They keep this
- * shim rather than being rewritten — only getMarketingSummary renders COUNTS,
- * and only a count can lie by saying zero.
- */
-function quiet(label: string, err: { code?: string; message?: string } | null): boolean {
-  return classify(label, err) !== "ok";
 }
 
 /**
@@ -387,37 +433,53 @@ export async function getMarketingSummary(
     // A failed chunk keeps the chunks that succeeded and marks the summary
     // degraded. Discarding them and reporting 0 was the same lie as above, at
     // smaller scale: "nothing waiting on you" when the query simply broke.
-    let openReviews = 0;
-    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-      const r = await db
-        .from("marketing_review")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .is("acted_on_at", null)
-        .in("asset_id", ids);
-      const verdict = classify("summary.reviews", r.error);
-      if (verdict !== "ok") {
-        if (verdict === "broken") degraded = true;
-        break;
+    //
+    // THE THREE COUNTS BELOW RUN TOGETHER (2026-10-01). They need the asset
+    // ids, or nothing, and not each other, but they ran one after another,
+    // with a corpus read behind them: three round trips in a row after the
+    // asset pages, which the Content Overview waited on before it drew
+    // anything. Each chunk loop is still sequential inside itself with the same
+    // stop-on-failure rule, and every `.from()` is still called in the same
+    // order per table. The corpus read left the summary: the training material
+    // is the Training tab's own read (getCorpusStats), so a failure there no
+    // longer degrades the Library's numbers.
+    const openReviewsP = (async () => {
+      let openReviews = 0;
+      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+        const r = await db
+          .from("marketing_review")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .is("acted_on_at", null)
+          .in("asset_id", ids);
+        const verdict = classify("summary.reviews", r.error);
+        if (verdict !== "ok") {
+          if (verdict === "broken") degraded = true;
+          break;
+        }
+        openReviews += r.count || 0;
       }
-      openReviews += r.count || 0;
-    }
+      return openReviews;
+    })();
 
-    let requestsBound = 0;
-    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-      const r = await db
-        .from("marketing_request")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .in("status", ["open", "claimed"])
-        .in("asset_id", ids);
-      const verdict = classify("summary.requests", r.error);
-      if (verdict !== "ok") {
-        if (verdict === "broken") degraded = true;
-        break;
+    const requestsBoundP = (async () => {
+      let requestsBound = 0;
+      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+        const r = await db
+          .from("marketing_request")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .in("status", ["open", "claimed"])
+          .in("asset_id", ids);
+        const verdict = classify("summary.requests", r.error);
+        if (verdict !== "ok") {
+          if (verdict === "broken") degraded = true;
+          break;
+        }
+        requestsBound += r.count || 0;
       }
-      requestsBound += r.count || 0;
-    }
+      return requestsBound;
+    })();
 
     // marketing_request.asset_id IS nullable — "a request not tied to an asset"
     // is the intended case (see the MATCH SIMPLE note on marketing_request_asset_fk).
@@ -425,37 +487,25 @@ export async function getMarketingSummary(
     // it belongs to the founders' own queue and is counted. Bound requests follow
     // their asset's brand. Two counts rather than one `.or()` because the bridge's
     // `.or()` support is not something this reader should depend on.
-    const [requestsUnbound, corpus] = await Promise.all([
+    const [openReviews, requestsBound, requestsUnbound] = await Promise.all([
+      openReviewsP,
+      requestsBoundP,
       db
         .from("marketing_request")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
         .in("status", ["open", "claimed"])
         .is("asset_id", null),
-      // TENANT-SCOPED ONLY, ON PURPOSE — do not "fix" this to match the two
-      // counts above. marketing_corpus is what Maven LEARNS FROM, not what OASIS
-      // has shipped, and you learn from everything you have made: a client ad
-      // that performed is training signal exactly like our own. The brand
-      // boundary exists so the founders LIBRARY shows our own deliverables; it is
-      // not a rule about training data. marketing_corpus.asset_id IS nullable, so
-      // scoping it here would be perfectly possible — which is exactly why this
-      // comment exists. Pinned by tests/marketing-core.test.ts.
-      db.from("marketing_corpus").select("state").eq("tenant_id", tenantId),
     ]);
 
     if (classify("summary.requests.unbound", requestsUnbound.error) === "broken") degraded = true;
-    if (classify("summary.corpus", corpus.error) === "broken") degraded = true;
 
-    const corpusRows = (corpus.data || []) as Array<{ state: string }>;
     return {
       total: rows.length,
       by_track,
       by_status,
       open_reviews: openReviews,
       open_requests: requestsBound + (requestsUnbound.count || 0),
-      corpus_indexed: corpusRows.filter((c) => c.state === "indexed").length,
-      corpus_pending: corpusRows.filter((c) => c.state === "queued" || c.state === "extracting")
-        .length,
       degraded,
     };
   } catch (e) {
@@ -464,9 +514,28 @@ export async function getMarketingSummary(
   }
 }
 
+/** One page of the Library: the rows to render and what is behind them. */
+export type MarketingAssetPage = {
+  /** At most `pageSize` rows, each with its media and open-review count. */
+  assets: MarketingAssetRow[];
+  /** Rows matching the filters across EVERY page, from a COUNT, not this page. */
+  total: number;
+  /** The page actually returned, 1-based. A page past the end lands on the last one. */
+  page: number;
+  pageSize: number;
+};
+
 /**
- * Library rows. Media is fetched in ONE follow-up query and grouped in JS rather
- * than per-asset, so a 200-item library is 2 round trips, not 201.
+ * One page of Library rows. Media is fetched in ONE follow-up query for that
+ * page's ids only and grouped in JS, so a page is 2 round trips, not 1 + 24.
+ *
+ * PAGED ON THE SERVER, and that is the fix for "clicking on the library takes
+ * way too long". This read used to return up to 200 rows, the page signed media
+ * for every one of them and rendered every tile, and the browser then fetched
+ * every tile's media. Now the database returns `pageSize` rows (24 by default)
+ * plus a COUNT for the pager, and nothing outside the page is read further.
+ *
+ * `db` is injectable for tests only, as in getMarketingSummary.
  */
 export async function getMarketingAssets(
   tenantId: string,
@@ -482,85 +551,109 @@ export async function getMarketingAssets(
     author?: string;
     /** Review + distribution bucket. The default view excludes archived. */
     lifecycle?: Lifecycle;
-    limit?: number;
+    /** 1-based. */
+    page?: number;
+    pageSize?: number;
   } = {},
-): Promise<MarketingAssetRow[]> {
-  if (!tenantId) return [];
-  const db = getServiceSupabase();
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<MarketingAssetPage> {
+  const pageSize = Math.max(1, Math.floor(opts.pageSize ?? LIBRARY_PAGE_SIZE));
+  const empty: MarketingAssetPage = { assets: [], total: 0, page: 1, pageSize };
+  if (!tenantId) return empty;
   try {
-    let q = db
-      .from("marketing_asset")
-      .select("*")
-      .eq("tenant_id", tenantId)
-      .order("created_at", { ascending: false })
-      .limit(opts.limit ?? 200);
-    if (opts.track) q = q.eq("track", opts.track);
-    if (opts.channel) q = q.eq("channel", opts.channel);
-    if (opts.author) q = q.eq("author_email", opts.author);
-
-    // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
-    // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
-    // compiles to `status = 'draft' AND status IN ('archived','rejected')`,
-    // which matches nothing. The grid would read "Nothing at this stage" while
-    // the pills above it show real counts — a dead end with no visible cause,
-    // and reachable in two clicks (arrive from a Studio pipeline tile, then
-    // press a lifecycle pill).
-    //
-    // Lifecycle wins because it is the axis the page is organised on; `status`
-    // survives only as a deep-link target for Studio's pipeline tiles, which
-    // address stages lifecycle deliberately merges (scheduled, draft). The UI
-    // also clears one when setting the other, so this guard is the backstop for
-    // a hand-typed URL rather than the primary defence.
-    if (opts.status && !opts.lifecycle) q = q.eq("status", opts.status);
-
-    // LIFECYCLE, the axis CC actually asked for: "organise this a lot better so
-    // that we can differentiate our pieces of content."
-    //
-    // Pushed into SQL rather than filtered in JS after the fact, because the
-    // reader caps at `limit` — filtering afterwards would silently show fewer
-    // than a page of archived assets while claiming to show them all.
-    //
-    // `published_at` is the evidence of distribution; `status` only carries the
-    // review verdict. See lifecycleOf() for why those are separate questions.
-    if (opts.lifecycle === "archived") {
-      q = q.in("status", ["archived", "rejected"]);
-    } else if (opts.lifecycle === "live") {
-      q = q.not("published_at", "is", null);
-    } else if (opts.lifecycle === "approved") {
-      q = q.eq("status", "approved").is("published_at", null);
-    } else if (opts.lifecycle === "needs_review") {
-      q = q.in("status", ["draft", "in_review"]).is("published_at", null);
-    } else if (!opts.status) {
-      // DEFAULT VIEW HIDES ARCHIVED. Archiving something should remove it from
-      // the working grid — that is the whole point of the verb — but it must
-      // stay reachable, which is what the Archived pill is for. Skipped when an
-      // explicit ?status= is set so Studio's pipeline tiles still deep-link to
-      // any single stage.
-      q = q.not("status", "in", "(archived,rejected)");
-    }
-
-    // The brand boundary. The tab is ALWAYS applied — there is no code path
-    // through this reader that returns rows from more than one tab, which is
-    // why the group filter is unconditional and the sub-filter is not.
     const group = opts.group ?? DEFAULT_BRAND_GROUP;
-    q = scopeToBrandGroup(q, group);
-    // A sub-filter NARROWS the tab and may never widen it. `?brand=warner` on
-    // the OASIS tab is dropped rather than honoured — see brandFilterAllowed.
-    if (opts.brand && brandFilterAllowed(opts.brand, group)) {
-      q = q.eq("brand_slug", opts.brand);
-    }
+    const filtered = () => {
+      // `count: "exact"` returns the total behind ALL pages with the page itself.
+      let q = db
+        .from("marketing_asset")
+        .select("*", { count: "exact" })
+        .eq("tenant_id", tenantId);
+      // Every facet the page offers narrows the grid AND the total behind it. The
+      // track line was dropped once when this builder was written: ?track=paid lit
+      // the Paid pill and printed "N assets - Paid" over every track's assets.
+      if (opts.track) q = q.eq("track", opts.track);
+      if (opts.channel) q = q.eq("channel", opts.channel);
+      if (opts.author) q = q.eq("author_email", opts.author);
 
-    const r = await q;
-    // Absent (pre-migration) is an honest empty library. Broken is NOT: returning
-    // [] there makes the page say "The library is empty" about a library that is
-    // full, and the caller cannot tell the difference from a shape that is just
-    // an array. Throwing is how this reader says "I could not find out" — the
-    // caller passes null as its safe() fallback and renders that distinctly.
-    const verdict = classify("assets", r.error);
-    if (verdict === "absent") return [];
-    if (verdict === "broken") throw new Error(`marketing_asset read failed: ${r.error?.message}`);
-    const assets = (r.data || []) as MarketingAssetRow[];
-    if (!assets.length) return [];
+      // `status` and `lifecycle` ARE TWO VOCABULARIES FOR ONE COLUMN, so applying
+      // both ANDs them into a contradiction: ?status=draft&lifecycle=archived
+      // compiles to `status = 'draft' AND status IN ('archived','rejected')`,
+      // which matches nothing. The grid would read "Nothing at this stage" while
+      // the pills above it show real counts — a dead end with no visible cause,
+      // and reachable in two clicks (arrive from a Studio pipeline tile, then
+      // press a lifecycle pill).
+      //
+      // Lifecycle wins because it is the axis the page is organised on; `status`
+      // survives only as a deep-link target for Studio's pipeline tiles, which
+      // address stages lifecycle deliberately merges (scheduled, draft). The UI
+      // also clears one when setting the other, so this guard is the backstop for
+      // a hand-typed URL rather than the primary defence.
+      if (opts.status && !opts.lifecycle) q = q.eq("status", opts.status);
+
+      // LIFECYCLE, the axis CC actually asked for: "organise this a lot better so
+      // that we can differentiate our pieces of content."
+      //
+      // Pushed into SQL rather than filtered in JS after the fact, because the
+      // reader pages — filtering afterwards would silently show fewer than a page
+      // of archived assets while claiming to show them all. The SAME predicate
+      // feeds the pill counts (getLifecycleCounts), so a pill and the grid
+      // behind it cannot disagree. See scopeToLifecycle().
+      if (opts.lifecycle) {
+        q = scopeToLifecycle(q, opts.lifecycle);
+      } else if (!opts.status) {
+        // DEFAULT VIEW HIDES ARCHIVED. Archiving something should remove it from
+        // the working grid — that is the whole point of the verb — but it must
+        // stay reachable, which is what the Archived pill is for. Skipped when an
+        // explicit ?status= is set so Studio's pipeline tiles still deep-link to
+        // any single stage.
+        q = hideArchived(q);
+      }
+
+      // The brand boundary. The tab is ALWAYS applied — there is no code path
+      // through this reader that returns rows from more than one tab, which is
+      // why the group filter is unconditional and the sub-filter is not.
+      q = scopeToBrandGroup(q, group);
+      // A sub-filter NARROWS the tab and may never widen it. `?brand=warner` on
+      // the OASIS tab is dropped rather than honoured — see brandFilterAllowed.
+      if (opts.brand && brandFilterAllowed(opts.brand, group)) {
+        q = q.eq("brand_slug", opts.brand);
+      }
+      return q;
+    };
+
+    const readPage = async (page: number) => {
+      const r = await filtered()
+        // ORDER BEFORE RANGE, ending on a UNIQUE key: created_at alone ties (a
+        // batch registers many rows in one second), and a tie at a page boundary
+        // repeats or skips an asset between page 2 and page 3.
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range((page - 1) * pageSize, page * pageSize - 1);
+      // Absent (pre-migration) is an honest empty library. Broken is NOT: returning
+      // [] there makes the page say "The library is empty" about a library that is
+      // full, and the caller cannot tell the difference from a shape that is just
+      // an array. Throwing is how this reader says "I could not find out" — the
+      // caller passes null as its safe() fallback and renders that distinctly.
+      const verdict = classify("assets", r.error);
+      if (verdict === "absent") return null;
+      if (verdict === "broken") throw new Error(`marketing_asset read failed: ${r.error?.message}`);
+      return { rows: (r.data || []) as MarketingAssetRow[], total: Number(r.count ?? 0) };
+    };
+
+    let page = Math.max(1, Math.floor(opts.page ?? 1));
+    let got = await readPage(page);
+    if (!got) return empty;
+    // A page past the end (a bookmark from before an archive, a hand-typed
+    // ?page=99) lands on the LAST page rather than an empty grid that claims the
+    // tab is empty while the pager says otherwise.
+    if (!got.rows.length && got.total > 0 && page > 1) {
+      page = libraryPageCount(got.total, pageSize);
+      got = await readPage(page);
+      if (!got) return empty;
+    }
+    const assets = got.rows;
+    const total = got.total;
+    if (!assets.length) return { assets: [], total, page, pageSize };
 
     const ids = assets.map((a) => a.id);
     const [media, reviews] = await Promise.all([
@@ -592,13 +685,105 @@ export async function getMarketingAssets(
       a.media = byAsset.get(a.id) || [];
       a.open_reviews = openCount.get(a.id) || 0;
     }
-    return assets;
+    return { assets, total, page, pageSize };
   } catch (e) {
     // Deliberately NOT caught into []: the caller distinguishes "empty" from
     // "could not load" by whether this resolves at all. See the throw above.
     console.warn("[marketing:assets] unexpected", e);
     throw e;
   }
+}
+
+/** What one Library tile needs, with its media already signed. */
+export type LibraryTile = {
+  asset: MarketingAssetRow;
+  playbackUrl: string | null;
+  posterUrl: string | null;
+  /** Measured pixels of the media the tile shows (the video, else the cover). */
+  mediaW: number | null;
+  mediaH: number | null;
+  /** Signed slides in `media_urls` order, or [] when any one failed to sign. */
+  slideUrls: string[];
+};
+
+export type LibraryPage = Omit<MarketingAssetPage, "assets"> & { tiles: LibraryTile[] };
+
+/**
+ * The objects a tile shows: its video (if any) and ONE cover image.
+ *
+ * A carousel's cover is its first image row; its slides are signed separately,
+ * in `media_urls` order, because a carousel read out of order is a different
+ * post and media rows carry no order.
+ */
+function tileMedia(a: MarketingAssetRow) {
+  const media = a.media || [];
+  return {
+    video: media.find((m) => m.kind === "video"),
+    poster:
+      media.find((m) => m.kind === "poster") ||
+      media.find((m) => m.kind === "thumb") ||
+      media.find((m) => m.kind === "preview") ||
+      media.find((m) => m.kind === "image"),
+  };
+}
+
+/**
+ * One Library page, read and signed: THE data path of /founders/marketing/library.
+ *
+ * Signing happens here, for the rows getMarketingAssets returned and nothing
+ * else, so the page cannot sign more than a page of assets however it renders.
+ * Signing for every asset in the tab was half of why the Library took minutes:
+ * a signed URL is an invitation for the browser to fetch.
+ *
+ * `deps` is injectable for tests only (a libSQL-backed client and a counting
+ * signer). A signing failure degrades every tile to "no media" rather than
+ * failing the page, as before.
+ */
+export async function loadLibraryPage(
+  tenantId: string,
+  opts: Parameters<typeof getMarketingAssets>[1] = {},
+  deps: {
+    db?: ReturnType<typeof getServiceSupabase>;
+    sign?: typeof signMediaUrls;
+  } = {},
+): Promise<LibraryPage> {
+  const { assets, ...rest } = await getMarketingAssets(tenantId, opts, deps.db ?? getServiceSupabase());
+  const sign = deps.sign ?? signMediaUrls;
+
+  const slidePaths = (a: MarketingAssetRow): string[] => parseSlideUrls(a.media_urls).filter(Boolean);
+  const refs = assets.flatMap((a) => {
+    const { video, poster } = tileMedia(a);
+    const base = [video, poster]
+      .filter((m): m is NonNullable<typeof m> => !!m)
+      .map((m) => ({ bucket: m.storage_bucket, path: m.storage_path }));
+    return [...base, ...slidePaths(a).map((path) => ({ bucket: "marketing-media", path }))];
+  });
+  let urls = new Map<string, string>();
+  try {
+    urls = await sign(refs);
+  } catch (e) {
+    console.warn("[marketing:library.sign] signing failed; tiles render without media", e);
+  }
+
+  const tiles = assets.map((a): LibraryTile => {
+    const { video, poster } = tileMedia(a);
+    const shape = video ?? poster;
+    const signedSlides = slidePaths(a).map((path) => urls.get(mediaKey("marketing-media", path)));
+    return {
+      asset: a,
+      playbackUrl: video ? (urls.get(mediaKey(video.storage_bucket, video.storage_path)) ?? null) : null,
+      posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
+      mediaW: shape?.width ?? null,
+      mediaH: shape?.height ?? null,
+      // ALL SLIDES OR NONE. Mapping then filtering silently renumbers a carousel
+      // when one slide fails to sign — 1,2,4,5 rendered as "1/4..4/4" — and a
+      // carousel read out of order is a different post. If we cannot show the
+      // whole thing we show the cover instead, which is honest rather than
+      // confidently wrong.
+      slideUrls: signedSlides.every(Boolean) ? (signedSlides as string[]) : [],
+    };
+  });
+  return { ...rest, tiles };
 }
 
 /**
@@ -810,6 +995,116 @@ export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
   degraded: true,
 };
 
+/** A `count: "exact", head: true` read: the number, never the rows. */
+type HeadCount = PromiseLike<{ count: number | null; error: { code?: string; message?: string } | null }>;
+
+/**
+ * Run COUNT queries in parallel and report them the way the pills need them:
+ * an absent table is an honest zero, a failed count is flagged (the number is
+ * then a floor), and the counts that did succeed are kept.
+ */
+async function headCounts<K extends string>(
+  label: string,
+  keys: readonly K[],
+  build: (key: K) => HeadCount,
+): Promise<{ counts: Record<K, number>; degraded: boolean; absent: boolean }> {
+  const counts = Object.fromEntries(keys.map((k) => [k, 0])) as Record<K, number>;
+  const results = await Promise.all(keys.map(async (k) => [k, await build(k)] as const));
+  let degraded = false;
+  let absent = false;
+  for (const [k, r] of results) {
+    const verdict = classify(label, r.error);
+    if (verdict === "absent") absent = true;
+    else if (verdict === "broken") degraded = true;
+    else counts[k] = Number(r.count ?? 0);
+  }
+  return { counts, degraded, absent };
+}
+
+/**
+ * How many assets sit in each lifecycle bucket, for the pill row.
+ *
+ * A filter pill that cannot say how much is behind it makes the operator click
+ * every one to find out — and an Archived pill showing nothing is exactly how CC
+ * concluded an archived video was "completely gone". The count is the difference
+ * between a filter and a search.
+ *
+ * One COUNT per bucket through scopeToLifecycle(), the SAME predicate the grid
+ * filters with, so a pill and the grid behind it cannot disagree. It used to
+ * read every row of the tab and bucket them in JS, which was both a full read
+ * per page view and a second definition of the buckets that had drifted.
+ *
+ * Studio's "N awaiting your verdict" is this call's needs_review on the OASIS
+ * tab, the grid its link opens, so the number and the grid it promises agree.
+ */
+export async function getLifecycleCounts(
+  tenantId: string,
+  group: BrandGroupKey = DEFAULT_BRAND_GROUP,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<{ counts: Record<Lifecycle, number>; degraded: boolean }> {
+  const empty: Record<Lifecycle, number> = {
+    needs_review: 0, approved: 0, live: 0, archived: 0,
+  };
+  if (!tenantId) return { counts: empty, degraded: false };
+  try {
+    const r = await headCounts("lifecycle", LIFECYCLE, (lifecycle) =>
+      scopeToLifecycle(
+        scopeToBrandGroup(
+          db
+            .from("marketing_asset")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+          group,
+        ),
+        lifecycle,
+      ) as unknown as HeadCount,
+    );
+    // Absent = pre-migration = genuinely empty, and quiet. Partial counts from a
+    // broken read are kept but flagged, because a floor the operator knows is a
+    // floor beats a blank pill row.
+    if (r.absent) return { counts: empty, degraded: false };
+    return { counts: r.counts, degraded: r.degraded };
+  } catch {
+    return { counts: empty, degraded: true };
+  }
+}
+
+/**
+ * How many assets each brand TAB shows when you click it: one COUNT per tab of
+ * its default (All) grid, so archived and rejected assets are left out
+ * (hideArchived; the Archived pill holds them). It used to count every status,
+ * so the OASIS tab read 103 above an "All 100" grid.
+ *
+ * DELIBERATELY SPANS EVERY TAB, like getMarketingFacets: "Clients 4" has to read
+ * before you click it. COUNTS ONLY, through scopeToBrandGroup, so the numbers
+ * are exactly the rows each tab's grid shows.
+ */
+export async function getBrandTabCounts(
+  tenantId: string,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<{ counts: Record<BrandGroupKey, number>; degraded: boolean }> {
+  const keys = BRAND_GROUPS.map((g) => g.key);
+  const empty = Object.fromEntries(keys.map((k) => [k, 0])) as Record<BrandGroupKey, number>;
+  if (!tenantId) return { counts: empty, degraded: false };
+  try {
+    const r = await headCounts("brand_tabs", keys, (group) =>
+      scopeToBrandGroup(
+        hideArchived(
+          db
+            .from("marketing_asset")
+            .select("id", { count: "exact", head: true })
+            .eq("tenant_id", tenantId),
+        ) as unknown as BrandFilterable,
+        group,
+      ) as unknown as HeadCount,
+    );
+    if (r.absent) return { counts: empty, degraded: false };
+    return { counts: r.counts, degraded: r.degraded };
+  } catch {
+    return { counts: empty, degraded: true };
+  }
+}
+
 /**
  * The facet counts behind the brand tabs and the author filter.
  *
@@ -826,53 +1121,10 @@ export const DEGRADED_MARKETING_FACETS: MarketingFacets = {
  * and a tab reading "Clients 0" because page two timed out is the same
  * confident lie as "Nothing waiting on you" — it tells CC there is nothing
  * there, and he stops looking.
- */
-/**
- * How many assets sit in each lifecycle bucket, for the pill row.
  *
- * A filter pill that cannot say how much is behind it makes the operator click
- * every one to find out — and an Archived pill showing nothing is exactly how CC
- * concluded an archived video was "completely gone". The count is the difference
- * between a filter and a search.
- *
- * One paged pass over (status, published_at), bucketed by lifecycleOf() so the
- * pills and the grid can never disagree about what "Posted" means.
+ * The Library's tab counts now come from getBrandTabCounts (one COUNT per tab);
+ * it still reads this for the brand sub-filter inside a tab and the author facet.
  */
-export async function getLifecycleCounts(
-  tenantId: string,
-  group: BrandGroupKey = DEFAULT_BRAND_GROUP,
-): Promise<{ counts: Record<Lifecycle, number>; degraded: boolean }> {
-  const empty: Record<Lifecycle, number> = {
-    needs_review: 0, approved: 0, live: 0, archived: 0,
-  };
-  if (!tenantId) return { counts: empty, degraded: false };
-  try {
-    const db = getServiceSupabase();
-    const counts = { ...empty };
-    const outcome = await pageAll<{ status: string; published_at: string | null }>(
-      "lifecycle",
-      () =>
-        scopeToBrandGroup(
-          db
-            .from("marketing_asset")
-            .select("status, published_at")
-            .eq("tenant_id", tenantId) as unknown as BrandFilterable,
-          group,
-        ) as unknown as PagedQuery<{ status: string; published_at: string | null }>,
-      (rows) => {
-        for (const row of rows) counts[lifecycleOf(row)] += 1;
-      },
-    );
-    // Absent = pre-migration = genuinely empty, and quiet. Partial counts from a
-    // broken read are kept but flagged, because a floor the operator knows is a
-    // floor beats a blank pill row.
-    if (outcome === "absent") return { counts: empty, degraded: false };
-    return { counts, degraded: outcome === "degraded" };
-  } catch {
-    return { counts: empty, degraded: true };
-  }
-}
-
 export async function getMarketingFacets(tenantId: string): Promise<MarketingFacets> {
   if (!tenantId) return EMPTY_MARKETING_FACETS;
   try {
@@ -954,23 +1206,45 @@ export type CorpusStats = {
   failed: number;
   exemplars: number;
   counter_examples: number;
+  /**
+   * True when the read FAILED, as opposed to the corpus being empty: the
+   * Training tab and the Content overview's Training card then say they could
+   * not read it instead of "nothing yet". Same reason as MarketingSummary.degraded.
+   */
+  degraded: boolean;
 };
 
 export const EMPTY_CORPUS_STATS: CorpusStats = {
   total: 0, queued: 0, extracting: 0, indexed: 0, failed: 0,
-  exemplars: 0, counter_examples: 0,
+  exemplars: 0, counter_examples: 0, degraded: false,
 };
 
-/** Counts for the Train screen. Never throws; pre-migration returns zeroes. */
-export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
+/**
+ * Counts for the Training tab and the overview's Training card. Never throws;
+ * pre-migration (no table) returns honest zeroes, any other failure is degraded.
+ *
+ * TENANT-SCOPED ONLY, ON PURPOSE — do not "fix" this to match the Library's
+ * brand-scoped counts. marketing_corpus is what the marketing agent LEARNS
+ * FROM, not what OASIS has shipped, and you learn from everything you have
+ * made: a client ad that performed is training signal exactly like our own.
+ * The brand boundary exists so the founders LIBRARY shows our own
+ * deliverables; it is not a rule about training data. marketing_corpus.asset_id
+ * IS nullable, so scoping it here would be perfectly possible — which is
+ * exactly why this comment exists. Pinned by tests/marketing-core.test.ts (it
+ * pinned the same read inside getMarketingSummary until 2026-10-01).
+ *
+ * `db` is injectable for tests only, as in getMarketingSummary.
+ */
+export async function getCorpusStats(
+  tenantId: string,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<CorpusStats> {
   if (!tenantId) return EMPTY_CORPUS_STATS;
   try {
-    const db = getServiceSupabase();
     const r = await db.from("marketing_corpus").select("state, label").eq("tenant_id", tenantId);
-    if (r.error) {
-      quiet("corpus.stats", r.error);
-      return EMPTY_CORPUS_STATS;
-    }
+    const verdict = classify("corpus.stats", r.error);
+    if (verdict === "absent") return EMPTY_CORPUS_STATS;
+    if (verdict === "broken") return { ...EMPTY_CORPUS_STATS, degraded: true };
     const rows = (r.data || []) as Array<{ state: string; label: string }>;
     return {
       total: rows.length,
@@ -980,16 +1254,25 @@ export async function getCorpusStats(tenantId: string): Promise<CorpusStats> {
       failed: rows.filter((x) => x.state === "failed").length,
       exemplars: rows.filter((x) => x.label === "exemplar").length,
       counter_examples: rows.filter((x) => x.label === "counter_example").length,
+      degraded: false,
     };
   } catch (e) {
     console.warn("[marketing:corpus.stats] unexpected", e);
-    return EMPTY_CORPUS_STATS;
+    return { ...EMPTY_CORPUS_STATS, degraded: true };
   }
 }
 
-/** Most recent corpus items, newest first. */
-export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusRow[]> {
-  if (!tenantId) return [];
+/** The newest corpus links, and whether the read failed (a failed read is not an empty list). */
+export type CorpusItems = { rows: CorpusRow[]; degraded: boolean };
+
+/**
+ * Most recent corpus items, newest first. Unlike the other list readers this
+ * one says when it failed: the Training tab prints "Nothing in it yet" for an
+ * empty list, so an empty list from a broken read would hide material that is
+ * there (the counts read separately and can succeed while this one fails).
+ */
+export async function getCorpusItems(tenantId: string, limit = 40): Promise<CorpusItems> {
+  if (!tenantId) return { rows: [], degraded: false };
   try {
     const db = getServiceSupabase();
     const r = await db
@@ -998,13 +1281,12 @@ export async function getCorpusItems(tenantId: string, limit = 40): Promise<Corp
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);
-    if (r.error) {
-      quiet("corpus.items", r.error);
-      return [];
-    }
-    return (r.data || []) as CorpusRow[];
+    const verdict = classify("corpus.items", r.error);
+    if (verdict === "absent") return { rows: [], degraded: false };
+    if (verdict === "broken") return { rows: [], degraded: true };
+    return { rows: (r.data || []) as CorpusRow[], degraded: false };
   } catch (e) {
     console.warn("[marketing:corpus.items] unexpected", e);
-    return [];
+    return { rows: [], degraded: true };
   }
 }

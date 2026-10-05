@@ -235,7 +235,12 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
 
   try {
     const [leadsRes, runsRes, intxRes, opensRes, clicksRes, viewsRes, suppRes, ccRunsRes, numHealthRes, inboundSmsRes, callsRes, smsStatusRes, seqDefsRes] = await Promise.all([
-      db.from("tenant_records").select("data").eq("tenant_id", tenantId).eq("entity_type", "lead"),
+      // P2 instant-load (2026-09-01): the funnel below reads ONLY stage/status,
+      // but this row pulled every lead's FULL data blob — measured 44MB / 3.8-4.9s
+      // on the volume tenant, on every /metrics visit, the exact bug class
+      // web-leads fixed in R3. `->` (not `->>`) keeps parsed-JSON semantics
+      // identical on both backends, same as web-leads' FILTER_SELECT.
+      db.from("tenant_records").select("data->stage,data->status").eq("tenant_id", tenantId).eq("entity_type", "lead"),
       db.from("drip_runs").select("sequence_name, status, last_error").eq("tenant_id", tenantId).gte("created_at", curStartIso),
       // 2× window for period-over-period. Inside .or(), like-wildcards are '*'.
       db.from("lead_interactions").select("id, lead_id, channel, agent_source, metadata, created_at")
@@ -262,9 +267,10 @@ export async function getEmailMetrics(tenantId: string, days = 30): Promise<Metr
     // ---- Drip funnel (current-stage distribution, all-time snapshot) ----
     const stageCounts: Record<string, number> = {};
     let total = 0, appliedCount = 0, signedCount = 0, fundedCount = 0;
-    for (const r of (leadsRes.data || []) as Array<{ data: Record<string, unknown> | null }>) {
-      const d = r.data || {};
-      const stage = (typeof d.stage === "string" ? d.stage : typeof d.status === "string" ? d.status : "unset") as string;
+    // Projected rows arrive as {stage, status} (one column per json path),
+    // not {data: {...}} — see the projection note on the query above.
+    for (const r of (leadsRes.data || []) as Array<{ stage?: unknown; status?: unknown }>) {
+      const stage = (typeof r.stage === "string" ? r.stage : typeof r.status === "string" ? r.status : "unset") as string;
       if (stage === "archived") continue;
       stageCounts[stage] = (stageCounts[stage] || 0) + 1;
       total += 1;

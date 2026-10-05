@@ -1,23 +1,31 @@
 "use client";
 
 /**
- * BackgroundWorkersPanel — read-only view of the operator's local PM2
- * daemons + standalone Skool daemon. Renders below the cron-jobs list on
- * /automations so the operator can see at a glance:
- *   - Which background workers should be running on their machine
+ * BackgroundWorkersPanel — an execution-aware view of local, cloud, remote,
+ * and retired workers. Renders below the cron-jobs list on /automations so
+ * the operator can see at a glance:
+ *   - Where each worker runs and whether it is dashboard-controllable
  *   - Which are alive (status: healthy) vs stopped (down) vs unknown
  *     (bridge hasn't pushed a snapshot recently)
  *   - When each was last reported
  *
- * The bridge daemon (bravo_cli/local_bridge.py) is what populates the
- * underlying data — it calls `pm2 jlist` on each 60s heartbeat and POSTs
- * the snapshot to /api/bridge/ping. If the bridge itself is offline, this
- * panel will say so + degrade gracefully (all workers as "unknown").
+ * The local/remote bridge populates integrations_health; cloud automations
+ * report independently. A bridge outage therefore never makes a cloud row
+ * look stale.
  */
 
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/fetch-json";
 import { runWorkerAction, type WorkerAction } from "@/lib/automations/worker-control";
+import {
+  countsTowardHealth,
+  formatLastSeen,
+  isOperatorStopped,
+  type StatusReporter,
+  type WorkerControlMode,
+  type WorkerRuntime,
+  type WorkerStatusSource,
+} from "@/lib/automations/worker-status";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 /**
@@ -48,36 +56,72 @@ type Worker = {
   stale?: boolean;
   metadata: Record<string, unknown>;
   last_ping_at: string | null;
-  /** True when the worker is registered with pm2 and the dashboard's
-   * Start/Stop/Restart buttons can drive it. False for standalone
-   * Python scripts (Skool engine) — UI hides the buttons. */
+  /** Rolling-deploy compatibility for the former PM2-only API contract. */
   manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
+  /** Set when this worker is not meant to run on this machine — the string is
+   * the reason. Excluded from the healthy/total pill and rendered neutrally
+   * rather than as a fault. See the API's OASIS_WORKERS. */
+  not_expected_here?: string;
+  /** Execution and lifecycle facts. Optional only for compatibility with a
+   * stale API response during deployment. */
+  runtime?: WorkerRuntime;
+  control_mode?: WorkerControlMode;
+  status_source?: WorkerStatusSource;
   /** B4 (2026-07-23): who this daemon belongs to. The API always sends this
    * now (defaults "cc" server-side for the pre-existing CC-only worker list)
    * — optional here only as a defensive fallback against a stale API. */
   owner?: "cc" | "adon" | "shared";
 };
 
-const OWNER_GROUP_LABEL: Record<"cc" | "adon" | "shared", string> = {
-  cc: "CC",
-  adon: "Adon — Breeze / MCA underwriting",
-  shared: "Shared",
+const RUNTIME_GROUP_META: Record<WorkerRuntime, { label: string; detail: string }> = {
+  local: {
+    label: "This computer",
+    detail: "OASIS services supervised on this machine.",
+  },
+  cloud: {
+    label: "OASIS cloud",
+    detail: "Runs automatically whether this computer is on or off.",
+  },
+  remote: {
+    label: "Remote infrastructure",
+    detail: "Runs on this tenant's dedicated host.",
+  },
+  retired: {
+    label: "Inactive / retired",
+    detail: "Preserved for reference and excluded from active health.",
+  },
 };
-// Fixed display order so the grouping doesn't reshuffle between refreshes.
-const OWNER_GROUP_ORDER: Array<"cc" | "adon" | "shared"> = ["cc", "adon", "shared"];
+const RUNTIME_GROUP_ORDER: WorkerRuntime[] = ["local", "cloud", "remote", "retired"];
 
 type ApiResponse = {
   ok: boolean;
   bridge_online: boolean;
   last_seen_at: string | null;
+  /** Whether the bridge could read the fleet — absent on an older API. */
+  status_reporter?: StatusReporter;
   workers: Worker[];
   /** When true, worker actions route through the server-side bridge proxy
    * (SunBiz VPS daemons) instead of the operator's localhost bridge. */
   remote_control?: boolean;
   error?: string;
+  message?: string;
 };
+
+function runtimeFor(worker: Worker, legacyRemoteControl = false): WorkerRuntime {
+  if (worker.runtime) return worker.runtime;
+  if (worker.not_expected_here) return "retired";
+  return legacyRemoteControl ? "remote" : "local";
+}
+
+function controlModeFor(worker: Worker, legacyRemoteControl = false): WorkerControlMode {
+  if (worker.control_mode) return worker.control_mode;
+  if (worker.manageable_via_pm2 === false || runtimeFor(worker, legacyRemoteControl) === "retired") {
+    return "none";
+  }
+  return legacyRemoteControl ? "remote_bridge" : "local_fleet";
+}
 
 export function BackgroundWorkersPanel() {
   const [data, setData] = useState<ApiResponse | null>(null);
@@ -95,7 +139,7 @@ export function BackgroundWorkersPanel() {
       }
       const j = result.data;
       if (!j.ok) {
-        setError(j.error || `http_${result.status}`);
+        setError(j.message || j.error || `http_${result.status}`);
         return;
       }
       setData(j);
@@ -129,9 +173,30 @@ export function BackgroundWorkersPanel() {
     );
   }
 
-  const active = data.workers.filter((w) => w.status !== "archived");
+  // Local, cloud, and remote workers are active health. Retired inventory is
+  // visible in its own collapsed section but never counts as an outage.
+  const active = data.workers.filter(countsTowardHealth);
   const healthy = active.filter((w) => w.status === "healthy").length;
   const total = active.length;
+  const legacyRemoteControl = data.remote_control || false;
+  const byRuntime = new Map<WorkerRuntime, Worker[]>();
+  for (const worker of data.workers) {
+    const workerRuntime = runtimeFor(worker, legacyRemoteControl);
+    const list = byRuntime.get(workerRuntime) ?? [];
+    list.push(worker);
+    byRuntime.set(workerRuntime, list);
+  }
+  const runtimesPresent = RUNTIME_GROUP_ORDER.filter(
+    (workerRuntime) => (byRuntime.get(workerRuntime)?.length ?? 0) > 0,
+  );
+  const hasLocalWorkers = (byRuntime.get("local")?.length ?? 0) > 0;
+  const hasRemoteWorkers = (byRuntime.get("remote")?.length ?? 0) > 0;
+  const bridgeLabel = hasRemoteWorkers && !hasLocalWorkers ? "Remote bridge" : "Local bridge";
+  // When the reporter itself is blind, a stale local tile means "unseen", not
+  // "down" — the pill and the tiles must say so instead of counting outages.
+  const reporter = data.status_reporter;
+  const reporterBlind =
+    hasLocalWorkers && (reporter?.state === "failing" || reporter?.state === "silent");
 
   return (
     <div className="space-y-3">
@@ -140,91 +205,93 @@ export function BackgroundWorkersPanel() {
           <Cpu className="w-4 h-4 text-fg-muted" />
           <div className="text-sm font-bold text-fg">Background workers</div>
           <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
-            {healthy}/{total} healthy
+            {reporterBlind ? "status unknown" : `${healthy}/${total} healthy`}
           </span>
         </div>
-        {data.last_seen_at && (
+        {(hasLocalWorkers || hasRemoteWorkers) && data.last_seen_at && (
           <div className="text-[11px] text-fg-dim inline-flex items-center gap-1.5">
             <Activity className="w-3 h-3" />
-            Bridge last seen {new Date(data.last_seen_at).toLocaleTimeString()}
+            {bridgeLabel} last seen {new Date(data.last_seen_at).toLocaleTimeString()}
           </div>
         )}
       </div>
 
-      {!data.bridge_online && (
+      {reporterBlind && reporter && (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-status-warm flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>
+            Worker status isn&apos;t reaching the dashboard — the workers themselves may be
+            running fine.{" "}
+            {reporter.state === "failing"
+              ? `This computer reports it can't read its process list: ${reporter.error}.`
+              : `This computer is online but its last worker report was ${
+                  reporter.last_ping_at ? formatLastSeen(reporter.last_ping_at) : "never"
+                }.`}{" "}
+            Restarting &ldquo;Bridge heartbeat&rdquo; usually clears it.
+          </span>
+        </div>
+      )}
+
+      {!data.bridge_online && (hasLocalWorkers || hasRemoteWorkers) && (
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">
-          {data.remote_control ? (
+          {hasRemoteWorkers && !hasLocalWorkers ? (
             <>
-              The VPS heartbeat hasn&apos;t landed in the last 2 minutes — the
-              statuses below may be lagging. The controls still work: hit{" "}
-              <span className="font-mono text-fg">Restart</span> on the
-              &ldquo;Bridge heartbeat&rdquo; worker to recover it.
+              Remote infrastructure has not reported in the last 2 minutes, so
+              that section may be lagging. Server-side controls remain available.
             </>
           ) : (
             <>
-              Bridge hasn&apos;t pinged in the last 2 minutes — worker statuses
-              below may be stale. Run <span className="font-mono text-fg">pm2 restart claude-bridge-ping</span> on your machine.
+              This computer has not reported in the last 2 minutes, so its worker
+              statuses may be stale. OASIS cloud automations are unaffected.
             </>
           )}
         </div>
       )}
 
-      {(() => {
-        // B4 (2026-07-23): group by owner (cc / adon / shared) so a mixed
-        // worker list (SunBiz core + Breeze/MCA underwriting daemons) reads
-        // as two clearly-attributed sets instead of one undifferentiated
-        // grid. Skip the group headers entirely when everything belongs to
-        // one owner (e.g. CC's own OASIS worker list has no adon entries) —
-        // no reason to add label noise to the common single-owner case.
-        const byOwner = new Map<"cc" | "adon" | "shared", Worker[]>();
-        for (const w of data.workers) {
-          const owner = w.owner ?? "cc";
-          const list = byOwner.get(owner) ?? [];
-          list.push(w);
-          byOwner.set(owner, list);
-        }
-        const groupsPresent = OWNER_GROUP_ORDER.filter((o) => (byOwner.get(o)?.length ?? 0) > 0);
-        const showGroupHeaders = groupsPresent.length > 1;
-
-        if (!showGroupHeaders) {
-          return (
+      <div className="space-y-4">
+        {runtimesPresent.map((workerRuntime) => {
+          const groupWorkers = byRuntime.get(workerRuntime) ?? [];
+          const group = RUNTIME_GROUP_META[workerRuntime];
+          const cards = (
             <div className="grid sm:grid-cols-2 gap-2">
-              {data.workers.map((w) => (
+              {groupWorkers.map((worker) => (
                 <WorkerRow
-                  key={w.service}
-                  worker={w}
+                  key={worker.service}
+                  worker={worker}
                   bridgeOnline={data.bridge_online}
-                  remoteControl={data.remote_control || false}
+                  reporterBlind={reporterBlind && workerRuntime === "local"}
+                  remoteControl={legacyRemoteControl}
                   onChange={refresh}
                 />
               ))}
             </div>
           );
-        }
 
-        return (
-          <div className="space-y-4">
-            {groupsPresent.map((owner) => (
-              <div key={owner} className="space-y-2">
+          if (workerRuntime === "retired") {
+            return (
+              <details key={workerRuntime} className="rounded-lg border border-bg-border bg-bg-deep/20 p-3">
+                <summary className="cursor-pointer text-[10px] font-bold uppercase tracking-wider text-fg-dim">
+                  {group.label} ({groupWorkers.length})
+                </summary>
+                <div className="mt-1 mb-3 text-[11px] text-fg-dim">{group.detail}</div>
+                {cards}
+              </details>
+            );
+          }
+
+          return (
+            <section key={workerRuntime} className="space-y-2">
+              <div>
                 <div className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">
-                  {OWNER_GROUP_LABEL[owner]}
+                  {group.label}
                 </div>
-                <div className="grid sm:grid-cols-2 gap-2">
-                  {(byOwner.get(owner) ?? []).map((w) => (
-                    <WorkerRow
-                      key={w.service}
-                      worker={w}
-                      bridgeOnline={data.bridge_online}
-                      remoteControl={data.remote_control || false}
-                      onChange={refresh}
-                    />
-                  ))}
-                </div>
+                <div className="text-[11px] text-fg-dim mt-0.5">{group.detail}</div>
               </div>
-            ))}
-          </div>
-        );
-      })()}
+              {cards}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -232,11 +299,14 @@ export function BackgroundWorkersPanel() {
 function WorkerRow({
   worker,
   bridgeOnline,
+  reporterBlind = false,
   remoteControl,
   onChange,
 }: {
   worker: Worker;
   bridgeOnline: boolean;
+  /** The bridge can't read the fleet, so a stale tile is unseen, not down. */
+  reporterBlind?: boolean;
   /** Route actions through the server-side bridge proxy (SunBiz VPS). */
   remoteControl: boolean;
   onChange: () => void | Promise<void>;
@@ -247,17 +317,38 @@ function WorkerRow({
   // null = no override, fall through to worker.status from the server.
   const [optimisticStatus, setOptimisticStatus] = useState<Worker["status"] | null>(null);
   const effectiveStatus = optimisticStatus ?? worker.status;
+  const workerRuntime = runtimeFor(worker, remoteControl);
+  const controlMode = controlModeFor(worker, remoteControl);
 
-  const Icon =
-    effectiveStatus === "healthy"
+  // "Off" is a fourth state, and it is NOT a fault (2026-09-02). The rule lives
+  // in lib/automations/worker-status so a test can execute it — see that file
+  // for why "Degraded — check logs" was being shown for a deliberate stop.
+  // Suppressed while an optimistic flip is pending: that flip has no fresh
+  // supervisor reading behind it.
+  const operatorStopped = optimisticStatus === null && isOperatorStopped(worker);
+  // Not a fault and must not be coloured like one — see the API's
+  // OASIS_WORKERS.not_expected_here compatibility field.
+  const byDesign =
+    (workerRuntime === "retired" || Boolean(worker.not_expected_here)) &&
+    optimisticStatus === null;
+
+  // Unseen while the reporter is blind: neither a fault nor a green light.
+  const unseen = reporterBlind && optimisticStatus === null && Boolean(worker.stale);
+
+  const Icon = unseen
+    ? HelpCircle
+    : byDesign || operatorStopped
+    ? MinusCircle
+    : effectiveStatus === "healthy"
       ? CheckCircle2
       : effectiveStatus === "down"
         ? MinusCircle
         : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
-  const iconClass =
-    effectiveStatus === "healthy"
+  const iconClass = unseen || byDesign || operatorStopped
+    ? "text-fg-dim"
+    : effectiveStatus === "healthy"
       ? "text-status-engaged"
       : effectiveStatus === "down"
         ? "text-status-warm"
@@ -283,22 +374,49 @@ function WorkerRow({
   // with no timestamp and a 20-minute-old silence look identical otherwise.
   // The optimistic flip has no fresh ping to quote, so it shows plain
   // "Stopped"/"Running" until the next heartbeat lands.
+  //
+  // The DATE is not optional (2026-09-02). This printed toLocaleTimeString()
+  // alone, so the Skool daemon's "last seen 7:31 PM" was 18 May — 106 days old
+  // — and rendered identically to a worker that dropped out twenty minutes ago.
+  // A relic and a live incident MUST NOT look the same. Anything older than
+  // today carries its date; today's pings stay time-only so the common case
+  // reads short.
   const lastSeen =
     optimisticStatus === null && worker.last_ping_at
-      ? ` · last seen ${new Date(worker.last_ping_at).toLocaleTimeString()}`
+      ? ` · last seen ${formatLastSeen(worker.last_ping_at)}`
       : "";
-  const statusLabel =
-    effectiveStatus === "healthy"
-      ? uptimeStr
-        ? `Running · up ${uptimeStr}`
-        : "Running"
-      : effectiveStatus === "down"
-        ? optimisticStatus === null && worker.stale
-          ? `Down — stopped reporting${lastSeen}`
-          : `Stopped${lastSeen}`
-        : effectiveStatus === "degraded"
-          ? `Degraded — check logs${lastSeen}`
-          : "Not running on your machine";
+  const lastRun =
+    optimisticStatus === null && worker.last_ping_at
+      ? ` · last run ${formatLastSeen(worker.last_ping_at)}`
+      : "";
+  let statusLabel: string;
+  if (byDesign) {
+    statusLabel = worker.not_expected_here || "Retired — preserved for reference";
+  } else if (workerRuntime === "cloud") {
+    statusLabel =
+      effectiveStatus === "healthy"
+        ? `Healthy · managed automatically${lastRun}`
+        : effectiveStatus === "down"
+          ? `Down — cloud schedule stopped reporting${lastRun}`
+          : effectiveStatus === "degraded"
+            ? `Degraded — check the latest run${lastRun}`
+            : "Waiting for first scheduled run";
+  } else if (operatorStopped) {
+    statusLabel = `Off — you stopped this. Start it to resume.${lastSeen}`;
+  } else if (effectiveStatus === "healthy") {
+    statusLabel = uptimeStr ? `Running · up ${uptimeStr}` : "Running";
+  } else if (effectiveStatus === "down") {
+    statusLabel =
+      optimisticStatus === null && worker.stale
+        ? reporterBlind
+          ? `Status unknown — not reported${lastSeen}`
+          : `Down — stopped reporting${lastSeen}`
+        : `Stopped${lastSeen}`;
+  } else if (effectiveStatus === "degraded") {
+    statusLabel = `Degraded — check logs${lastSeen}`;
+  } else {
+    statusLabel = workerRuntime === "remote" ? "Waiting for remote status" : "Not yet reporting";
+  }
 
   // Detailed pm2 fields land in the tooltip. Operators who care about
   // memory + cpu + restart count + PID can hover; everyone else sees
@@ -311,11 +429,13 @@ function WorkerRow({
   return (
     <div
       className={`rounded-lg border p-3 ${
-        effectiveStatus === "healthy"
-          ? "border-bg-border bg-bg-elev/30"
-          : effectiveStatus === "down"
-            ? "border-status-warm/30 bg-status-warm/5"
-            : "border-bg-border bg-bg-deep/40 opacity-80"
+        unseen || byDesign || operatorStopped
+          ? "border-bg-border bg-bg-deep/40 opacity-70"
+          : effectiveStatus === "healthy"
+            ? "border-bg-border bg-bg-elev/30"
+            : effectiveStatus === "down"
+              ? "border-status-warm/30 bg-status-warm/5"
+              : "border-bg-border bg-bg-deep/40 opacity-80"
       }`}
       title={detailTooltip}
     >
@@ -327,24 +447,31 @@ function WorkerRow({
             <span className="text-[10px] uppercase tracking-wider text-fg-dim font-mono">
               {worker.service.replace(/^pm2\./, "")}
             </span>
+            {workerRuntime === "cloud" && (
+              <span className="text-[9px] uppercase tracking-wider text-accent border border-accent/30 rounded-full px-1.5 py-0.5">
+                Managed automatically
+              </span>
+            )}
+            {workerRuntime === "retired" && (
+              <span className="text-[9px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
+                Retired
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-fg-muted mt-0.5 leading-relaxed">{worker.purpose}</div>
           <div className="text-[11px] text-fg-dim mt-1">
             {statusLabel}
           </div>
-          <WorkerActions
-            service={worker.service}
-            bridgeOnline={bridgeOnline}
-            remoteControl={remoteControl}
-            status={effectiveStatus}
-            // pm2-controllable? Pass through so WorkerActions can disable
-            // the buttons for standalones (Skool) without hiding them —
-            // hiding was confusing CC ("I don't see the three buttons").
-            // Disabled + tooltip is clearer than absent.
-            pm2Managed={worker.manageable_via_pm2 !== false}
-            onOptimistic={setOptimisticStatus}
-            onChange={onChange}
-          />
+          {worker.control_mode !== "none" && controlMode !== "none" && (
+            <WorkerActions
+              service={worker.service}
+              bridgeOnline={bridgeOnline}
+              remoteControl={controlMode === "remote_bridge"}
+              status={effectiveStatus}
+              onOptimistic={setOptimisticStatus}
+              onChange={onChange}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -361,7 +488,6 @@ function WorkerActions({
   bridgeOnline,
   remoteControl,
   status,
-  pm2Managed = true,
   onOptimistic,
   onChange,
 }: {
@@ -370,11 +496,6 @@ function WorkerActions({
   /** Route actions through the server-side bridge proxy (SunBiz VPS). */
   remoteControl: boolean;
   status: Worker["status"];
-  /** When false, the worker isn't registered with pm2 (e.g., Skool engine
-   * owns its own lock file). Buttons render but stay disabled with a
-   * tooltip explaining why — hiding them confused CC ("I don't see the
-   * three buttons under it to start or stop it"). */
-  pm2Managed?: boolean;
   /** Optimistic local-state flip so the tile reflects success before the
    * bridge's next 60s heartbeat lands. Passing null clears the override
    * and falls back to server data. */
@@ -402,7 +523,7 @@ function WorkerActions({
 
     setBusy(action);
     setFeedback(null);
-    const result = await runWorkerAction(service, action, remoteControl);
+    const result = await runWorkerAction(service, action);
     setBusy(null);
 
     // Codex audit — DON'T optimistically flip critical workers. The 90s
@@ -431,12 +552,6 @@ function WorkerActions({
 
   const canStart = status !== "healthy";
   const canStop = status === "healthy" || status === "degraded";
-  // Disable reasons stack. Most specific wins (non-pm2 wins over bridge
-  // offline wins over already-running/stopped) so the tooltip always
-  // surfaces the most actionable reason.
-  const nonPm2Hint = !pm2Managed
-    ? "Standalone — manages its own lifecycle outside pm2. Start / stop via direct CLI."
-    : undefined;
   // Heartbeat freshness only blocks the LOCAL path (browser → localhost bridge):
   // if that bridge is offline the browser can't reach it. For the REMOTE path
   // the control POST goes server-side to the VPS exec-tool (hosted by
@@ -446,7 +561,7 @@ function WorkerActions({
   // dead claude-bridge-ping. So remote stays actionable; a truly-down bridge
   // surfaces a clear error from the POST instead of a greyed-out button.
   const bridgeBlocks = !remoteControl && !bridgeOnline;
-  const disabledHint = nonPm2Hint || (bridgeBlocks ? "Bridge offline — can't reach pm2" : undefined);
+  const disabledHint = bridgeBlocks ? "Local bridge offline — can't reach this worker" : undefined;
 
   return (
     <div className="mt-2 flex items-center gap-1.5">
@@ -454,10 +569,10 @@ function WorkerActions({
         icon={busy === "start" ? Loader2 : Play}
         spin={busy === "start"}
         label="Start"
-        disabled={!pm2Managed || bridgeBlocks || busy !== null || !canStart}
+        disabled={bridgeBlocks || busy !== null || !canStart}
         title={
           disabledHint ||
-          (!canStart ? "Already running" : "Start this worker via pm2")
+          (!canStart ? "Already running" : "Start this worker")
         }
         onClick={() => handle("start")}
       />
@@ -465,10 +580,10 @@ function WorkerActions({
         icon={busy === "stop" ? Loader2 : Square}
         spin={busy === "stop"}
         label="Stop"
-        disabled={!pm2Managed || bridgeBlocks || busy !== null || !canStop}
+        disabled={bridgeBlocks || busy !== null || !canStop}
         title={
           disabledHint ||
-          (!canStop ? "Already stopped" : "Stop this worker via pm2")
+          (!canStop ? "Already stopped" : "Stop this worker")
         }
         onClick={() => handle("stop")}
       />
@@ -476,8 +591,8 @@ function WorkerActions({
         icon={busy === "restart" ? Loader2 : RotateCw}
         spin={busy === "restart"}
         label="Restart"
-        disabled={!pm2Managed || bridgeBlocks || busy !== null}
-        title={disabledHint || "Restart this worker via pm2"}
+        disabled={bridgeBlocks || busy !== null}
+        title={disabledHint || "Restart this worker"}
         onClick={() => handle("restart")}
       />
       {feedback && (

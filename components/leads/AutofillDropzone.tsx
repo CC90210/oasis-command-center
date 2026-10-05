@@ -24,6 +24,113 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Turn the daemon's internal failure token into something a rep can act on.
+ *
+ * For three weeks the only thing anyone saw when an application drop broke was
+ * the literal string "Couldn't read it (download_failed)." — a rep cannot tell
+ * from that whether to re-drop, wait, or give up, so Ezra reasonably concluded
+ * the feature was dead and went back to JotForm. The two cases need opposite
+ * actions: a `blocked:` prefix means the reader is misconfigured and re-dropping
+ * will fail identically every time, while anything else is worth one retry.
+ *
+ * The raw code is still shown in parentheses because support needs it, but it
+ * is no longer the whole message.
+ */
+function explainFailure(error: string | null): string {
+  if (!error) return "Couldn't read this application. Try dropping it again, or enter the deal manually.";
+  if (error.startsWith("blocked:")) {
+    return (
+      "The application reader is offline, so this file can't be read automatically right now. " +
+      "Nothing was saved, so enter the deal manually. The team has been alerted. " +
+      `(${error})`
+    );
+  }
+  return `Couldn't read this application. Try dropping it again, or enter the deal manually. (${error})`;
+}
+
+/**
+ * Plain-language message for a failed UPLOAD (the POST that queues the job),
+ * as opposed to explainFailure() above which covers a failed EXTRACTION.
+ *
+ * Adon, 2026-09-15: the drop "kept on getting error-coded". Half of that was a
+ * real outage (Cloudflare's Browser Integrity Check answering the VPS callbacks
+ * with "error code: 1010"); the other half was this screen, which printed
+ * `failed_500` and stopped. A rep cannot act on a status code.
+ *
+ * 🚨 WHETHER ANYTHING WAS SAVED IS NOT UNIFORM — do not collapse these branches
+ * back into one blanket "Nothing was saved."
+ *
+ * The first version of this function did exactly that, and it was WRONG for one
+ * real path. The two routes differ:
+ *
+ *   new-from-document      uploads to a `_extraction_pending/` path and, if the
+ *                          job insert then fails, REMOVES it. Nothing saved.
+ *   autofill-application   calls uploadLeadDocument() FIRST, which commits a
+ *                          real `lead_documents` row against the lead, and does
+ *                          NOT roll it back if the job insert fails. The
+ *                          document IS filed and shows on the Documents tab.
+ *
+ * Telling a rep "nothing was saved" there sends them to re-drop a file the lead
+ * already has — the exact duplicate this screen is supposed to prevent. Every
+ * size/type/role check runs BEFORE either upload, so those branches genuinely
+ * did save nothing; only `queue_failed` and an unknown crash are ambiguous, and
+ * an unknown crash gets a hedge rather than a promise.
+ *
+ * The raw code stays in parentheses so we can diagnose from a screenshot.
+ */
+function explainUploadFailure(
+  status: number,
+  detail: string | null,
+  raw: string,
+  mode: "existing" | "new",
+): string {
+  const code = detail || (raw ? raw.slice(0, 120) : `HTTP ${status}`);
+  // Only claim this where the server rejected the file BEFORE storing it.
+  const nothingSaved = ` Nothing was saved. (${code})`;
+
+  // Rejected before either upload ran — safe to promise nothing was stored.
+  if (status === 401 || status === 403) {
+    return "Your session expired, so the upload was rejected. Reload the page, sign in again, and drop the file once more." + nothingSaved;
+  }
+  if (status === 413 || detail === "file_too_large") {
+    return "That file is too large to upload. Split it or compress it and try again, or enter the deal manually." + nothingSaved;
+  }
+  if (status === 415 || detail === "unsupported_type") {
+    return "That file type can't be read. Drop a PDF of the signed application." + nothingSaved;
+  }
+  if (detail === "empty_file" || detail === "file_required") {
+    return "That file was empty, so there was nothing to read. Drop the signed application PDF." + nothingSaved;
+  }
+  if (status === 429) {
+    return "Too many uploads at once. Wait a moment and drop the file again." + nothingSaved;
+  }
+  // The upload itself failed, on either route — the file never landed.
+  if (detail === "upload_failed") {
+    return "The file couldn't be stored, so reading it never started. Try again, or enter the deal manually." + nothingSaved;
+  }
+  // The file stored but the job didn't queue. THIS is where the two routes part.
+  if (detail === "queue_failed") {
+    return mode === "existing"
+      ? "The application was filed to this lead, but reading it never started. " +
+          `It's already on the Documents tab — don't drop it again, or you'll file a second copy. Fill the fields manually. (${code})`
+      : "Couldn't start reading this application, and the upload was discarded, so nothing was saved. " +
+          `Try again, or enter the deal manually. (${code})`;
+  }
+  // Unknown server failure — including the empty-bodied 500 an uncaught throw
+  // produces. We do NOT know how far it got, so we do not pretend to.
+  if (status >= 500 || !raw) {
+    return (
+      "The application reader failed before it could start. " +
+      (mode === "existing"
+        ? "Check the lead's Documents tab before dropping the file again, so you don't file two copies. "
+        : "No new lead was created. ") +
+      `Enter the deal manually, and tell APEX if it keeps happening. (${code})`
+    );
+  }
+  return `Couldn't start reading this application. Try again, or enter the deal manually. (${code})`;
+}
+
 export function AutofillDropzone({
   mode,
   leadId,
@@ -56,7 +163,7 @@ export function AutofillDropzone({
   }
 
   async function pollJob(jobId: string): Promise<
-    | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null }
+    | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null; matchedExisting: boolean }
     | { status: "failed"; error: string | null }
     | { status: "timeout" }
   > {
@@ -79,6 +186,7 @@ export function AutofillDropzone({
           signaturePreview: typeof j.signature_preview === "string" ? j.signature_preview : null,
           applicationId: typeof j.application_id === "string" ? j.application_id : null,
           jobLeadId: typeof j.lead_id === "string" ? j.lead_id : null,
+          matchedExisting: j.matched_existing === true,
         };
       }
       if (status === "failed") {
@@ -101,9 +209,29 @@ export function AutofillDropzone({
       const url =
         mode === "existing" ? `/api/leads/${leadId}/autofill-application` : `/api/leads/new-from-document`;
       const r = await fetch(url, { method: "POST", credentials: "include", body: fd });
-      const j = await r.json().catch(() => ({}));
+      // Read as TEXT first. `r.json()` on an empty-bodied 500 rejects, the
+      // `.catch(() => ({}))` swallowed it into `{}`, and the rep was shown the
+      // bare string "failed_500" — a status code with no instruction attached.
+      // Keeping the raw body lets explainUploadFailure say something the rep
+      // can act on, and still print the code for us.
+      const raw = await r.text();
+      let j: Record<string, unknown> = {};
+      try {
+        j = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      } catch {
+        j = {};
+      }
       if (!r.ok || !j.ok || !j.job_id) {
-        setErr(j.detail || j.error || `failed_${r.status}`);
+        setErr(
+          explainUploadFailure(
+            r.status,
+            (typeof j.detail === "string" && j.detail) ||
+              (typeof j.error === "string" && j.error) ||
+              null,
+            raw,
+            mode,
+          ),
+        );
         return;
       }
       jobId = j.job_id as string;
@@ -121,7 +249,7 @@ export function AutofillDropzone({
     try {
       const res = await pollJob(jobId);
       if (res.status === "failed") {
-        setErr(res.error ? `Couldn't read it (${res.error}). Re-drop or fill manually.` : "Couldn't read the application. Re-drop or fill manually.");
+        setErr(explainFailure(res.error));
         return;
       }
       if (res.status === "timeout") {
@@ -129,7 +257,14 @@ export function AutofillDropzone({
         return;
       }
       // applied
-      setMsg(`Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`);
+      // Say when the document joined a merchant we already had. Without this the
+      // rep drops a file, no new card appears, and the only way to find out why
+      // is to go looking — which is how people conclude a feature is broken.
+      setMsg(
+        res.matchedExisting
+          ? `Matched an existing merchant. Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} on their file instead of creating a duplicate.`
+          : `Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`,
+      );
       const resolvedLeadId = leadId || res.jobLeadId || "";
       const newRedirect = mode === "new" && res.applicationId && tenantSlug ? res.applicationId : null;
       setPendingRedirect(newRedirect);
@@ -180,7 +315,7 @@ export function AutofillDropzone({
     }
   }
 
-  const text = label || (mode === "existing" ? "Autofill from application" : "New from application");
+  const text = label || (mode === "existing" ? "Autofill from application" : "New Form Application");
   const working = busy || reading;
 
   return (

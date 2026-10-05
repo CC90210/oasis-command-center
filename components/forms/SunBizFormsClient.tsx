@@ -20,6 +20,11 @@ import { useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
+  LEAD_SOURCE_CHANNELS,
+  LEAD_SOURCE_LABELS,
+  withLeadSourceParam,
+} from "@/lib/forms/lead-source";
+import {
   FileText,
   CheckCircle2,
   AlertCircle,
@@ -276,6 +281,11 @@ function PerAgentLinksCard({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   if (!tenantSlug || !interestForm) return null;
   const origin = typeof window !== "undefined" ? window.location.origin : "";
+  // No ?rep= on purpose: this is the shared-template link.
+  const universalEmailUrl = withLeadSourceParam(
+    `${origin}/f/${tenantSlug}/${interestForm.slug}`,
+    "email",
+  );
 
   async function copy(key: string, url: string) {
     try {
@@ -297,6 +307,10 @@ function PerAgentLinksCard({
           Share each agent&apos;s own link to the Initial Lead Capture form. A submission lands in the
           Opportunity Pipeline <strong className="text-fg">assigned to that agent</strong>, and the
           Inquiry Welcomer drip texts + emails the applicant the full application — signed by them.
+          {" "}Each agent gets <strong className="text-fg">three</strong> links: send the Text one
+          in an SMS blast, read the Dial one out on a call, paste the Email one into an email.
+          Whichever they use tags the lead, and the split shows up under Metrics — Lead
+          Origination. A link without the tag still works, it just counts as Unknown.
           {!interestForm.enabled && (
             <span className="text-amber-400">
               {" "}
@@ -305,35 +319,100 @@ function PerAgentLinksCard({
             </span>
           )}
         </div>
-        <div className="space-y-2">
+        <div className="space-y-4">
           {SUNBIZ_AGENTS.map((a) => {
-            const url = `${origin}/f/${tenantSlug}/${interestForm.slug}?rep=${a.key}`;
+            // ?rep= routes the lead to the agent; ?source= tags how it came in.
+            // Orthogonal on purpose — the same agent works both channels — so
+            // every agent gets one link per channel off a shared base.
+            const base = `${origin}/f/${tenantSlug}/${interestForm.slug}?rep=${a.key}`;
             return (
-              <div key={a.key} className="flex items-center gap-2">
-                <span className="w-14 shrink-0 text-sm font-bold text-fg">{a.label}</span>
-                <code className="flex-1 truncate rounded-md bg-bg-deep border border-bg-border px-2.5 py-1.5 font-mono text-[11px] text-fg-muted">
-                  {url}
-                </code>
-                <button
-                  type="button"
-                  onClick={() => copy(a.key, url)}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
-                >
-                  {copiedKey === a.key ? (
-                    <>
-                      <Check className="w-3.5 h-3.5" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" />
-                      Copy
-                    </>
-                  )}
-                </button>
+              <div key={a.key} className="space-y-1.5">
+                <div className="text-sm font-bold text-fg">{a.label}</div>
+                {LEAD_SOURCE_CHANNELS.map((channel) => {
+                  const url = withLeadSourceParam(base, channel);
+                  const copyKey = `${a.key}:${channel}`;
+                  return (
+                    <div key={channel} className="flex items-center gap-2">
+                      <span
+                        className={`w-12 shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] ${
+                          channel === "text"
+                            ? "text-accent"
+                            : channel === "dial"
+                              ? "text-status-engaged"
+                              : "text-[#a855f7]"
+                        }`}
+                      >
+                        {LEAD_SOURCE_LABELS[channel]}
+                      </span>
+                      <code className="flex-1 truncate rounded-md bg-bg-deep border border-bg-border px-2.5 py-1.5 font-mono text-[11px] text-fg-muted">
+                        {url}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copy(copyKey, url)}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
+                      >
+                        {copiedKey === copyKey ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            Copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
+        </div>
+
+        {/* Universal email link — Adon 2026-08-24: "this could just be one
+            universal link that is used for any leads that we send an
+            application through email to". Carries the channel tag but no rep,
+            so it is the right thing to paste into a shared email template or
+            anywhere the sender is not one specific agent. A lead from it is
+            attributed to Email and lands unassigned, exactly as an untagged
+            shared link does today. */}
+        <div className="mt-4 space-y-1.5 border-t border-bg-border pt-4">
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+            Universal email link (no rep)
+          </div>
+          <div className="text-xs leading-relaxed text-fg-dim">
+            For shared email templates and anywhere the sender is not one specific agent. Counts as
+            Email, lands unassigned. Use an agent&apos;s own Email link above when you want the lead
+            to land under their name.
+          </div>
+          <div className="flex items-center gap-2 pt-1">
+            <span className="w-12 shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-[#a855f7]">
+              Email
+            </span>
+            <code className="flex-1 truncate rounded-md bg-bg-deep border border-bg-border px-2.5 py-1.5 font-mono text-[11px] text-fg-muted">
+              {universalEmailUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => copy("universal:email", universalEmailUrl)}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-bg-elev border border-bg-border text-fg-muted hover:text-fg hover:border-accent/40 px-3 py-1.5 text-xs font-bold transition-colors"
+            >
+              {copiedKey === "universal:email" ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  Copy
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </section>

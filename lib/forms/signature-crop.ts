@@ -16,6 +16,8 @@
 
 import "server-only";
 
+import { loadNativeRaster, loadPdfjs } from "./native-raster";
+
 export type NormalizedBBox = { x: number; y: number; width: number; height: number };
 
 export type CropResult =
@@ -53,7 +55,9 @@ function validBox(box: NormalizedBBox): boolean {
 }
 
 async function cropImage(bytes: Buffer, box: NormalizedBBox): Promise<CropResult> {
-  const sharp = (await import("sharp")).default;
+  const native = await loadNativeRaster();
+  if (!native.available) return { ok: false, error: native.reason };
+  const sharp = native.sharp;
   const img = sharp(bytes, { failOn: "none" }).rotate(); // honor EXIF orientation
   const meta = await img.metadata();
   const W = meta.width || 0;
@@ -65,9 +69,12 @@ async function cropImage(bytes: Buffer, box: NormalizedBBox): Promise<CropResult
 }
 
 async function cropPdf(bytes: Buffer, box: NormalizedBBox, page: number): Promise<CropResult> {
+  const native = await loadNativeRaster();
+  if (!native.available) return { ok: false, error: native.reason };
+  const { createCanvas } = native.canvasMod;
   // Legacy build runs in Node without a separate worker thread.
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const { createCanvas } = await import("@napi-rs/canvas");
+  const pdfjs = await loadPdfjs();
+  if (!pdfjs) return { ok: false, error: "native_raster_unavailable:pdfjs" };
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(bytes),
     useSystemFonts: true,

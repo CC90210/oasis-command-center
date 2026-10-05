@@ -88,11 +88,14 @@ export function QuickAddLeadModal({
         return;
       }
       // Surface a returning-merchant merge so the rep knows it wasn't a new dup.
+      // The server's sentence wins: it knows the stage the lead is really in
+      // (a lead further along is left there, not moved to this column).
       if (json.existing) {
         alert(
-          json.advanced
-            ? `That merchant already had a lead — moved it to ${stageLabel}.`
-            : `That merchant is already at ${stageLabel}.`,
+          json.message ??
+            (json.advanced
+              ? `That merchant already had a lead — moved it to ${stageLabel}.`
+              : `That merchant is already at ${stageLabel}.`),
         );
       }
       reset();

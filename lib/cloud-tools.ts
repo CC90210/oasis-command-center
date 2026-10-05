@@ -30,6 +30,7 @@ import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
 import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
+import { isClientSafeTool, isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 
 export type CloudToolContext = {
   tenantId: string;
@@ -222,10 +223,12 @@ const integrationStatus: CloudTool = {
 const importLeadsFromAttachment: CloudTool = {
   name: "import_leads_from_attachment",
   description:
-    "Parse a CSV uploaded through chat and import recognized SunBiz leads into the CRM with dedupe. Use only when the operator explicitly asks to import/sync/update leads from an attached CSV; use dry_run=true when they only ask you to inspect it.",
+    "Parse a CSV uploaded through chat and import recognized leads with dedupe. OASIS defaults the batch owner to the signed-in operator and permits only CC or Adon; pass assignee as conaugh@oasisai.work or adon@oasisai.work to choose explicitly. Use only when the operator explicitly asks to import/sync/update leads; use dry_run=true when they only ask you to inspect it.",
   args: {
     attachment_id: "UUID shown in the ATTACHED FILES block.",
     dry_run: "Optional boolean. true parses and previews without inserting.",
+    assignee:
+      "Optional OASIS batch owner: conaugh@oasisai.work, adon@oasisai.work, or canonical auth UUID. Defaults to the signed-in operator.",
   },
   async execute(input, ctx) {
     const attachmentId = String(input.attachment_id || "").trim();
@@ -260,6 +263,7 @@ const importLeadsFromAttachment: CloudTool = {
       tenantId: ctx.tenantId,
       rows: parsed.mapped,
       defaultSource: `chat_attachment:${row.filename}`,
+      assignee: String(input.assignee || ctx.userId).trim(),
     });
     if (!result.ok) {
       return {
@@ -338,6 +342,17 @@ export async function runCloudTool(
   const tool = CLOUD_TOOLS[spec.name];
   if (!tool) {
     return { ok: false, name: spec.name, error: `unknown_cloud_tool:${spec.name}` };
+  }
+  // The legacy marker path (non-native providers) has no palette filter, so
+  // apply the same sandbox executeTool applies: a client tenant runs only
+  // client-safe tools. Without this, read_brain_doc / search_memory would
+  // read OASIS's brain repo for any tenant (docs/os-revamp/03 F2).
+  if (!isOasisInternalTenant(ctx.tenantId) && !isClientSafeTool(spec.name)) {
+    console.error("[cloud-tools] refused non-client-safe tool for a non-OASIS tenant", {
+      tenantId: ctx.tenantId || "(none)",
+      tool: spec.name,
+    });
+    return { ok: false, name: spec.name, error: "tool_not_available_in_this_workspace" };
   }
   try {
     return await tool.execute(spec.input, ctx);

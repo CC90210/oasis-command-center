@@ -207,9 +207,15 @@ export default function WorkPage() {
             </p>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <CtaLink href="/contact">Start the audit</CtaLink>
-              <CtaLink href={BOOKING_URL} variant="secondary" external arrow={false}>
-                Book a call instead
-              </CtaLink>
+              {/* Rendered only when a booking link exists. The hardcoded one
+                  this used to point at had been deleted, so "Book a call
+                  instead" led to "Appointment not found". /contact stays as
+                  the always-working route. */}
+              {BOOKING_URL ? (
+                <CtaLink href={BOOKING_URL} variant="secondary" external arrow={false}>
+                  Book a call instead
+                </CtaLink>
+              ) : null}
             </div>
           </div>
         </Reveal>

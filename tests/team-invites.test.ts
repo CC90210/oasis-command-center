@@ -1,10 +1,100 @@
 import assert from "node:assert/strict";
-import { INVITE_TTL_DAYS, createInvite, inviteEmailMatchesUser } from "@/lib/team";
+import { readFileSync } from "node:fs";
+import {
+  INVITE_TTL_DAYS,
+  canManageTeam,
+  canonicalizeTenantMembers,
+  createInvite,
+  inviteEmailMatchesUser,
+  normalizeInviteEmail,
+  type MemberRow,
+} from "@/lib/team";
+import {
+  invitableRoleOptionsFor,
+  invitableRoleOptionsForActor,
+  roleAllowedForTenant,
+} from "@/lib/role-surfaces";
 import {
   INVITABLE_ROLES,
   INVITABLE_ROLE_OPTIONS,
   isInvitableRole,
+  isOasisPipelineRepRole,
 } from "@/lib/team-roles";
+import {
+  teamInviteEmailText,
+  teamInviteOrigin,
+  teamInviteUrl,
+} from "@/lib/team-invite-email";
+
+assert.equal(canManageTeam("manager", false), false, "manager/off is not a team admin");
+assert.equal(
+  canManageTeam("manager", true),
+  true,
+  "manager/on retains the explicit owner-controlled full-admin toggle",
+);
+for (const role of ["manager", "closer", "opener", "builder", "marketing", "agent"]) {
+  assert.equal(isOasisPipelineRepRole(role), true, `${role} belongs to the manager sales roster`);
+}
+for (const role of ["owner", "admin", "member", "read_only", "loan_officer", "processor"]) {
+  assert.equal(
+    isOasisPipelineRepRole(role),
+    false,
+    `${role} must not authorize manager access to founder/internal/system records`,
+  );
+}
+
+assert.deepEqual(
+  invitableRoleOptionsFor("oasis-webdev").map((option) => option.value),
+  ["admin", "manager", "closer", "opener", "builder", "marketing"],
+  "OASIS exposes one consistent, explicit job-role menu without legacy Member/Agent roles",
+);
+assert.deepEqual(
+  invitableRoleOptionsFor("sunbiz").map((option) => option.value),
+  ["member", "admin"],
+  "non-OASIS tenants retain the platform role menu",
+);
+assert.equal(roleAllowedForTenant("member", "oasis-webdev"), false);
+assert.equal(roleAllowedForTenant("agent", "oasis-webdev"), false);
+assert.equal(roleAllowedForTenant("marketing", "oasis-webdev"), true);
+assert.deepEqual(
+  invitableRoleOptionsForActor("oasis-webdev", false).map((option) => option.value),
+  ["manager", "closer", "opener", "builder", "marketing"],
+  "temporary admin access cannot mint a permanent Administrator",
+);
+
+const member = (overrides: Partial<MemberRow>): MemberRow => ({
+  id: "profile-default",
+  auth_user_id: "auth-default",
+  email: "rep@oasisai.work",
+  full_name: "Rep",
+  display_name: "Rep",
+  team_role: "manager",
+  is_owner: false,
+  admin_access: false,
+  invited_by: null,
+  joined_at: "2026-01-01T00:00:00.000Z",
+  ...overrides,
+});
+const canonicalDuplicates = canonicalizeTenantMembers([
+  member({ id: "stale-manager", team_role: "manager", admin_access: true }),
+  member({ id: "base-admin", team_role: "admin", admin_access: false }),
+]);
+assert.deepEqual(
+  canonicalDuplicates.map((row) => row.id),
+  ["base-admin"],
+  "canonicalization must prefer a base admin over a stale manager/admin-access duplicate",
+);
+assert.deepEqual(
+  canonicalDuplicates.filter(
+    (row) =>
+      Boolean(row.auth_user_id?.trim()) &&
+      !row.is_owner &&
+      !row.admin_access &&
+      isOasisPipelineRepRole(row.team_role),
+  ),
+  [],
+  "a duplicate founder/admin identity must never enter the manager-readable sales roster",
+);
 
 assert.equal(
   inviteEmailMatchesUser("emliy@sunbizfunding.com", "emliy@sunbizfunding.com"),
@@ -20,8 +110,8 @@ assert.equal(
 
 assert.equal(
   inviteEmailMatchesUser(null, "jordan@sunbizfunding.com"),
-  true,
-  "open invites without a pinned email remain redeemable",
+  false,
+  "legacy open invites must fail closed",
 );
 
 assert.equal(
@@ -29,6 +119,15 @@ assert.equal(
   false,
   "pinned invite must not be redeemable by a different signed-in email",
 );
+
+assert.equal(normalizeInviteEmail("  David@OasisAI.Work "), "david@oasisai.work");
+for (const invalidEmail of [null, undefined, "", "david@", "@oasisai.work", "david oasisai.work"]) {
+  assert.equal(
+    normalizeInviteEmail(invalidEmail),
+    null,
+    `${String(invalidEmail)} cannot pin a teammate invite`,
+  );
+}
 
 // ── the role allowlist is the ONLY thing enforcing the enum ─────────────────
 // 2026-08-21: the live Turso user_profiles DDL is `"team_role" TEXT NOT NULL
@@ -82,7 +181,73 @@ for (const option of INVITABLE_ROLE_OPTIONS) {
     `${option.value} needs a human label — the dropdown renders this, and an empty ` +
       "string is an invisible menu row",
   );
+  assert.ok(
+    option.description.trim().length > 0,
+    `${option.value} needs a human explanation shared by Settings and /team`,
+  );
 }
+
+assert.equal(
+  teamInviteOrigin({ PUBLIC_APP_URL: "https://oasisai.work" }),
+  "https://oasisai.work",
+);
+assert.equal(
+  teamInviteOrigin({ PUBLIC_APP_URL: "https://attacker.test/path" }),
+  "https://oasisai.work",
+  "an emailed invite never trusts a configured path or request host",
+);
+assert.equal(
+  teamInviteUrl("token/with spaces", { PUBLIC_APP_URL: "https://oasisai.work" }),
+  "https://oasisai.work/invite/token%2Fwith%20spaces",
+);
+const inviteMail = teamInviteEmailText({
+  roleLabel: "Sales Manager",
+  inviteUrl: "https://oasisai.work/invite/offline-token",
+  expiresAt: "2026-09-08T12:00:00.000Z",
+});
+assert.match(inviteMail, /OASIS AI Command Center/);
+assert.match(inviteMail, /Role: Sales Manager/);
+assert.match(inviteMail, /https:\/\/oasisai\.work\/invite\/offline-token/);
+assert.equal(
+  INVITABLE_ROLE_OPTIONS.some((option) => option.value === "agent"),
+  false,
+  "the ambiguous legacy Agent role must not return to either invite form",
+);
+
+const TEAM_INVITE = readFileSync("app/team/TeamInviteActions.tsx", "utf8");
+const INVITE_ROUTE = readFileSync("app/api/team/invites/route.ts", "utf8");
+const TEAM_LIB = readFileSync("lib/team.ts", "utf8");
+const SETTINGS = readFileSync("components/settings/SettingsContent.tsx", "utf8");
+assert.equal(
+  /<QuickInviteCard/.test(SETTINGS),
+  false,
+  "Settings must link to the canonical Team flow instead of rendering a second invite form",
+);
+assert.ok(
+  INVITE_ROUTE.includes("role_options: invitableRoleOptionsForActor"),
+  "the canonical Team flow receives tenant/actor-filtered role options",
+);
+assert.ok(
+  TEAM_INVITE.includes('type="email"') && TEAM_INVITE.includes("email: normalizedEmail"),
+  "the invite flow requires and submits a pinned work email",
+);
+assert.ok(
+  TEAM_INVITE.includes("selectedRole.description"),
+  "the invite flow explains the selected human role",
+);
+assert.match(TEAM_INVITE, /Send invite email/);
+assert.match(INVITE_ROUTE, /const delivery = await sendAuthEmail/);
+assert.match(INVITE_ROUTE, /invite_url: inviteUrl/);
+assert.doesNotMatch(INVITE_ROUTE, /raw_token:/);
+const supersedeSource = TEAM_LIB.match(
+  /export async function supersedeActiveInvites[\s\S]*?\n\}/,
+);
+assert.ok(supersedeSource, "the active-invite replacement guard exists");
+assert.doesNotMatch(
+  supersedeSource[0],
+  /\.eq\("team_role"/,
+  "correcting a role must revoke every older token for that email, including a higher-privilege invite",
+);
 
 // ── the invite INSERT must satisfy the table's real column contract ──────────
 // 2026-08-14, CC: the Team page returned "invite_create_failed" for every invite.
@@ -96,7 +261,14 @@ for (const option of INVITABLE_ROLE_OPTIONS) {
 // the only code that touches the schema had no seam. So the fake below encodes
 // the table's ACTUAL required columns — read from the live DDL — and rejects an
 // insert that omits one, exactly as the database does.
-const TENANT_INVITES_REQUIRED = ["tenant_id", "team_role", "token_hash", "created_by", "expires_at"];
+const TENANT_INVITES_REQUIRED = [
+  "tenant_id",
+  "email",
+  "team_role",
+  "token_hash",
+  "created_by",
+  "expires_at",
+];
 
 async function insertContractChecks() {
   const seen: Record<string, unknown>[] = [];
@@ -161,6 +333,32 @@ async function insertContractChecks() {
     `expires_at should be ~${INVITE_TTL_DAYS} days out, got ${seen[0].expires_at}`,
   );
 
+  // This guard is below the role/permission layer and therefore protects every
+  // caller (owner/admin/member-with-admin-access) even if a request bypasses
+  // the browser form. No role can mint an unpinned bearer invite.
+  for (const role of ["admin", "opener", "member"] as const) {
+    let missingEmail: unknown = null;
+    try {
+      await createInvite(
+        { tenantId: "t-1", role, createdBy: `u-${role}`, email: "" },
+        fakeDb,
+      );
+    } catch (error) {
+      missingEmail = error;
+    }
+    assert.match(
+      missingEmail instanceof Error ? missingEmail.message : "",
+      /invite_email_required/,
+      `${role} cannot create an invite without an email pin`,
+    );
+  }
+
+  const inviteRoute = readFileSync("app/api/team/invites/route.ts", "utf8");
+  assert(
+    inviteRoute.includes('return bad(400, "valid teammate email required")'),
+    "the HTTP boundary rejects an unpinned invite as a client error",
+  );
+
   // A failed insert must carry WHY. Returning the bare code is what turned a
   // one-line schema bug into an opaque screen.
   const brokenDb = {
@@ -180,7 +378,10 @@ async function insertContractChecks() {
 
   let caught: unknown = null;
   try {
-    await createInvite({ tenantId: "t-1", role: "member", createdBy: "u-1" }, brokenDb);
+    await createInvite(
+      { tenantId: "t-1", role: "member", createdBy: "u-1", email: "x@example.com" },
+      brokenDb,
+    );
   } catch (e) {
     caught = e;
   }

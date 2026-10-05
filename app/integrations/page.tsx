@@ -1,6 +1,6 @@
-import { Card, PageHeader, Tag } from "@/components/Card";
+import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { IntegrationDot } from "@/components/IntegrationDot";
-import { getActiveProfile, integrationsHealth, aiServicesWithKey } from "@/lib/queries";
+import { getActiveProfile, integrationsHealth, aiServicesWithKey, aiKeyOnFile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import {
   INTEGRATION_CATEGORIES,
@@ -8,7 +8,7 @@ import {
   type IntegrationCategory,
 } from "@/lib/integrations-registry";
 import { resolveAgentKey } from "@/lib/agents";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getSessionUser } from "@/lib/supabase-server";
 import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
 import type { IntegrationHealth } from "@/lib/supabase";
@@ -21,9 +21,13 @@ export const dynamic = "force-dynamic";
 export default async function IntegrationsPage() {
   const profile = await safe("integrations.profile", getActiveProfile(), null);
 
+  // Both reads throw on failure; null is "Couldn't check", never a wall of
+  // "Not connected" (middleware sends /integrations to Settings › Connections,
+  // but the page must not lie if it is reached). A failed key read makes only
+  // the AI provider cards unknown: it is the only thing it answers for.
   const [dbRows, connectedAiSet, user, enabledRaw] = await Promise.all([
-    safe("integrations.health", integrationsHealth(profile?.tenant_id || null), []),
-    safe("integrations.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
+    safe("integrations.health", integrationsHealth(profile?.tenant_id || null), null),
+    safe("integrations.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null),
     getSessionUser().catch(() => null),
     safe(
       "integrations.tenant_aware_agents",
@@ -39,8 +43,21 @@ export default async function IntegrationsPage() {
   // profile column → empty). Never falls back to a hardcoded empire
   // default. Visible integrations narrow to just what these agents need.
   const enabledAgents = enabledRaw.map(resolveAgentKey);
-  const isOperator = isOperatorEmail(user?.email || undefined);
+  // Developer-only platform integrations are for the verified operator (alias
+  // AND owner/admin OASIS membership by auth id), not for an email match.
+  const isOperator = await isPlatformOperatorForAuthUser(user?.id, user?.email);
   const visibleDefinitions = visibleIntegrationsForTenant(enabledAgents, { isOperator });
+
+  if (dbRows === null) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Integrations" subtitle="Couldn't check the integrations just now." />
+        <Card title="Couldn't check">
+          <EmptyState message="The integration heartbeats could not be read, so none is shown as connected or not connected. The error has been logged. Reload to try again." />
+        </Card>
+      </div>
+    );
+  }
 
   const dbByService = new Map(dbRows.map((row) => [row.service, row] as const));
   const allRows: IntegrationHealth[] = visibleDefinitions.map((definition) => {
@@ -101,7 +118,7 @@ export default async function IntegrationsPage() {
                 <IntegrationDot
                   key={row.service}
                   health={row}
-                  connection={{ hasCredentials: connectedAiSet.has(row.service) }}
+                  connection={{ hasCredentials: aiKeyOnFile(connectedAiSet, row.service) }}
                 />
               ))}
             </div>

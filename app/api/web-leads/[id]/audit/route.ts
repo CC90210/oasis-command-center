@@ -26,8 +26,9 @@
 
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { fetchLead, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
+import { fetchLead, WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { fetchAudit } from "@/lib/web-leads/audit";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,8 +47,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const { id } = await ctx.params;
-  const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
   try {
+    const viewer = await resolveWebLeadViewer(session);
     // Same existence-and-visibility check the sibling [id]/route.ts uses,
     // so an id outside this viewer's scope 404s here too instead of leaking
     // through to a state the audit lookup alone couldn't have distinguished.

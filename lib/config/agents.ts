@@ -1,18 +1,47 @@
 /**
- * SunBiz agent roster (Jordan / Alex / Matt) — read at REQUEST time
- * from agents.config.json at the repo root.
+ * Agent roster — BUNDLED from agents.config.json at the repo root via a
+ * static import.
  *
- * This is the source of truth for the shop-out derived-CC list (Adon's
- * 2026-06-10 spec, section 2). When the operator fires a shop-out, the
- * application row's rep fields are intersected against these agents to
- * produce the auto-checked CC list. Anyone whose email isn't in this
- * file is excluded — processors, admins, ops, etc. don't get CC'd on
- * lender outreach.
+ * EMPTY SINCE 2026-10-01 (OS plan W0). It held SunBiz's three reps with their
+ * work emails and a phone number, shipped in every client's bundle; SunBiz was
+ * retired 2026-09-28, so the entries were removed with the shop-out panel. The
+ * file and this module stay because every send path still resolves its signer
+ * through resolveSignerForOperator below: with no roster the OASIS and
+ * Bluerise branches answer exactly as before, and a "sunbiz" send falls to the
+ * shared Submissions identity. tests/agents-config-runtime-portable.test.ts
+ * pins that the roster carries no personal data.
  *
- * Request-time read (NOT module-scope cache) so editing the config file
- * during a deployment takes effect on the next request without a
- * rebuild. Reads are cheap (sub-millisecond JSON parse on hot filesystem
- * cache); the safety win is worth it.
+ * It was the source of truth for the shop-out derived-CC list (Adon's
+ * 2026-06-10 spec, section 2): the application row's rep fields were
+ * intersected against these agents to produce the auto-checked CC list.
+ *
+ * 🚨 STATIC IMPORT, NOT readFileSync — DO NOT "restore" the fs read.
+ *
+ * This module used to do `readFileSync(join(process.cwd(),
+ * "agents.config.json"))` on every call, documented as a deliberate
+ * request-time read so the roster could be edited without a rebuild.
+ * That premise died when production moved to Cloudflare Workers
+ * (OpenNext; see wrangler.jsonc). workerd has no filesystem, so the read
+ * threw `Error: ENOENT` from `node-internal:internal_fs_sync` on EVERY
+ * authenticated call — and because the shop-out route did not catch it,
+ * Next returned a 500 with an EMPTY body, which the browser surfaced as
+ * "Unexpected end of JSON input". Shop-out was dead for every deal:
+ * the lender grid, the attachment step and the send step all gate on
+ * that response.
+ *
+ * Confirmed from the production Worker's own logs, 2026-09-15:
+ *   at readFileSync (node-internal:internal_fs_sync:366:7)
+ *   at getAgents -> findAgentByEmail -> resolveSignerForOperator
+ *   at POST /api/applications/[id]/shop-out
+ *
+ * The "edit without a rebuild" win was already fiction — Vercel's
+ * filesystem is read-only too, so nothing could edit the deployed file
+ * there either. A static import bundles the roster at build time and
+ * works identically under Node, Vercel and workerd. The roster changes
+ * the way every other config in this repo changes: commit + deploy.
+ *
+ * Pinned by tests/agents-config-runtime-portable.test.ts, which fails if
+ * a runtime `fs` read comes back to this module.
  *
  * Signer rule (Adon spec 2.4):
  *   - Exactly one agent on CC after operator finalization → THAT agent
@@ -20,9 +49,9 @@
  *   - Zero or multiple → signer is "SunBiz Submissions", phone omitted
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import agentsConfig from "@/agents.config.json";
 import { deriveSignerName } from "@/lib/lenders/derive-signer-label";
+import type { BrandKey } from "@/lib/email/brands";
 
 export type AgentEntry = {
   /** Stable lowercase identifier — used as agents[].key in the config. */
@@ -39,18 +68,17 @@ export type AgentEntry = {
 };
 
 /**
- * Returns the current agent roster. Reads agents.config.json fresh on
- * every call — a quirk Adon's spec relies on for runtime config flips.
- * If the file is missing or malformed the function throws; the caller
- * should treat that as a deployment defect (the build never ships
- * without this file).
+ * Returns the current agent roster from the bundled agents.config.json.
+ * If the config is malformed the function throws; the caller should
+ * treat that as a deployment defect (the build never ships without this
+ * file, and a static import makes a missing file a BUILD failure rather
+ * than a runtime 500 — which is the point).
+ *
+ * Still validated at runtime rather than trusted: the import only proves
+ * the JSON parsed, not that its entries have the required fields.
  */
 export function getAgents(): AgentEntry[] {
-  // process.cwd() is the project root in Next.js (server runtime + dev).
-  // agents.config.json sits at the repo root per Adon's spec.
-  const path = join(process.cwd(), "agents.config.json");
-  const raw = readFileSync(path, "utf8");
-  const parsed = JSON.parse(raw) as { agents?: unknown };
+  const parsed = agentsConfig as { agents?: unknown };
   if (!parsed || !Array.isArray(parsed.agents)) {
     throw new Error("agents.config.json malformed: expected { agents: [...] }");
   }
@@ -99,18 +127,125 @@ export function findAgentByEmail(email: string | null | undefined): AgentEntry |
  * final CC list (Adon spec 2.4). Operator-driven sends use THIS path:
  * who is the human who clicked send, regardless of CCs.
  */
+/**
+ * A person's first name out of their work address.
+ *
+ * Used only when an operator is not on the agent roster. `full_name` on
+ * user_profiles is NOT a better source here: on this workspace it is populated
+ * with the email itself ("ariel@oasisai.work"), so preferring it would sign the
+ * email with an address.
+ *
+ * Returns "" when nothing name-shaped survives, so the caller can decide rather
+ * than being handed a plausible-looking wrong name.
+ */
+function firstNameFromEmail(email: string | null | undefined): string {
+  const local = String(email || "").split("@")[0] || "";
+  // "conaugh.mckenna" / "conaugh_m" / "conaugh+leads" -> "conaugh"
+  const first = local.split(/[._+\-0-9]+/).filter(Boolean)[0] || "";
+  if (first.length < 2) return "";
+  return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+}
+
+/**
+ * Who signs an outbound email.
+ *
+ * THE BUG THIS FIXES (CC, 2026-09-08, with a screenshot). The fallback was a
+ * hardcoded "SunBiz Submissions", and it fired for ANY operator not on the
+ * SunBiz agent roster. conaugh@oasisai.work is not on that roster, so every
+ * OASIS lead email a rep sent signed off as another company. The footer said
+ * OASIS AI Solutions, Montreal, and the signature above it said SunBiz
+ * Submissions.
+ *
+ * `brand` makes the fallback follow the mail it is signing. An OASIS operator
+ * signs with their own first name, derived from their address; nothing about
+ * the other portal changes, and callers that pass no brand keep the exact
+ * behaviour they shipped with.
+ */
 export function resolveSignerForOperator(
   operatorEmail: string | null | undefined,
+  /**
+   * REQUIRED as of 2026-09-09. This was optional with a SunBiz fallback, so a
+   * caller that omitted it signed the email "SunBiz Submissions" — which is how
+   * OASIS cold emails went out signed as the client, reported by CC on
+   * 2026-09-08. Adding an optional parameter fixed the one route that was
+   * reported and left every other caller on the old behaviour; requiring it
+   * makes the compiler find them instead.
+   */
+  opts: { brand: BrandKey },
 ): { name: string; email: string; phone: string } {
-  const agent = findAgentByEmail(operatorEmail);
+  // `brand` is required at the type level, but TypeScript does not typecheck the
+  // test suite and nothing stops a JS caller. Without this, omitting it threw
+  // "Cannot read properties of undefined (reading 'brand')" from deep inside the
+  // roster lookup — a stack trace that says nothing about the actual mistake.
+  // Say what is wrong instead, and refuse rather than picking a company.
+  if (!opts || !opts.brand) {
+    throw new Error(
+      "resolveSignerForOperator: brand is required. It used to default to " +
+        '"SunBiz Submissions", which signed OASIS cold email as the client. ' +
+        "Pass the sending brand explicitly.",
+    );
+  }
+
+  // ROSTER FIRST — BUT IT IS SUNBIZ'S ROSTER.
+  //
+  // agents.config.json holds only @sunbizfunding.com addresses and is read for
+  // every tenant. Matching it on a non-SunBiz send would sign that company's
+  // mail with a SunBiz rep's name and reply address, so the lookup is now
+  // scoped to the brand that actually owns the roster.
+  const agent = opts.brand === "sunbiz" ? findAgentByEmail(operatorEmail) : null;
   if (agent) {
     return { name: agent.name, email: agent.email, phone: agent.phone };
   }
-  return {
-    name: "SunBiz Submissions",
-    email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
-    phone: "",
-  };
+
+  const email = String(operatorEmail || "").trim();
+  // BRAND ONLY, never the sender's domain.
+  //
+  // Inferring "OASIS" from an @oasisai.work address was the obvious shortcut
+  // and it is wrong: the same operator runs the SunBiz application flows
+  // (shop-out, lender-thread retries), where signing as the shared SunBiz
+  // Submissions identity is correct and deliberate. A domain heuristic would
+  // have silently re-signed those, which is precisely the cross-portal bleed
+  // this change exists to stop. Callers that mean OASIS say so.
+  // Exhaustive on the brand. No fallback branch, because the fallback WAS the
+  // bug: anything that was not explicitly OASIS became "SunBiz Submissions".
+  switch (opts.brand) {
+    case "oasis":
+      return {
+        name: firstNameFromEmail(email) || "OASIS AI",
+        email,
+        // No phone on the roster for these operators. Empty rather than a shared
+        // number: a wrong direct line on a cold email is worse than none.
+        phone: "",
+      };
+    case "bluerise":
+      // Its own shared identity. Previously fell through to SunBiz's, which put
+      // the wrong company's name and reply address on Bluerise mail — the same
+      // defect as the OASIS one, one brand over.
+      return {
+        name: "Bluerise Business Capital",
+        email:
+          process.env.BLUERISE_SUBMISSIONS_EMAIL ||
+          "submissions@bluerisebusinesscapital.com",
+        phone: "",
+      };
+    case "sunbiz":
+      return {
+        name: "SunBiz Submissions",
+        email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
+        phone: "",
+      };
+    default:
+      // An UNRECOGNISED brand at runtime. TypeScript makes the switch above
+      // exhaustive, but it does not typecheck the test suite and cannot stop a
+      // JS caller passing { brand: "unknwon" }. Without this the switch fell
+      // through returning undefined, and the caller read `.name` off it — a
+      // TypeError far from the typo. Refuse instead, naming the value.
+      // (CodeRabbit, PR #423.)
+      throw new Error(
+        `resolveSignerForOperator: unknown brand ${JSON.stringify(opts.brand)}. ` +
+          "Refusing to sign as no company rather than guessing at one.",
+      );
+  }
 }
 
 /**

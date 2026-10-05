@@ -89,6 +89,15 @@ const LEADS: EntityDefinition = {
     { key: "monthly_revenue", label: "Monthly revenue", requirement: "optional", type: "money" },
     { key: "notes", label: "Notes", requirement: "optional", type: "text", maxLen: 2000 },
     { key: "tags", label: "Tags", requirement: "optional", type: "tag-list" },
+    // Website-sales research. The wizard silently dropped every key not listed
+    // here, so a spreadsheet of audited sites imported as bare contacts — the
+    // columns the rep needs most were the ones thrown away.
+    { key: "website", label: "Website", requirement: "optional", type: "text", maxLen: 240 },
+    { key: "website_condition", label: "Website condition", requirement: "optional", type: "text", maxLen: 240 },
+    { key: "audit_findings", label: "Audit findings", requirement: "optional", type: "text", maxLen: 2000 },
+    { key: "icp_track", label: "ICP track", requirement: "optional", type: "text", maxLen: 120 },
+    { key: "industry", label: "Industry", requirement: "optional", type: "text", maxLen: 180 },
+    { key: "business_city", label: "City", requirement: "optional", type: "text", maxLen: 120 },
   ],
   headerAliases: {
     name: "name", fullname: "name",
@@ -107,6 +116,16 @@ const LEADS: EntityDefinition = {
     monthlyrevenue: "monthly_revenue", mrr: "monthly_revenue", revenue: "monthly_revenue",
     notes: "notes", note: "notes", comment: "notes", comments: "notes",
     tags: "tags", labels: "tags",
+    // Mirrors lib/leads-import-parser.ts so the same spreadsheet maps the same
+    // way through the wizard as it does through the chat importer.
+    website: "website", businesswebsite: "website", websiteurl: "website",
+    site: "website", url: "website", domain: "website",
+    websitecondition: "website_condition", sitecondition: "website_condition",
+    auditfindings: "audit_findings", websiteaudit: "audit_findings",
+    audit: "audit_findings", findings: "audit_findings",
+    icptrack: "icp_track", icp: "icp_track", track: "icp_track",
+    industry: "industry", vertical: "industry", niche: "industry",
+    city: "business_city", businesscity: "business_city", town: "business_city",
   },
   sampleCsv:
     "Business Name,Owner,Email,Phone,State,Monthly Revenue,Stage,Source,Notes\n" +

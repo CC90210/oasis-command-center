@@ -9,11 +9,13 @@ export function LeadDocumentDownloadButton({
   filename,
   mimeType,
   docType,
+  canMutate = true,
 }: {
   documentId: string;
   filename: string;
   mimeType: string | null;
   docType: string;
+  canMutate?: boolean;
 }) {
   const [viewing, setViewing] = useState(false);
   const contentUrl = `/api/lead-documents/${encodeURIComponent(documentId)}/content`;
@@ -41,6 +43,7 @@ export function LeadDocumentDownloadButton({
         <DocumentsViewer
           docs={[{ id: documentId, filename, mime_type: mimeType, doc_type: docType }]}
           onClose={() => setViewing(false)}
+          canMutate={canMutate}
         />
       )}
     </div>

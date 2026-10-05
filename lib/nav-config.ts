@@ -1,13 +1,16 @@
 /**
  * Navigation primitives for the command-center shell.
  *
- * Each client/product profile (see lib/client-profiles.ts) picks one of
- * these nav arrays and can layer its own branding, runtime, and transport
- * rules on top. Sidebar.tsx stays fully tenant-agnostic.
+ * THE LIVE RAIL IS NOT BUILT FROM THESE ARRAYS ANY MORE. A workspace's own
+ * shell renders OASIS OS sections computed by lib/os/nav.ts (buildOsNav). The
+ * arrays below still feed the manifest seeds (lib/manifest/seeds.ts,
+ * lib/client-profiles.ts), which is what the /t/<slug> preview and /demo/sun
+ * shells render — so they stay until those shells move to the OS model.
  *
  * Keep icons as string keys. These profiles are resolved in a Server
  * Component and then passed to the client Sidebar; passing icon functions
- * across that boundary crashes production rendering.
+ * across that boundary crashes production rendering. The key → component map
+ * is NAV_ICONS in components/os/RailRow.tsx.
  */
 
 export type NavIconKey =
@@ -45,7 +48,26 @@ export type NavIconKey =
   | "Heart"
   | "Sparkles"
   | "FileSearch"
-  | "ClipboardCheck";
+  | "ClipboardCheck"
+  | "Ticket"
+  // OASIS OS rail (lib/os/nav.ts). Not accepted in stored manifests:
+  // lib/manifest/schema.ts NAV_ICON_KEYS is a deliberate subset.
+  | "Home"
+  | "Rss"
+  | "CalendarDays"
+  | "FolderKanban"
+  | "Library"
+  | "Hash"
+  | "GraduationCap"
+  | "Building2"
+  | "LifeBuoy"
+  | "Wallet"
+  | "TrendingUp"
+  | "Handshake"
+  | "Shield"
+  | "SquareTerminal"
+  | "Cpu"
+  | "HeartPulse";
 
 /**
  * NavItem - one entry in the sidebar.
@@ -103,14 +125,16 @@ export const CC_NAV: NavItem[] = [
   // does better (every prompt has its own "Open in chat" button, plus search
   // and copy), and the Agent Decisions tape — which moved to /operations,
   // where the rest of the autonomous-loop observability already lives.
-  // The ROUTE stays alive and tenant-scoped: SUN_NAV + SUGA_NAV below still
-  // link to it, so deleting the page would 404 those client portals.
+  // The ROUTE stays alive and tenant-scoped (the SunBiz seed manifest links
+  // /t/sun/reasoning).
   { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
   // System group — observability + control surfaces.
   { group: "System", href: "/operations", label: "Operations", icon: "Activity" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
   { group: "System", href: "/analytics", label: "Analytics", icon: "BarChart3" },
+  { group: "System", href: "/projects", label: "Projects", icon: "ClipboardCheck" },
+  { group: "System", href: "/tickets", label: "Tickets", icon: "FileSearch" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
   // Nav arc on CC's empire sidebar:
   //   - 13 entries → 7  (Phase 2, 2026-05-16: blunt consolidation, no merge)
@@ -140,59 +164,23 @@ export const CC_NAV: NavItem[] = [
   // /forms is now present (above, Operations) — CC's native funnel replaced the
   // standalone cc-funnel app (2026-06-18). /sequences stays absent: it's the
   // SunBiz drip-cadence surface; CC's funnel uses a direct welcome email + the
-  // pipeline, not the multi-step sequence engine (see SUN_NAV below).
+  // pipeline, not the multi-step sequence engine.
 ];
 
 /**
- * Sun Biz Funding nav - funding-ops sidebar.
+ * Sun Biz Funding nav: RETIRED 2026-09-30, kept empty only until its last
+ * importer goes.
  *
- * Industry-relevant only: SMS, Email, CRM (Leads/Contacts/Applications), Deals,
- * Playbook + Reasoning (operating manual + decision log). The OASIS-internal
- * agent-handoff inbox (/inbox) is intentionally absent — clients don't need
- * to see agent-to-agent message routing.
+ * SunBiz was retired on 2026-09-28. This array pointed at /leads (never a
+ * route) and at the SunBiz pages retired on 2026-09-30 (/metrics,
+ * /applications, /offers, /funded-deals, /renewals, /sms, /email-blast,
+ * /lenders, /templates, /embed), and nothing rendered it: the rail is
+ * lib/os/nav.ts, and lib/client-profiles.ts's SUN_PROFILE.nav is never read.
+ * DELETE this export in the same change that drops the import from
+ * lib/client-profiles.ts (a file another track owns). Until then it is empty so
+ * no dead link ships, and tests/os-redirects.test.ts checks every href in lib/.
  */
-export const SUN_NAV: NavItem[] = [
-  // Operations — daily-use core. /pipeline is the new Salesforce-parity
-  // superview (Lead Pipeline + Opportunity Pipeline stacked with arrow
-  // chevron bars per Adon's 2026-05-16 screenshots).
-  { group: "Operations", href: "/", label: "Dashboard", icon: "LayoutDashboard" },
-  { group: "Operations", href: "/pipeline", label: "Pipeline", icon: "GitBranch" },
-  { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
-  { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
-  { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
-  // Metrics — one aggregate hub across all deals: conversion, reach/
-  // deliverability, application-form interaction, email open/click-through, and
-  // per-drip performance. The CRM still shows per-lead detail; this is the roll-up.
-  { group: "Metrics", href: "/metrics", label: "Metrics", icon: "BarChart3" },
-  // Pipeline — per-entity boards behind the unified /pipeline view.
-  // Contacts dropped 2026-05-17 — was a speculative scaffold; the lead
-  // record itself carries contact_name + phone + email so a separate
-  // Contacts surface is dead weight until Adon asks for it.
-  { group: "Pipeline", href: "/leads", label: "Leads", icon: "Users" },
-  { group: "Pipeline", href: "/applications", label: "Applications", icon: "FileText", badgeKey: "applications" },
-  { group: "Pipeline", href: "/import", label: "Import", icon: "Upload" },
-  { group: "Pipeline", href: "/forms", label: "Forms", icon: "FileCode2" },
-  // Deals — Opportunity-side records.
-  { group: "Deals", href: "/offers", label: "Offers", icon: "HandCoins" },
-  { group: "Deals", href: "/funded-deals", label: "Funded Deals", icon: "BadgeDollarSign" },
-  { group: "Deals", href: "/renewals", label: "Renewals", icon: "RefreshCcw" },
-  { group: "Deals", href: "/commissions", label: "Commissions", icon: "DollarSign" },
-  // Outreach — drip + blast cadence surfaces.
-  // Labelled "Drips" because that is what Adon and the team call it. The route
-  // stays /sequences so existing links, bookmarks and docs keep resolving.
-  { group: "Outreach", href: "/sequences", label: "Drips", icon: "Sparkles" },
-  { group: "Outreach", href: "/sms", label: "SMS", icon: "MessageSquare", expandable: true },
-  { group: "Outreach", href: "/email-blast", label: "Email Blast", icon: "Mail" },
-  // Network — lender book + templates.
-  { group: "Network", href: "/lenders", label: "Lenders", icon: "Landmark" },
-  { group: "Network", href: "/templates", label: "Templates", icon: "FileCode2" },
-  // System — config + ops.
-  { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
-  { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
-  { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
-  { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
-  { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
-];
+export const SUN_NAV: NavItem[] = [];
 
 /**
  * The web-design leads browser (Adon 2026-08-20). This is NOT a separate
@@ -207,6 +195,16 @@ export const SUN_NAV: NavItem[] = [
 export const WEBDEV_NAV: NavItem[] = [
   ...CC_NAV,
   { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
+  { group: "Leads", href: "/commissions", label: "Commissions", icon: "DollarSign" },
+  // Training, and the objection library underneath it.
+  //
+  // A nav row is only half of being reachable: `lib/role-surfaces.ts` narrows
+  // this list per persona, so a route absent from SALES_NAV_ALLOWLIST is
+  // filtered straight back out for a rep no matter what is written here. Both
+  // files were changed together, and the objection surfaces are in this commit
+  // because they shipped without either one and no rep could find them.
+  { group: "Training", href: "/training", label: "Training", icon: "BookOpen" },
+  { group: "Training", href: "/objections", label: "Objections", icon: "MessageSquare" },
   // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
   // filtered to this engine's leads -- a VIEW over the fourteen-stage
   // lifecycle CC already runs, never a second one (2026-08-21, Build D).
@@ -217,35 +215,13 @@ export const WEBDEV_NAV: NavItem[] = [
 ];
 
 /**
- * Suga Sean O'Malley nav — fan-ops + brand sidebar (Phase 1 scaffold).
+ * Suga nav: RETIRED 2026-09-30, kept empty only until its last importer goes.
  *
- * Placeholder routes that mostly point to /agent or generic stubs until the
- * Suga Sean agent ships its own pages. Mirrors SUN_NAV's structure so the
- * sidebar UX stays consistent across client agents.
+ * Eleven of its eighteen rows pointed at top-level routes that were never
+ * built (/subscribers, /segments, /posts, /drafts, /queue, /merch, /orders,
+ * /affiliates, /sponsorship, /contracts) or at the retired /embed, and nothing
+ * rendered it (SUGA_PROFILE.nav in lib/client-profiles.ts is never read; the
+ * Suga seed manifest carries its own /t/suga/* nav). DELETE this export in the
+ * same change that drops the import from lib/client-profiles.ts.
  */
-export const SUGA_NAV: NavItem[] = [
-  { group: "Operations", href: "/", label: "Dashboard", icon: "LayoutDashboard" },
-  { group: "Operations", href: "/agent", label: "Agents", icon: "Bot" },
-  { group: "Operations", href: "/reasoning", label: "Reasoning", icon: "Brain" },
-  { group: "Operations", href: "/playbook", label: "Playbook", icon: "BookOpen" },
-  { group: "Fans", href: "/subscribers", label: "Subscribers", icon: "Users" },
-  { group: "Fans", href: "/segments", label: "Segments", icon: "Sparkles" },
-  { group: "Brand", href: "/posts", label: "Posts", icon: "Megaphone" },
-  { group: "Brand", href: "/drafts", label: "Drafts", icon: "FileText" },
-  // /forms intentionally NOT in SUGA nav — the form builder shipped
-  // in Phase 3 of the SunBiz CRM build is funding-shop-flavored
-  // (multi-step funnels, bank statement upload, stage_outcomes mapping
-  // to funding lead.stage values). SUGA's brand workflow uses a
-  // different model (fan signups via Late/Zernio + Square). If SUGA
-  // ever needs a generic form builder, that's a separate add.
-  { group: "Brand", href: "/queue", label: "Queue", icon: "RefreshCcw" },
-  { group: "Commerce", href: "/merch", label: "Merch", icon: "ShoppingBag" },
-  { group: "Commerce", href: "/orders", label: "Orders", icon: "BadgeDollarSign" },
-  { group: "Commerce", href: "/affiliates", label: "Affiliates", icon: "Heart" },
-  { group: "Sponsorship", href: "/sponsorship", label: "Pipeline", icon: "HandCoins" },
-  { group: "Sponsorship", href: "/contracts", label: "Contracts", icon: "FileCode2" },
-  { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
-  { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
-  { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
-  { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
-];
+export const SUGA_NAV: NavItem[] = [];

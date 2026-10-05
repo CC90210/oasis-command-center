@@ -10,6 +10,7 @@
  * comma-join would silently split one industry into two filters that match
  * nothing.
  */
+import { type EnrichmentFilter, parseEnrichment } from "./enrichment";
 
 /**
  * The three in-page views the browser can show (2026-08-23 revamp). Pipeline
@@ -19,8 +20,17 @@
  * switched the same way every other filter here is: through the URL, so a
  * view survives a refresh, back/forward, and a shared link.
  */
-export type WebLeadView = "leads" | "pipeline" | "territories";
-const VALID_VIEWS: readonly WebLeadView[] = ["leads", "pipeline", "territories"];
+/**
+ * `pipeline` was a shared stage board showing every rep's leads mixed together.
+ * Adon, 2026-08-23: "You could remove the pipeline feature. I don't see any use
+ * for that." He was right, and why it was useless is worth recording: a board
+ * of everyone's leads answers a manager's question, and the people on this
+ * screen are reps, who only need to know what is in THEIR book. `mine` replaces
+ * it. Old `?view=pipeline` links fall through to the default rather than
+ * breaking, via the VALID_VIEWS check in parseFilters.
+ */
+export type WebLeadView = "leads" | "mine" | "team" | "territories";
+const VALID_VIEWS: readonly WebLeadView[] = ["leads", "mine", "team", "territories"];
 
 /**
  * Score bands, as RANGES rather than judgements (2026-08-23).
@@ -49,15 +59,109 @@ const VALID_BANDS: readonly ScoreBand[] = ["all", "under40", "mid", "sixty_plus"
  * them -- unscored leads are not "bad prospects", they are unknown, so they
  * sort last rather than being interleaved as if a missing score were a low one.
  */
-export type LeadSort = "opportunity" | "name" | "score_desc";
-const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc"];
+/**
+ * Canada is spelled by its province codes; anything else on a lead is the US.
+ * Derived rather than stored so a lead that already exists does not need a
+ * backfill to appear in the right place, and a typo cannot invent a country.
+ */
+export const CA_REGIONS: readonly string[] = [
+  "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+];
+
+export type LeadCountry = "ca" | "us";
+
+/** @param region the lead's province/state code */
+export function countryOf(region: string | null | undefined): LeadCountry {
+  return CA_REGIONS.includes(String(region || "").trim().toUpperCase()) ? "ca" : "us";
+}
+
+/** The board names a person reads: the country switch and the book tabs' hints. */
+export const LEAD_COUNTRY_NAMES: Readonly<Record<LeadCountry, string>> = Object.freeze({
+  ca: "Canada",
+  us: "United States",
+});
+
+export type LeadSort = "opportunity" | "name" | "score_desc" | "enriched_desc";
+const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc", "enriched_desc"];
 
 export type WebLeadFilters = {
   view: WebLeadView;
   provinces: string[];
+  /**
+   * Which country's board a rep is working.
+   *
+   * Oasis is entering the US (Adon 2026-09-02) and US leads live in the SAME
+   * table, distinguished only by their region code. Without this they would
+   * interleave with Canadian leads on one list, which is wrong twice over: a
+   * rep works one territory at a time, and the two markets have different
+   * compliance rules (CASL vs TCPA/DNC) — mixing them on screen is how someone
+   * dials a US mobile under Canadian assumptions.
+   *
+   * Defaults to "ca" so the existing board is unchanged for everyone until a
+   * rep deliberately switches.
+   */
+  country: LeadCountry;
   cities: string[];
   industries: string[];
   noSiteOnly: boolean;
+  /**
+   * Only leads where we know the OWNER by name.
+   *
+   * A main line reaches whoever answers; a name lets a rep ask for the person
+   * who can actually say yes. The name is read off the business's own About or
+   * Team page and stored with the page that proved it, so this filter is
+   * "someone verified a human here", not a guess.
+   *
+   * Off by default: the enriched share of the board is small, and a rep who
+   * lands on an empty-looking queue assumes the board is broken.
+   */
+  ownerOnly: boolean;
+  /**
+   * Only leads this rep already owes a call, soonest first.
+   *
+   * WHY THIS EXISTS. `dispositionPatch` REQUIRES a future `next_action_at` for
+   * the attempted and voicemail dispositions and refuses the write without one,
+   * so the promise a rep makes on a call has always been recorded. Nothing ever
+   * read it back. A rep said "call me in two weeks", the date was stored, and no
+   * screen in this product mentioned it again. On a cold week deferrals are most
+   * of what the week produces, so the single largest category of work the board
+   * knew about was the one category it could not show.
+   *
+   * It is a FILTER rather than a view because "due" is inherently about the
+   * caller's own book: it composes with trade, province and enrichment tier, and
+   * a rep filtering to trades in BC still wants to see what they owe there. A
+   * fifth view would have needed its own scope mapping and would have collided
+   * with the pool/team semantics that PR #237 settled.
+   */
+  due: boolean;
+  /**
+   * How much we know about a lead before the rep dials.
+   *
+   * Distinct from `ownerOnly`, which asks only "is there a name". This ranks
+   * the EVIDENCE: a name plus an independently published number is a different
+   * call from a name alone. Choosing a tier means that tier and better, so a
+   * rep never has to switch filters to see their strongest prospects.
+   *
+   * Defaults to "all" for the same reason ownerOnly defaults to off: a queue
+   * that looks empty reads as a broken board, not as a strict filter.
+   */
+  enrichment: EnrichmentFilter;
+  /**
+   * Only businesses OPEN RIGHT NOW, in their own time zone.
+   *
+   * Evaluated per request against a fresh clock (see fetchLeads), never baked
+   * into the memoised lead list -- a cached "open now" is a claim that decays
+   * into a lie every minute it sits there, and the entire point of this filter
+   * is that somebody picks up the phone.
+   *
+   * A lead whose hours we do not hold is EXCLUDED while this is on, and that
+   * direction is deliberate. The filter answers "who can I reach in the next
+   * ten minutes", and an unknown is not a maybe, it is not an answer. Roughly
+   * three-quarters of the corpus has no hours in the directory (measured
+   * 2026-08-24), and all of it stays reachable with the filter off, which is
+   * the default.
+   */
+  openNow: boolean;
   band: ScoreBand;
   sort: LeadSort;
   query: string;
@@ -74,10 +178,15 @@ const EMPTY_LIST = Object.freeze([]) as unknown as string[];
 
 export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   view: "leads",
+  country: "ca",
   provinces: EMPTY_LIST,
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
   noSiteOnly: false,
+  ownerOnly: false,
+  due: false,
+  enrichment: "all",
+  openNow: false,
   band: "all",
   sort: "opportunity",
   query: "",
@@ -92,7 +201,17 @@ function list(sp: URLSearchParams, key: string): string[] {
   return raw
     .split(",")
     .map((v) => {
-      try { return decodeURIComponent(v).trim(); } catch { return v.trim(); }
+      let s = v.trim();
+      try {
+        while (s.includes("%")) {
+          const decoded = decodeURIComponent(s);
+          if (decoded === s) break;
+          s = decoded;
+        }
+        return s.trim();
+      } catch {
+        return s.trim();
+      }
     })
     .filter((v) => v.length > 0);
 }
@@ -107,10 +226,15 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
   const sortRaw = sp.get("sort");
   return {
     view,
+    country: sp.get("country") === "us" ? "us" : "ca",
     provinces: list(sp, "prov"),
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
+    ownerOnly: sp.get("owner") === "1",
+    due: sp.get("due") === "1",
+    enrichment: parseEnrichment(sp.get("enrich")),
+    openNow: sp.get("open") === "1",
     // Unrecognised values fall back to the default rather than throwing: these
     // come from a URL a rep can hand-edit or a stale bookmark, and a filter
     // page that 500s on a typo is worse than one that shows everything.
@@ -134,12 +258,28 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   // Defaults stay out of the URL, same convention as view/page above.
   if (f.band !== "all") sp.set("band", f.band);
   if (f.sort !== "opportunity") sp.set("sort", f.sort);
+  if (f.country !== "ca") sp.set("country", f.country);
   put("prov", f.provinces);
   put("city", f.cities);
   put("ind", f.industries);
   if (f.noSiteOnly) sp.set("nosite", "1");
+  if (f.ownerOnly) sp.set("owner", "1");
+  if (f.due) sp.set("due", "1");
+  if (f.enrichment !== "all") sp.set("enrich", f.enrichment);
+  if (f.openNow) sp.set("open", "1");
   if (f.query) sp.set("q", f.query);
   if (f.page > 1) sp.set("page", String(f.page));
   if (f.leadId) sp.set("lead", f.leadId);
   return sp;
+}
+
+/**
+ * Move to the other country's board. One function for both switches -- the
+ * rail's and the one on My leads / Team leads -- so they cannot behave
+ * differently. Provinces and cities are cleared because each list belongs to
+ * one country: Ontario still selected on the US board would empty the pool for
+ * a reason nothing on screen names. Page 1, like every targeting change.
+ */
+export function switchCountry(f: WebLeadFilters, country: LeadCountry): WebLeadFilters {
+  return { ...f, country, provinces: [], cities: [], page: 1 };
 }

@@ -1,6 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getClientProfileSlugForBrand, resolveClientProfileSlug } from "@/lib/client-profiles";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { safeInternalPath } from "@/lib/turso-auth-admin";
+import { finalizeInviteProfile, type InviteProfilePlan } from "@/lib/invite-profile-finalization";
+import type { TeamRole } from "@/lib/team-roles";
 
 type ProfileRouteRow = {
   id: string;
@@ -17,7 +20,8 @@ type ProfileRouteRow = {
 export type PostLoginTenantContext = {
   tenantSlug?: string | null;
   commandCenterProfileSlug?: string | null;
-  // Empire operators (OPERATOR_EMAIL / ADMIN_EMAILS) default to the master
+  // Empire operators (verified: an OPERATOR_EMAIL / ADMIN_EMAILS alias AND an
+  // owner/admin OASIS membership — lib/platform-operator.ts) default to the master
   // dashboard on login even when their user_profiles row resolves to a
   // client tenant — they're frequently listed as the operator on a
   // client's tenants row (e.g. CC on SunBiz), and auto-routing them
@@ -30,15 +34,6 @@ export type PostLoginTenantContext = {
 function cleanSlug(value: string | null | undefined): string | null {
   const slug = (value || "").trim().toLowerCase();
   return slug || null;
-}
-
-function safeInternalPath(raw: string | null | undefined): string {
-  const value = (raw || "/").trim();
-  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "/";
-  if (value.startsWith("/auth/callback") || value.startsWith("/auth/land") || value.startsWith("/login")) {
-    return "/";
-  }
-  return value || "/";
 }
 
 function tenantSlugFromPath(path: string): string | null {
@@ -58,6 +53,13 @@ export function normalizePostLoginRedirect(
   ctx: PostLoginTenantContext,
 ): string {
   const safeNext = safeInternalPath(requestedNext);
+  if (
+    safeNext.startsWith("/auth/callback")
+    || safeNext.startsWith("/auth/land")
+    || safeNext.startsWith("/login")
+  ) {
+    return homePathForTenant(ctx);
+  }
   if (safeNext.startsWith("/demo/")) return homePathForTenant(ctx);
   // A bare-root next ("/" — the default whenever there's no explicit ?next=,
   // and what safeInternalPath collapses login-loop / auth-callback values to)
@@ -129,7 +131,11 @@ function isClientBrand(brand: string | null): boolean {
   return CLIENT_BRAND_PATTERNS.some((re) => re.test(s));
 }
 
-function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | undefined): ProfileRouteRow | null {
+function chooseProfileForLogin(
+  rows: ProfileRouteRow[],
+  email: string | null | undefined,
+  isEmpireOperator: boolean,
+): ProfileRouteRow | null {
   if (rows.length === 0) return null;
   if (rows.length === 1) return rows[0];
 
@@ -151,7 +157,7 @@ function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | u
   //      candidates intact and let the find chain pick its best.
   //
   // Non-operators get the full row set unchanged.
-  if (isOperatorEmail(email || undefined)) {
+  if (isEmpireOperator) {
     const operatorHome = candidates.filter((row) => isOperatorHomeBrand(row.brand));
     if (operatorHome.length > 0) {
       candidates = operatorHome;
@@ -229,7 +235,7 @@ async function tryRecoverOrphanInvite(
   // the user is in a working state.
   const { data: invites } = await db
     .from("tenant_invites")
-    .select("token_hash, created_at")
+    .select("token_hash, tenant_id, team_role, created_at")
     .eq("email", normalizedEmail)
     .is("redeemed_at", null)
     .is("revoked_at", null)
@@ -237,7 +243,9 @@ async function tryRecoverOrphanInvite(
     .order("created_at", { ascending: false })
     .limit(1);
 
-  const invite = (invites || [])[0] as { token_hash?: string | null } | undefined;
+  const invite = (invites || [])[0] as
+    | { token_hash?: string | null; tenant_id?: string | null; team_role?: string | null }
+    | undefined;
   if (!invite?.token_hash) {
     // Quiet path — orphan with no invite means a genuinely new user landed
     // in the resolver before provisioning ran. The wizard fallthrough will
@@ -254,10 +262,33 @@ async function tryRecoverOrphanInvite(
   // auth.users the way the Postgres SECURITY DEFINER function did, so it fails
   // closed without it. normalizedEmail is the same address this function used
   // to FIND the invite three queries up, so the email pin still holds.
+  // Same profile plan every other redemption path writes with the claim
+  // (lib/invite-profile-finalization.ts), so a recovered member gets the
+  // workspace's own teammates rather than none. A plan that cannot be made
+  // leaves the invite unclaimed, like everywhere else.
+  let plan: InviteProfilePlan;
+  try {
+    if (!invite.tenant_id) throw new Error("invite_has_no_tenant");
+    plan = await finalizeInviteProfile({
+      tenantId: invite.tenant_id,
+      teamRole: (invite.team_role || "member") as TeamRole,
+      db,
+    });
+  } catch (err) {
+    console.warn("[auth-routing] orphan-recovery profile plan failed; invite left unclaimed", {
+      auth_user_id: authUserId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
   const { data, error } = await db.rpc("redeem_tenant_invite", {
     p_token_hash: invite.token_hash,
     p_redeemer_auth_id: authUserId,
     p_redeemer_email: normalizedEmail,
+    p_expected_tenant_id: invite.tenant_id,
+    p_agents_enabled: plan.agentsEnabled,
+    p_primary_agent: plan.primaryAgent,
+    p_brand: plan.brand,
   });
   if (error || !data?.ok) {
     // Structured server log so ops can see when recovery WAS attempted
@@ -295,6 +326,11 @@ export async function resolvePostLoginRedirect({
   email?: string | null;
   requestedNext?: string | null;
 }): Promise<string> {
+  // Evaluated ONCE per login and keyed on the auth user: an alias email alone
+  // is what anyone can register, so it must not steer an operator's routing
+  // (the any-tenant deep link, the OASIS-home profile pick). A failed lookup
+  // routes the login like any member's — every destination has its own gate.
+  const isEmpireOperator = await isPlatformOperatorForAuthUser(authUserId, email);
   let rows = await fetchProfileRows(db, authUserId, email);
 
   // Provisioning race recovery (2026-05-24): when a brand-new OAuth
@@ -308,7 +344,7 @@ export async function resolvePostLoginRedirect({
     rows = await fetchProfileRows(db, authUserId, email);
   }
 
-  let profile = chooseProfileForLogin(rows, email);
+  let profile = chooseProfileForLogin(rows, email, isEmpireOperator);
 
   // Orphan recovery (2026-05-29): if there's still no tenant attachment
   // after the provisioning-race retry, check for an active invite pinned
@@ -319,7 +355,7 @@ export async function resolvePostLoginRedirect({
     const recovered = await tryRecoverOrphanInvite(db, authUserId, email);
     if (recovered) {
       rows = await fetchProfileRows(db, authUserId, email);
-      profile = chooseProfileForLogin(rows, email);
+      profile = chooseProfileForLogin(rows, email, isEmpireOperator);
     }
   }
 
@@ -342,11 +378,11 @@ export async function resolvePostLoginRedirect({
     resolveClientProfileSlug({
       slug: tenant?.slug || "",
       custom_fields: tenant?.custom_fields || {},
-    }) || getClientProfileSlugForBrand(profile.brand, profile.email);
+    });
 
   return normalizePostLoginRedirect(requestedNext, {
     tenantSlug: tenant?.slug || null,
     commandCenterProfileSlug: profileSlug,
-    isEmpireOperator: isOperatorEmail(email || profile.email || undefined),
+    isEmpireOperator,
   });
 }

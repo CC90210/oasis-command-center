@@ -1,11 +1,19 @@
 import { createHash, randomBytes } from "node:crypto";
+import { cache } from "react";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
+import {
+  finalizeInviteProfile,
+  inviteTenantSlug,
+  type InviteProfilePlan,
+} from "@/lib/invite-profile-finalization";
 
 import {
   INVITABLE_ROLES,
   isInvitableRole,
+  isOasisPipelineRepRole,
   type InvitableRole,
   type TeamRole,
 } from "@/lib/team-roles";
@@ -32,7 +40,7 @@ export type { InvitableRole, TeamRole };
  * by the two surfaces added for the sales roles; consolidating the rest is a
  * separate change and not one to make while shipping a feature.
  */
-export async function tenantSlugFor(tenantId: string): Promise<string | null> {
+export const tenantSlugFor = cache(async (tenantId: string): Promise<string | null> => {
   try {
     const supa = getServiceSupabase();
     const { data, error } = await supa
@@ -47,7 +55,7 @@ export async function tenantSlugFor(tenantId: string): Promise<string | null> {
     console.error("[team.tenantSlugFor]", err);
     return null;
   }
-}
+});
 
 /**
  * How long a fresh invite stays redeemable.
@@ -89,7 +97,141 @@ export type MemberRow = {
   admin_access: boolean;
   invited_by: string | null;
   joined_at: string;
+  manager_user_id?: string | null;
+  /** Set when a founder deactivated this teammate (migration 179). NULL = active. */
+  deactivated_at?: string | null;
+  deactivated_by?: string | null;
+  deactivation_reason?: string | null;
 };
+
+/**
+ * Active = not deactivated. Deactivated teammates keep their history but must
+ * never appear in a LIVE list — assign menus, rep chips, the scorecard, form
+ * routing. Every roster read below defaults to active-only, so a caller that
+ * forgets to ask hides a retired rep rather than handing them new work; only
+ * history views (name lookups for old records, the activity feed, the Team
+ * admin page) opt in with `includeInactive`.
+ */
+export function isActiveMember(member: { deactivated_at?: string | null }): boolean {
+  return !member.deactivated_at;
+}
+
+export type RosterOptions = { includeInactive?: boolean };
+
+/** The refusal every live-work route returns for a deactivated target. */
+export const MEMBER_DEACTIVATED_MESSAGE =
+  "That teammate has been deactivated and can't take new work. Choose an active teammate.";
+
+export type MemberStanding = "active" | "deactivated" | "not_member";
+
+/**
+ * Where one person stands in a workspace, for code about to hand them LIVE
+ * work — a new owner, a collaborator, a calendar invite, a notification.
+ * Before 2026-09-24 each route selected `auth_user_id` alone, so a deactivated
+ * teammate passed as a member everywhere. A person with several profile rows
+ * is active if any row is. A read error throws; the caller decides whether a
+ * failed check refuses (writes) or skips the person (best-effort notices).
+ */
+export async function memberStanding(
+  tenantId: string,
+  authUserId: string,
+): Promise<{ standing: MemberStanding; member: MemberRow | null }> {
+  const { data, error } = await getServiceSupabase()
+    .from("user_profiles")
+    .select(MEMBER_COLUMNS)
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", authUserId);
+  if (error) throw dbError("memberStanding", error);
+  const rows = (data ?? []) as MemberRow[];
+  if (rows.length === 0) return { standing: "not_member", member: null };
+  const active = rows.find(isActiveMember);
+  return active ? { standing: "active", member: active } : { standing: "deactivated", member: rows[0] };
+}
+
+const MEMBER_COLUMNS =
+  "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id, deactivated_at, deactivated_by, deactivation_reason";
+
+function cleanMemberName(value: string | null | undefined): string | null {
+  const normalized = String(value || "").trim();
+  // Several legacy profiles stored the email address (and, in one import,
+  // the email plus "00") as the person's name. Never render that as identity.
+  if (!normalized || normalized.includes("@")) return null;
+  return normalized.slice(0, 120);
+}
+
+function nameFromMemberEmail(email: string): string {
+  const local = email.split("@")[0]?.trim() || "Team member";
+  return local
+    .split(/[._-]+/u)
+    .filter(Boolean)
+    .map((part) =>
+      part.length <= 2
+        ? part.toUpperCase()
+        : `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`,
+    )
+    .join(" ") || "Team member";
+}
+
+function memberPreferenceScore(member: MemberRow): number {
+  return (
+    // An active row outranks every deactivated one, whatever its authority:
+    // the rosters filter to active AFTER this dedup, so a deactivated duplicate
+    // that won here would take the person's live row with it and they would
+    // vanish from every live list although they still work here.
+    (isActiveMember(member) ? 10_000 : 0) +
+    (member.is_owner ? 1_000 : 0) +
+    (member.team_role === "owner" ? 500 : 0) +
+    (member.team_role === "admin" ? 400 : 0) +
+    (member.admin_access ? 200 : 0) +
+    (member.auth_user_id ? 50 : 0) +
+    (cleanMemberName(member.display_name) ? 20 : 0) +
+    (cleanMemberName(member.full_name) ? 10 : 0)
+  );
+}
+
+/**
+ * Return one deterministic, human-readable row per real teammate.
+ *
+ * Turso contains a small amount of pre-cutover profile debt: duplicate rows
+ * can share an auth id or email, and some names are email-shaped. Choosing a
+ * row by database return order made Team and Activity disagree between loads.
+ * Prefer the highest-authority/richest row, use the primary key as the stable
+ * tiebreaker, and normalize only the returned view (no destructive data edit).
+ */
+export function canonicalizeTenantMembers(rows: MemberRow[]): MemberRow[] {
+  const ordered = [...rows].sort(
+    (left, right) =>
+      memberPreferenceScore(right) - memberPreferenceScore(left) ||
+      left.id.localeCompare(right.id),
+  );
+  const seenAuthIds = new Set<string>();
+  const seenEmails = new Set<string>();
+  const canonical: MemberRow[] = [];
+
+  for (const row of ordered) {
+    const authId = row.auth_user_id?.trim() || null;
+    const email = row.email.trim().toLowerCase();
+    if ((authId && seenAuthIds.has(authId)) || (email && seenEmails.has(email))) continue;
+    if (authId) seenAuthIds.add(authId);
+    if (email) seenEmails.add(email);
+
+    const displayName = cleanMemberName(row.display_name);
+    const fullName = cleanMemberName(row.full_name) || nameFromMemberEmail(email);
+    canonical.push({
+      ...row,
+      email,
+      display_name: displayName,
+      full_name: fullName,
+    });
+  }
+
+  return canonical.sort(
+    (left, right) =>
+      Number(right.is_owner) - Number(left.is_owner) ||
+      left.joined_at.localeCompare(right.joined_at) ||
+      left.id.localeCompare(right.id),
+  );
+}
 
 export type InviteRow = {
   id: string;
@@ -107,7 +249,8 @@ export type InviteRow = {
 export type InvitePreview = {
   tenant_id: string;
   tenant_name: string;
-  team_role: Exclude<TeamRole, "owner">;
+  /** "owner" only on an operator-minted owner-claim invite (bravo__196). */
+  team_role: TeamRole;
   expires_at: string;
   email_pinned: string | null;
 };
@@ -157,29 +300,33 @@ export function generateInviteToken(): { raw: string; hash: string } {
   return { raw, hash: hashInviteToken(raw) };
 }
 
-function normalizeEmail(email: string | null | undefined): string {
-  return (email || "").trim().toLowerCase();
+const TEAM_INVITE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Normalize a teammate address or fail closed when it cannot pin an invite. */
+export function normalizeInviteEmail(email: unknown): string | null {
+  if (typeof email !== "string") return null;
+  const normalized = email.trim().toLowerCase();
+  if (!normalized || normalized.length > 254 || !TEAM_INVITE_EMAIL_RE.test(normalized)) {
+    return null;
+  }
+  return normalized;
 }
 
 export function inviteEmailMatchesUser(
   inviteEmail: string | null | undefined,
   userEmail: string | null | undefined,
 ): boolean {
-  const pinned = normalizeEmail(inviteEmail);
-  if (!pinned) return true;
-  return pinned === normalizeEmail(userEmail);
+  const pinned = normalizeInviteEmail(inviteEmail);
+  const user = normalizeInviteEmail(userEmail);
+  return pinned !== null && user !== null && pinned === user;
 }
 
 export async function getSessionContext(): Promise<SessionContext | null> {
   const user = await getSessionUser();
   if (!user) return null;
-  const supa = getServiceSupabase();
-  const { data, error } = await supa
-    .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  if (error || !data || !data.tenant_id) return null;
+  const resolved = await resolveActiveProfileForUser(user);
+  const data = resolved.profile;
+  if (resolved.error || !data?.tenant_id) return null;
   return {
     authUserId: user.id,
     profileId: data.id,
@@ -190,18 +337,122 @@ export async function getSessionContext(): Promise<SessionContext | null> {
   };
 }
 
-export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
+export async function getTenantMembers(
+  tenantId: string,
+  options: RosterOptions = {},
+): Promise<MemberRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at"
-    )
+    .select(MEMBER_COLUMNS)
     .eq("tenant_id", tenantId)
     .order("is_owner", { ascending: false })
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getTenantMembers", error);
-  return (data ?? []) as MemberRow[];
+  // Canonicalize before filtering, for the same reason the sales roster does:
+  // a deactivated duplicate must not knock out the authoritative row.
+  const members = canonicalizeTenantMembers((data ?? []) as MemberRow[]);
+  return options.includeInactive ? members : members.filter(isActiveMember);
+}
+
+/**
+ * Tenant-scoped roster that defines a sales manager's cross-rep READ boundary.
+ * Owner/admin/member/read-only profiles and rows without an auth identity are
+ * intentionally excluded, so this list can never authorize unassigned,
+ * founder, or system records.
+ */
+export async function getOasisSalesRepRoster(
+  tenantId: string,
+  managerUserId?: string,
+  options: RosterOptions = {},
+): Promise<MemberRow[]> {
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("user_profiles")
+    .select(MEMBER_COLUMNS)
+    .eq("tenant_id", tenantId)
+    .order("joined_at", { ascending: true });
+  if (error) throw dbError("getOasisSalesRepRoster", error);
+  // Canonicalize the FULL tenant before role filtering. Live pre-cutover data
+  // contains duplicate profiles for the same auth user/email. Filtering the
+  // query to sales roles first could discard the authoritative owner/admin row
+  // and retain a stale manager/agent duplicate, silently admitting a founder
+  // identity into the manager's cross-rep read boundary.
+  const roster = canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
+    (member) =>
+      Boolean(member.auth_user_id?.trim()) &&
+      member.is_owner !== true &&
+      member.admin_access !== true &&
+      isOasisPipelineRepRole(member.team_role) &&
+      // A deactivated manager also loses their cross-rep read boundary here.
+      (options.includeInactive === true || isActiveMember(member)),
+  );
+  if (managerUserId === undefined) return roster;
+  const managerId = managerUserId.trim().toLowerCase();
+  if (!managerId) return [];
+  return roster.filter((member) =>
+    member.auth_user_id?.trim().toLowerCase() !== managerId &&
+    member.manager_user_id?.trim().toLowerCase() === managerId,
+  );
+}
+
+/**
+ * The founders — the two people who must always be assignable. Owners/admins
+ * are excluded from getOasisSalesRepRoster because that function is a manager
+ * authorization boundary, so they are named here rather than smuggled into it
+ * through a role exception.
+ */
+export const OASIS_PIPELINE_ASSIGNMENT_EMAILS = [
+  "conaugh@oasisai.work",
+  "adon@oasisai.work",
+] as const;
+
+export function isOasisPipelineAssignmentMember(member: { email?: string | null }): boolean {
+  const email = (member.email || "").trim().toLowerCase();
+  return (OASIS_PIPELINE_ASSIGNMENT_EMAILS as readonly string[]).includes(email);
+}
+
+/**
+ * Everyone a lead may be assigned to: the founders first, then every ACTIVE
+ * rep (2026-09-24). CC and Adon run sales; Schneur (builder) and David (opener)
+ * are the reps who stay. This one list feeds the assign menus AND the server
+ * checks behind them, so the menu can never offer a person the API refuses —
+ * and deactivating a rep removes them from both at once.
+ *
+ * Until 2026-09-24 this was the founders only, which also meant the two reps
+ * who remained could not claim from the pool at all.
+ */
+export async function getOasisPipelineAssignmentRoster(tenantId: string): Promise<MemberRow[]> {
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("user_profiles")
+    .select(MEMBER_COLUMNS)
+    .eq("tenant_id", tenantId)
+    .order("joined_at", { ascending: true });
+  if (error) throw dbError("getOasisPipelineAssignmentRoster", error);
+
+  const members = canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
+    (member) => Boolean(member.auth_user_id?.trim()) && isActiveMember(member),
+  );
+  const byEmail = new Map(
+    members
+      .filter((member) => isOasisPipelineAssignmentMember(member))
+      .map((member) => [member.email.trim().toLowerCase(), member]),
+  );
+  const founders = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
+    const member = byEmail.get(email);
+    return member ? [member] : [];
+  });
+  if (founders.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
+    throw new Error("oasis_pipeline_assignment_roster_incomplete");
+  }
+  const reps = members.filter(
+    (member) =>
+      !isOasisPipelineAssignmentMember(member) &&
+      member.is_owner !== true &&
+      isOasisPipelineRepRole(member.team_role),
+  );
+  return [...founders, ...reps];
 }
 
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {
@@ -220,12 +471,52 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
   return (data ?? []) as InviteRow[];
 }
 
+/**
+ * Revoke earlier live grants for the same tenant and normalized mailbox.
+ *
+ * A retry cannot resend an earlier raw token because only its hash is stored.
+ * The role is deliberately NOT part of the match: correcting an Admin invite
+ * to Member must revoke the older higher-privilege token. Retiring the old row
+ * before minting the replacement keeps ordinary retries and double-clicks to
+ * one usable grant. The browser also blocks a second submit in flight.
+ */
+export async function supersedeActiveInvites(args: {
+  tenantId: string;
+  email: string;
+}): Promise<number> {
+  const email = normalizeInviteEmail(args.email);
+  if (!email) throw new Error("invite_email_required");
+
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("tenant_invites")
+    .select("id, email, team_role")
+    .eq("tenant_id", args.tenantId)
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString());
+  if (error) throw dbError("invite_supersede_read_failed", error);
+
+  const ids = ((data || []) as Array<{ id: string; email: string | null; team_role: string }>)
+    .filter((row) => normalizeInviteEmail(row.email) === email)
+    .map((row) => row.id);
+  if (ids.length === 0) return 0;
+
+  const update = await supa
+    .from("tenant_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("tenant_id", args.tenantId)
+    .in("id", ids);
+  if (update.error) throw dbError("invite_supersede_write_failed", update.error);
+  return ids.length;
+}
+
 export async function createInvite(
   args: {
     tenantId: string;
     role: Exclude<TeamRole, "owner">;
     createdBy: string;
-    email?: string | null;
+    email: string;
   },
   /**
    * Injectable for tests ONLY; every caller in the app omits it.
@@ -239,12 +530,14 @@ export async function createInvite(
   db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
 ): Promise<{ id: string; rawToken: string; expiresAt: string }> {
   const supa = db;
+  const email = normalizeInviteEmail(args.email);
+  if (!email) throw new Error("invite_email_required");
   const { raw, hash } = generateInviteToken();
   const { data, error } = await supa
     .from("tenant_invites")
     .insert({
       tenant_id: args.tenantId,
-      email: args.email ?? null,
+      email,
       team_role: args.role,
       token_hash: hash,
       created_by: args.createdBy,
@@ -284,15 +577,40 @@ export async function revokeInvite(inviteId: string, tenantId: string): Promise<
   if (error) throw dbError("revokeInvite", error);
 }
 
+export type RedeemInviteResult =
+  | {
+      ok: true;
+      tenantId: string;
+      teamRole: TeamRole;
+      /** Where the member lands (/t/<slug>); null when it could not be read. */
+      tenantSlug: string | null;
+      idempotent?: boolean;
+      /**
+       * True when nothing was written: the caller already redeemed this invite,
+       * or already belongs to this workspace. A retry after a network blip ends
+       * here and succeeds instead of failing the same way twice.
+       */
+      alreadyMember?: boolean;
+    }
+  | { ok: false; error: string };
+
 export async function redeemInvite(
   rawToken: string,
   redeemerAuthId: string
-): Promise<
-  | { ok: true; tenantId: string; teamRole: TeamRole; idempotent?: boolean }
-  | { ok: false; error: string }
-> {
+): Promise<RedeemInviteResult> {
   const supa = getServiceSupabase();
   const hash = hashInviteToken(rawToken);
+
+  const landingSlug = async (tenantId: string): Promise<string | null> => {
+    try {
+      return await inviteTenantSlug(tenantId);
+    } catch (err) {
+      // The redemption itself is done; the member still lands on "/", which
+      // resolves their workspace from the session. Logged, not hidden.
+      console.error("[team.redeemInvite] landing slug lookup failed", { tenantId, err });
+      return null;
+    }
+  };
 
   const preview = await previewInvite(rawToken);
   if (!preview) {
@@ -312,11 +630,17 @@ export async function redeemInvite(
       .not("redeemed_at", "is", null)
       .maybeSingle();
     if (priorRedeem?.tenant_id && priorRedeem.team_role) {
+      // alreadyMember: this caller's profile was finished in the same write
+      // that claimed the invite, so there is nothing left to do. Before
+      // 2026-09-30 this branch omitted it and every retry re-ran finalization.
+      const tenantId = priorRedeem.tenant_id as string;
       return {
         ok: true,
-        tenantId: priorRedeem.tenant_id as string,
+        tenantId,
         teamRole: priorRedeem.team_role as TeamRole,
+        tenantSlug: await landingSlug(tenantId),
         idempotent: true,
+        alreadyMember: true,
       };
     }
     return { ok: false, error: "invalid_or_expired" };
@@ -337,6 +661,20 @@ export async function redeemInvite(
   // without it — returning "auth_user_not_found", the SAME string the lookup
   // above returns on failure. That collision is why this went unnoticed: the
   // join simply reported the error it would have reported anyway.
+  // The joining member's profile (agents, primary agent, workspace name) is
+  // decided HERE, before anything is claimed, and redeem_tenant_invite writes
+  // it in the same batch as the claim. A failure to decide (the workspace or
+  // its manifest could not be read) refuses now, with the invite untouched.
+  let plan: InviteProfilePlan;
+  try {
+    plan = await finalizeInviteProfile({ tenantId: preview.tenant_id, teamRole: preview.team_role });
+  } catch (err) {
+    console.error("[team.redeemInvite] profile plan failed; invite left unclaimed", {
+      tenantId: preview.tenant_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, error: "profile_finalize_failed" };
+  }
   // The value is already in hand from the adminGetUser call one line up.
   const { data, error } = await supa.rpc("redeem_tenant_invite", {
     p_token_hash: hash,
@@ -346,10 +684,22 @@ export async function redeemInvite(
     // Turso port takes it as an argument, and without it a new member's profile
     // is created with full_name set to their email address.
     p_redeemer_full_name: authUser.value.fullName,
+    p_expected_tenant_id: preview.tenant_id,
+    p_agents_enabled: plan.agentsEnabled,
+    p_primary_agent: plan.primaryAgent,
+    p_brand: plan.brand,
   });
   if (error) return { ok: false, error: error.message };
   if (!data?.ok) return { ok: false, error: data?.error ?? "invalid_or_expired" };
-  return { ok: true, tenantId: data.tenant_id, teamRole: data.team_role as TeamRole };
+  const nothingWritten = data.already_member === true || data.already_redeemed === true;
+  return {
+    ok: true,
+    tenantId: data.tenant_id,
+    teamRole: data.team_role as TeamRole,
+    tenantSlug: data.tenant_id === preview.tenant_id ? plan.tenantSlug : await landingSlug(data.tenant_id),
+    idempotent: data.already_redeemed === true || undefined,
+    alreadyMember: nothingWritten,
+  };
 }
 
 export async function setMemberRole(args: {

@@ -48,7 +48,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // ANY lead in their tenant (LEAD_SCOPING_ENABLED does not narrow this). The
   // application is the lead's; gating the lead is the authorization boundary.
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity: "lead", id },
   );
   if (!acc.ok) {

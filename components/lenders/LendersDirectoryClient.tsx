@@ -16,6 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatMoney, relTime } from "@/lib/format-helpers";
+import { lenderNetworkOf } from "@/lib/lenders/lender-network";
 import { Landmark, Loader2, Plus, Save, Trash2, X } from "lucide-react";
 
 /* -------------------------------------------------------------------------- */
@@ -137,7 +138,7 @@ function bool(v: unknown): boolean {
 
 function toLenderData(raw: Record<string, unknown>): LenderData {
   return {
-    lender_network: raw.lender_network === "funmate" ? "funmate" : "sunbiz",
+    lender_network: lenderNetworkOf(raw),
     name: str(raw.name),
     contact: str(raw.contact),
     product_type: str(raw.product_type),
@@ -278,7 +279,7 @@ export function LendersDirectoryClient({
     if (!records) return [];
     const needle = search.trim().toLowerCase();
     return records.filter((r) => {
-      if ((r.data.lender_network === "funmate" ? "funmate" : "sunbiz") !== network) return false;
+      if (lenderNetworkOf(r.data) !== network) return false;
       if (activeOnly && !bool(r.data.active)) return false;
       if (productFilter.length > 0 && !productFilter.includes(str(r.data.product_type))) {
         return false;

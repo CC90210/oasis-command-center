@@ -29,6 +29,7 @@ const ENV_KEYS = [
   "DRIP_INTAKE_URL",
   "DRIP_SUPPRESSION_BRAND",
   "PUBLIC_APP_URL",
+  "SUNBIZ_PUBLIC_FORM_ORIGIN",
 ];
 
 /** Run `fn` with a specific environment, restoring whatever was there before. */
@@ -260,8 +261,28 @@ assert.equal(unsubscribeMailto("bluerise"),
   "mailto:submissions@bluerisebusinesscapital.com?subject=unsubscribe",
   "the unsubscribe mailto must reach the mailbox that actually sent");
 
-// An unknown brand falls back to SunBiz rather than erroring or going blank.
-assert.equal(fromAddress("nonsense" as never), "submissions@sunbizfunding.com");
+// An unknown brand REFUSES rather than falling back.
+//
+// This asserted `fromAddress("nonsense") === "submissions@sunbizfunding.com"`
+// until 2026-09-09 — a second test, in a second file, locking in the same
+// fail-open as tests/brand-registry.test.ts. Between them they made the client's
+// From address the answer to every question the system could not parse, and
+// reported that as correct on every CI run.
+assert.throws(
+  () => fromAddress("nonsense" as never),
+  /unknown brand/,
+  "an unparseable brand must not resolve to a real company's mailbox",
+);
+
+// OASIS resolves to OASIS. Before it was a registry entry this returned
+// submissions@sunbizfunding.com — the client's mailbox, for our own mail.
+assert.equal(fromAddress("oasis"), "conaugh@oasisai.work");
+assert.equal(fromDomain("oasis"), "oasisai.work");
+assert.equal(
+  messageIdDomain("oasis"),
+  "oasisai.work",
+  "Message-Id must follow the sending domain, not the client's",
+);
 
 // ---------------------------------------------------------------------------
 // The click allowlist must cover EVERY brand at once, not just the caller's.
@@ -301,6 +322,19 @@ withEnv({ BLUERISE_TRACKING_ORIGIN: "not-a-url" }, () => {
   const hosts = clickAllowedHosts();
   assert.ok(!hosts.has("not-a-url"), "unparseable origin contributes nothing");
   assert.ok(hosts.has("bluerisebusinesscapital.com"), "and does not break the rest");
+});
+
+// SunBiz's application-link host joins the allowlist. Without it, an unsigned
+// click on a merchant's own application link lands on the generic intake form,
+// and moving SUNBIZ_PUBLIC_FORM_ORIGIN to a new host would do that to all of them.
+withEnv({ SUNBIZ_PUBLIC_FORM_ORIGIN: "https://agent-dashboard-cc90210.vercel.app" }, () => {
+  assert.ok(clickAllowedHosts().has("agent-dashboard-cc90210.vercel.app"),
+    "the SunBiz form host in production today must be trusted");
+});
+withEnv({ SUNBIZ_PUBLIC_FORM_ORIGIN: "https://apply.sunbizfunding.com" }, () => {
+  const hosts = clickAllowedHosts();
+  assert.ok(hosts.has("apply.sunbizfunding.com"), "a newly configured SunBiz form host must be trusted");
+  assert.ok(hosts.has("oasisai.work"), "mail already in inboxes still points at the old host");
 });
 
 // ---------------------------------------------------------------------------

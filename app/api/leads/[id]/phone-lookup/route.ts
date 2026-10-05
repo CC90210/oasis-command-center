@@ -26,10 +26,9 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canWriteCrm } from "@/lib/role-gates";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { hasUsablePhone } from "@/lib/clair/eligibility";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { getReadableLeadTargetForSession, getWritableLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,20 +64,11 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   // another agent's lead lookup PII (names/phones/emails) by hitting this
   // endpoint with a UUID. Same boundary the detail/documents routes enforce.
   // 404 (not 403) so the endpoint doesn't confirm the lead exists.
-  const { data: lead } = await svc
-    .from("tenant_records")
-    .select("data")
-    .eq("id", leadId)
-    .eq("tenant_id", sess.tenantId)
-    .maybeSingle();
-  if (
-    !lead ||
-    !canViewLead(
-      { isAdmin: sess.isAdmin, userId: sess.userId },
-      (lead.data ?? {}) as Record<string, unknown>,
-      leadScopingEnabled(),
-    )
-  ) {
+  const target = await getReadableLeadTargetForSession(sess, {
+    tenantId: sess.tenantId,
+    id: leadId,
+  });
+  if (!target) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
@@ -124,12 +114,6 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
   // Checked before any record lookup so a read-only caller gets an identical 403
   // whether or not the lead exists (no enumeration oracle).
-  if (!canWriteCrm(sess.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't run lookups." },
-      { status: 403 },
-    );
-  }
   const { id: leadId } = await ctx.params;
   if (!UUID_RE.test(leadId)) {
     return NextResponse.json({ ok: false, error: "bad_lead_id" }, { status: 400 });
@@ -139,32 +123,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   // Tenant isolation: the lead must live in THIS tenant, or a valid session
   // could research another tenant's merchant by id.
-  const { data: lead, error: leadErr } = await svc
-    .from("tenant_records")
-    .select("id,data")
-    .eq("id", leadId)
-    .eq("tenant_id", sess.tenantId)
-    .maybeSingle();
-  if (leadErr) {
-    return NextResponse.json({ ok: false, error: "lookup_failed" }, { status: 500 });
-  }
-  if (!lead) {
-    return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
+  const access = await getWritableLead(
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
+    { tenantId: sess.tenantId, entity: "lead", id: leadId },
+  );
+  if (!access.ok) {
+    return access.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
-  const leadData = (lead.data ?? {}) as Record<string, unknown>;
+  const leadData = access.record.data;
   // Per-agent lead visibility: a write-capable member must not enqueue a lookup
   // (which spends scrape budget and produces PII) for a lead outside their scope.
   // 404, matching the detail/documents routes — no existence oracle.
-  if (
-    !canViewLead(
-      { isAdmin: sess.isAdmin, userId: sess.userId },
-      leadData,
-      leadScopingEnabled(),
-    )
-  ) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  }
   if (hasUsablePhone(leadData)) {
     return NextResponse.json(
       { ok: false, error: "already_has_phone", message: "This lead already has a phone number on file." },

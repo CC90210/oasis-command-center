@@ -25,6 +25,64 @@
  * is not.
  */
 
+/**
+ * Hosts where the PATH is the identity and the origin is useless.
+ *
+ * `facebook.com/joesplumbing` is Joe's website; `facebook.com` is not. Same for
+ * every platform that hands businesses a page rather than a domain. Everywhere
+ * else, the path is a page ON the business's own site and the origin is their
+ * homepage.
+ */
+const PLATFORM_HOSTS = [
+  "facebook.com", "fb.com", "instagram.com", "linkedin.com", "twitter.com", "x.com",
+  "yelp.ca", "yelp.com", "tripadvisor.ca", "tripadvisor.com", "google.com", "goo.gl",
+  "sites.google.com", "business.site", "wixsite.com", "squarespace.com", "wordpress.com",
+  "blogspot.com", "shopify.com", "myshopify.com", "weebly.com", "godaddysites.com",
+  "linktr.ee", "square.site", "ca.linkedin.com",
+];
+
+function isPlatformHost(host: string): boolean {
+  const h = host.replace(/^www\./i, "").toLowerCase();
+  return PLATFORM_HOSTS.some((p) => h === p || h.endsWith(`.${p}`));
+}
+
+/**
+ * The URL a rep should actually be sent to — usually the business's HOMEPAGE,
+ * not the deep path OpenStreetMap happens to store.
+ *
+ * WHY, WITH EVIDENCE (measured 2026-08-24): Adon reported "View website" giving
+ * 404s across multiple leads. The links were well-formed and safeExternalUrl
+ * was doing its job; the stored URLs themselves are simply stale. OSM entries
+ * are contributed once and rarely revisited, so a path recorded years ago rots
+ * while the domain stays fine. In a four-URL sample,
+ * `mangomedical.ca/familypractice/` returned 410 Gone while `mangomedical.ca`
+ * returned 200 — one in four dead, which matches "I tested it out with multiple
+ * websites".
+ *
+ * A rep on a call wants to see the business's site, not one archived sub-page
+ * of it. The origin is both what they want and the far more durable URL.
+ *
+ * The exception is platform hosts, where the path IS the business (see above) —
+ * stripping it would send a rep to facebook.com's front page and tell them
+ * nothing.
+ *
+ * Returns null on anything safeExternalUrl rejects, so every caller keeps the
+ * same contract: render nothing rather than a dead or dangerous control.
+ */
+export function preferredSiteUrl(raw: string | null): string | null {
+  const safe = safeExternalUrl(raw);
+  if (!safe) return null;
+  try {
+    const u = new URL(safe);
+    if (isPlatformHost(u.hostname)) return safe;
+    // No meaningful path: already the homepage.
+    if (u.pathname === "/" || u.pathname === "") return u.origin + "/";
+    return u.origin + "/";
+  } catch {
+    return safe;
+  }
+}
+
 export function safeExternalUrl(raw: string | null): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();

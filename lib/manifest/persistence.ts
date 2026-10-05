@@ -24,6 +24,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { parseManifest, type TenantManifest } from "./schema";
 import type { DiffEntry } from "./diff";
+import { isSeedOverlay, resolveStoredManifest } from "./seed-overlay";
 
 export type ManifestRow = {
   id: string;
@@ -58,7 +59,11 @@ function client(): SupabaseClient {
   return getServiceSupabase();
 }
 
-/** Read a manifest row by slug. Returns null when no row exists. */
+/**
+ * Read a manifest row by slug. Returns null when no row exists. A seed
+ * overlay row (lib/manifest/seed-overlay.ts) comes back as the manifest the
+ * loader serves: the current seed with the workspace's own bindings.
+ */
 export async function getManifestRow(slug: string): Promise<ManifestRow | null> {
   const db = client();
   const result = await db
@@ -69,7 +74,32 @@ export async function getManifestRow(slug: string): Promise<ManifestRow | null> 
   if (result.error) throw new ManifestPersistenceError("db", result.error.message);
   if (!result.data) return null;
   const row = result.data as Omit<ManifestRow, "manifest"> & { manifest: unknown };
+  if (isSeedOverlay(row.manifest)) {
+    const served = resolveStoredManifest(row.manifest, row.slug, row.tenant_id);
+    if (served.ok) return { ...row, manifest: served.manifest };
+    throw new ManifestPersistenceError("validation", served.error.message);
+  }
   return { ...row, manifest: parseManifest(row.manifest) };
+}
+
+/**
+ * Read the slug a tenant has claimed, by tenant_id. Returns null when the
+ * tenant has no manifest row. Selects only the slug — callers want the
+ * namespace, not the manifest body, so this skips the parse.
+ *
+ * tenant_id is unique on this table (070_tenant_manifests_unique_tenant.sql),
+ * so at most one row can come back.
+ */
+export async function getManifestSlugForTenant(tenantId: string): Promise<string | null> {
+  const db = client();
+  const result = await db
+    .from("tenant_manifests")
+    .select("slug")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (result.error) throw new ManifestPersistenceError("db", result.error.message);
+  const slug = (result.data as { slug?: unknown } | null)?.slug;
+  return typeof slug === "string" && slug.trim() ? slug.trim() : null;
 }
 
 export type SaveManifestInput = {

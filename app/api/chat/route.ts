@@ -28,7 +28,6 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import {
   streamChat,
   type ChatMessage,
-  type Provider,
 } from "@/lib/providers";
 import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
 import { operatorNameOverride } from "@/lib/operator-name";
@@ -42,7 +41,7 @@ import {
   READ_ONLY_DENIED_TOOLS,
   READ_ONLY_DENIED_MARKERS,
   TOOL_NATIVE_MARKER_TYPES,
-  isReadOnlyRole,
+  canWriteCrm,
 } from "@/lib/role-gates";
 import { logAction } from "@/lib/action-log";
 import {
@@ -54,16 +53,22 @@ import {
   cloudToolsPromptBlockV2,
   streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
+  type ResumeState,
 } from "@/lib/cloud-tool-runner";
-import { resolveChatContext } from "@/lib/chat-auth";
+import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
-import { isOperatorEmail } from "@/lib/operator-credentials";
 import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import {
+  addToSessionTotals,
+  fetchTenantVaultSecretsForRedaction,
+  persistAssistantTurn,
+  sessionTotalsDelta,
+  type TurnTokens,
+} from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
   formatAttachmentContext,
@@ -71,6 +76,16 @@ import {
   linkChatAttachmentsToSession,
   loadChatAttachmentsForTurn,
 } from "@/lib/chat-attachments";
+import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
+import {
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  budgetRefusalResponse,
+  modelCallMeter,
+  usageUnavailableResponse,
+} from "@/lib/ai/usage";
+import { sseErrorFrame } from "@/lib/ai/usage-codes";
+import { departmentForAgent } from "@/lib/os/approvals/rules";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -155,7 +170,7 @@ export async function POST(req: NextRequest) {
     // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope } = ctxResult;
+  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope, keySource } = ctxResult;
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
   // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
@@ -208,8 +223,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ---- The month's AI budget (lib/ai/usage.ts) ----------------------------
+  // A workspace already AT its cap gets a 402 and one plain sentence before
+  // anything is written or streamed. Every model call below still reserves for
+  // itself, so a turn that reaches the cap mid-loop stops with the same code.
+  // No cap for the month = nothing to check; a local model is never capped.
+  const billing = billingForKey(provider, keySource);
+  let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
+  try {
+    exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
+  } catch (err) {
+    console.error("[chat.budget] the AI budget could not be read", {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return usageUnavailableResponse();
+  }
+  if (exhausted) return budgetRefusalResponse(exhausted);
+
   // ---- Open or create chat_sessions row -----------------------------------
-  let sessionId = payload.session_id || null;
+  // A body-supplied session id is kept only when it is this person's session
+  // in this workspace; the turn's messages, totals and AI usage rows are filed
+  // under it.
+  let sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
   if (!sessionId) {
     const { data: created, error: createErr } = await service
       .from("chat_sessions")
@@ -226,6 +262,8 @@ export async function POST(req: NextRequest) {
     if (createErr || !created) return jsonError(500, "session_create_failed");
     sessionId = created.id as string;
   }
+  // The session a paused turn's resume_state names (and is signed with).
+  const turnSessionId: string = sessionId;
   if (sessionId && turnAttachments.length > 0) {
     await linkChatAttachmentsToSession({
       tenantId,
@@ -253,10 +291,9 @@ export async function POST(req: NextRequest) {
   // whether the operator's local bridge is reachable. When it IS, Phase 2
   // of giggly-reef gives the cloud-mode chat real local tools (read_file,
   // write_file, bash, send_email, send_sms) via the browser proxy to
-  // localhost:9100/exec-tool. Without this check, the OLD notice would
-  // gaslight the model into telling the operator "I can't send email —
-  // run bravo bridge serve" even when the bridge is right there waiting
-  // for the tool call. Caught 2026-05-15 from CC's screenshot.
+  // localhost:9100/exec-tool. Without this check, the old notice would
+  // tell the operator to relaunch an already-running bridge instead of
+  // issuing the available tool call. Caught 2026-05-15 from CC's screenshot.
   // Bridge online check + advertised tool list (Phase F). Single round
   // trip vs the original separate getBridgeOnline call. When the bridge
   // is online AND has advertised a capabilities list, the dashboard
@@ -265,9 +302,13 @@ export async function POST(req: NextRequest) {
   // freshly-paired bridges before their first heartbeat), bridgeAdvertisedTools
   // is null and the dashboard falls back to advertising every defer:true
   // tool in TOOL_DEFINITIONS (pre-Phase-F behavior).
-  const bridgeState = await getBridgeToolCapabilities(tenantId).catch(
-    () => ({ online: false, tools: null as string[] | null }),
-  );
+  // A failed pairings read (getBridgeToolCapabilities throws) is logged and
+  // gated as offline: bridge tools are never offered on a heartbeat nobody
+  // could read. This only gates tools; nothing here shows "offline".
+  const bridgeState = await getBridgeToolCapabilities(tenantId).catch((err) => {
+    console.error("[chat] bridge pairings read failed; bridge tools withheld this turn", err instanceof Error ? err.message : err);
+    return { online: false, tools: null as string[] | null };
+  });
   const bridgeOnline = bridgeState.online;
   const bridgeAdvertisedTools = bridgeState.tools;
 
@@ -310,9 +351,13 @@ export async function POST(req: NextRequest) {
   //   - run_script (arbitrary Python execution)
   //   - delete_record without an explicit operator confirmation flow
   //
-  // Operators (OPERATOR_EMAIL / ADMIN_EMAILS) get the full unrestricted
-  // palette so CC's own multi-tool workflows aren't crippled.
-  const isOperator = isOperatorEmail(user.email);
+  // Verified platform operators get the full unrestricted palette so CC's own
+  // multi-tool workflows aren't crippled. The verdict is the one
+  // resolveChatContext already reached (lib/platform-operator.ts: alias AND
+  // owner/admin OASIS membership by auth id) — re-deriving it here from the
+  // email would hand bash/write_file/run_script to anyone who registered an
+  // unclaimed alias.
+  const isOperator = ctxResult.isOperator;
   if (!toolPalette && !isOperator) {
     toolPalette = SAFE_TENANT_TOOL_PALETTE;
   }
@@ -322,11 +367,9 @@ export async function POST(req: NextRequest) {
   // bridge owns tool execution). The model gets ONE of them so it
   // doesn't have to guess. Empty when cloud_tools is "off".
   //
-  // Phase 0 of harness completeness — these are agent-agnostic. Bravo-
-  // specific CLI strings ("bravo bridge serve") removed; the universal
-  // "pm2 restart claude-bridge" is correct for every agent on the
-  // operator's machine since the bridge is one process shared across
-  // agents. The model is addressed by its registry label so Maven
+  // Phase 0 of harness completeness — these are agent-agnostic. The installed
+  // OASIS launcher owns the shared bridge lifecycle on every supported host.
+  // The model is addressed by its registry label so Maven
   // says "Maven, your CMO," not "Bravo, your lead architect."
   const agentInfo = getAgentInfo(agentKey);
   const agentLabel = agentInfo.label || agentKey.toUpperCase();
@@ -344,7 +387,8 @@ export async function POST(req: NextRequest) {
     ? `\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If the operator might have stored it as a SECRET (API key, webhook URL, access token), call get_credential with a plausible UPPER_SNAKE_CASE name (e.g., STRIPE_SECRET_KEY, CALENDLY_API_KEY, CUSTOM_WEBHOOK_URL). Try 2-3 plausible names before giving up.\n  3. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  4. Only after a real search returns nothing should you ask the operator. When they give you the answer, IMMEDIATELY call save_known_fact for facts OR add_credential for secrets (admin-only — if get_credential returned {forbidden:true} earlier, tell them to save it via Settings → Custom credentials instead).\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last, save always. NEVER echo a credential value back in chat — pass it to the tool that needs it and tell the operator what you did, not what the value was. Vault values you receive are scrubbed from chat_messages on persist, but the live SSE stream is the operator's screen — discipline yourself.`
     : `\n\nSEARCH BEFORE DECLINING:\nBefore saying "I don't have X" or asking the operator for something basic about them, ALWAYS:\n  - Check the OPERATOR KNOWN FACTS block (if present below) — evergreen facts live there.\n  - For secrets (API keys, webhooks, tokens), call get_credential with a plausible UPPER_SNAKE_CASE name first.\nIf a fact or credential isn't found, ask AND save it via save_known_fact (facts) or add_credential (secrets — admin only; if you're forbidden, tell the operator the exact KEY name to add under Settings → Custom credentials). NEVER echo a credential value back in chat.`;
 
-  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to check \`pm2 logs claude-bridge\` and \`pm2 restart claude-bridge\` — don't retry the same tool.\n---`;
+  const hostedRuntime = deploymentRuntimeLabel();
+  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on the ${hostedRuntime} — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to open Settings → Devices, or run \`oasis bridge status\` followed by \`oasis bridge restart\` on the paired machine — don't retry the same tool.\n---`;
 
   // Same operator/tenant split as the bridge notice. For non-operators,
   // skip the `search_memory` mention since they don't have the tool in
@@ -353,7 +397,7 @@ export async function POST(req: NextRequest) {
     ? `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nEven without the bridge, three cloud-side surfaces hold operator context:\n  - OPERATOR KNOWN FACTS block below (calendar link, signature, business name, common asks)\n  - Custom credentials vault — call get_credential with a plausible UPPER_SNAKE_CASE name for any secret (API keys, webhook URLs, access tokens)\n  - search_memory for prior decisions / SOPs the operator's brain has documented\nALWAYS check all three before saying "I don't have X." When a fact is missing, ask AND call save_known_fact; when a credential is missing, ask AND call add_credential (admin only — fall back to telling the operator the exact KEY name to add under Settings → Custom credentials if you're forbidden). NEVER echo a credential value back in chat.`
     : `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nTwo cloud-side surfaces hold operator context: the OPERATOR KNOWN FACTS block below (evergreen facts) and the Custom credentials vault (call get_credential with a plausible UPPER_SNAKE_CASE name for secrets). ALWAYS check both before saying "I don't have X." When something's missing, ask AND save it (save_known_fact for facts; add_credential for secrets if admin, else tell the operator the exact KEY name for Settings). NEVER echo a credential value back in chat.`;
 
-  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open a terminal on your machine and run \`pm2 restart claude-bridge\`. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
+  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on the ${hostedRuntime}. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open Settings → Devices, or run \`oasis bridge status\` followed by \`oasis bridge restart\` on the paired machine. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
 
   // Phase 3 — when operator pinned cloud_only, the persona MUST see the
   // no-bridge notice even if the bridge is paired. Otherwise the model
@@ -472,8 +516,8 @@ export async function POST(req: NextRequest) {
   // write tools from the palette AND block write markers in the
   // dispatcher below. Both lists live in lib/role-gates.ts so they
   // can't drift out of sync.
-  const isReadOnly = isReadOnlyRole(operatorRole);
-  if (isReadOnly) {
+  const crmWritesAllowed = canWriteCrm(operatorRole);
+  if (!crmWritesAllowed) {
     const base = toolPalette ?? SAFE_TENANT_TOOL_PALETTE;
     toolPalette = base.filter((t) => !READ_ONLY_DENIED_TOOLS.has(t));
   }
@@ -506,7 +550,7 @@ export async function POST(req: NextRequest) {
     cloudToolsMode === "off"
       ? ""
       : cloudToolsMode === "tools"
-        ? cloudToolsPromptBlockV2({ bridgeOnline: bridgeToolsActive })
+        ? cloudToolsPromptBlockV2({ bridgeOnline: bridgeToolsActive, tenantId })
         : cloudToolsPromptBlock();
   // Phase J — fold per-agent setup answers from the onboarding wizard
   // into a "TENANT SETUP" overlay so the agent sees the operator's
@@ -555,10 +599,28 @@ export async function POST(req: NextRequest) {
   const persona = composePlanSystem(personaPreOverlay, effectivePlanMode);
   const startedAt = Date.now();
 
+  // One meter for the turn: every model call it makes (each tool-loop
+  // iteration, or the one plain stream) records its own ai_usage_events row
+  // for the SESSION's tenant, and the turn's cost is their sum.
+  const meter = modelCallMeter({
+    tenantId,
+    surface: cloudToolsMode === "tools" && supportsNativeTools ? "chat.tools" : "chat.stream",
+    ...billing,
+    departmentKey: departmentForAgent(agentKey),
+    sessionId,
+    teammateId: agentKey,
+    userId: user.id,
+  });
+
   // ---- Stream response back as SSE ----------------------------------------
   let assistantText = "";
-  let usageIn = 0;
-  let usageOut = 0;
+  // The chat_messages row's tokens; null when the turn's tokens are unknown.
+  let usageIn: number | null = 0;
+  let usageOut: number | null = 0;
+  // The loop's own token count when the turn ended (a done event, or a pause
+  // for a bridge tool); null when it ended with neither. The session's running
+  // totals are added from this and nothing else (lib/chat-persistence.ts).
+  let turnTokens: TurnTokens | null = null;
   let streamError: string | null = null;
 
   // Pre-fetch the tenant's vault values ONCE before the stream opens.
@@ -626,6 +688,7 @@ export async function POST(req: NextRequest) {
               // mode filters write tools out + appends the plan-mode
               // system overlay. "build" or undefined = no change.
               chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+              meter,
             },
             { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin }
           )
@@ -638,6 +701,7 @@ export async function POST(req: NextRequest) {
                     messages: stripped,
                     toolPalette,
                     chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+                    meter,
                   },
                   { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
                 );
@@ -671,7 +735,13 @@ export async function POST(req: NextRequest) {
               // re-checks this binding against the caller's resolved
               // identity so a captured signature can't replay across
               // tenants or under a different agent.
-              const sig = signResumeState(ev.resume_state, {
+              // The paused loop's calls have finished; resume_state carries
+              // their token count, and the resume adds only what comes after.
+              turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
+              // The state names this turn's session, signed with the rest:
+              // /api/chat/resume files the resumed half under it.
+              const issued: ResumeState = { ...ev.resume_state, sessionId: turnSessionId };
+              const sig = signResumeState(issued, {
                 tenant_id: tenantId,
                 user_id: user.id,
                 agent_key: agentKey,
@@ -684,17 +754,27 @@ export async function POST(req: NextRequest) {
                   tool_use_id: ev.tool_use_id,
                   name: ev.name,
                   input: ev.input,
-                  resume_state: ev.resume_state,
+                  resume_state: issued,
                   resume_signature: sig,
                 });
               }
             } else if (ev.type === "done") {
-              usageIn = ev.inputTokens;
-              usageOut = ev.outputTokens;
-              send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
+              if (ev.unreportedCalls > 0) {
+                // A step the provider sent no usage report for: the sums are
+                // only the other steps', so the message row records unknown
+                // tokens and no usage event claims them as the turn's. (The
+                // session totals add nothing either: that call's cost is unknown.)
+                usageIn = null;
+                usageOut = null;
+              } else {
+                usageIn = ev.inputTokens;
+                usageOut = ev.outputTokens;
+                send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              }
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         } else {
@@ -715,6 +795,7 @@ export async function POST(req: NextRequest) {
             baseUrl: isOllama ? apiKey : undefined,
             system: persona,
             messages: messagesForModel,
+            meter,
           })) {
             if (ev.type === "delta") {
               assistantText += ev.text;
@@ -722,13 +803,14 @@ export async function POST(req: NextRequest) {
             } else if (ev.type === "done") {
               usageIn = ev.inputTokens;
               usageOut = ev.outputTokens;
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               // Redact any operator/platform credential values before
               // emitting over SSE or persisting — provider error bodies
               // can echo headers / URLs that contain the API key.
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         }
@@ -754,6 +836,14 @@ export async function POST(req: NextRequest) {
           const { PLAN_MODE_TOOL_ALLOWLIST } = await import("@/lib/chat-modes/plan-mode");
           const toolSpecs = extractCloudToolMarkers(assistantText);
           for (const spec of toolSpecs) {
+            if (!crmWritesAllowed && READ_ONLY_DENIED_TOOLS.has(spec.name)) {
+              send("cloud_tool_result", {
+                ok: false,
+                name: spec.name,
+                error: `forbidden_role:${operatorRole}`,
+              });
+              continue;
+            }
             if (effectivePlanMode === "plan" && !PLAN_MODE_TOOL_ALLOWLIST.has(spec.name)) {
               send("cloud_tool_result", {
                 ok: false,
@@ -793,11 +883,11 @@ export async function POST(req: NextRequest) {
             ? rawSpecs.filter((s) => !TOOL_NATIVE_MARKER_TYPES.has(s.type))
             : rawSpecs;
         for (const spec of specs) {
-          if (isReadOnly && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
+          if (!crmWritesAllowed && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
             send("action", {
               ok: false,
-              error: "forbidden_read_only",
-              summary: `Refused ${spec.type}: signed-in operator has team_role=read_only.`,
+              error: "forbidden_role",
+              summary: `Refused ${spec.type}: signed-in operator has no recognized CRM-write role.`,
             });
             continue;
           }
@@ -843,16 +933,23 @@ export async function POST(req: NextRequest) {
         error: streamError,
         vaultSecrets: vaultSecretsForRedaction,
       });
-      const cost = estimateCostUsd(provider, model, usageIn, usageOut);
-      await service
-        .from("chat_sessions")
-        .update({
-          total_input_tokens: usageIn,
-          total_output_tokens: usageOut,
-          estimated_cost_usd: cost,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", sessionId);
+      // chat_sessions running totals. The turn's cost is what the ledger
+      // recorded for its model calls (ai_usage_events by session_id is the
+      // record). estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say
+      // "unknown", so the turn's tokens and cost are ADDED together, in one SQL
+      // increment shared with /api/chat/resume, and only when the turn has a
+      // token count and every call's cost is known (a local call is a known
+      // $0). Anything else adds nothing and only stamps updated_at: never this
+      // turn's tokens beside an older cost, never a $0 over the last known pair.
+      try {
+        await addToSessionTotals({ sessionId, tenantId, delta: sessionTotalsDelta({ end: turnTokens, meter }) });
+      } catch (err) {
+        console.error("[chat.session_totals] the session's running totals were not updated", {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (cfgScope) {
         let lastUsedUpdate = service
           .from("agent_model_config")
@@ -894,53 +991,6 @@ export async function POST(req: NextRequest) {
       "x-accel-buffering": "no",
     },
   });
-}
-
-/* ============================================================================
- * Cost estimation (rough — published per-1M-token pricing as of 2026-05).
- * Wrong is fine; we just want a directional number on the dashboard.
- * ============================================================================ */
-function estimateCostUsd(
-  provider: Provider,
-  model: string,
-  inTok: number,
-  outTok: number
-): number {
-  const m = model.toLowerCase();
-  let inP = 0;
-  let outP = 0;
-  if (provider === "anthropic") {
-    if (m.includes("opus")) {
-      inP = 15;
-      outP = 75;
-    } else if (m.includes("sonnet")) {
-      inP = 3;
-      outP = 15;
-    } else {
-      inP = 1;
-      outP = 5;
-    }
-  } else if (provider === "openai") {
-    if (m.includes("mini")) {
-      inP = 0.25;
-      outP = 2;
-    } else if (m.includes("codex")) {
-      inP = 3;
-      outP = 12;
-    } else {
-      inP = 2.5;
-      outP = 10;
-    }
-  } else if (provider === "google") {
-    if (m.includes("flash")) {
-      inP = 0.3;
-      outP = 1.2;
-    } else {
-      inP = 1.25;
-      outP = 5;
-    }
-  }
-  return ((inTok * inP) + (outTok * outP)) / 1_000_000;
 }
 
 function jsonError(status: number, message: string, code?: string) {
