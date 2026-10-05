@@ -27,5 +27,17 @@ assert.match(card, /onBookMeet=\{/, "the Hero must get an onBookMeet handler");
 assert.match(card, /Book the Meet/);
 // The card still renders seven sections with the same defaults (pinned in web-leads-battlecard.test.ts).
 
+// Booking logs the call, so the call history sitting right under the form must
+// pick that up without a reload (Codex P2 on Task 8): otherwise the rep sees no
+// call on record after booking and logs it a second time. BookMeetPanel already
+// announces the write on "oasis:lead-touch"; the history listens for it, scoped
+// to its own lead, the same way LeadTimelinePanel does.
+const panel = strip(readFileSync("components/web-leads/BookMeetPanel.tsx", "utf8"));
+assert.match(panel, /dispatchEvent\(new CustomEvent\("oasis:lead-touch", \{ detail: \{ leadId \} \}\)\)/, "the booking flow must announce the call it logged");
+const outcomeLog = strip(readFileSync("components/web-leads/CallOutcomeLog.tsx", "utf8"));
+assert.match(outcomeLog, /addEventListener\("oasis:lead-touch"/, "the call history must refresh when a booking logs the call");
+assert.match(outcomeLog, /removeEventListener\("oasis:lead-touch"/, "the call history must stop listening on unmount or lead change");
+assert.match(outcomeLog, /detail\.leadId === leadId/, "a touch on a different lead must not refresh this lead's history");
+
 // ── Call Mode half is added in Task 9. ──
 console.log("book-meet-wiring (battle card): OK");

@@ -158,6 +158,25 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leadId]);
 
+  // Book the Meet logs the call itself and announces it on "oasis:lead-touch"
+  // (the same signal LeadTimelinePanel listens to). Refetch quietly so the
+  // call it logged shows here without a reload; a rep who sees no call on
+  // record after booking logs it twice. Scoped to this lead, and the history
+  // is not cleared first, so nothing flickers.
+  useEffect(() => {
+    let ok = true;
+    const onTouch = (event: Event) => {
+      const detail = (event as CustomEvent<{ leadId?: string }>).detail;
+      if (detail?.leadId && detail.leadId === leadId) loadHistory(() => ok);
+    };
+    window.addEventListener("oasis:lead-touch", onTouch);
+    return () => {
+      ok = false;
+      window.removeEventListener("oasis:lead-touch", onTouch);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leadId]);
+
   async function logOutcome(outcome: CallOutcome) {
     if (!leadCanMutate) return;
     const trimmedNote = note.trim();
