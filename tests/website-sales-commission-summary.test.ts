@@ -5,9 +5,14 @@ import { createTursoPostgrest } from "../lib/turso-postgrest";
 import {
   commissionPartyRoleLabel,
   formatCommissionAmounts,
-  loadWebsiteSalesCommissionListing,
+  listWebsiteSalesCommissions,
   loadWebsiteSalesCommissionSummary,
+  loadWebsiteSalesCommissionSummaryRows,
 } from "../lib/website-sales-commission-summary";
+
+// The Commissions list is taken from the same complete-ledger read as the
+// totals (2026-10-02), so it reads these columns as well as the totals' own.
+const LISTING_COLUMNS = "id,deal_id,rep_user_id,status,amount_cents,amount,entry_type,created_at";
 
 assert.equal(commissionPartyRoleLabel("full_stack", 3_500), "Finder + closer");
 assert.equal(commissionPartyRoleLabel("full_stack", 4_000), "Finder + closer", "accelerated finder/closer stays truthful");
@@ -140,13 +145,24 @@ assert.equal(
   "a manager override is never repeated inside the team commission breakdown",
 );
 
-type ManagerListingRow = { id: string; rep_user_id: string };
-const managerTeamListing = await loadWebsiteSalesCommissionListing<ManagerListingRow>(db, {
-  tenantId: "tenant-a",
-  repUserIds: ["manager-a", "rep-a"],
-  columns: "id,rep_user_id",
-  recentLimit: 1_000,
-});
+type ManagerListingRow = {
+  id: string;
+  deal_id: string;
+  rep_user_id: string;
+  status: "accrued" | "approved" | "paid" | "offset" | "voided";
+  amount_cents: number | null;
+  amount: number | null;
+  entry_type: string;
+  created_at: string;
+};
+const managerTeamListing = listWebsiteSalesCommissions(
+  await loadWebsiteSalesCommissionSummaryRows<ManagerListingRow>(db, {
+    tenantId: "tenant-a",
+    repUserIds: ["manager-a", "rep-a"],
+    columns: LISTING_COLUMNS,
+  }),
+  1_000,
+);
 assert.ok(
   managerTeamListing.rows.some((row) => row.id === "manager-cad") &&
     managerTeamListing.rows.some((row) => row.id === "cad-000"),
@@ -203,19 +219,37 @@ for (let index = 0; index < 500; index += 1) {
 for (let offset = 0; offset < listingRows.length; offset += 200) {
   await client.batch(listingRows.slice(offset, offset + 200), "write");
 }
-type ListingRow = { id: string; status: string };
-const listing = await loadWebsiteSalesCommissionListing<ListingRow>(db, {
-  tenantId: "tenant-list",
-  repUserId: "rep-list",
-  columns: "id,status",
-  recentLimit: 500,
-});
+type ListingRow = ManagerListingRow;
+const listing = listWebsiteSalesCommissions(
+  await loadWebsiteSalesCommissionSummaryRows<ListingRow>(db, {
+    tenantId: "tenant-list",
+    repUserId: "rep-list",
+    columns: LISTING_COLUMNS,
+  }),
+  500,
+);
 assert.equal(listing.recentCount, 500);
 assert.equal(listing.outstandingCount, 1);
 assert.equal(listing.rows.length, 501);
 assert.ok(
   listing.rows.some((row) => row.id === "old-accrued" && row.status === "accrued"),
   "an old accrued commission behind 500 newer paid rows remains in the founder action list",
+);
+// The list is now taken in memory from the ledger read; its newest-first page
+// must be exactly the page the SQL it replaced returned.
+const sqlRecent = await client.execute({
+  sql: "SELECT id FROM website_sales_commissions WHERE tenant_id = ? AND rep_user_id = ? ORDER BY created_at DESC, id DESC LIMIT 500",
+  args: ["tenant-list", "rep-list"],
+});
+assert.deepEqual(
+  listing.rows.slice(0, listing.recentCount).map((row) => row.id),
+  sqlRecent.rows.map((row) => String(row.id)),
+  "the in-memory newest-first order matches ORDER BY created_at DESC, id DESC",
+);
+await assert.rejects(
+  loadWebsiteSalesCommissionSummaryRows(db, { tenantId: "tenant-list", columns: "id,status" }),
+  /commission_summary_columns_missing:deal_id,rep_user_id,amount_cents,amount/,
+  "a ledger read that leaves out a column the totals need fails before it reads",
 );
 
 console.log("website-sales-commission-summary: OK — 502 scoped rows, offsets, and CAD/USD stay authoritative");
