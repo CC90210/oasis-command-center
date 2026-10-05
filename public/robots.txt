@@ -3,7 +3,10 @@
 # THE APP IS PRIVATE; THE MARKETING SITE IS NOT.
 # Almost every path here is an authenticated operator surface holding merchant
 # PII. So the posture is default-deny: `Disallow: /` first, then allow back the
-# nine public marketing pages by name. Adding a page to lib/marketing/routes.ts
+# eight public marketing pages by name, plus the few files those pages need:
+# llms.txt, the sitemap, /_next/static/ (CSS, JS, fonts; Google cannot render a
+# page without them), the favicon and the link-preview image.
+# Adding a page to lib/marketing/routes.ts
 # does NOT publish it to crawlers — this file has to say so too, and
 # tests/robots-tiers.test.ts fails if the two drift apart.
 #
@@ -34,10 +37,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 # /unsubscribe carries the recipient's address in the query string. Crawling it
 # would put merchant email addresses into a search index, and following it would
 # fire opt-outs we never received. Never allow.
@@ -65,10 +72,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -89,10 +100,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -113,10 +128,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -137,10 +156,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -161,10 +184,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -185,10 +212,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -209,10 +240,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -233,10 +268,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -257,10 +296,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -281,10 +324,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -305,10 +352,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/
@@ -329,10 +380,14 @@ Allow: /fleet
 Allow: /work
 Allow: /about
 Allow: /contact
-Allow: /start
 Allow: /privacy
 Allow: /terms
 Allow: /dmca
+Allow: /llms.txt
+Allow: /sitemap.xml
+Allow: /_next/static/
+Allow: /favicon.ico
+Allow: /opengraph-image
 Disallow: /unsubscribe
 Disallow: /api/
 Disallow: /t/

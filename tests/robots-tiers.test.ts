@@ -25,13 +25,27 @@
  *    query string. Indexing it publishes merchant addresses; following it fires
  *    opt-outs nobody requested. It must be disallowed in EVERY group.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert";
-import { ALL_MARKETING_PATHS, MARKETING_HOME_PATH } from "../lib/marketing/routes";
+import { ALL_MARKETING_PATHS, CONTACT_EMAIL, MARKETING_HOME_PATH, SITE_ORIGIN } from "../lib/marketing/routes";
 import { PAGES, sitemapPaths } from "../app/sitemap";
 
 const robots = readFileSync(join(process.cwd(), "public", "robots.txt"), "utf8");
+const llms = readFileSync(join(process.cwd(), "public", "llms.txt"), "utf8");
+
+/**
+ * Not pages, but what the pages need. Under `Disallow: /` each of these is
+ * blocked unless allowed back by name, and every one of those blocks is silent:
+ * - /llms.txt is the briefing this whole file exists to let AI crawlers read.
+ * - /_next/static/ holds the CSS, JS and fonts; Google renders pages and marks
+ *   them broken without it.
+ * - /favicon.ico and /opengraph-image are what a search result and a shared
+ *   link show.
+ * - /sitemap.xml is referenced below; a crawler that obeys the Disallow cannot
+ *   fetch the list of pages it is being pointed at.
+ */
+const ASSET_ALLOWS = ["/llms.txt", "/sitemap.xml", "/_next/static/", "/favicon.ico", "/opengraph-image"];
 
 /** Parse into groups: user-agent list -> ordered rule lines. */
 function parseGroups(text: string): { agents: string[]; rules: string[] }[] {
@@ -135,8 +149,20 @@ check("every marketing route is allowed in every non-tier-3 group", () => {
   }
 });
 
+check("the AI briefing and the render assets are reachable in every non-tier-3 group", () => {
+  for (const [agent, rules] of byAgent) {
+    if (TIER3.includes(agent)) continue;
+    for (const path of ASSET_ALLOWS) {
+      assert.ok(
+        rules.includes(`allow:${path}`),
+        `${agent} cannot fetch ${path}: \`Disallow: /\` blocks it and nothing allows it back`
+      );
+    }
+  }
+});
+
 check("no group allows a path that is not a public marketing route", () => {
-  const allowed = new Set([...ALL_MARKETING_PATHS.map((p) => String(p)), "/", "/$"]);
+  const allowed = new Set([...ALL_MARKETING_PATHS.map((p) => String(p)), "/", "/$", ...ASSET_ALLOWS]);
   for (const [agent, rules] of byAgent) {
     for (const r of rules) {
       if (!r.startsWith("allow:")) continue;
@@ -174,6 +200,43 @@ check("Content-Signal is declared", () => {
 
 check("the sitemap is referenced", () => {
   assert.match(robots, /^Sitemap:\s*https:\/\/oasisai\.work\/sitemap\.xml$/m);
+});
+
+check("robots.txt has one source: public/robots.txt, never app/robots.ts beside it", () => {
+  // Both answer /robots.txt. Which one a host serves is decided by the host, not
+  // by us, and this test only reads the public file, so a second source would be
+  // an unchecked policy that might be the live one.
+  assert.ok(
+    !existsSync(join(process.cwd(), "app", "robots.ts")),
+    "app/robots.ts exists beside public/robots.txt. Delete it; the public file is the policy."
+  );
+});
+
+/* ---------------------------------------------------------------- llms.txt */
+
+check("llms.txt links every public page and nothing that is not one", () => {
+  const linked = new Set(
+    [...llms.matchAll(/\]\((https:\/\/oasisai\.work[^)]*)\)/g)].map((m) => new URL(m[1]).pathname)
+  );
+  for (const p of sitemapPaths()) {
+    assert.ok(linked.has(p), `llms.txt does not link ${p}, which the sitemap publishes`);
+  }
+  for (const p of linked) {
+    assert.ok(
+      sitemapPaths().includes(p),
+      `llms.txt links ${p}, which is not a public page. An assistant will send people to a 404.`
+    );
+  }
+  assert.ok(llms.includes(SITE_ORIGIN.replace("https://", "")), "llms.txt must name the canonical domain");
+});
+
+check("llms.txt gives the same contact address as the site", () => {
+  const addresses = new Set(llms.match(/[a-z0-9._-]+@oasisai\.work/gi) ?? []);
+  assert.deepEqual(
+    [...addresses],
+    [CONTACT_EMAIL],
+    `llms.txt publishes ${[...addresses].join(", ") || "no address"}; the site publishes ${CONTACT_EMAIL}`
+  );
 });
 
 /* ------------------------------------------------------------------ sitemap */
