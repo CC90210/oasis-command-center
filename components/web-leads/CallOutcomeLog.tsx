@@ -130,20 +130,26 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const submissionRef = useRef<{ signature: string; requestId: string } | null>(null);
 
+  // Loads can overlap: the mount load, a booking's lead-touch refresh, a
+  // refresh after logging. Only the LATEST may write, or a slow older answer
+  // lands last and erases the call that was just logged.
+  const historyGenRef = useRef(0);
+
   function loadHistory(alive: () => boolean) {
+    const gen = ++historyGenRef.current;
     fetch(`/api/web-leads/${encodeURIComponent(leadId)}/outcome`)
       .then(async (r) => {
         if (!r.ok) {
-          if (alive()) setError("Could not load call history.");
+          if (alive() && gen === historyGenRef.current) setError("Could not load call history.");
           return;
         }
         const body = await r.json();
-        if (alive()) {
+        if (alive() && gen === historyGenRef.current) {
           setHistory(body.outcomes || []);
           setLeadCanMutate(canMutate && body.canMutate === true);
         }
       })
-      .catch(() => { if (alive()) setError("Could not load call history."); });
+      .catch(() => { if (alive() && gen === historyGenRef.current) setError("Could not load call history."); });
   }
 
   useEffect(() => {

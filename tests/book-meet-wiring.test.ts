@@ -38,6 +38,12 @@ const outcomeLog = strip(readFileSync("components/web-leads/CallOutcomeLog.tsx",
 assert.match(outcomeLog, /addEventListener\("oasis:lead-touch"/, "the call history must refresh when a booking logs the call");
 assert.match(outcomeLog, /removeEventListener\("oasis:lead-touch"/, "the call history must stop listening on unmount or lead change");
 assert.match(outcomeLog, /detail\.leadId === leadId/, "a touch on a different lead must not refresh this lead's history");
+// Two loads can now overlap (mount + a booking's touch, or two touches). Only
+// the LATEST may write, or a slow older answer erases the call booking just
+// logged (CodeRabbit on #543). One generation inside loadHistory covers every caller.
+const loadFn = outcomeLog.slice(outcomeLog.indexOf("function loadHistory"), outcomeLog.indexOf("useEffect(", outcomeLog.indexOf("function loadHistory")));
+assert.match(loadFn, /const gen = \+\+historyGenRef\.current/, "every history load must take a new generation");
+assert.equal((loadFn.match(/gen === historyGenRef\.current/g) || []).length, 3, "all three writes (error, history, error) must check the load is still the latest");
 
 // ── Call Mode half is added in Task 9. ──
 console.log("book-meet-wiring (battle card): OK");
