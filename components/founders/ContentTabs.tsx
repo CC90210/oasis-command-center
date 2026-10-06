@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * Content's tab bar: Overview - Library - Training - Performance. The one strip
- * that reaches the Library from inside the OS shell (2026-10-01): the rail
- * draws Content as a single row and the breadcrumb knew no sub-pages, so the
- * Library was reachable only through the legacy founders banner, which CC had
- * already asked to remove. Modelled on components/founders/finances/FinanceTabs.tsx
+ * Content's tab bar: Overview - Library - Content Tools - Performance. The one
+ * strip that reaches the Library from inside the OS shell (2026-10-01): the
+ * rail draws Content as a single row and the breadcrumb knew no sub-pages, so
+ * the Library was reachable only through the legacy founders banner, which CC
+ * had already asked to remove. Modelled on components/founders/finances/FinanceTabs.tsx
  * and rendered by app/founders/marketing/layout.tsx above every Content page.
  * lib/os/match.ts carries these same labels for the breadcrumb ("Content >
  * Library"); tests/content-hub.test.ts pins the two lists together.
@@ -19,11 +19,13 @@
  * is not the Overview, and longest-prefix alone would underline Overview there.
  * The other tabs light on themselves and their sub-paths, longest prefix wins.
  *
- * Training (route /train) stays a tab for now. It moves to Playbook > Skills
- * ("Teach from a URL") with the Playbook track
- * (docs/os-revamp/01-product-surface-ia-ux.md, the /founders/marketing row).
- * It was labelled "Train" until 2026-10-01; CC did not know what the "Training
- * corpus" was, so the tab is a noun and the page says what it holds.
+ * Content Tools replaced the Training tab on 2026-10-06 — the Oasis
+ * Whiteboard lives there now. The Training PAGE was not deleted:
+ * /founders/marketing/train still resolves by direct URL (the Overview's
+ * Training card still links to it, and lib/os/match.ts keeps its crumb), and
+ * its planned long-term home is Playbook > Skills ("Teach from a URL") with
+ * the Playbook track (docs/os-revamp/01-product-surface-ia-ux.md, the
+ * /founders/marketing row).
  *
  * Plain <Link>s, as on Finances: with a loading.tsx beside the layout, Next
  * prefetches each tab's shell and a click paints the skeleton under the tabs
@@ -38,7 +40,7 @@ export const CONTENT_ROOT = "/founders/marketing";
 export const CONTENT_TABS = [
   { href: "/founders/marketing", label: "Overview" },
   { href: "/founders/marketing/library", label: "Library" },
-  { href: "/founders/marketing/train", label: "Training" },
+  { href: "/founders/marketing/tools", label: "Content Tools" },
   { href: "/founders/marketing/performance", label: "Performance" },
 ] as const;
 
