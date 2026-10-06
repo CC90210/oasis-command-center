@@ -19,6 +19,12 @@
  * A failed read says "Forms couldn't load" and logs the detail. It used to
  * print the database driver's message, or tell a client to run a Supabase
  * migration command "on the operator machine".
+ *
+ * WHO MAY CHANGE (MKT-02, 2026-10-02). canEdit is canEditForms for the
+ * session's persona (lib/forms/access.ts), the rule every forms write route
+ * enforces: everyone else gets the list and each form's responses without
+ * New form, the on/off switch, Edit or Delete. Each row carries its response
+ * count (MKT-05); a count that could not be read is null, never a zero.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -29,6 +35,8 @@ import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { FormsListClient } from "@/components/forms/FormsListClient";
 import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
+import { canEditForms } from "@/lib/forms/access";
+import { countResponsesByForm } from "@/lib/forms/responses";
 import { AlertCircle } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -89,12 +97,15 @@ export default async function FormsPage() {
   // generic FormsListClient — so the SunBiz step cards + per-agent links
   // never rendered. (Fixed 2026-06-16.)
   const profileSlug = resolveClientProfileSlug(tenant);
+  const responseCounts = result.ok
+    ? await countResponsesByForm(getServiceSupabase(), tenantId, result.rows.map((r) => r.id))
+    : {};
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Forms"
-        subtitle="First-party forms with personalized lead links. Built-in replacement for JotForm + similar 3rd-party intake."
+        subtitle="Forms people fill in to reach you, with every answer they sent."
       />
 
       {!result.ok && (
@@ -116,6 +127,8 @@ export default async function FormsPage() {
           tenantSlug={tenantSlug}
           tenantName={tenant?.name ?? null}
           profileSlug={profileSlug}
+          canEdit={canEditForms(viewer.surface.persona)}
+          responseCounts={responseCounts}
         />
       ) : null}
     </div>

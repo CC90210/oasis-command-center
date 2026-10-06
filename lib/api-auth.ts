@@ -93,7 +93,10 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   // PERMANENT admin by base role — the escalation-guard predicate.
   const isTrueAdmin = !!profile.is_owner || teamRole === "admin" || teamRole === "owner";
   // Additive full-admin grant: an admin toggled this agent to admin_access.
-  const adminAccess = profile.admin_access === true;
+  // The store hands booleans back as 0/1 (SQLite has no bool — see
+  // lib/turso-postgrest.ts), so accept both shapes. Strict `=== true` alone
+  // made every grant resolve to false after the Turso cutover.
+  const adminAccess = Number(profile.admin_access) === 1 || profile.admin_access === true;
   return {
     ok: true,
     userId: user.id,
