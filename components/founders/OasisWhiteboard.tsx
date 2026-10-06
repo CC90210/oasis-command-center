@@ -22,7 +22,7 @@ import { useEffect, useRef, useState } from "react";
 
 const PALETTE = [
   { color: "#38bdf8", name: "Sky" },
-  { color: "#a855f7", name: "Violet" },
+  { color: "#d946ef", name: "Magenta" },
   { color: "#ec4899", name: "Pink" },
   { color: "#22c55e", name: "Green" },
   { color: "#f59e0b", name: "Amber" },
@@ -261,10 +261,6 @@ export function OasisWhiteboard() {
     <div
       ref={containerRef}
       className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-2xl border border-bg-border bg-bg-deep"
-      style={{
-        backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1px)",
-        backgroundSize: "28px 28px",
-      }}
     >
       <canvas
         ref={canvasRef}
@@ -275,15 +271,9 @@ export function OasisWhiteboard() {
 
       {/* Floating toolbar — glass pill, wraps into a rounded card on narrow
           screens (the original's 820px breakpoint, expressed responsively). */}
-      <div className="absolute left-1/2 top-4 z-10 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-3xl border border-white/10 bg-bg-panel/70 px-4 py-2.5 shadow-elev backdrop-blur-xl backdrop-saturate-150 animate-slide-up md:flex-nowrap md:gap-5 md:rounded-full md:px-6 md:py-3">
-        <div className="flex select-none items-center gap-2 whitespace-nowrap bg-gradient-to-r from-sky-400 to-purple-500 bg-clip-text text-[1.05rem] font-bold text-transparent">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="url(#wb-g)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <defs>
-              <linearGradient id="wb-g" x1="0" y1="0" x2="24" y2="24">
-                <stop stopColor="#38bdf8" />
-                <stop offset="1" stopColor="#a855f7" />
-              </linearGradient>
-            </defs>
+      <div className="absolute left-1/2 top-4 z-10 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-3xl border border-white/10 bg-bg-panel/70 px-4 py-2.5 shadow-elev backdrop-blur-xl backdrop-saturate-150 animate-slide-up md:flex-nowrap md:gap-5 md:rounded-[999px] md:px-6 md:py-3">
+        <div className="flex select-none items-center gap-2 whitespace-nowrap text-[1.05rem] font-bold text-fg">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <path d="M2 12h4l3-9 5 18 3-9h5" />
           </svg>
           <span className="hidden md:inline">Oasis Whiteboard</span>
