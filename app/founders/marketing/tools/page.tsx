@@ -14,7 +14,7 @@
  */
 
 import { notFound } from "next/navigation";
-import { PageHeader } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
 import { OasisWhiteboard } from "@/components/founders/OasisWhiteboard";
 
@@ -26,12 +26,11 @@ export default async function ContentToolsPage() {
   if (!founder) notFound();
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Content Tools"
-        subtitle="Sketch an idea, save it as a PNG, hand it to the marketing agent."
-      />
+    <PageFrame
+      title="Content Tools"
+      subtitle="Sketch an idea, save it as a PNG, hand it to the marketing agent."
+    >
       <OasisWhiteboard />
-    </div>
+    </PageFrame>
   );
 }
