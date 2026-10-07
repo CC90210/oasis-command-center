@@ -155,3 +155,14 @@ test("site: a site with nothing collected yet says so, with dashes", () => {
   assert.match(html, /No data collected yet/);
   assert.doesNotMatch(html, />0</);
 });
+
+test("add: labelled domain field, DPA tick, test tick, the address to share, submit", () => {
+  const [html] = render([{ view: "add", props: { serviceAccount: "oasis-seo-measure@oasis-ai-508017.iam.gserviceaccount.com" } }]);
+  assert.match(html, /<label[^>]*for="[^"]+"[^>]*>Domain<\/label>/);
+  assert.match(html, /type="checkbox"[^>]*required/);
+  assert.match(html, /data processing agreement/);
+  assert.match(html, /Test site/);
+  assert.match(html, /oasis-seo-measure@oasis-ai-508017\.iam\.gserviceaccount\.com/);
+  assert.match(html, /<button[^>]*type="submit"[^>]*>Add site<\/button>/);
+  assert.match(html, /aria-live="polite"/);
+});

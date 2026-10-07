@@ -49,6 +49,7 @@ async function main() {
     sites: (await import("../components/seo/SitesView")).SitesView as React.ComponentType<never>,
     "sites-actions": (await import("../components/seo/SitesActions")).SitesActions as React.ComponentType<never>,
     site: SitePage as React.ComponentType<never>,
+    add: (await import("../components/seo/AddSiteForm")).AddSiteForm as React.ComponentType<never>,
   };
   const cases = JSON.parse(await readStdin()) as Array<{ view: string; props: Record<string, unknown> }>;
   const out = cases.map(({ view, props }) => renderToStaticMarkup(React.createElement(VIEWS[view], props as never)));
