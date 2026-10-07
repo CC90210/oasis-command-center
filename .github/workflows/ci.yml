@@ -102,6 +102,7 @@ jobs:
           # unknown-is-not-zero) and none of them had a CI entry: every OS PR
           # before this one deployed on typecheck + build alone.
           npm run test:os
+          npm run test:seo
           # Repo invariant: the chat's CLI-runtime storage key is declared
           # once. It used to be a literal in two files synchronised by a
           # comment — desyncing them breaks the runtime picker silently.
