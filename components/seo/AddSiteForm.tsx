@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useId, useState, type FormEvent } from "react";
+import { checkAccessOutcome } from "@/lib/seo/check-access-outcome";
 import type { AccessResult, AddSiteResult } from "@/lib/seo/types";
 
 type Site = AddSiteResult["site"];
@@ -17,7 +18,12 @@ type Phase =
  * bad_json and any code this screen doesn't recognise must never mark the field invalid. */
 const DOMAIN_ERROR_CODE = "bad_domain";
 
-const BTN = "rounded-md bg-accent-muted px-3 py-1.5 text-sm font-medium text-fg hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60";
+// text-white, not text-fg: text-fg (#ededef) on bg-accent-muted (#2563eb) is ~4.42:1, under the
+// 4.5:1 AA floor; white on the same background is ~5.17:1. The hover darkens (never lightens, so
+// it never tips white-on-blue the other way) to rgb(29 78 216) — the same colour .btn-primary in
+// app/globals.css hovers to (white on it is ~6.70:1) — expressed as an arbitrary value because no
+// accent-* token in tailwind.config.ts is that shade (accent/accent-muted are the only two steps).
+const BTN = "rounded-md bg-accent-muted px-3 py-1.5 text-sm font-medium text-white hover:bg-[rgb(29_78_216)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60";
 const BTN2 = "rounded-md border border-bg-border-strong px-3 py-1.5 text-sm font-medium text-fg hover:bg-bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60";
 const DOWN = "The SEO service did not answer. Try again in a minute.";
 
@@ -59,9 +65,10 @@ export function AddSiteForm({ serviceAccount, base = "/seo", api = "/api/seo" }:
     if (!site || busy) return;
     setPhase({ kind: "checking", site, existed });
     const r = await post(`${api}/sites/${site.id}/check-access`, {});
-    const result = r.json as AccessResult | null;
-    if (r.status === 200 && result?.result) setPhase({ kind: "access", site, existed, result });
-    else if (r.status === 404) setPhase({ kind: "error", message: "That site no longer exists. Reload the list." });
+    const outcome = checkAccessOutcome(r);
+    if (outcome.kind === "ok") setPhase({ kind: "access", site, existed, result: outcome.result });
+    else if (outcome.kind === "gone") setPhase({ kind: "error", message: "That site no longer exists. Reload the list." });
+    else if (outcome.kind === "bad_request") setPhase({ kind: "error", message: outcome.message, site, existed });
     else setPhase({ kind: "error", message: DOWN, site, existed });
   }
 

@@ -32,18 +32,23 @@ export class SeoApiError extends Error {
 /** Same rule as the Worker's route pattern and the tenants.tenant_id CHECK. */
 export const SITE_ID_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 export const SEO_TIMEOUT_MS = 8_000;
+// check-access does a token exchange plus up to 4 Google calls, which outruns the 8s default
+// used for every other call; give it its own longer budget (M1, 2026-10-07).
+export const SEO_CHECK_ACCESS_TIMEOUT_MS = 20_000;
 const MIN_KEY = 32;
 // A service binding ignores the host; it only has to be a valid URL.
 const ORIGIN = "https://oasis-seo-measure.internal";
 
-type Opts = { fetcher: Fetcher; readKey: string; manageKey?: string | null; timeoutMs?: number };
+type Opts = { fetcher: Fetcher; readKey: string; manageKey?: string | null; timeoutMs?: number; checkAccessTimeoutMs?: number };
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 export function createSeoClient(opts: Opts) {
   const timeoutMs = opts.timeoutMs ?? SEO_TIMEOUT_MS;
+  const checkAccessTimeoutMs = opts.checkAccessTimeoutMs ?? SEO_CHECK_ACCESS_TIMEOUT_MS;
 
-  async function call(method: "GET" | "POST", path: string, key: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+  async function call(method: "GET" | "POST", path: string, key: string, body?: unknown, msOverride?: number): Promise<{ status: number; json: Record<string, unknown> }> {
+    const ms = msOverride ?? timeoutMs;
     const headers: Record<string, string> = { authorization: `Bearer ${key}` };
     if (body !== undefined) headers["content-type"] = "application/json";
     const req = new Request(ORIGIN + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -52,7 +57,7 @@ export function createSeoClient(opts: Opts) {
     try {
       res = await Promise.race([
         opts.fetcher.fetch(req),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SeoUnavailable("timeout")), timeoutMs); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SeoUnavailable("timeout")), ms); }),
       ]);
     } catch (e) {
       throw e instanceof SeoUnavailable ? e : new SeoUnavailable("unreachable");
@@ -114,7 +119,7 @@ export function createSeoClient(opts: Opts) {
     },
     async checkAccess(id: string, actor: string): Promise<AccessResult> {
       const path = `/v1/sites/${siteId(id)}/check-access`;
-      const { json } = await call("POST", path, manage(), { actor });
+      const { json } = await call("POST", path, manage(), { actor }, checkAccessTimeoutMs);
       return shape<AccessResult>(json.result === "ok" || json.result === "blocked" || json.result === "failed", json);
     },
   };

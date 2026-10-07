@@ -178,3 +178,27 @@ test("add: help text is on the domain field (not the form), and the copy result 
   const liveRegions = html.match(/aria-live="polite"/g) ?? [];
   assert.ok(liveRegions.length >= 2, `expected the status region plus a copy-status region, got ${liveRegions.length}`);
 });
+
+test("add: the primary 'Add site' button is white text on accent-muted with a darkening hover (WCAG 2.2 AA floor 4.5:1)", () => {
+  const [html] = render([{ view: "add", props: { serviceAccount: "oasis-seo-measure@oasis-ai-508017.iam.gserviceaccount.com" } }]);
+  const buttons = html.match(/<button[^>]*bg-accent-muted[^>]*>/g) ?? [];
+  assert.ok(buttons.length >= 1, "expected at least one bg-accent-muted primary button");
+  for (const btn of buttons) {
+    // text-fg (#ededef) on bg-accent-muted (#2563eb) is ~4.42:1, under the 4.5:1 floor.
+    assert.doesNotMatch(btn, /text-fg\b/, btn);
+    assert.match(btn, /text-white/, btn);
+    // hover:bg-accent (#3b82f6) LIGHTENS to ~3.15:1; the fix must darken instead.
+    assert.doesNotMatch(btn, /hover:bg-accent\b/, btn);
+    assert.match(btn, /hover:bg-\[rgb\(29_78_216\)\]/, btn);
+  }
+});
+
+test("sites-actions: the 'Add a site' link is white text on accent-muted with a darkening hover (WCAG 2.2 AA floor 4.5:1)", () => {
+  const [html] = render([{ view: "sites-actions", props: { includeTest: false } }]);
+  const link = (html.match(/<a[^>]*bg-accent-muted[^>]*>/g) ?? [])[0];
+  assert.ok(link, "expected the 'Add a site' link with bg-accent-muted");
+  assert.doesNotMatch(link!, /text-fg\b/, link);
+  assert.match(link!, /text-white/, link);
+  assert.doesNotMatch(link!, /hover:bg-accent\b/, link);
+  assert.match(link!, /hover:bg-\[rgb\(29_78_216\)\]/, link);
+});

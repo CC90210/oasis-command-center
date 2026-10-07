@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSeoClient, clientFromEnv, settle, SeoUnavailable, SeoApiError } from "../lib/seo/client";
+import { createSeoClient, clientFromEnv, settle, SeoUnavailable, SeoApiError, SEO_TIMEOUT_MS, SEO_CHECK_ACCESS_TIMEOUT_MS } from "../lib/seo/client";
 
 const READ = "r".repeat(32);
 const MANAGE = "m".repeat(32);
@@ -130,6 +130,24 @@ test("a 400 carries the Worker's own message; an unknown site is a 404 SeoApiErr
 test("a Worker that never answers times out as unavailable", async () => {
   const c = createSeoClient({ fetcher: { fetch: () => new Promise<Response>(() => undefined) }, readKey: READ, timeoutMs: 20 });
   await assert.rejects(c.listSites(), (e: unknown) => e instanceof SeoUnavailable && e.reason === "timeout");
+});
+
+test("the default check-access timeout is 20s, longer than the general 8s default (M1)", () => {
+  assert.equal(SEO_TIMEOUT_MS, 8_000);
+  assert.equal(SEO_CHECK_ACCESS_TIMEOUT_MS, 20_000);
+});
+
+test("checkAccess uses its own longer timeout; other calls keep the general one (M1)", async () => {
+  const never = { fetch: () => new Promise<Response>(() => undefined) };
+  const c = createSeoClient({ fetcher: never, readKey: READ, manageKey: MANAGE, timeoutMs: 25, checkAccessTimeoutMs: 90 });
+  const t0 = Date.now();
+  await assert.rejects(c.checkAccess("acme-ca", "op@oasisai.work"), (e: unknown) => e instanceof SeoUnavailable && e.reason === "timeout");
+  const checkDur = Date.now() - t0;
+  const t1 = Date.now();
+  await assert.rejects(c.listSites(), (e: unknown) => e instanceof SeoUnavailable && e.reason === "timeout");
+  const listDur = Date.now() - t1;
+  assert.ok(checkDur >= 80, `checkAccess should wait ~90ms before timing out, waited ${checkDur}ms`);
+  assert.ok(listDur < 60, `listSites should wait ~25ms before timing out, waited ${listDur}ms`);
 });
 
 test("a fetch that throws is unreachable", async () => {
