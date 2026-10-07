@@ -6,7 +6,6 @@
  * confirmed), then same-origin (403), then the body. The operator's identity always comes
  * from deps.operatorEmail(), never from the form.
  */
-import { sameOrigin } from "@/lib/calendar/http";
 import { SeoApiError, SeoUnavailable, type SeoClient } from "./client";
 
 export type ActionDeps = {
@@ -20,6 +19,18 @@ const reply = (body: unknown, status: number) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const notFound = () => reply({ error: "not found", code: "not_found" }, 404);
 const bad = (code: string, error: string) => reply({ error, code }, 400);
+
+/** A browser POST always carries Origin. A missing or foreign one is a forged request: refuse. */
+function crossSite(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return true;
+  try {
+    const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;
+    return new URL(origin).host !== host;
+  } catch {
+    return true;
+  }
+}
 
 async function readJson(req: Request): Promise<Record<string, unknown> | null> {
   const text = await req.text();
@@ -42,7 +53,7 @@ function failure(e: unknown): Response {
 export async function addSiteAction(req: Request, deps: ActionDeps): Promise<Response> {
   const who = await deps.operatorEmail();
   if (!who) return notFound();
-  if (!sameOrigin(req)) return reply({ error: "forbidden", code: "forbidden" }, 403);
+  if (crossSite(req)) return reply({ error: "forbidden", code: "forbidden" }, 403);
   const body = await readJson(req);
   if (!body) return bad("bad_json", "Send a JSON object under 4 KB.");
   if (typeof body.domain !== "string" || !body.domain.trim()) return bad("bad_domain", "Enter a domain, like example.com");
@@ -60,7 +71,7 @@ export async function addSiteAction(req: Request, deps: ActionDeps): Promise<Res
 export async function checkAccessAction(req: Request, siteId: string, deps: ActionDeps): Promise<Response> {
   const who = await deps.operatorEmail();
   if (!who) return notFound();
-  if (!sameOrigin(req)) return reply({ error: "forbidden", code: "forbidden" }, 403);
+  if (crossSite(req)) return reply({ error: "forbidden", code: "forbidden" }, 403);
   try {
     const client = await deps.client();
     return reply(await client.checkAccess(siteId, who), 200);
