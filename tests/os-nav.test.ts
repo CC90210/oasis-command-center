@@ -101,7 +101,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     ["/", "team"], ["/feed", "team"], ["/schedule", "team"], ["/projects", "team"], ["/playbook", "team"],
     ["/agents", "team"], ["/team/chief-of-staff", "team"], ["/pipeline", "growth"], ["/web-leads", "growth"],
     ["/training", "growth"], ["/commissions", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
-    ["/founders/marketing", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
+    ["/founders/marketing", "growth"], ["/seo", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
     ["/analytics", "money"], ["/operations", "admin"], ["/automations", "admin"], ["/health", "admin"],
     ["/agent", "admin"], ["/admin/agents", "admin"], ["/runs", "admin"], ["/inbox", "admin"],
   ];
@@ -121,7 +121,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
 {
   // /agents (the AI Team) left this list in W4a (decision 22): it is every
   // workspace's own roster, for its owners and admins (section 4 below).
-  const OASIS_ONLY = ["/web-leads", "/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook"];
+  const OASIS_ONLY = ["/web-leads", "/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook", "/seo"];
   for (const slug of [null, "", "acme-roofing", "sun", "submissions", "oasis-ai-cc-evil", "unprovisioned"]) {
     for (const persona of PERSONAS) {
       for (const lyingOasisFlag of [true, false]) {
