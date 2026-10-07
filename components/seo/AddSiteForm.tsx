@@ -11,7 +11,11 @@ type Phase =
   | { kind: "added"; site: Site; existed: boolean }
   | { kind: "checking"; site: Site; existed: boolean }
   | { kind: "access"; site: Site; existed: boolean; result: AccessResult }
-  | { kind: "error"; message: string; site?: Site; existed?: boolean };
+  | { kind: "error"; message: string; site?: Site; existed?: boolean; code?: string };
+
+/** The only 400 code that means the DOMAIN field is what's wrong; dpa_required, bad_is_test,
+ * bad_json and any code this screen doesn't recognise must never mark the field invalid. */
+const DOMAIN_ERROR_CODE = "bad_domain";
 
 const BTN = "rounded-md bg-accent-muted px-3 py-1.5 text-sm font-medium text-fg hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60";
 const BTN2 = "rounded-md border border-bg-border-strong px-3 py-1.5 text-sm font-medium text-fg hover:bg-bg-elev focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60";
@@ -45,8 +49,10 @@ export function AddSiteForm({ serviceAccount, base = "/seo", api = "/api/seo" }:
     const r = await post(`${api}/sites`, { domain, dpa_confirmed: dpa, is_test: isTest });
     const s = r.json?.site as Site | undefined;
     if ((r.status === 201 || r.status === 409) && s) setPhase({ kind: "added", site: s, existed: r.status === 409 });
-    else if (r.status === 400) setPhase({ kind: "error", message: String(r.json?.error ?? "Check the domain and try again.") });
-    else setPhase({ kind: "error", message: DOWN });
+    else if (r.status === 400) {
+      const code = typeof r.json?.code === "string" ? r.json.code : undefined;
+      setPhase({ kind: "error", message: String(r.json?.error ?? "Check the domain and try again."), code });
+    } else setPhase({ kind: "error", message: DOWN });
   }
 
   async function check() {
@@ -70,13 +76,14 @@ export function AddSiteForm({ serviceAccount, base = "/seo", api = "/api/seo" }:
 
   return (
     <div className="max-w-xl space-y-6">
-      <form onSubmit={add} className="space-y-4 rounded-lg border border-hairline bg-bg-panel p-4" aria-describedby={`${id}-help`}>
+      <form onSubmit={add} className="space-y-4 rounded-lg border border-hairline bg-bg-panel p-4">
         <div>
           <label htmlFor={`${id}-domain`} className="block text-sm font-medium text-fg">Domain</label>
           <input
             id={`${id}-domain`} name="domain" type="text" inputMode="url" autoComplete="off" spellCheck={false} required
             value={domain} onChange={(e) => setDomain(e.target.value)} disabled={!!site} placeholder="example.com"
-            aria-invalid={phase.kind === "error" && !site ? true : undefined}
+            aria-describedby={`${id}-help`}
+            aria-invalid={phase.kind === "error" && !site && phase.code === DOMAIN_ERROR_CODE ? true : undefined}
             className="mt-1 h-9 w-full rounded-md border border-bg-border-strong bg-bg px-3 text-sm text-fg placeholder:text-fg-dim focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-60"
           />
           <p id={`${id}-help`} className="mt-1 text-xs text-fg-dim">Just the domain: no https://, no path.</p>
@@ -102,6 +109,9 @@ export function AddSiteForm({ serviceAccount, base = "/seo", api = "/api/seo" }:
         <div className="flex flex-wrap items-center gap-2">
           <code className="break-all rounded bg-bg-elev px-2 py-1 text-xs text-fg">{serviceAccount}</code>
           <button type="button" onClick={copy} className={BTN2}>{copied === "yes" ? "Copied" : "Copy"}</button>
+          <span aria-live="polite" className="sr-only">
+            {copied === "yes" ? "Copied to clipboard." : copied === "failed" ? "Copy failed. Select the address and copy it." : ""}
+          </span>
         </div>
         {copied === "failed" && <p className="text-xs text-status-warm">Copy failed: select the address and copy it.</p>}
         {site && (

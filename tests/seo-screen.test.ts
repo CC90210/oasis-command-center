@@ -166,3 +166,15 @@ test("add: labelled domain field, DPA tick, test tick, the address to share, sub
   assert.match(html, /<button[^>]*type="submit"[^>]*>Add site<\/button>/);
   assert.match(html, /aria-live="polite"/);
 });
+
+test("add: help text is on the domain field (not the form), and the copy result has its own announced region", () => {
+  const [html] = render([{ view: "add", props: { serviceAccount: "oasis-seo-measure@oasis-ai-508017.iam.gserviceaccount.com" } }]);
+  // aria-describedby belongs to the input the help text describes, never the <form> wrapper.
+  assert.doesNotMatch(html, /<form[^>]*aria-describedby/);
+  assert.match(html, /<input[^>]*id="([^"]*)-domain"[^>]*aria-describedby="\1-help"/);
+  // The visible "Copy"/"Copied" label can stay; the result still needs its own aria-live region
+  // so a screen-reader user who never looks at the button hears what happened.
+  assert.match(html, /<span aria-live="polite" class="sr-only">/);
+  const liveRegions = html.match(/aria-live="polite"/g) ?? [];
+  assert.ok(liveRegions.length >= 2, `expected the status region plus a copy-status region, got ${liveRegions.length}`);
+});
