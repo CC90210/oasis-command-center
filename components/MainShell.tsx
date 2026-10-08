@@ -77,6 +77,23 @@ function isFullBleedPath(pathname: string): boolean {
 }
 
 /**
+ * The page slot: a function component around {children}, never {children}
+ * straight inside a host element (React error #418, 2026-10-08).
+ *
+ * The page arrives from the server as an element that can still be waiting on
+ * a JS chunk: Next passes app/error.tsx to it as a module reference. When React
+ * reaches it during hydration before that chunk has loaded, it pauses and later
+ * replays the page's PARENT. Replaying a host element such as <div> claims it a
+ * second time from React's hydration cursor, which by then points inside it, so
+ * React finds no <div>, throws #418 and redraws the whole page in the browser
+ * (seen by the crawl probe on this exact <div>). Replaying a function component
+ * claims nothing. tests/shell-boundary.test.ts pins it.
+ */
+export function PageSlot({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+
+/**
  * The OPERATOR'S OWN agent chat — where the persistent ChatWidget is visible.
  * Narrower than isChatShellPath on purpose: the /t/<slug>/agent preview path
  * renders AgentChat, not ChatWidget, so the persistent instance must stay
@@ -124,14 +141,16 @@ export function MainShell({
     // only scroller. The canvas frame is h-full of the padded main, so a
     // child sized h-full still fills exactly the visible panel.
     <main className={`${MAIN_BASE} h-[100dvh] overflow-hidden`}>
-      <div className={`${CANVAS} h-full overflow-hidden`}>{children}</div>
+      <div className={`${CANVAS} h-full overflow-hidden`}>
+        <PageSlot>{children}</PageSlot>
+      </div>
     </main>
   ) : (
     <main className={`${MAIN_BASE} min-h-screen`}>
       <div className={`${CANVAS} flex min-h-[calc(100dvh-3.5rem)] flex-col md:min-h-[calc(100dvh-1rem)]`}>
         {header && <ContentHeader {...header} />}
         <div className={`mx-auto w-full flex-1 ${CONTENT_WIDTH} px-4 md:px-8 py-6 md:py-8`}>
-          {children}
+          <PageSlot>{children}</PageSlot>
         </div>
         <footer className={`mx-auto w-full ${CONTENT_WIDTH} px-4 md:px-8 py-6 text-xs text-fg-dim`}>
           <div className="border-t border-hairline pt-4 flex flex-wrap items-center justify-between gap-y-2">
