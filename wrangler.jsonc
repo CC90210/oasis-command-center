@@ -15,8 +15,6 @@
   },
   "services": [
     { "binding": "WORKER_SELF_REFERENCE", "service": "oasis-command-center" },
-    // The SEO screen reads oasis-seo-measure's /v1 API over this binding (keys: SEO_READ_TOKEN,
-    // SEO_MANAGE_TOKEN, pushed by JARVIS `node scripts/oasis_seo_ops.mjs occ-secrets`).
     { "binding": "SEO_MEASURE", "service": "oasis-seo-measure" }
   ],
   "observability": {
