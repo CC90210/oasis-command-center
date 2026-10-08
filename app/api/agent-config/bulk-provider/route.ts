@@ -38,14 +38,15 @@
  *   ok is the workspace account saved (scope=tenant), or at least one personal
  *   row saved (scope=user). 409 { error: "superseded", message } when the
  *   account no longer held this key once every row was written (a disconnect
- *   or another connect landed meanwhile): the rows this request wrote are
- *   deleted again.
+ *   or another connect landed meanwhile): the rows this request wrote follow
+ *   the account instead (see LOOK BACK below). Every non-ok answer the card
+ *   shows carries a plain `message`.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { PROVIDER_MODELS, PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
-import { encryptField } from "@/lib/field-encryption";
+import { decryptField, encryptField } from "@/lib/field-encryption";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
@@ -53,9 +54,12 @@ import {
   LEGACY_WORKSPACE_AI_AGENT_KEY,
   LOCAL_MODEL_REFUSAL,
   WORKSPACE_AI_AGENT_KEY,
+  hasUsableKey,
   mayUseLocalModel,
+  readWorkspaceAiAccount,
   retireWorkspaceAiAccount,
   saveWorkspaceAiAccount,
+  type WorkspaceAiAccount,
 } from "@/lib/ai/workspace-account";
 
 export const dynamic = "force-dynamic";
@@ -208,6 +212,9 @@ export async function POST(req: NextRequest) {
 
   const service = getServiceSupabase();
   const applied: string[] = [];
+  // The rows this request CREATED (the others it only updated): the look-back
+  // below may remove these, and only these.
+  const inserted: string[] = [];
   const failed: Array<{ agent_key: string; error: string }> = [];
   // The old team key moves with the team: a workspace that kept a key on the
   // legacy `bravo` workspace row before it had an account row gets that row
@@ -269,53 +276,95 @@ export async function POST(req: NextRequest) {
     } else {
       const { error } = await service.from("agent_model_config").insert(payload);
       if (error) failed.push({ agent_key: agentKey, error: error.code || error.message });
-      else applied.push(agentKey);
+      else {
+        applied.push(agentKey);
+        inserted.push(agentKey);
+      }
     }
   }
 
-  // Two tabs: a disconnect can land while this connect is still stamping the
-  // rows above. It retires the account saved first and deletes the rows on
-  // file, then this loop writes new ones: the key stayed on rows a per-agent
-  // chat could spend while every surface said not connected. So, once every
-  // row is written, the account is read again. When it no longer holds this
-  // key (a disconnect or a newer connect landed after the save), every
-  // workspace row this request stamped is deleted, and the owner is told the
-  // key was not kept. Those rows carry this request's own ciphertext (each
-  // save encrypts afresh), so nothing else is touched. A disconnect that
-  // lands after this read deletes the rows itself: it retires, then deletes.
-  let superseded = false;
+  // LOOK BACK. Two tabs: a disconnect, or another connect, can land while this
+  // one is still stamping the rows above. So once every row is written, the
+  // account is read again, and the rows this request wrote (they carry its own
+  // ciphertext: every save encrypts afresh, so nothing else matches) are put
+  // in line with it:
+  //   - it holds this key, or the same key saved by another tab: done;
+  //   - it holds another live key (a newer connect won): these rows take that
+  //     key, provider and model, and keep their custom prompts and names;
+  //   - it holds none (a disconnect landed): the rows this request created
+  //     go, and the rows it only updated keep their place, prompt, name and
+  //     on/off switch, with the key taken off. The inverse of an update is
+  //     not a delete: deleting them took the owner's custom prompts and the
+  //     newer connect's rows (PR #535 review).
+  // An account that cannot be read on a second try is not taken as success:
+  // the key comes off these rows the same way, and the owner is asked to
+  // connect again. A disconnect that lands after this read retires, then
+  // deletes, so it removes these rows itself.
+  let lookBack: "ours" | "superseded" | "unconfirmed" = "ours";
   if (scope === "tenant") {
-    const now = await service
-      .from("agent_model_config")
-      .select("encrypted_api_key")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
-      .is("user_id", null)
-      .maybeSingle();
-    if (now.error) {
-      // The account saved; only the look-back failed. Logged, and listed in
-      // `failed` (the card logs it), never silently passed over.
-      console.error("[bulk-provider.workspace_account_recheck]", { tenantId, provider, error: now.error.code || now.error.message });
-      failed.push({ agent_key: WORKSPACE_AI_AGENT_KEY, error: `recheck_failed:${now.error.code || now.error.message}` });
-    } else if ((now.data as { encrypted_api_key?: string | null } | null)?.encrypted_api_key !== encryptedKey) {
-      superseded = true;
-      const cleared = await service
-        .from("agent_model_config")
-        .delete()
-        .eq("tenant_id", tenantId)
-        .is("user_id", null)
-        .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
-        .eq("encrypted_api_key", encryptedKey);
-      if (cleared.error) {
-        console.error("[bulk-provider.superseded_cleanup]", { tenantId, provider, error: cleared.error.code || cleared.error.message });
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "save_failed",
-            message: "The AI account changed while this key saved, and its copies could not be cleared. Disconnect the provider, then connect it again.",
-          },
-          { status: 500 },
-        );
+    const readBack = async (): Promise<{ account: WorkspaceAiAccount | null } | null> => {
+      try {
+        return { account: await readWorkspaceAiAccount(tenantId) };
+      } catch (err) {
+        console.error("[bulk-provider.workspace_account_lookback]", { tenantId, provider, error: err instanceof Error ? err.message : String(err) });
+        return null;
+      }
+    };
+    const back = (await readBack()) ?? (await readBack());
+    // Only the account row counts here, never the legacy row.
+    const account = back?.account?.source === "workspace" ? back.account : null;
+    const sameKeyAsThis = (acct: WorkspaceAiAccount) => {
+      if (acct.provider !== provider || acct.model !== model || !acct.encryptedApiKey) return false;
+      try {
+        return decryptField(acct.encryptedApiKey) === apiKeyPlain;
+      } catch {
+        return false;
+      }
+    };
+    const holdsThisKey = !!account && (account.encryptedApiKey === encryptedKey || (hasUsableKey(account) && sameKeyAsThis(account)));
+    if (!holdsThisKey) {
+      lookBack = back ? "superseded" : "unconfirmed";
+      let settled: { error: unknown } = { error: null };
+      if (back && account && hasUsableKey(account)) {
+        settled = await service
+          .from("agent_model_config")
+          .update({ provider: account.provider, model: account.model, encrypted_api_key: account.encryptedApiKey })
+          .eq("tenant_id", tenantId)
+          .is("user_id", null)
+          .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
+          .eq("encrypted_api_key", encryptedKey);
+      } else {
+        if (inserted.length > 0) {
+          settled = await service
+            .from("agent_model_config")
+            .delete()
+            .eq("tenant_id", tenantId)
+            .is("user_id", null)
+            .in("agent_key", inserted)
+            .eq("encrypted_api_key", encryptedKey);
+        }
+        if (!settled.error) {
+          settled = await service
+            .from("agent_model_config")
+            .update({ encrypted_api_key: null })
+            .eq("tenant_id", tenantId)
+            .is("user_id", null)
+            .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
+            .eq("encrypted_api_key", encryptedKey);
+        }
+      }
+      if (settled.error) {
+        console.error("[bulk-provider.lookback_settle]", { tenantId, provider, lookBack, error: String((settled.error as { message?: string }).message ?? settled.error) });
+        if (lookBack === "superseded") {
+          return NextResponse.json(
+            {
+              ok: false,
+              error: "save_failed",
+              message: "The AI account changed while this key saved, and not every teammate could be updated. Connect it again in a moment.",
+            },
+            { status: 500 },
+          );
+        }
       }
     }
   }
@@ -334,15 +383,21 @@ export async function POST(req: NextRequest) {
         workspace_account: scope === "tenant",
         applied_to: applied,
         failed,
-        superseded,
-        has_key: !superseded && (scope === "tenant" || applied.length > 0),
+        look_back: lookBack,
+        has_key: lookBack === "ours" && (scope === "tenant" || applied.length > 0),
       },
     });
   } catch {
     // audit-log soft-fail
   }
 
-  if (superseded) {
+  if (lookBack === "unconfirmed") {
+    return NextResponse.json(
+      { ok: false, error: "save_unconfirmed", message: "We couldn't check that this key saved everywhere. Connect it again in a moment." },
+      { status: 503 },
+    );
+  }
+  if (lookBack === "superseded") {
     return NextResponse.json(
       {
         ok: false,
@@ -380,27 +435,35 @@ export async function POST(req: NextRequest) {
  * is retired and deleted the same way.
  *
  * Query: provider=<provider>&scope=tenant|user
- * Returns: { ok, scope, provider, count }
+ * Returns: { ok, scope, provider, count } (count = rows removed). Every non-ok
+ * answer carries one plain `message`, the only thing the card shows: never a
+ * code or the database's own words (PR #535 review).
  */
+const DISCONNECT_FAILED = "The AI account couldn't be disconnected just now. Try again in a moment.";
+const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
+
 export async function DELETE(req: NextRequest) {
   const { tenantId, userId, canManageTenant } = await resolveTenant();
   if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    return NextResponse.json({ ok: false, error: "unauthorized", message: SIGNED_OUT }, { status: 401 });
   }
   const url = req.nextUrl;
   const provider = String(url.searchParams.get("provider") || "");
   if (!Object.keys(PROVIDER_MODELS).includes(provider)) {
     return NextResponse.json(
-      { ok: false, error: `invalid_provider:${provider}` },
+      { ok: false, error: `invalid_provider:${provider}`, message: "That AI provider can't be disconnected here." },
       { status: 400 },
     );
   }
   const scope = url.searchParams.get("scope") === "user" ? "user" : "tenant";
   if (scope === "tenant" && !canManageTenant) {
-    return NextResponse.json({ ok: false, error: "admin_required" }, { status: 403 });
+    return NextResponse.json(
+      { ok: false, error: "admin_required", message: "Only an owner or admin can disconnect the team's AI account." },
+      { status: 403 },
+    );
   }
   if (scope === "user" && !userId) {
-    return NextResponse.json({ ok: false, error: "no_user" }, { status: 401 });
+    return NextResponse.json({ ok: false, error: "no_user", message: SIGNED_OUT }, { status: 401 });
   }
   const service = getServiceSupabase();
   // Retire, delete, then look at the account again. A connect in another tab,
@@ -416,7 +479,7 @@ export async function DELETE(req: NextRequest) {
       const retired = await retireWorkspaceAiAccount(tenantId, provider);
       if (!retired.ok) {
         console.error("[bulk-provider.workspace_account_retire]", { tenantId, provider, error: retired.error });
-        return NextResponse.json({ ok: false, error: "disconnect_failed" }, { status: 500 });
+        return NextResponse.json({ ok: false, error: "disconnect_failed", message: DISCONNECT_FAILED }, { status: 500 });
       }
     }
     let q = service
@@ -427,9 +490,10 @@ export async function DELETE(req: NextRequest) {
     q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null).neq("agent_key", WORKSPACE_AI_AGENT_KEY);
     const deleted = await q.select("agent_key");
     if (deleted.error) {
-      return NextResponse.json({ ok: false, error: deleted.error.message }, { status: 500 });
+      console.error("[bulk-provider.disconnect_delete]", { tenantId, provider, error: deleted.error.code || deleted.error.message });
+      return NextResponse.json({ ok: false, error: "disconnect_failed", message: DISCONNECT_FAILED }, { status: 500 });
     }
-    count += deleted.count ?? 0;
+    count += Array.isArray(deleted.data) ? deleted.data.length : 0;
     if (scope === "user") break;
     const after = await service
       .from("agent_model_config")
@@ -440,13 +504,19 @@ export async function DELETE(req: NextRequest) {
       .maybeSingle();
     if (after.error) {
       console.error("[bulk-provider.workspace_account_recheck]", { tenantId, provider, error: after.error.code || after.error.message });
-      return NextResponse.json({ ok: false, error: "disconnect_failed" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "disconnect_unconfirmed", message: "We couldn't confirm the AI account was disconnected. Try again in a moment." },
+        { status: 500 },
+      );
     }
     const back = after.data as { provider?: string | null; encrypted_api_key?: string | null } | null;
     if (!(back?.provider === provider && back.encrypted_api_key)) break;
     if (round === 3) {
       console.error("[bulk-provider.workspace_account_raced]", { tenantId, provider });
-      return NextResponse.json({ ok: false, error: "disconnect_raced" }, { status: 409 });
+      return NextResponse.json(
+        { ok: false, error: "disconnect_raced", message: "The AI account kept changing while it was being disconnected. Try again in a moment." },
+        { status: 409 },
+      );
     }
   }
 
@@ -466,5 +536,5 @@ export async function DELETE(req: NextRequest) {
     // audit-log soft-fail
   }
 
-  return NextResponse.json({ ok: true, scope, provider, count: count ?? 0 });
+  return NextResponse.json({ ok: true, scope, provider, count });
 }

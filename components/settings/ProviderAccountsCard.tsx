@@ -120,6 +120,25 @@ export function ProviderAccountsCard({
     router.refresh();
   }
 
+  // A disconnect that failed may still have changed something (it retires
+  // first, then a later step failed): this page's own overlay for that card is
+  // dropped and the server is read again, so the card shows the server's
+  // answer and is never left on Connected by mistake.
+  function rereadAfterFailure(p: Provider, scope: "tenant" | "user") {
+    const svc = PROVIDER_TO_SERVICE[p];
+    const forget = (prev: ReadonlyMap<string, boolean>) => {
+      const next = new Map(prev);
+      next.delete(svc);
+      return next;
+    };
+    if (scope === "user") setPersonalHere(forget);
+    else setChangedHere(forget);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("oasis:agent-configs-changed"));
+    }
+    router.refresh();
+  }
+
   const totalConnected = CARD_PROVIDERS.filter((p) =>
     services.has(PROVIDER_TO_SERVICE[p])
   ).length;
@@ -294,6 +313,7 @@ export function ProviderAccountsCard({
                             }
                             router.refresh();
                           }}
+                          onFailed={() => rereadAfterFailure(p, "tenant")}
                         />
                       </>
                     )}
@@ -312,6 +332,7 @@ export function ProviderAccountsCard({
                         }
                         router.refresh();
                       }}
+                      onFailed={() => rereadAfterFailure(p, "user")}
                     />
                   </>
                 )}
@@ -363,6 +384,8 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 const SAVE_ANYWAY_CODES: ReadonlySet<string> = new Set(["provider_5xx", "timeout"]);
 const COULD_NOT_TEST = "The key couldn't be tested just now, so it was not saved. Try again in a moment.";
 const COULD_NOT_SAVE = "The key couldn't be saved just now. Try again in a moment.";
+/** Longer than the test's own 15-second provider call, plus the trip here. */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 /** The save route's refusal, as one sentence: never an agent name or an error code. */
 function saveFailureSentence(body: Record<string, unknown>): string {
@@ -381,7 +404,9 @@ function saveFailureSentence(body: Record<string, unknown>): string {
  * empty-balance key is caught on the spot instead of reading "Connected"
  * (AIP-05, AIP-07). `skipTest` is "Save anyway", offered only when the
  * provider was down or slow. `stillWanted` is asked once more just before the
- * save: false (the dialog's form moved on while the test ran) saves nothing.
+ * save: false (the dialog's form moved on, or closed, while the test ran)
+ * saves nothing. Each request gives up after `timeoutMs`, so one that hangs
+ * can never keep the dialog locked (it cannot be closed while a run is out).
  */
 export async function connectProviderKey(
   input: {
@@ -391,16 +416,33 @@ export async function connectProviderKey(
     scope: "tenant" | "user";
     skipTest?: boolean;
     stillWanted?: () => boolean;
+    timeoutMs?: number;
   },
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): Promise<ConnectResult> {
   const post = async (url: string, body: Record<string, unknown>) => {
-    const res = await fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new Error("request timed out"));
+      }, input.timeoutMs ?? REQUEST_TIMEOUT_MS);
     });
-    return (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    try {
+      const res = await Promise.race([
+        fetchImpl(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: abort.signal,
+        }),
+        gaveUp,
+      ]);
+      return (await Promise.race([res.json().catch(() => ({})), gaveUp])) as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
   };
   if (!input.skipTest) {
     let tested: Record<string, unknown>;
@@ -484,6 +526,16 @@ export function ConnectProviderDialog({
   useLayoutEffect(() => {
     drawn.current = { provider, apiKey: apiKey.trim(), model, scope };
   });
+  // A closed dialog wants nothing: a test that passes after it closed saves
+  // nothing, and no answer is applied (PR #535 review). It cannot be closed
+  // while a run is out, but it can still go away with the page.
+  const mounted = useRef(true);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   if (!reg) return null;
 
@@ -495,9 +547,14 @@ export function ConnectProviderDialog({
     setSaving(true);
     setError(null);
     setUntested(null);
-    const result = await connectProviderKey({ ...target, skipTest, stillWanted: () => isNewest() && formUnchanged() });
-    // A newer run holds the lock and speaks for the form: this one says nothing.
-    if (!isNewest()) return;
+    const result = await connectProviderKey({
+      ...target,
+      skipTest,
+      stillWanted: () => mounted.current && isNewest() && formUnchanged(),
+    });
+    // Closed meanwhile: nothing is applied. A newer run holds the lock and
+    // speaks for the form: this one says nothing.
+    if (!mounted.current || !isNewest()) return;
     setSaving(false);
     if (result.kind === "dropped" || !formUnchanged()) return;
     if (result.kind === "saved") {
@@ -517,7 +574,10 @@ export function ConnectProviderDialog({
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-bg-deep/80 backdrop-blur-sm p-4"
-      onClick={onClose}
+      onClick={() => {
+        // Like Cancel and the close button: not while a key is being tried.
+        if (!saving) onClose();
+      }}
     >
       <form
         onSubmit={handleSubmit}
@@ -538,6 +598,7 @@ export function ConnectProviderDialog({
             onClick={onClose}
             className="text-fg-dim hover:text-fg-muted p-1"
             title="Close"
+            disabled={saving}
           >
             <X className="w-5 h-5" />
           </button>
@@ -742,15 +803,23 @@ export function ConnectProviderDialog({
  * operator has to paste it again from the provider's console). Soft-fails
  * are surfaced inline. scope="user" is "Remove my key": only the viewer's
  * own key for that provider, which department chats never used.
+ *
+ * A failure shows the route's one plain sentence and never its code or the
+ * database's own words (PR #535 review), and `onFailed` has the card read the
+ * server again: a disconnect can fail after it already changed something.
  */
+const DISCONNECT_FALLBACK = "The AI account couldn't be disconnected just now. Try again in a moment.";
+
 function DisconnectButton({
   provider,
   scope = "tenant",
   onDisconnected,
+  onFailed,
 }: {
   provider: Provider;
   scope?: "tenant" | "user";
   onDisconnected: () => void;
+  onFailed: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -776,15 +845,17 @@ function DisconnectButton({
       );
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
-        error?: string;
+        message?: unknown;
       };
       if (!res.ok || !data.ok) {
-        setError(data.error || `http_${res.status}`);
+        setError(typeof data.message === "string" && data.message.trim() ? data.message : DISCONNECT_FALLBACK);
+        onFailed();
         return;
       }
       onDisconnected();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "network_error");
+    } catch {
+      setError(DISCONNECT_FALLBACK);
+      onFailed();
     } finally {
       setBusy(false);
     }
@@ -806,8 +877,8 @@ function DisconnectButton({
         {scope === "user" ? "Remove my key" : "Disconnect"}
       </button>
       {error && (
-        <span className="text-[10px] text-rose-400" title={error}>
-          ({error})
+        <span role="alert" className="text-[10px] text-rose-400">
+          {error}
         </span>
       )}
     </>
@@ -822,6 +893,8 @@ function DisconnectButton({
  * health check for already-saved keys; complements validate-on-save at the
  * connect step.
  */
+const TEST_FALLBACK = "The key couldn't be tested just now. Try again in a moment.";
+
 function TestConnectionButton({ provider }: { provider: Provider }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<
@@ -848,18 +921,15 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
       if (body.ok && typeof body.latency_ms === "number") {
         setResult({ kind: "ok", latency: body.latency_ms, at: Date.now() });
       } else {
+        // The route's own sentence, never its code or a status number.
         setResult({
           kind: "err",
-          message: body.message || body.error || `HTTP ${res.status}`,
+          message: typeof body.message === "string" && body.message.trim() ? body.message : TEST_FALLBACK,
           at: Date.now(),
         });
       }
-    } catch (err) {
-      setResult({
-        kind: "err",
-        message: err instanceof Error ? err.message : "network_error",
-        at: Date.now(),
-      });
+    } catch {
+      setResult({ kind: "err", message: TEST_FALLBACK, at: Date.now() });
     } finally {
       setBusy(false);
     }

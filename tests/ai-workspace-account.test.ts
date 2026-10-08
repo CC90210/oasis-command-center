@@ -141,6 +141,13 @@ const RACE = "a9a9a9a9-0000-4000-8000-0000000000a9";
 const BACKFILL_ONE = "b8b8b8b8-0000-4000-8000-0000000000b8";
 const BACKFILL_TWO = "b9b9b9b9-0000-4000-8000-0000000000b9";
 const TEAMCO = "c9c9c9c9-0000-4000-8000-0000000000c9";
+// Round 4 (PR #535 review): a workspace whose Sales lead has its own prompt,
+// for two tabs connecting at once; one whose look-back read fails; one whose
+// disconnect fails every way it can.
+const PROMPTCO = "d9d9d9d9-0000-4000-8000-0000000000d9";
+const LOOKCO = "e9e9e9e9-0000-4000-8000-0000000000e9";
+const CODECO = "f9f9f9f9-0000-4000-8000-0000000000f9";
+const FRENCH = "Always greet in French.";
 
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -161,6 +168,10 @@ const USERS = {
   backfillTwo: u(14, "owner@backfill-two.test"),
   team: u(15, "owner@team.test"),
   teamRep: u(16, "rep@team.test"), // a closer: saves keys for their own chats only
+  prompt: u(17, "owner@prompt.test"),
+  look: u(18, "owner@look.test"),
+  code: u(19, "owner@code.test"),
+  codeRep: u(20, "rep@code.test"), // a closer: may not disconnect the team's account
 } as const;
 
 const KEY_ALPHA = "sk-ant-alpha-workspace-key-0001";
@@ -186,6 +197,10 @@ const KEY_TEAM = "sk-ant-team-key-0108";
 const KEY_TEAM_REP_OWN = "sk-ant-team-rep-own-key-0109";
 const KEY_TEAM_AGAIN = "sk-ant-team-key-again-0110";
 const KEY_TEAM_REP_NEW = "sk-ant-team-rep-own-key-0111";
+const KEY_RACE_OWN = "sk-or-v1-race-client-success-own-0112";
+const KEY_PROMPT = ["sk-ant-prompt-first-0200", "sk-ant-prompt-older-0201", "sk-ant-prompt-newer-0202", "sk-ant-prompt-same-0203"] as const;
+const KEY_LOOK = ["sk-ant-look-first-0300", "sk-ant-look-second-0301", "sk-ant-look-third-0302"] as const;
+const KEY_CODE = "sk-ant-code-key-0400";
 
 async function login(user: U | null) {
   if (!user) {
@@ -418,13 +433,20 @@ async function main() {
       ...workspace(BACKFILL_ONE, "backfill-one", "Backfill One"),
       ...workspace(BACKFILL_TWO, "backfill-two", "Backfill Two"),
       ...workspace(TEAMCO, "team-co", "Team Co"),
-      profile("p-race", USERS.race, RACE, "owner", 1, ["sdr"]),
+      profile("p-race", USERS.race, RACE, "owner", 1, ["sdr", "customer-support"]),
       profile("p-backfill-one", USERS.backfillOne, BACKFILL_ONE, "owner", 1, ["sdr"]),
       profile("p-backfill-two", USERS.backfillTwo, BACKFILL_TWO, "owner", 1, ["sdr"]),
       profile("p-team", USERS.team, TEAMCO, "owner", 1, ["sdr"]),
       profile("p-team-rep", USERS.teamRep, TEAMCO, "closer", 0, ["sdr"]),
       configRow(BACKFILL_ONE, null, "bravo", "anthropic", "claude-sonnet-4-6", KEY_BACKFILL_ONE),
       configRow(BACKFILL_TWO, null, "bravo", "openrouter", "anthropic/claude-sonnet-4.6", KEY_BACKFILL_TWO_OLD),
+      ...workspace(PROMPTCO, "prompt-co", "Prompt Co"),
+      ...workspace(LOOKCO, "look-co", "Look Co"),
+      ...workspace(CODECO, "code-co", "Code Co"),
+      profile("p-prompt", USERS.prompt, PROMPTCO, "owner", 1, ["sdr", "customer-support"]),
+      profile("p-look", USERS.look, LOOKCO, "owner", 1, ["sdr"]),
+      profile("p-code", USERS.code, CODECO, "owner", 1, ["sdr"]),
+      profile("p-code-rep", USERS.codeRep, CODECO, "closer", 0, ["sdr"]),
     ],
     "write",
   );
@@ -679,17 +701,21 @@ async function main() {
   let html: Record<string, string> = {};
   const plain = (s: string | undefined) => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
   const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
-  await check("the provider card renders (tests/ai-workspace-account.render.ts)", () => {
+  /** Run the render helper (with `extra` in its environment) and read what it printed. */
+  const renderHelper = (extra: Record<string, string> = {}): unknown => {
     // The render needs whole React: drop the suite's react-server condition.
     const nodeOptions = (process.env.NODE_OPTIONS || "")
       .split(/\s+/)
       .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
       .join(" ");
-    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra, NODE_OPTIONS: nodeOptions };
     if (!nodeOptions) delete env.NODE_OPTIONS;
     const r = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-workspace-account.render.ts"], { encoding: "utf8", env, timeout: 120_000 });
     assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
-    html = JSON.parse(r.stdout) as Record<string, string>;
+    return JSON.parse(r.stdout);
+  };
+  await check("the provider card renders (tests/ai-workspace-account.render.ts)", () => {
+    html = renderHelper() as Record<string, string>;
   });
   await check("the card draws a personal key as the owner's own, never Connected", () => {
     const personal = plain(html.personalOnly);
@@ -800,6 +826,16 @@ async function main() {
       { saveAnyway: false, alert: "Your AI account refused the request. Check its billing or key." },
     );
     assert.equal(steps.heldLeft, 0 as unknown, "a held test answer never landed");
+  });
+  await check("the dialog cannot be closed while a key is being tried, and one that went away anyway saves and applies nothing", () => {
+    const closing = JSON.parse(html.closing ?? "{}") as Record<string, unknown>;
+    assert.equal(closing.closeLocked, true, "the close button worked while the key was being tried");
+    assert.equal(closing.backdropCloses, 0, "a click on the backdrop closed the dialog while the key was being tried");
+    // Closed anyway, then the test passed: nothing saved team-wide, nothing marked connected.
+    assert.deepEqual(closing.closedThenPassed, { closes: 1, saves: 0, connected: 0 });
+    // Gone while the save was out: the save had already left; nothing is applied after it.
+    assert.equal(closing.saveWasOut, true, "the save never went out: the step proved nothing");
+    assert.deepEqual(closing.goneDuringSave, { saves: 1, connected: 0 });
   });
   await check("a failed key read is Couldn't check everywhere, never not connected", async () => {
     await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_offline");
@@ -948,9 +984,47 @@ async function main() {
       assert.equal(result.message, "Only an owner or admin can connect an AI account for the whole team.");
       assert.doesNotMatch(result.message, /sdr|customer-support|bravo|admin_required|_/);
     }
-    const src = readFileSync(join(process.cwd(), "components/settings/ProviderAccountsCard.tsx"), "utf8");
-    assert.doesNotMatch(src, /f\.agent_key/, "the dialog lists teammate slugs again");
-    assert.match(src, /connectProviderKey\(\{ \.\.\.target, skipTest, stillWanted: /, "the dialog does not use the tested connect");
+    // What the dialog itself sends and shows, driven in the render helper (it
+    // used to be read off the dialog's source text).
+    const dialogSent = JSON.parse(html.plainConnect ?? "{}") as Record<string, unknown>;
+    assert.deepEqual(
+      dialogSent.calls,
+      [
+        { url: "/api/agent-config/test-connection", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-4-6" } },
+        { url: "/api/agent-config/bulk-provider", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-4-6", scope: "tenant" } },
+      ],
+      "the dialog does not test the pasted key once, on its model, before it saves it",
+    );
+    assert.equal(dialogSent.connected, 1);
+    assert.equal(dialogSent.refusedSave, "Only an owner or admin can connect an AI account for the whole team.", "a refused save named a teammate or a code");
+    assert.deepEqual(dialogSent.partialSave, { connected: 1, alert: null }, "a teammate row that did not update reached the screen");
+  });
+  await check("a request that hangs gives up, so the dialog unlocks with a plain sentence", async () => {
+    const signals: AbortSignal[] = [];
+    const hangs = (_url: string, init: RequestInit) => {
+      if (init.signal) signals.push(init.signal);
+      return new Promise<Response>(() => undefined);
+    };
+    const passesThenHangs = (url: string, init: RequestInit) =>
+      url.endsWith("/test-connection") ? Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 })) : hangs(url, init);
+    // A hung call must not hang this suite either: it fails the check instead.
+    const within = async <T>(work: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("connectProviderKey never gave up")), 3000)))]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const key = { provider: "anthropic" as const, apiKey: KEY_FRESH, model: "claude-sonnet-4-6", scope: "tenant" as const, timeoutMs: 25 };
+    assert.deepEqual(await within(connectProviderKey(key, hangs)), {
+      kind: "refused",
+      message: "The key couldn't be tested just now, so it was not saved. Try again in a moment.",
+      canSaveAnyway: false,
+    });
+    assert.deepEqual(await within(connectProviderKey(key, passesThenHangs)), { kind: "failed", message: "The key couldn't be saved just now. Try again in a moment." });
+    assert.equal(signals.length, 2);
+    assert.ok(signals.every((s) => s.aborted), "a request that gave up was not aborted");
   });
 
   // -- 5. A local model server is the verified operator's only ---------------
@@ -1155,6 +1229,7 @@ async function main() {
     await login(USERS.partner);
     const res = await jsonOf(await bulk.DELETE(req("/api/agent-config/bulk-provider?provider=openrouter&scope=tenant", "DELETE")));
     assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.count, 1, "the disconnect's count is not the number of rows it removed");
     const left = await rows(OASIS);
     assert.ok(!left.some((r) => r.agent_key === "maven" && r.user_id === null), "the disconnected row is still there");
     assert.ok(!left.some((r) => r.agent_key === account.WORKSPACE_AI_AGENT_KEY), "a disconnect created an account row for OASIS");
@@ -1262,42 +1337,72 @@ async function main() {
     }
   });
 
-  // -- 11. Interleavings (Codex review of PR #535, round 3) ------------------
+  // -- 11. Interleavings (Codex review of PR #535, rounds 3 and 4) -----------
   // Every route here writes one statement at a time, with no transaction, so
-  // two requests interleave statement by statement. `interleaved` holds the
-  // app's first statement that matches `at` until the other request (or the
-  // backfill) has run to the end: the exact moment a second tab can land.
+  // two requests interleave statement by statement. A hook holds the app's
+  // first statement that matches `at` until the other request (or the
+  // backfill) has run to the end: the exact moment a second tab can land. A
+  // hook can also make a statement fail, as a briefly unreachable database
+  // does.
   const { getTursoClient } = await import("../lib/turso");
   type Stmt = string | { sql: string; args?: unknown[] };
-  let between: { at: (sql: string, args: unknown[]) => boolean; run: () => Promise<void> } | null = null;
+  type Hook = { at: (sql: string, args: unknown[]) => boolean; times: number; run: () => Promise<void> | void };
+  let hooks: Hook[] = [];
+  let insideHook = false;
   // The app's client is the cached libSQL client behind a timing proxy that
   // looks `execute` up on the client at call time: an own `execute` set on it
-  // sees every statement the app runs, then hands it to the client's own.
+  // sees every statement the app runs, then hands it to the client's own. The
+  // statements a hook runs itself (the other tab's request) are not matched.
   const appClient = getTursoClient() as unknown as { execute: (stmt: Stmt) => Promise<unknown> };
   appClient.execute = async function (this: object, stmt: Stmt) {
-    const hook = between;
-    if (hook && hook.at(typeof stmt === "string" ? stmt : stmt.sql, typeof stmt === "string" ? [] : (stmt.args ?? []))) {
-      between = null;
-      await hook.run();
+    if (!insideHook) {
+      const sql = typeof stmt === "string" ? stmt : stmt.sql;
+      const args = typeof stmt === "string" ? [] : (stmt.args ?? []);
+      for (const hook of hooks) {
+        if (hook.times <= 0 || !hook.at(sql, args)) continue;
+        hook.times -= 1;
+        insideHook = true;
+        try {
+          await hook.run();
+        } finally {
+          insideHook = false;
+        }
+      }
     }
     return (Object.getPrototypeOf(this) as { execute: (s: Stmt) => Promise<unknown> }).execute.call(this, stmt);
   };
-  async function interleaved<T>(request: () => Promise<T>, at: (sql: string, args: unknown[]) => boolean, other: () => Promise<void>): Promise<T> {
-    let landed = false;
-    between = {
-      at,
-      run: async () => {
-        landed = true;
-        await other();
-      },
-    };
+  async function withHooks<T>(added: Hook[], request: () => Promise<T>): Promise<T> {
+    hooks.push(...added);
     try {
-      const out = await request();
-      assert.ok(landed, "the other request never landed inside this one");
-      return out;
+      return await request();
     } finally {
-      between = null;
+      hooks = hooks.filter((h) => !added.includes(h));
     }
+  }
+  /** The other request, run from start to end at the held statement (once). */
+  const hold = (at: Hook["at"], other: () => Promise<void>): Hook => ({ at, times: 1, run: other });
+  /** The matching statements fail `times` times, in the database's own words. */
+  const DB_WORDS = "SQLITE_BUSY: database is locked (injected)";
+  const fail = (at: Hook["at"], times: number): Hook => ({
+    at,
+    times,
+    run: () => {
+      throw new Error(DB_WORDS);
+    },
+  });
+  async function interleaved<T>(request: () => Promise<T>, at: Hook["at"], other: () => Promise<void>): Promise<T> {
+    let landed = false;
+    const out = await withHooks(
+      [
+        hold(at, async () => {
+          landed = true;
+          await other();
+        }),
+      ],
+      request,
+    );
+    assert.ok(landed, "the other request never landed inside this one");
+    return out;
   }
   /** `who`'s request, run while another person's request is held (their own session). */
   const as = async <T>(who: U, request: () => Promise<T>): Promise<T> => {
@@ -1327,10 +1432,39 @@ async function main() {
       args: [tenant],
     });
   const keysOn = async (tenant: string) => (await rows(tenant)).filter((r) => r.key !== null).map((r) => `${r.agent_key}/${r.user_id === null ? "team" : "own"}:${r.key}`);
+  /** One teammate's team row, with its own prompt (null: no such row). */
+  const teamRow = async (tenant: string, agentKey: string) => {
+    const found = await db.execute({
+      sql: "SELECT provider, encrypted_api_key, system_prompt_override, enabled FROM agent_model_config WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL",
+      args: [tenant, agentKey],
+    });
+    const r = found.rows[0];
+    return r
+      ? {
+          provider: String(r.provider),
+          key: r.encrypted_api_key === null ? null : decryptField(String(r.encrypted_api_key)),
+          prompt: r.system_prompt_override === null ? null : String(r.system_prompt_override),
+          enabled: Number(r.enabled),
+        }
+      : null;
+  };
+  /** What a per-agent chat with this teammate would do (/api/chat's resolver). */
+  const perAgentChat = async (who: U, agentKey: string) => {
+    const ctx = await resolveChatContext({ id: who.id, email: who.email }, agentKey);
+    return ctx.ok ? `answers with ${ctx.apiKey}` : { status: ctx.status, code: ctx.code };
+  };
+  /** The connect's look-back read of the account: the only read naming both rows. */
+  const lookBackRead = (tenant: string) => statement("SELECT", tenant, account.WORKSPACE_AI_AGENT_KEY, account.LEGACY_WORKSPACE_AI_AGENT_KEY);
 
-  await check("a disconnect in another tab that lands inside a connect: the connect keeps nothing, says so, and nothing answers", async () => {
+  await check("a disconnect in another tab that lands inside a connect: the connect keeps no key, a teammate's own prompt stays, and nothing answers", async () => {
     await login(USERS.race);
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_RACE[0] })).status, 200);
+    // The owner had moved Client Success onto its own OpenRouter key, with a
+    // prompt of its own: a row the next connect only updates, never creates.
+    await db.execute({
+      sql: "UPDATE agent_model_config SET provider = 'openrouter', model = 'anthropic/claude-sonnet-4.6', encrypted_api_key = ?, system_prompt_override = ? WHERE tenant_id = ? AND agent_key = 'customer-support' AND user_id IS NULL",
+      args: [encryptField(KEY_RACE_OWN), FRENCH, RACE],
+    });
     // The connect saves the account, then (before its teammate rows) the
     // other tab's disconnect runs from start to end.
     let other = null as Awaited<ReturnType<typeof disconnect>> | null;
@@ -1345,11 +1479,14 @@ async function main() {
     assert.equal(res.status, 409, JSON.stringify(res.body));
     assert.equal(res.body.error, "superseded");
     assert.match(String(res.body.message), /^The AI account was changed somewhere else while this key saved, so it was not kept/);
-    // No row keeps either key: the teammate row the connect wrote after the
-    // disconnect is gone, so no per-agent chat can spend it.
+    // No row keeps a key. The Sales lead row the connect created after the
+    // disconnect is gone; the Client Success row it only updated keeps its
+    // place, prompt and on/off switch, with the key taken off.
     assert.deepEqual(await keysOn(RACE), []);
-    const perAgent = await resolveChatContext({ id: USERS.race.id, email: USERS.race.email }, "sdr");
-    assert.deepEqual(perAgent.ok ? `answers with ${perAgent.apiKey}` : { status: perAgent.status, code: perAgent.code }, { status: 412, code: "agent_not_configured" });
+    assert.equal(await teamRow(RACE, "sdr"), null, "the row the connect created is still there");
+    assert.deepEqual(await teamRow(RACE, "customer-support"), { provider: "anthropic", key: null, prompt: FRENCH, enabled: 1 });
+    assert.deepEqual(await perAgentChat(USERS.race, "sdr"), { status: 412, code: "agent_not_configured" });
+    assert.deepEqual(await perAgentChat(USERS.race, "customer-support"), { status: 412, code: "no_api_key" });
     await assertNothingAnswers(RACE, "race-co", USERS.race);
   });
   await check("a connect in another tab that lands inside a disconnect: the disconnect still ends with nothing connected", async () => {
@@ -1369,6 +1506,189 @@ async function main() {
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(await keysOn(RACE), [], "a key survived the disconnect");
     await assertNothingAnswers(RACE, "race-co", USERS.race);
+  });
+  await check("a newer connect in another tab wins: the older one hands its rows to it, and custom prompts and per-agent chats are kept", async () => {
+    await login(USERS.prompt);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_PROMPT[0] })).status, 200);
+    await db.execute({
+      sql: "UPDATE agent_model_config SET system_prompt_override = ? WHERE tenant_id = ? AND agent_key = 'sdr' AND user_id IS NULL",
+      args: [FRENCH, PROMPTCO],
+    });
+    // Tab A saves the account and stalls before its teammate rows; tab B
+    // connects a newer key from start to end; then A writes over B's rows.
+    let newer = null as Awaited<ReturnType<typeof connect>> | null;
+    const older = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_PROMPT[1] }),
+      statement("SELECT", PROMPTCO, "sdr"),
+      async () => {
+        newer = await connect({ provider: "anthropic", api_key: KEY_PROMPT[2] });
+      },
+    );
+    assert.equal(newer!.status, 200, JSON.stringify(newer!.body));
+    assert.deepEqual(newer!.body.applied_to, ["sdr", "customer-support"]);
+    assert.equal(older.status, 409, JSON.stringify(older.body));
+    assert.equal(older.body.error, "superseded");
+    // Every team row holds the newer key (none was deleted), and the owner's
+    // prompt is still on the Sales lead.
+    assert.deepEqual(await keysOn(PROMPTCO), [
+      `__workspace__/team:${KEY_PROMPT[2]}`,
+      `customer-support/team:${KEY_PROMPT[2]}`,
+      `sdr/team:${KEY_PROMPT[2]}`,
+    ]);
+    assert.equal((await teamRow(PROMPTCO, "sdr"))?.prompt, FRENCH, "the owner's custom prompt was lost");
+    assert.equal(await perAgentChat(USERS.prompt, "sdr"), `answers with ${KEY_PROMPT[2]}`);
+    assert.deepEqual([...(await q.aiServicesWithKey(PROMPTCO))], ["anthropic"]);
+  });
+  await check("the same key pasted in two tabs at once: both keep it, and nothing is deleted", async () => {
+    await login(USERS.prompt);
+    let second = null as Awaited<ReturnType<typeof connect>> | null;
+    const first = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_PROMPT[3] }),
+      statement("SELECT", PROMPTCO, "sdr"),
+      async () => {
+        second = await connect({ provider: "anthropic", api_key: KEY_PROMPT[3] });
+      },
+    );
+    assert.equal(second!.status, 200, JSON.stringify(second!.body));
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(await keysOn(PROMPTCO), [
+      `__workspace__/team:${KEY_PROMPT[3]}`,
+      `customer-support/team:${KEY_PROMPT[3]}`,
+      `sdr/team:${KEY_PROMPT[3]}`,
+    ]);
+    assert.equal((await teamRow(PROMPTCO, "sdr"))?.prompt, FRENCH, "the owner's custom prompt was lost");
+    assert.equal(await perAgentChat(USERS.prompt, "sdr"), `answers with ${KEY_PROMPT[3]}`);
+  });
+  await check("a look-back that fails once is read again, and the connect stands", async () => {
+    await login(USERS.look);
+    const res = await withHooks([fail(lookBackRead(LOOKCO), 1)], () => connect({ provider: "anthropic", api_key: KEY_LOOK[0] }));
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(await keysOn(LOOKCO), [`__workspace__/team:${KEY_LOOK[0]}`, `sdr/team:${KEY_LOOK[0]}`]);
+  });
+  await check("a look-back that cannot be read is not taken as success: the key comes off the teammates and the owner is asked to connect again", async () => {
+    await login(USERS.look);
+    // A disconnect in another tab lands inside the connect, and then the
+    // connect cannot read the account back, twice.
+    let other = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const res = await withHooks(
+      [
+        hold(statement("SELECT", LOOKCO, "sdr"), async () => {
+          other = await disconnect("anthropic");
+        }),
+        fail(lookBackRead(LOOKCO), 2),
+      ],
+      () => connect({ provider: "anthropic", api_key: KEY_LOOK[1] }),
+    );
+    assert.equal(other!.status, 200, JSON.stringify(other!.body));
+    assert.equal(res.status, 503, JSON.stringify(res.body));
+    assert.deepEqual(res.body, { ok: false, error: "save_unconfirmed", message: "We couldn't check that this key saved everywhere. Connect it again in a moment." });
+    assert.deepEqual(await keysOn(LOOKCO), [], "a teammate row kept the key");
+    assert.deepEqual(await perAgentChat(USERS.look, "sdr"), { status: 412, code: "agent_not_configured" });
+  });
+  await check("when a disconnect landed and the key cannot be taken off the teammates, the owner is told something they can do", async () => {
+    await login(USERS.look);
+    let other = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const res = await withHooks(
+      [
+        hold(statement("SELECT", LOOKCO, "sdr"), async () => {
+          other = await disconnect("anthropic");
+        }),
+        // The connect's removal of the Sales lead row it created fails.
+        fail((sql, args) => sql.startsWith("DELETE") && args.includes(LOOKCO) && args.includes("sdr"), 1),
+      ],
+      () => connect({ provider: "anthropic", api_key: KEY_LOOK[2] }),
+    );
+    assert.equal(other!.status, 200, JSON.stringify(other!.body));
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    // The card now reads Not connected and offers Connect, never Disconnect:
+    // the sentence asks for what the owner can actually do.
+    assert.equal(res.body.message, "The AI account changed while this key saved, and not every teammate could be updated. Connect it again in a moment.");
+    assert.equal((await q.aiServicesWithKey(LOOKCO)).size, 0);
+  });
+  // Every way a disconnect can fail, collected from the real route, then
+  // pressed on the real card (the render helper, second run).
+  const disconnectReplies: Array<{ label: string; status: number; body: Record<string, unknown> | null }> = [];
+  await check("every way a disconnect can fail answers one plain sentence, never a code or the database's words", async () => {
+    await login(USERS.code);
+    const reconnect = async () => assert.equal((await connect({ provider: "anthropic", api_key: KEY_CODE })).status, 200);
+    const collect = async (label: string, request: () => Promise<{ status: number; body: Record<string, unknown> }>) => {
+      const r = await request();
+      disconnectReplies.push({ label, status: r.status, body: r.body });
+    };
+    await reconnect();
+    await collect("retire fails", () => withHooks([fail(statement("UPDATE", CODECO, account.WORKSPACE_AI_AGENT_KEY, "anthropic"), 1)], () => disconnect("anthropic")));
+    await reconnect();
+    await collect("delete fails", () => withHooks([fail(statement("DELETE", CODECO, "anthropic"), 1)], () => disconnect("anthropic")));
+    await reconnect();
+    const readAfter = (sql: string, args: unknown[]) =>
+      statement("SELECT", CODECO, account.WORKSPACE_AI_AGENT_KEY)(sql, args) && !args.includes(account.LEGACY_WORKSPACE_AI_AGENT_KEY);
+    await collect("read after fails", () => withHooks([fail(readAfter, 1)], () => disconnect("anthropic")));
+    await reconnect();
+    // A key that comes back on the account before every delete.
+    const comesBack: Hook = {
+      at: statement("DELETE", CODECO, "anthropic"),
+      times: 3,
+      run: async () => {
+        await db.execute({
+          sql: "UPDATE agent_model_config SET encrypted_api_key = ?, enabled = 1 WHERE tenant_id = ? AND agent_key = '__workspace__' AND user_id IS NULL",
+          args: [encryptField(KEY_CODE), CODECO],
+        });
+      },
+    };
+    await collect("key keeps coming back", () => withHooks([comesBack], () => disconnect("anthropic")));
+    await login(USERS.codeRep);
+    await collect("not an owner", () => disconnect("anthropic"));
+    await login(null);
+    await collect("signed out", () => disconnect("anthropic"));
+    assert.deepEqual(
+      disconnectReplies.map((r) => [r.label, r.status]),
+      [
+        ["retire fails", 500],
+        ["delete fails", 500],
+        ["read after fails", 500],
+        ["key keeps coming back", 409],
+        ["not an owner", 403],
+        ["signed out", 401],
+      ],
+    );
+    for (const r of disconnectReplies) {
+      assert.equal(r.body?.ok, false, r.label);
+      const message = String(r.body?.message ?? "");
+      assert.ok(message.length > 0, `${r.label}: no plain message`);
+      assert.doesNotMatch(message, /[a-z]+_[a-z]+|SQLITE|locked|injected|http/i, `${r.label}: ${message}`);
+    }
+    // And a request that never reached the server, for the card's own sentence.
+    disconnectReplies.push({ label: "never reached the server", status: 0, body: null });
+  });
+  await check("the card shows only that sentence, and draws itself again from the server after a failed disconnect", () => {
+    assert.ok(disconnectReplies.length > 1, "no replies were collected");
+    const testReplies = [
+      { label: "refused without a sentence", status: 403, body: { ok: false, error: "forbidden" } },
+      { label: "never reached the server", status: 0, body: null },
+      { label: "refused with a sentence", status: 400, body: { ok: false, status: "error", code: "provider_401", message: "Your AI account refused the request. Check its billing or key." } },
+    ];
+    const pressed = renderHelper({ DRIVE_FAILURES: JSON.stringify({ disconnects: disconnectReplies, tests: testReplies }) }) as {
+      disconnects: Array<Record<string, unknown>>;
+      tests: Array<Record<string, unknown>>;
+    };
+    assert.equal(pressed.disconnects.length, disconnectReplies.length);
+    for (const d of pressed.disconnects) {
+      const reply = disconnectReplies.find((r) => r.label === d.label);
+      const expected = reply?.body ? reply.body.message : "The AI account couldn't be disconnected just now. Try again in a moment.";
+      assert.equal(d.connectedFirst, true, `${d.label}: the card was not Connected before the disconnect`);
+      assert.equal(d.shown, expected, `${d.label}: the card showed something else`);
+      assert.equal(d.title, null, `${d.label}: the error carries a tooltip`);
+      assert.equal(d.refreshed, 1, `${d.label}: the card did not read the server again`);
+      assert.equal(d.connectedAfter, false, `${d.label}: the card stayed on Connected`);
+    }
+    assert.deepEqual(
+      pressed.tests.map((t) => [t.label, t.title]),
+      [
+        ["refused without a sentence", "The key couldn't be tested just now. Try again in a moment."],
+        ["never reached the server", "The key couldn't be tested just now. Try again in a moment."],
+        ["refused with a sentence", "Your AI account refused the request. Check its billing or key."],
+      ],
+    );
   });
   await check("the backfill landing inside a disconnect never brings the legacy key back", async () => {
     // Before: the legacy row answers (no account row yet).
@@ -1413,7 +1733,7 @@ async function main() {
     assert.ok(turn.ok && turn.turn.apiKey === KEY_BACKFILL_TWO_NEW, JSON.stringify(turn));
     assert.equal((await backfill(BACKFILL_TWO)).rowsAffected, 0, "a second backfill copied the legacy row over the account");
   });
-  await check("a member's own key and the owner's team account never touch each other, whichever lands first", async () => {
+  await check("a member's own key and the owner's team account never touch each other, each landing inside the other's request", async () => {
     await login(USERS.team);
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM })).status, 200);
     // The member has a key for their own chats and replaces it; the owner's
@@ -1436,17 +1756,20 @@ async function main() {
     assert.deepEqual([...(await account.readPersonalAiServices(TEAMCO, USERS.teamRep.id))], ["anthropic"]);
     const slackOff = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
     assert.deepEqual(slackOff.ok ? `answers with ${slackOff.turn.apiKey}` : slackOff.status, 412, "a Slack mention answered on the member's own key");
-    // The member removes their key; the owner's connect lands inside it.
-    let ownerOn = null as Awaited<ReturnType<typeof connect>> | null;
-    const removed = await interleaved(
-      () => disconnect("anthropic", "user"),
-      statement("DELETE", TEAMCO, USERS.teamRep.id),
-      async () => {
-        ownerOn = await as(USERS.team, () => connect({ provider: "anthropic", api_key: KEY_TEAM_AGAIN }));
-      },
+    // The owner connects again; the member's removal of their own key lands
+    // inside it, after the account is saved and before the teammate rows.
+    let removed = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const ownerOn = await as(USERS.team, () =>
+      interleaved(
+        () => connect({ provider: "anthropic", api_key: KEY_TEAM_AGAIN }),
+        statement("SELECT", TEAMCO, "sdr"),
+        async () => {
+          removed = await as(USERS.teamRep, () => disconnect("anthropic", "user"));
+        },
+      ),
     );
-    assert.equal(ownerOn!.status, 200, JSON.stringify(ownerOn!.body));
-    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.equal(removed!.status, 200, JSON.stringify(removed!.body));
+    assert.equal(ownerOn.status, 200, JSON.stringify(ownerOn.body));
     assert.deepEqual(await keysOn(TEAMCO), [`__workspace__/team:${KEY_TEAM_AGAIN}`, `sdr/team:${KEY_TEAM_AGAIN}`], "the member's removal took the team's key, or kept their own");
     const slackOn = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
     assert.ok(slackOn.ok && slackOn.turn.apiKey === KEY_TEAM_AGAIN, JSON.stringify(slackOn));
