@@ -26,7 +26,7 @@ type SidebarProps = ComponentProps<typeof Sidebar>;
 
 export function SidebarShell(props: SidebarProps) {
   const [open, setOpen] = useState(false);
-  const { collapsed: desktopCollapsed, toggle: toggleDesktopCollapse } = useSidebarCollapsed();
+  const { collapsed: desktopCollapsed, setCollapsed: setDesktopCollapsed } = useSidebarCollapsed();
   const pathname = usePathname();
   const hamburgerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -106,20 +106,25 @@ export function SidebarShell(props: SidebarProps) {
 
       {/* Floating reopen button — visible ONLY at md+ when desktop
           sidebar is collapsed. Anchored to top-left so the operator can
-          always find their way back. */}
-      {desktopCollapsed && (
-        <button
-          type="button"
-          onClick={toggleDesktopCollapse}
-          aria-label="Open navigation"
-          aria-expanded={false}
-          aria-controls="sidebar-drawer"
-          title="Reopen sidebar"
-          className="hidden md:inline-flex fixed top-3 left-3 z-30 h-9 w-9 items-center justify-center rounded-lg border border-hairline bg-bg-panel text-fg-muted hover:text-fg hover:bg-bg-elev shadow-card transition-colors duration-150"
-        >
-          <PanelLeftOpen className="w-4 h-4" />
-        </button>
-      )}
+          always find their way back.
+          ALWAYS RENDERED, shown by CSS (2026-10-08): `os-rail-reopen` in
+          app/globals.css displays it only under html[data-sidebar="collapsed"],
+          which the boot script sets before paint. Rendering it only when the
+          collapsed state was true put a <button> in the browser's first render
+          that the server never drew: React error #418 on every page for anyone
+          who had collapsed the sidebar. It opens explicitly rather than
+          toggling, so a click before the stored choice is read still opens. */}
+      <button
+        type="button"
+        onClick={() => setDesktopCollapsed(false)}
+        aria-label="Open navigation"
+        aria-expanded={false}
+        aria-controls="sidebar-drawer"
+        title="Reopen sidebar"
+        className="os-rail-reopen fixed top-3 left-3 z-30 h-9 w-9 items-center justify-center rounded-lg border border-hairline bg-bg-panel text-fg-muted hover:text-fg hover:bg-bg-elev shadow-card transition-colors duration-150"
+      >
+        <PanelLeftOpen className="w-4 h-4" />
+      </button>
 
       {/* The aside itself — Sidebar owns its own close button (mobile)
           via the onMobileClose prop, so the X always tracks the sidebar's
@@ -128,7 +133,7 @@ export function SidebarShell(props: SidebarProps) {
         {...props}
         isMobileOpen={open}
         onMobileClose={() => setOpen(false)}
-        onDesktopCollapse={toggleDesktopCollapse}
+        onDesktopCollapse={() => setDesktopCollapsed(true)}
         isDesktopCollapsed={desktopCollapsed}
       />
     </>
