@@ -644,6 +644,24 @@ async function main() {
     await resolveAgentAlerts({ tenantId: CLIENT_A, alertType: "sms_reconcile_errors", resolvedBy: "test reset" });
   });
 
+  await check("OASIS's own chat refusing an alert, and quoting OASIS's bot token back, is recorded without the token", async () => {
+    calls.length = 0;
+    refusingChats.add(ENV_TELEGRAM.OASIS_TELEGRAM_CHAT_ID);
+    let result: Awaited<ReturnType<typeof writeAgentAlert>>;
+    try {
+      result = await quietly(() =>
+        writeAgentAlert({ tenantId: OASIS, alertType: "oasis_chat_refused_probe", severity: "warn", title: "x" }),
+      );
+    } finally {
+      refusingChats.delete(ENV_TELEGRAM.OASIS_TELEGRAM_CHAT_ID);
+    }
+    assert.deepEqual(calls.map((c) => c.token), [ENV_TELEGRAM.OASIS_TELEGRAM_BOT_TOKEN], "not the operator chat");
+    const recorded = String(payloadOf((await alertCard(OASIS, "oasis_chat_refused_probe"))[0].payload).telegram);
+    assert.match(recorded, /^Not sent: Telegram said: Bad Request: chat not found \(bot\[token\]\)/);
+    assert.equal(result.telegram, recorded);
+    assert.ok(!ENV_TOKENS.some((t) => recorded.includes(t)), `a bot token reached the card: ${recorded}`);
+  });
+
   await check("once per open card: a refresh pages nobody and keeps the outcome the first push recorded", async () => {
     calls.length = 0;
     const alert = {

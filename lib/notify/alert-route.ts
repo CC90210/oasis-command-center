@@ -25,7 +25,7 @@
  */
 import "server-only";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { laneCredentials, sendTelegram } from "@/lib/notify/telegram";
 import { sendWorkspaceTelegram, workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
@@ -50,12 +50,16 @@ type LaneResult = { ok: boolean; reason?: string; degraded?: boolean };
 /**
  * OASIS's own chat's answer, in the card's words. A delivery that only
  * reached a lane's backup chat is not "Sent": the chat its people read is
- * broken, and the card must say so. Exported for tests.
+ * broken, and the card must say so. A refusal can quote the request back, bot
+ * token included, so the lane's `token` is cut out before any of Telegram's
+ * words reach the card (./workspace-telegram.ts does the same for a
+ * workspace's own bot). Exported for tests.
  */
-export function oasisLaneOutcome(sent: LaneResult): string {
+export function oasisLaneOutcome(sent: LaneResult, token?: string | null): string {
   if (sent.ok && !sent.degraded) return "Sent to Telegram";
   if (sent.ok) return "Sent to the backup Telegram chat: the main chat refused it";
-  const reason = sent.reason || "";
+  const raw = sent.reason || "";
+  const reason = token ? raw.split(token).join("[token]") : raw;
   if (reason.startsWith("telegram_lane_not_configured")) return "Not sent: the Telegram alert chat is not set up";
   const http = /^telegram_http_(\d+)(?::\s*([\s\S]*))?$/.exec(reason);
   if (http) return `Not sent: Telegram said: ${(http[2]?.trim() || `HTTP ${http[1]}`).slice(0, 200)}`;
@@ -74,7 +78,7 @@ export async function pushWorkspaceAlert(tenantId: string, text: string): Promis
       ok: false,
       reason: err instanceof Error ? err.message : "telegram_error",
     }));
-    return { delivered: sent.ok, outcome: oasisLaneOutcome(sent) };
+    return { delivered: sent.ok, outcome: oasisLaneOutcome(sent, laneCredentials("operator")?.token) };
   }
   const result = await sendWorkspaceTelegram(tenantId, text);
   return { delivered: result.ok, outcome: workspaceTelegramOutcome(result) };
