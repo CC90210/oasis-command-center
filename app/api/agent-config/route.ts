@@ -168,7 +168,7 @@ export async function POST(req: NextRequest) {
   // Upsert
   let existingQ = service
     .from("agent_model_config")
-    .select("id, encrypted_api_key, provider")
+    .select("id, encrypted_api_key, provider, model")
     .eq("tenant_id", tenantId)
     .eq("agent_key", agentKey);
   existingQ = effectiveUserId
@@ -204,11 +204,15 @@ export async function POST(req: NextRequest) {
   }
   // A model the registry knows is gone, or ends within its horizon, is never
   // saved (lib/ai/model-registry.ts): Settings lists a saved value as itself,
-  // so a save can never put a model back that no longer answers. A model the
-  // registry does not know (any of OpenRouter's catalog, a local tag) is
-  // saved as before, and Settings says plainly that nobody here vouches for it.
-  const modelCheck = saveCheck(provider, model);
-  if (!modelCheck.ok) {
+  // so a save can never put a model back that no longer answers. A row that
+  // is ALREADY on such a model keeps it through an edit that does not change
+  // it (a new key, the on/off switch, the prompt): nothing is put back, its
+  // calls already send the replacement, and Settings says so next to it. A
+  // model the registry does not know (any of OpenRouter's catalog, a local
+  // tag) is saved as before, and Settings says nobody here vouches for it.
+  const unchangedModel = existingProvider === provider && existing?.model === model;
+  const modelCheck = unchangedModel ? null : saveCheck(provider, model);
+  if (modelCheck && !modelCheck.ok) {
     return NextResponse.json({ ok: false, error: "model_not_offered", message: modelCheck.message }, { status: 400 });
   }
 

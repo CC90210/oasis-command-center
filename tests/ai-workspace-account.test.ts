@@ -2084,6 +2084,25 @@ async function main() {
     const unknownModel = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "openrouter", model: "some-vendor/new-model", api_key: "sk-or-v1-new-row-0613" })));
     assert.equal(unknownModel.status, 200, JSON.stringify(unknownModel.body));
     await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = 'sdr'", args: [GONECO] });
+    // A row ALREADY on a gone model keeps it through an edit that does not
+    // change it (CodeRabbit on #555): nothing is put back, and its calls
+    // already send the replacement. Changing to another gone model is refused.
+    await db.execute({
+      sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'sdr', 'google', 'gemini-2.5-pro', ?, 1, ?)",
+      args: [GONECO, encryptField("AIza-sdr-row-0620"), stamp],
+    });
+    try {
+      const switchedOff = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-pro", enabled: false })));
+      assert.equal(switchedOff.status, 200, `an edit of a row on a gone model was refused: ${JSON.stringify(switchedOff.body)}`);
+      const rekeyed = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-pro", api_key: "AIza-sdr-new-0621" })));
+      assert.equal(rekeyed.status, 200, JSON.stringify(rekeyed.body));
+      const toAnotherGone = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-flash" })));
+      assert.equal(toAnotherGone.status, 400, "a change to another gone model was saved");
+      const saved = (await rows(GONECO)).find((r) => r.agent_key === "sdr");
+      assert.deepEqual([saved?.model, saved?.key, saved?.enabled], ["gemini-2.5-pro", "AIza-sdr-new-0621", 1]);
+    } finally {
+      await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = 'sdr'", args: [GONECO] });
+    }
     // The connect route too: a gone model is refused before any key is tested.
     sent = [];
     const connectGone = await connect({ provider: "google", api_key: "AIza-connect-0614", model: "gemini-2.5-flash" });
