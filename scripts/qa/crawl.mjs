@@ -78,9 +78,12 @@ const H418_PROBE = `(() => {
   const send = (kind, msg) => {
     try {
       const dom = document.documentElement ? document.documentElement.outerHTML : "";
-      if (window.__h418Report) window.__h418Report({ kind, msg: String(msg).slice(0, 30000), href: location.href, readyState: document.readyState, t: performance.now(), dom });
+      if (window.__h418Report) window.__h418Report({ kind, msg: String(msg).slice(0, 30000), href: location.href, readyState: document.readyState, t: performance.now(), dom, info: window.__h418Info || null, infoErr: window.__h418InfoErr || null, root: window.__h418Root || null, dcl: window.__h418Dcl || null, rsLog: window.__h418Rs || null });
     } catch (e) {}
   };
+  window.__h418Rs = [[document.readyState, performance.now()]];
+  document.addEventListener("readystatechange", () => { window.__h418Rs.push([document.readyState, performance.now()]); });
+  document.addEventListener("DOMContentLoaded", () => { window.__h418Dcl = performance.now(); }, { once: true });
   window.addEventListener("error", (e) => {
     const m = String((e && e.message) || (e && e.error && e.error.message) || "");
     if (/#41[89]|#42[0-9]|Hydration|hydrat|didn't match/i.test(m)) send("error", m + (e && e.error && e.error.digest ? " digest=" + e.error.digest : ""));
