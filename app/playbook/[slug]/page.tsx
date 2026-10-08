@@ -1,4 +1,6 @@
 import { requirePlaybookReader } from "@/lib/playbook-access";
+import { agentTextFor } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
@@ -32,11 +34,14 @@ export default async function PlaybookSlugPage({
     if (err instanceof PlaybookNotFoundError) notFound();
     throw err;
   }
+  // The manual is written by and for OASIS's founders: anyone else reads each
+  // agent named as its department (lib/os/agent-names.ts).
+  const internalNames = await viewerReadsInternalAgentNames();
 
   return (
     <div className="space-y-6 max-w-4xl">
       <PageHeader
-        title={file.title}
+        title={agentTextFor(file.title, internalNames)}
         subtitle={
           <span>
             <Link href="/playbook" className="text-fg-muted hover:text-accent underline-offset-2 hover:underline">
@@ -49,7 +54,7 @@ export default async function PlaybookSlugPage({
       />
       <Card title="" subtitle="">
         <article className="prose prose-invert prose-headings:text-fg prose-p:text-fg-muted prose-strong:text-fg prose-a:text-accent max-w-none">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{file.body}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{agentTextFor(file.body, internalNames)}</ReactMarkdown>
         </article>
       </Card>
     </div>

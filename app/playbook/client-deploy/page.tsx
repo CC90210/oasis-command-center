@@ -1,4 +1,4 @@
-import { requirePlaybookReader } from "@/lib/playbook-access";
+import { requirePlaybookFounder } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -313,8 +313,9 @@ function StepRow({ step, open }: { step: Phase["steps"][number]; open: readonly 
 }
 
 export default async function ClientDeployPage() {
-  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
-  await requirePlaybookReader();
+  // OASIS's founders only (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS): an
+  // operator runbook for OASIS's own harness; everyone else gets the 404.
+  await requirePlaybookFounder();
   const open = await openAskDepartments();
   const totalSteps = PHASES.reduce((acc, p) => acc + p.steps.length, 0);
 

@@ -14,13 +14,27 @@ const ICON_MAP = {
   Users, DollarSign, Phone, Calendar,
 } as const;
 
+/** What a group of actions is headed with: a name and its one-line description. */
+export type QuickActionHeading = { label: string; tagline: string };
+
 /**
  * Renders curated quick actions per agent. Click -> opens the department that
  * answers for the agent (lib/os/chat-href.ts askDepartment) with the prompt in
  * `?ask=`. The department's composer prefills it once and cleans the URL; the
  * person reviews it and presses Send. Nothing is sent on their behalf.
+ *
+ * `headings`, by agent slug, is what the page decided this viewer calls each
+ * agent (lib/os/agent-names.ts: its department, for anyone but OASIS's
+ * founders). Without it a group is headed by the agent's own name, which only
+ * the operator's /reasoning page leaves it to do.
  */
-export function QuickActionsGrid({ actions }: { actions: QuickAction[] }) {
+export function QuickActionsGrid({
+  actions,
+  headings,
+}: {
+  actions: QuickAction[];
+  headings?: Readonly<Record<string, QuickActionHeading>>;
+}) {
   // Group by agent so the page reads as "what each agent can do for you"
   const byAgent = actions.reduce<Record<string, QuickAction[]>>((acc, q) => {
     if (!acc[q.agent]) acc[q.agent] = [];
@@ -53,13 +67,14 @@ export function QuickActionsGrid({ actions }: { actions: QuickAction[] }) {
         .filter((slug) => byAgent[slug]?.length)
         .map((slug) => {
           const info = getAgentInfo(slug as string);
+          const heading = headings?.[slug] ?? { label: info.label, tagline: info.tagline };
           return (
             <div key={slug as string}>
               <div className="flex items-baseline gap-2 mb-2.5">
                 <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
-                  {info.label}
+                  {heading.label}
                 </span>
-                <span className="text-xs text-fg-muted">{info.tagline}</span>
+                <span className="text-xs text-fg-muted">{heading.tagline}</span>
               </div>
               <div className="grid sm:grid-cols-2 gap-2.5">
                 {byAgent[slug].map((q) => {
