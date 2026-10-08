@@ -4,13 +4,26 @@
  * TelegramConnectCard — self-service walkthrough that lets any employee create
  * their OWN Telegram bot in BotFather and link it, with no developer help.
  * Three states: (1) create + paste token, (2) message the bot to link the chat,
- * (3) connected. Backed by /api/integrations/personal/telegram.
+ * (3) linked. Backed by /api/integrations/personal/telegram.
+ *
+ * Its status line is the API's `status`, the words Settings > Notifications
+ * shows for the same bot (lib/os/connectors.ts personalTelegramStatus). No
+ * sender reads a personal bot yet, so nothing here promises alerts.
  */
 
 import { useEffect, useState } from "react";
 import { Loader2, Check, Copy, Send, X } from "lucide-react";
+import { StatusLine } from "@/components/os/connections/StatusLine";
+import type { ConnectorStatus } from "@/lib/os/connectors";
 
-type Status = { connected: boolean; username: string | null; linked: boolean; chat_id: string | null };
+type Status = {
+  connected: boolean;
+  username: string | null;
+  linked: boolean;
+  chat_id: string | null;
+  /** The resolved words for this bot; absent only from an older server. */
+  status?: ConnectorStatus;
+};
 
 function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -38,7 +51,7 @@ export function TelegramConnectCard() {
       const r = await fetch("/api/integrations/personal/telegram", { cache: "no-store" });
       const b = (await r.json().catch(() => ({}))) as { ok?: boolean } & Status;
       if (r.ok && b.ok) {
-        setStatus({ connected: b.connected, username: b.username, linked: b.linked, chat_id: b.chat_id });
+        setStatus({ connected: b.connected, username: b.username, linked: b.linked, chat_id: b.chat_id, status: b.status });
         setLoadState("ready");
       } else {
         setStatus(null);
@@ -98,7 +111,7 @@ export function TelegramConnectCard() {
         );
         return;
       }
-      setFlash(`Linked to ${b.chat_name}. You're connected ✓`);
+      setFlash(`Linked to ${b.chat_name}.`);
       await refresh();
     } catch (linkError) {
       console.error("[TelegramConnectCard.link]", linkError);
@@ -133,21 +146,21 @@ export function TelegramConnectCard() {
         <div>
           <div className="flex items-center gap-2">
             <Send className="h-4 w-4 text-accent" />
-            <span className="font-semibold text-sm text-fg">Your personal Telegram alert bot</span>
+            <span className="font-semibold text-sm text-fg">Your own Telegram bot</span>
             {loadState === "loading" ? (
               <span className="inline-flex items-center gap-1 rounded border border-bg-border bg-bg-elev/60 px-1.5 py-0.5 text-[10px] font-medium text-fg-dim"><Loader2 className="h-3 w-3 animate-spin" /> Checking</span>
-            ) : loadState === "unavailable" ? (
-              <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">Status unavailable</span>
-            ) : linked ? (
-              <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"><Check className="h-3 w-3" />Connected</span>
-            ) : connected ? (
-              <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">Bot saved · link your chat</span>
             ) : (
-              <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">Not connected</span>
+              <StatusLine
+                status={
+                  loadState === "ready" && status?.status
+                    ? status.status
+                    : { kind: "unknown", label: "Status unavailable" }
+                }
+              />
             )}
           </div>
           <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-            This bot belongs only to your signed-in profile. It is separate from the workspace Telegram bridge and from every teammate&apos;s alert bot.
+            This bot belongs only to your signed-in profile. It is separate from the workspace&apos;s team bot in Connections and from every teammate&apos;s bot. OASIS does not send alerts to personal bots yet.
           </div>
         </div>
         {(connected || linked) && (
@@ -203,7 +216,7 @@ export function TelegramConnectCard() {
       {/* STEP 3 — done */}
       {loadState === "ready" && linked && (
         <div className="mt-3 text-[12.5px] text-fg-muted">
-          Bot <span className="font-mono text-accent">@{status?.username}</span> is linked to your Telegram. You&apos;ll get your alerts here.
+          Bot <span className="font-mono text-accent">@{status?.username}</span> is linked to your Telegram chat. OASIS does not send alerts to it yet.
         </div>
       )}
     </div>

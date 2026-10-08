@@ -1,11 +1,21 @@
 /**
  * /settings/notifications — Settings › Notifications. Everyone.
  *
- * Says where YOUR alerts go today, from the one per-person channel that exists:
- * your own Telegram alert bot (lib/integrations/telegram-personal.ts, the same
- * strict read /api/integrations/personal/telegram serves the card with). A
- * failed read is "Status unavailable", never "not set up" — the reader throws
- * on purpose so those two can't be confused.
+ * Two different Telegram bots, each named for what it is, each in the words
+ * every other screen uses for it (2026-10-08, CC: Notifications said Telegram
+ * was "not set up" while Connections said "Connected"):
+ *
+ *   - The WORKSPACE's team bot: the Connections card's own status
+ *     (lib/os/connectors.ts resolveConnectorStatus over the hub's facts), so
+ *     this page, Connections and Chat apps can never answer differently. Owners
+ *     and admins see it, the same rule as Chat apps and Connections.
+ *   - YOUR OWN bot: lib/os/connectors.ts personalTelegramStatus over
+ *     lib/integrations/telegram-personal.ts readPersonalTelegramFact, the same
+ *     words its setup card shows. Nothing sends to a personal bot yet, and the
+ *     page says so instead of promising alerts.
+ *
+ * A failed read is "Status unavailable", never "not set up": both readers fail
+ * loud so those two can't be confused.
  *
  * Choosing which events notify you has no store yet, and the page says so,
  * as a state with no release promise, rather than rendering toggles that
@@ -17,55 +27,78 @@ import { requireSettingsSection } from "@/components/settings/settings-viewer";
 import { PageFrame } from "@/components/os/PageFrame";
 import { ConnectorIcon } from "@/components/os/connections/ConnectorIcon";
 import { StatusLine } from "@/components/os/connections/StatusLine";
-import { connectorBySlug, type ConnectorStatus } from "@/lib/os/connectors";
-import { getTelegramStatus } from "@/lib/integrations/telegram-personal";
+import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
+import {
+  connectorBySlug,
+  connectorHref,
+  personalTelegramStatus,
+  resolveConnectorStatus,
+  type ConnectorStatus,
+} from "@/lib/os/connectors";
+import { readPersonalTelegramFact } from "@/lib/integrations/telegram-personal";
 
 export const dynamic = "force-dynamic";
 
-async function personalTelegramStatus(tenantId: string, userId: string): Promise<ConnectorStatus> {
+async function yourTelegram(tenantId: string, userId: string): Promise<ConnectorStatus> {
   try {
-    const s = await getTelegramStatus(tenantId, userId);
-    if (s.linked) {
-      // Verified when it was set up (the bot token passed getMe and the chat id
-      // was read from the bot's own updates), not re-checked on every visit.
-      return {
-        kind: "configured",
-        label: s.username ? `Linked · @${s.username}` : "Linked",
-      };
-    }
-    if (s.connected) {
-      return { kind: "attention", label: "Bot saved · chat not linked yet" };
-    }
-    return { kind: "not_connected", label: "Not set up" };
+    return personalTelegramStatus(await readPersonalTelegramFact(tenantId, userId));
   } catch (error) {
     console.error("[settings.notifications.telegram]", error);
-    return { kind: "unknown", label: "Status unavailable" };
+    return personalTelegramStatus(null);
   }
 }
 
 export default async function SettingsNotificationsPage() {
   const viewer = await requireSettingsSection("notifications");
   const telegram = connectorBySlug("telegram");
-  const status = await personalTelegramStatus(viewer.tenantId, viewer.userId);
+  const nowMs = Date.now();
+  const [workspaceBot, yours] = await Promise.all([
+    viewer.access.canManage && telegram
+      ? loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId }).then((facts) =>
+          resolveConnectorStatus(telegram, facts, nowMs),
+        )
+      : Promise.resolve(null),
+    yourTelegram(viewer.tenantId, viewer.userId),
+  ]);
 
   return (
-    <PageFrame title="Notifications" subtitle="Where your own alerts reach you.">
+    <PageFrame title="Notifications" subtitle="The workspace's Telegram bot, and your own.">
       <div className="space-y-4">
         <section className="rounded-xl border border-hairline bg-bg-panel">
           <div className="flex flex-wrap items-start gap-3 px-4 py-4">
             {telegram && <ConnectorIcon def={telegram} size="lg" />}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <h2 className="text-sm font-semibold text-fg">Your Telegram alert bot</h2>
-                <StatusLine status={status} />
+                <h2 className="text-sm font-semibold text-fg">Workspace Telegram bot</h2>
+                {workspaceBot && <StatusLine status={workspaceBot} />}
               </div>
               <p className="mt-1 text-[13px] leading-5 text-fg-muted">
-                A bot that belongs only to your login and sends your own alerts to your phone. A teammate&apos;s bot
-                never receives yours.
+                {workspaceBot
+                  ? `The team bot set up in Connections, with the same status it shows there. ${workspaceBot.detail ?? ""}`
+                  : "The team bot is set up in Connections by an owner or admin."}
+              </p>
+            </div>
+            {workspaceBot && (
+              <Link href={connectorHref("telegram")} prefetch={false} className="btn-secondary">
+                Open in Connections
+              </Link>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-hairline bg-bg-panel">
+          <div className="flex flex-wrap items-start gap-3 px-4 py-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <h2 className="text-sm font-semibold text-fg">Your own Telegram bot</h2>
+                <StatusLine status={yours} />
+              </div>
+              <p className="mt-1 text-[13px] leading-5 text-fg-muted">
+                A bot only your login uses, separate from the workspace bot. {yours.detail}
               </p>
             </div>
             <Link href="/settings/chat-apps" prefetch={false} className="btn-secondary">
-              {status.kind === "configured" ? "Manage" : "Set up"}
+              {yours.kind === "not_connected" ? "Set up" : "Manage"}
             </Link>
           </div>
         </section>
