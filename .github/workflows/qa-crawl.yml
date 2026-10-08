@@ -113,6 +113,22 @@ jobs:
             --repeat 6 \
             --match "$PROBE_MATCH"
           ls -la "$QA_DIR/report/h418" 2>/dev/null | head -60 || echo "no h418 captures"
+      - name: Crawl as a viewer who collapsed the sidebar
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$QA_DIR/report-collapsed"
+          npm run qa:crawl -- \
+            --base "http://localhost:$QA_PORT" \
+            --db "$QA_DB" \
+            --seed "$QA_DIR/seed.json" \
+            --out "$QA_DIR/report-collapsed" \
+            --egress-log "$EGRESS_LOG" \
+            --concurrency 2 \
+            --repeat 2 \
+            --preset-collapsed \
+            --match "^/(settings|pipeline|t/oasis-ai-cc/contacts|onboarding)$"
+          ls -la "$QA_DIR/report-collapsed/h418" 2>/dev/null | head -60 || echo "no h418 captures"
       - name: Keep the built client chunks
         if: always()
         run: |
@@ -126,7 +142,90 @@ jobs:
           name: h418-prod
           path: |
             ${{ env.QA_DIR }}/report
+            ${{ env.QA_DIR }}/report-collapsed
             ${{ env.QA_DIR }}/logs
             ${{ env.QA_DIR }}/chunks
+          retention-days: 7
+          if-no-files-found: warn
+
+  full-crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Chromium for Playwright (this run only)
+        run: |
+          npm i --no-save --no-audit --no-fund playwright@1.58.2
+          npx playwright install --with-deps chromium
+      - name: Local environment
+        run: |
+          set -euo pipefail
+          QA_DIR="$RUNNER_TEMP/qa"
+          mkdir -p "$QA_DIR/report" "$QA_DIR/logs"
+          SESSION_SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64url'))")"
+          FIELD_KEY="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))")"
+          echo "::add-mask::$SESSION_SECRET"
+          echo "::add-mask::$FIELD_KEY"
+          {
+            echo "QA_DIR=$QA_DIR"
+            echo "QA_DB=$QA_DIR/occ-qa.db"
+            echo "TURSO_DB_PATH=$QA_DIR/occ-qa.db"
+            echo "TURSO_DATABASE_URL=file:$QA_DIR/occ-qa.db"
+            echo "AUTH_SESSION_SECRET=$SESSION_SECRET"
+            echo "BRAVO_FIELD_ENCRYPTION_KEY=$FIELD_KEY"
+            echo "PUBLIC_APP_URL=http://localhost:$QA_PORT"
+            echo "EGRESS_LOG=$QA_DIR/logs/egress.log"
+            echo "QA_GUARD=$GITHUB_WORKSPACE/scripts/qa/egress-guard.cjs"
+          } >> "$GITHUB_ENV"
+      - name: Local database
+        run: |
+          set -euo pipefail
+          node scripts/qa/build-db.mjs "$QA_DB"
+          NODE_OPTIONS="--require $QA_GUARD --conditions=react-server" node --import tsx scripts/qa/seed.mjs "$QA_DB" "$QA_DIR/seed.json"
+      - name: Build
+        env:
+          NODE_OPTIONS_EXTRA: "--max-old-space-size=4096"
+        run: NODE_OPTIONS="--require $QA_GUARD $NODE_OPTIONS_EXTRA" npm run build
+      - name: Instrument the built React DOM client (probe only)
+        run: node scripts/qa/patch-react-probe.cjs .next/static/chunks
+      - name: Start
+        run: |
+          set -euo pipefail
+          NODE_OPTIONS="--require $QA_GUARD" nohup npx next start --port "$QA_PORT" --hostname 127.0.0.1 > "$QA_DIR/logs/server.log" 2>&1 &
+          echo $! > "$QA_DIR/server.pid"
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$QA_PORT/api/health" > /dev/null 2>&1; then echo "server up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          tail -n 80 "$QA_DIR/logs/server.log"
+          exit 1
+      - name: Crawl every route (same as the QA crawl)
+        run: |
+          set -euo pipefail
+          npm run qa:crawl -- \
+            --base "http://localhost:$QA_PORT" \
+            --db "$QA_DB" \
+            --seed "$QA_DIR/seed.json" \
+            --out "$QA_DIR/report" \
+            --egress-log "$EGRESS_LOG" \
+            --concurrency 2
+          ls -la "$QA_DIR/report/h418" 2>/dev/null | head -60 || echo "no h418 captures"
+      - name: Stop
+        if: always()
+        run: if [ -f "$QA_DIR/server.pid" ]; then kill "$(cat "$QA_DIR/server.pid")" 2>/dev/null || true; fi
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h418-full
+          path: |
+            ${{ env.QA_DIR }}/report
+            ${{ env.QA_DIR }}/logs
           retention-days: 7
           if-no-files-found: warn

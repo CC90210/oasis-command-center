@@ -10,11 +10,15 @@
  *
  * Storage key is versioned so future schema changes can ignore stale
  * values rather than breaking the layout.
+ *
+ * The key and the <head> boot script live in lib/sidebar-boot.ts, a plain
+ * module: the root layout imports the script, and a value a Server Component
+ * imports from this "use client" module reaches the browser as a chunk
+ * reference instead of a string (React error #418, 2026-10-08).
  */
 
 import { useCallback, useEffect, useState } from "react";
-
-export const SIDEBAR_COLLAPSED_KEY = "oasis.ui.sidebar_collapsed.v1";
+import { SIDEBAR_COLLAPSED_KEY } from "@/lib/sidebar-boot";
 
 function readInitial(): boolean {
   if (typeof window === "undefined") return false;
@@ -29,8 +33,8 @@ export function useSidebarCollapsed() {
   // useState's initializer reads localStorage exactly once before paint
   // so we don't have a flash of "expanded" → "collapsed" on every nav.
   // The data-attribute on <html> is also set in a synchronous script
-  // in the layout (RootScript below), giving the CSS the value before
-  // React even mounts.
+  // in the layout (SIDEBAR_BOOT_SCRIPT, lib/sidebar-boot.ts), giving the
+  // CSS the value before React even mounts.
   const [collapsed, setCollapsedState] = useState<boolean>(readInitial);
 
   // Reflect changes to the data-attribute + storage on every flip. The
@@ -62,11 +66,3 @@ export function useSidebarCollapsed() {
   const setCollapsed = useCallback((value: boolean) => setCollapsedState(value), []);
   return { collapsed, toggle, setCollapsed };
 }
-
-/**
- * Inline script string we render in `<head>` to set the data-attribute
- * synchronously, BEFORE any CSS paints. Without this the page's first
- * paint uses the expanded sidebar width and visibly shifts when React
- * hydrates and applies the collapsed value.
- */
-export const SIDEBAR_BOOT_SCRIPT = `(function(){try{var v=localStorage.getItem(${JSON.stringify(SIDEBAR_COLLAPSED_KEY)});document.documentElement.dataset.sidebar=(v==='true')?'collapsed':'expanded';}catch(e){document.documentElement.dataset.sidebar='expanded';}})();`;

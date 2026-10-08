@@ -70,6 +70,8 @@ const opts = {
   egressLog: arg("--egress-log", process.env.EGRESS_LOG || ""),
   // H418 PROBE (throwaway diagnostic branch): visit every route N times per context.
   repeat: Math.max(1, Number(arg("--repeat", process.env.QA_REPEAT || "1")) || 1),
+  // H418 PROBE: a viewer who collapsed the desktop sidebar (the stored value the boot script reads).
+  presetCollapsed: process.argv.includes("--preset-collapsed"),
 };
 
 // H418 PROBE: captured at the moment React reports a hydration error, in every
@@ -581,6 +583,9 @@ async function main() {
           if (rec.h418.length < 6) rec.h418.push(payload);
         });
         await ctx.addInitScript(H418_PROBE);
+        if (opts.presetCollapsed) {
+          await ctx.addInitScript(`try{localStorage.setItem("oasis.ui.sidebar_collapsed.v1","true")}catch(e){}`);
+        }
         await ctx.addInitScript(READY_PROBE);
         // Nothing leaves the machine from the browser either. Each blocked
         // request is counted by host, and the first few are kept with the page
