@@ -2,10 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
+/**
+ * CI exports NODE_OPTIONS=--conditions=react-server, which a child inherits and
+ * which makes react-dom/server refuse to load. Drop only that condition.
+ */
+export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const opts = (env.NODE_OPTIONS ?? "")
+    .replace(/(?:--conditions|-C)(?:=|\s+)react-server\b/g, "")
+    .replace(/\s+/g, " ").trim();
+  const out = { ...env };
+  if (opts) out.NODE_OPTIONS = opts; else delete out.NODE_OPTIONS;
+  return out;
+}
+
 /** Render cases in one child process (plain node, full React). */
 export function render(cases: Array<{ view: string; props: unknown }>): string[] {
   const r = spawnSync(process.execPath, ["--import", "tsx", "tests/seo.render.ts"], {
-    input: JSON.stringify(cases), encoding: "utf8", timeout: 60_000,
+    input: JSON.stringify(cases), encoding: "utf8", timeout: 60_000, env: childEnv(process.env),
   });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout) as string[];
@@ -201,4 +214,12 @@ test("sites-actions: the 'Add a site' link is white text on accent-muted with a 
   assert.match(link!, /text-white/, link);
   assert.doesNotMatch(link!, /hover:bg-accent\b/, link);
   assert.match(link!, /hover:bg-\[rgb\(29_78_216\)\]/, link);
+});
+
+test("render child drops CI's react-server condition and keeps every other option", () => {
+  const env = childEnv({ PATH: "p", NODE_OPTIONS: "--max-old-space-size=4096 --conditions=react-server --use-system-ca" });
+  assert.equal(env.NODE_OPTIONS, "--max-old-space-size=4096 --use-system-ca");
+  assert.equal(env.PATH, "p");
+  assert.equal("NODE_OPTIONS" in childEnv({ NODE_OPTIONS: "--conditions=react-server" }), false);
+  assert.equal(childEnv({ NODE_OPTIONS: "-C react-server" }).NODE_OPTIONS, undefined);
 });

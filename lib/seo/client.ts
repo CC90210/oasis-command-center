@@ -51,21 +51,31 @@ export function createSeoClient(opts: Opts) {
     const ms = msOverride ?? timeoutMs;
     const headers: Record<string, string> = { authorization: `Bearer ${key}` };
     if (body !== undefined) headers["content-type"] = "application/json";
-    const req = new Request(ORIGIN + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    // One deadline covers the request AND the body read: a Worker that sends headers
+    // then stalls the body must time out too. On expiry the request is aborted.
+    const abort = new AbortController();
+    const req = new Request(ORIGIN + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: abort.signal });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { abort.abort(); reject(new SeoUnavailable("timeout")); }, ms);
+    });
     let res: Response;
+    let parsed: unknown;
     try {
-      res = await Promise.race([
-        opts.fetcher.fetch(req),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SeoUnavailable("timeout")), ms); }),
-      ]);
-    } catch (e) {
-      throw e instanceof SeoUnavailable ? e : new SeoUnavailable("unreachable");
+      try {
+        res = await Promise.race([opts.fetcher.fetch(req), deadline]);
+      } catch (e) {
+        throw e instanceof SeoUnavailable ? e : new SeoUnavailable("unreachable");
+      }
+      try {
+        parsed = await Promise.race([res.json(), deadline]);
+      } catch (e) {
+        if (e instanceof SeoUnavailable) { res.body?.cancel().catch(() => undefined); throw e; }
+        throw new SeoUnavailable(`bad_response_${res.status}`);
+      }
     } finally {
       if (timer) clearTimeout(timer);
     }
-    let parsed: unknown;
-    try { parsed = await res.json(); } catch { throw new SeoUnavailable(`bad_response_${res.status}`); }
     if (!isObj(parsed)) throw new SeoUnavailable(`bad_response_${res.status}`);
     if (res.ok || res.status === 409) return { status: res.status, json: parsed };
     const code = typeof parsed.code === "string" ? parsed.code : "unknown";

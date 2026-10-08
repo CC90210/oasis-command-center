@@ -132,6 +132,19 @@ test("a Worker that never answers times out as unavailable", async () => {
   await assert.rejects(c.listSites(), (e: unknown) => e instanceof SeoUnavailable && e.reason === "timeout");
 });
 
+test("a Worker that sends headers then stalls the body still times out, and the request is aborted", async () => {
+  let signal: AbortSignal | undefined;
+  const stalled = new ReadableStream<Uint8Array>({ start() { /* never enqueues, never closes */ } });
+  const c = createSeoClient({
+    fetcher: { fetch: (req: Request) => { signal = req.signal; return Promise.resolve(new Response(stalled, { status: 200, headers: { "content-type": "application/json" } })); } },
+    readKey: READ, timeoutMs: 30,
+  });
+  const t0 = Date.now();
+  await assert.rejects(c.listSites(), (e: unknown) => e instanceof SeoUnavailable && e.reason === "timeout");
+  assert.ok(Date.now() - t0 < 2_000, "body read must share the call's deadline");
+  assert.equal(signal?.aborted, true, "the stalled request is aborted, not left running");
+});
+
 test("the default check-access timeout is 20s, longer than the general 8s default (M1)", () => {
   assert.equal(SEO_TIMEOUT_MS, 8_000);
   assert.equal(SEO_CHECK_ACCESS_TIMEOUT_MS, 20_000);
