@@ -102,6 +102,7 @@ jobs:
           # unknown-is-not-zero) and none of them had a CI entry: every OS PR
           # before this one deployed on typecheck + build alone.
           npm run test:os
+          npm run test:seo
           # Repo invariant: the chat's CLI-runtime storage key is declared
           # once. It used to be a literal in two files synchronised by a
           # comment — desyncing them breaks the runtime picker silently.
@@ -177,6 +178,13 @@ jobs:
           npm run test:legal
           npm run test:media
           npm run test:onboarding
+          # ADDED 2026-10-01 (W10a). Every connection a workspace can see works
+          # or says it does not: Twilio end to end per workspace (keys, the
+          # read-only test's plain states, webhook addresses, each workspace's
+          # own signature token, live-send gate) against a mocked Twilio, and
+          # the not-built apps' requests, the setup step and AI brain on the
+          # same drawer and statuses as Settings > Connections.
+          npm run test:connections
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
       # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
@@ -227,3 +235,24 @@ jobs:
           set -o pipefail
           npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
           node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run
+      # EVERY CHUNK THE WORKER CAN ASK FOR IS IN IT (2026-10-02, #531 review).
+      # workerd has no file system, so OpenNext turns webpack's
+      # require("./chunks/" + id) into a switch over the numbered files in
+      # .next/server/chunks/, ending in "Unknown chunk". next.config.js shapes
+      # how the Worker's server compile splits chunks, so this reads the result:
+      # every chunk id an entry's startup list or a dynamic import() can request
+      # must have a case and a file. Deterministic, a few seconds.
+      - name: Check every server chunk the Worker can request is inlined
+        run: node --import tsx scripts/check-worker-chunks.ts .open-next/server-functions/default/.next/server
+      # THE BUILT WORKER, COLD (2026-10-02, #531 review). Starts it under
+      # workerd (wrangler dev, no Cloudflare account, no secrets) once per
+      # group of routes, so each group's first request meets a cold isolate,
+      # and fails on a startup crash, a timeout, or any chunk-loading error.
+      # Signed-in requests use a throwaway session secret and run until their
+      # first database call, which fails at once (no database here); that is
+      # how they reach the dynamic imports behind lib/supabase-server.ts and
+      # lib/bridge-proxy.ts. Ends with a self-test: one chunk removed, and the
+      # gate must catch it. See scripts/check-worker-runtime.ts.
+      - name: Run the built Worker cold under workerd
+        timeout-minutes: 8
+        run: node --import tsx scripts/check-worker-runtime.ts

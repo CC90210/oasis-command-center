@@ -128,6 +128,27 @@ const TESTS = [
   // returned 400 next_action_required since #488; this runs the client's date
   // through the server's own validator.
   "tests/web-leads-callmode-next-action.test.ts",
+  // The four qualification gates: new wording, unchanged stored keys, legacy
+  // records still read as qualified (book-the-meet plan, Task 2).
+  "tests/sales-qualification.test.ts",
+  // Meeting times in the prospect's own zone; DST gaps refused, not shifted
+  // (book-the-meet plan, Task 3).
+  "tests/meeting-time-zones.test.ts",
+  // Booking from the call screen: lapsed claims refused; do-not-call booked
+  // only on the rep's "owner asked" confirmation (book-the-meet plan, Task 4).
+  "tests/book-meet-route.test.ts",
+  // What the call-screen booking panel reads first; "may book" must agree
+  // with the booking route (book-the-meet plan, Task 5).
+  "tests/web-leads-booking-context-route.test.ts",
+  // The call-screen booking flow: call order, failures, request ids, copy,
+  // and do-not-call as a box to tick (book-the-meet plan, Task 6).
+  "tests/book-meet-flow.test.ts",
+  // The Book the Meet form in every state a rep sees, including the
+  // do-not-call "owner asked" box (book-the-meet plan, Task 7).
+  "tests/book-meet-panel.test.ts",
+  // Book the Meet wired onto the battle card: a Hero button, and the form
+  // above the call outcomes, never collapsible (book-the-meet plan, Task 8).
+  "tests/book-meet-wiring.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

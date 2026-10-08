@@ -85,7 +85,10 @@ export function buildProvisionedManifest(input: ProvisionedManifestInput): Tenan
  *   department teammates     the neutral agents lib/provisioning/team.ts binds
  *                            to departments. One that stays keeps its stored
  *                            binding (a name the owner gave it, enabled or
- *                            not); one whose department was removed goes.
+ *                            not) but leads the departments chosen now (its
+ *                            `departments`, W4a: a stored binding from before
+ *                            that field would otherwise lead nothing); one
+ *                            whose department was removed goes.
  * Everything else is the workspace's own and is kept as stored: brand, nav,
  * pages, data_model, default_prompts, permissions, connectors, tier, ui, and
  * every teammate that is not a department teammate.
@@ -97,7 +100,7 @@ export function mergeProvisionedManifest(stored: TenantManifest, built: TenantMa
   const storedBySlug = new Map(stored.agents.map((a) => [a.slug, a]));
   const team: ManifestAgentBinding[] = built.agents.map((a) => {
     const prev = storedBySlug.get(a.slug);
-    return prev ? { ...prev } : { ...a };
+    return prev ? { ...prev, departments: [...(a.departments ?? [])] } : { ...a };
   });
   const own = stored.agents.filter((a) => !DEPARTMENT_TEAMMATE_SLUGS.has(a.slug)).map((a) => ({ ...a }));
   const agents = [...team, ...own];

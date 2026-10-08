@@ -8,8 +8,9 @@
  * "Your tools" first: live connectors this workspace has already set up in some
  * way (connected, saved, failing, or not checkable right now). Then the apps
  * that can be connected today, grouped by purpose, with the Custom key card
- * last. Apps that are not built yet are one compact "Coming later" row, not a
- * grid of cards that do nothing. Statuses arrive computed from the server
+ * last. Apps that are not built yet are one compact "Not built yet" row, not a
+ * grid of cards that do nothing; each opens its drawer, which says why and
+ * files a request on OASIS's desk. Statuses arrive computed from the server
  * (lib/os/connectors.ts resolveConnectorStatus), so this component only
  * arranges them — it has no way to make a card look more connected than the
  * server said.
@@ -71,11 +72,30 @@ const CUSTOM_KEYS = {
   words: ["custom", "key", "keys", "secret", "token", "webhook", "api", "env", "other"],
 };
 
+/**
+ * What clicking a card does. Keys (and an app that is not built) open the
+ * drawer, where the app is set up or requested; only an OAuth popup or a page
+ * link leaves it. Inside the workspace setup (`embedded`) a Settings page is
+ * not reachable yet, so a page link opens the drawer, which says where.
+ */
+export function connectorClickAction(def: ConnectorDef, embedded: boolean): "drawer" | "popup" | "navigate" {
+  const action = def.live?.connect;
+  if (!action || action.kind === "key_form" || action.kind === "keys") return "drawer";
+  if (action.kind === "link") return embedded ? "drawer" : "navigate";
+  return "popup";
+}
+
+/** The drawer a `?app=` deep link opens on the first render (not after it), or null. */
+function deepLinkedApp(initialApp: string | null): string | null {
+  return initialApp && initialApp !== "custom-keys" && connectorBySlug(initialApp) ? initialApp : null;
+}
+
 export function ConnectionsHub({
   statuses,
   supportHref,
   initialApp,
   personalGoogle,
+  embedded = false,
 }: {
   statuses: Record<string, ConnectorStatus>;
   supportHref: string | null;
@@ -83,12 +103,20 @@ export function ConnectionsHub({
   initialApp: string | null;
   /** This workspace connects each person's own Google (not a shared inbox). */
   personalGoogle: boolean;
+  /**
+   * The workspace setup's connections step (onboarding): the same cards and
+   * drawer, but nothing navigates away from the setup. An app set up on
+   * another Settings page opens its drawer, which says where.
+   */
+  embedded?: boolean;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [drawerSlug, setDrawerSlug] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [customOpen, setCustomOpen] = useState(false);
+  // A deep link opens its drawer in the first render, so the page arrives with
+  // it open rather than opening a moment later.
+  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => deepLinkedApp(initialApp));
+  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkedApp(initialApp) !== null);
+  const [customOpen, setCustomOpen] = useState(() => initialApp === "custom-keys");
   const [banner, setBanner] = useState<NoticeValue>(null);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
@@ -174,14 +202,13 @@ export function ConnectionsHub({
   const connect = useCallback(
     (def: ConnectorDef) => {
       const action = def.live?.connect;
-      // Keys are set up in the drawer itself (form, Test, Remove), so the card
-      // opens the drawer; only an OAuth popup or a page link leaves it.
-      if (!action || action.kind === "key_form" || action.kind === "keys") return openDrawer(def.slug);
+      const next = connectorClickAction(def, embedded);
+      if (next === "drawer" || !action) return openDrawer(def.slug);
       setDrawerOpen(false);
-      if (action.kind === "popup") return runPopup(def, action.href, action.messageSource);
-      router.push(action.href);
+      if (next === "popup" && action.kind === "popup") return runPopup(def, action.href, action.messageSource);
+      if (action.kind === "link") router.push(action.href);
     },
-    [openDrawer, router, runPopup],
+    [openDrawer, router, runPopup, embedded],
   );
 
   const visible = useMemo(
@@ -302,10 +329,10 @@ export function ConnectionsHub({
       {later.length > 0 && (
         <section aria-labelledby="later-heading">
           <h2 id="later-heading" className="text-sm font-semibold text-fg">
-            Coming later
+            Not built yet
           </h2>
           <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-            Not connectable yet. Open one to see what it will do.
+            Not connectable today. Open one to see why, and ask OASIS for it in one click.
           </p>
           <ul className="mt-3 flex flex-wrap gap-1.5">
             {later.map((def) => (
@@ -342,8 +369,9 @@ export function ConnectionsHub({
         onClose={closeDrawer}
         onConnect={connect}
         onChanged={() => router.refresh()}
-        supportHref={supportHref}
         personalGoogle={personalGoogle}
+        embedded={embedded}
+        requestFrom={embedded ? "the workspace setup" : "Settings > Connections"}
       />
 
       <DrawerSheet

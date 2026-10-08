@@ -15,7 +15,7 @@ import {
   mayUseDirectAdvance,
   mayWorkWebsiteSalesLifecycle,
   mayCreditAdminVerifiedCloser,
-  mayRepRunWebsiteSalesDeal,
+  websiteSalesLeadSeat,
   matchesWebsiteSalesPaymentReplay,
   nextOasisLifecycleStage,
   resolveWebsiteSalesCloseParties,
@@ -43,11 +43,6 @@ import {
 } from "@/lib/leads/canonical-lead-fields";
 import { normalizeCollaborators } from "@/lib/lead-scope";
 import {
-  mayOperateOasisDeliveryStage,
-  ownsOasisDeliveryRecord,
-  ownsOasisSalesRecord,
-} from "@/lib/oasis-sales-pipeline-policy";
-import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
@@ -72,6 +67,11 @@ import {
   type MemberStanding,
 } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
+import {
+  isCompleteQualificationPayload,
+  normalizeQualificationForStorage,
+} from "@/lib/sales-qualification";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -261,46 +261,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   }
   const currentStage = typeof current.stage === "string" ? current.stage : "";
   const leadSourceTrack = resolveWebsiteSalesLeadSourceTrack(current.lead_source_track);
-  const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
-  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
-  const actorOwnsSalesLead = ownsOasisSalesRecord({ id: row.id, data: current }, session.userId);
-  const actorHoldsDealSeat = mayRepRunWebsiteSalesDeal({
-    actorUserId:session.userId,
-    assignedTo:current.assigned_to,
-    auditHostUserId:current.audit_host_user_id,
+  // Ownership half of the gate, shared with the call screen's booking read
+  // (GET /api/web-leads/[id]?view=booking) so the two cannot drift apart.
+  const seat = websiteSalesLeadSeat({
+    teamRole:session.teamRole,
+    isAdmin:session.isAdmin,
+    userId:session.userId,
+    row:{ id:row.id, data:current },
   });
-  // A manager's frozen attribution survives a handoff for reporting, but it is
-  // not continuing write authority. Managers operate their own assigned lead
-  // normally and coach every other roster lead read-only. The explicit
-  // admin_access toggle retains its existing tenant-wide semantics via
-  // session.isAdmin.
-  if (
-    session.teamRole.trim().toLowerCase() === "manager" &&
-    !session.isAdmin &&
-    !assignedToUser &&
-    !actorHoldsDealSeat
-  ) {
-    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
-  }
-  const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
-  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(
-    { id:row.id, data:current },
-    session.userId,
-  );
-  // CC, 2026-08-25: a builder working HIS OWN sales lead (assigned, or frozen
-  // attribution) walks the normal rep path through this route. The delivery
-  // lane below exists for his BUILD work; letting it intercept the selling
-  // half 403'd every structured sales action a selling builder clicked.
-  const builderOnOwnSalesLead = mayBeDeliveryOperator && (assignedToUser || attributedToUser);
-  if (mayBeDeliveryOperator && !builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)) {
-    return NextResponse.json({
-      ok:false,
-      error:builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only",
-    },{status:403});
-  }
-  if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
-    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
-  }
+  if (!seat.ok) return NextResponse.json({ok:false,error:seat.error},{status:403});
+  const { actorHoldsDealSeat, builderMayRunDelivery, builderOwnsDelivery, builderOnOwnSalesLead } = seat;
   // Role and current deal-seat ownership are both load-bearing. Frozen opener
   // attribution remains read access and 15% credit after handoff; it is not
   // permission to quote, record payment, or take the closer's commission.
@@ -573,16 +543,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     catch (error) { return NextResponse.json({ok:false,error:error instanceof Error ? error.message : "invalid_disposition"},{status:400}); }
   } else if (body.action === "qualify") {
     if (!mayAgentQualify(currentStage)) return NextResponse.json({ok:false,error:"connect_before_qualifying"},{status:409});
-    const q = body.qualification as Record<string,unknown>|undefined;
-    if (!q || !["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"].every(k => q[k] === true)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
-    patch = { qualification:q, stage:"qualified", qualified_at:occurredAt };
+    if (!isCompleteQualificationPayload(body.qualification)) return NextResponse.json({ok:false,error:"qualification_incomplete"},{status:400});
+    patch = { qualification:normalizeQualificationForStorage(body.qualification), stage:"qualified", qualified_at:occurredAt };
   } else if (body.action === "book_founder") {
-    const qualification = body.qualification as Record<string,unknown>|undefined;
-    const qualificationIncluded = Boolean(
-      qualification &&
-      ["authorityConfirmed","websiteProblemConfirmed","timingConfirmed","minimumInvestmentConfirmed"]
-        .every((key) => qualification[key] === true),
-    );
+    const qualificationIncluded = isCompleteQualificationPayload(body.qualification);
     if (!mayAgentBookFounder(currentStage, qualificationIncluded)) {
       return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
     }
@@ -596,6 +560,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       confirmations.handoffComplete !== true
     ) {
       return NextResponse.json({ok:false,error:"booking_confirmations_required"},{status:400});
+    }
+    // Same claim rule lib/leads/rep-lead-access.ts applies to logging a call:
+    // a rep whose claim lapsed back into the pool no longer holds the lead.
+    // isActionableBy also refuses every do-not-call lead, so the lapse is
+    // judged with dnc set aside; do-not-call has its own rule below.
+    const claimFacts = factsFrom(current);
+    if (
+      !session.isAdmin &&
+      isInBookOf(claimFacts, session.userId) &&
+      !isActionableBy({ ...claimFacts, dnc:false }, session.userId, Date.now())
+    ) {
+      return NextResponse.json({ok:false,error:"claim_released"},{status:409});
+    }
+    // Do-not-call (Adon, 2026-10-02: "allow"). A do-not-call business may still
+    // be booked when the owner asks for the meeting on this call, but only on
+    // an explicit, literal-true confirmation from the rep, which is stored
+    // with who gave it and when. Without it nothing reaches Google. Binds
+    // admins and owners too. The dnc flag itself is never cleared here.
+    const dncMeetingOverride = claimFacts.dnc
+      ? confirmations.ownerRequestedMeeting === true
+        ? { confirmed_by:session.userId, confirmed_at:occurredAt }
+        : null
+      : undefined;
+    if (dncMeetingOverride === null) {
+      return NextResponse.json({ok:false,error:"do_not_call"},{status:409});
     }
     const qualifiedDuringHandoff = currentStage !== "qualified";
     if (!transitionNote) return NextResponse.json({ok:false,error:"handoff_note_required"},{status:400});
@@ -690,9 +679,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     ].filter((userId, index, list) => list.indexOf(userId) === index).slice(0, 5);
     patch = {
       stage:"founder_meeting_booked",
+      ...(dncMeetingOverride ? { dnc_meeting_override:dncMeetingOverride } : {}),
       ...(qualifiedDuringHandoff
         ? {
-            qualification,
+            qualification:normalizeQualificationForStorage(body.qualification),
             qualified_at:occurredAt,
             qualification_completed_by:session.userId,
             qualification_source:"confirmed_calendar_handoff",

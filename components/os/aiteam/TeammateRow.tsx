@@ -14,10 +14,18 @@
  * so their rows say nothing about it. Telegram carries alerts only today: no
  * teammate answers there, and the row says that rather than naming a phase.
  *
- * Server component. Dense rows on a hairline list, the same density as the
- * rail and the channel; no card grid.
+ * ON / OFF (W4a, S2-06). An owner or admin gets a real switch on every
+ * teammate that has one (the page passes a TeammateToggle as `control`: POST
+ * /api/tenant/agents/toggle), so a teammate built in the builder is never stuck
+ * "Off" with no way to turn it on. Core teammates have no switch. Everyone
+ * else reads the state word.
+ *
+ * Server component, with no client import of its own (the page hands the
+ * switch in), so it renders anywhere. Dense rows on a hairline list, the same
+ * density as the rail and the channel; no card grid.
  */
 
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { Check } from "lucide-react";
 import type { TeammateHome } from "./roster";
@@ -29,15 +37,17 @@ import type { SlackHome } from "@/lib/slack/status";
  *                department header says "Not working" for the same reason
  * not_connected  no AI account, or no agent settings, for this workspace
  * not_set_up     no teammate behind this department yet
+ * off            the teammate is switched off in this workspace
  * unknown        a read behind the answer failed, so it is not known
  */
-export type WebState = "ready" | "not_working" | "not_connected" | "not_set_up" | "unknown";
+export type WebState = "ready" | "not_working" | "not_connected" | "not_set_up" | "off" | "unknown";
 
 const WEB_LABEL: Record<WebState, string> = {
   ready: "App channel",
   not_working: "App channel · not working",
   not_connected: "App channel · not connected",
   not_set_up: "App channel · not set up",
+  off: "App channel · off",
   unknown: "App channel · couldn’t check",
 };
 
@@ -104,6 +114,7 @@ export function TeammateRow({
   slack,
   href,
   badge,
+  control,
 }: {
   name: string;
   summary: string;
@@ -117,8 +128,10 @@ export function TeammateRow({
   slack?: SlackHome;
   /** Where the name links: the teammate's channel or chat. */
   href?: string | null;
-  /** A short state word on the right, e.g. "On" / "Off". */
+  /** A short state word on the right, e.g. "On" / "Off", for a viewer with no switch. */
   badge?: string;
+  /** The On/Off switch an owner or admin gets (a TeammateToggle); it takes the badge's place. */
+  control?: ReactNode;
 }) {
   return (
     <li className="flex items-start gap-3 px-4 py-3">
@@ -151,11 +164,13 @@ export function TeammateRow({
         )}
         <Homes web={web} webReason={webReason} slack={slack} />
       </div>
-      {badge && (
-        <span className="shrink-0 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-medium leading-4 text-fg-muted">
-          {badge}
-        </span>
-      )}
+      {control
+        ? control
+        : badge && (
+            <span className="shrink-0 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-medium leading-4 text-fg-muted">
+              {badge}
+            </span>
+          )}
     </li>
   );
 }

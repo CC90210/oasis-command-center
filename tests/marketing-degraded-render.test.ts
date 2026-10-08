@@ -26,8 +26,14 @@ const PAGE = join(process.cwd(), "app", "founders", "marketing", "page.tsx");
 const SRC = readFileSync(PAGE, "utf8");
 const LINES = SRC.split("\n");
 
-/** Counts whose zero value is ambiguous between "none" and "unknown". */
-const AMBIGUOUS = /summary\.(total|open_requests|corpus_indexed|corpus_pending)\s*===\s*0/;
+/**
+ * Counts whose zero value is ambiguous between "none" and "unknown". The
+ * Training card reads the training material itself since 2026-10-01
+ * (`corpus`, getCorpusStats), so its zero-check needs `corpus.degraded`.
+ */
+const AMBIGUOUS = /summary\.(total|open_requests|corpus_indexed|corpus_pending)\s*===\s*0|\bcorpus\.(total|indexed|queued|extracting)\s*===\s*0/;
+/** The guard a zero-check needs: the degraded flag of the read it came from. */
+const guardFor = (line: string) => (/\bcorpus\.(total|indexed|queued|extracting)\s*===\s*0/.test(line) ? "corpus.degraded" : "summary.degraded");
 
 /** How far back a `summary.degraded` guard may sit and still cover the check. */
 const WINDOW = 6;
@@ -47,7 +53,7 @@ test("every ambiguous zero-check is guarded by a degraded branch", () => {
   LINES.forEach((line, i) => {
     if (!AMBIGUOUS.test(line)) return;
     const before = LINES.slice(Math.max(0, i - WINDOW), i + 1).join("\n");
-    if (!before.includes("summary.degraded")) {
+    if (!before.includes(guardFor(line))) {
       unguarded.push(`line ${i + 1}: ${line.trim()}`);
     }
   });

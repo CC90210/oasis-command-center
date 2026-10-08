@@ -190,10 +190,18 @@ async function main() {
     CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT, publisher_agent TEXT,
       target_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT, status TEXT, published_at TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
+      version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
   await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
   const stamp = "2026-09-01T00:00:00Z";
+  // Each client workspace as OASIS provisions it: its manifest is the roster
+  // that says which departments have a lead to answer in Slack (W4a).
+  const { buildProvisionedManifest } = await import("../lib/provisioning/manifest");
+  const { DEFAULT_DEPARTMENTS } = await import("../lib/provisioning/team");
+  const provisioned = (slug: string, name: string) =>
+    JSON.stringify(buildProvisionedManifest({ slug, name, departments: DEFAULT_DEPARTMENTS, modules: [], now: stamp }));
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -204,6 +212,8 @@ async function main() {
       ...Object.values(USERS).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'alpha-co', 'Alpha Co')", args: [ALPHA] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'bravo-co', 'Bravo Co')", args: [BRAVO_CO] },
+      { sql: "INSERT INTO tenant_manifests VALUES ('m-alpha', ?, 'alpha-co', ?, 1, 1, ?, ?)", args: [ALPHA, provisioned("alpha-co", "Alpha Co"), stamp, stamp] },
+      { sql: "INSERT INTO tenant_manifests VALUES ('m-bravo', ?, 'bravo-co', ?, 1, 1, ?, ?)", args: [BRAVO_CO, provisioned("bravo-co", "Bravo Co"), stamp, stamp] },
       profile(USERS.ownerA, ALPHA, "owner", 1),
       profile(USERS.adminA, ALPHA, "admin"),
       profile(USERS.memberA, ALPHA, "member"),
@@ -355,6 +365,23 @@ async function main() {
     assert.equal(exchanges[exchanges.length - 1].redirect_uri, "https://oasisai.work/api/connections/slack/callback");
   });
 
+  await check("end to end: after the install, Settings > Connections reads Slack as connected for that workspace only, and each kind of workspace is shown its own path", async () => {
+    const { loadConnectorStatuses } = await import("../components/os/connections/connector-facts");
+    const alpha = (await loadConnectorStatuses({ tenantId: ALPHA, userId: USERS.ownerA.id })).slack;
+    assert.equal(alpha.kind, "connected", JSON.stringify(alpha));
+    assert.match(alpha.label, /^Connected · verified/);
+    assert.equal(alpha.account, "Alpha Slack");
+    const bravo = (await loadConnectorStatuses({ tenantId: BRAVO_CO, userId: USERS.ownerB.id })).slack;
+    assert.notEqual(bravo.kind, "connected", "another workspace's card is untouched");
+    // CC's model (W10a R1): a client connects its own Slack app, which is not
+    // built yet; OASIS's own workspace uses the OASIS app.
+    assert.deepEqual([bravo.kind, bravo.label], ["coming_soon", "Not built yet"]);
+    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not built yet"]]);
+    const paths = connectors.connectorBySlug("slack")!.paths ?? [];
+    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", false]]);
+    assert.ok(paths.every((p) => !/OASIS's own included|every workspace/i.test(p.body)), "no path claims to be every workspace's way in");
+  });
+
   await check("the state is single-use: the same state again is refused and nothing changes", async () => {
     const before = await count("SELECT COUNT(*) AS n FROM tenant_connections");
     const exchangesBefore = exchanges.length;
@@ -453,6 +480,25 @@ async function main() {
     const general = await putChannel({ channel_id: "C0MARKETING", department: null });
     assert.equal(general.status, 200, "a general channel is always allowed");
     assert.equal(await routesOf(ALPHA), 2);
+  });
+
+  // W4a review R3: the departments that may be mapped are the workspace
+  // manifest's leads. A read that fails is a 5xx, never "Client Success has no
+  // AI teammate" for a department that has one.
+  await check("a manifest read that fails answers 500, never 'no AI teammate'; nothing is written", async () => {
+    await login(USERS.ownerA);
+    const before = await routesOf(ALPHA);
+    await db.execute("ALTER TABLE tenant_manifests RENAME TO tenant_manifests_offline");
+    let res: Response;
+    try {
+      res = await putChannel({ channel_id: "C0MARKETING", department: "sales" });
+    } finally {
+      await db.execute("ALTER TABLE tenant_manifests_offline RENAME TO tenant_manifests");
+    }
+    const body = (await res.json()) as { error?: string };
+    assert.equal(res.status, 500, JSON.stringify(body));
+    assert.notEqual(body.error, "department_not_set_up");
+    assert.equal(await routesOf(ALPHA), before, "a mapping was written on a roster nobody could read");
   });
 
   await check("disconnecting Slack deletes its channel map and the people it looked up; the next workspace to install that team can map its channels", async () => {

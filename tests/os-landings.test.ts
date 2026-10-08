@@ -479,6 +479,12 @@ async function main() {
       | undefined;
     assert.ok(fleetProp, "the fleet reached the page");
     assert.equal(fleetProp.signalsKnown, true);
+    // W4a, decision 21: the fleet is OASIS's house agents, CC's own included,
+    // not the business workspace's roster (its leads and built teammates).
+    const { FAMILY_AGENT_KEYS } = await import("../lib/agents");
+    assert.deepEqual(fleetProp.agents, [...FAMILY_AGENT_KEYS]);
+    assert.ok(fleetProp.agents.includes("aura") && fleetProp.agents.includes("lex"), "CC's own agents live in Admin > Fleet");
+    assert.ok(!fleetProp.agents.includes("sdr") && !fleetProp.agents.includes("customer-support"), "a library template is not a fleet process");
     assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo's scheduler process checked in 2 minutes ago");
     assert.equal(fleetProp.signals.get("bravo")?.tickCount, 41);
     assert.ok(fleetProp.signals.get("bravo")?.lastTaskAt, "the last tick is kept as Last task");
@@ -818,7 +824,10 @@ async function main() {
       ["bravo_scheduler", "Chief of Staff scheduler"],
       ["maven-publisher", "Marketing publisher"],
       ["oasis_lead_stage_engine", "Oasis lead stage engine"],
-      ["aura", "Aura"],
+      // The persona rule covers every AGENT_REGISTRY persona (identity.ts, W4a S2-14), OASIS included: no department, so "Workspace".
+      ["aura", "Workspace"],
+      ["hermes", "Workspace"],
+      ["lex", "Workspace"],
       ["conaugh_cli", "Workspace"],
     ] as const) {
       assert.equal(summaryOf({ agent, kind: "tick" }, true), `${oasis} · tick`, `OASIS: ${agent}`);

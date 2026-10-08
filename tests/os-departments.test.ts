@@ -45,7 +45,12 @@ import { connectorBySlug } from "../lib/os/connectors";
 import { TEAMMATE_TEMPLATES } from "../components/os/aiteam/templates";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import { ALL_MODULES, resolveOsModules } from "../lib/os/modules";
-import type { BuildOsNavInput } from "../lib/os/nav";
+import { OS_NAV_CATALOG, mayOpenOsHref, type BuildOsNavInput } from "../lib/os/nav";
+import { DEFAULT_DEPARTMENTS, neutralTeamFor } from "../lib/provisioning/team";
+import { OASIS_SEED } from "../lib/manifest/seeds";
+import type { ManifestAgentBinding } from "../lib/manifest/schema";
+import type { DepartmentKey } from "../lib/os/types";
+import { workspaceTeammates } from "../lib/os/teammates";
 import { CATEGORY_LABELS, getSeedAgent } from "../lib/agents/library";
 import { QUICK_ACTIONS } from "../lib/quick-actions";
 import { SURFACE_CAPABILITIES, capabilitiesFor, type Persona } from "../lib/role-surfaces";
@@ -162,10 +167,13 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
 }
 
 // ── 5. A client workspace never meets OASIS's agents or copy ──────────────
+// Who leads a client's department is ITS manifest (W4a, 2026-10-01): the
+// neutral leads OASIS provisions (lib/provisioning/team.ts neutralTeamFor).
 {
   const OASIS_STRINGS = /\b(bravo|maven|atlas|aura|hermes|solara|helios|lex|oasis|cc)\b/i;
+  const client = { oasis: false, manifest: { agents: neutralTeamFor(DEFAULT_DEPARTMENTS) } };
   for (const d of OS_DEPARTMENTS) {
-    const channel = departmentChannelFor(d.key, { oasis: false });
+    const channel = departmentChannelFor(d.key, client);
     const out = JSON.stringify({ channel, asks: suggestedAsksFor(d.key, { oasis: false }), profile: departmentProfile(d.key) });
     assert.ok(!OASIS_STRINGS.test(out), `${d.slug}: client-workspace tab carries an OASIS string: ${out.match(OASIS_STRINGS)?.[0]}`);
     if (channel.kind === "agent") {
@@ -181,21 +189,127 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
     assert.ok(!["bravo", "maven", "atlas", "aura", "hermes", "solara", "helios", "lex"].includes(slug), `${slug} is an OASIS persona`);
   }
   // Departments with no neutral agent say so; they do not borrow OASIS's.
-  assert.equal(departmentChannelFor("chief_of_staff", { oasis: false }).kind, "unavailable");
-  assert.equal(departmentChannelFor("marketing", { oasis: false }).kind, "unavailable");
-  assert.equal(departmentChannelFor("sales", { oasis: false }).kind, "agent");
-  assert.equal(departmentChannelFor("client_success", { oasis: false }).kind, "agent");
+  assert.equal(departmentChannelFor("chief_of_staff", client).kind, "unavailable");
+  assert.equal(departmentChannelFor("marketing", client).kind, "unavailable");
+  assert.equal(departmentChannelFor("sales", client).kind, "agent");
+  assert.equal(departmentChannelFor("client_success", client).kind, "agent");
+  // No manifest, no lead: a client workspace is never handed a static binding.
+  for (const d of OS_DEPARTMENTS) {
+    assert.equal(departmentChannelFor(d.key, { oasis: false }).kind, "unavailable", `${d.slug}: a client with no manifest got a lead`);
+    assert.equal(departmentChannelFor(d.key, { oasis: false, manifest: { agents: [] } }).kind, "unavailable", d.slug);
+  }
+  // A client binding that names a house agent is ignored, whatever it claims.
+  const forged = {
+    oasis: false,
+    manifest: {
+      agents: [
+        { slug: "maven", display_name: "Marketing", enabled: true, departments: ["marketing"] },
+        { slug: "bravo", display_name: "Chief of Staff", enabled: true, departments: ["chief_of_staff"] },
+      ] as ManifestAgentBinding[],
+    },
+  };
+  assert.equal(departmentChannelFor("marketing", forged).kind, "unavailable", "a client manifest put Maven in its Marketing channel");
+  assert.equal(departmentChannelFor("chief_of_staff", forged).kind, "unavailable");
+  // A lead switched off answers nothing, and says so.
+  const off = { oasis: false, manifest: { agents: neutralTeamFor(DEFAULT_DEPARTMENTS).map((a) => (a.slug === "sdr" ? { ...a, enabled: false } : a)) } };
+  const offSales = departmentChannelFor("sales", off);
+  assert.equal(offSales.kind, "unavailable");
+  assert.match(offSales.kind === "unavailable" ? offSales.reason : "", /turned off/);
+  // A custom (non-house) agent a client binds as a lead answers there.
+  const own = { oasis: false, manifest: { agents: [{ slug: "renewals-desk", display_name: "Renewals", enabled: true, departments: ["sales"] }] as ManifestAgentBinding[] } };
+  const ownSales = departmentChannelFor("sales", own);
+  assert.equal(ownSales.kind === "agent" ? ownSales.agentSlug : null, "renewals-desk", "a client's own lead answers its department");
+  // A neutral lead stored before `departments` existed (provisioning and the
+  // setup wizard wrote none until W4a) still leads the department the stored
+  // setup chose; not one the setup left out, not without a stored setup, and
+  // not when its `departments` is an explicit [] (CodeRabbit on #517).
+  const undeclared = neutralTeamFor(DEFAULT_DEPARTMENTS).map((a) => {
+    const { departments: _drop, ...rest } = a;
+    void _drop;
+    return rest;
+  });
+  const setup = (departments: DepartmentKey[]) => ({ departments, modules: [] });
+  const legacyClient = { oasis: false, manifest: { agents: undeclared, os: setup([...DEFAULT_DEPARTMENTS]) } };
+  for (const k of ["sales", "client_success"] as const) {
+    assert.equal(departmentChannelFor(k, legacyClient).kind, "agent", `${k}: a client provisioned before departments lost its lead`);
+  }
+  assert.deepEqual(
+    workspaceTeammates(legacyClient).map((t) => [t.slug, t.kind, t.departments]),
+    [
+      ["sdr", "lead", ["sales"]],
+      ["customer-support", "lead", ["client_success"]],
+    ],
+    "the roster agrees with the channels",
+  );
+  assert.equal(
+    departmentChannelFor("client_success", { oasis: false, manifest: { agents: undeclared, os: setup(["chief_of_staff", "sales"]) } }).kind,
+    "unavailable",
+    "a department the stored setup did not choose",
+  );
+  assert.equal(departmentChannelFor("sales", { oasis: false, manifest: { agents: undeclared } }).kind, "unavailable", "no stored setup, nothing inferred");
+  assert.equal(
+    departmentChannelFor("sales", { oasis: false, manifest: { agents: undeclared.map((a) => ({ ...a, departments: [] })), os: setup([...DEFAULT_DEPARTMENTS]) } }).kind,
+    "unavailable",
+    "an explicit [] is a custom teammate",
+  );
 }
 
 // ── 6. OASIS binds its own agents, and every one resolves ─────────────────
 {
+  // OASIS's seed (OASIS has no stored manifest row) and the static fallback
+  // for a manifest that names no lead agree, department by department.
+  for (const scope of [{ oasis: true, manifest: OASIS_SEED }, { oasis: true }, { oasis: true, manifest: { agents: [] } }]) {
+    const bound = (k: Parameters<typeof departmentChannelFor>[0]) => {
+      const c = departmentChannelFor(k, scope);
+      return c.kind === "agent" ? c.agentSlug : null;
+    };
+    assert.deepEqual(
+      OS_DEPARTMENTS.map((d) => bound(d.key)),
+      ["bravo", "sdr", "maven", "customer-support", "atlas", "bravo"],
+      "OASIS's leads: Chief of Staff, Sales, Marketing, Client Success, Finance, Operations",
+    );
+  }
+  // Decision 21: OASIS's seed holds the five leads and none of CC's own agents.
+  assert.deepEqual(
+    OASIS_SEED.agents.map((a) => [a.slug, a.display_name, a.departments]),
+    [
+      ["bravo", "Chief of Staff · Operations", ["chief_of_staff", "operations"]],
+      ["sdr", "Sales", ["sales"]],
+      ["maven", "Marketing", ["marketing"]],
+      ["customer-support", "Client Success", ["client_success"]],
+      ["atlas", "Finance", ["finance"]],
+    ],
+  );
+  for (const slug of ["aura", "lex", "hermes", "life-preservation"]) {
+    assert.ok(!OASIS_SEED.agents.some((a) => a.slug === slug), `${slug} is CC's own agent, not an OASIS business teammate`);
+  }
   const bound = (k: Parameters<typeof departmentChannelFor>[0]) => {
-    const c = departmentChannelFor(k, { oasis: true });
+    const c = departmentChannelFor(k, { oasis: true, manifest: OASIS_SEED });
     return c.kind === "agent" ? c.agentSlug : null;
   };
   assert.equal(bound("chief_of_staff"), "bravo");
   assert.equal(bound("marketing"), "maven");
   assert.equal(bound("finance"), "atlas");
+  // A stored OASIS manifest from before `departments`: bravo bound with no
+  // department, not core, and switched off. Its departments answer on the
+  // static fallback, and the binding's switch is that lead's switch: the AI
+  // Team row reads Off, so its channels are turned off too (W4a review R5).
+  const legacyOff = {
+    oasis: true,
+    manifest: { agents: [{ slug: "bravo", display_name: "Bravo", enabled: false, core: false }] as ManifestAgentBinding[] },
+  };
+  for (const k of ["chief_of_staff", "operations"] as const) {
+    const c = departmentChannelFor(k, legacyOff);
+    assert.equal(c.kind, "unavailable", `${k}: a lead the AI Team shows Off still answers in its channel`);
+    assert.match(c.kind === "unavailable" ? c.reason : "", /turned off/, k);
+  }
+  const offLead = workspaceTeammates(legacyOff).find((t) => t.slug === "bravo");
+  assert.deepEqual(
+    offLead && [offLead.enabled, offLead.core, offLead.bound],
+    [false, false, true],
+    "the roster shows the same lead Off, with a switch",
+  );
+  assert.equal(departmentChannelFor("sales", legacyOff).kind, "agent", "a lead with no binding of its own still answers");
   for (const slug of OASIS_BOUND_SLUGS) {
     assert.ok(getSeedAgent(slug)?.is_public, `OASIS agent "${slug}" must be a public library seed or its channel 404s`);
   }
@@ -248,6 +362,21 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   assert.ok(firstRead > rail, "/agents reads its roster before it has decided the viewer may see it");
   assert.match(page, /const AI_TEAM_HREF = "\/agents";/);
   assert.match(page, /if \(!viewer\.provisioned\) notFound\(\);/, "an unprovisioned workspace sees Today only");
+
+  // Decision 22 (W4a): the AI Team is for owners and admins of ANY workspace,
+  // not OASIS's alone. The rail row and the page gate are one predicate.
+  const row = OS_NAV_CATALOG.find((e) => e.id === "ai-team");
+  assert.equal(row?.href, "/agents");
+  assert.equal(row?.audience, "manage");
+  assert.ok(!row?.oasisOnly, "the AI Team row is not OASIS-only any more");
+  for (const slug of [OASIS, CLIENT]) {
+    assert.ok(mayOpenOsHref(viewer("founder", slug), "/agents"), `an owner in ${slug} opens the AI Team`);
+    for (const persona of PERSONAS.filter((p) => p !== "founder")) {
+      assert.ok(!mayOpenOsHref(viewer(persona, slug), "/agents"), `${persona} in ${slug} must 404 on the AI Team`);
+    }
+    assert.ok(!mayOpenOsHref(viewer("founder", slug, { provisioned: false }), "/agents"), `${slug} unprovisioned: Today only`);
+    assert.ok(!mayOpenOsHref(viewer(null, slug), "/agents"), `${slug}: an unresolved viewer opens nothing`);
+  }
 
   // One fleet, at Admin › Fleet. A second copy of the old page was once left
   // under components/os/aiteam — dead code carrying the ChatWidget and the

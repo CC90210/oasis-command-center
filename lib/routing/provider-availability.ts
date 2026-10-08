@@ -48,10 +48,13 @@ const REQUIRED_FIELDS: Record<ProviderId, string[][]> = {
   texttorrent: [["api_sid", "api_public_key"], ["api_key"]],
   // from_number too: sendSmsDirectTwilio returns missing_twilio_credentials
   // without it, so advertising the lane on sid+token alone would offer an
-  // SMS route that cannot send.
+  // SMS route that cannot send. An API key with its secret sends in place of
+  // the Auth Token (lib/twilio/connection.ts twilioAuthFor).
   twilio: [
     ["account_sid", "auth_token", "from_number"],
     ["account_sid", "auth_token", "messaging_service_sid"],
+    ["account_sid", "api_key_sid", "api_key_secret", "from_number"],
+    ["account_sid", "api_key_sid", "api_key_secret", "messaging_service_sid"],
   ],
 };
 

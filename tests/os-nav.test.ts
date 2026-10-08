@@ -101,7 +101,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     ["/", "team"], ["/feed", "team"], ["/schedule", "team"], ["/projects", "team"], ["/playbook", "team"],
     ["/agents", "team"], ["/team/chief-of-staff", "team"], ["/pipeline", "growth"], ["/web-leads", "growth"],
     ["/training", "growth"], ["/commissions", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
-    ["/founders/marketing", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
+    ["/founders/marketing", "growth"], ["/seo", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
     ["/analytics", "money"], ["/operations", "admin"], ["/automations", "admin"], ["/health", "admin"],
     ["/agent", "admin"], ["/admin/agents", "admin"], ["/runs", "admin"], ["/inbox", "admin"],
   ];
@@ -119,7 +119,9 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
 // Adversarial: every flag a careless caller could set wrong IS set wrong —
 // operator true, founders gates open, every module on, and isOasisTenant true.
 {
-  const OASIS_ONLY = ["/web-leads", "/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook", "/agents"];
+  // /agents (the AI Team) left this list in W4a (decision 22): it is every
+  // workspace's own roster, for its owners and admins (section 4 below).
+  const OASIS_ONLY = ["/web-leads", "/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook", "/seo"];
   for (const slug of [null, "", "acme-roofing", "sun", "submissions", "oasis-ai-cc-evil", "unprovisioned"]) {
     for (const persona of PERSONAS) {
       for (const lyingOasisFlag of [true, false]) {
@@ -196,11 +198,19 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   };
   assert.ok(!sectionKeys(clientOwner).includes("money"), "client owner: no Money yet");
   assert.ok(!hrefs(clientOwner).includes("/team/finance"), "client owner: no Finance department yet");
-  // …but the core OS they bought is there.
-  for (const href of ["/", "/feed", "/schedule", "/projects", "/pipeline", "/forms", "/clients", "/tickets",
+  // …but the core OS they bought is there, the AI Team included (decision 22).
+  for (const href of ["/", "/feed", "/schedule", "/projects", "/pipeline", "/forms", "/clients", "/tickets", "/agents",
     "/team/chief-of-staff", "/team/sales", "/team/marketing", "/team/client-success", "/team/operations"]) {
     assert.ok(hrefs(clientOwner).includes(href), `client owner keeps ${href}`);
   }
+  // The AI Team is a manage surface: no one below an owner/admin gets it, in
+  // a client's workspace or OASIS's.
+  for (const persona of PERSONAS.filter((p) => p !== "founder")) {
+    const member: BuildOsNavInput = { ...clientOwner, persona, capabilities: capabilitiesFor(persona, "acme-roofing") };
+    assert.ok(!hrefs(member).includes("/agents"), `client ${persona} must not get the AI Team`);
+    assert.ok(!hrefs(oasisViewer(persona)).includes("/agents"), `OASIS ${persona} must not get the AI Team`);
+  }
+  assert.ok(hrefs(oasisViewer("founder")).includes("/agents"), "OASIS's owner keeps the AI Team");
 }
 
 // ── 5. Admin: platform operators in an OASIS workspace ────────────────────

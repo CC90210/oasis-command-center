@@ -14,7 +14,9 @@
  *
  * Twilio: saved credentials are not a working sender. Texting stays off
  * ("Email-only") until the connection test passes; a messaging service can
- * stand in for the from-number.
+ * stand in for the from-number, and an API key for the Auth Token. Test runs
+ * as soon as the account and a credential are saved, so "needs a number" is an
+ * answer the owner can read, not a missing button.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -89,10 +91,14 @@ export function ServiceKeysForm({
 
   const row = (key: string) => rows?.find((r) => r.field_key === key) ?? null;
   const has = (key: string) => !!row(key)?.has_value;
+  // Twilio: the Auth Token, or an API key with its secret; and a sender.
+  const twilioCredential = has("account_sid") && (has("auth_token") || (has("api_key_sid") && has("api_key_secret")));
   const allSet =
     service === "twilio"
-      ? has("account_sid") && has("auth_token") && (has("from_number") || has("messaging_service_sid"))
+      ? twilioCredential && (has("from_number") || has("messaging_service_sid"))
       : schema.fields.every((f) => has(f.key));
+  // Twilio's test runs before a sender is saved: "needs a number" is its answer.
+  const testable = service === "twilio" ? twilioCredential : allSet;
   const tested = (rows ?? []).filter((r) => r.last_tested_at);
   const lastFail = tested.find((r) => r.last_test_ok === false) ?? null;
   const lastOk = tested.find((r) => r.last_test_ok === true) ?? null;
@@ -136,10 +142,14 @@ export function ServiceKeysForm({
     run("test", async () => {
       const r = await send("POST", "/api/integrations/keys/test", { service });
       const detail = typeof r.data?.detail === "string" ? r.data.detail : null;
+      // A plain-state answer (Twilio) is shown as the provider check put it.
+      const message = typeof r.data?.message === "string" ? r.data.message : null;
       setNotice(
-        r.ok
-          ? { tone: "ok", text: detail || `The check with ${appName} passed.` }
-          : { tone: "err", text: `The check with ${appName} failed: ${r.msg}` },
+        message
+          ? { tone: r.ok ? "ok" : "err", text: detail ? `${message} ${detail}` : message }
+          : r.ok
+            ? { tone: "ok", text: detail || `The check with ${appName} passed.` }
+            : { tone: "err", text: `The check with ${appName} failed: ${r.msg}` },
       );
       await reload();
       onChanged();
@@ -238,7 +248,7 @@ export function ServiceKeysForm({
               <button type="submit" disabled={busy !== null || !dirty} className="btn-primary">
                 {busy === "save" ? "Saving…" : "Save"}
               </button>
-              {allSet && (
+              {testable && (
                 <button type="button" onClick={test} disabled={busy !== null} className="btn-secondary">
                   {busy === "test" ? `Checking with ${appName}…` : "Test"}
                 </button>

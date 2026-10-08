@@ -3,7 +3,7 @@
  * OS shell (2026-10-01): ContentTabs, its layout, the breadcrumb alias, the
  * hidden founders banner, and one name for the hub.
  *
- *   1. ContentTabs lists Overview · Library · Train · Performance in that
+ *   1. ContentTabs lists Overview · Library · Training · Performance in that
  *      order, each a founders page that gates itself; the active tab is the
  *      longest matching one, Overview only on its exact path (an asset page
  *      lights no tab); every tab is a Link with aria-current on the active one;
@@ -18,7 +18,10 @@
  *      crumb for anyone else (their page is a 404). The section crumb is the
  *      rail's own name for the row.
  *   4. The founders portal banner is hidden on every Content path, as on
- *      Finances, and still renders on the Growth preview shell.
+ *      Finances, and still renders on the Growth preview shell. Stronger: for
+ *      every page the file system has under Content and Finances, nothing in
+ *      its layout chain or its imports can render the banner or its chips
+ *      (the founders layout no longer mounts it; the Growth layout does).
  *   5. One name. FOUNDERS_NAV, the Overview's <h1> and <title>, every <title>
  *      under the hub, the back links and MarketingToday say Content; no hub
  *      file calls it "Studio" or "Marketing" in code (comments may say how it
@@ -33,8 +36,29 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import * as ReactNS from "react";
+import ts from "typescript";
 
 const root = join(__dirname, "..");
+
+/**
+ * Every piece of text a file can put on the screen: JSX text, string literals
+ * and template-literal parts, parsed (so a comment is never mistaken for copy,
+ * nor copy for a comment). A console.* call is skipped: it writes the server
+ * log, never the page.
+ */
+function screenText(file: string, src: string): string[] {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression) && n.expression.expression.text === "console") return;
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isJsxText(n)) {
+      out.push(n.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
 const code = (rel: string) => readFileSync(join(root, rel), "utf8");
 /** Code only: a comment may say what the hub used to be called, or what colour it is not. */
 const stripped = (file: string) => code(file).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
@@ -75,6 +99,64 @@ function walkFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** "app/founders/marketing/asset/[id]/page.tsx" -> "/founders/marketing/asset/[id]" (route groups dropped). */
+function routeOf(page: string): string {
+  const segs = page.replace(/^app\//, "").split("/").slice(0, -1).filter((s) => !/^\(.*\)$/.test(s));
+  return `/${segs.join("/")}`;
+}
+
+/**
+ * What Next renders around a page: every layout, template, loading, error and
+ * not-found file from app/ down to the page's own folder, then the page.
+ */
+function layoutChain(page: string): string[] {
+  const dirs = page.split("/").slice(0, -1);
+  const chain: string[] = [];
+  for (let i = 1; i <= dirs.length; i += 1) {
+    const dir = dirs.slice(0, i).join("/");
+    for (const name of ["layout", "template", "loading", "error", "not-found"]) {
+      for (const ext of [".tsx", ".ts"]) {
+        if (existsSync(join(root, dir, name + ext))) chain.push(`${dir}/${name}${ext}`);
+      }
+    }
+  }
+  chain.push(page);
+  return chain;
+}
+
+/** Repo-relative files reachable through runtime imports (type-only imports are erased, so they are skipped). */
+const importsCache = new Map<string, string[]>();
+function importsOf(file: string): string[] {
+  const hit = importsCache.get(file);
+  if (hit) return hit;
+  const src = stripped(file);
+  const specs: string[] = [];
+  for (const m of src.matchAll(/^\s*(?:import|export)\s+(type\s+)?(?:[\w*${}\s,]+?\s+from\s+)?["']([^"']+)["']/gm)) {
+    if (!m[1]) specs.push(m[2]);
+  }
+  for (const m of src.matchAll(/\b(?:import|require)\(\s*["']([^"']+)["']\s*\)/g)) specs.push(m[1]);
+  const out: string[] = [];
+  for (const spec of specs) {
+    const base = spec.startsWith("@/") ? spec.slice(2) : spec.startsWith(".") ? join(dirname(file), spec).split(sep).join("/") : null;
+    if (base === null) continue;
+    const found = ["", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.tsx"].map((ext) => base + ext).find((p) => /\.(?:[cm]?[jt]sx?)$/.test(p) && existsSync(join(root, p)) && statSync(join(root, p)).isFile());
+    if (found) out.push(found);
+  }
+  importsCache.set(file, out);
+  return out;
+}
+function importClosure(entries: string[]): Set<string> {
+  const seen = new Set<string>();
+  const stack = [...entries];
+  while (stack.length) {
+    const file = stack.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const next of importsOf(file)) if (!seen.has(next)) stack.push(next);
+  }
+  return seen;
+}
+
 let failures = 0;
 async function check(name: string, fn: () => Promise<void> | void) {
   try {
@@ -95,9 +177,11 @@ async function main() {
   const { foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
 
   // ── 1. the tabs ──────────────────────────────────────────────────────────
-  await check("ContentTabs: Overview · Library · Train · Performance, each a founders page that gates itself", () => {
+  await check("ContentTabs: Overview · Library · Training · Performance, each a founders page that gates itself", () => {
     assert.equal(CONTENT_ROOT, "/founders/marketing");
-    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Train", "Performance"]);
+    // "Training", a noun, since 2026-10-01 ("Train" left CC asking what it did);
+    // the route stays /train so no link or bookmark breaks.
+    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Training", "Performance"]);
     assert.deepEqual(
       CONTENT_TABS.map((t) => t.href),
       [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/train`, `${CONTENT_ROOT}/performance`],
@@ -211,6 +295,62 @@ async function main() {
     }
   });
 
+  // CC, 2026-10-01: "there's still that banner at the top. It allows us to
+  // switch between finances, and I want to get rid of this." The pathname
+  // check above only hides a banner the founders layout still MOUNTED on every
+  // Content page. This proves, for every page the file system has under the
+  // Content hub (and under Finances), that nothing in its layout chain or its
+  // imports can render the banner or its section chips at all.
+  await check("no page under Content or Finances has the founders banner or its chips in its layout chain or imports; the Growth shell still does", () => {
+    const pagesUnder = (dir: string) => walkFiles(join(root, dir)).map(rel).filter((f) => /\/page\.tsx?$/.test(f));
+    const content = pagesUnder("app/founders/marketing");
+    const routes = content.map(routeOf);
+    for (const must of [CONTENT_ROOT, ...CONTENT_TABS.map((t) => t.href), `${CONTENT_ROOT}/asset/[id]`]) {
+      assert.ok(routes.includes(must), `the walk found ${must}: ${routes.join(", ")}`);
+    }
+    const finances = pagesUnder("app/founders/finances");
+    assert.ok(finances.length >= 9, `walked Finances: ${finances.length} pages`);
+    const BANNER = ["components/founders/FoundersPortalBanner.tsx", "components/founders/FoundersSectionNav.tsx"];
+    for (const page of [...content, ...finances]) {
+      const chain = layoutChain(page);
+      const reach = importClosure(chain);
+      assert.ok(reach.size > chain.length, `${page}: the import walk went past the chain itself`);
+      for (const b of BANNER) assert.equal(reach.has(b), false, `${routeOf(page)} reaches ${b} from ${chain.join(" > ")}`);
+      assert.equal(foundersBannerHidden(routeOf(page).replace(/\[[^\]]+\]/g, "a_1")), true, `${routeOf(page)}: the second wall`);
+    }
+    // Not vacuous: the same walk finds the banner where it IS still mounted.
+    const growth = pagesUnder("app/founders/growth");
+    assert.ok(growth.length >= 1, "walked the Growth preview shell");
+    for (const page of growth) {
+      assert.ok(importClosure(layoutChain(page)).has(BANNER[0]), `${routeOf(page)} still renders the banner`);
+    }
+  });
+
+  await check("no Content page puts a log tag or 'server log' on the screen; a failure says it plainly and that the cause is logged for the OASIS team", () => {
+    const TAG = /\[(marketing|founders|safe)[:.][^\]]*\]|server log/i;
+    // The scan reads what renders, not lines: copy that starts with * or //
+    // is still copy, and a comment naming a log tag is still a comment.
+    const fixture = [
+      "// [marketing:assets] is where the server logs this",
+      "/* the server log has it */",
+      'export default function P() { console.warn("[marketing:x] server log line"); return (',
+      "  <p>",
+      "    * See the server log under [marketing:assets]",
+      "  </p>",
+      "); }",
+      "const t = `line one",
+      "// [founders:performance] in a template literal`;",
+    ].join("\n");
+    const seen = screenText("fixture.tsx", fixture).filter((s) => TAG.test(s));
+    assert.equal(seen.length, 2, `the JSX text and the template literal are caught, the comments and the console call are not: ${JSON.stringify(seen)}`);
+
+    const files = walkFiles(join(root, "app/founders/marketing")).map(rel);
+    assert.ok(files.length >= 6, `walked the Content pages: ${files.length}`);
+    for (const f of files) {
+      for (const s of screenText(f, code(f))) assert.doesNotMatch(s, TAG, `${f}: ${s.trim().slice(0, 160)}`);
+    }
+  });
+
   // ── 5. one name ──────────────────────────────────────────────────────────
   await check("one name: Content in FOUNDERS_NAV, the h1, every <title>, the back links and MarketingToday; no 'Studio', no 'Marketing · OASIS'", () => {
     assert.equal(FOUNDERS_NAV.find((n) => n.href === CONTENT_ROOT)?.label, "Content");
@@ -218,7 +358,7 @@ async function main() {
     assert.match(overview, /title: "Content · OASIS"/, "the Overview's <title>");
     assert.match(overview, /<PageHeader\s+title="Content"/, "the Overview's <h1>");
     assert.match(code("app/founders/marketing/library/page.tsx"), /title: "Library · Content · OASIS"/);
-    assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Train · Content · OASIS"/);
+    assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Training · Content · OASIS"/);
     for (const page of ["app/founders/marketing/library/page.tsx", "app/founders/marketing/performance/page.tsx"]) {
       assert.match(code(page), /href="\/founders\/marketing"[^>]*>\s*Back to Content\s*<\/Link>/, `${page}: the back link says Content`);
     }

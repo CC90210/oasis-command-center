@@ -49,17 +49,17 @@
 
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import { LayoutGrid, Smartphone } from "lucide-react";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
 import {
   DEGRADED_MARKETING_FACETS,
-  getMarketingAssets,
+  getBrandTabCounts,
   getLifecycleCounts,
   getMarketingFacets,
-  mediaKey,
-  signMediaUrls,
-  type MarketingAssetRow,
+  loadLibraryPage,
+  type LibraryPage,
 } from "@/lib/founders/marketing-queries";
 import {
   BRAND_GROUPS,
@@ -73,15 +73,20 @@ import {
   isBrandGroupKey,
   authorName,
   isLifecycle,
+  libraryHref,
+  libraryPageCount,
+  libraryPagerItems,
   lifecycleHint,
   lifecycleLabel,
-  parseSlideUrls,
+  parseLibraryPage,
+  parseLibraryView,
   isChannel,
   trackForChannel,
   trackLabel,
-  type AssetStatus,
   type BrandGroupKey,
   type Channel,
+  type LibraryHrefChange,
+  type LibraryView,
   type Lifecycle,
   type Track,
 } from "@/lib/founders-marketing-core";
@@ -108,6 +113,8 @@ export default async function MarketingLibraryPage({
     author?: string;
     status?: string;
     lifecycle?: string;
+    page?: string;
+    view?: string;
   }>;
 }) {
   const founder = await resolveFounder();
@@ -129,16 +136,25 @@ export default async function MarketingLibraryPage({
   // The primary organisation axis. Absent = the default working view, which
   // shows everything except archived.
   const lifecycle: Lifecycle | undefined = isLifecycle(sp.lifecycle) ? sp.lifecycle : undefined;
+  // 1-based. A page past the end is clamped by the reader to the last page.
+  const requestedPage = parseLibraryPage(sp.page);
+  // Phone frames by default; ?view=grid is the plain card grid.
+  const view: LibraryView = parseLibraryView(sp.view);
 
   // `null` rather than `[]` as the fallback: an empty array cannot say whether
   // the library is empty or the query failed, and the page renders very
   // different copy for those two. getMarketingAssets throws on a broken read and
   // returns [] only when the table genuinely is not there yet.
-  const [assetsOrNull, facets, lc] = await Promise.all([
-    safe<MarketingAssetRow[] | null>(
+  //
+  // ONE PAGE, SIGNED. loadLibraryPage reads LIBRARY_PAGE_SIZE rows plus a COUNT
+  // and signs media for those rows only; the tab and pill numbers come from
+  // COUNT queries. The page used to read up to 200 rows and sign every one, and
+  // the browser then fetched media for every tile: minutes, not seconds.
+  const [pageOrNull, facets, lc, tabCounts] = await Promise.all([
+    safe<LibraryPage | null>(
       "marketing.library",
-      getMarketingAssets(founder.tenantId, {
-        group, track, channel, brand, author, status, lifecycle,
+      loadLibraryPage(founder.tenantId, {
+        group, track, channel, brand, author, status, lifecycle, page: requestedPage,
       }),
       null,
     ),
@@ -147,23 +163,32 @@ export default async function MarketingLibraryPage({
       counts: { needs_review: 0, approved: 0, live: 0, archived: 0 },
       degraded: true,
     }),
+    safe("marketing.library.tabs", getBrandTabCounts(founder.tenantId), {
+      counts: { "oasis-ai": 0, conaugh: 0, music: 0, clients: 0 },
+      degraded: true,
+    }),
   ]);
-  const lifecycleTotal = lc.degraded
-    ? 0
-    : LIFECYCLE.reduce((n, l) => n + lc.counts[l], 0);
+  // "All N" is the tab's own number (getBrandTabCounts counts what each tab's
+  // grid shows: archived and rejected sit behind the Archived pill), so the tab,
+  // the All pill and the grid read the same number. Not the sum of the four
+  // pills: a scheduled asset sits in none of them and would drop out. Null when
+  // the count is unread.
+  const lifecycleTotal = tabCounts.degraded ? null : tabCounts.counts[group];
+  const assetsOrNull = pageOrNull ? pageOrNull.tiles : null;
   const libraryDegraded = assetsOrNull === null;
-  const assets = assetsOrNull ?? [];
+  const signed = assetsOrNull ?? [];
+  const total = pageOrNull?.total ?? 0;
+  const currentPage = pageOrNull?.page ?? 1;
+  const pageCount = libraryPageCount(total, pageOrNull?.pageSize);
+  const firstShown = signed.length ? (currentPage - 1) * (pageOrNull?.pageSize ?? 0) + 1 : 0;
+  const lastShown = firstShown ? firstShown + signed.length - 1 : 0;
 
-  // Tab counts, from the one reader that deliberately spans every brand.
+  // Tab counts: one COUNT per tab of what its grid shows, across every brand.
   // A tab with no rows still renders — it is navigation, not a measurement, and
   // an absent tab is how CC ends up not knowing a brand exists. What it must NOT
   // do is print a confident 0 when the count simply failed to load.
   const countFor = (key: BrandGroupKey): number | null =>
-    facets.degraded
-      ? null
-      : facets.brands
-          .filter((b) => brandGroupFor(b.slug) === key)
-          .reduce((n, b) => n + b.count, 0);
+    tabCounts.degraded ? null : tabCounts.counts[key];
 
   /** Brands inside the current tab — the sub-filter, e.g. Warner within Clients. */
   const brandsInGroup = facets.brands.filter((b) => brandGroupFor(b.slug) === group);
@@ -174,61 +199,6 @@ export default async function MarketingLibraryPage({
   // so this row is invisible and lights up the moment that changes.
   const showAuthors = facets.authors.length > 1;
 
-  // Pick the objects each tile needs, then sign them ALL in one batched call per
-  // bucket. Signing per object was one Storage round-trip each — 400 sequential
-  // requests on a full 200-asset library, which is the entire render time.
-  const pick = (a: (typeof assets)[number]) => {
-    const media = a.media || [];
-    return {
-      video: media.find((m) => m.kind === "video"),
-      poster:
-        media.find((m) => m.kind === "poster") ||
-        media.find((m) => m.kind === "thumb") ||
-        media.find((m) => m.kind === "preview") ||
-        media.find((m) => m.kind === "image"),
-    };
-  };
-
-  // Slides are signed too, in `media_urls` order. A carousel read out of order
-  // is a different post, so the order recorded at migration time is the order
-  // rendered — never re-derived from the media rows, whose row order means
-  // nothing.
-  const slidePaths = (a: (typeof assets)[number]): string[] =>
-    parseSlideUrls(a.media_urls).filter(Boolean);
-
-  const refs = assets.flatMap((a) => {
-    const { video, poster } = pick(a);
-    const base = [video, poster]
-      .filter((m): m is NonNullable<typeof m> => !!m)
-      .map((m) => ({ bucket: m.storage_bucket, path: m.storage_path }));
-    const slides = slidePaths(a).map((path: string) => ({ bucket: "marketing-media", path }));
-    return [...base, ...slides];
-  });
-  const urls = await safe("marketing.library.sign", signMediaUrls(refs), new Map<string, string>());
-
-  const signed = assets.map((a) => {
-    const { video, poster } = pick(a);
-    const shape = video ?? poster;
-    return {
-      asset: a,
-      playbackUrl: video ? (urls.get(mediaKey(video.storage_bucket, video.storage_path)) ?? null) : null,
-      posterUrl: poster ? (urls.get(mediaKey(poster.storage_bucket, poster.storage_path)) ?? null) : null,
-      mediaW: shape?.width ?? null,
-      mediaH: shape?.height ?? null,
-      // ALL SLIDES OR NONE. Mapping then filtering silently renumbers a carousel
-      // when one slide fails to sign — 1,2,4,5 rendered as "1/4..4/4" — and a
-      // carousel read out of order is a different post. If we cannot show the
-      // whole thing we show the cover instead, which is honest rather than
-      // confidently wrong.
-      slideUrls: (() => {
-        const paths = slidePaths(a);
-        const signedSlides = paths.map((path: string) =>
-          urls.get(mediaKey("marketing-media", path)));
-        return signedSlides.every(Boolean) ? (signedSlides as string[]) : [];
-      })(),
-    };
-  });
-
   // Derive ONE supported-channel list and use it for row visibility, pill
   // rendering and active state. The earlier version made `activeChannels` a
   // length-1 array as soon as a channel was picked, so the channel row unmounted
@@ -238,57 +208,15 @@ export default async function MarketingLibraryPage({
   // uses the real mapping and cannot drift.
   const activeTrack: Track | undefined = track ?? (channel ? trackForChannel(channel) : undefined);
   const channelOptions: Channel[] = activeTrack ? channelsForTrack(activeTrack) : [];
-  // Every dimension is preserved unless explicitly overridden. `status` was
-  // omitted here once while Studio's pipeline tiles link in WITH it, so arriving
-  // on "In review" and then touching any pill — including "All" — silently
-  // widened the view to every status while the page gave no sign it had. You
-  // were reviewing, then you were not, and nothing said so.
-  const filterHref = (next: {
-    group?: BrandGroupKey;
-    track?: Track | null;
-    channel?: Channel | null;
-    brand?: string | null;
-    author?: string | null;
-    status?: AssetStatus | null;
-    lifecycle?: Lifecycle | null;
-  }) => {
-    const params = new URLSearchParams();
-    const nextGroup = next.group ?? group;
-    // Switching tabs CLEARS the brand sub-filter. `warner` is meaningless on the
-    // OASIS tab — the reader would drop it anyway (brandFilterAllowed), but a URL
-    // that still carries it describes a view the page is not showing, and the
-    // next click would propagate the lie.
-    const groupChanged = next.group !== undefined && next.group !== group;
-    const nextTrack = next.track === undefined ? track : next.track || undefined;
-    const nextChannel = next.channel === undefined ? channel : next.channel || undefined;
-    const nextBrand = groupChanged
-      ? undefined
-      : next.brand === undefined ? brand : next.brand || undefined;
-    const nextAuthor = next.author === undefined ? author : next.author || undefined;
-    // ONE OR THE OTHER, NEVER BOTH. They filter the same column with different
-    // vocabularies, so carrying both produces `status = 'draft' AND status IN
-    // ('archived',...)` — an empty grid under pills that promise rows. Setting
-    // either one drops the other, which is also what the operator means: picking
-    // "Archived" is a request to see archived, not to intersect it with the
-    // stage they arrived from.
-    const settingLifecycle = next.lifecycle !== undefined;
-    const settingStatus = next.status !== undefined;
-    const nextStatus = settingLifecycle
-      ? undefined
-      : next.status === undefined ? status : next.status || undefined;
-    const nextLifecycle = settingStatus
-      ? undefined
-      : next.lifecycle === undefined ? lifecycle : next.lifecycle || undefined;
-    if (nextGroup !== DEFAULT_BRAND_GROUP) params.set("group", nextGroup);
-    if (nextTrack) params.set("track", nextTrack);
-    if (nextChannel) params.set("channel", nextChannel);
-    if (nextBrand) params.set("brand", nextBrand);
-    if (nextAuthor) params.set("author", nextAuthor);
-    if (nextStatus) params.set("status", nextStatus);
-    if (nextLifecycle) params.set("lifecycle", nextLifecycle);
-    const query = params.toString();
-    return `/founders/marketing/library${query ? `?${query}` : ""}`;
-  };
+  // Every link on the page goes through libraryHref (lib/founders-marketing-core.ts),
+  // which keeps every filter unless one is explicitly changed; the pager keeps
+  // them all and changes only the page.
+  const here = { group, track, channel, brand, author, status, lifecycle, view };
+  const filterHref = (next: LibraryHrefChange) => libraryHref(here, next);
+  const pageHref = (n: number) => filterHref({ page: n });
+  // This exact view - tab, filters, view and page - for the asset page's
+  // "Library" link to come back to.
+  const thisView = pageHref(currentPage);
 
   const activeGroup = BRAND_GROUPS.find((g) => g.key === group)!;
   const filtered = !!(track || channel || brand || author || status || lifecycle);
@@ -351,7 +279,7 @@ export default async function MarketingLibraryPage({
       <div className="flex flex-wrap items-center gap-2">
         <FilterPill
           href={filterHref({ lifecycle: null })}
-          label={`All ${lifecycleTotal || ""}`.trim()}
+          label={`All ${lifecycleTotal === null ? "—" : lifecycleTotal}`}
           active={!lifecycle}
         />
         {LIFECYCLE.map((l) => {
@@ -370,7 +298,7 @@ export default async function MarketingLibraryPage({
       {/* The sentence that answers "have these been posted at all, ever?".
           Rendered from the counts rather than written as a claim, so it cannot
           go stale the way a hardcoded roadmap note does. */}
-      {!lc.degraded && lc.counts.live === 0 && lifecycleTotal > 0 && (
+      {!lc.degraded && lc.counts.live === 0 && lifecycleTotal !== null && lifecycleTotal > 0 && (
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 px-4 py-3 text-xs leading-5 text-fg-muted">
           <span className="font-semibold text-fg">
             None of these {lifecycleTotal} have been posted.
@@ -404,50 +332,6 @@ export default async function MarketingLibraryPage({
             />
           ))}
         </div>
-      )}
-
-      {group === "clients" && (!brand || brand === "arthrisil") && (
-        <Card title="Arthrisil · Social-proof edit V6" subtitle="Client creative · Internal review · 48s · 9:16">
-          <div className="grid gap-5 lg:grid-cols-[minmax(260px,420px)_1fr]">
-            <div className="overflow-hidden rounded-2xl border border-bg-border bg-black">
-              <video
-                className="mx-auto block max-h-[70vh] w-full bg-black object-contain"
-                controls
-                playsInline
-                preload="metadata"
-                poster="/media/arthrisil-marketing/end-card-preview.png"
-              >
-                <source src="/media/arthrisil-marketing/arthrisil-social-proof-v6.mp4" type="video/mp4" />
-                Your browser does not support HTML video.
-              </video>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-accent">Client asset</p>
-                <h2 className="mt-2 text-xl font-semibold text-fg">Arthritis impact → Dr. Azoulay → Arthrisil</h2>
-                <p className="mt-2 text-sm leading-6 text-fg-muted">
-                  Three complete outside perspectives establish pain and lost mobility. Dr. Michael then enters on camera before
-                  speaking in one single-source, transcript-led sequence: morning stiffness, a natural solution, 27 years of
-                  experience, and the Arthrisil reveal. A luminous bottle-outline close completes the ad.
-                </p>
-              </div>
-              <dl className="grid grid-cols-2 gap-3 text-sm">
-                <div><dt className="text-fg-dim">Brand</dt><dd className="font-semibold text-fg">Arthrisil</dd></div>
-                <div><dt className="text-fg-dim">Status</dt><dd className="font-semibold text-fg">In review</dd></div>
-                <div><dt className="text-fg-dim">Channel</dt><dd className="font-semibold text-fg">Organic social</dd></div>
-                <div><dt className="text-fg-dim">Rights</dt><dd className="font-semibold text-amber-300">Internal only</dd></div>
-              </dl>
-              <div className="flex flex-wrap gap-2" aria-label="Asset tags">
-                {["arthrisil", "client", "doctor", "social-proof", "arthritis", "vertical-video", "j-cut", "music-bed", "internal-review"].map((tag) => (
-                  <span key={tag} className="rounded-full border border-bg-border bg-bg-deep px-2.5 py-1 text-xs text-fg-muted">{tag}</span>
-                ))}
-              </div>
-              <p className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-fg-muted">
-                Public release is blocked until third-party clip permissions are documented. Product copy is limited to licensed claim language; unsupported superlatives from the source footage were excluded.
-              </p>
-            </div>
-          </div>
-        </Card>
       )}
 
       {/* A status filter arrives from Studio's pipeline tiles, never from a pill
@@ -532,15 +416,29 @@ export default async function MarketingLibraryPage({
       </details>
 
       {/* The count sits with the grid it describes rather than in the header,
-          which now carries the "what this page IS" line. */}
-      {assets.length > 0 && (
-        <div className="px-1 text-xs text-fg-dim">
-          {assets.length} {assets.length === 1 ? "asset" : "assets"}
-          {channel ? ` · ${channelLabel(channel)}` : track ? ` · ${trackLabel(track)}` : ""}
+          which now carries the "what this page IS" line. It is the COUNT behind
+          every page, with the slice this page shows. */}
+      {signed.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <div className="text-xs text-fg-dim">
+            {total} {total === 1 ? "asset" : "assets"}
+            {channel ? ` · ${channelLabel(channel)}` : track ? ` · ${trackLabel(track)}` : ""}
+            {pageCount > 1 && ` · showing ${firstShown}-${lastShown}`}
+          </div>
+          {/* Phone frames are the default (CC: "the preferred iPhone view");
+              Grid is the plain card grid. The page you are on is kept. */}
+          <div className="flex items-center gap-1" role="group" aria-label="Library layout">
+            <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
+              <Smartphone className="h-3.5 w-3.5" />
+            </ViewLink>
+            <ViewLink href={filterHref({ view: "grid", page: currentPage })} active={view === "grid"} label="Grid">
+              <LayoutGrid className="h-3.5 w-3.5" />
+            </ViewLink>
+          </div>
         </div>
       )}
 
-      {assets.length === 0 ? (
+      {signed.length === 0 ? (
         <Card>
           <MarketingEmpty
             // Order matters: a failed read outranks everything, because when the
@@ -572,7 +470,7 @@ export default async function MarketingLibraryPage({
             }
             detail={
               libraryDegraded
-                ? "The query failed, so this is not a statement about what the library holds. Nothing has been lost — refresh, and if it persists the server log carries the reason under [marketing:assets]."
+                ? "The library did not load, so this is not a statement about what it holds. Nothing has been lost. Try again in a minute; the cause is logged for the OASIS team."
                 : status
                 ? "No assets are sitting at this stage right now. Clear the stage to see the rest of the library."
                 : lifecycle
@@ -589,37 +487,98 @@ export default async function MarketingLibraryPage({
           />
         </Card>
       ) : (
-        <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {/* items-start: tiles now differ in height because each takes its asset's own
-              shape. Without it the grid stretches every tile to the tallest in its row,
-              leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
-              space created BY the fix. */}
-          {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => (
-            <AssetTile
-              key={asset.id}
-              id={asset.id}
-              title={asset.title}
-              brandName={asset.brand_name}
-              channel={asset.channel}
-              status={asset.status}
-              publishedAt={asset.published_at}
-              hook={asset.hook}
-              aspect={asset.aspect}
-              durationS={asset.duration_s}
-              format={asset.format}
-              platforms={asset.platforms}
-              assetType={asset.asset_type}
-              slideUrls={slideUrls}
-              playbackUrl={playbackUrl}
-              posterUrl={posterUrl}
-              mediaW={mediaW}
-              mediaH={mediaH}
-              openReviews={asset.open_reviews}
-            />
-          ))}
-        </div>
+        <>
+          {/* Phones take as many columns as fit at 232px or wider: narrower than
+              that the verdict row under each phone cannot fit and the page
+              scrolls sideways (it did at 390px and 768px with fixed breakpoints). */}
+          <div
+            className={
+              view === "phone"
+                ? "grid grid-cols-[repeat(auto-fill,minmax(232px,1fr))] items-start gap-4"
+                : "grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+            }
+          >
+            {/* items-start: tiles now differ in height because each takes its asset's own
+                shape. Without it the grid stretches every tile to the tallest in its row,
+                leaving a 9:16 tile's worth of empty panel beside every 16:9 one — dead
+                space created BY the fix. */}
+            {signed.map(({ asset, playbackUrl, posterUrl, mediaW, mediaH, slideUrls }) => (
+              <AssetTile
+                key={asset.id}
+                id={asset.id}
+                title={asset.title}
+                brandName={asset.brand_name}
+                channel={asset.channel}
+                status={asset.status}
+                publishedAt={asset.published_at}
+                hook={asset.hook}
+                aspect={asset.aspect}
+                durationS={asset.duration_s}
+                format={asset.format}
+                platforms={asset.platforms}
+                assetType={asset.asset_type}
+                slideUrls={slideUrls}
+                playbackUrl={playbackUrl}
+                posterUrl={posterUrl}
+                mediaW={mediaW}
+                mediaH={mediaH}
+                openReviews={asset.open_reviews}
+                presentation={view}
+                returnTo={thisView}
+              />
+            ))}
+          </div>
+          {pageCount > 1 && (
+            <nav className="flex flex-wrap items-center justify-center gap-1.5 pt-2" aria-label="Library pages">
+              {currentPage > 1 ? (
+                <FilterPill href={pageHref(currentPage - 1)} label="Previous" active={false} subtle />
+              ) : null}
+              {libraryPagerItems(currentPage, pageCount).map((n, i) =>
+                n === "gap" ? (
+                  <span key={`gap-${i}`} className="px-1 text-xs text-fg-dim" aria-hidden>
+                    ...
+                  </span>
+                ) : (
+                  <FilterPill key={n} href={pageHref(n)} label={String(n)} active={n === currentPage} subtle />
+                ),
+              )}
+              {currentPage < pageCount ? (
+                <FilterPill href={pageHref(currentPage + 1)} label="Next" active={false} subtle />
+              ) : null}
+            </nav>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+/** One half of the Phone / Grid toggle. A link, so the choice lives in the URL. */
+function ViewLink({
+  href,
+  active,
+  label,
+  children,
+}: {
+  href: string;
+  active: boolean;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "true" : undefined}
+      className={
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors " +
+        (active
+          ? "border-accent/30 bg-accent-soft text-accent"
+          : "border-bg-border bg-bg-deep/40 text-fg-dim hover:bg-bg-hover hover:text-fg")
+      }
+    >
+      {children}
+      {label}
+    </Link>
   );
 }
 

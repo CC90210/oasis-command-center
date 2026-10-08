@@ -95,7 +95,8 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         type: "phone",
         required: true,
         placeholder: "+1 …",
-        help: "So I can text you the findings — most people never open the email.",
+        // No report is texted (CC, 2026-10-08): the line promises only what he does.
+        help: "So I can follow up with you personally — I read every one.",
       },
       {
         name: "company",

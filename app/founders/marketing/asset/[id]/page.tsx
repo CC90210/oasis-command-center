@@ -34,9 +34,11 @@ import {
   channelLabel,
   isOwnBrand,
   isRenderableCarousel,
+  libraryReturnPath,
   parsePlatforms,
   parseSlideUrls,
   authorName,
+  phoneChromeFor,
   platformLabel,
   stalePublishWarning,
   trackLabel,
@@ -45,6 +47,8 @@ import {
 } from "@/lib/founders-marketing-core";
 import { StatusTag, isPortrait, mediaFrame } from "@/components/founders/marketing-shared";
 import { CarouselFrame } from "@/components/founders/CarouselFrame";
+import { PhoneFrame, PhoneTextCard } from "@/components/founders/PhoneFrame";
+import { TileVideo } from "@/components/founders/TileVideo";
 import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
@@ -64,14 +68,42 @@ function fmtDuration(s?: number | null) {
   return n >= 60 ? `${Math.floor(n / 60)}m ${Math.round(n % 60)}s` : `${n.toFixed(1)}s`;
 }
 
+/** A preview toggle. A link, so the choice lives in the URL and survives a reload. */
+function PreviewLink({ href, active, label }: { href: string; active: boolean; label: string }) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "true" : undefined}
+      className={
+        "rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors " +
+        (active
+          ? "border-accent/30 bg-accent-soft text-accent"
+          : "border-bg-border bg-bg-deep/40 text-fg-dim hover:bg-bg-hover hover:text-fg")
+      }
+    >
+      {label}
+    </Link>
+  );
+}
+
 export default async function AssetDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ frame?: string; chrome?: string; guides?: string; from?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
   const { id } = await params;
+  const sp = await searchParams;
+  // The phone preview is the default view of an asset; ?frame=original shows
+  // the media alone at its own shape, as this page always has.
+  const original = sp.frame === "original";
+  const guides = sp.guides === "1";
+  // The Library view this asset was opened from (tab, filters, view, page),
+  // validated to the Library's own path; anything else is its front page.
+  const libraryBack = libraryReturnPath(sp.from);
 
   // Null covers both "no such asset" and "not yours" — the caller cannot tell
   // them apart, which is the point. 404, never 403.
@@ -129,6 +161,45 @@ export default async function AssetDetailPage({
   const frame = mediaFrame(w, h, asset.aspect);
   const vertical = isPortrait(w, h);
 
+  // ONE media decision for both views, so the phone and the original can never
+  // show different things. In the phone the video plays the way a Reel does
+  // (TileVideo, no control bar over the caption); the Original view keeps the
+  // browser's player for scrubbing. initialOpen: this page IS the opened asset,
+  // so the player is there from the start with its first frame - not a cover,
+  // which for most videos (no poster on file) was a black "No cover image".
+  const mediaEl = isRenderableCarousel(asset.asset_type, slideUrls) ? (
+    <CarouselFrame slides={slideUrls} title={asset.title} width={w} height={h} className="h-full w-full" />
+  ) : videoUrl && !original ? (
+    <TileVideo src={videoUrl} posterUrl={posterUrl} width={w} height={h} title={asset.title} variant="phone" initialOpen />
+  ) : videoUrl ? (
+    <video
+      src={videoUrl}
+      poster={posterUrl || undefined}
+      controls
+      playsInline
+      preload="metadata"
+      className="h-full w-full bg-black object-contain"
+    />
+  ) : imageUrl ? (
+    // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, not a static asset
+    <img src={imageUrl} alt={asset.title} decoding="async" width={w ?? undefined} height={h ?? undefined} className="h-full w-full object-contain" />
+  ) : null;
+
+  // Instagram unless the asset is TikTok-first; ?chrome= switches it.
+  const chrome = phoneChromeFor(sp.chrome, asset.channel);
+  const detailHref = (next: { original?: boolean; chrome?: "instagram" | "tiktok"; guides?: boolean }) => {
+    const q = new URLSearchParams();
+    const nextOriginal = next.original ?? original;
+    if (nextOriginal) q.set("frame", "original");
+    const nextChrome = next.chrome ?? (sp.chrome === "instagram" || sp.chrome === "tiktok" ? sp.chrome : null);
+    if (!nextOriginal && nextChrome) q.set("chrome", nextChrome);
+    if (!nextOriginal && (next.guides ?? guides)) q.set("guides", "1");
+    // A preview toggle keeps the way back to the Library view.
+    if (libraryBack !== "/founders/marketing/library") q.set("from", libraryBack);
+    const s = q.toString();
+    return `/founders/marketing/asset/${asset.id}${s ? `?${s}` : ""}`;
+  };
+
   // Most recent publish request, so the panel can say what already happened
   // rather than inviting the operator to fire a second one blind.
   const lastIntent = await getLatestPublishIntent(founder.tenantId, asset.id);
@@ -159,8 +230,10 @@ export default async function AssetDetailPage({
         title={asset.title}
         subtitle={asset.hook || "No hook recorded"}
         action={
+          // Back to the Library view this asset was opened from, not page 1 of
+          // the default tab.
           <Link
-            href="/founders/marketing/library"
+            href={libraryBack}
             className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
@@ -169,33 +242,60 @@ export default async function AssetDetailPage({
         }
       />
 
-      <div className={`grid gap-6 ${vertical ? "lg:grid-cols-[minmax(0,380px)_1fr]" : "lg:grid-cols-2"}`}>
-        <Card noPadding>
-          <div
-            className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
-            style={frame.style}
-          >
-            {isRenderableCarousel(asset.asset_type, slideUrls) ? (
-              <CarouselFrame slides={slideUrls} title={asset.title} className="h-full w-full" />
-            ) : videoUrl ? (
-              <video
-                src={videoUrl}
-                poster={posterUrl || undefined}
-                controls
-                playsInline
-                preload="metadata"
-                className="h-full w-full object-contain"
-              />
-            ) : imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, not a static asset
-              <img src={imageUrl} alt={asset.title} className="h-full w-full object-contain" />
-            ) : (
-              <div className="p-8 text-center text-sm text-fg-dim">
-                No playable media is attached to this asset.
+      <div className={`grid gap-6 ${vertical || !original ? "lg:grid-cols-[minmax(0,380px)_1fr]" : "lg:grid-cols-2"}`}>
+        <div className="space-y-3">
+          {original ? (
+            <Card noPadding>
+              <div
+                className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
+                style={frame.style}
+              >
+                {mediaEl ?? (
+                  <div className="p-8 text-center text-sm text-fg-dim">
+                    No playable media is attached to this asset.
+                  </div>
+                )}
               </div>
+            </Card>
+          ) : (
+            // THE PHONE IS THE DEFAULT VIEW. The asset at its real shape inside a
+            // 9:19.5 screen with the app's own chrome over it, so the caption,
+            // the action column and the letterbox are judged where they will be
+            // seen. An asset with no media still shows its copy on the screen.
+            <PhoneFrame
+              mediaW={w}
+              mediaH={h}
+              aspect={asset.aspect}
+              handle={asset.brand_name || asset.brand_slug}
+              caption={mediaEl ? asset.hook : null}
+              chrome={chrome}
+              guides={guides}
+              label={asset.title}
+              className="mx-auto max-w-[360px]"
+            >
+              {mediaEl ?? (
+                <PhoneTextCard
+                  kicker={asset.format === "html" ? "HTML page" : asset.format === "video" ? "Video - no render on file yet" : "Text post"}
+                  text={asset.hook || asset.body || asset.title}
+                  note="No media is attached to this asset yet."
+                />
+              )}
+            </PhoneFrame>
+          )}
+          <div className="flex flex-wrap items-center justify-center gap-1.5" aria-label="Preview options">
+            <PreviewLink href={detailHref({ original: false })} active={!original} label="Phone" />
+            <PreviewLink href={detailHref({ original: true })} active={original} label="Original" />
+            {!original && (
+              <>
+                <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />
+                <PreviewLink href={detailHref({ chrome: "instagram" })} active={chrome === "instagram"} label="Instagram" />
+                <PreviewLink href={detailHref({ chrome: "tiktok" })} active={chrome === "tiktok"} label="TikTok" />
+                <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />
+                <PreviewLink href={detailHref({ guides: !guides })} active={guides} label="Safe zones" />
+              </>
             )}
           </div>
-        </Card>
+        </div>
 
         <div className="space-y-6">
           <Card title="Status" subtitle="Where this sits, and what you can do about it">
@@ -225,8 +325,8 @@ export default async function AssetDetailPage({
               ) : (
                 <p className="text-xs text-fg-dim">
                   {slidePaths.length - slidePairs.length} of {slidePaths.length} slides could not
-                  be loaded, so the order cannot be changed safely from a partial view. Refresh —
-                  if it persists, the missing objects are named in the server log.
+                  be loaded, so the order cannot be changed safely from a partial view. Try again
+                  in a minute; the cause is logged for the OASIS team.
                 </p>
               )}
             </Card>

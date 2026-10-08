@@ -90,8 +90,12 @@ assert.deepEqual([...ASSET_TYPES], ["video", "single_image", "carousel"]);
 
   const lib = readFileSync(join(ROOT, "app/founders/marketing/library/page.tsx"), "utf8");
   assert.match(lib, /slideUrls=\{slideUrls\}/, "the library must pass signed slides into the tile");
+  // The Library's slides are read and signed in loadLibraryPage, the page's one
+  // data path since the Library became paged (W8a), so the rule is pinned there.
+  const loader = readFileSync(join(ROOT, "lib/founders/marketing-queries.ts"), "utf8");
+  assert.match(lib, /loadLibraryPage\(/, "the library reads its tiles through loadLibraryPage");
   assert.match(
-    lib,
+    loader,
     /parseSlideUrls\(a\.media_urls\)/,
     "slides come from media_urls — NOT re-derived from media rows, whose order means nothing",
   );

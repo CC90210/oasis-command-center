@@ -8,11 +8,11 @@
  * every workspace's AI Team page.
  *
  * `brief` is the paragraph for the builder's "Describe what this agent should
- * do" field. components/marketplace/CustomAgentBuilder.tsx does not read
- * templates from the URL yet, so the card shows the brief to paste and the
- * link carries `?template=<key>` for the builder to pick up once it does (a
- * gap in the workstream report). `category` is the builder's own category key
- * (lib/agents/library.ts AgentCategory).
+ * do" field. The template link carries `?template=<key>`, and
+ * components/marketplace/CustomAgentBuilder.tsx opens prefilled from it
+ * (templateDraft: name, category, one-line summary and brief; W4a, audit
+ * S2-06). `category` is the builder's own category key (lib/agents/library.ts
+ * AgentCategory).
  */
 
 import type { AgentCategory } from "@/lib/agents/library";
@@ -84,3 +84,15 @@ export const TEAMMATE_TEMPLATES: readonly TeammateTemplate[] = [
       "Project manager for client work. Tracks every project's stage, due dates and blockers, writes a short weekly update for each client, and flags anything slipping before it is late. Drafts client updates for approval.",
   },
 ];
+
+/**
+ * What the builder starts from for `?template=<key>`, or null for no key or an
+ * unknown one (the builder then starts empty, as it always did).
+ */
+export function templateDraft(
+  key: string | null | undefined,
+): Pick<TeammateTemplate, "name" | "category" | "summary" | "brief"> | null {
+  const k = (key || "").trim().toLowerCase();
+  const t = k ? TEAMMATE_TEMPLATES.find((x) => x.key === k) : undefined;
+  return t ? { name: t.name, category: t.category, summary: t.summary, brief: t.brief } : null;
+}
