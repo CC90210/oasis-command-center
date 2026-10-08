@@ -113,27 +113,28 @@ async function main() {
   render("unsubscribeLinked", React.createElement(UnsubscribeForm, { email: "reader@example.com", brand: "", token: "" }));
   render("unsubscribeTyped", React.createElement(UnsubscribeForm, { email: "", brand: "", token: "" }));
   // A client workspace's /forms list with one live form: the row's Copy-link
-  // hint and the help block under the table.
-  render(
-    "formsList",
-    React.createElement(FormsListClient, {
-      initialRows: [
-        {
-          id: "f-1",
-          slug: "intake",
-          name: "Intake",
-          description: null,
-          enabled: true,
-          created_at: "2026-09-01T00:00:00Z",
-          updated_at: "2026-09-01T00:00:00Z",
-        },
-      ],
-      tenantLogoUrl: null,
-      tenantSlug: "client-co",
-      tenantName: "Client Co",
-      profileSlug: "client-co",
-    }),
-  );
+  // hint and the help block under the table, as an owner sees it (canEdit)
+  // and as a member who may not change forms sees it.
+  const formsListProps = {
+    initialRows: [
+      {
+        id: "f-1",
+        slug: "intake",
+        name: "Intake",
+        description: null,
+        enabled: true,
+        created_at: "2026-09-01T00:00:00Z",
+        updated_at: "2026-09-01T00:00:00Z",
+      },
+    ],
+    tenantLogoUrl: null,
+    tenantSlug: "client-co",
+    tenantName: "Client Co",
+    profileSlug: "client-co",
+    responseCounts: { "f-1": 3 },
+  };
+  render("formsList", React.createElement(FormsListClient, { ...formsListProps, canEdit: true }));
+  render("formsListReadOnly", React.createElement(FormsListClient, { ...formsListProps, canEdit: false }));
 
   process.stdout.write(JSON.stringify(out));
 }

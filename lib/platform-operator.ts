@@ -21,6 +21,7 @@
  */
 
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
+import { dbBool } from "@/lib/db-bool";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { resolvePersona } from "@/lib/role-surfaces";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -107,8 +108,8 @@ export async function resolvePlatformOperatorForAuthUser(
     !profile.deactivated_at &&
     resolvePersona({
       teamRole: profile.team_role,
-      // Number(): true and 1 both count, and a stringly "0" cannot read as truthy.
-      isTrueAdmin: Number(profile.is_owner) === 1,
+      // dbBool (lib/db-bool.ts): true, 1 and "1" count; a stringly "0" cannot.
+      isTrueAdmin: dbBool(profile.is_owner),
       adminAccess: false,
     }) === "founder";
   return founder

@@ -116,8 +116,19 @@ const TESTS = [
   "tests/forms-visibility.test.ts",
   // Delete reported 404 AFTER deleting the row: the Turso adapter swallowed
   // `{ count: "exact" }` on delete/update. Runs the real adapter against a
-  // real in-memory libSQL db and pins create+delete to one resolveTenantId.
+  // real in-memory libSQL db and pins create+delete to one formsSession.
   "tests/forms-delete-tenant-scope.test.ts",
+  // Any member could create, switch off or delete a workspace's live forms,
+  // and no screen showed the answers. Every role in two workspaces against
+  // every forms route, the Responses page and its CSV (MKT-02, MKT-05).
+  "tests/forms-safe.test.ts",
+  // A stored is_owner of "0" made a member a full admin; a stored grant of 1
+  // read as no. The seven flag shapes through the real Forms and team routes,
+  // and a parser guard that every read of either flag goes through dbBool.
+  "tests/db-bool.test.ts",
+  // A rejected first step of a public form created a lead, or rewrote a
+  // returning merchant's, before the 400. Every rejection, new and existing.
+  "tests/forms-submit-validate-first.test.ts",
   // The form builder was SunBiz-hardcoded for every tenant. Pins the tenant
   // boundary: sun keeps its presets, nobody else ever sees them, unknown
   // tenants get NO stage vocabulary (fail closed).

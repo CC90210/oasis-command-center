@@ -861,7 +861,22 @@ async function main() {
     assert.ok(forms.includes("Intake"), "the forms list rendered the row");
     const formsText = readable(forms);
     assert.doesNotMatch(formsText, /Solara|Helios|SunBiz|Sun Biz/i, "SunBiz agent copy on a client's /forms");
-    assert.match(formsText, /Personalized links/);
+    // MKT-04: the developer-API instructions for "Personalized links" are gone.
+    assert.doesNotMatch(forms, /Personalized links|mint-link|lead_id|step_outcomes/, "an API call shown as instructions on /forms");
+    // MKT-02 / MKT-05: an owner gets the controls; a member who may not change
+    // forms gets none of them, and both open each form's responses.
+    assert.match(formsText, /New form/);
+    assert.ok(forms.includes('href="/forms/f-1/edit"') && />\s*Delete\s*</.test(forms), "an owner's row has Edit and Delete");
+    const readOnly = html.client.formsListReadOnly;
+    assert.ok(readOnly.includes("Intake"), "the read-only list rendered the row");
+    assert.doesNotMatch(readable(readOnly), /New form|Delete/, "a member who may not edit is offered New form or Delete");
+    assert.ok(!readOnly.includes("/forms/f-1/edit"), "a member who may not edit is offered the editor");
+    assert.doesNotMatch(readOnly, /<button[^>]*>(?:(?!<\/button>)[\s\S])*Live/, "a member who may not edit gets the on/off switch");
+    assert.match(readable(readOnly), /Only owners and admins can create or change forms/);
+    for (const markup of [forms, readOnly]) {
+      assert.ok(markup.includes('href="/forms/f-1/responses"'), "the row links to its responses");
+      assert.match(readable(markup), /3 responses/, "the row shows its response count");
+    }
     // The Manage tab's help text (a client component with a live fetch): read as source.
     const manage = readFileSync(join(ROOT, "components/sequences/SequencesListClient.tsx"), "utf8");
     assert.doesNotMatch(manage, /Bravo|Metrics tab/, "Drips > Manage names Bravo or sends people to the retired Metrics page");

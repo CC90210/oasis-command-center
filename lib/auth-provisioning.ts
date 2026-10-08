@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Client } from "@libsql/client";
 import { dbError } from "@/lib/db-error";
+import { dbBool } from "@/lib/db-bool";
 import { validateActiveInviteForEmail } from "@/lib/invite-account-recovery";
 
 /**
@@ -218,14 +219,15 @@ function chooseProvisioningRow<T extends {
   const normalizedEmail = email.trim().toLowerCase();
   const exactEmail = scopedRows.filter((row) => (row.email || "").trim().toLowerCase() === normalizedEmail);
   const candidates = exactEmail.length > 0 ? exactEmail : scopedRows;
+  // dbBool (lib/db-bool.ts): a stored "0" must not pick a seat as the owner's.
   return (
     candidates.find((row) => {
       const brand = (row.brand || "").toLowerCase();
-      return row.is_owner && row.primary_agent === "bravo" && brand.includes("oasis");
+      return dbBool(row.is_owner) && row.primary_agent === "bravo" && brand.includes("oasis");
     }) ||
-    candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
+    candidates.find((row) => dbBool(row.is_owner) && row.onboarding_completed_at) ||
     candidates.find((row) => row.onboarding_completed_at) ||
-    candidates.find((row) => row.is_owner) ||
+    candidates.find((row) => dbBool(row.is_owner)) ||
     candidates[0]
   );
 }

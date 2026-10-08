@@ -25,6 +25,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 import { createRecord, RecordsError } from "@/lib/manifest/data";
 import { promoteLeadToApplication } from "@/lib/applications/promote-lead-to-application";
 import { findExistingLead } from "@/lib/forms/agent-routing";
@@ -101,7 +102,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     | null;
   const tenantId = profile?.tenant_id ?? null;
   if (!tenantId) return err(401, "no_tenant");
-  const role = (profile?.is_owner ? "owner" : profile?.team_role || "read_only").toLowerCase();
+  // dbBool (lib/db-bool.ts): truthiness read a stored "0" as the owner.
+  const role = (dbBool(profile?.is_owner) ? "owner" : profile?.team_role || "read_only").toLowerCase();
   if (role === "read_only") return err(403, "forbidden", "read-only users cannot review deals");
 
   // Tenant-scoped fetch — a user can only act on their own tenant's candidates.

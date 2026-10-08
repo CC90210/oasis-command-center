@@ -1,8 +1,8 @@
 /**
  * /forms/[id]/edit — operator form-builder page.
  *
- * Server component loads the form row (tenant-scoped via service-role
- * + explicit user_profiles join), then hands it to FormBuilderClient
+ * Server component loads the form row (tenant-scoped via service-role),
+ * then hands it to FormBuilderClient
  * which owns the visual editor + live preview. If the stored definition
  * is malformed (manual DB edit, schema drift), we render a clean
  * "definition corrupt" page instead of routing into the editor —
@@ -10,16 +10,27 @@
  *
  * 404 when the form doesn't belong to this user's tenant — defends
  * against a guessed-UUID URL.
+ *
+ * GATE (MKT-15, MKT-02, 2026-10-02). requireOsRoute("/forms") is the first
+ * statement, as on /forms, and the form is read by the SESSION's workspace
+ * (viewer.surface.tenantId). It used to find the workspace with its own
+ * user_profiles lookup, which errored for anyone with a seat in two
+ * workspaces (a 404 on every form) and could disagree with the list. Someone
+ * formsEditRefusal refuses (a member who may not edit, or anyone in a retired
+ * workspace) gets its plain sentence and a link to the answers, never a
+ * builder whose Save the API would refuse.
  */
 
 import { PageHeader } from "@/components/Card";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
+import { requireOsRoute } from "@/components/os/landings/page-gate";
+import { formsEditRefusal } from "@/lib/forms/access";
 import Link from "next/link";
-import { redirect, notFound } from "next/navigation";
+import { notFound } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import {
   parseFormSteps,
@@ -48,15 +59,8 @@ type FormDbRow = {
   updated_at: string;
 };
 
-async function loadForm(id: string, userId: string): Promise<FormDbRow | null> {
+async function loadForm(id: string, tenantId: string): Promise<FormDbRow | null> {
   const db = getServiceSupabase();
-  const profileRow = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", userId)
-    .maybeSingle();
-  const tenantId = (profileRow.data as { tenant_id: string | null } | null)?.tenant_id;
-  if (!tenantId) return null;
   const { data, error } = await db
     .from("forms")
     .select("*")
@@ -72,11 +76,37 @@ export default async function EditFormPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const user = await getSessionUser();
-  if (!user) redirect("/login");
+  const viewer = await requireOsRoute("/forms");
   const { id } = await params;
-  const row = await loadForm(id, user.id);
+  const row = await loadForm(id, viewer.surface.tenantId);
   if (!row) notFound();
+
+  const refusal = formsEditRefusal({ persona: viewer.surface.persona, tenantId: viewer.surface.tenantId });
+  if (refusal) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader
+          title={row.name || "Untitled form"}
+          subtitle={refusal.message}
+          action={
+            <Link
+              href="/forms"
+              className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Back to forms
+            </Link>
+          }
+        />
+        <Link
+          href={`/forms/${encodeURIComponent(row.id)}/responses`}
+          className="text-sm text-accent hover:text-accent-bright"
+        >
+          See this form&apos;s responses
+        </Link>
+      </div>
+    );
+  }
 
   // Resolve the tenant's PROFILE slug ("sun" for SunBiz) so the builder
   // renders THIS tenant's themes, stage vocabulary, and step presets —
