@@ -32,6 +32,13 @@
  * cards (SunBizFormsClient) only ever offer changes, so they render only for
  * someone who may make them, which in a retired workspace is nobody; SunBiz is
  * that workspace.
+ *
+ * OFFERS (2026-10-08). The rail calls this page Offers: a form can carry a full
+ * landing page (form_offer_pages, bravo__203). The list is split in two:
+ * Offers (forms with a page: its status, new leads in 7 days, responses, link)
+ * and Intake forms (forms without one, exactly as before). Before the
+ * migration is applied every form is an intake form and New offer says it is
+ * not available yet. A number that could not be read is "-", never a zero.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -44,6 +51,7 @@ import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
+import { countRecentLeads, listOfferStatuses, offerPagesDb, type OfferPageStatus } from "@/lib/offer-pages/store";
 import { AlertCircle } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -109,12 +117,13 @@ export default async function FormsPage() {
     : {};
   const refusal = formsEditRefusal({ persona: viewer.surface.persona, tenantId });
   const canEdit = refusal === null;
+  const offers = result.ok ? await loadOfferColumns(tenantId, result.rows.map((r) => r.id)) : null;
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title="Forms"
-        subtitle="Forms people fill in to reach you, with every answer they sent."
+        title="Offers"
+        subtitle="Full pages that make the case and take people's details, and the plain forms behind your other requests."
       />
 
       {!result.ok && (
@@ -139,8 +148,34 @@ export default async function FormsPage() {
           canEdit={canEdit}
           readOnlyNote={refusal?.error === "workspace_closed" ? refusal.message : undefined}
           responseCounts={responseCounts}
+          offers={offers?.statuses ?? null}
+          recentLeads={offers?.recentLeads ?? {}}
         />
       ) : null}
     </div>
   );
+}
+
+/**
+ * Which forms have an offer page, and each one's new leads over the last 7
+ * days. null when offer pages are not available here (no Turso data plane, or
+ * bravo__203 not applied): every form is then an intake form, as before.
+ */
+async function loadOfferColumns(
+  tenantId: string,
+  formIds: string[],
+): Promise<{ statuses: Record<string, { status: OfferPageStatus; publishedVersion: number }>; recentLeads: Record<string, number | null> } | null> {
+  const db = offerPagesDb();
+  if (!db) return null;
+  try {
+    const map = await listOfferStatuses(db, tenantId);
+    if (!map) return null;
+    const statuses = Object.fromEntries([...map.entries()].filter(([id]) => formIds.includes(id)));
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentLeads = await countRecentLeads(db, tenantId, Object.keys(statuses), since);
+    return { statuses, recentLeads };
+  } catch (err) {
+    console.error("[forms.offers] offer pages unreadable", { tenantId }, err);
+    return null;
+  }
 }

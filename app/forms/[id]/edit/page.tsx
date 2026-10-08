@@ -19,6 +19,14 @@
  * formsEditRefusal refuses (a member who may not edit, or anyone in a retired
  * workspace) gets its plain sentence and a link to the answers, never a
  * builder whose Save the API would refuse.
+ *
+ * OFFERS (2026-10-08). A form with an offer page (form_offer_pages, bravo__203)
+ * opens the offer builder (components/offer-pages/builder/OfferBuilder.tsx):
+ * Page / Video / Form & booking / Settings / Preview, with this same
+ * FormBuilderClient in the Form & booking tab. An intake form keeps
+ * FormBuilderClient exactly as before, with "Turn into an offer" above it,
+ * except a support desk's form, which never becomes a sales page. Before the
+ * migration is applied every form is an intake form and nothing is offered.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -27,8 +35,15 @@ import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
+import { OfferBuilder } from "@/components/offer-pages/builder/OfferBuilder";
+import { TurnIntoOffer } from "@/components/offer-pages/builder/TurnIntoOffer";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
+import { isSupportDeskForm, offerPagesDb, readOfferRow } from "@/lib/offer-pages/store";
+import { offerView } from "@/lib/offer-pages/operator";
+import { offerAlertStatus } from "@/lib/offer-pages/notify";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
+import { resolveBookingUrl } from "@/lib/booking-link";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
@@ -144,6 +159,50 @@ export default async function EditFormPage({
     );
   }
 
+  const initialForm = {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description,
+    branding,
+    steps,
+    on_complete_stage: row.on_complete_stage,
+    step_outcomes: stepOutcomes,
+    enabled: row.enabled,
+    redirect_url: row.redirect_url,
+  };
+  const offer = await loadOfferForEditor(row.tenant_id, initialForm);
+
+  if (offer.kind === "offer") {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader
+          title={row.name || "Untitled offer"}
+          subtitle={`Offer page /${row.slug} - its form is ${row.enabled ? "on" : "off"}`}
+          action={
+            <Link
+              href="/forms"
+              className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Back to offers
+            </Link>
+          }
+        />
+        <OfferBuilder
+          form={initialForm}
+          profileSlug={profileSlug}
+          initial={offer.view}
+          tenantSlug={tenant?.slug ?? null}
+          alert={offer.alert}
+          libraryAvailable={isOasisInternalTenant(row.tenant_id)}
+          bookingLinkSet={isOasisInternalTenant(row.tenant_id) && !!resolveBookingUrl()}
+          canRequestCopy={isOasisInternalTenant(row.tenant_id)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
@@ -159,21 +218,44 @@ export default async function EditFormPage({
           </Link>
         }
       />
+      {offer.kind === "offerable" ? <TurnIntoOffer formId={row.id} /> : null}
       <FormBuilderClient
-        initialForm={{
-          id: row.id,
-          slug: row.slug,
-          name: row.name,
-          description: row.description,
-          branding,
-          steps,
-          on_complete_stage: row.on_complete_stage,
-          step_outcomes: stepOutcomes,
-          enabled: row.enabled,
-          redirect_url: row.redirect_url,
-        }}
+        initialForm={initialForm}
         profileSlug={profileSlug}
       />
     </div>
   );
+}
+
+type EditorOffer =
+  | { kind: "offer"; view: ReturnType<typeof offerView>; alert: Awaited<ReturnType<typeof offerAlertStatus>> }
+  | { kind: "offerable" }
+  | { kind: "intake" };
+
+/**
+ * Does this form have an offer page (the builder), could it get one (Turn into
+ * an offer), or neither (offer pages unavailable here, or a support desk's
+ * form)? Any failure reads as "intake": the form's own editor always opens.
+ */
+async function loadOfferForEditor(
+  tenantId: string,
+  form: { id: string; slug: string; name: string; branding: FormBranding; enabled: boolean },
+): Promise<EditorOffer> {
+  const db = offerPagesDb();
+  if (!db) return { kind: "intake" };
+  try {
+    const read = await readOfferRow(db, tenantId, form.id);
+    if (read.state === "unavailable") return { kind: "intake" };
+    if (read.state === "row") {
+      return {
+        kind: "offer",
+        view: offerView(read.row, { ...form, tenantId }),
+        alert: await offerAlertStatus(tenantId),
+      };
+    }
+    return (await isSupportDeskForm(db, tenantId, form)) ? { kind: "intake" } : { kind: "offerable" };
+  } catch (err) {
+    console.error("[forms.edit] offer page unreadable; opening the form editor", { form_id: form.id }, err);
+    return { kind: "intake" };
+  }
 }

@@ -14,12 +14,25 @@
  * No HMAC verification on this route — auth is bound to the form's
  * `enabled` flag and the (tenant_slug, form_slug) uniqueness check in
  * the submit route.
+ *
+ * OFFER PAGES (2026-10-08). When the form has an offer page that is LIVE
+ * (form_offer_pages, bravo__203), this URL draws that page, with this same form
+ * inside its Book section. Otherwise (no row, a draft nobody published, the
+ * table not there yet, or any error in the page layer) it renders exactly what
+ * it always has: the FormPublicClient element below, unchanged.
+ * tests/offer-pages-public.test.ts holds that byte for byte.
+ *
+ * ?offer_preview=1 shows the DRAFT, but only to a signed-in owner or admin of
+ * the form's own workspace (the builder's Preview tab). Everyone else gets the
+ * public page, and a preview never mounts a live form.
  */
 
 import type { Metadata } from "next";
+import { cache } from "react";
 import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { OfferPage } from "@/components/offer-pages/OfferPage";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -28,7 +41,17 @@ import {
   type FormBranding,
 } from "@/lib/forms/types";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
-import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
+import { publicMarkForTenant, faviconForTenant, publicIdentityForTenant } from "@/lib/tenant/public-identity";
+import { offerPagesDb, readLiveOfferDoc, readOfferRow } from "@/lib/offer-pages/store";
+import { prepareOfferRender, type PreparedOffer } from "@/lib/offer-pages/render";
+import type { OfferPageDoc } from "@/lib/offer-pages/types";
+import { signMediaUrls } from "@/lib/founders/marketing-queries";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
+import { resolveBookingUrl } from "@/lib/booking-link";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { resolvePersona } from "@/lib/role-surfaces";
+import { formsEditRefusal } from "@/lib/forms/access";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -67,12 +90,24 @@ export async function generateMetadata({
     tenantId: lookup.form.tenant_id,
     tenantSlug: resolved.tenant_slug,
   });
+  // A live offer page names the tab and the link preview from its own words.
+  // noindex either way (D8): offer pages stay out of search results.
+  const offer = await liveOfferDoc(lookup.form.tenant_id, lookup.form.id);
+  const description = offer ? offer.seo.description || offer.hero.subheadline : undefined;
+  if (offer) title = offer.seo.title || offer.hero.headline || title;
   return {
     title,
+    ...(description ? { description } : {}),
     robots: { index: false, follow: false },
     ...(icon ? { icons: { icon } } : {}),
   };
 }
+
+/** The live offer page for a form, read once per request (metadata and page share it). */
+const liveOfferDoc = cache(async (tenantId: string, formId: string): Promise<OfferPageDoc | null> => {
+  const db = offerPagesDb();
+  return db ? readLiveOfferDoc(db, tenantId, formId) : null;
+});
 
 type RouteParams = {
   tenant_slug: string;
@@ -176,7 +211,7 @@ export default async function AnonymousFormPage({
   // agent blasts texts AND dials, so both params travel together on a link.
   // Passed through raw; lib/forms/lead-source.ts normalizes it server-side on
   // submit, where a bad value becomes "unknown" instead of rejecting the lead.
-  searchParams?: Promise<{ rep?: string; source?: string }>;
+  searchParams?: Promise<{ rep?: string; source?: string; offer_preview?: string }>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
@@ -189,6 +224,47 @@ export default async function AnonymousFormPage({
       return <FormErrorPage reason={result.reason} detail={result.detail} />;
     }
     notFound();
+  }
+
+  const offer = await loadOfferView(result, sp.offer_preview === "1");
+  if (offer) {
+    const tenantId = result.form.tenant_id;
+    const oasis = isOasisInternalTenant(tenantId);
+    return (
+      <OfferPage
+        prepared={offer.prepared}
+        workspaceName={offer.workspaceName}
+        logoUrl={offer.doc.theme.logo === "none" ? null : (result.form.branding.logo_url ?? null)}
+        legalLinks={oasis}
+        // A client workspace has no booking link of its own yet; OASIS's link
+        // must never appear on another company's page.
+        bookingUrl={oasis ? resolveBookingUrl() || null : null}
+        contactEmail={oasis ? CONTACT_EMAIL : null}
+        preview={offer.preview ? { steps: result.form.steps.map((s) => s.title) } : null}
+        form={
+          offer.preview
+            ? null
+            : {
+                formId: result.form.id,
+                formName: result.form.name,
+                // One accent on the page: the form's buttons follow it.
+                branding: { ...result.form.branding, primary_color: offer.prepared.accent },
+                steps: result.form.steps,
+                redirectUrl: result.form.redirect_url,
+                token: null,
+                brand: consentBrandForTenant(result.tenant_slug, result.form.slug),
+                submissionSource: source,
+                submissionPath: `/f/${result.tenant_slug}/${result.form.slug}`,
+                anonymousInit: {
+                  tenant_slug: result.tenant_slug,
+                  form_slug: result.form.slug,
+                  ...(rep ? { rep } : {}),
+                  ...(source ? { source } : {}),
+                },
+              }
+        }
+      />
+    );
   }
 
   return (
@@ -228,6 +304,72 @@ export default async function AnonymousFormPage({
       }}
     />
   );
+}
+
+type OfferView = { doc: OfferPageDoc; prepared: PreparedOffer; workspaceName: string; preview: boolean };
+
+/**
+ * May this session see this form's DRAFT? A signed-in owner or admin of the
+ * form's own workspace, by the rule every forms write uses. Anyone else,
+ * including a signed-in member of another workspace, is an ordinary visitor.
+ */
+async function canPreview(tenantId: string): Promise<boolean> {
+  try {
+    const session = await resolveSessionContext();
+    if (!session.ok || session.tenantId !== tenantId) return false;
+    return formsEditRefusal({ persona: resolvePersona(session), tenantId }) === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The offer page to draw instead of the plain form, or null for the plain form.
+ * Never throws: whatever goes wrong in the page layer, the visitor gets the
+ * form they came for, never a 500.
+ */
+async function loadOfferView(
+  result: Extract<LoadResult, { ok: true }>,
+  previewRequested: boolean,
+): Promise<OfferView | null> {
+  const db = offerPagesDb();
+  if (!db) return null;
+  const { id: formId, tenant_id: tenantId } = result.form;
+  try {
+    let doc: OfferPageDoc | null = null;
+    let preview = false;
+    if (previewRequested && (await canPreview(tenantId))) {
+      const row = await readOfferRow(db, tenantId, formId);
+      if (row.state === "row" && row.row.draft) {
+        doc = row.row.draft;
+        preview = true;
+      }
+    }
+    if (!doc) doc = await liveOfferDoc(tenantId, formId);
+    if (!doc) return null;
+    const prepared = await prepareOfferRender({
+      db,
+      tenantId,
+      formId,
+      doc,
+      fallbackHeadline: result.form.branding.headline || result.form.name,
+      sign: signMediaUrls,
+      // Read lazily: without an object store a link video simply has no poster.
+      publicUrl: (path) => getServiceSupabase().storage.from("tenant-assets").getPublicUrl(path).data.publicUrl || null,
+    });
+    let workspaceName = publicIdentityForTenant({ tenantId })?.displayName ?? "";
+    if (!workspaceName) {
+      const t = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
+      workspaceName = String((t.rows[0] as unknown as { name?: unknown } | undefined)?.name ?? "").trim() || result.form.name;
+    }
+    return { doc, prepared, workspaceName, preview };
+  } catch (err) {
+    console.error("[offer-pages] page layer failed; rendering the form", {
+      form_id: formId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 function FormErrorPage({
