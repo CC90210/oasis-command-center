@@ -59,6 +59,19 @@ async function main() {
     assert.deepEqual(await ok.json(), { ok: true, stored: 1 });
   });
 
+  await check("an oversize body is 413 by BYTES, not UTF-16 characters (fix round 1)", async () => {
+    // "€" (EUR SIGN) is one UTF-16 code unit but three UTF-8 bytes: 700,000 of them is
+    // ~700,040 *characters* (under the 2,000,000-character false floor a naive text.length
+    // check would apply) but ~2,100,040 *bytes* (over MAX_BODY_BYTES). No content-length
+    // header is sent (the harness's req() never sets one for a constructed Request), so this
+    // also exercises the streamed-read path rather than the content-length fast path.
+    const raw = JSON.stringify({ skills_sha: "s2", skills: [], pad: "€".repeat(700_000) });
+    assert.ok(raw.length < 2_000_000, "test precondition: under the character-count false floor");
+    assert.ok(Buffer.byteLength(raw, "utf8") > 2_000_000, "test precondition: over the real byte cap");
+    const res = await pushSkills(req("/api/skills/checkin/skills", { method: "POST", headers: bearer(pc.key), raw }) as never);
+    assert.equal(res.status, 413);
+  });
+
   await check("a computer pulls only its own pending changes, oldest first", async () => {
     const ops = [{ op: "assign", skill: "graft", label: "debug", rank: "use-first" }];
     await createChange(db, USERS.adon.id, "adon", { description: "first", scope: "shared", ops });

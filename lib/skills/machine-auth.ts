@@ -42,17 +42,53 @@ export async function authenticateComputer(req: Request, db: Client): Promise<{ 
   }
 }
 
-/** The JSON body under MAX_BODY_BYTES: 413 when larger (declared or actual), 400 when not a JSON object. */
+const TOO_LARGE: Denied = { ok: false, response: json({ ok: false, error: "too_large" }, 413) };
+const BAD_JSON: Denied = { ok: false, response: json({ ok: false, error: "bad_json" }, 400) };
+
+/**
+ * The JSON body under MAX_BODY_BYTES: 413 when larger (declared or actual), 400 when not a JSON
+ * object. The content-length check is a fast path only, never the enforcement: a chunked body,
+ * or one sent with no content-length header at all, would otherwise be buffered in full (up to
+ * the platform's own cap, tens of MB) before any size check ran. The real cap is a running BYTE
+ * count read off the stream, cancelling the reader the moment it is exceeded, so an oversize body
+ * is never held in memory whole. Counting `req.text()`'s result in UTF-16 *characters* (the
+ * previous shape of this function) undercounts any body with multi-byte UTF-8 text — 2,000,000
+ * three-byte characters is ~6 MB but only 2,000,000 JS string chars, so it passed the old check;
+ * the byte count here is exact regardless of what the text contains.
+ */
 export async function readBoundedJson(req: Request): Promise<{ ok: true; body: unknown } | Denied> {
   const declared = Number(req.headers.get("content-length") || 0);
-  if (declared > MAX_BODY_BYTES) return { ok: false, response: json({ ok: false, error: "too_large" }, 413) };
-  const text = await req.text();
-  if (text.length > MAX_BODY_BYTES) return { ok: false, response: json({ ok: false, error: "too_large" }, 413) };
+  if (declared > MAX_BODY_BYTES) return TOO_LARGE;
+  let bytes: Uint8Array;
+  if (!req.body) {
+    bytes = new Uint8Array(0);
+  } else {
+    const reader = req.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        await reader.cancel();
+        return TOO_LARGE;
+      }
+      chunks.push(value);
+    }
+    bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+  }
   try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     const v = JSON.parse(text) as unknown;
     if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not an object");
     return { ok: true, body: v };
   } catch {
-    return { ok: false, response: json({ ok: false, error: "bad_json" }, 400) };
+    return BAD_JSON;
   }
 }
