@@ -143,6 +143,12 @@ const TESTS = [
   // The call-screen booking flow: call order, failures, request ids, copy,
   // and do-not-call as a box to tick (book-the-meet plan, Task 6).
   "tests/book-meet-flow.test.ts",
+  // The Book the Meet form in every state a rep sees, including the
+  // do-not-call "owner asked" box (book-the-meet plan, Task 7).
+  "tests/book-meet-panel.test.ts",
+  // Book the Meet wired onto the battle card: a Hero button, and the form
+  // above the call outcomes, never collapsible (book-the-meet plan, Task 8).
+  "tests/book-meet-wiring.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
