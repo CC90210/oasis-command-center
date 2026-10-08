@@ -3,7 +3,7 @@ import localFont from "next/font/local";
 import { Ambient } from "@/components/marketing/Ambient";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
-import { SITE_ORIGIN } from "@/lib/marketing/routes";
+import { CONTACT_EMAIL, SITE_ORIGIN } from "@/lib/marketing/routes";
 import "./marketing.css";
 
 /**
@@ -110,6 +110,58 @@ export const metadata: Metadata = {
  */
 const JS_FLAG = `document.documentElement.classList.add('js')`;
 
+/**
+ * Entity identity for search and AI assistants.
+ *
+ * The OG/Twitter metadata above tells a crawler how to RENDER a link. This
+ * tells it WHO the link is about, which is the part an assistant needs before
+ * it will name us in an answer. "OASIS AI" is a generic-sounding string that
+ * collides with several unrelated products, so the job here is to pin the
+ * entity to a domain and an email that nothing else shares.
+ *
+ * WHAT IS DELIBERATELY ABSENT:
+ *   - `offers` / any price. Engagements are scoped individually and no public
+ *     figure exists. Structured data that states a price we do not publish is
+ *     how an assistant ends up quoting a number to a prospect that we then have
+ *     to walk back.
+ *   - `sameAs`. It should list the real GitHub / LinkedIn / X profiles, and
+ *     guessing URLs that 404 actively damages entity resolution. Add them here
+ *     once the handles are confirmed.
+ */
+const ORGANIZATION_JSONLD = {
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  "@id": `${SITE_ORIGIN}/#organization`,
+  name: "OASIS AI",
+  alternateName: "Operational Agentic Systems Increasing Scalability",
+  url: SITE_ORIGIN,
+  email: CONTACT_EMAIL,
+  description:
+    "OASIS builds AI agents that hold a seat in a business — operations, marketing, finance, legal — and the systems they run on.",
+  knowsAbout: [
+    "AI agents",
+    "business process automation",
+    "agentic systems",
+    "operations automation",
+  ],
+  contactPoint: {
+    "@type": "ContactPoint",
+    contactType: "sales",
+    email: CONTACT_EMAIL,
+    url: `${SITE_ORIGIN}/contact`,
+  },
+};
+
+const WEBSITE_JSONLD = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "@id": `${SITE_ORIGIN}/#website`,
+  url: SITE_ORIGIN,
+  name: "OASIS AI",
+  publisher: { "@id": `${SITE_ORIGIN}/#organization` },
+  inLanguage: "en-CA",
+};
+
 export default function MarketingLayout({
   children,
 }: {
@@ -120,6 +172,18 @@ export default function MarketingLayout({
       className={`marketing ${display.variable} ${body.variable} ${data.variable} min-h-screen bg-ops-void font-body text-fg antialiased`}
     >
       <script dangerouslySetInnerHTML={{ __html: JS_FLAG }} />
+      {/* JSON-LD is emitted from the layout so every marketing page carries the
+          same entity identity. Rendering it per-page invites drift, and an
+          assistant that sees two different @id values for one organisation
+          resolves neither. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(ORGANIZATION_JSONLD) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(WEBSITE_JSONLD) }}
+      />
       {/* One fixed atmosphere behind the entire site. Each page used to
           mount its own hero-height backdrop, so everything below the fold
           was flat black — the reason the site felt like it stopped having
