@@ -68,7 +68,33 @@ const opts = {
   navTimeoutMs: Number(arg("--nav-timeout-ms", "60000")) || 60000,
   screenshots: arg("--screenshots", ""),
   egressLog: arg("--egress-log", process.env.EGRESS_LOG || ""),
+  // H418 PROBE (throwaway diagnostic branch): visit every route N times per context.
+  repeat: Math.max(1, Number(arg("--repeat", process.env.QA_REPEAT || "1")) || 1),
 };
+
+// H418 PROBE: captured at the moment React reports a hydration error, in every
+// document the tab loads (so a redirect's first and second document both count).
+const H418_PROBE = `(() => {
+  const send = (kind, msg) => {
+    try {
+      const dom = document.documentElement ? document.documentElement.outerHTML : "";
+      if (window.__h418Report) window.__h418Report({ kind, msg: String(msg).slice(0, 30000), href: location.href, readyState: document.readyState, t: performance.now(), dom });
+    } catch (e) {}
+  };
+  window.addEventListener("error", (e) => {
+    const m = String((e && e.message) || (e && e.error && e.error.message) || "");
+    if (/#41[89]|#42[0-9]|Hydration|hydrat|didn't match/i.test(m)) send("error", m + (e && e.error && e.error.digest ? " digest=" + e.error.digest : ""));
+  }, true);
+  const origError = console.error;
+  console.error = function (...args) {
+    try {
+      const m = args.map((a) => (a && a.message) ? a.message : String(a)).join(" ");
+      if (/Hydration|hydrat|didn't match/i.test(m)) send("console", m);
+    } catch (e) {}
+    return origError.apply(this, args);
+  };
+})();`;
+const recByPage = new WeakMap();
 
 function fail(message) {
   console.error(`qa:crawl: ${message}`);
@@ -544,6 +570,14 @@ async function main() {
           acceptDownloads: false,
         });
         await ctx.addCookies([{ name: "oasis_session", value: sessions[viewer.key].cookie, url: opts.base }]);
+        // H418 PROBE: the page calls this binding when React reports a hydration error.
+        await ctx.exposeBinding("__h418Report", (source, payload) => {
+          const rec = source && source.page ? recByPage.get(source.page) : null;
+          if (!rec) return;
+          rec.h418 = rec.h418 || [];
+          if (rec.h418.length < 6) rec.h418.push(payload);
+        });
+        await ctx.addInitScript(H418_PROBE);
         await ctx.addInitScript(READY_PROBE);
         // Nothing leaves the machine from the browser either. Each blocked
         // request is counted by host, and the first few are kept with the page
@@ -586,10 +620,15 @@ async function main() {
         }
         if (probe.finalPath.startsWith("/onboarding")) notes.push(`${viewer.key} (${vp.key}) is held at ${probe.finalPath} by the onboarding gate`);
 
-        const queue = [...routes];
+        const queue = [];
+        for (let k = 0; k < opts.repeat; k++) queue.push(...routes.map((r) => ({ ...r, iteration: k })));
         const worker = async () => {
           for (let r = queue.shift(); r; r = queue.shift()) {
             const v = await visitRoute(ctx, viewer, vp, r, false);
+            writeH418(v, r.iteration);
+            delete v.docs;
+            delete v.h418;
+            delete v.awaitDocs;
             visits.push(v);
             for (const href of v.rail || []) rails[viewer.key].add(href);
             const found = visitDefects(v, { slowMs: opts.slowMs, checkPersona: viewer.checkPersona === true });
@@ -725,16 +764,47 @@ async function visitRoute(ctx, viewer, vp, route, probeOnly) {
     navigationError: null,
   };
   let closing = false;
+  // H418 PROBE: full messages, every main-frame document's server HTML, and the
+  // navigations the tab made, so a hydration error can be diffed offline.
+  recByPage.set(page, rec);
+  rec.pageErrorsFull = [];
+  rec.consoleFull = [];
+  rec.docs = [];
+  rec.navs = [];
+  const docBodies = [];
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame() && rec.navs.length < 10) rec.navs.push(frame.url());
+  });
+  page.on("response", (resp) => {
+    try {
+      const req = resp.request();
+      if (req.resourceType() !== "document" || req.frame() !== page.mainFrame()) return;
+      const entry = { url: resp.url(), status: resp.status(), headers: resp.headers(), body: null };
+      rec.docs.push(entry);
+      if (resp.status() >= 300 && resp.status() < 400) return;
+      docBodies.push(
+        resp.text().then(
+          (t) => { entry.body = t; },
+          (e) => { entry.body = `<<unavailable: ${String((e && e.message) || e).slice(0, 200)}>>`; },
+        ),
+      );
+    } catch {
+      // a worker's request has no frame
+    }
+  });
   page.on("console", (msg) => {
     if (msg.type() !== "error") return;
     const text = msg.text();
+    if (/ydrat|didn't match|#41[89]/.test(text) && rec.consoleFull.length < 6) rec.consoleFull.push(text.slice(0, 30000));
     // Resource failures are reported once, as failed requests; blocked egress is counted separately.
     if (/Failed to load resource|ERR_BLOCKED_BY_CLIENT/.test(text)) return;
     if (rec.consoleErrors.length < 15) rec.consoleErrors.push(text.slice(0, 400));
   });
   page.on("pageerror", (err) => {
+    if (rec.pageErrorsFull.length < 6) rec.pageErrorsFull.push(String((err && err.stack) || (err && err.message) || err).slice(0, 30000));
     if (rec.pageErrors.length < 10) rec.pageErrors.push(String((err && err.message) || err).slice(0, 400));
   });
+  rec.awaitDocs = () => withTimeout(Promise.allSettled(docBodies), 15000, "doc bodies").catch(() => {});
   page.on("response", (resp) => {
     let u;
     try {
@@ -833,9 +903,47 @@ async function visitRoute(ctx, viewer, vp, route, probeOnly) {
     rec.navigationError = rec.navigationError || `measurement failed: ${String((err && err.message) || err).split("\n")[0].slice(0, 300)}`;
   } finally {
     closing = true;
+    if (rec.awaitDocs) await rec.awaitDocs();
     await page.close().catch(() => {});
   }
   return rec;
+}
+
+/** H418 PROBE: one JSON file per visit that saw a hydration error. */
+function writeH418(v, iteration) {
+  try {
+    const hit =
+      (v.h418 && v.h418.length > 0) ||
+      (v.pageErrorsFull || []).some((e) => /#41[89]|ydrat|didn't match/.test(e)) ||
+      (v.consoleFull || []).length > 0;
+    if (!hit) return;
+    const dir = path.join(opts.out, "h418");
+    mkdirSync(dir, { recursive: true });
+    const slug = (v.route === "/" ? "root" : v.route.replace(/^\//, "").replace(/[^A-Za-z0-9_-]+/g, "_")).slice(0, 80);
+    const file = path.join(dir, `${slug}__${v.viewer}__${v.viewport}__${iteration ?? 0}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          route: v.route,
+          viewer: v.viewer,
+          viewport: v.viewport,
+          iteration: iteration ?? 0,
+          finalPath: v.finalPath,
+          h1: v.h1,
+          navs: v.navs,
+          pageErrorsFull: v.pageErrorsFull,
+          consoleFull: v.consoleFull,
+          h418: v.h418 || [],
+          docs: v.docs,
+        },
+        null,
+        1,
+      ),
+    );
+  } catch (err) {
+    console.error("h418 write failed", err);
+  }
 }
 
 main().catch((err) => {
