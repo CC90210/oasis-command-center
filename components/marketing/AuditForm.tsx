@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { AUDIT_FUNNEL, CONTACT_EMAIL } from "@/lib/marketing/routes";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
+import { auditFormBody, auditFormProblem } from "@/components/marketing/audit-form-body";
 
 /**
  * The site's one conversion point.
@@ -13,11 +14,10 @@ import { CTA_PRIMARY } from "@/components/marketing/Cta";
  * funnel's own first step does, to the same endpoint, and the server
  * creates the same lead row. The five fields here are exactly the five
  * fields step 0 declares (lib/forms/oasis-ai-audit-seed.ts): name, email,
- * phone and company required, website optional. If that seed changes, this
- * has to change with it or the submit fails server-side validation —
- * which is what happened from 2026-08-20 to 2026-10-08: the seed made phone
- * required, this form never sent it, and every inline submit got a 400.
- * tests/audit-form-fields.test.ts now fails the build when the two differ.
+ * phone and company required, website optional. The body itself is built by
+ * audit-form-body.ts, and tests/audit-form-fields.test.ts fails the build
+ * when it and the seed differ — from 2026-08-20 to 2026-10-08 the seed
+ * required phone, this form never sent it, and every inline submit got a 400.
  *
  * On success the server returns `minted_token`, and we hand the visitor
  * straight into the funnel's remaining steps at the personalised URL. The
@@ -48,14 +48,14 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
     if (inFlight.current) return;
     inFlight.current = true;
 
-    const form = new FormData(e.currentTarget);
-    const payload = {
-      name: String(form.get("name") || "").trim(),
-      email: String(form.get("email") || "").trim(),
-      phone: String(form.get("phone") || "").trim(),
-      company: String(form.get("company") || "").trim(),
-      website: String(form.get("website") || "").trim(),
-    };
+    const body = auditFormBody(new FormData(e.currentTarget));
+    const problem = auditFormProblem(body.payload);
+    if (problem) {
+      setError(problem);
+      setStatus("error");
+      inFlight.current = false;
+      return;
+    }
 
     setStatus("sending");
     setError(null);
@@ -64,14 +64,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
       const res = await fetch("/api/forms/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          step_index: 0,
-          anonymous_init: {
-            tenant_slug: AUDIT_FUNNEL.tenantSlug,
-            form_slug: AUDIT_FUNNEL.formSlug,
-          },
-          payload,
-        }),
+        body: JSON.stringify(body),
       });
 
       const data = (await res.json().catch(() => null)) as
@@ -128,6 +121,14 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
           type="tel"
           autoComplete="tel"
           required
+          help={
+            <>
+              Used only to text you your audit findings and follow up on this request.{" "}
+              <a href="/privacy" className="underline underline-offset-2 hover:text-fg">
+                Privacy policy
+              </a>
+            </>
+          }
         />
         <Field
           name="company"
@@ -179,6 +180,7 @@ function Field({
   required = false,
   autoComplete,
   hint,
+  help,
 }: {
   name: string;
   label: string;
@@ -186,26 +188,37 @@ function Field({
   required?: boolean;
   autoComplete?: string;
   hint?: string;
+  /** Shown under the input and read with it; outside the <label>, so a link in it is never inside the control's label. */
+  help?: React.ReactNode;
 }) {
+  const helpId = help ? `${name}-help` : undefined;
   return (
-    <label className="block">
-      {/* Field labels are the one place tiny mono uppercase actively hurt:
-          this is the form the whole site exists to get filled in, and
-          10px letterspaced caps is the least readable setting on the page.
-          Sentence case, body face, real size.
-          gap-x-3 is load-bearing: justify-between alone lets a long label
-          and its hint touch at narrow column widths. */}
-      <span className="flex items-baseline justify-between gap-x-3 text-[14px] font-medium text-fg-muted">
-        <span>{label}</span>
-        {hint ? <span className="shrink-0 text-[13px] font-normal text-fg-dim">{hint}</span> : null}
-      </span>
-      <input
-        name={name}
-        type={type}
-        required={required}
-        autoComplete={autoComplete}
-        className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[15px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal"
-      />
-    </label>
+    <div>
+      <label className="block">
+        {/* Field labels are the one place tiny mono uppercase actively hurt:
+            this is the form the whole site exists to get filled in, and
+            10px letterspaced caps is the least readable setting on the page.
+            Sentence case, body face, real size.
+            gap-x-3 is load-bearing: justify-between alone lets a long label
+            and its hint touch at narrow column widths. */}
+        <span className="flex items-baseline justify-between gap-x-3 text-[14px] font-medium text-fg-muted">
+          <span>{label}</span>
+          {hint ? <span className="shrink-0 text-[13px] font-normal text-fg-dim">{hint}</span> : null}
+        </span>
+        <input
+          name={name}
+          type={type}
+          required={required}
+          autoComplete={autoComplete}
+          aria-describedby={helpId}
+          className="mt-2 w-full rounded-md border border-ops-edge bg-ops-void/60 px-3.5 py-2.5 text-[15px] text-fg outline-none transition-colors placeholder:text-fg-faint hover:border-fg-faint focus:border-signal"
+        />
+      </label>
+      {help ? (
+        <p id={helpId} className="mt-1.5 text-[13px] leading-5 text-fg-dim">
+          {help}
+        </p>
+      ) : null}
+    </div>
   );
 }
