@@ -101,6 +101,25 @@ type Props = {
 };
 
 /**
+ * three.js, fetched in the browser only.
+ *
+ * `typeof window` is a build-time constant in Next: "undefined" when the
+ * server compiles this client component for server-side rendering. Webpack
+ * drops the dead branch without following its import, so the server bundle
+ * (the Cloudflare Worker, which has a hard upload limit) does not carry
+ * three.js, about a megabyte that could never run there: this is only called
+ * from an effect, and effects do not run on the server. In the browser the
+ * test is always false, so this is the same lazy chunk the bare dynamic
+ * import fetched before. Keep the import inside this branch
+ * (tests/marketing-car-launch.test.ts).
+ */
+function loadThree(): Promise<typeof ThreeNS> {
+  return typeof window === "undefined"
+    ? Promise.reject(new Error("three.js loads in the browser only"))
+    : import("three");
+}
+
+/**
  * Detach objects from their parent and free every GPU resource they own.
  *
  * Extracted because this exact traversal appeared FOUR times — in both
@@ -282,7 +301,7 @@ export function CarStage({
       // both now report through onFail rather than returning silently.
       let THREE: typeof import("three");
       try {
-        THREE = await import("three");
+        THREE = await loadThree();
       } catch (err) {
         console.error("[CarStage] three.js chunk failed to load", err);
         if (!disposed) onFailRef.current?.();
