@@ -123,7 +123,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
           required
           help={
             <>
-              Used only to text you your audit findings and follow up on this request.{" "}
+              Used only to follow up on this request.{" "}
               <a href="/privacy" className="underline underline-offset-2 hover:text-fg">
                 Privacy policy
               </a>
