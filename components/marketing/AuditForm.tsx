@@ -11,10 +11,13 @@ import { CTA_PRIMARY } from "@/components/marketing/Cta";
  * This is step 0 of the live `ai-audit` funnel, rendered inline. It is not
  * a second lead pipeline — it POSTs the same `anonymous_init` shape the
  * funnel's own first step does, to the same endpoint, and the server
- * creates the same lead row. The four fields here are exactly the four
- * fields step 0 declares (lib/forms/oasis-ai-audit-seed.ts): name, email
- * and company required, website optional. If that seed changes, this has
- * to change with it or the submit fails server-side validation.
+ * creates the same lead row. The five fields here are exactly the five
+ * fields step 0 declares (lib/forms/oasis-ai-audit-seed.ts): name, email,
+ * phone and company required, website optional. If that seed changes, this
+ * has to change with it or the submit fails server-side validation —
+ * which is what happened from 2026-08-20 to 2026-10-08: the seed made phone
+ * required, this form never sent it, and every inline submit got a 400.
+ * tests/audit-form-fields.test.ts now fails the build when the two differ.
  *
  * On success the server returns `minted_token`, and we hand the visitor
  * straight into the funnel's remaining steps at the personalised URL. The
@@ -23,7 +26,7 @@ import { CTA_PRIMARY } from "@/components/marketing/Cta";
  *
  * Not FormPublicClient: that component owns multi-step state, conditional
  * field visibility, and direct-to-storage file uploads, none of which a
- * four-field marketing form needs.
+ * five-field marketing form needs.
  */
 
 type Status = "idle" | "sending" | "error";
@@ -49,6 +52,7 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
     const payload = {
       name: String(form.get("name") || "").trim(),
       email: String(form.get("email") || "").trim(),
+      phone: String(form.get("phone") || "").trim(),
       company: String(form.get("company") || "").trim(),
       website: String(form.get("website") || "").trim(),
     };
@@ -116,6 +120,13 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
           label="Work email"
           type="email"
           autoComplete="email"
+          required
+        />
+        <Field
+          name="phone"
+          label="Mobile number"
+          type="tel"
+          autoComplete="tel"
           required
         />
         <Field
