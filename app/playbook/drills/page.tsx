@@ -1,4 +1,4 @@
-import { FOUNDER_PLAYBOOK_PATHS, requirePlaybookReader } from "@/lib/playbook-access";
+import { isFounderPlaybookHref, requirePlaybookReader } from "@/lib/playbook-access";
 import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -367,7 +367,7 @@ function DrillCard({ drill: d, open, founder }: { drill: Drill; open: readonly s
   const chatHref = d.chat && chatDept ? askIfOpen(chatDept, d.chat.prompt, open) : null;
   const linkSlug = d.link ? teamSlugOf(d.link.href) : null;
   const link =
-    d.link && (linkSlug === null || open.includes(linkSlug)) && (founder || !FOUNDER_PLAYBOOK_PATHS.includes(d.link.href))
+    d.link && (linkSlug === null || open.includes(linkSlug)) && (founder || !isFounderPlaybookHref(d.link.href))
       ? d.link
       : null;
   return (

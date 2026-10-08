@@ -472,9 +472,13 @@ async function main() {
     const example = (agent: string) => `Rename the ${agent} agent to ${LSQUO}Ops Lead${RSQUO}`;
     assert.ok(readable(html.client).includes(example("Sales lead")), "the client's example names its own lead");
     assert.ok(readable(html.closer).includes(example(OASIS_LEAD)), "OASIS's example names its own lead");
-    assert.ok(readable(html.signup).includes(example("Chief of Staff")), "the self-signup's example names its lead by department");
+    // The editor's AI knows a binding by its stored name, so a binding shown
+    // only by its department ("Chief of Staff" for one stored as a persona) is
+    // never the example: the command would not resolve (Codex review on #551).
+    assert.ok(!readable(html.signup).includes("Rename the "), "the self-signup was offered a rename its editor cannot resolve");
     assert.match(readable(html.signup), /Chief of Staff \(primary\), Finance, Marketing/, "the snapshot names the self-signup's bindings by department");
     assert.match(readable(html.signupForFounder), /Bravo \(primary\), Atlas, Maven/, "control: the bindings carry the persona names the rule removes");
+    assert.ok(readable(html.signupForFounder).includes(example("Bravo")), "control: a founder's example uses the stored name");
   });
 
   // -- the Reasoning quick actions --
@@ -532,9 +536,15 @@ async function main() {
     const drillPage = draw(await drills());
     noName(drillPage.text.join(" "), "the rep's drills");
     assert.ok(drillPage.hrefs.length > 0 && !drillPage.hrefs.includes("/playbook/client-deploy"), "the drills link the rep to the runbook");
-    const doc = draw(await playbookDoc(docParams)).text.join(" ");
+    const docPage = draw(await playbookDoc(docParams));
+    const doc = docPage.text.join(" ");
     noName(doc, "the rep's OASIS Loop");
     assert.match(doc, /Last updated: 2026-07-11 by Marketing via Antigravity IDE\./, "the manual itself still renders");
+    // The manual links the prompts library: for a rep the words stay and the
+    // link to a 404 goes (Codex review on #551).
+    assert.ok(doc.includes("Prompts Library"), "the manual's sentence lost its words");
+    assert.ok(!docPage.hrefs.includes("/playbook/prompts"), "the manual links the rep to a page that is a 404 for them");
+    assert.ok(docPage.hrefs.includes("/oasis-loop/index.html"), "the manual's other links are untouched");
   });
   await check("the Playbook, CC: the prompts library, the runbook and the manual as written", async () => {
     await login("cc");
@@ -542,7 +552,9 @@ async function main() {
     assert.equal(await outcome(() => clientDeploy()), "rendered");
     assert.ok(draw(await playbookIndex()).hrefs.includes("/playbook/prompts"), "CC lost the prompts card");
     assert.ok(draw(await drills()).hrefs.includes("/playbook/client-deploy"), "CC lost the drills' runbook link");
-    assert.match(draw(await playbookDoc(docParams)).text.join(" "), /by Maven via Antigravity IDE/);
+    const docPage = draw(await playbookDoc(docParams));
+    assert.match(docPage.text.join(" "), /by Maven via Antigravity IDE/);
+    assert.ok(docPage.hrefs.includes("/playbook/prompts"), "CC lost the manual's link to the prompts library");
   });
   await check("the Playbook, a client owner: every page is the 404 (another workspace)", async () => {
     await login("client");
@@ -589,6 +601,41 @@ async function main() {
   });
   await check("a dashboard's agents card, CC (control): the stored persona names are what the rule removes", async () => {
     assert.match(await agentsCard("cc"), /\bBravo\b.*\bAtlas\b.*\bMaven\b/);
+  });
+
+  // -- a founders' page link, wherever it is written --
+  await check("a link to a founders' page is caught with a query, a fragment or a sub-path, and nothing else is", async () => {
+    const { isFounderPlaybookHref } = await import("../lib/playbook-access");
+    for (const href of ["/playbook/prompts", "/playbook/prompts#translator", "/playbook/prompts?q=x", "/playbook/client-deploy", "/PLAYBOOK/PROMPTS"]) {
+      assert.equal(isFounderPlaybookHref(href), true, href);
+    }
+    for (const href of ["/playbook", "/playbook/promptsx", "/playbook/script", "/oasis-loop/index.html", "", null]) {
+      assert.equal(isFounderPlaybookHref(href), false, String(href));
+    }
+  });
+
+  // -- the agent builder: a house agent's slug is not a workspace's to take --
+  // A teammate built on one would vanish (no surface outside OASIS shows a row
+  // under a house agent's slug); CodeRabbit on #551 found the builder allowed it.
+  await check("the builder refuses a house agent's slug or alias; a slug that merely contains one is fine", async () => {
+    const { createCustomAgent, AgentPersistenceError } = await import("../lib/agents/persistence");
+    const base = {
+      name: "Intake bot",
+      category: "custom" as const,
+      short_description: "Answers intake questions.",
+      base_prompt: "You answer intake questions for {{tenant.brand.name}} and draft replies for approval.",
+      created_by: USERS.client.id,
+      tenant_id: CLIENT,
+    };
+    for (const slug of ["bravo", "maven", "aura", "life-preservation", "sunbiz", "MAVEN"]) {
+      await assert.rejects(
+        () => createCustomAgent({ ...base, slug }),
+        (err: unknown) => err instanceof AgentPersistenceError && err.code === "validation" && /reserved/.test(err.message),
+        slug,
+      );
+    }
+    const created = await createCustomAgent({ ...base, slug: "maven-intake" });
+    assert.equal(created.slug, "maven-intake");
   });
 
   console.log(`agent-names: ${passed} passed, ${failures} failed`);

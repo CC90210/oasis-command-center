@@ -64,6 +64,12 @@ export async function requirePlaybookReader(): Promise<void> {
  */
 export const FOUNDER_PLAYBOOK_PATHS: readonly string[] = ["/playbook/prompts", "/playbook/client-deploy"];
 
+/** True for a link to one of FOUNDER_PLAYBOOK_PATHS (with or without a query, a fragment or a sub-path). */
+export function isFounderPlaybookHref(href: string | null | undefined): boolean {
+  const h = (href || "").trim().toLowerCase();
+  return FOUNDER_PLAYBOOK_PATHS.some((p) => h === p || h.startsWith(`${p}?`) || h.startsWith(`${p}#`) || h.startsWith(`${p}/`));
+}
+
 /**
  * First statement of a page in FOUNDER_PLAYBOOK_PATHS, in place of
  * requirePlaybookReader: 404 for anyone who does not read OASIS's internal

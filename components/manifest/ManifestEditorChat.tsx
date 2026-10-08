@@ -188,10 +188,12 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion, inte
   };
 
   // Every agent named on this page goes through lib/os/agent-names.ts. The
-  // rename example names one this workspace actually runs: it said "Rename the
-  // Bravo agent" to every workspace, a client's included.
+  // rename example names one this workspace actually runs (it said "Rename the
+  // Bravo agent" to every workspace, a client's included), by the stored name
+  // the editor knows it by, so the command it suggests resolves. A binding this
+  // viewer is shown only by its department is not offered as the example.
   const agentName = (a: TenantManifest["agents"][number]) => agentNameFor({ slug: a.slug, name: a.display_name }, internalNames);
-  const exampleAgent = manifest.agents.find((a) => a.enabled);
+  const exampleAgent = manifest.agents.find((a) => a.enabled && agentName(a) === a.display_name.trim());
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_0.95fr] gap-6">

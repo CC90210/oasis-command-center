@@ -1,4 +1,4 @@
-import { FOUNDER_PLAYBOOK_PATHS, requirePlaybookReader } from "@/lib/playbook-access";
+import { isFounderPlaybookHref, requirePlaybookReader } from "@/lib/playbook-access";
 import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -89,7 +89,7 @@ export default async function PlaybookIndex() {
   // The founders' pages (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS) are a
   // 404 for everyone else, so only a founder is shown their cards.
   const founder = await viewerReadsInternalAgentNames();
-  const sections = founder ? SECTIONS : SECTIONS.filter((s) => !FOUNDER_PLAYBOOK_PATHS.includes(s.href));
+  const sections = founder ? SECTIONS : SECTIONS.filter((s) => !isFounderPlaybookHref(s.href));
   return <DefaultPlaybookIndex sections={sections} operatingManual={operatingManual} />;
 }
 
