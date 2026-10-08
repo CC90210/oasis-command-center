@@ -1704,7 +1704,12 @@ async function main() {
       "the connect whose save never arrived",
       connectProviderKey({ provider: "anthropic", apiKey: KEY_LOOK[1], model: "claude-sonnet-4-6", scope: "tenant", timeoutMs: 1500 }, neverArrived),
     );
-    assert.deepEqual(lost, { kind: "failed", message: "The key couldn't be saved just now. Try again in a moment." });
+    // Not saved when asked; the abandoned save could still land, so the
+    // dialog says what it saw and where to look, never that it failed.
+    assert.deepEqual(lost, {
+      kind: "failed",
+      message: "The key wasn't saved when we checked. Close this, look at the card in a moment, and connect again if it doesn't show it.",
+    });
     assert.deepEqual(await spending(LOOKCO, "look-co", USERS.look), answersWith(KEY_LOOK[0]));
     // Sending the same connect again is harmless: the same key, saved again.
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_LOOK[0] })).status, 200);
@@ -1841,6 +1846,32 @@ async function main() {
     }
     // And a request that never reached the server, for the card's own sentence.
     disconnectReplies.push({ label: "never reached the server", status: 0, body: null });
+  });
+  await check("outside the Turso data backend the readers use, a one-step write fails closed before writing anything", async () => {
+    const before = await keysOn(PROMPTCO);
+    const backend = process.env.EMPIRE_DATA_BACKEND;
+    process.env.EMPIRE_DATA_BACKEND = "supabase_legacy";
+    try {
+      await assert.rejects(account.readAccountStamp(PROMPTCO), /Turso data backend/);
+      await assert.rejects(
+        account.connectWorkspaceAccountInOneStep({
+          tenantId: PROMPTCO,
+          stamp: { present: false },
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          encryptedApiKey: encryptField("sk-ant-never-written-0500"),
+          agentKeys: ["sdr"],
+        }),
+        /Turso data backend/,
+      );
+      await assert.rejects(account.disconnectWorkspaceAccountInOneStep({ tenantId: PROMPTCO, stamp: { present: false }, provider: "anthropic" }), /Turso data backend/);
+    } finally {
+      process.env.EMPIRE_DATA_BACKEND = backend;
+    }
+    assert.deepEqual(await keysOn(PROMPTCO), before, "a write went through outside the Turso data backend");
+  });
+  await check("closing the connect dialog has the cards read the server again", () => {
+    assert.equal(html.closeRefreshes, "1", "the card did not read the server again when the dialog closed");
   });
   await check("the card shows only that sentence, and draws itself again from the server after a failed disconnect", () => {
     assert.ok(disconnectReplies.length > 1, "no replies were collected");

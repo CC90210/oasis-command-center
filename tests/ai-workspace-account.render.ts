@@ -258,6 +258,18 @@ async function main() {
   out.afterPersonalConnectRefresh = renderToStaticMarkup(
     accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set(["google_ai"]) }),
   );
+  // Closing the dialog draws the cards again from the server: a save whose
+  // answer never came may have landed after all.
+  const closeFrames = framesOf(ProviderAccountsCard);
+  const none = { ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() };
+  let closeFrame = closeFrames(none);
+  const openAnthropic = find(card(closeFrame, "anthropic"), "Anthropic's Connect button", (el) => el.type === "button" && typeof el.props.onClick === "function");
+  (openAnthropic.props.onClick as () => void)();
+  closeFrame = closeFrames(none);
+  const openDialog = find(closeFrame, "the open connect dialog", (el) => typeof el.props.onConnected === "function");
+  const refreshesBeforeClose = refreshes;
+  (openDialog.props.onClose as () => void)();
+  out.closeRefreshes = String(refreshes - refreshesBeforeClose);
 
   // The connect dialog itself (Codex review, PR #535): "Save anyway" belongs to
   // the exact provider, key, model and scope the provider timed out on, and

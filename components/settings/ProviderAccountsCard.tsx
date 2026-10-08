@@ -350,7 +350,12 @@ export function ProviderAccountsCard({
         <ConnectProviderDialog
           provider={activeProvider}
           canManageTeam={canManageTeam}
-          onClose={() => setActiveProvider(null)}
+          onClose={() => {
+            setActiveProvider(null);
+            // A save whose answer never came may have landed after all: the
+            // cards are drawn again from the server once the dialog closes.
+            router.refresh();
+          }}
           onConnected={(p, scope) => {
             markConnected(p, scope);
             setActiveProvider(null);
@@ -385,6 +390,7 @@ const SAVE_ANYWAY_CODES: ReadonlySet<string> = new Set(["provider_5xx", "timeout
 const COULD_NOT_TEST = "The key couldn't be tested just now, so it was not saved. Try again in a moment.";
 const COULD_NOT_SAVE = "The key couldn't be saved just now. Try again in a moment.";
 const COULD_NOT_TELL = "We couldn't check whether the key was saved. Close this and look at the card in a moment.";
+const NOT_SAVED_WHEN_CHECKED = "The key wasn't saved when we checked. Close this, look at the card in a moment, and connect again if it doesn't show it.";
 /** Longer than the test's own 15-second provider call, plus the trip here. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -482,7 +488,9 @@ export async function connectProviderKey(
       return { kind: "failed", message: COULD_NOT_TELL };
     }
     if (check.ok === true && check.saved === true) return { kind: "saved" };
-    if (check.ok === true && check.saved === false) return { kind: "failed", message: COULD_NOT_SAVE };
+    // Not saved YET: the abandoned save may still be running on the server
+    // and land a moment later, so this is never told as a failure.
+    if (check.ok === true && check.saved === false) return { kind: "failed", message: NOT_SAVED_WHEN_CHECKED };
     return { kind: "failed", message: COULD_NOT_TELL };
   }
   if (saved.ok !== true) return { kind: "failed", message: saveFailureSentence(saved) };

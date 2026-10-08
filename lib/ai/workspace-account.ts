@@ -213,9 +213,17 @@ export type AccountStamp =
   | { present: false }
   | { present: true; provider: string; model: string; encryptedApiKey: string | null; enabled: number };
 
-/** The libSQL client every one-step write runs on (the store the PostgREST adapter wraps). */
+/**
+ * The libSQL client every one-step write runs on: the database the readers
+ * above use through getServiceSupabase (lib/supabase-server.ts), which is
+ * Turso only when EMPIRE_DATA_BACKEND is turso_cloud and Turso is configured.
+ * Any other setup (the supabase_legacy rollback) fails closed here, before
+ * anything is written, so reads and writes never split across two databases.
+ */
 function oneStepClient() {
-  if (!tursoConfigured()) throw new Error("workspace AI account: the database is not configured");
+  if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud" || !tursoConfigured()) {
+    throw new Error("workspace AI account: one-step writes run only on the Turso data backend the readers use");
+  }
   return getTursoClient();
 }
 
