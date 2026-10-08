@@ -20,8 +20,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { SIDEBAR_COLLAPSED_KEY } from "@/lib/sidebar-boot";
 
-function readInitial(): boolean {
-  if (typeof window === "undefined") return false;
+/** The stored choice. Called from effects only, never while rendering. */
+function readStored(): boolean {
   try {
     return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
   } catch {
@@ -30,25 +30,38 @@ function readInitial(): boolean {
 }
 
 export function useSidebarCollapsed() {
-  // useState's initializer reads localStorage exactly once before paint
-  // so we don't have a flash of "expanded" → "collapsed" on every nav.
-  // The data-attribute on <html> is also set in a synchronous script
-  // in the layout (SIDEBAR_BOOT_SCRIPT, lib/sidebar-boot.ts), giving the
-  // CSS the value before React even mounts.
-  const [collapsed, setCollapsedState] = useState<boolean>(readInitial);
+  // FALSE ON THE SERVER AND IN THE BROWSER'S FIRST RENDER (2026-10-08). The
+  // stored choice used to be read right here, in the state initializer, so for
+  // anyone who had collapsed the sidebar the browser's first render drew the
+  // floating reopen button the server never drew. React found <aside> where it
+  // expected that <button>, threw error #418 on every page and redrew the whole
+  // page in the browser. The stored choice is read after mount instead, and
+  // nothing on screen waits for it: SIDEBAR_BOOT_SCRIPT (lib/sidebar-boot.ts)
+  // sets html[data-sidebar] before first paint, and app/globals.css hides the
+  // rail and shows the reopen button from that attribute.
+  // tests/shell-boundary.test.ts renders the shell both ways and compares.
+  const [collapsed, setCollapsedState] = useState(false);
+  // True once the stored choice has been read. Until then there is nothing to
+  // write back, and writing the default would erase the stored choice.
+  const [restored, setRestored] = useState(false);
+
+  useEffect(() => {
+    setCollapsedState(readStored());
+    setRestored(true);
+  }, []);
 
   // Reflect changes to the data-attribute + storage on every flip. The
   // attribute is the source of truth for CSS; localStorage is for the
   // next page load.
   useEffect(() => {
-    if (typeof document === "undefined") return;
+    if (!restored) return;
     document.documentElement.dataset.sidebar = collapsed ? "collapsed" : "expanded";
     try {
       window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "true" : "false");
     } catch {
       // Quota / private mode — no-op. Attribute still tracks.
     }
-  }, [collapsed]);
+  }, [collapsed, restored]);
 
   // Sync across browser tabs so toggling on one tab doesn't leave
   // another tab showing the old state forever.

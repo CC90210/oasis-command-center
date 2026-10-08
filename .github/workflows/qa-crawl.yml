@@ -110,7 +110,7 @@ jobs:
             --out "$QA_DIR/report" \
             --egress-log "$EGRESS_LOG" \
             --concurrency 2 \
-            --repeat 6 \
+            --repeat 10 \
             --match "$PROBE_MATCH"
           ls -la "$QA_DIR/report/h418" 2>/dev/null | head -60 || echo "no h418 captures"
       - name: Crawl as a viewer who collapsed the sidebar
