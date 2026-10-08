@@ -12,12 +12,22 @@
  * and passed in; `resolveConnectorStatus` below is the only thing that turns
  * them into words.
  *
- * NEVER A FAKE GREEN. A connector is "connected" only when a real source proved
- * it: a fresh healthy heartbeat, or a passing connection test that actually
- * called the provider. A saved key that nothing checked is "set up", a failed
- * lookup is "status unavailable" (unknown is not disconnected), and an app with
- * no status source is "coming soon" whatever the facts say — the resolver
- * returns before it ever reads them.
+ * NEVER A FAKE GREEN. A connector is "connected" only when a real check proved
+ * it: a passing connection test that actually called the provider, or a live
+ * health check of a Connections-framework connection. A saved key that nothing
+ * checked is "set up", a failed lookup is "status unavailable" (unknown is not
+ * disconnected), and an app with no status source is "coming soon" whatever
+ * the facts say — the resolver returns before it ever reads them.
+ *
+ * ONE ANSWER PER INTEGRATION (2026-10-08). Every screen that says whether an
+ * app is connected reads it from here: the hub, Chat apps, Notifications, AI
+ * brain, the setup wizard, the department tabs, the AI Team roster and the
+ * rail. A heartbeat from OASIS's own computer only says a key NAME is in its
+ * env file, so it never proves anything here (it used to turn Telegram and
+ * Google "Connected, verified just now" while nothing had checked them). The
+ * per-person connections (your own Google account, your own Telegram bot) have
+ * their own resolvers below, so a screen about you and a screen about the
+ * workspace say which one they mean.
  *
  * LOGOS. The SVGs in public/connectors/ are copied unmodified from Simple Icons
  * (simple-icons 16.33.0, CC0 — https://simpleicons.org). The marks themselves
@@ -29,10 +39,6 @@
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
-import {
-  classifyWorkspaceConnection,
-  isWorkspaceHeartbeatFresh,
-} from "@/lib/integrations/workspace-connection-status";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
 import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
 import { TWILIO_FAILURE_STATES } from "@/lib/twilio/shared";
@@ -68,13 +74,12 @@ export type ConnectorIcon =
 /**
  * Where a LIVE connector's status comes from. The only way to be "connected".
  *
- *   workspace_heartbeat  credential presence + the tenant's integrations_health
- *                        heartbeat, merged by classifyWorkspaceConnection — the
- *                        same rule the workspace summary has always used.
  *   tenant_keys          the shared key store's per-field presence and its last
- *                        connection test. `verifiable: false` means the "test"
+ *                        connection test (Google's mailbox, the Telegram team
+ *                        bot, Twilio). `verifiable: false` means the "test"
  *                        for this service only checks presence, so it can never
- *                        prove a connection.
+ *                        prove a connection. Values OASIS sets on its own
+ *                        server are never tested here, and say so.
  *   oauth_tokens         OAuth tokens in the shared store. Authorised, but not
  *                        re-checked on page load (that would be a provider call
  *                        per render).
@@ -85,7 +90,6 @@ export type ConnectorIcon =
  */
 export type ConnectorStatusSource =
   | { kind: "tenant_connection"; provider: string }
-  | { kind: "workspace_heartbeat"; service: "gws" | "telegram"; requireAll: readonly string[] }
   | {
       kind: "tenant_keys";
       service: string;
@@ -182,6 +186,72 @@ export function connectorHref(slug: string): string {
   return `/settings/connections?app=${encodeURIComponent(slug)}`;
 }
 
+type TestState = { kind: "attention" | "configured"; label: string; detail: string };
+
+/**
+ * The Google mailbox card's words for a FAILED Test, keyed by the code the Test
+ * stored (app/api/integrations/keys/test probeSmtp). The Test signs in to Gmail
+ * with the saved address and App Password; any refusal or timeout is stored as
+ * the one code below, so the words say only what is known.
+ */
+export const GOOGLE_TEST_STATES: Readonly<Record<string, TestState>> = {
+  smtp_auth_failed: {
+    kind: "attention",
+    label: "Could not sign in to Gmail",
+    detail:
+      "The last Test could not sign in to Gmail with this address and App Password. Check both (2-Step Verification must be on for an App Password), save them again, then run Test.",
+  },
+  missing_smtp_fields: {
+    kind: "attention",
+    label: "Needs attention",
+    detail: "Setup is incomplete: the address or the App Password is missing.",
+  },
+};
+
+/**
+ * The Telegram team bot card's words for a FAILED Test, keyed by the code the
+ * Test stored (probeTelegram: getMe for the bot, getChat for the chat). A code
+ * with a detail after a colon ("network_error: ...") is looked up by the part
+ * before it.
+ */
+export const TELEGRAM_TEST_STATES: Readonly<Record<string, TestState>> = {
+  telegram_http_401: {
+    kind: "attention",
+    label: "Bot token not accepted",
+    detail: "Telegram refused this bot token. Copy it again from BotFather, save it, then run Test.",
+  },
+  telegram_http_404: {
+    kind: "attention",
+    label: "Bot token not accepted",
+    detail: "Telegram does not know this bot token. Copy it again from BotFather, save it, then run Test.",
+  },
+  telegram_returned_not_ok: {
+    kind: "attention",
+    label: "Bot token not accepted",
+    detail: "Telegram did not accept this bot token. Copy it again from BotFather, save it, then run Test.",
+  },
+  telegram_chat_http_400: {
+    kind: "attention",
+    label: "Chat not found",
+    detail: "Telegram could not find this chat for this bot. Send the bot a message from the chat, check the chat ID, then run Test.",
+  },
+  telegram_chat_http_403: {
+    kind: "attention",
+    label: "Bot not in the chat",
+    detail: "The bot was removed from this chat or blocked there. Add it back, then run Test.",
+  },
+  telegram_chat_returned_not_ok: {
+    kind: "attention",
+    label: "Chat not found",
+    detail: "Telegram did not return this chat for this bot. Check the chat ID, then run Test.",
+  },
+  network_error: {
+    kind: "configured",
+    label: "Set up · Telegram did not answer the last Test",
+    detail: "OASIS could not reach Telegram during the last Test, so nothing is known about the bot. Run Test again.",
+  },
+};
+
 // ── The catalog ────────────────────────────────────────────────────────────
 
 export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
@@ -272,7 +342,15 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Sends email from your own address", "Adds booked calls to your calendar"],
     keywords: ["gmail", "calendar", "email", "drive", "meet", "google"],
     live: {
-      source: { kind: "workspace_heartbeat", service: "gws", requireAll: ["app_password", "from_address"] },
+      // Proven only by its own Test (a Gmail sign-in with the saved address and
+      // App Password), never by a heartbeat from OASIS's computer.
+      source: {
+        kind: "tenant_keys",
+        service: "gws",
+        requireAll: ["app_password", "from_address"],
+        failureStates: GOOGLE_TEST_STATES,
+        verifiable: true,
+      },
       connect: { kind: "keys", label: "Connect Google", service: "gws" },
     },
     yourAccount: "google",
@@ -413,10 +491,19 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Sends your team's alerts to Telegram"],
     keywords: ["chat", "alerts", "bot"],
     live: {
-      source: { kind: "workspace_heartbeat", service: "telegram", requireAll: ["bot_token", "chat_id"] },
+      // The workspace's team bot. Proven only by its own Test (Telegram's getMe
+      // for the bot and getChat for the chat), never by a heartbeat from
+      // OASIS's computer, which only says a key name is in its env file.
+      source: {
+        kind: "tenant_keys",
+        service: "telegram",
+        requireAll: ["bot_token", "chat_id"],
+        failureStates: TELEGRAM_TEST_STATES,
+        verifiable: true,
+      },
       connect: { kind: "keys", label: "Set up Telegram", service: "telegram" },
     },
-    seeAlso: { href: "/settings/chat-apps", label: "Your own Telegram alerts are under Chat apps" },
+    seeAlso: { href: "/settings/chat-apps", label: "Your own Telegram bot, separate from this team bot, is under Chat apps" },
     docs: { href: "https://core.telegram.org/bots/tutorial", label: "Telegram's guide to creating a bot" },
   },
   {
@@ -432,7 +519,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       "Twilio's delivery report for each text OASIS sends",
     ],
     does: [
-      "Sends texts from your own Twilio number or messaging service, once the connection test passes",
+      "Sends texts from your own Twilio number or messaging service. Run Test first: a failed Test does not stop texts on its own",
       "Sends only while live texting is switched on. While it is off, OASIS asks Twilio to send nothing, so no text leaves your number",
       "Checks Twilio's signature on every incoming text with your Auth Token and refuses any it cannot verify",
     ],
@@ -661,11 +748,30 @@ export type KeyRowFact = {
   source?: "stored" | "environment" | null;
 };
 
-/** One integrations_health row, newest first per service. */
-export type HeartbeatFact = {
-  service: string;
-  status: string | null;
-  last_ping_at: string | null;
+/**
+ * The viewer's own Google connection (user_integration_credentials
+ * gmail_oauth), as presence and non-secret fields only. Read by
+ * lib/integrations/personal-google.ts readPersonalGoogleFact, the one reader
+ * every screen about "your Google" uses.
+ */
+export type PersonalGoogleFact = {
+  /** A refresh token is saved: the account was authorized. */
+  linked: boolean;
+  /** The saved grant includes Google Calendar events. */
+  calendarScope: boolean;
+  /** The Google address that authorized it, as Google named it. */
+  address: string | null;
+  /** The viewer's own work email: client invitations must come from this address. */
+  workEmail: string | null;
+};
+
+/** The viewer's own Telegram bot (user_integration_credentials telegram_bot): presence only. */
+export type PersonalTelegramFact = {
+  /** A bot token Telegram accepted is saved. */
+  botSaved: boolean;
+  /** The chat the bot will write to is linked. */
+  chatLinked: boolean;
+  username: string | null;
 };
 
 /**
@@ -674,9 +780,8 @@ export type HeartbeatFact = {
  */
 export type ConnectorFacts = {
   keyRows: readonly KeyRowFact[] | null;
-  heartbeats: readonly HeartbeatFact[] | null;
-  /** The viewer's own Google (gmail_oauth) link, or null when it could not be read. */
-  personalGoogleLinked: boolean | null;
+  /** The viewer's own Google connection, or null when it could not be read. */
+  personalGoogle: PersonalGoogleFact | null;
   /** The tenant's live Connections-framework connections. */
   connections: readonly ConnectionFact[] | null;
   /**
@@ -727,10 +832,20 @@ function latestIso(values: readonly (string | null)[]): string | null {
   return best;
 }
 
+/**
+ * A stored test code's lookup key: "network_error: getaddrinfo ..." is looked
+ * up as "network_error". Twilio's states carry no colon and pass unchanged.
+ */
+function testCodeKey(code: string | null | undefined): string | null {
+  const key = (code ?? "").split(":")[0].trim();
+  return key || null;
+}
+
 function keyedStatus(
   source: Extract<ConnectorStatusSource, { kind: "tenant_keys" | "oauth_tokens" }>,
   keyRows: readonly KeyRowFact[],
   nowMs: number,
+  appName: string,
 ): ConnectorStatus {
   const rows = keyRows.filter((r) => r.service === source.service);
   const present = (field: string) => rows.some((r) => r.field_key === field && r.has_value);
@@ -766,7 +881,7 @@ function keyedStatus(
     }
     const failed = rows.filter((r) => r.last_test_ok === false && r.last_tested_at);
     const newest = latestIso(failed.map((r) => r.last_tested_at));
-    const code = failed.find((r) => r.last_tested_at === newest)?.last_test_error ?? null;
+    const code = testCodeKey(failed.find((r) => r.last_tested_at === newest)?.last_test_error);
     const state = code && Object.prototype.hasOwnProperty.call(states, code) ? states[code] : null;
     if (state) return { kind: state.kind, label: state.label, detail: state.detail };
   }
@@ -803,17 +918,29 @@ function keyedStatus(
   const verifiedAt = latestIso(
     rows.filter((r) => r.last_test_ok === true).map((r) => r.last_tested_at),
   );
-  return verifiedAt
-    ? {
-        kind: "connected",
-        label: `Connected · verified ${formatVerifiedAgo(verifiedAt, nowMs)}`,
-        detail: "The last connection test called the provider and passed.",
-      }
-    : {
-        kind: "configured",
-        label: "Set up · not tested yet",
-        detail: "The key is saved but has not passed a connection test. Open this app and run Test.",
-      };
+  if (verifiedAt) {
+    return {
+      kind: "connected",
+      label: `Connected · verified ${formatVerifiedAgo(verifiedAt, nowMs)}`,
+      detail: "The last connection test called the provider and passed.",
+    };
+  }
+  // Every value is OASIS's own, set on its server (an OASIS workspace with
+  // nothing saved here). A Test checks those values with the provider when it
+  // is pressed, but its result has no saved row to land on, so nothing here
+  // can ever say "verified" or "not tested yet" about them.
+  if (rows.filter((r) => r.has_value).every((r) => r.source === "environment")) {
+    return {
+      kind: "configured",
+      label: "Set up on OASIS's server · not verified",
+      detail: `This workspace uses ${appName} details set on OASIS's own server. No check of them is recorded here: Test checks them with ${appName} when you press it.`,
+    };
+  }
+  return {
+    kind: "configured",
+    label: "Set up · not tested yet",
+    detail: "The key is saved but has not passed a connection test. Open this app and run Test.",
+  };
 }
 
 function accountLine(row: ConnectionFact): string | undefined {
@@ -836,18 +963,22 @@ function frameworkStatus(
 ): ConnectorStatus {
   const row = connections.find((c) => c.provider === provider && c.status !== "revoked");
   if (!row) {
-    // Stripe only: the Credentials store may also hold a separate secret key
-    // (checkout links for proposals). It is not this connection and never makes
-    // it green, but an owner deserves to know both exist.
+    // Stripe only: the key store may also hold a separate secret key
+    // (checkout links, and OASIS's own books). It is not this connection and
+    // never makes it green, but an owner deserves to know both exist, and where
+    // the other one's state is shown.
     const legacyKey =
-      provider === "stripe" &&
-      !!keyRows?.some((r) => r.service === "stripe" && r.field_key === "secret_key" && r.has_value);
+      provider === "stripe"
+        ? keyRows?.find((r) => r.service === "stripe" && r.field_key === "secret_key" && r.has_value) ?? null
+        : null;
     return {
       kind: "not_connected",
       label: "Not connected",
-      detail: legacyKey
-        ? "A Stripe secret key is also saved under Keys and accounts for checkout links. That key is separate and is not used as this read-only connection."
-        : undefined,
+      detail: !legacyKey
+        ? undefined
+        : legacyKey.source === "environment"
+          ? "This card is the read-only connection, and it is not connected. OASIS's own Stripe secret key is set on its server for its books and checkout links: whether the books are reading Stripe is shown under Money > Settings."
+          : "This card is the read-only connection, and it is not connected. A Stripe secret key is also saved for checkout links; that key is separate and is never used as this connection.",
     };
   }
   const account = accountLine(row);
@@ -975,65 +1106,144 @@ export function resolveConnectorStatus(
     }
     return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }
-  if (source.kind === "tenant_keys" || source.kind === "oauth_tokens") {
-    if (!facts.keyRows) return UNKNOWN;
-    return keyedStatus(source, facts.keyRows, nowMs);
-  }
+  if (!facts.keyRows) return UNKNOWN;
+  const workspace = keyedStatus(source, facts.keyRows, nowMs, def.name);
+  if (def.yourAccount !== "google") return workspace;
+  // Google also has a per-person connection. The card is the WORKSPACE's
+  // shared mailbox, and its state is only that; the viewer's own account is
+  // reported beside it, in the same words Settings and Today use for it
+  // (personalGoogleStatus), never folded into the card's state.
+  const yours = personalGoogleStatus(facts.personalGoogle);
+  const mailbox: ConnectorStatus =
+    workspace.kind === "not_connected"
+      ? {
+          ...workspace,
+          label: yours.state === "ready" ? "Your account connected · no shared mailbox" : "No shared mailbox",
+          detail: "No shared workspace mailbox is set up.",
+        }
+      : workspace;
+  return { ...mailbox, detail: [mailbox.detail, `Your own Google account: ${yours.label}.`].filter(Boolean).join(" ") };
+}
 
-  // workspace_heartbeat
-  if (!facts.keyRows || !facts.heartbeats) return UNKNOWN;
-  const rows = facts.keyRows.filter((r) => r.service === source.service);
-  const configured = source.requireAll.every((f) =>
-    rows.some((r) => r.field_key === f && r.has_value),
-  );
-  const health = facts.heartbeats.find((h) => h.service === source.service) ?? null;
-  const state = classifyWorkspaceConnection({
-    lookupAvailable: true,
-    configured,
-    healthStatus: health?.status ?? null,
-    healthFresh: isWorkspaceHeartbeatFresh(health?.last_ping_at ?? null, nowMs),
-  });
+/**
+ * A card status that must override a line elsewhere claiming the app works.
+ * The department tab and the AI Team say where a department answers in Slack
+ * from lib/slack/status.ts, which only knows that a connection row exists,
+ * whatever its state: an expired or failing connection still read "Answers
+ * @mentions in #sales" while its card said "Key no longer accepted". When the
+ * card's own status is a problem or could not be read, those lines say the
+ * card's words instead (null: the card is fine, the line stands).
+ */
+export function connectionProblem(status: ConnectorStatus | null): string | null {
+  if (!status) return null;
+  return status.kind === "attention" || status.kind === "unknown" ? status.label : null;
+}
 
-  // Google also has a per-person connection. It never makes the WORKSPACE look
-  // connected, but it is real, so it is reported alongside.
-  const personal =
-    source.service === "gws" && facts.personalGoogleLinked !== null
-      ? facts.personalGoogleLinked
-        ? "Your own Google account is linked."
-        : "Your own Google account is not linked yet."
-      : undefined;
+/** The workspace has this app set up (whatever its last check said): a line may name it. */
+export function connectionSetUp(status: ConnectorStatus | null): boolean {
+  return !!status && (status.kind === "connected" || status.kind === "configured" || status.kind === "attention");
+}
 
+// -- Your own connections ------------------------------------------------------
+
+/**
+ * Where the viewer's own Google account stands, in one word set:
+ *
+ *   ready          authorized with Calendar access, as the viewer's work email
+ *   wrong_account  authorized as a different address than the work email, so
+ *                  client invitations refuse it (calendar_organizer_mismatch)
+ *   reconnect      authorized, but without Calendar access (or without an
+ *                  address OASIS can match), so it must be granted once more
+ *   not_linked     nothing authorized for this login
+ *   unknown        the read failed: never "not connected"
+ *
+ * The same predicate the booking path enforces (lib/integrations/
+ * google-calendar.ts): a refresh token, the Calendar events scope, and the
+ * connected address equal to the viewer's work email.
+ */
+export type PersonalGoogleState = "ready" | "wrong_account" | "reconnect" | "not_linked" | "unknown";
+
+export function personalGoogleState(fact: PersonalGoogleFact | null): PersonalGoogleState {
+  if (!fact) return "unknown";
+  if (!fact.linked) return "not_linked";
+  const address = (fact.address ?? "").trim().toLowerCase();
+  const work = (fact.workEmail ?? "").trim().toLowerCase();
+  if (work && address && address !== work) return "wrong_account";
+  if (fact.calendarScope && work && address === work) return "ready";
+  return "reconnect";
+}
+
+/** The viewer's own Google account, as every screen about it says it. Never green: nothing re-checks the grant on page load. */
+export function personalGoogleStatus(fact: PersonalGoogleFact | null): ConnectorStatus & { state: PersonalGoogleState } {
+  const state = personalGoogleState(fact);
+  const address = fact?.address?.trim() || "an address OASIS could not read";
   switch (state) {
-    case "connected":
+    case "ready":
       return {
-        kind: "connected",
-        label: `Connected · verified ${formatVerifiedAgo(health?.last_ping_at ?? null, nowMs)}`,
-        detail: personal ?? "A health check passed in the last 24 hours.",
-      };
-    case "attention":
-      return {
-        kind: "attention",
-        label: "Needs attention",
-        detail: `The latest health check failed${health?.last_ping_at ? ` (${formatVerifiedAgo(health.last_ping_at, nowMs)})` : ""}.${personal ? ` ${personal}` : ""}`,
-      };
-    case "configured":
-      return {
+        state,
         kind: "configured",
-        label: "Set up · waiting for a health check",
-        detail: `The shared details are saved, but no health check has passed in the last 24 hours.${personal ? ` ${personal}` : ""}`,
+        label: "Connected",
+        detail: `Connected as ${address}. Your Gmail sends and Calendar invites with Google Meet use this account. OASIS does not re-check it on every visit.`,
       };
-    case "not_configured":
-      if (source.service === "gws" && facts.personalGoogleLinked === true) {
-        return {
-          kind: "configured",
-          label: "Your account linked",
-          detail: "Your own Google account is linked. No shared workspace mailbox is set up.",
-        };
-      }
-      return { kind: "not_connected", label: "Not connected", detail: personal };
+    case "wrong_account":
+      return {
+        state,
+        kind: "attention",
+        label: "Wrong Google account",
+        detail: `Connected as ${address}, but your invitations must come from ${fact?.workEmail?.trim() || "your work email"}. Reconnect with that account.`,
+      };
+    case "reconnect":
+      return {
+        state,
+        kind: "attention",
+        label: "Reconnect once",
+        detail: `Connected as ${address}, but without Calendar access. Reconnect once so OASIS can send Calendar invites with Google Meet.`,
+      };
+    case "not_linked":
+      return { state, kind: "not_connected", label: "Not connected", detail: "No Google account is connected for your login." };
     default:
-      return UNKNOWN;
+      return {
+        state,
+        kind: "unknown",
+        label: "Status unavailable",
+        detail: "OASIS could not check your Google account right now. That does not mean it is disconnected.",
+      };
   }
+}
+
+/**
+ * The viewer's own Telegram bot, in one word set for Settings > Notifications
+ * and the bot's setup card. Nothing in OASIS sends to a personal bot yet (no
+ * sender reads it), so a linked bot is "Linked", never "Connected" or a promise
+ * of alerts.
+ */
+export function personalTelegramStatus(fact: PersonalTelegramFact | null): ConnectorStatus {
+  if (!fact) {
+    return {
+      kind: "unknown",
+      label: "Status unavailable",
+      detail: "OASIS could not check your Telegram bot right now. That does not mean it is disconnected.",
+    };
+  }
+  if (fact.botSaved && fact.chatLinked) {
+    return {
+      kind: "configured",
+      label: fact.username ? `Linked · @${fact.username}` : "Linked",
+      detail: "Your own bot is linked to your Telegram chat. OASIS does not send alerts to personal bots yet.",
+    };
+  }
+  if (fact.botSaved) {
+    return {
+      kind: "attention",
+      label: "Bot saved · chat not linked yet",
+      detail: "Open your bot in Telegram, tap Start, then finish linking.",
+    };
+  }
+  return {
+    kind: "not_connected",
+    label: "Not set up",
+    detail: "You have no personal Telegram bot. OASIS does not send alerts to personal bots yet.",
+  };
 }
 
 // -- The workspace at a glance ----------------------------------------------
@@ -1045,7 +1255,9 @@ export function resolveConnectorStatus(
  * not be checked. From resolveConnectorStatus, so the rail's Connections dot,
  * the Operations tab and the hub's own cards can never tell different stories.
  * Apps not connected and apps not built yet are not counted: neither is a
- * problem.
+ * problem. It is the WORKSPACE's count: a card's kind never depends on the
+ * viewer's own accounts (those are reported in its detail line), so two people
+ * in one workspace always get the same numbers.
  */
 export type ConnectionsHealth = { setUp: number; attention: number; connected: number; unknown: number };
 

@@ -2,7 +2,8 @@
  * lib/integrations/telegram-personal.ts — self-service Telegram bot linking so
  * each employee can create + connect THEIR OWN bot (via BotFather) with no
  * developer help. Distinct from TelegramLinkCard (which links a chat to the
- * shared SunBiz alert bot).
+ * shared SunBiz alert bot), and from the workspace's team bot in Connections.
+ * No sender reads this bot yet, so no screen may promise alerts through it.
  *
  * Flow: user makes a bot in BotFather → pastes the token → we validate via
  * getMe + store it encrypted (user_integration_credentials, service
@@ -17,6 +18,7 @@ import {
   setUserIntegrationValue,
   clearUserIntegration,
 } from "@/lib/user-integration-store";
+import type { PersonalTelegramFact } from "@/lib/os/connectors";
 
 const TG = "https://api.telegram.org";
 const SERVICE = "telegram_bot";
@@ -99,6 +101,21 @@ export async function captureChatId(
 }
 
 type Chat = { id: number; first_name?: string; last_name?: string; username?: string; title?: string };
+
+/**
+ * The person's own bot as the one fact every screen about it reads (Settings >
+ * Notifications and the bot's setup card), turned into words by
+ * lib/os/connectors.ts personalTelegramStatus. Throws when the store cannot be
+ * read, so the caller says "Status unavailable", never "Not set up".
+ */
+export async function readPersonalTelegramFact(tenantId: string, userId: string): Promise<PersonalTelegramFact> {
+  return toPersonalTelegramFact(await getTelegramStatus(tenantId, userId));
+}
+
+/** getTelegramStatus's answer as the fact the resolver reads (the status API uses both). */
+export function toPersonalTelegramFact(s: { connected: boolean; linked: boolean; username: string | null }): PersonalTelegramFact {
+  return { botSaved: s.connected, chatLinked: s.linked, username: s.username };
+}
 
 export async function getTelegramStatus(tenantId: string, userId: string) {
   // Settings must distinguish an empty credential bundle (not connected) from

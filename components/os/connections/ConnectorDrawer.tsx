@@ -263,7 +263,7 @@ export function ConnectorDrawer({
           )}
 
           {savedKeys && (
-            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onKeysChanged} />
+            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onKeysChanged} status={status} />
           )}
 
           {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={keysRevision} />}
@@ -296,8 +296,7 @@ export function ConnectorDrawer({
             <section>
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Your own Google account</h3>
               <p className="mb-3 text-[13px] leading-5 text-fg-muted">
-                Tied to your login only. It sends as you and puts your booked calls on your calendar; a teammate connects
-                their own.
+                Your login only, separate from the shared mailbox above. A teammate connects their own.
               </p>
               <PersonalIntegrationsPanel showGmail showKixie={false} />
             </section>

@@ -12,17 +12,24 @@
  * which records the result the card's status is computed from, so the hub
  * re-reads every status afterwards (onChanged → router.refresh).
  *
- * Twilio: saved credentials are not a working sender. Texting stays off
- * ("Email-only") until the connection test passes; a messaging service can
- * stand in for the from-number, and an API key for the Auth Token. Test runs
- * as soon as the account and a credential are saved, so "needs a number" is an
- * answer the owner can read, not a missing button.
+ * ONE VERDICT (2026-10-08). The form never judges the keys itself: the drawer's
+ * Status above it is the card's own (lib/os/connectors.ts), and this form used
+ * to print its own "Last check passed" / "Account and sender are verified" from
+ * a different rule, under a card that said "not tested yet" for the same keys.
+ * It shows only what each field holds, and says a Test result in plain words
+ * (never the stored code).
+ *
+ * Twilio: a messaging service can stand in for the from-number, and an API key
+ * for the Auth Token. Test runs as soon as the account and a credential are
+ * saved, so "needs a number" is an answer the owner can read, not a missing
+ * button. Texts leave only while live texting is switched on; a failed Test
+ * does not stop them, and the form says so rather than promising it.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
-import { relTime } from "@/lib/format-helpers";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
+import type { ConnectorStatus } from "@/lib/os/connectors";
 
 type Row = {
   service: string;
@@ -45,8 +52,22 @@ async function send(method: "POST" | "DELETE", url: string, body: unknown) {
     cache: "no-store",
   });
   const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-  const msg = typeof data?.message === "string" ? data.message : typeof data?.error === "string" ? data.error : `HTTP ${res.status}`;
-  return { ok: res.ok && data?.ok !== false, data, msg };
+  const ok = res.ok && data?.ok !== false;
+  if (!ok) console.error("[connections.keys]", url, res.status, data?.error);
+  return { ok, data, msg: plainFailure(res.status, data) };
+}
+
+/**
+ * A refused request in plain words. A 422 carries the field check's own
+ * sentence ("invalid email") or a written message; anything else is a code
+ * meant for the logs, so the owner is told what to do instead.
+ */
+function plainFailure(status: number, data: Record<string, unknown> | null): string {
+  if (typeof data?.message === "string" && data.message.trim()) return data.message;
+  if (status === 422 && typeof data?.error === "string" && data.error.trim()) return data.error;
+  if (status === 401) return "Your session ended. Sign in again, then retry.";
+  if (status === 403) return "Only an owner or admin can change these keys.";
+  return "OASIS could not finish that just now. Nothing else changed; try again in a minute.";
 }
 
 export function ServiceKeysForm({
@@ -54,11 +75,14 @@ export function ServiceKeysForm({
   appName,
   canManage,
   onChanged,
+  status,
 }: {
   service: string;
   appName: string;
   canManage: boolean;
   onChanged: () => void;
+  /** The card's own status (the drawer shows it above this form): the only verdict on these keys. */
+  status: ConnectorStatus | null;
 }) {
   const schema = findTenantManuallyEditableIntegrationSchema(service);
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -76,10 +100,12 @@ export function ServiceKeysForm({
         setRows((j.rows ?? []).filter((row) => row.service === service));
         setLoadError(null);
       } else {
-        setLoadError(j.error || `HTTP ${r.status}`);
+        console.error("[connections.keys.load]", r.status, j.error);
+        setLoadError(plainFailure(r.status, null));
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "network_error");
+      console.error("[connections.keys.load]", err);
+      setLoadError("OASIS could not be reached. Check your connection.");
     }
   }, [service]);
 
@@ -99,10 +125,6 @@ export function ServiceKeysForm({
       : schema.fields.every((f) => has(f.key));
   // Twilio's test runs before a sender is saved: "needs a number" is its answer.
   const testable = service === "twilio" ? twilioCredential : allSet;
-  const tested = (rows ?? []).filter((r) => r.last_tested_at);
-  const lastFail = tested.find((r) => r.last_test_ok === false) ?? null;
-  const lastOk = tested.find((r) => r.last_test_ok === true) ?? null;
-  const twilioVerified = service === "twilio" && allSet && !!lastOk && !lastFail;
   const stored = (rows ?? []).filter((r) => r.has_value && r.source !== "environment");
   const dirty = Object.values(drafts).some((v) => v.trim());
 
@@ -143,13 +165,20 @@ export function ServiceKeysForm({
       const r = await send("POST", "/api/integrations/keys/test", { service });
       const detail = typeof r.data?.detail === "string" ? r.data.detail : null;
       // A plain-state answer (Twilio) is shown as the provider check put it.
+      // Anything else names no code: the Status above, re-read after this,
+      // says in plain words what the check found.
       const message = typeof r.data?.message === "string" ? r.data.message : null;
       setNotice(
         message
           ? { tone: r.ok ? "ok" : "err", text: detail ? `${message} ${detail}` : message }
           : r.ok
-            ? { tone: "ok", text: detail || `The check with ${appName} passed.` }
-            : { tone: "err", text: `The check with ${appName} failed: ${r.msg}` },
+            ? {
+                tone: "ok",
+                // Telegram names the bot and the chat it reached: the one thing
+                // that shows the alerts land where the owner reads them.
+                text: service === "telegram" && detail ? `The check with ${appName} passed: ${detail}.` : `The check with ${appName} passed.`,
+              }
+            : { tone: "err", text: `The check with ${appName} did not pass. The status above says what it found.` },
       );
       await reload();
       onChanged();
@@ -185,25 +214,17 @@ export function ServiceKeysForm({
 
       {service === "twilio" && allSet && (
         <p className="text-[13px] leading-5 text-fg-muted">
-          {twilioVerified
-            ? "Account and sender are verified. Carrier registration and the live-send switch still control delivery."
-            : "Email-only: the keys are saved, but texting stays off until Twilio passes Test."}
+          {status?.kind === "connected"
+            ? "The account and sender passed Test. Carrier registration and the live-send switch still decide whether a text is delivered."
+            : "Texts go out only while live texting is switched on, and a failed Test does not stop them: run Test and fix what it finds before switching it on."}
         </p>
       )}
-
-      {lastFail ? (
-        <p className="text-[12px] leading-4 text-status-hot">
-          Last check failed{lastFail.last_test_error ? `: ${lastFail.last_test_error}` : ""} · {relTime(lastFail.last_tested_at)}
-        </p>
-      ) : lastOk ? (
-        <p className="text-[12px] leading-4 text-fg-dim">Last check passed · {relTime(lastOk.last_tested_at)}</p>
-      ) : null}
 
       {rows === null && !loadError ? (
         <p className="text-[13px] text-fg-dim">Loading…</p>
       ) : loadError ? (
         <p className="rounded-lg border border-status-warm/30 bg-status-warm/10 px-3 py-2 text-[13px] leading-5 text-fg">
-          The saved keys could not be read ({loadError}), so nothing here is shown as set or missing. Refresh to try again.
+          The saved keys could not be read, so nothing here is shown as set or missing. {loadError} Refresh to try again.
         </p>
       ) : (
         <form

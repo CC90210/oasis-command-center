@@ -5,8 +5,10 @@
  * through components/os/aiteam/roster.ts; Settings > AI brain lists the same)
  *   Department leads   the teammate leading each department channel the viewer
  *                      can open, with where it lives (Web; Slack as the
- *                      workspace's real state, lib/slack/status.ts; Telegram
- *                      is Phase 2 and says so).
+ *                      workspace's real state, lib/slack/status.ts, or the
+ *                      Slack card's own words when that connection is failing;
+ *                      Telegram only where the workspace has a team bot set
+ *                      up, as its Connections card says).
  *   Custom teammates   agents this workspace built in the builder, On/Off as
  *                      the workspace manifest has them.
  *   On / Off           owners and admins switch any teammate that is not core
@@ -119,6 +121,8 @@ export default async function AiTeamPage() {
                 web={lead.web}
                 webReason={lead.webReason}
                 slack={lead.slack}
+                slackProblem={team.channels.slackProblem}
+                telegramSetUp={team.channels.telegramSetUp}
                 href={lead.departments[0]?.href ?? null}
                 control={lead.toggle ? <TeammateToggle {...lead.toggle} name={lead.name} /> : undefined}
               />
@@ -156,6 +160,7 @@ export default async function AiTeamPage() {
                 summary={c.summary}
                 web={c.web}
                 webReason={c.webReason}
+                telegramSetUp={team.channels.telegramSetUp}
                 href={c.webHref}
                 badge={c.enabled ? "On" : "Off"}
                 control={c.toggle ? <TeammateToggle {...c.toggle} name={c.name} /> : undefined}

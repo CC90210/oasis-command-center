@@ -207,9 +207,10 @@ export function ScheduleGlance({ blocks, meetings, partial, calendar, connectHre
                 <span aria-hidden className="text-fg-dim">
                   ·
                 </span>
-                <span>Not connected</span>
+                {/* The same word Settings and the Connections card use for your own Google account. */}
+                <span>{calendar.value.personal.label}</span>
                 <Link href={connectHref} prefetch={false} className="ml-auto font-medium text-accent hover:underline">
-                  Connect
+                  {calendar.value.personal.label === "Not connected" ? "Connect" : "Fix"}
                 </Link>
               </p>
             )}

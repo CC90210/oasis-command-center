@@ -1102,7 +1102,12 @@ export function stripeConnection(
  *              OASIS: it is OASIS's identity, not the viewer's.
  */
 export type CalendarStatus = {
-  personal: { connected: boolean; address: string | null };
+  /**
+   * `label` is lib/os/connectors.ts personalGoogleStatus's word for it, the one
+   * Settings and the Connections card show ("Wrong Google account", "Reconnect
+   * once", "Not connected"); `connected` is its ready state.
+   */
+  personal: { connected: boolean; label: string; address: string | null };
   workspace: { configured: boolean; address: string | null } | null;
 };
 

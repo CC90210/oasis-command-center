@@ -15,7 +15,9 @@ import {
   captureChatId,
   getTelegramStatus,
   disconnectTelegram,
+  toPersonalTelegramFact,
 } from "@/lib/integrations/telegram-personal";
+import { personalTelegramStatus } from "@/lib/os/connectors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +26,12 @@ export async function GET() {
   const s = await resolveSessionContext();
   if (!s.ok) return NextResponse.json({ ok: false, error: s.reason }, { status: 401 });
   try {
-    return NextResponse.json({ ok: true, ...(await getTelegramStatus(s.tenantId, s.userId)) });
+    const raw = await getTelegramStatus(s.tenantId, s.userId);
+    // `status`: the words Settings > Notifications shows for this same bot
+    // (lib/os/connectors.ts personalTelegramStatus), so the card and that page
+    // can never label it differently.
+    const status = personalTelegramStatus(toPersonalTelegramFact(raw));
+    return NextResponse.json({ ok: true, ...raw, status });
   } catch (error) {
     console.error("[personal-telegram-status] unable to read status", {
       tenantId: s.tenantId,
