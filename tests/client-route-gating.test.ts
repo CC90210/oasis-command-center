@@ -324,8 +324,8 @@ async function main() {
     -- Settings > AI brain reads these; empty is "no key, no bridge", not a failure.
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, last_seen_at TEXT,
       tool_capabilities TEXT, revoked_at TEXT);
-    CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, agent_name TEXT, provider TEXT,
-      encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
+    CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, agent_key TEXT, provider TEXT,
+      model TEXT, encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
     -- Teammates built in the builder (the AI Team's custom read, W4a).
     CREATE TABLE agents (slug TEXT PRIMARY KEY, name TEXT, category TEXT, short_description TEXT, description TEXT,
       base_prompt TEXT, required_tools TEXT, suggested_model TEXT, pricing TEXT, is_public INTEGER,

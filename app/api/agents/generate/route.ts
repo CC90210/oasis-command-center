@@ -30,7 +30,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
-import { getAgentModelForUser } from "@/lib/agent-resolver";
+import {
+  LOCAL_MODEL_PROVIDER,
+  LOCAL_MODEL_REFUSAL,
+  mayUseLocalModel,
+  readPersonAiAccount,
+  type UsableAiAccount,
+} from "@/lib/ai/workspace-account";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
@@ -177,23 +183,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
-  // Provider resolution — same path the manifest editor uses: personal
-  // override first, tenant default second, operator platform fallback last.
-  const cfg = await getAgentModelForUser({
-    tenantId: profile.tenant_id,
-    userId: user.id,
-    agentKey: "bravo",
-  });
+  // Provider resolution, the same path the manifest editor uses: the person's own
+  // key first, then the workspace's AI account (lib/ai/workspace-account.ts,
+  // the account every department chat uses), operator platform fallback last.
+  let cfg: UsableAiAccount | null;
+  try {
+    cfg = await readPersonAiAccount(profile.tenant_id, user.id);
+  } catch (err) {
+    // A failed read is not "no account": the owner would be sent to connect one
+    // that may well be connected.
+    console.error("[agents.generate.ai_account]", { tenantId: profile.tenant_id, error: err instanceof Error ? err.message : String(err) });
+    return NextResponse.json(
+      { ok: false, error: "config_unavailable", message: "We could not read this workspace's AI settings just now. Try again in a moment." },
+      { status: 503 },
+    );
+  }
+
+  // A saved local model server answers for the verified operator only: its
+  // "key" is a web address this server would call (lib/ai/workspace-account.ts).
+  const localModelAllowed = cfg?.provider === LOCAL_MODEL_PROVIDER ? await mayUseLocalModel(user.id, user.email) : false;
+  if (cfg?.provider === LOCAL_MODEL_PROVIDER && !localModelAllowed) {
+    return NextResponse.json({ ok: false, error: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL }, { status: 403 });
+  }
 
   let provider: Provider;
   let model: string;
   let apiKey = "";
   let keySource: "tenant" | "platform" = "tenant";
-  if (cfg && cfg.encrypted_api_key) {
-    provider = cfg.provider as Provider;
+  if (cfg) {
+    provider = cfg.provider;
     model = cfg.model;
     try {
-      apiKey = decryptField(cfg.encrypted_api_key);
+      apiKey = decryptField(cfg.encryptedApiKey);
     } catch {
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
@@ -202,7 +223,12 @@ export async function POST(req: NextRequest) {
     const fallback = (await isPlatformOperatorForAuthUser(user.id, user.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
-        { ok: false, error: "agent_not_configured", hint: "Configure your Bravo provider in Settings to use the AI builder." },
+        {
+          ok: false,
+          error: "agent_not_configured",
+          hint: "Connect an AI account in Settings > AI brain.",
+          message: "Connect an AI account in Settings > AI brain.",
+        },
         { status: 412 }
       );
     }
@@ -224,6 +250,7 @@ export async function POST(req: NextRequest) {
       model,
       apiKey: isOllama ? "" : apiKey,
       baseUrl: isOllama ? apiKey : undefined,
+      allowLocalModel: localModelAllowed,
       system: SYSTEM_PROMPT,
       messages,
       maxTokens: 1500,

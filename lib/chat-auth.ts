@@ -29,6 +29,13 @@
  *      (412 agent_not_configured / no_api_key) so they can't accidentally
  *      bill the platform owner's key.
  *
+ * A LOCAL MODEL ROW (provider "ollama": its "key" is a web address the server
+ * would call) answers for the verified platform operator only. Anyone else's
+ * turn on such a row, personal or workspace, is refused 403
+ * local_model_not_allowed before any request is made (Codex review, PR #535):
+ * a row saved before the save-time rule, or by any other path, must not make
+ * the server call an address for them.
+ *
  * Returns a discriminated union so callers don't have to remember which
  * NextResponse status maps to which error code.
  */
@@ -38,6 +45,7 @@ import { getServiceSupabase } from "./supabase-server";
 import { decryptField } from "./field-encryption";
 import { operatorPlatformFallback } from "./operator-credentials";
 import { isPlatformOperatorForAuthUser } from "./platform-operator";
+import { LOCAL_MODEL_PROVIDER, LOCAL_MODEL_REFUSAL } from "./ai/workspace-account";
 
 export type ChatAuthContext = {
   tenantId: string;
@@ -76,7 +84,8 @@ export type ChatAuthError = {
     | "no_api_key"
     | "agent_not_configured"
     | "admin_no_platform_key"
-    | "key_decrypt_failed";
+    | "key_decrypt_failed"
+    | "local_model_not_allowed";
   detail?: string;
 };
 
@@ -161,6 +170,9 @@ export async function resolveChatContext(
     provider = cfg.provider as Provider;
     model = cfg.model as string;
     cfgOverride = (cfg.system_prompt_override as string | null) || null;
+    if (provider === LOCAL_MODEL_PROVIDER && cfg.encrypted_api_key && !isOperator) {
+      return { ok: false, status: 403, code: "local_model_not_allowed", detail: LOCAL_MODEL_REFUSAL };
+    }
     if (!cfg.encrypted_api_key) {
       // Row exists but key wasn't set — try operator fallback before failing.
       const fallback = isOperator ? operatorPlatformFallback() : null;
