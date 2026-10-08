@@ -13,6 +13,8 @@ import { formatMoney, timeAgo } from "@/lib/fmt";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
 import { staticLeadSlug } from "@/components/os/department/config";
+import { agentNameFor } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 
 /**
  * Where an agent's "Chat" goes: the department channel it answers in
@@ -103,6 +105,9 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
 
   // The workspace's owners and admins only; empty for everyone else, unread.
   const openAlerts = await loadDashboardAlerts(tenantId);
+  // How the agents card names each agent (lib/os/agent-names.ts): a stored
+  // manifest can bind a house agent under its persona's name.
+  const internalNames = enabledAgents.length > 0 && (await viewerReadsInternalAgentNames());
 
   const slug = manifest.tenant_slug;
 
@@ -177,7 +182,7 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
                     <Bot className="h-4 w-4 text-accent" aria-hidden />
                   </div>
                   <div>
-                    <div className="font-semibold text-sm text-fg">{agent.display_name}</div>
+                    <div className="font-semibold text-sm text-fg">{agentNameFor({ slug: agent.slug, name: agent.display_name }, internalNames)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-fg-dim">
                       {agent.primary ? "primary agent" : "sub-agent"}
                     </div>

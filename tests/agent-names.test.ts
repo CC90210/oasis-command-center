@@ -28,8 +28,9 @@
  *                                  information to be published, and CC holds the
  *                                  role (lib/legal/constants.ts PRIVACY_OFFICER).
  *                                  It is the one sanctioned name, checked as such.
- * plus /t/<slug> with no root page (a stored manifest that binds the house
- * agents under their persona names, as two live self-signup workspaces do).
+ * plus /t/<slug> with no root page and a workspace dashboard's "Your agents"
+ * card, for a stored manifest that binds the house agents under their persona
+ * names, as two live self-signup workspaces do.
  *
  * THE NAMES are the crawl's seven (scripts/qa/crawl-lib.mjs on the crawl
  * branch: Bravo, Maven, Atlas, Aura, Hermes, Lex, Conaugh), matched as whole
@@ -271,11 +272,14 @@ async function main() {
   const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
   const clientManifest = parseManifest(finalizeManifestFromWizard({ template: "custom", slug: "client-co", answers: {} }));
   // The self-signup binds the house agents under their persona names and has
-  // no root page, so /t/selfsignup draws the generic summary.
+  // no root page, so /t/selfsignup draws the generic summary. One entity, so a
+  // dashboard over it draws its "Your agents" card (an empty data model draws
+  // only an empty-state card).
   const signupManifest = {
     ...clientManifest,
     tenant_slug: "selfsignup",
     pages: [],
+    data_model: [{ name: "note", label: "Note", fields: [{ name: "title", type: "string" as const }] }],
     agents: [
       { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
       { slug: "atlas", display_name: "Atlas", enabled: true },
@@ -565,6 +569,26 @@ async function main() {
     const text = draw(await tenantRoot({ params: Promise.resolve({ slug: "selfsignup" }) })).text.join(" ");
     noName(text, "the self-signup's summary");
     for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(text.includes(dept), `${dept} is not on the summary`);
+  });
+
+  // -- a workspace dashboard's "Your agents" card --
+  const { ManifestDashboard } = await import("../components/manifest/ManifestDashboard");
+  const { Card } = await import("../components/Card");
+  const signupStored = await getManifest("selfsignup");
+  const agentsCard = async (who: Who) => {
+    await login(who);
+    const tree = await ManifestDashboard({ manifest: signupStored, tenantId: SIGNUP });
+    const card = elementsOf(tree, Card).find((el) => (el.props as { title?: unknown }).title === "Your agents");
+    assert.ok(card, "the dashboard drew no agents card");
+    return draw(card).text.join(" ");
+  };
+  await check("a dashboard's agents card, the self-signup's owner: the bound house agents by department", async () => {
+    const text = await agentsCard("signup");
+    noName(text, "the self-signup's agents card");
+    for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(text.includes(dept), `${dept} is not on the card`);
+  });
+  await check("a dashboard's agents card, CC (control): the stored persona names are what the rule removes", async () => {
+    assert.match(await agentsCard("cc"), /\bBravo\b.*\bAtlas\b.*\bMaven\b/);
   });
 
   console.log(`agent-names: ${passed} passed, ${failures} failed`);
