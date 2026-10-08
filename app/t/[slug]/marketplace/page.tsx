@@ -7,6 +7,8 @@ import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireOwnedTenantSlug } from "@/lib/tenant-access";
+import { agentNameFor, libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -18,6 +20,10 @@ export const runtime = "nodejs";
  * tenant manifest) get a "Enabled" badge so the operator can see at a
  * glance what's already wired up; detail-page Enable / Disable wiring lives
  * one click away in `[agent-slug]/page.tsx`.
+ *
+ * OASIS's house agents are in the library for OASIS's founders only, and every
+ * card is named by lib/os/agent-names.ts: a client or a rep was shown Atlas,
+ * Aura, Bravo and Maven here (crawl 2026-10-02 and 2026-10-08).
  */
 export default async function MarketplaceBrowsePage({
   params,
@@ -48,7 +54,10 @@ export default async function MarketplaceBrowsePage({
 
   const filterCategory =
     category && category in CATEGORY_LABELS ? (category as AgentCategory) : undefined;
-  const agents = await listAgents({ category: filterCategory, tenant_id: tenantId });
+  const internalNames = await viewerReadsInternalAgentNames();
+  const agents = (await listAgents({ category: filterCategory, tenant_id: tenantId })).filter((a) =>
+    libraryOffersAgent(a.slug, internalNames),
+  );
 
   const enabledSlugs = new Set(
     manifest.agents.filter((a) => a.enabled).map((a) => a.slug.toLowerCase())
@@ -133,7 +142,7 @@ export default async function MarketplaceBrowsePage({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold text-fg group-hover:text-accent transition-colors">
-                          {agent.name}
+                          {agentNameFor(agent, internalNames)}
                         </span>
                         {agent.is_oasis_managed && <Tag tone="accent">platform</Tag>}
                         {!agent.is_public && <Tag tone="neutral">private</Tag>}

@@ -1,4 +1,5 @@
-import { requirePlaybookReader } from "@/lib/playbook-access";
+import { isFounderPlaybookHref, requirePlaybookReader } from "@/lib/playbook-access";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { listPlaybooks, type PlaybookFile } from "@/lib/playbooks";
@@ -85,10 +86,14 @@ export default async function PlaybookIndex() {
   // 2026-09-28 and its playbooks (01-06, 08, INDEX) left content/playbooks.
   const cardHrefs = new Set(SECTIONS.map((s) => s.href));
   const operatingManual = listPlaybooks().filter((f) => !cardHrefs.has(`/playbook/${f.slug}`));
-  return <DefaultPlaybookIndex operatingManual={operatingManual} />;
+  // The founders' pages (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS) are a
+  // 404 for everyone else, so only a founder is shown their cards.
+  const founder = await viewerReadsInternalAgentNames();
+  const sections = founder ? SECTIONS : SECTIONS.filter((s) => !isFounderPlaybookHref(s.href));
+  return <DefaultPlaybookIndex sections={sections} operatingManual={operatingManual} />;
 }
 
-function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFile[] }) {
+function DefaultPlaybookIndex({ sections, operatingManual }: { sections: PlaybookSection[]; operatingManual: PlaybookFile[] }) {
   return (
     <div className="space-y-8 animate-fade-in">
       <PageHeader
@@ -106,7 +111,7 @@ function DefaultPlaybookIndex({ operatingManual }: { operatingManual: PlaybookFi
           2026-05-22: "they need to be the same size, not weird
           different-size blocks." */}
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {SECTIONS.map((section, index) => {
+        {sections.map((section, index) => {
           return (
             <Link
               key={`${section.href}-${index}`}
