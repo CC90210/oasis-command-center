@@ -1127,7 +1127,17 @@ async function main() {
   const needsForRender = buildNeedsYou({
     sales: null, delivery: null, inbound: null, cash: null, alerts: await loadWorkspaceAlerts(CLIENT_A), nowMs: Date.now(),
   });
+  // CI runs every suite with NODE_OPTIONS=--conditions=react-server, which the
+  // child would inherit, and react-dom/server refuses to load under it. Drop
+  // that condition for the child only (the same as tests/clients-hub.test.ts).
+  const childNodeOptions = (process.env.NODE_OPTIONS || "")
+    .split(/\s+/)
+    .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+    .join(" ");
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: childNodeOptions };
+  if (!childNodeOptions) delete childEnv.NODE_OPTIONS;
   const rendered = spawnSync(process.execPath, ["--import", "tsx", "tests/workspace-alerts.render.ts"], {
+    env: childEnv,
     input: JSON.stringify({
       feedRows: [customerRow("ev-lex", "+14165550188", lexText), customerRow("ev-atlas", "+14165550189", atlasText)],
       oasisWorkspace: false,
