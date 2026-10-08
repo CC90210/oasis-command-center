@@ -39,6 +39,7 @@ import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { CONNECTOR_CATALOG, connectorHref } from "@/lib/os/connectors";
 import { FOUNDER_MEETING_DURATION_MINUTES } from "@/lib/website-sales-meeting";
+import { mayManageWorkspaceAlerts } from "@/lib/notify/alert-access";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 export type Read<T> = { ok: true; value: T } | { ok: false };
@@ -96,8 +97,9 @@ export function todayBriefPlan(input: {
     connections: input.persona === "founder" && caps.canSeeSystemSurfaces && caps.canAct,
     routines: input.departments.has("operations"),
     // An alert card is the workspace's own (never another's), and resolving
-    // one is an owner's act: the same audience as connections.
-    alerts: input.persona === "founder" && caps.canSeeSystemSurfaces && caps.canAct,
+    // one is an owner's act. The one rule the Resolve route and the dashboard
+    // also ask (lib/notify/alert-access.ts).
+    alerts: mayManageWorkspaceAlerts(input.persona, caps),
   };
 }
 

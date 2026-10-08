@@ -12,9 +12,9 @@
 
 import "server-only";
 import { readRecentReceiptsByLine } from "./delivery-receipts";
-import { sendableLines, wireDecision, type LineDecision } from "./line-health-core";
+import { newestVerdict, sendableLines, wireDecision, type LineDecision } from "./line-health-core";
 import { canaryStatus } from "./canary";
-import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
+import { resolveAgentAlerts, writeAgentAlert } from "@/lib/notify/agent-alert";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isRetiredTenant } from "@/lib/tenant/retired";
@@ -26,7 +26,18 @@ export type PoolVerdict = {
   /** True when the whole wire is halted, not just some lines. */
   wireHalted: boolean;
   reason: string;
+  /** Every line the wire was judged on (the pool given). */
+  pool?: string[];
+  /** Lines whose newest carrier verdict is a delivery: the evidence a benched line is back. */
+  delivering?: string[];
+  /** The newest carrier verdict across the whole wire is a delivery. */
+  wireDelivering?: boolean;
 };
+
+/** The workspace's card for one benched number (subject: `<wire>:<number>`). */
+export const LINE_BENCHED_ALERT = "sms_line_benched";
+/** The workspace's card for a halted wire (subject: the wire). */
+export const WIRE_HALTED_ALERT = "sms_wire_halted";
 
 /**
  * Filter a wire's sending pool down to the lines that are actually working.
@@ -77,33 +88,45 @@ export async function sendablePool(
     blocked.push({ number: n, bench: true, consecutiveFailures: 0, sample: 0, reason: "refused a canary test send" });
   }
 
+  const evidence =
+    samples === null
+      ? {}
+      : {
+          pool,
+          delivering: pool.filter((n) => newestVerdict(samples.filter((s) => s.number === n)) === "delivered"),
+          wireDelivering: newestVerdict(samples) === "delivered",
+        };
   if (wire?.halt) {
     // A halted wire overrides the per-line result: five consecutive failures
     // across the route means the route is dead, and picking whichever line has
     // not personally reached three yet just burns it next.
-    return { lines: [], blocked, wireHalted: true, reason: wire.reason };
+    return { lines: [], blocked, wireHalted: true, reason: wire.reason, ...evidence };
   }
   return {
     lines: allowed,
     blocked,
     wireHalted: false,
     reason: canaryFailed.size > 0 ? `${reason}; ${canaryFailed.size} refused a canary` : reason,
+    ...evidence,
   };
-}
-
-function esc(s: string): string {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /**
  * Tell the workspace a line was benched, once, on the standing decay ladder.
- * The page goes to that workspace's own audience (lib/notify/alert-route.ts);
- * until 2026-10-02 every workspace's benched lines paged the SunBiz chat.
+ *
+ * EVERY PAGE IS ALSO A CARD (writeAgentAlert), keyed by a stable subject (the
+ * wire, or `<wire>:<number>`), in the workspace's own Needs you list. Until
+ * 2026-10-08 this only pushed to Telegram and recorded the ladder whether or
+ * not the push landed, so a workspace with no Telegram bot was never told and
+ * the ladder kept it quiet. The card's push goes to that workspace's own
+ * audience (lib/notify/alert-route.ts), and the card stays open until the line
+ * demonstrably delivers again (closeRecoveredLineCards).
  *
  * KEYED ON THE CONDITION, not the message: the alert key is the line plus the
  * wire, so a number that keeps failing re-alerts on the ladder rather than
  * every dispatch tick. There is exactly one ladder in this codebase and this
- * does not add a second.
+ * does not add a second. The ladder, not once-per-open, decides each page:
+ * a number benched for days re-pages at 6, 12 and 24 hours, as it always did.
  */
 export async function announceBenchedLines(
   tenantId: string,
@@ -117,18 +140,38 @@ export async function announceBenchedLines(
   const db = getServiceSupabase();
   const alerted: string[] = [];
   const wire = opts.wire || "sms";
+  // The lines the card's recovery check judges again: the whole pool.
+  const lines = [...new Set([...(verdict.pool ?? verdict.lines), ...verdict.blocked.map((b) => b.number)])];
 
-  const conditions: Array<{ key: string; body: string }> = [];
+  const conditions: Array<{ key: string; alert: Parameters<typeof writeAgentAlert>[0] }> = [];
   if (verdict.wireHalted) {
     conditions.push({
       key: `sms-wire-halt:${wire}`,
-      body: `🔴 <b>TEXTING HALTED</b> — wire <b>${esc(wire)}</b>\n${esc(verdict.reason)}\nNo texts will send on this wire until a line delivers again.`,
+      alert: {
+        tenantId,
+        alertType: WIRE_HALTED_ALERT,
+        severity: "urgent",
+        subjectType: "sms_wire",
+        subjectId: wire,
+        title: "Texting is paused",
+        body: `No texts will send until one of your numbers delivers again (${verdict.reason}).`,
+        payload: { wire, lines },
+      },
     });
   }
   for (const b of verdict.blocked) {
     conditions.push({
       key: `sms-line-benched:${wire}:${b.number}`,
-      body: `🟠 <b>NUMBER BENCHED</b> — ${esc(b.number)} (${esc(wire)})\n${esc(b.reason)}\nIt will come back on its own if it starts delivering again.`,
+      alert: {
+        tenantId,
+        alertType: LINE_BENCHED_ALERT,
+        severity: "warn",
+        subjectType: "sms_line",
+        subjectId: `${wire}:${b.number}`,
+        title: "A texting number was paused",
+        body: `${b.number} is paused (${b.reason}). It comes back on its own once it delivers again.`,
+        payload: { wire, number: b.number, lines },
+      },
     });
   }
 
@@ -141,11 +184,12 @@ export async function announceBenchedLines(
       new Date(nowMs),
     );
     if (!decision.send) continue;
-    await pushWorkspaceAlert(tenantId, c.body);
+    await writeAgentAlert(c.alert);
     alerted.push(c.key);
     // Recorded regardless of delivery: if Telegram is down we must not spin
-    // re-sending on every dispatch tick. The delivery self-test is the separate
-    // mechanism that catches a dead channel.
+    // re-sending on every dispatch tick. The card above is the record that
+    // does not depend on delivery: it sits in the workspace's Needs you list
+    // until the line recovers, and says whether its Telegram heard.
     await db.from("health_alert_state").upsert(
       {
         alert_key: c.key,
@@ -160,4 +204,101 @@ export async function announceBenchedLines(
     ).then(() => undefined, () => undefined);
   }
   return { alerted };
+}
+
+type OpenLineCard = { alertType: string; subjectId: string; wire: string; number: string | null; lines: string[] };
+
+function openLineCard(row: { alert_type?: unknown; subject_id?: unknown; payload?: unknown }): OpenLineCard | null {
+  let payload: Record<string, unknown> = {};
+  if (row.payload && typeof row.payload === "object") payload = row.payload as Record<string, unknown>;
+  else if (typeof row.payload === "string") {
+    try {
+      payload = JSON.parse(row.payload) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  const wire = typeof payload.wire === "string" ? payload.wire : null;
+  const lines = Array.isArray(payload.lines) ? payload.lines.filter((n): n is string => typeof n === "string") : [];
+  const number = typeof payload.number === "string" ? payload.number : null;
+  if (!wire || lines.length === 0 || typeof row.subject_id !== "string") return null;
+  if (row.alert_type === LINE_BENCHED_ALERT && !number) return null;
+  return { alertType: String(row.alert_type), subjectId: row.subject_id, wire, number, lines };
+}
+
+/**
+ * Close a workspace's benched-line and halted-wire cards whose condition has
+ * DEMONSTRABLY cleared, and restart their ladder so the next occurrence pages
+ * at once instead of inheriting a 24-hour silence.
+ *
+ * The evidence is the bench decision itself, re-run on the lines the card
+ * recorded (sendablePool, canary refusals included), plus a delivery as the
+ * newest verdict. "Not benched" alone is not enough: a line's failures age out
+ * of the 24-hour window and it reads "not benched" with nothing showing it
+ * delivers, and an empty or pending-only history proves nothing either. A card
+ * closed on those reopens and pages as if new the next time the line fails.
+ *
+ * Runs from the reconcile cron after the receipts close, once per workspace;
+ * one read when nothing is open. Never throws.
+ */
+export async function closeRecoveredLineCards(
+  tenantId: string,
+  opts: { nowMs?: number } = {},
+): Promise<string[]> {
+  if (isRetiredTenant(tenantId)) return [];
+  const closed: string[] = [];
+  try {
+    const db = getServiceSupabase();
+    const open = await db
+      .from("agent_alerts")
+      .select("alert_type, subject_id, payload")
+      .eq("tenant_id", tenantId)
+      .in("alert_type", [LINE_BENCHED_ALERT, WIRE_HALTED_ALERT])
+      .is("resolved_at", null)
+      .limit(50);
+    if (open.error) {
+      console.error("[line-health] open line cards unreadable:", open.error.message);
+      return [];
+    }
+    const cards = ((open.data || []) as Array<Record<string, unknown>>)
+      .map(openLineCard)
+      .filter((c): c is OpenLineCard => c !== null);
+    const byWire = new Map<string, OpenLineCard[]>();
+    for (const card of cards) byWire.set(card.wire, [...(byWire.get(card.wire) ?? []), card]);
+
+    for (const [wire, wireCards] of byWire) {
+      const pool = [...new Set(wireCards.flatMap((c) => c.lines))];
+      const verdict = await sendablePool(tenantId, pool, { wire, nowMs: opts.nowMs });
+      for (const card of wireCards) {
+        const back =
+          card.alertType === WIRE_HALTED_ALERT
+            ? !verdict.wireHalted && verdict.wireDelivering === true
+            : verdict.lines.includes(card.number as string) && (verdict.delivering ?? []).includes(card.number as string);
+        if (!back) continue;
+        const n = await resolveAgentAlerts({
+          tenantId,
+          alertType: card.alertType,
+          subjectId: card.subjectId,
+          resolvedBy:
+            card.alertType === WIRE_HALTED_ALERT
+              ? "auto: texts deliver again"
+              : "auto: a text from this number delivered again",
+        });
+        if (n === 0) continue;
+        closed.push(card.subjectId);
+        // The ladder keys announceBenchedLines pages on: `sms-wire-halt:<wire>`
+        // and `sms-line-benched:<wire>:<number>` (the card's subject).
+        const key = card.alertType === WIRE_HALTED_ALERT ? `sms-wire-halt:${wire}` : `sms-line-benched:${card.subjectId}`;
+        await db
+          .from("health_alert_state")
+          .update({ last_signature: "recovered", updated_at: new Date(opts.nowMs ?? Date.now()).toISOString() })
+          .eq("tenant_id", tenantId)
+          .eq("alert_key", key)
+          .then(() => undefined, () => undefined);
+      }
+    }
+  } catch (err) {
+    console.error("[line-health] closing recovered line cards failed:", err instanceof Error ? err.message : err);
+  }
+  return closed;
 }

@@ -21,10 +21,11 @@
 
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram } from "@/lib/notify/telegram";
-import { notifyLanesForTenant } from "@/lib/tenant/public-identity";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
+import { alertAudienceFor } from "@/lib/notify/alert-route";
 import { shouldAlert } from "@/lib/notify/alert-decay";
+import { resolvePublicForm } from "@/lib/forms/public-resolver";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /** Slugs reach the alert text and the DB; merchants type neither, but the
  *  beacon is public input — allowlist rather than trust. */
@@ -97,12 +98,101 @@ export function cappedJson(value: unknown): string | null {
 }
 
 /**
- * Persist the dead-letter row and page THE LANE THAT OWNS THIS TENANT on the
- * ONE decay ladder (lib/notify/alert-decay.ts, state in health_alert_state).
+ * The form a failure names: the caller's slugs, else the form's own URL
+ * (`/f/<tenant>/<form>/...`) that the submission carried, which is all a
+ * signed-link submission has. Both are request input, so neither decides
+ * anything until verifiedForm finds the form record they name.
+ */
+function namedForm(input: SubmitFailureInput): { tenantSlug: string; formSlug: string } | null {
+  const tenantSlug = safeSlug(input.tenantSlug);
+  const formSlug = safeSlug(input.formSlug);
+  if (tenantSlug && formSlug) return { tenantSlug, formSlug };
+  const p = input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : null;
+  const path = typeof p?.submission_path === "string" ? p.submission_path : "";
+  const parts = path.split("?")[0].split("/").filter(Boolean);
+  if (parts[0] !== "f") return null;
+  const t = safeSlug(parts[1]);
+  const f = safeSlug(parts[2]);
+  return t && f ? { tenantSlug: t, formSlug: f } : null;
+}
+
+type VerifiedForm = { tenantId: string; tenantSlug: string; formId: string; formSlug: string; formName: string };
+
+/**
+ * The form record the slugs name, through the same resolver the public form
+ * page uses (an enabled form of that workspace), or null. The tenant id comes
+ * from THE FORM RECORD, never from the slug a request sent.
+ */
+async function verifiedForm(named: { tenantSlug: string; formSlug: string } | null): Promise<VerifiedForm | null> {
+  if (!named) return null;
+  try {
+    const found = await resolvePublicForm(
+      getServiceSupabase() as unknown as Parameters<typeof resolvePublicForm>[0],
+      named.tenantSlug,
+      named.formSlug,
+    );
+    if (!found.ok) return null;
+    return {
+      tenantId: found.form.tenant_id,
+      tenantSlug: found.tenant_slug,
+      formId: found.form.id,
+      formSlug: found.form.slug,
+      formName: found.form.name,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The card's words. OASIS's own forms keep the operator detail CC recovers a
+ * merchant from (the error line, crushed of identifiers, and the dead-letter
+ * id). A client's card says what happened in plain words, with a reference
+ * OASIS support can find the saved answers by: the client cannot open the
+ * dead-letter store, and its error text is OASIS's internals.
+ */
+function failureCard(
+  form: VerifiedForm,
+  input: SubmitFailureInput,
+  dead: { id: string; inserted: boolean },
+  windowH: number,
+): { title: string; body: string } {
+  if (alertAudienceFor(form.tenantId) === "oasis_operator") {
+    const errLine = redactForAlert(String(input.error).split("\n")[0].slice(0, 200));
+    return {
+      title: "Form submission blocked: a merchant could not submit",
+      body:
+        `${form.tenantSlug}/${form.formSlug} (step ${input.stepIndex ?? "?"}, ${input.source}). Error: ${errLine}. ` +
+        (dead.inserted
+          ? `Merchant data captured: dead-letter ${dead.id}; recover it and set recovered_at.`
+          : "The dead-letter insert ALSO failed: only this alert records the loss.") +
+        ` Re-alerts in ${windowH}h if it keeps happening; forms.submit_failures_open stays red until recovered.`,
+    };
+  }
+  return {
+    title: "Someone could not submit one of your forms",
+    body:
+      `A visitor's submission of "${form.formName}" did not go through. ` +
+      (dead.inserted
+        ? `Their answers were kept: contact OASIS support with reference ${dead.id} to get them.`
+        : "Their answers could not be kept. Contact OASIS support if this keeps happening."),
+  };
+}
+
+/**
+ * Persist the dead-letter row, then tell THE WORKSPACE THAT OWNS THE FORM, on
+ * the ONE decay ladder (lib/notify/alert-decay.ts, state in health_alert_state).
  *
- * The lane is resolved from the tenant, not hardcoded — see
- * notifyLanesForTenant. An unmapped tenant reaches both lanes rather than
- * defaulting to one.
+ * WHOSE ALERT (2026-10-08). The workspace is the one the form record belongs
+ * to, never a slug from the request. Its card goes in that workspace's own
+ * Needs you list and its page to that workspace's own audience
+ * (lib/notify/alert-route.ts): OASIS's chat for OASIS's own forms, a client's
+ * own Telegram bot (or the card alone) for a client's. Until then the page went
+ * to OASIS's lanes by slug, and an unmapped slug, which is every client's,
+ * fanned the client's incident and error text to OASIS's chat and the retired
+ * SunBiz chat. A failure that names no form we can find, or a retired
+ * workspace's, pages nobody: the dead-letter row keeps it, and the estate
+ * check forms.submit_failures_open counts it.
  *
  * The ladder key is COARSE — tenant/form/source, never the message — so a
  * burst of failing submissions pages once and escalates instead of storming.
@@ -112,8 +202,9 @@ export function cappedJson(value: unknown): string | null {
  */
 export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{ id: string | null }> {
   const id = randomUUID();
-  const tenantSlug = safeSlug(input.tenantSlug);
-  const formSlug = safeSlug(input.formSlug);
+  const named = namedForm(input);
+  const tenantSlug = named?.tenantSlug ?? null;
+  const formSlug = named?.formSlug ?? null;
   let inserted = false;
 
   try {
@@ -136,8 +227,22 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
   }
 
   try {
+    const form = await verifiedForm(named);
+    if (!form || isRetiredTenant(form.tenantId)) {
+      // No workspace to tell: the slugs name no form we can find (a forged
+      // beacon, a deleted or disabled form, a signed link with no path), or
+      // the form's workspace is retired. Nobody is paged; the dead-letter row
+      // keeps the merchant's answers and the estate check counts it.
+      console.warn("[submit-failure-capture] no workspace to alert; dead-letter only:", {
+        id: inserted ? id : null,
+        tenantSlug,
+        formSlug,
+        source: input.source,
+      });
+      return { id: inserted ? id : null };
+    }
     const db = getServiceSupabase();
-    const key = `submitfail:${tenantSlug ?? "unknown"}/${formSlug ?? "unknown"}/${input.source}`;
+    const key = `submitfail:${form.tenantSlug}/${form.formSlug}/${input.source}`;
     const stateRow = await db
       .from("health_alert_state")
       .select("*")
@@ -152,21 +257,13 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
       repeatN: state?.repeat_n,
     });
     if (decision.send) {
-      const errLine = redactForAlert(String(input.error).split("\n")[0].slice(0, 200));
-      const text =
-        `🔴 <b>FORM SUBMISSION BLOCKED</b> — a merchant could not submit\n` +
-        `form: <b>${escapeTelegramHtml(`${tenantSlug ?? "?"}/${formSlug ?? "?"}`)}</b> (step ${input.stepIndex ?? "?"}, ${input.source})\n` +
-        `error: ${escapeTelegramHtml(errLine)}\n` +
-        (inserted
-          ? `merchant data captured — dead-letter <code>${escapeTelegramHtml(id)}</code>; recover + set recovered_at`
-          : `⚠️ dead-letter insert ALSO failed — only this alert records the loss`) +
-        `\n<i>re-alerts in ${decision.windowH}h if it keeps happening; forms.submit_failures_open stays red until recovered</i>`;
       // Persist the ladder state BEFORE the send: a crash mid-send costs one
       // page (the health check re-asserts within 15 min); the reverse ordering
       // storms on every crash-loop.
       await db.from("health_alert_state").upsert(
         {
           alert_key: key,
+          tenant_id: form.tenantId,
           last_signature: key,
           last_alerted_at: new Date().toISOString(),
           repeat_n: decision.nextRepeatN,
@@ -175,22 +272,24 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
         },
         { onConflict: "alert_key" },
       );
-      // Page the lane that OWNS this tenant, not a hardcoded one.
-      //
-      // This was `lane: "sunbiz-ops"` unconditionally. A blocked submission on
-      // an OASIS funnel stored its dead-letter row correctly under
-      // tenant_slug='oasis-ai-cc' and then paged Adon, who cannot action a form
-      // he does not own — while CC, who could recover the prospect from the
-      // stored payload in minutes, was never told. The 15-minute health check
-      // then re-asserted the same alert into the same wrong lane.
-      //
-      // An UNMAPPED tenant fans to both lanes rather than defaulting to one:
-      // two dead-letter rows in production carry tenant_slug NULL, and a lost
-      // merchant nobody is paged about is worse than one two teams see.
-      for (const lane of notifyLanesForTenant({ tenantSlug })) {
-        await sendTelegram(text, { lane }).catch(() => undefined);
-      }
     }
+    // The card is written on every failure (a refresh while it is open), so
+    // the workspace sees the latest one; the ladder decides whether it pages.
+    await writeAgentAlert({
+      tenantId: form.tenantId,
+      alertType: "form_submit_blocked",
+      severity: "urgent",
+      subjectType: "form",
+      subjectId: form.formId,
+      ...failureCard(form, input, { id, inserted }, decision.windowH),
+      payload: {
+        form_slug: form.formSlug,
+        source: input.source,
+        step_index: Number.isFinite(input.stepIndex as number) ? input.stepIndex : null,
+        dead_letter_id: inserted ? id : null,
+      },
+      telegram: decision.send,
+    });
   } catch (err) {
     // The alert path must never take the request down with it. The open
     // dead-letter row keeps the health check red, so this failure is not

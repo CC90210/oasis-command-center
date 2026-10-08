@@ -284,14 +284,35 @@ export function customerMessageOf(payload: unknown): CustomerMessage | null {
   return { phone: phone.trim(), text: typeof text === "string" ? text : "" };
 }
 
+/** The Feed rows written about a customer's own text (lib/sms/reply-agent.ts handOffToWorkspace). */
+export const CUSTOMER_TEXT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "CUSTOMER_TEXT_NEEDS_REPLY",
+  "CUSTOMER_OPTED_OUT_OF_TEXTS",
+]);
+
+/**
+ * What a customer-text row keeps for a viewer who may not read the customer.
+ * An ALLOW-list, not "remove the one key": a row written in any other shape
+ * keeps the customer out too. This change's own first draft put the number and
+ * words in `preview` and `phone`; it never reached production (no row of
+ * either type exists there, 2026-10-08), and a later producer adding a key
+ * must not reopen it either.
+ */
+const CUSTOMER_TEXT_SHAREABLE_KEYS = ["tenant_id", "note", "channel", "lead_id", "sms_agent_job_id"] as const;
+
 /** Rows with the customer's words kept only where `mayRead` says so, and removed everywhere else. */
-export function withCustomerMessagesFor<T extends { payload: unknown }>(
+export function withCustomerMessagesFor<T extends { payload: unknown; event_type?: string | null }>(
   rows: readonly T[],
   mayRead: (row: T) => boolean,
 ): T[] {
   return rows.map((row) => {
     if (mayRead(row)) return row;
     const p = payloadObject(row.payload);
+    if (CUSTOMER_TEXT_EVENT_TYPES.has(row.event_type || "")) {
+      const shareable: Record<string, unknown> = {};
+      for (const key of CUSTOMER_TEXT_SHAREABLE_KEYS) if (key in p) shareable[key] = p[key];
+      return { ...row, payload: shareable };
+    }
     if (!(CUSTOMER_MESSAGE_KEY in p)) return row;
     const rest: Record<string, unknown> = { ...p };
     delete rest[CUSTOMER_MESSAGE_KEY];

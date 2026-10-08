@@ -186,15 +186,24 @@ export async function resolveAgentAlerts(input: {
   alertType: string;
   /** Why, kept on the card (agent_alerts.resolved_by). */
   resolvedBy: string;
+  /** Only the card about this subject (agent_alerts.subject_id): one line, one wire. */
+  subjectId?: string;
+  /**
+   * Only cards last written before this instant (ISO). A card refreshed after
+   * the recovery evidence was seen failing again since, so it stays open.
+   */
+  createdBefore?: string;
 }): Promise<number> {
   try {
-    const res = await getServiceSupabase()
+    let q = getServiceSupabase()
       .from("agent_alerts")
       .update({ resolved_at: new Date().toISOString(), resolved_by: input.resolvedBy })
       .eq("tenant_id", input.tenantId)
       .eq("alert_type", input.alertType)
-      .is("resolved_at", null)
-      .select("id");
+      .is("resolved_at", null);
+    if (input.subjectId !== undefined) q = q.eq("subject_id", input.subjectId);
+    if (input.createdBefore !== undefined) q = q.lt("created_at", input.createdBefore);
+    const res = await q.select("id");
     if (res.error) {
       console.error("[agent-alert] recovery close failed:", res.error.message);
       return 0;

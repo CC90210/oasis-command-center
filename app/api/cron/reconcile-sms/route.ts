@@ -15,6 +15,8 @@ import { checkCronAuth } from "@/lib/cron-auth";
 import { resolveAgentAlerts, writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
+import { routeEvidence, type RouteEvidence } from "@/lib/sms/carrier-status";
+import { closeRecoveredLineCards } from "@/lib/sms/line-health";
 import { refreshDestinationHealth } from "@/lib/sms/destination-health";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
@@ -154,19 +156,36 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       }).catch(() => undefined);
     }
 
-    // RECOVERY CLOSES THE CARD. A workspace whose breaker no longer halts has a
-    // route that delivers again, so its open card is closed and the next
-    // outage opens a new card and pages. Left open, telegramOncePerOpen would
-    // keep every later outage silent.
+    // RECOVERY CLOSES THE CARD, ON EVIDENCE ONLY. Left open forever,
+    // telegramOncePerOpen would keep every later outage silent; closed too
+    // early, the outage is hidden and the next refresh pages as if it were new.
+    // "Not halted" is not evidence: an empty or pending-only history and a
+    // breaker switched off by SMS_BREAKER_DISABLED answer it too
+    // (routeEvidence, lib/sms/carrier-status.ts). The card closes only when
+    // the newest terminal receipt is a delivery sent after the card was last
+    // written, i.e. after the route was last seen failing.
     const recovered: string[] = [];
+    const routeEvidenceByTenant: Record<string, RouteEvidence> = {};
     for (const t of tenants) {
-      if (breakers[t]?.halt) continue;
+      const verdict = breakers[t];
+      const evidence = routeEvidence(verdict);
+      routeEvidenceByTenant[t] = evidence;
+      if (evidence !== "delivering") continue;
       const closed = await resolveAgentAlerts({
         tenantId: t,
         alertType: "sms_carrier_route_dead",
-        resolvedBy: "auto: the carrier route delivers again",
+        resolvedBy: "auto: a text delivered after the failures",
+        createdBefore: verdict.newestTerminal ? new Date(verdict.newestTerminal.at).toISOString() : undefined,
       });
       if (closed > 0) recovered.push(t);
+    }
+
+    // A benched number's or a halted wire's card closes the same way: on a
+    // delivery, judged by the same rules that benched it (lib/sms/line-health.ts).
+    const linesRecovered: Record<string, string[]> = {};
+    for (const t of tenants) {
+      const back = await closeRecoveredLineCards(t);
+      if (back.length > 0) linesRecovered[t] = back;
     }
 
     // Each workspace's reconcile errors are that workspace's card and its own
@@ -189,7 +208,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
 
     return NextResponse.json({
-      ok: true, tenants: tenants.length, ...r, breakers, halted, recovered, destination_health: destinationHealth,
+      ok: true, tenants: tenants.length, ...r, breakers, halted, recovered,
+      route_evidence: routeEvidenceByTenant, lines_recovered: linesRecovered, destination_health: destinationHealth,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

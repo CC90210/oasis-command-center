@@ -10,23 +10,27 @@
  * appointment could even be answered as "OASIS AI:". The customer's words then
  * sat in a Feed payload that /api/event-feed handed raw to any member.
  *
- * WHAT RUNS FOR REAL, against a local libSQL file database whose alert, event
- * and credential tables are the live DDL verbatim: the alert writer, its card
- * and the one audience resolver (lib/notify/alert-route.ts), the workspace
- * Telegram sender and the strict credential store (encrypted rows), the SMS
- * reply agent (queue, claim, matching, classification, conversation state,
- * replies, dead letters), /api/event-feed with real signed sessions, the
- * Feed's own reader, the Needs-you reads and builder, the alert resolve route,
- * the reconcile-sms cron and the benched-line announcer. Every OASIS and
- * SunBiz Telegram credential is set to a value a leak would show.
+ * WHAT RUNS FOR REAL, against a local libSQL file database whose alert, event,
+ * credential, receipt, form and ladder tables are the live DDL verbatim: the
+ * alert writer, its card and the one audience resolver
+ * (lib/notify/alert-route.ts), the workspace Telegram sender and the strict
+ * credential store (encrypted rows), the SMS reply agent (queue, claim,
+ * matching, classification, conversation state, replies, dead letters),
+ * /api/event-feed with real signed sessions, the Feed's own reader, the
+ * Needs-you reads and builder, the alert resolve route, the dashboard's alert
+ * read, the reconcile-sms cron with the real carrier breaker and line-health
+ * rules over real receipt rows, the benched-line announcer and the public-form
+ * failure capture. Every OASIS and SunBiz Telegram credential is set to a value
+ * a leak would show.
  *
  * STAND-INS replace only what would leave the machine: fetch (records every
  * call; Telegram answers per chat, and can quote the bot token back the way a
  * real error can), Twilio's sender (records the exact reply), the rep's Gmail,
  * the LLM queue, the canonical-touch writer, the conversations nudge, and the
- * TextTorrent receipt reconciler, carrier breaker and destination-health
- * refresh the reconcile cron calls. Rendered rows come from
- * tests/workspace-alerts.render.ts (react-dom/server does not load here).
+ * two TextTorrent API calls (receipt reconciliation, and the list of tenants
+ * with open receipts) plus the destination-health refresh the reconcile cron
+ * makes. Rendered rows come from tests/workspace-alerts.render.ts
+ * (react-dom/server does not load here).
  *
  * Run: node --conditions=react-server --import tsx tests/workspace-alerts.test.ts
  */
@@ -83,6 +87,8 @@ const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110"; // retired 2026-09-28
 const CLIENT_A = "c1c1c1c1-0000-4000-8000-0000000000a1"; // provisioned ("suga" seed); saved its own bot
 const CLIENT_B = "c2c2c2c2-0000-4000-8000-0000000000b2"; // saved nothing
 const CLIENT_C = "c3c3c3c3-0000-4000-8000-0000000000c3"; // saved a bot that will not decrypt
+const CLIENT_D = "c4c4c4c4-0000-4000-8000-0000000000d4"; // saved nothing; reconcile scenarios
+const CLIENT_E = "c5c5c5c5-0000-4000-8000-0000000000e5"; // saved nothing; reconcile scenarios
 const CLIENT_A_TOKEN = "2001:client-a-own-bot";
 const CLIENT_A_CHAT = "-1009990001";
 const OASIS_SAVED_TOKEN = "2002:oasis-saved-workspace-bot";
@@ -96,6 +102,8 @@ const USERS = {
   aOwner: person(2, "owner@client-a.test"),
   aRep: person(3, "rep@client-a.test"), // a commission-only closer
   bOwner: person(4, "owner@client-b.test"),
+  aMember: person(5, "member@client-a.test"), // team_role member: may see system surfaces and act, not an owner
+  aViewer: person(6, "viewer@client-a.test"), // team_role read_only
 } as const;
 
 type TelegramCall = { url: string; token: string; chatId: string; text: string };
@@ -191,28 +199,12 @@ stubModule(require.resolve("../lib/leads/canonical-touch"), {
 stubModule(require.resolve("../lib/realtime/conversations-nudge"), {
   nudgeConversations: async () => undefined,
 });
-// The reconcile cron's TextTorrent side: per-tenant receipts and breakers.
+// The reconcile cron's TextTorrent API side: which tenants have open receipts,
+// and closing them. The receipts it then READS, the carrier breaker over them
+// and the line-health rules are the real code (stubbed in main(), over the
+// real module, before anything imports it).
 let openReceiptTenants: string[] = [];
 const reconcileErrors: Record<string, string[]> = {};
-const halted: Record<string, boolean> = {};
-stubModule(require.resolve("../lib/sms/delivery-receipts"), {
-  tenantsWithOpenReceipts: async () => openReceiptTenants,
-  reconcileReceipts: async (tenantId: string) => ({
-    examined: 0, resolved: 0, delivered: 0, failed: 0, stillOpen: 0, abandoned: 0, errors: reconcileErrors[tenantId] ?? [],
-  }),
-  openReceipt: notCalled("openReceipt"),
-  readRecentReceiptsByLine: notCalled("readRecentReceiptsByLine"),
-  readRecentReceipts: notCalled("readRecentReceipts"),
-  newestOpenReceiptAt: notCalled("newestOpenReceiptAt"),
-});
-stubModule(require.resolve("../lib/sms/send-breaker"), {
-  smsSendAllowed: async (tenantId: string) =>
-    halted[tenantId]
-      ? { halt: true, reason: "the carrier refused 9 of the last 10", sample: 10, failRatio: 0.9 }
-      : { halt: false, reason: "ok", sample: 10, failRatio: 0 },
-  resetBreakerCache: () => undefined,
-  claimBreakerProbe: notCalled("claimBreakerProbe"),
-});
 stubModule(require.resolve("../lib/sms/destination-health"), {
   refreshDestinationHealth: async () => ({ examined: 0, untextable: 0, verified: 0, written: 0, error: null }),
   isTextable: notCalled("isTextable"),
@@ -292,8 +284,7 @@ const LANE_ALLOWED: Readonly<Record<string, string>> = {
   "lib/forms/ai-audit-notify.ts": "OASIS's own AI-audit funnel: always OASIS's workspace",
   "lib/website-sales-booking.ts": "OASIS's own website-sales program",
   "lib/delivery/notify.ts": "OASIS's own support desk (deskUsesOasisLanes); a client desk moves to its own bot in the desk-lanes track",
-  "lib/forms/submit-failure-capture.ts": "LO1: the next PR routes a public form's failure through the resolver",
-  "lib/tenant/public-identity.ts": "LO1: the next PR (notifyLanesForTenant)",
+  "lib/tenant/public-identity.ts": "notifyLanesForTenant: no sender calls it since the form failure moved to the resolver (2026-10-08); tests/tenant-public-identity.test.ts still does",
   "lib/drips/reply-handoff.ts": "LO4: no caller",
 };
 function sourceFiles(): Map<string, string> {
@@ -313,12 +304,23 @@ function sourceFiles(): Map<string, string> {
 
 async function main() {
   console.log("workspace-alerts:");
+  const realReceipts = await import("../lib/sms/delivery-receipts");
+  stubModule(require.resolve("../lib/sms/delivery-receipts"), {
+    ...realReceipts,
+    tenantsWithOpenReceipts: async () => openReceiptTenants,
+    reconcileReceipts: async (tenantId: string) => ({
+      examined: 0, resolved: 0, delivered: 0, failed: 0, stillOpen: 0, abandoned: 0, errors: reconcileErrors[tenantId] ?? [],
+    }),
+    openReceipt: notCalled("openReceipt"),
+  });
   const seed = createClient({ url: `file:${dbFile}` });
-  // agent_alerts, agent_events and tenant_integration_credentials exactly as
-  // the live database defines them (read from sqlite_master 2026-10-08),
-  // indexes included; sms_agent_jobs from its migration, CHECKs included.
+  // agent_alerts, agent_events, tenant_integration_credentials,
+  // health_alert_state, sms_delivery_receipts, forms and form_submit_failures
+  // exactly as the live database defines them (read from sqlite_master
+  // 2026-10-08), indexes included; sms_agent_jobs from its migration, CHECKs
+  // included.
   await seed.executeMultiple(`
-    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, logo_url TEXT, custom_fields TEXT);
     CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
       session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
@@ -390,8 +392,60 @@ async function main() {
       FOREIGN KEY ("tenant_id") REFERENCES "tenants" ("id") ON DELETE CASCADE
     );
     CREATE UNIQUE INDEX "tenant_integration_credentials_tenant_id_service_field_key_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
-    CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, last_signature TEXT,
-      last_alerted_at TEXT, repeat_n INTEGER, first_failed_at TEXT, updated_at TEXT);
+    CREATE TABLE "health_alert_state" (
+      "alert_key" TEXT NOT NULL,
+      "tenant_id" TEXT,
+      "last_signature" TEXT,
+      "last_alerted_at" TEXT,
+      "repeat_n" INTEGER NOT NULL DEFAULT 0,
+      "first_failed_at" TEXT,
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("alert_key"),
+      FOREIGN KEY ("tenant_id") REFERENCES "tenants" ("id") ON DELETE CASCADE
+    );
+    CREATE TABLE "sms_delivery_receipts" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random())%4+1,1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+      "tenant_id" TEXT NOT NULL,
+      "drip_run_id" TEXT,
+      "lead_id" TEXT,
+      "chat_id" TEXT NOT NULL,
+      "rep_key" TEXT,
+      "act_as_email" TEXT,
+      "from_number" TEXT,
+      "to_last4" TEXT,
+      "body_hash" TEXT NOT NULL,
+      "sent_at" TEXT NOT NULL,
+      "carrier_status" TEXT NOT NULL DEFAULT 'unknown',
+      "msg_sid" TEXT,
+      "segments" INTEGER,
+      "credits" INTEGER,
+      "check_attempts" INTEGER NOT NULL DEFAULT 0,
+      "last_checked_at" TEXT,
+      "resolved_at" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), purpose TEXT NOT NULL DEFAULT 'drip',
+      PRIMARY KEY ("id"),
+      CONSTRAINT "sms_delivery_receipts_carrier_status_check" CHECK ((carrier_status IN ('delivered', 'failed', 'pending', 'unknown'))),
+      FOREIGN KEY ("tenant_id") REFERENCES "tenants" ("id") ON DELETE CASCADE
+    );
+    CREATE TABLE "forms" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random())%4+1,1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+      "tenant_id" TEXT NOT NULL,
+      "slug" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "branding" TEXT NOT NULL DEFAULT '{}',
+      "steps" TEXT NOT NULL DEFAULT '[]',
+      "on_complete_stage" TEXT,
+      "step_outcomes" TEXT NOT NULL DEFAULT '{}',
+      "enabled" INTEGER NOT NULL DEFAULT 1,
+      "redirect_url" TEXT,
+      "created_by" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("id"),
+      FOREIGN KEY ("tenant_id") REFERENCES "tenants" ("id") ON DELETE CASCADE
+    );
+    CREATE TABLE form_submit_failures (id TEXT NOT NULL PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), source TEXT NOT NULL, tenant_slug TEXT, form_slug TEXT, step_index INTEGER, error_message TEXT, error_stack TEXT, payload TEXT, user_agent TEXT, recovered_at TEXT, recovered_note TEXT);
     CREATE TABLE drip_runs (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, sequence_id TEXT, step_index INTEGER,
       status TEXT, attempts INTEGER DEFAULT 0, last_error TEXT, scheduled_for TEXT, sent_at TEXT,
       from_identity TEXT, provider_message_id TEXT);
@@ -432,12 +486,16 @@ async function main() {
       tenantRow(CLIENT_A, "suga", "Client A"),
       tenantRow(CLIENT_B, "client-b", "Client B"),
       tenantRow(CLIENT_C, "client-c", "Client C"),
+      tenantRow(CLIENT_D, "client-d", "Client D"),
+      tenantRow(CLIENT_E, "client-e", "Client E"),
       ...Object.values(USERS).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
       profile("p-host", { id: HOST, email: HOST_EMAIL }, OASIS, "owner", 0),
       profile("p-cc", USERS.cc, OASIS, "owner", 1),
       profile("p-a-owner", USERS.aOwner, CLIENT_A, "owner", 1),
       profile("p-a-rep", USERS.aRep, CLIENT_A, "closer", 0),
       profile("p-b-owner", USERS.bOwner, CLIENT_B, "owner", 1),
+      profile("p-a-member", USERS.aMember, CLIENT_A, "member", 0),
+      profile("p-a-viewer", USERS.aViewer, CLIENT_A, "read_only", 0),
     ],
     "write",
   );
@@ -978,6 +1036,21 @@ async function main() {
           VALUES ('INVOICE_PAID', 'dept:finance', 'info', ?, ?, ?, ?)`,
     args: [JSON.stringify({ amount_cad: 1250, invoice_id: "inv-9" }), CLIENT_A, now, now],
   });
+  // Two customer-text rows in another shape: the number and words in `preview`
+  // and `phone`, the way this change's own first draft wrote them. None reached
+  // production, but a shape the redaction does not know must still be cut.
+  const earlier = new Date(Date.now() - 30 * 60_000).toISOString();
+  await seed.execute({
+    sql: `INSERT INTO agent_events (event_type, publisher_agent, severity, payload, correlation_id, created_at, published_at)
+          VALUES ('CUSTOMER_TEXT_NEEDS_REPLY', 'dept:sales', 'warn', ?, ?, ?, ?),
+                 ('CUSTOMER_OPTED_OUT_OF_TEXTS', 'dept:sales', 'info', ?, ?, ?, ?)`,
+    args: [
+      JSON.stringify({ tenant_id: CLIENT_A, preview: "+14165550177: legacy words in preview", channel: "sms", phone: "+14165550177", lead_id: null, sms_agent_job_id: "job-legacy-1" }),
+      CLIENT_A, earlier, earlier,
+      JSON.stringify({ tenant_id: CLIENT_A, preview: "+14165550178 replied STOP. Texts to this number are off.", channel: "sms", phone: "+14165550178", sms_agent_job_id: "job-legacy-2" }),
+      CLIENT_A, earlier, earlier,
+    ],
+  });
   const eventFeed = await import("../app/api/event-feed/route");
   const { NextRequest } = await import("next/server");
   const readFeed = async () => {
@@ -1019,6 +1092,24 @@ async function main() {
     await login(null);
   });
 
+  await check("event feed: a customer text in another shape (number and words in preview/phone) is cut to its shareable keys for everyone but its own workspace", async () => {
+    await login(USERS.cc);
+    const op = await readFeed();
+    assert.equal(op.status, 200, op.body);
+    const legacy = op.rows.filter((row) => String(payloadOf(row.payload).sms_agent_job_id ?? "").startsWith("job-legacy"));
+    assert.equal(legacy.length, 2, "the operator lost the rows themselves");
+    for (const row of legacy) {
+      for (const key of Object.keys(payloadOf(row.payload))) {
+        assert.ok(["tenant_id", "note", "channel", "lead_id", "sms_agent_job_id"].includes(key), `kept ${key}`);
+      }
+    }
+    assert.doesNotMatch(op.body, /4165550177|4165550178|legacy words/, "another business's customer reached the operator");
+    await login(USERS.aOwner);
+    const own = await readFeed();
+    assert.match(own.body, /legacy words in preview/, "the workspace's own owner lost its own customer's text");
+    await login(null);
+  });
+
   await check("the Feed strips a customer's words for a viewer who may not see client identities", async () => {
     const { withCustomerMessagesFor, customerMessageOf } = await import("../components/os/landings/feed-model");
     const feed = await loadTenantFeed({ tenantId: CLIENT_A });
@@ -1027,7 +1118,8 @@ async function main() {
     const stripped = withCustomerMessagesFor(feed.rows, () => false);
     assert.ok(kept.some((row) => customerMessageOf(row.payload)?.phone === text.phone));
     assert.ok(stripped.every((row) => customerMessageOf(row.payload) === null));
-    assert.ok(stripped.every((row) => !JSON.stringify(row.payload).includes("4165550101")));
+    assert.ok(stripped.every((row) => !/4165550101|4165550177|4165550178|legacy words/.test(JSON.stringify(row.payload))));
+    assert.ok(kept.some((row) => JSON.stringify(row.payload).includes("legacy words in preview")), "the reader lost the row itself");
   });
 
   // -- E. The workspace's open alert cards in Needs you (owners/admins) ------
@@ -1088,15 +1180,43 @@ async function main() {
     assert.deepEqual(needsYouTotal(needs), { total: 10, capped: true });
   });
 
+  const resolveRoute = await import("../app/api/agent-alerts/[id]/resolve/route");
+  const post = (id: string) =>
+    quietly(() =>
+      resolveRoute.POST(
+        new NextRequest(`http://localhost/api/agent-alerts/${id}/resolve`, { method: "POST", headers: { accept: "application/json" } }),
+        { params: Promise.resolve({ id }) },
+      ),
+    );
+
+  await check("the Resolve action refuses a rep, a member and a read-only seat (403), and the card stays open", async () => {
+    const aCard = (await alertCard(CLIENT_A, "optout_stamp_unrepairable"))[0];
+    assert.ok(aCard, "no open card to try");
+    for (const u of [USERS.aRep, USERS.aMember, USERS.aViewer]) {
+      await login(u);
+      const res = await post(String(aCard.id));
+      assert.equal(res.status, 403, `${u.email} was let in`);
+    }
+    await login(null);
+    assert.equal((await rows("SELECT resolved_at FROM agent_alerts WHERE id = ?", [String(aCard.id)]))[0].resolved_at, null);
+  });
+
+  await check("the dashboard's System health card reads cards for the workspace's owners and admins only", async () => {
+    const { loadDashboardAlerts } = await import("../components/manifest/dashboard-alerts");
+    await login(USERS.aOwner);
+    const own = await loadDashboardAlerts(CLIENT_A);
+    assert.ok(own.length > 0, "the owner reads no cards");
+    assert.ok(own.every((c) => c.id && c.title), "not card rows");
+    assert.deepEqual(await loadDashboardAlerts(CLIENT_B), [], "an owner read another workspace's cards");
+    for (const u of [USERS.aRep, USERS.aMember, USERS.aViewer]) {
+      await login(u);
+      assert.deepEqual(await loadDashboardAlerts(CLIENT_A), [], `${u.email} read the cards`);
+    }
+    await login(null);
+    assert.deepEqual(await loadDashboardAlerts(CLIENT_A), [], "a signed-out read returned cards");
+  });
+
   await check("the Resolve action closes the owner's own card and no other workspace's", async () => {
-    const resolveRoute = await import("../app/api/agent-alerts/[id]/resolve/route");
-    const post = (id: string) =>
-      quietly(() =>
-        resolveRoute.POST(
-          new NextRequest(`http://localhost/api/agent-alerts/${id}/resolve`, { method: "POST", headers: { accept: "application/json" } }),
-          { params: Promise.resolve({ id }) },
-        ),
-      );
     const aCard = (await alertCard(CLIENT_A, "optout_stamp_unrepairable"))[0];
     const bCard = bCards[0];
     await login(USERS.bOwner);
@@ -1175,7 +1295,7 @@ async function main() {
     for (const anchor of needs.match(/<a\b[\s\S]*?<\/a>/g) ?? []) assert.doesNotMatch(anchor, /<form/);
   });
 
-  // -- F. Recovery closes cards; reconcile and benched-line pages are routed --
+  // -- F. Recovery closes cards on evidence only; reconcile and benched-line cards --
   const reconcile = await import("../app/api/cron/reconcile-sms/route");
   const cronGet = () =>
     quietly(() =>
@@ -1186,29 +1306,66 @@ async function main() {
       ),
     );
 
-  await check("reconcile: a recovered route closes the open carrier card; a halted client is paged on its own bot", async () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  /** One carrier receipt: a send from `from`, `m` minutes ago, with the carrier's verdict so far. */
+  const receipt = (tenantId: string, status: "delivered" | "failed" | "pending", m: number, from = "+15145550900", purpose = "drip") => ({
+    sql: `INSERT INTO sms_delivery_receipts (tenant_id, chat_id, body_hash, sent_at, carrier_status, from_number, resolved_at, purpose)
+          VALUES (?, ?, 'hash', ?, ?, ?, ?, ?)`,
+    args: [tenantId, `chat-${from}-${m}-${status}`, minutesAgo(m), status, from, status === "pending" ? null : minutesAgo(m - 1), purpose],
+  });
+  /** An open carrier-outage card, last written `m` minutes ago. */
+  const carrierCard = (tenantId: string, m: number) => ({
+    sql: `INSERT INTO agent_alerts (tenant_id, alert_type, severity, title, payload, created_at)
+          VALUES (?, 'sms_carrier_route_dead', 'urgent', 'SMS halted', '{"telegram":"Sent to Telegram"}', ?)`,
+    args: [tenantId, minutesAgo(m)],
+  });
+  const openCarrier = async (tenantId: string) =>
+    (await alertCard(tenantId, "sms_carrier_route_dead")).filter((c) => c.resolved_at === null);
+  type CronBody = { recovered: string[]; route_evidence: Record<string, string>; lines_recovered: Record<string, string[]> };
+  const runCron = async () => {
+    const res = await cronGet();
+    return { status: res.status, body: (await res.json()) as CronBody };
+  };
+
+  await check("reconcile: the carrier card closes on a delivery newer than the card, and on nothing else (pending-only, empty, failing)", async () => {
     await seed.batch(
       [
-        "INSERT INTO agent_alerts (tenant_id, alert_type, severity, title, payload) VALUES ('" + OASIS + "', 'sms_carrier_route_dead', 'urgent', 'SMS halted', '{\"telegram\":\"Sent to Telegram\"}')",
-        "INSERT INTO agent_alerts (tenant_id, alert_type, severity, title) VALUES ('" + OASIS + "', 'sms_reconcile_errors', 'warn', 'errors')",
+        // Three failures, then a delivery an hour ago; the card is two hours old.
+        carrierCard(OASIS, 120), receipt(OASIS, "failed", 100), receipt(OASIS, "failed", 90), receipt(OASIS, "failed", 80),
+        receipt(OASIS, "delivered", 60),
+        { sql: "INSERT INTO agent_alerts (tenant_id, alert_type, severity, title) VALUES (?, 'sms_reconcile_errors', 'warn', 'errors')", args: [OASIS] },
+        // The same delivery, but the card was written after it: the route was seen failing since.
+        carrierCard(OASIS_WEBDEV, 10), receipt(OASIS_WEBDEV, "failed", 100), receipt(OASIS_WEBDEV, "delivered", 60),
+        // Ten failures in a row: halted.
+        ...Array.from({ length: 10 }, (_, i) => receipt(CLIENT_A, "failed", 50 - i)),
+        // Pending only: nothing terminal yet.
+        carrierCard(CLIENT_B, 120), receipt(CLIENT_B, "pending", 30), receipt(CLIENT_B, "pending", 20),
+        // No receipts at all.
+        carrierCard(CLIENT_C, 120),
+        // A delivery, then two failures: still failing, under the halt thresholds.
+        carrierCard(CLIENT_D, 120), receipt(CLIENT_D, "delivered", 100), receipt(CLIENT_D, "failed", 90), receipt(CLIENT_D, "failed", 80),
       ],
       "write",
     );
-    openReceiptTenants = [CLIENT_A, OASIS];
-    halted[CLIENT_A] = true;
-    halted[OASIS] = false;
+    openReceiptTenants = [CLIENT_A, CLIENT_B, CLIENT_C, CLIENT_D, OASIS, OASIS_WEBDEV];
     reconcileErrors[CLIENT_A] = ["thread 7: provider answered 502"];
-    reconcileErrors[OASIS] = [];
     calls.length = 0;
-    const res = await cronGet();
-    const body = (await res.json()) as { recovered: string[] };
-    assert.equal(res.status, 200, JSON.stringify(body));
+    const { status, body } = await runCron();
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.deepEqual(body.route_evidence, {
+      [OASIS]: "delivering", [OASIS_WEBDEV]: "delivering", [CLIENT_A]: "halted",
+      [CLIENT_B]: "no_evidence", [CLIENT_C]: "no_evidence", [CLIENT_D]: "failing",
+    });
     assert.deepEqual(body.recovered, [OASIS]);
     const oasisCarrier = (await alertCard(OASIS, "sms_carrier_route_dead"))[0];
     assert.ok(oasisCarrier.resolved_at, "the recovered route's card stayed open");
-    assert.equal(oasisCarrier.resolved_by, "auto: the carrier route delivers again");
+    assert.equal(oasisCarrier.resolved_by, "auto: a text delivered after the failures");
+    assert.equal((await openCarrier(OASIS_WEBDEV)).length, 1, "a delivery older than the card closed it");
+    assert.equal((await openCarrier(CLIENT_B)).length, 1, "a pending-only history closed the card");
+    assert.equal((await openCarrier(CLIENT_C)).length, 1, "an empty history closed the card");
+    assert.equal((await openCarrier(CLIENT_D)).length, 1, "a route still failing closed the card");
     assert.ok((await alertCard(OASIS, "sms_reconcile_errors"))[0].resolved_at, "a clean reconcile left its error card open");
-    const clientCarrier = (await alertCard(CLIENT_A, "sms_carrier_route_dead")).filter((c) => c.resolved_at === null);
+    const clientCarrier = await openCarrier(CLIENT_A);
     assert.equal(clientCarrier.length, 1);
     assert.equal(payloadOf(clientCarrier[0].payload).telegram, "Sent to Telegram");
     const clientErrors = (await alertCard(CLIENT_A, "sms_reconcile_errors")).filter((c) => c.resolved_at === null);
@@ -1223,22 +1380,84 @@ async function main() {
     assert.deepEqual(calls, [], "the second tick paged again");
   });
 
-  await check("a benched line pages the workspace's own audience: a client's bot, OASIS's operator chat", async () => {
-    const { announceBenchedLines } = await import("../lib/sms/line-health");
-    const benched = (n: string) => ({
-      lines: [],
-      blocked: [{ number: n, bench: true, consecutiveFailures: 5, sample: 5, reason: "5 failed in a row" }],
-      wireHalted: false,
-      reason: "benched",
-    });
+  await check("reconcile: a switched-off breaker is no evidence; the card closes only once the breaker reads the delivery", async () => {
+    await seed.batch([carrierCard(CLIENT_E, 120), receipt(CLIENT_E, "failed", 100), receipt(CLIENT_E, "delivered", 60)], "write");
+    openReceiptTenants = [CLIENT_E];
+    process.env.SMS_BREAKER_DISABLED = "1";
+    try {
+      const off = await runCron();
+      assert.equal(off.body.route_evidence[CLIENT_E], "bypassed");
+      assert.deepEqual(off.body.recovered, []);
+      assert.equal((await openCarrier(CLIENT_E)).length, 1, "the switched-off breaker closed the card");
+    } finally {
+      delete process.env.SMS_BREAKER_DISABLED;
+    }
+    const on = await runCron();
+    assert.equal(on.body.route_evidence[CLIENT_E], "delivering");
+    assert.deepEqual(on.body.recovered, [CLIENT_E]);
+  });
+
+  const { announceBenchedLines, closeRecoveredLineCards } = await import("../lib/sms/line-health");
+  const benched = (n: string, pool: string[], reason = "3 consecutive carrier failures") => ({
+    lines: pool.filter((x) => x !== n),
+    blocked: [{ number: n, bench: true, consecutiveFailures: 3, sample: 3, reason }],
+    wireHalted: false,
+    reason: "benched",
+    pool,
+  });
+  const LINE_1 = "+15145550931";
+  const LINE_2 = "+15145550932";
+  const lineCard = async (tenantId: string, subject: string) =>
+    rows(
+      "SELECT id, title, payload, resolved_at, resolved_by FROM agent_alerts WHERE tenant_id = ? AND alert_type = 'sms_line_benched' AND subject_id = ?",
+      [tenantId, subject],
+    );
+
+  await check("a benched number in a workspace with no Telegram bot is a card in its Needs you, saying it was not sent", async () => {
     calls.length = 0;
-    await quietly(() => announceBenchedLines(CLIENT_A, benched("+15145550901") as never));
-    await quietly(() => announceBenchedLines(OASIS, benched("+15145550902") as never));
+    const r = await quietly(() => announceBenchedLines(CLIENT_B, benched(LINE_1, [LINE_1, LINE_2]), { wire: "main" }));
+    assert.deepEqual(r.alerted, [`sms-line-benched:main:${LINE_1}`]);
+    assert.deepEqual(calls, [], "a page went somewhere");
+    const card = (await lineCard(CLIENT_B, `main:${LINE_1}`))[0];
+    assert.ok(card, "no card");
+    assert.equal(card.title, "A texting number was paused");
+    assert.equal(payloadOf(card.payload).telegram, "Not sent: no Telegram bot connected");
+    const needs = await loadWorkspaceAlerts(CLIENT_B);
+    assert.ok(needs.ok && needs.value.cards.some((c) => c.id === card.id), "the card is not in Needs you");
+  });
+
+  await check("a benched line pages the workspace's own audience: a client's bot, OASIS's operator chat", async () => {
+    calls.length = 0;
+    await quietly(() => announceBenchedLines(CLIENT_A, benched("+15145550901", ["+15145550901"])));
+    await quietly(() => announceBenchedLines(OASIS, benched("+15145550902", ["+15145550902"])));
     assert.deepEqual(
       calls.map((c) => c.token),
       [CLIENT_A_TOKEN, ENV_TELEGRAM.OASIS_TELEGRAM_BOT_TOKEN],
       "a benched line paged a lane its workspace does not own",
     );
+  });
+
+  await check("a benched number's card closes only when the number delivers again, and its next benching pages at once", async () => {
+    assert.deepEqual(await quietly(() => closeRecoveredLineCards(CLIENT_B)), [], "closed with no history from the number");
+    await seed.batch([receipt(CLIENT_B, "failed", 40, LINE_1)], "write");
+    assert.deepEqual(await quietly(() => closeRecoveredLineCards(CLIENT_B)), [], "closed while its newest verdict is a failure");
+    await seed.batch([receipt(CLIENT_B, "delivered", 5, LINE_1)], "write");
+    openReceiptTenants = [CLIENT_B];
+    const { body } = await runCron();
+    assert.deepEqual(body.lines_recovered, { [CLIENT_B]: [`main:${LINE_1}`] });
+    const card = (await lineCard(CLIENT_B, `main:${LINE_1}`))[0];
+    assert.ok(card.resolved_at, "the card stayed open after the number delivered");
+    assert.equal(card.resolved_by, "auto: a text from this number delivered again");
+    const again = await quietly(() => announceBenchedLines(CLIENT_B, benched(LINE_1, [LINE_1, LINE_2]), { wire: "main" }));
+    assert.deepEqual(again.alerted, [`sms-line-benched:main:${LINE_1}`], "the ladder kept the next benching quiet");
+  });
+
+  await check("a number the canary refused stays out, and its card open, even after a delivery", async () => {
+    await quietly(() => announceBenchedLines(CLIENT_B, benched(LINE_2, [LINE_1, LINE_2], "refused a canary test send"), { wire: "main" }));
+    await seed.batch([receipt(CLIENT_B, "failed", 50, LINE_2, "canary"), receipt(CLIENT_B, "delivered", 3, LINE_2)], "write");
+    const closed = await quietly(() => closeRecoveredLineCards(CLIENT_B));
+    assert.ok(!closed.includes(`main:${LINE_2}`), "the canary-refused number's card closed");
+    assert.equal((await lineCard(CLIENT_B, `main:${LINE_2}`)).filter((c) => c.resolved_at === null).length, 1);
   });
 
   // -- G. The drip compliance guards: once per open card, with a subject ------
@@ -1271,6 +1490,91 @@ async function main() {
       (await rows("SELECT subject_type, subject_id FROM agent_alerts WHERE tenant_id = ? AND alert_type = 'drip_safety_lookup_failed'", [CLIENT_A]))[0],
       { subject_type: "tenant", subject_id: CLIENT_A },
     );
+  });
+
+  // -- H. A public form that could not submit: the form's own workspace -------
+  await seed.execute({
+    sql: `INSERT INTO forms (id, tenant_id, slug, name) VALUES
+            ('form-a-intake', ?, 'intake', 'Spring intake'), ('form-b-quote', ?, 'quote', 'Quote request'),
+            ('form-oasis-audit', ?, 'audit', 'AI audit'), ('form-sunbiz-apply', ?, 'apply', 'Application')`,
+    args: [CLIENT_A, CLIENT_B, OASIS, SUNBIZ],
+  });
+  const { captureSubmitFailure } = await import("../lib/forms/submit-failure-capture");
+  const formCards = (tenantId: string) =>
+    rows(
+      "SELECT id, title, body, payload, subject_id FROM agent_alerts WHERE tenant_id = ? AND alert_type = 'form_submit_blocked' AND resolved_at IS NULL",
+      [tenantId],
+    );
+  const formCardCount = async () =>
+    Number((await rows("SELECT COUNT(*) AS n FROM agent_alerts WHERE alert_type = 'form_submit_blocked'"))[0].n);
+
+  await check("a client's blocked form is that client's card and its own bot's page, in plain words, never an OASIS or SunBiz chat", async () => {
+    calls.length = 0;
+    const r = await quietly(() =>
+      captureSubmitFailure({
+        source: "client_beacon", tenantSlug: "suga", formSlug: "intake", stepIndex: 1,
+        error: "TypeError: cannot read 'or' of jane.doe@example.com", payload: { email: "jane.doe@example.com" },
+      }),
+    );
+    assert.ok(r.id, "the answers were not kept");
+    const cards = await formCards(CLIENT_A);
+    assert.equal(cards.length, 1);
+    assert.equal(cards[0].subject_id, "form-a-intake");
+    assert.equal(cards[0].title, "Someone could not submit one of your forms");
+    assert.match(String(cards[0].body), /"Spring intake"/);
+    assert.ok(String(cards[0].body).includes(String(r.id)), "no reference to the kept answers");
+    assert.doesNotMatch(String(cards[0].body), /TypeError|jane\.doe|dead-letter|recovered_at/);
+    assert.deepEqual(calls.map((c) => c.token), [CLIENT_A_TOKEN]);
+    assert.ok(!calls.some(usedEnvToken));
+  });
+
+  await check("the same form failing again inside the ladder's window refreshes its card and pages nobody", async () => {
+    calls.length = 0;
+    await quietly(() => captureSubmitFailure({ source: "client_beacon", tenantSlug: "suga", formSlug: "intake", error: "again" }));
+    assert.equal((await formCards(CLIENT_A)).length, 1);
+    assert.deepEqual(calls, [], "paged again inside the window");
+  });
+
+  await check("a signed-link failure (no slugs) is attributed by the form's own URL, checked against the form record", async () => {
+    calls.length = 0;
+    const r = await quietly(() =>
+      captureSubmitFailure({
+        source: "server_catch", error: "boom", payload: { token: "<redacted>", submission_path: "/f/suga/intake/[signed-link]" },
+      }),
+    );
+    const dead = (await rows("SELECT tenant_slug, form_slug FROM form_submit_failures WHERE id = ?", [String(r.id)]))[0];
+    assert.deepEqual({ ...dead }, { tenant_slug: "suga", form_slug: "intake" });
+    assert.deepEqual(calls.map((c) => c.token), [CLIENT_A_TOKEN], "the signed-link failure reached no one, or the wrong chat");
+  });
+
+  await check("a client with no Telegram bot gets the card, saying it was not sent, and no page", async () => {
+    calls.length = 0;
+    await quietly(() => captureSubmitFailure({ source: "client_beacon", tenantSlug: "client-b", formSlug: "quote", error: "x" }));
+    const cards = await formCards(CLIENT_B);
+    assert.equal(cards.length, 1);
+    assert.equal(payloadOf(cards[0].payload).telegram, "Not sent: no Telegram bot connected");
+    assert.deepEqual(calls, []);
+  });
+
+  await check("a failure naming no real form, or a retired workspace's, pages nobody and writes no card; the answers are still kept", async () => {
+    const before = await formCardCount();
+    calls.length = 0;
+    for (const [tenantSlug, formSlug] of [["suga", "no-such-form"], ["no-such-workspace", "intake"], ["submissions", "apply"]]) {
+      const r = await quietly(() => captureSubmitFailure({ source: "client_beacon", tenantSlug, formSlug, error: "forged" }));
+      assert.ok(r.id, `${tenantSlug}/${formSlug}: the answers were not kept`);
+    }
+    assert.equal(await formCardCount(), before, "a card was written for a form that is not a live workspace's");
+    assert.deepEqual(calls, []);
+  });
+
+  await check("OASIS's own blocked form pages OASIS's operator chat with the recovery detail", async () => {
+    calls.length = 0;
+    const r = await quietly(() =>
+      captureSubmitFailure({ source: "client_beacon", tenantSlug: "oasis-ai-cc", formSlug: "audit", stepIndex: 0, error: "RangeError for amy@example.com" }),
+    );
+    assert.deepEqual(calls.map((c) => c.token), [ENV_TELEGRAM.OASIS_TELEGRAM_BOT_TOKEN]);
+    assert.ok(calls[0].text.includes(String(r.id)) && calls[0].text.includes("recovered_at"), calls[0].text);
+    assert.doesNotMatch(calls[0].text, /amy@example\.com/);
   });
 
   seed.close();
