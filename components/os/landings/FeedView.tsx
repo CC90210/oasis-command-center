@@ -16,6 +16,7 @@ import { timeAgo } from "@/lib/fmt";
 import type { DepartmentKey } from "@/lib/os/types";
 import {
   FEED_TABS,
+  customerMessageOf,
   departmentForEvent,
   displayPayload,
   feedPublisherLabel,
@@ -157,6 +158,9 @@ export function FeedRows({
           const ev = projectEvent({ ...row, payload: displayPayload(row.payload, oasisWorkspace) });
           const label = feedSystemName(ev.label) ?? "Activity";
           const summary = ev.summary !== "—" ? feedSummary(ev.summary, oasisWorkspace) : null;
+          // A customer's own words (stripped already for a viewer who may not
+          // read them): shown as written, never through the persona rule.
+          const customer = customerMessageOf(row.payload);
           const dept = departmentForEvent(row);
           const who = dept ? departmentLabels[dept] ?? null : null;
           const when = ev.published_at || row.created_at;
@@ -178,6 +182,12 @@ export function FeedRows({
                   {(sev === "warn" || sev === "warning") && <Tag tone="warm">Warning</Tag>}
                 </div>
                 {summary && <p className="mt-0.5 truncate text-[13px] leading-5 text-fg-muted">{summary}</p>}
+                {customer && (
+                  <p className="mt-0.5 truncate text-[13px] leading-5 text-fg">
+                    <span className="tabular-nums">{customer.phone}</span>
+                    {customer.text ? `: ${customer.text}` : null}
+                  </p>
+                )}
               </div>
             </li>
           );

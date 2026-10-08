@@ -71,6 +71,10 @@ export async function smsSendAllowed(
       consecutiveFailures: 0,
       failRatio: 0,
       sample: 0,
+      // Nothing was read: "not halted" here says nothing about the route
+      // (routeEvidence answers "bypassed", and no outage card closes on it).
+      newestTerminal: null,
+      bypassed: true,
     };
   }
   const nowMs = opts.nowMs ?? Date.now();

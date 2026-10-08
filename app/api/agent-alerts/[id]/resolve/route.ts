@@ -6,8 +6,12 @@
  * components/manifest/ManifestDashboard.tsx (form submit, so it works
  * without JS). Idempotent — already-resolved rows return ok:true.
  *
- * Auth: session-cookie + tenant_id match on the alert row (defense in
- * depth — caller can't dismiss another tenant's alerts via a guessed id).
+ * Auth: the workspace's owners and admins only, the same people Needs you
+ * shows a card to (lib/notify/alert-access.ts), decided from the session;
+ * then a tenant_id match on the alert row (a guessed id from another
+ * workspace resolves nothing). Until 2026-10-08 this admitted any member of
+ * a client workspace, so a rep or a read-only seat could close an outage card
+ * its owners had not seen.
  *
  * Response shape:
  *   On a form-submit (Content-Type: application/x-www-form-urlencoded),
@@ -17,8 +21,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveSessionContext } from "@/lib/api-auth";
-import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { mayManageWorkspaceAlerts } from "@/lib/notify/alert-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,11 +31,11 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const session = await resolveSessionContext();
+  const session = await resolveViewerSurface();
   if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!(await canAccessSharedTenantResource(session))) {
+  if (!mayManageWorkspaceAlerts(session.persona, session.capabilities)) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
   const { id } = await ctx.params;

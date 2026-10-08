@@ -214,7 +214,6 @@ async function alertWithheldReminders(withheld: NotificationRow[]): Promise<void
       title: "Founder-meeting reminder withheld: host deactivated",
       body: `${rows.length} reminder email(s) were not sent because the meeting host has been deactivated. ` +
         `Mark each meeting no-show and book a new audit with an active host. Appointments: ${appointmentIds.join(", ")}`,
-      lane: "operator",
       payload: {
         notification_ids: rows.map((row) => row.id),
         appointment_ids: appointmentIds,
