@@ -384,6 +384,7 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 const SAVE_ANYWAY_CODES: ReadonlySet<string> = new Set(["provider_5xx", "timeout"]);
 const COULD_NOT_TEST = "The key couldn't be tested just now, so it was not saved. Try again in a moment.";
 const COULD_NOT_SAVE = "The key couldn't be saved just now. Try again in a moment.";
+const COULD_NOT_TELL = "We couldn't check whether the key was saved. Close this and look at the card in a moment.";
 /** Longer than the test's own 15-second provider call, plus the trip here. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -407,6 +408,9 @@ function saveFailureSentence(body: Record<string, unknown>): string {
  * save: false (the dialog's form moved on, or closed, while the test ran)
  * saves nothing. Each request gives up after `timeoutMs`, so one that hangs
  * can never keep the dialog locked (it cannot be closed while a run is out).
+ * A save whose answer never came is then checked with a read (`verify`), so
+ * the dialog says what is actually saved: the save is one step on the server,
+ * so it landed whole or not at all.
  */
 export async function connectProviderKey(
   input: {
@@ -462,16 +466,24 @@ export async function connectProviderKey(
     }
   }
   if (input.stillWanted && !input.stillWanted()) return { kind: "dropped" };
+  const theKey = { provider: input.provider, api_key: input.apiKey, model: input.model, scope: input.scope };
   let saved: Record<string, unknown>;
   try {
-    saved = await post("/api/agent-config/bulk-provider", {
-      provider: input.provider,
-      api_key: input.apiKey,
-      model: input.model,
-      scope: input.scope,
-    });
+    saved = await post("/api/agent-config/bulk-provider", theKey);
   } catch {
-    return { kind: "failed", message: COULD_NOT_SAVE };
+    // No answer (it timed out, or never arrived): the save may still have
+    // landed. Ask the route what is saved now (a read) and say exactly that,
+    // instead of reporting a failure that may be false. The save is one step
+    // on the server, so the answer is all of it or none of it.
+    let check: Record<string, unknown>;
+    try {
+      check = await post("/api/agent-config/bulk-provider", { ...theKey, verify: true });
+    } catch {
+      return { kind: "failed", message: COULD_NOT_TELL };
+    }
+    if (check.ok === true && check.saved === true) return { kind: "saved" };
+    if (check.ok === true && check.saved === false) return { kind: "failed", message: COULD_NOT_SAVE };
+    return { kind: "failed", message: COULD_NOT_TELL };
   }
   if (saved.ok !== true) return { kind: "failed", message: saveFailureSentence(saved) };
   // A teammate row that did not update is logged, not shown: the chats run on

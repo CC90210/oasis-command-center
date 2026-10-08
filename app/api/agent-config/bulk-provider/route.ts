@@ -10,60 +10,79 @@
  *     length sanity check, NOT a live provider ping; the Settings card asks
  *     /api/agent-config/test-connection for one real message BEFORE it saves,
  *     and saves anyway only when the provider was down or slow).
- *   - scope=tenant ALWAYS saves the workspace's AI account first (lib/ai/
+ *   - scope=tenant ALWAYS saves the workspace's AI account (lib/ai/
  *     workspace-account.ts, agent_key "__workspace__"): the account every
  *     department chat and Slack mention answers on, whatever teammates the
  *     workspace has. Before this, a client whose teammates are neutral leads
  *     got rows nobody read, and every chat said "No AI account is connected"
- *     (AIP-01). If that save fails, nothing else is written.
+ *     (AIP-01).
+ *   - ONE STEP: the account and every teammate row it stamps are written in
+ *     ONE batch (one transaction), guarded on the account as this request read
+ *     it (lib/ai/workspace-account.ts, ONE STEP). All of it lands, or none of
+ *     it: a key is never left half-saved. If another window changed the
+ *     account meanwhile, nothing is written and the answer is 409 with a plain
+ *     sentence; when what changed it was this same key (a retry, or the same
+ *     key in another window), it is written again on top, which changes
+ *     nothing.
  *   - Resolves the agent set: explicit `agent_keys[]` if supplied,
  *     otherwise the tenant's enabled chat-eligible agents.
- *   - Upserts (provider, model, encrypted_api_key) for each agent.
- *     Existing per-agent customizations (system_prompt_override, etc.)
- *     are preserved — only the provider/model/key triple is replaced.
+ *   - Upserts (provider, model, encrypted_api_key) for each agent. Existing
+ *     per-agent customizations (system_prompt_override, display_name_override)
+ *     and each row's own on/off switch are preserved: only the
+ *     provider/model/key triple is replaced. A row created here is switched on.
  *   - Defaults model to the provider's first registry entry (the
  *     recommended one) unless the caller passed a specific model.
  *   - Provider "ollama" (a local model server, whose "key" is a web address
  *     the server calls) is the verified platform operator's only (403).
+ *   - `verify: true` writes nothing: it answers whether exactly this key is
+ *     saved now (the card asks when a connect's answer never came back).
  *
  * Body shape:
  *   {
  *     provider: "anthropic" | "openai" | "google" | "openrouter",
  *     api_key: string,                    // required, encrypted server-side
  *     model?: string,                     // optional, default = first registry entry
- *     agent_keys?: string[]               // optional, default = enabled agents
+ *     agent_keys?: string[],              // optional, default = enabled agents
+ *     scope?: "tenant" | "user",          // default tenant
+ *     verify?: boolean                    // read-only check, see above
  *   }
  *
- * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed, count }
- *   ok is the workspace account saved (scope=tenant), or at least one personal
- *   row saved (scope=user). 409 { error: "superseded", message } when the
- *   account no longer held this key once every row was written (a disconnect
- *   or another connect landed meanwhile): the rows this request wrote follow
- *   the account instead (see LOOK BACK below). Every non-ok answer the card
- *   shows carries a plain `message`.
+ * Returns: { ok, scope, workspace_account, applied_to: [agent_key,...], failed: [], count }
+ *   (verify: { ok, saved }). Every non-ok answer the card shows carries a
+ *   plain `message`, never a code or the database's own words.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { PROVIDER_MODELS, PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
-import { decryptField, encryptField } from "@/lib/field-encryption";
+import { encryptField } from "@/lib/field-encryption";
 import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
 import {
   LEGACY_WORKSPACE_AI_AGENT_KEY,
   LOCAL_MODEL_REFUSAL,
-  WORKSPACE_AI_AGENT_KEY,
-  hasUsableKey,
+  connectWorkspaceAccountInOneStep,
+  disconnectWorkspaceAccountInOneStep,
+  keyIsSaved,
   mayUseLocalModel,
-  readWorkspaceAiAccount,
-  retireWorkspaceAiAccount,
-  saveWorkspaceAiAccount,
-  type WorkspaceAiAccount,
+  readAccountStamp,
+  savePersonalKeyInOneStep,
+  stampHoldsKey,
 } from "@/lib/ai/workspace-account";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+const NOT_SAVED = "The key couldn't be saved just now. Nothing was changed. Try again in a moment.";
+const CONNECT_CONFLICT =
+  "The AI account was changed in another window while this key saved, so nothing was changed. Check the card, then connect again if you still want this key.";
+const COULD_NOT_TELL = "We couldn't check whether the key was saved. Close this and look at the card in a moment.";
+const DISCONNECT_FAILED = "The AI account couldn't be disconnected just now. Nothing was changed. Try again in a moment.";
+const DISCONNECT_CONFLICT = "The AI account was changed in another window, so nothing was disconnected. Check the card, then try again.";
+const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
+
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 async function resolveTenant(): Promise<{
   tenantId: string | null;
@@ -158,6 +177,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Read-only: is exactly this key saved now? The card asks this when a
+  // connect's answer never came back (it timed out in the browser): the save
+  // may have landed, so it says what is saved instead of guessing.
+  if (body?.verify === true) {
+    try {
+      const saved = await keyIsSaved({ tenantId, userId, scope, provider, model, apiKey: apiKeyPlain });
+      return NextResponse.json({ ok: true, saved });
+    } catch (err) {
+      console.error("[bulk-provider.verify]", { tenantId, provider, error: errText(err) });
+      return NextResponse.json({ ok: false, error: "verify_failed", message: COULD_NOT_TELL }, { status: 503 });
+    }
+  }
+
   // Resolve target agent set. Caller-supplied list takes precedence; otherwise
   // fall back to the profile's enabled agents. If neither is populated, fall
   // back to the full chat-eligible set — operators on a fresh tenant want
@@ -192,181 +224,42 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // The workspace's AI account (lib/ai/workspace-account.ts), written first and
-  // never filtered by the teammate list: it is the row every department chat
-  // and Slack mention answers on. If it cannot be saved, nothing else is.
-  if (scope === "tenant") {
-    const saved = await saveWorkspaceAiAccount(tenantId, {
-      provider: provider as Provider,
-      model,
-      encryptedApiKey: encryptedKey,
-    });
-    if (!saved.ok) {
-      console.error("[bulk-provider.workspace_account]", { tenantId, provider, error: saved.error });
-      return NextResponse.json(
-        { ok: false, error: "save_failed", message: "The key could not be saved just now. Nothing was changed. Try again in a moment." },
-        { status: 500 },
-      );
+  // ONE STEP (lib/ai/workspace-account.ts): every row this connect writes
+  // lands together, or none does. Nothing is written row by row, so nothing
+  // is ever left half-saved and nothing needs cleaning up after a race.
+  let applied = targetAgents;
+  if (scope === "user") {
+    try {
+      await savePersonalKeyInOneStep({ tenantId, userId: userId!, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
+    } catch (err) {
+      console.error("[bulk-provider.personal_save]", { tenantId, provider, error: errText(err) });
+      return NextResponse.json({ ok: false, error: "save_failed", message: NOT_SAVED }, { status: 500 });
     }
-  }
-
-  const service = getServiceSupabase();
-  const applied: string[] = [];
-  // The rows this request CREATED (the others it only updated): the look-back
-  // below may remove these, and only these.
-  const inserted: string[] = [];
-  const failed: Array<{ agent_key: string; error: string }> = [];
-  // The old team key moves with the team: a workspace that kept a key on the
-  // legacy `bravo` workspace row before it had an account row gets that row
-  // stamped too, when it is not a target already. Left behind, the old key sat
-  // unseen and stayed spendable by a per-agent chat after this account was
-  // disconnected (Codex review, PR #535). It is only ever UPDATED here, never
-  // created: a workspace without that row does not get one.
-  if (scope === "tenant" && !targetAgents.includes(LEGACY_WORKSPACE_AI_AGENT_KEY)) {
-    const legacy = await service
-      .from("agent_model_config")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", LEGACY_WORKSPACE_AI_AGENT_KEY)
-      .is("user_id", null)
-      .maybeSingle();
-    if (legacy.error) failed.push({ agent_key: LEGACY_WORKSPACE_AI_AGENT_KEY, error: `lookup_failed:${legacy.error.code || legacy.error.message}` });
-    else if (legacy.data) targetAgents.push(LEGACY_WORKSPACE_AI_AGENT_KEY);
-  }
-  // Sequential — Supabase upsert with onConflict isn't reliable across the
-  // current PostgREST setup for compound keys (we'd need a real unique
-  // index on (tenant_id, agent_key)). Doing it as N small writes is fine
-  // — N is bounded by chat-eligible agent count (5-ish today).
-  //
-  // Partial-failure semantics: if any agent fails to save, the response
-  // surfaces the failing agents + their error codes (logged by the card,
-  // never shown as slugs). For a team-wide connect the workspace account above
-  // is what makes the chats work, so ok is true once it saved; for a personal
-  // one, ok is true iff at least one row saved.
-  for (const agentKey of targetAgents) {
-    let lookupQ = service
-      .from("agent_model_config")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", agentKey);
-    lookupQ = effectiveUserId
-      ? lookupQ.eq("user_id", effectiveUserId)
-      : lookupQ.is("user_id", null);
-    const { data: existing, error: lookupErr } = await lookupQ.maybeSingle();
-    if (lookupErr) {
-      failed.push({ agent_key: agentKey, error: `lookup_failed:${lookupErr.code || lookupErr.message}` });
-      continue;
-    }
-    const payload: Record<string, unknown> = {
-      tenant_id: tenantId,
-      user_id: effectiveUserId,
-      agent_key: agentKey,
-      provider,
-      model,
-      enabled: true,
-      encrypted_api_key: encryptedKey,
-    };
-    if (existing) {
-      const { error } = await service
-        .from("agent_model_config")
-        .update(payload)
-        .eq("id", existing.id);
-      if (error) failed.push({ agent_key: agentKey, error: error.code || error.message });
-      else applied.push(agentKey);
-    } else {
-      const { error } = await service.from("agent_model_config").insert(payload);
-      if (error) failed.push({ agent_key: agentKey, error: error.code || error.message });
-      else {
-        applied.push(agentKey);
-        inserted.push(agentKey);
-      }
-    }
-  }
-
-  // LOOK BACK. Two tabs: a disconnect, or another connect, can land while this
-  // one is still stamping the rows above. So once every row is written, the
-  // account is read again, and the rows this request wrote (they carry its own
-  // ciphertext: every save encrypts afresh, so nothing else matches) are put
-  // in line with it:
-  //   - it holds this key, or the same key saved by another tab: done;
-  //   - it holds another live key (a newer connect won): these rows take that
-  //     key, provider and model, and keep their custom prompts and names;
-  //   - it holds none (a disconnect landed): the rows this request created
-  //     go, and the rows it only updated keep their place, prompt, name and
-  //     on/off switch, with the key taken off. The inverse of an update is
-  //     not a delete: deleting them took the owner's custom prompts and the
-  //     newer connect's rows (PR #535 review).
-  // An account that cannot be read on a second try is not taken as success:
-  // the key comes off these rows the same way, and the owner is asked to
-  // connect again. A disconnect that lands after this read retires, then
-  // deletes, so it removes these rows itself.
-  let lookBack: "ours" | "superseded" | "unconfirmed" = "ours";
-  if (scope === "tenant") {
-    const readBack = async (): Promise<{ account: WorkspaceAiAccount | null } | null> => {
-      try {
-        return { account: await readWorkspaceAiAccount(tenantId) };
-      } catch (err) {
-        console.error("[bulk-provider.workspace_account_lookback]", { tenantId, provider, error: err instanceof Error ? err.message : String(err) });
-        return null;
-      }
-    };
-    const back = (await readBack()) ?? (await readBack());
-    // Only the account row counts here, never the legacy row.
-    const account = back?.account?.source === "workspace" ? back.account : null;
-    const sameKeyAsThis = (acct: WorkspaceAiAccount) => {
-      if (acct.provider !== provider || acct.model !== model || !acct.encryptedApiKey) return false;
-      try {
-        return decryptField(acct.encryptedApiKey) === apiKeyPlain;
-      } catch {
-        return false;
-      }
-    };
-    const holdsThisKey = !!account && (account.encryptedApiKey === encryptedKey || (hasUsableKey(account) && sameKeyAsThis(account)));
-    if (!holdsThisKey) {
-      lookBack = back ? "superseded" : "unconfirmed";
-      let settled: { error: unknown } = { error: null };
-      if (back && account && hasUsableKey(account)) {
-        settled = await service
-          .from("agent_model_config")
-          .update({ provider: account.provider, model: account.model, encrypted_api_key: account.encryptedApiKey })
-          .eq("tenant_id", tenantId)
-          .is("user_id", null)
-          .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
-          .eq("encrypted_api_key", encryptedKey);
-      } else {
-        if (inserted.length > 0) {
-          settled = await service
-            .from("agent_model_config")
-            .delete()
-            .eq("tenant_id", tenantId)
-            .is("user_id", null)
-            .in("agent_key", inserted)
-            .eq("encrypted_api_key", encryptedKey);
-        }
-        if (!settled.error) {
-          settled = await service
-            .from("agent_model_config")
-            .update({ encrypted_api_key: null })
-            .eq("tenant_id", tenantId)
-            .is("user_id", null)
-            .neq("agent_key", WORKSPACE_AI_AGENT_KEY)
-            .eq("encrypted_api_key", encryptedKey);
+  } else {
+    const thisKey = { provider, model, apiKey: apiKeyPlain };
+    let outcome: { committed: boolean; legacyRowMoved: boolean };
+    try {
+      let stamp = await readAccountStamp(tenantId);
+      outcome = await connectWorkspaceAccountInOneStep({ tenantId, stamp, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
+      if (!outcome.committed) {
+        // The account changed after the read. When it now holds this very key
+        // (a retry of this connect, or another window saving the same key),
+        // this connect is written again on top of it, which changes nothing
+        // and stamps this request's rows too. Anything else is someone else's
+        // change, and it stands.
+        stamp = await readAccountStamp(tenantId);
+        if (stampHoldsKey(stamp, thisKey)) {
+          outcome = await connectWorkspaceAccountInOneStep({ tenantId, stamp, provider, model, encryptedApiKey: encryptedKey, agentKeys: targetAgents });
         }
       }
-      if (settled.error) {
-        console.error("[bulk-provider.lookback_settle]", { tenantId, provider, lookBack, error: String((settled.error as { message?: string }).message ?? settled.error) });
-        if (lookBack === "superseded") {
-          return NextResponse.json(
-            {
-              ok: false,
-              error: "save_failed",
-              message: "The AI account changed while this key saved, and not every teammate could be updated. Connect it again in a moment.",
-            },
-            { status: 500 },
-          );
-        }
-      }
+    } catch (err) {
+      console.error("[bulk-provider.connect]", { tenantId, provider, error: errText(err) });
+      return NextResponse.json({ ok: false, error: "save_failed", message: NOT_SAVED }, { status: 500 });
     }
+    if (!outcome.committed) {
+      return NextResponse.json({ ok: false, error: "conflict", message: CONNECT_CONFLICT }, { status: 409 });
+    }
+    if (outcome.legacyRowMoved) applied = [...targetAgents, LEGACY_WORKSPACE_AI_AGENT_KEY];
   }
 
   try {
@@ -382,37 +275,19 @@ export async function POST(req: NextRequest) {
         scope,
         workspace_account: scope === "tenant",
         applied_to: applied,
-        failed,
-        look_back: lookBack,
-        has_key: lookBack === "ours" && (scope === "tenant" || applied.length > 0),
+        has_key: true,
       },
     });
   } catch {
     // audit-log soft-fail
   }
 
-  if (lookBack === "unconfirmed") {
-    return NextResponse.json(
-      { ok: false, error: "save_unconfirmed", message: "We couldn't check that this key saved everywhere. Connect it again in a moment." },
-      { status: 503 },
-    );
-  }
-  if (lookBack === "superseded") {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "superseded",
-        message: "The AI account was changed somewhere else while this key saved, so it was not kept: check the card, and connect again if you need to.",
-      },
-      { status: 409 },
-    );
-  }
   return NextResponse.json({
-    ok: scope === "tenant" || applied.length > 0,
+    ok: true,
     scope,
     workspace_account: scope === "tenant",
     applied_to: applied,
-    failed,
+    failed: [],
     count: applied.length,
   });
 }
@@ -425,23 +300,18 @@ export async function POST(req: NextRequest) {
  * use this to revoke a connected provider before re-pasting a new key or
  * switching providers entirely. Without this they could only paste a new
  * key on top, leaving the old one encrypted-at-rest forever. scope=tenant
- * removes every workspace row (user_id IS NULL) on that provider, and RETIRES
- * the workspace's AI account row when it is on that provider: its key is wiped
- * and it is switched off, but the row stays, so an older legacy row can never
- * answer for the workspace again (lib/ai/workspace-account.ts, DISCONNECT
- * KEEPS THE ROW). It is retired first: if anything after fails, the chats have
- * already stopped using the key. Then the account is read again, and a key
- * that came back on it meanwhile (a connect in another tab, or the backfill)
- * is retired and deleted the same way.
+ * removes every workspace row (user_id IS NULL) on that provider and RETIRES
+ * the workspace's AI account row when it is on that provider (its key is
+ * wiped and it is switched off, but the row stays, so an older legacy row can
+ * never answer for the workspace again: lib/ai/workspace-account.ts, DISCONNECT
+ * KEEPS THE ROW), in ONE step: all of it, or none of it. If another window
+ * changed the account meanwhile, nothing is removed and the answer is 409.
  *
  * Query: provider=<provider>&scope=tenant|user
  * Returns: { ok, scope, provider, count } (count = rows removed). Every non-ok
  * answer carries one plain `message`, the only thing the card shows: never a
  * code or the database's own words (PR #535 review).
  */
-const DISCONNECT_FAILED = "The AI account couldn't be disconnected just now. Try again in a moment.";
-const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
-
 export async function DELETE(req: NextRequest) {
   const { tenantId, userId, canManageTenant } = await resolveTenant();
   if (!tenantId) {
@@ -465,59 +335,34 @@ export async function DELETE(req: NextRequest) {
   if (scope === "user" && !userId) {
     return NextResponse.json({ ok: false, error: "no_user", message: SIGNED_OUT }, { status: 401 });
   }
-  const service = getServiceSupabase();
-  // Retire, delete, then look at the account again. A connect in another tab,
-  // or the one-time backfill that copies a legacy row into the account, can
-  // put a key on the account between the first two steps; the delete then
-  // took the legacy row and left that copy answering. So while the account
-  // still holds a key on this provider, the round runs again, retire before
-  // delete every time: the disconnect ends with the account retired, or says
-  // it could not (a key that keeps coming back is reported, never left).
   let count = 0;
-  for (let round = 1; ; round++) {
-    if (scope === "tenant") {
-      const retired = await retireWorkspaceAiAccount(tenantId, provider);
-      if (!retired.ok) {
-        console.error("[bulk-provider.workspace_account_retire]", { tenantId, provider, error: retired.error });
-        return NextResponse.json({ ok: false, error: "disconnect_failed", message: DISCONNECT_FAILED }, { status: 500 });
-      }
-    }
-    let q = service
+  if (scope === "user") {
+    // One statement: the person's own rows on this provider.
+    const deleted = await getServiceSupabase()
       .from("agent_model_config")
       .delete()
       .eq("tenant_id", tenantId)
-      .eq("provider", provider);
-    q = scope === "user" ? q.eq("user_id", userId!) : q.is("user_id", null).neq("agent_key", WORKSPACE_AI_AGENT_KEY);
-    const deleted = await q.select("agent_key");
+      .eq("provider", provider)
+      .eq("user_id", userId!)
+      .select("agent_key");
     if (deleted.error) {
-      console.error("[bulk-provider.disconnect_delete]", { tenantId, provider, error: deleted.error.code || deleted.error.message });
+      console.error("[bulk-provider.personal_disconnect]", { tenantId, provider, error: deleted.error.code || deleted.error.message });
       return NextResponse.json({ ok: false, error: "disconnect_failed", message: DISCONNECT_FAILED }, { status: 500 });
     }
-    count += Array.isArray(deleted.data) ? deleted.data.length : 0;
-    if (scope === "user") break;
-    const after = await service
-      .from("agent_model_config")
-      .select("provider, encrypted_api_key")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
-      .is("user_id", null)
-      .maybeSingle();
-    if (after.error) {
-      console.error("[bulk-provider.workspace_account_recheck]", { tenantId, provider, error: after.error.code || after.error.message });
-      return NextResponse.json(
-        { ok: false, error: "disconnect_unconfirmed", message: "We couldn't confirm the AI account was disconnected. Try again in a moment." },
-        { status: 500 },
-      );
+    count = Array.isArray(deleted.data) ? deleted.data.length : 0;
+  } else {
+    let outcome: { committed: boolean; removed: number };
+    try {
+      const stamp = await readAccountStamp(tenantId);
+      outcome = await disconnectWorkspaceAccountInOneStep({ tenantId, stamp, provider });
+    } catch (err) {
+      console.error("[bulk-provider.disconnect]", { tenantId, provider, error: errText(err) });
+      return NextResponse.json({ ok: false, error: "disconnect_failed", message: DISCONNECT_FAILED }, { status: 500 });
     }
-    const back = after.data as { provider?: string | null; encrypted_api_key?: string | null } | null;
-    if (!(back?.provider === provider && back.encrypted_api_key)) break;
-    if (round === 3) {
-      console.error("[bulk-provider.workspace_account_raced]", { tenantId, provider });
-      return NextResponse.json(
-        { ok: false, error: "disconnect_raced", message: "The AI account kept changing while it was being disconnected. Try again in a moment." },
-        { status: 409 },
-      );
+    if (!outcome.committed) {
+      return NextResponse.json({ ok: false, error: "conflict", message: DISCONNECT_CONFLICT }, { status: 409 });
     }
+    count = outcome.removed;
   }
 
   // Audit-log the disconnect.

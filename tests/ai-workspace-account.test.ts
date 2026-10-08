@@ -198,9 +198,18 @@ const KEY_TEAM_REP_OWN = "sk-ant-team-rep-own-key-0109";
 const KEY_TEAM_AGAIN = "sk-ant-team-key-again-0110";
 const KEY_TEAM_REP_NEW = "sk-ant-team-rep-own-key-0111";
 const KEY_RACE_OWN = "sk-or-v1-race-client-success-own-0112";
-const KEY_PROMPT = ["sk-ant-prompt-first-0200", "sk-ant-prompt-older-0201", "sk-ant-prompt-newer-0202", "sk-ant-prompt-same-0203"] as const;
-const KEY_LOOK = ["sk-ant-look-first-0300", "sk-ant-look-second-0301", "sk-ant-look-third-0302"] as const;
-const KEY_CODE = "sk-ant-code-key-0400";
+const KEY_PROMPT = [
+  "sk-ant-prompt-first-0200",
+  "sk-ant-prompt-second-tab-0201",
+  "sk-ant-prompt-first-tab-0202",
+  "sk-ant-prompt-same-0203",
+  "sk-ant-prompt-all-0204",
+  "sk-ant-prompt-sales-only-0205",
+  "sk-ant-prompt-failed-0206",
+  "sk-ant-prompt-switched-off-0207",
+] as const;
+const KEY_LOOK = ["sk-ant-look-first-0300", "sk-ant-look-second-0301"] as const;
+const KEY_CODE = ["sk-ant-code-key-0400", "sk-ant-code-other-window-0401"] as const;
 
 async function login(user: U | null) {
   if (!user) {
@@ -212,6 +221,24 @@ async function login(user: U | null) {
 }
 
 let failures = 0;
+// A request that never settles empties Node's event loop, and Node then exits
+// with code 0 halfway through the suite: a hang would read as a pass. The
+// suite says it finished, and an exit before that is a failure.
+let finished = false;
+process.on("exit", () => {
+  if (finished) return;
+  console.log("ai-workspace-account: STOPPED before the end (something never settled)");
+  process.exitCode = 1;
+});
+/** `work`, or a failure after `ms`: a call that never settles fails its check instead of stopping the suite. */
+async function settlesWithin<T>(ms: number, what: string, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`${what} never settled`)), ms)))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function check(name: string, fn: () => Promise<void> | void) {
   try {
     await fn();
@@ -1008,22 +1035,20 @@ async function main() {
     const passesThenHangs = (url: string, init: RequestInit) =>
       url.endsWith("/test-connection") ? Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 })) : hangs(url, init);
     // A hung call must not hang this suite either: it fails the check instead.
-    const within = async <T>(work: Promise<T>): Promise<T> => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("connectProviderKey never gave up")), 3000)))]);
-      } finally {
-        clearTimeout(timer);
-      }
-    };
+    const within = <T>(work: Promise<T>) => settlesWithin(3000, "connectProviderKey", work);
     const key = { provider: "anthropic" as const, apiKey: KEY_FRESH, model: "claude-sonnet-4-6", scope: "tenant" as const, timeoutMs: 25 };
     assert.deepEqual(await within(connectProviderKey(key, hangs)), {
       kind: "refused",
       message: "The key couldn't be tested just now, so it was not saved. Try again in a moment.",
       canSaveAnyway: false,
     });
-    assert.deepEqual(await within(connectProviderKey(key, passesThenHangs)), { kind: "failed", message: "The key couldn't be saved just now. Try again in a moment." });
-    assert.equal(signals.length, 2);
+    // The save hangs, and so does the read that asks whether it landed: the
+    // dialog says it could not tell, never that the key was not saved.
+    assert.deepEqual(await within(connectProviderKey(key, passesThenHangs)), {
+      kind: "failed",
+      message: "We couldn't check whether the key was saved. Close this and look at the card in a moment.",
+    });
+    assert.equal(signals.length, 3);
     assert.ok(signals.every((s) => s.aborted), "a request that gave up was not aborted");
   });
 
@@ -1337,39 +1362,60 @@ async function main() {
     }
   });
 
-  // -- 11. Interleavings (Codex review of PR #535, rounds 3 and 4) -----------
-  // Every route here writes one statement at a time, with no transaction, so
-  // two requests interleave statement by statement. A hook holds the app's
-  // first statement that matches `at` until the other request (or the
-  // backfill) has run to the end: the exact moment a second tab can land. A
-  // hook can also make a statement fail, as a briefly unreachable database
-  // does.
+  // -- 11. One step (PR #535, round 5) -----------------------------------------
+  // A team-wide connect and a disconnect are each ONE batch: one transaction,
+  // guarded on the account as the request read it (lib/ai/workspace-account.ts,
+  // ONE STEP). A hook can hold the app's next write (a single statement, or a
+  // whole batch) until another request, or the backfill, has run from start
+  // to end: the exact moment a second tab lands. A hook can also make one
+  // statement fail as it runs, the way a database that drops a write does.
+  // After every case, all three places that spend a key are asked: a
+  // per-agent chat, a department chat on the web and a Slack mention.
   const { getTursoClient } = await import("../lib/turso");
   type Stmt = string | { sql: string; args?: unknown[] };
-  type Hook = { at: (sql: string, args: unknown[]) => boolean; times: number; run: () => Promise<void> | void };
+  type Hook = { at: (sql: string, args: unknown[]) => boolean; times: number; run?: () => Promise<void> | void; breakIt?: boolean };
   let hooks: Hook[] = [];
   let insideHook = false;
-  // The app's client is the cached libSQL client behind a timing proxy that
-  // looks `execute` up on the client at call time: an own `execute` set on it
-  // sees every statement the app runs, then hands it to the client's own. The
-  // statements a hook runs itself (the other tab's request) are not matched.
-  const appClient = getTursoClient() as unknown as { execute: (stmt: Stmt) => Promise<unknown> };
-  appClient.execute = async function (this: object, stmt: Stmt) {
-    if (!insideHook) {
-      const sql = typeof stmt === "string" ? stmt : stmt.sql;
-      const args = typeof stmt === "string" ? [] : (stmt.args ?? []);
-      for (const hook of hooks) {
-        if (hook.times <= 0 || !hook.at(sql, args)) continue;
-        hook.times -= 1;
-        insideHook = true;
-        try {
-          await hook.run();
-        } finally {
-          insideHook = false;
-        }
+  /** A statement that fails when it runs (an integer overflow), so the batch it is in rolls back. */
+  const FAILS_WHEN_RUN = { sql: "SELECT abs(-9223372036854775807 - 1)", args: [] as unknown[] };
+  const sqlOf = (s: Stmt) => (typeof s === "string" ? s : s.sql);
+  const argsOf = (s: Stmt) => (typeof s === "string" ? [] : (s.args ?? []));
+  async function applyHooks(list: Stmt[]): Promise<Stmt[]> {
+    if (insideHook) return list;
+    let out = list;
+    for (const hook of hooks) {
+      if (hook.times <= 0) continue;
+      const hit = out.findIndex((s) => hook.at(sqlOf(s), argsOf(s)));
+      if (hit < 0) continue;
+      hook.times -= 1;
+      if (hook.breakIt) {
+        out = out.map((s, i) => (i === hit ? FAILS_WHEN_RUN : s));
+        continue;
+      }
+      insideHook = true;
+      try {
+        await hook.run?.();
+      } finally {
+        insideHook = false;
       }
     }
-    return (Object.getPrototypeOf(this) as { execute: (s: Stmt) => Promise<unknown> }).execute.call(this, stmt);
+    return out;
+  }
+  // The app's client is the cached libSQL client behind a timing proxy that
+  // looks `execute` and `batch` up on the client at call time: own ones set on
+  // it see every statement and batch the app runs, then hand them on to the
+  // client's own. What a hook runs itself (the other tab) is not matched.
+  const appClient = getTursoClient() as unknown as {
+    execute: (stmt: Stmt) => Promise<unknown>;
+    batch: (stmts: Stmt[], mode?: string) => Promise<unknown>;
+  };
+  appClient.execute = async function (this: object, stmt: Stmt) {
+    const [s] = await applyHooks([stmt]);
+    return (Object.getPrototypeOf(this) as { execute: (s: Stmt) => Promise<unknown> }).execute.call(this, s);
+  };
+  appClient.batch = async function (this: object, stmts: Stmt[], mode?: string) {
+    const list = await applyHooks(stmts);
+    return (Object.getPrototypeOf(this) as { batch: (s: Stmt[], m?: string) => Promise<unknown> }).batch.call(this, list, mode);
   };
   async function withHooks<T>(added: Hook[], request: () => Promise<T>): Promise<T> {
     hooks.push(...added);
@@ -1379,17 +1425,10 @@ async function main() {
       hooks = hooks.filter((h) => !added.includes(h));
     }
   }
-  /** The other request, run from start to end at the held statement (once). */
+  /** The other request, run from start to end just before the held write (once). */
   const hold = (at: Hook["at"], other: () => Promise<void>): Hook => ({ at, times: 1, run: other });
-  /** The matching statements fail `times` times, in the database's own words. */
-  const DB_WORDS = "SQLITE_BUSY: database is locked (injected)";
-  const fail = (at: Hook["at"], times: number): Hook => ({
-    at,
-    times,
-    run: () => {
-      throw new Error(DB_WORDS);
-    },
-  });
+  /** The matching statement fails as it runs (once). */
+  const breakAt = (at: Hook["at"]): Hook => ({ at, times: 1, breakIt: true });
   async function interleaved<T>(request: () => Promise<T>, at: Hook["at"], other: () => Promise<void>): Promise<T> {
     let landed = false;
     const out = await withHooks(
@@ -1414,8 +1453,21 @@ async function main() {
       sessionCookie = held;
     }
   };
-  const statement = (verb: string, ...values: string[]) => (sql: string, args: unknown[]) =>
-    sql.startsWith(verb) && values.every((v) => args.includes(v));
+  const has = (args: unknown[], ...values: string[]) => values.every((v) => args.includes(v));
+  /** A team-wide connect's one step (its teammate rows, or its account row). */
+  const connectStep = (tenant: string) => (sql: string, args: unknown[]) =>
+    has(args, tenant) && (sql.includes("ON CONFLICT (tenant_id, agent_key)") || sql.includes("enabled = 1, updated_at") || sql.includes("SELECT ?, NULL, ?, ?, ?, ?, 1, ?"));
+  /** The account row's own write in a connect's one step (an account already on file). */
+  const accountWrite = (tenant: string) => (sql: string, args: unknown[]) => has(args, tenant) && sql.includes("enabled = 1, updated_at");
+  /** A team-wide disconnect's one step, and the retire inside it. */
+  const disconnectStep = (tenant: string) => (sql: string, args: unknown[]) => has(args, tenant) && sql.startsWith("SELECT 1 AS held");
+  const retireWrite = (tenant: string) => (sql: string, args: unknown[]) => has(args, tenant) && sql.startsWith("UPDATE agent_model_config SET enabled = 0");
+  /** The read of the account a connect or disconnect is guarded on. */
+  const stampRead = (tenant: string) => (sql: string, args: unknown[]) =>
+    has(args, tenant) && sql.startsWith("SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config");
+  /** A person's own save ("Just me"), one step. */
+  const personalStep = (tenant: string, userId: string) => (sql: string, args: unknown[]) =>
+    has(args, tenant, userId) && sql.includes("ON CONFLICT (tenant_id, user_id, agent_key)");
   const disconnect = async (prov: string, scope: "tenant" | "user" = "tenant") =>
     jsonOf(await bulk.DELETE(req(`/api/agent-config/bulk-provider?provider=${prov}&scope=${scope}`, "DELETE")));
   /** The backfill's insert-only statement exactly as Bravo runs it, held to one workspace here. */
@@ -1453,189 +1505,320 @@ async function main() {
     const ctx = await resolveChatContext({ id: who.id, email: who.email }, agentKey);
     return ctx.ok ? `answers with ${ctx.apiKey}` : { status: ctx.status, code: ctx.code };
   };
-  /** The connect's look-back read of the account: the only read naming both rows. */
-  const lookBackRead = (tenant: string) => statement("SELECT", tenant, account.WORKSPACE_AI_AGENT_KEY, account.LEGACY_WORKSPACE_AI_AGENT_KEY);
+  /** All three places that spend the key: a per-agent chat, a department chat (web) and a Slack mention. */
+  const spending = async (tenant: string, slug: string, owner: U, agentKey = "sdr") => {
+    const perAgent = await perAgentChat(owner, agentKey);
+    await login(owner);
+    sent = [];
+    provider = answering("ok");
+    const web = await chatTurn({ agent_slug: "sdr", department: "sales" });
+    await web.text();
+    const department = web.status === 200 && sent[0] ? `answers with ${keyOf(sent[0])}` : web.status;
+    const slack = await slackTurn(tenant, slug, "sales", "sdr");
+    return { perAgent, department, slack: slack.ok ? `answers with ${slack.turn.apiKey}` : slack.status };
+  };
+  const answersWith = (key: string) => ({ perAgent: `answers with ${key}`, department: `answers with ${key}`, slack: `answers with ${key}` });
+  const nothingAnswers = { perAgent: { status: 412, code: "agent_not_configured" }, department: 412, slack: 412 };
+  const PLAIN = /^[A-Z][^_]*[.]$/;
 
-  await check("a disconnect in another tab that lands inside a connect: the connect keeps no key, a teammate's own prompt stays, and nothing answers", async () => {
+  await check("a disconnect in another tab lands before a connect's one step: the connect changes nothing, says so, and nothing answers", async () => {
     await login(USERS.race);
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_RACE[0] })).status, 200);
     // The owner had moved Client Success onto its own OpenRouter key, with a
-    // prompt of its own: a row the next connect only updates, never creates.
+    // prompt of its own.
     await db.execute({
       sql: "UPDATE agent_model_config SET provider = 'openrouter', model = 'anthropic/claude-sonnet-4.6', encrypted_api_key = ?, system_prompt_override = ? WHERE tenant_id = ? AND agent_key = 'customer-support' AND user_id IS NULL",
       args: [encryptField(KEY_RACE_OWN), FRENCH, RACE],
     });
-    // The connect saves the account, then (before its teammate rows) the
-    // other tab's disconnect runs from start to end.
     let other = null as Awaited<ReturnType<typeof disconnect>> | null;
     const res = await interleaved(
       () => connect({ provider: "anthropic", api_key: KEY_RACE[1] }),
-      statement("SELECT", RACE, "sdr"),
+      connectStep(RACE),
       async () => {
         other = await disconnect("anthropic");
       },
     );
     assert.equal(other!.status, 200, JSON.stringify(other!.body));
     assert.equal(res.status, 409, JSON.stringify(res.body));
-    assert.equal(res.body.error, "superseded");
-    assert.match(String(res.body.message), /^The AI account was changed somewhere else while this key saved, so it was not kept/);
-    // No row keeps a key. The Sales lead row the connect created after the
-    // disconnect is gone; the Client Success row it only updated keeps its
-    // place, prompt and on/off switch, with the key taken off.
-    assert.deepEqual(await keysOn(RACE), []);
-    assert.equal(await teamRow(RACE, "sdr"), null, "the row the connect created is still there");
-    assert.deepEqual(await teamRow(RACE, "customer-support"), { provider: "anthropic", key: null, prompt: FRENCH, enabled: 1 });
-    assert.deepEqual(await perAgentChat(USERS.race, "sdr"), { status: 412, code: "agent_not_configured" });
-    assert.deepEqual(await perAgentChat(USERS.race, "customer-support"), { status: 412, code: "no_api_key" });
-    await assertNothingAnswers(RACE, "race-co", USERS.race);
+    assert.equal(res.body.error, "conflict");
+    assert.match(String(res.body.message), PLAIN);
+    // Nothing of the connect landed. The disconnect took every Anthropic row;
+    // Client Success, on its own OpenRouter key, is untouched by either.
+    assert.deepEqual(await keysOn(RACE), [`customer-support/team:${KEY_RACE_OWN}`]);
+    assert.deepEqual(await teamRow(RACE, "customer-support"), { provider: "openrouter", key: KEY_RACE_OWN, prompt: FRENCH, enabled: 1 });
+    assert.deepEqual(await spending(RACE, "race-co", USERS.race), nothingAnswers);
+    assert.equal(await perAgentChat(USERS.race, "customer-support"), `answers with ${KEY_RACE_OWN}`);
   });
-  await check("a connect in another tab that lands inside a disconnect: the disconnect still ends with nothing connected", async () => {
+  await check("a connect in another tab lands before a disconnect's one step: the disconnect changes nothing, says so, and the new key answers everywhere", async () => {
     await login(USERS.race);
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_RACE[2] })).status, 200);
-    // The disconnect retires the account, then (before it deletes the rows)
-    // the other tab's connect runs from start to end.
     let other = null as Awaited<ReturnType<typeof connect>> | null;
     const res = await interleaved(
       () => disconnect("anthropic"),
-      statement("DELETE", RACE, "anthropic"),
+      disconnectStep(RACE),
       async () => {
         other = await connect({ provider: "anthropic", api_key: KEY_RACE[3] });
       },
     );
     assert.equal(other!.status, 200, JSON.stringify(other!.body));
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.deepEqual(await keysOn(RACE), [], "a key survived the disconnect");
-    await assertNothingAnswers(RACE, "race-co", USERS.race);
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.equal(res.body.error, "conflict");
+    assert.match(String(res.body.message), PLAIN);
+    assert.deepEqual(await spending(RACE, "race-co", USERS.race), answersWith(KEY_RACE[3]));
+    assert.deepEqual(await teamRow(RACE, "customer-support"), { provider: "anthropic", key: KEY_RACE[3], prompt: FRENCH, enabled: 1 });
   });
-  await check("a newer connect in another tab wins: the older one hands its rows to it, and custom prompts and per-agent chats are kept", async () => {
+  await check("two tabs connect different keys at once: the first one's key is saved whole, the second changes nothing and says so", async () => {
     await login(USERS.prompt);
     assert.equal((await connect({ provider: "anthropic", api_key: KEY_PROMPT[0] })).status, 200);
     await db.execute({
       sql: "UPDATE agent_model_config SET system_prompt_override = ? WHERE tenant_id = ? AND agent_key = 'sdr' AND user_id IS NULL",
       args: [FRENCH, PROMPTCO],
     });
-    // Tab A saves the account and stalls before its teammate rows; tab B
-    // connects a newer key from start to end; then A writes over B's rows.
-    let newer = null as Awaited<ReturnType<typeof connect>> | null;
-    const older = await interleaved(
+    let first = null as Awaited<ReturnType<typeof connect>> | null;
+    const second = await interleaved(
       () => connect({ provider: "anthropic", api_key: KEY_PROMPT[1] }),
-      statement("SELECT", PROMPTCO, "sdr"),
+      connectStep(PROMPTCO),
       async () => {
-        newer = await connect({ provider: "anthropic", api_key: KEY_PROMPT[2] });
+        first = await connect({ provider: "anthropic", api_key: KEY_PROMPT[2] });
       },
     );
-    assert.equal(newer!.status, 200, JSON.stringify(newer!.body));
-    assert.deepEqual(newer!.body.applied_to, ["sdr", "customer-support"]);
-    assert.equal(older.status, 409, JSON.stringify(older.body));
-    assert.equal(older.body.error, "superseded");
-    // Every team row holds the newer key (none was deleted), and the owner's
-    // prompt is still on the Sales lead.
+    assert.equal(first!.status, 200, JSON.stringify(first!.body));
+    assert.deepEqual(first!.body.applied_to, ["sdr", "customer-support"]);
+    assert.equal(second.status, 409, JSON.stringify(second.body));
+    assert.equal(second.body.error, "conflict");
+    assert.match(String(second.body.message), PLAIN);
     assert.deepEqual(await keysOn(PROMPTCO), [
       `__workspace__/team:${KEY_PROMPT[2]}`,
       `customer-support/team:${KEY_PROMPT[2]}`,
       `sdr/team:${KEY_PROMPT[2]}`,
     ]);
     assert.equal((await teamRow(PROMPTCO, "sdr"))?.prompt, FRENCH, "the owner's custom prompt was lost");
-    assert.equal(await perAgentChat(USERS.prompt, "sdr"), `answers with ${KEY_PROMPT[2]}`);
-    assert.deepEqual([...(await q.aiServicesWithKey(PROMPTCO))], ["anthropic"]);
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[2]));
   });
-  await check("the same key pasted in two tabs at once: both keep it, and nothing is deleted", async () => {
+  await check("the same key in two tabs at once: both are saved, nothing is lost, and it answers everywhere", async () => {
     await login(USERS.prompt);
-    let second = null as Awaited<ReturnType<typeof connect>> | null;
-    const first = await interleaved(
+    let first = null as Awaited<ReturnType<typeof connect>> | null;
+    const second = await interleaved(
       () => connect({ provider: "anthropic", api_key: KEY_PROMPT[3] }),
-      statement("SELECT", PROMPTCO, "sdr"),
+      connectStep(PROMPTCO),
       async () => {
-        second = await connect({ provider: "anthropic", api_key: KEY_PROMPT[3] });
+        first = await connect({ provider: "anthropic", api_key: KEY_PROMPT[3] });
       },
     );
-    assert.equal(second!.status, 200, JSON.stringify(second!.body));
-    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first!.status, 200, JSON.stringify(first!.body));
+    assert.equal(second.status, 200, JSON.stringify(second.body));
     assert.deepEqual(await keysOn(PROMPTCO), [
       `__workspace__/team:${KEY_PROMPT[3]}`,
       `customer-support/team:${KEY_PROMPT[3]}`,
       `sdr/team:${KEY_PROMPT[3]}`,
     ]);
     assert.equal((await teamRow(PROMPTCO, "sdr"))?.prompt, FRENCH, "the owner's custom prompt was lost");
-    assert.equal(await perAgentChat(USERS.prompt, "sdr"), `answers with ${KEY_PROMPT[3]}`);
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[3]));
   });
-  await check("a look-back that fails once is read again, and the connect stands", async () => {
+  await check("a connect for some teammates only lands inside another tab's connect: the first one's key stands whole", async () => {
+    await login(USERS.prompt);
+    let some = null as Awaited<ReturnType<typeof connect>> | null;
+    const all = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_PROMPT[4] }),
+      connectStep(PROMPTCO),
+      async () => {
+        some = await connect({ provider: "anthropic", api_key: KEY_PROMPT[5], agent_keys: ["sdr"] });
+      },
+    );
+    assert.equal(some!.status, 200, JSON.stringify(some!.body));
+    assert.deepEqual(some!.body.applied_to, ["sdr"]);
+    assert.equal(all.status, 409, JSON.stringify(all.body));
+    // The Sales-lead-only connect is the account; Client Success kept the key
+    // it had (that connect named only the Sales lead); nothing of the other landed.
+    assert.deepEqual(await keysOn(PROMPTCO), [
+      `__workspace__/team:${KEY_PROMPT[5]}`,
+      `customer-support/team:${KEY_PROMPT[3]}`,
+      `sdr/team:${KEY_PROMPT[5]}`,
+    ]);
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[5]));
+  });
+  await check("a connect whose one step fails part way changes nothing at all", async () => {
+    await login(USERS.prompt);
+    const before = await keysOn(PROMPTCO);
+    // The account row, the last write of the step, fails as it runs.
+    const res = await withHooks([breakAt(accountWrite(PROMPTCO))], () => connect({ provider: "anthropic", api_key: KEY_PROMPT[6] }));
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    assert.equal(res.body.message, "The key couldn't be saved just now. Nothing was changed. Try again in a moment.");
+    assert.deepEqual(await keysOn(PROMPTCO), before, "part of the failed connect was saved");
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[5]));
+  });
+  await check("a disconnect whose one step fails part way changes nothing at all", async () => {
+    await login(USERS.prompt);
+    const before = await keysOn(PROMPTCO);
+    const res = await withHooks([breakAt(retireWrite(PROMPTCO))], () => disconnect("anthropic"));
+    assert.equal(res.status, 500, JSON.stringify(res.body));
+    assert.equal(res.body.message, "The AI account couldn't be disconnected just now. Nothing was changed. Try again in a moment.");
+    assert.deepEqual(await keysOn(PROMPTCO), before, "part of the failed disconnect was applied");
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[5]));
+  });
+  await check("a teammate the owner switched off stays off after a connect, and only its key changes", async () => {
+    await login(USERS.prompt);
+    await db.execute({
+      sql: "UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'customer-support' AND user_id IS NULL",
+      args: [PROMPTCO],
+    });
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_PROMPT[7] })).status, 200);
+    assert.deepEqual(await teamRow(PROMPTCO, "customer-support"), { provider: "anthropic", key: KEY_PROMPT[7], prompt: null, enabled: 0 });
+    assert.deepEqual(await perAgentChat(USERS.prompt, "customer-support"), { status: 403, code: "agent_disabled" });
+    assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[7]));
+  });
+  await check("a save whose answer never came back: the card asks the server, and says exactly what was saved", async () => {
     await login(USERS.look);
-    const res = await withHooks([fail(lookBackRead(LOOKCO), 1)], () => connect({ provider: "anthropic", api_key: KEY_LOOK[0] }));
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+    // The save lands on the server, but its answer never reaches the browser.
+    // (The read that follows arrives after the save finished, as a later
+    // request does.)
+    let saving: Promise<unknown> = Promise.resolve();
+    const answerLost = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      if (url === "/api/agent-config/test-connection") return testConnection.POST(req(url, "POST", body));
+      if (body.verify === true) {
+        await saving;
+        return bulk.POST(req(url, "POST", body));
+      }
+      saving = bulk.POST(req(url, "POST", body));
+      await saving;
+      return new Promise<Response>(() => undefined);
+    };
+    provider = answering("ok");
+    const landed = await settlesWithin(
+      8000,
+      "the connect after a lost answer",
+      connectProviderKey({ provider: "anthropic", apiKey: KEY_LOOK[0], model: "claude-sonnet-4-6", scope: "tenant", timeoutMs: 1500 }, answerLost),
+    );
+    assert.deepEqual(landed, { kind: "saved" }, "a save that landed was reported as failed");
+    assert.deepEqual(await spending(LOOKCO, "look-co", USERS.look), answersWith(KEY_LOOK[0]));
+    // This time the save never reaches the server at all.
+    const neverArrived = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      if (url === "/api/agent-config/test-connection") return testConnection.POST(req(url, "POST", body));
+      if (body.verify === true) return bulk.POST(req(url, "POST", body));
+      return new Promise<Response>(() => undefined);
+    };
+    const lost = await settlesWithin(
+      8000,
+      "the connect whose save never arrived",
+      connectProviderKey({ provider: "anthropic", apiKey: KEY_LOOK[1], model: "claude-sonnet-4-6", scope: "tenant", timeoutMs: 1500 }, neverArrived),
+    );
+    assert.deepEqual(lost, { kind: "failed", message: "The key couldn't be saved just now. Try again in a moment." });
+    assert.deepEqual(await spending(LOOKCO, "look-co", USERS.look), answersWith(KEY_LOOK[0]));
+    // Sending the same connect again is harmless: the same key, saved again.
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_LOOK[0] })).status, 200);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_LOOK[0] })).status, 200);
     assert.deepEqual(await keysOn(LOOKCO), [`__workspace__/team:${KEY_LOOK[0]}`, `sdr/team:${KEY_LOOK[0]}`]);
   });
-  await check("a look-back that cannot be read is not taken as success: the key comes off the teammates and the owner is asked to connect again", async () => {
-    await login(USERS.look);
-    // A disconnect in another tab lands inside the connect, and then the
-    // connect cannot read the account back, twice.
-    let other = null as Awaited<ReturnType<typeof disconnect>> | null;
-    const res = await withHooks(
-      [
-        hold(statement("SELECT", LOOKCO, "sdr"), async () => {
-          other = await disconnect("anthropic");
-        }),
-        fail(lookBackRead(LOOKCO), 2),
-      ],
-      () => connect({ provider: "anthropic", api_key: KEY_LOOK[1] }),
+  await check("the backfill landing before a disconnect's one step: the disconnect changes nothing, and done again, nothing answers", async () => {
+    // Before: the legacy row answers (no account row yet).
+    const before = await slackTurn(BACKFILL_ONE, "backfill-one", "sales", "sdr");
+    assert.ok(before.ok && before.turn.apiKey === KEY_BACKFILL_ONE, "the legacy row did not answer");
+    await login(USERS.backfillOne);
+    let copied = -1;
+    const res = await interleaved(
+      () => disconnect("anthropic"),
+      disconnectStep(BACKFILL_ONE),
+      async () => {
+        copied = (await backfill(BACKFILL_ONE)).rowsAffected;
+      },
     );
-    assert.equal(other!.status, 200, JSON.stringify(other!.body));
-    assert.equal(res.status, 503, JSON.stringify(res.body));
-    assert.deepEqual(res.body, { ok: false, error: "save_unconfirmed", message: "We couldn't check that this key saved everywhere. Connect it again in a moment." });
-    assert.deepEqual(await keysOn(LOOKCO), [], "a teammate row kept the key");
-    assert.deepEqual(await perAgentChat(USERS.look, "sdr"), { status: 412, code: "agent_not_configured" });
+    assert.equal(copied, 1, "the backfill did not copy the legacy row: the case was not exercised");
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    // The disconnect again, now that the account row is there: nothing answers.
+    assert.equal((await disconnect("anthropic")).status, 200);
+    assert.deepEqual(await keysOn(BACKFILL_ONE), [], "the legacy key survived the disconnect");
+    assert.deepEqual(await spending(BACKFILL_ONE, "backfill-one", USERS.backfillOne), nothingAnswers);
+    await assertNothingAnswers(BACKFILL_ONE, "backfill-one", USERS.backfillOne);
   });
-  await check("when a disconnect landed and the key cannot be taken off the teammates, the owner is told something they can do", async () => {
-    await login(USERS.look);
-    let other = null as Awaited<ReturnType<typeof disconnect>> | null;
-    const res = await withHooks(
-      [
-        hold(statement("SELECT", LOOKCO, "sdr"), async () => {
-          other = await disconnect("anthropic");
-        }),
-        // The connect's removal of the Sales lead row it created fails.
-        fail((sql, args) => sql.startsWith("DELETE") && args.includes(LOOKCO) && args.includes("sdr"), 1),
-      ],
-      () => connect({ provider: "anthropic", api_key: KEY_LOOK[2] }),
+  await check("the backfill landing before a connect's one step: the connect changes nothing, and done again, the new key is the account", async () => {
+    await login(USERS.backfillTwo);
+    let copied = -1;
+    const res = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_BACKFILL_TWO_NEW }),
+      connectStep(BACKFILL_TWO),
+      async () => {
+        copied = (await backfill(BACKFILL_TWO)).rowsAffected;
+      },
     );
-    assert.equal(other!.status, 200, JSON.stringify(other!.body));
-    assert.equal(res.status, 500, JSON.stringify(res.body));
-    // The card now reads Not connected and offers Connect, never Disconnect:
-    // the sentence asks for what the owner can actually do.
-    assert.equal(res.body.message, "The AI account changed while this key saved, and not every teammate could be updated. Connect it again in a moment.");
-    assert.equal((await q.aiServicesWithKey(LOOKCO)).size, 0);
+    assert.equal(copied, 1, "the backfill did not copy the legacy row: the case was not exercised");
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    // The backfill's copy of the legacy key is the account until the connect runs again.
+    assert.equal((await slackTurn(BACKFILL_TWO, "backfill-two", "sales", "sdr")).ok, true);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_BACKFILL_TWO_NEW })).status, 200);
+    const acct = await account.readWorkspaceAiAccount(BACKFILL_TWO);
+    assert.deepEqual([acct?.source, acct?.provider], ["workspace", "anthropic"]);
+    assert.ok(!(await keysOn(BACKFILL_TWO)).some((k) => k.endsWith(KEY_BACKFILL_TWO_OLD)), "the old key is still on a row");
+    assert.deepEqual(await spending(BACKFILL_TWO, "backfill-two", USERS.backfillTwo), answersWith(KEY_BACKFILL_TWO_NEW));
+    assert.equal((await backfill(BACKFILL_TWO)).rowsAffected, 0, "a second backfill copied the legacy row over the account");
+  });
+  await check("a member's own key and the owner's team account never touch each other, each landing inside the other's step", async () => {
+    await login(USERS.team);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM })).status, 200);
+    // The member has a key for their own chats and replaces it; the owner's
+    // disconnect lands just before the member's one step.
+    await login(USERS.teamRep);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM_REP_OWN, scope: "user" })).status, 200);
+    let ownerOff = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const mine = await interleaved(
+      () => connect({ provider: "anthropic", api_key: KEY_TEAM_REP_NEW, scope: "user" }),
+      personalStep(TEAMCO, USERS.teamRep.id),
+      async () => {
+        ownerOff = await as(USERS.team, () => disconnect("anthropic"));
+      },
+    );
+    assert.equal(ownerOff!.status, 200, JSON.stringify(ownerOff!.body));
+    assert.equal(mine.status, 200, JSON.stringify(mine.body));
+    assert.deepEqual(await keysOn(TEAMCO), [`sdr/own:${KEY_TEAM_REP_NEW}`], "the owner's disconnect took the member's own key, or left the team's");
+    // And an owner's disconnect with the member's own key already on file
+    // leaves it alone (the save above would put back a row it had taken).
+    assert.equal((await as(USERS.team, () => disconnect("anthropic"))).status, 200);
+    assert.deepEqual(await keysOn(TEAMCO), [`sdr/own:${KEY_TEAM_REP_NEW}`], "the owner's disconnect took the member's own key");
+    assert.equal(await perAgentChat(USERS.teamRep, "sdr"), `answers with ${KEY_TEAM_REP_NEW}`, "the member's own chat lost their key");
+    assert.deepEqual(await spending(TEAMCO, "team-co", USERS.team), nothingAnswers);
+    // The owner connects again; the member's removal of their own key lands
+    // just before the owner's one step.
+    let removed = null as Awaited<ReturnType<typeof disconnect>> | null;
+    const ownerOn = await as(USERS.team, () =>
+      interleaved(
+        () => connect({ provider: "anthropic", api_key: KEY_TEAM_AGAIN }),
+        connectStep(TEAMCO),
+        async () => {
+          removed = await as(USERS.teamRep, () => disconnect("anthropic", "user"));
+        },
+      ),
+    );
+    assert.equal(removed!.status, 200, JSON.stringify(removed!.body));
+    assert.equal(ownerOn.status, 200, JSON.stringify(ownerOn.body));
+    assert.deepEqual(await keysOn(TEAMCO), [`__workspace__/team:${KEY_TEAM_AGAIN}`, `sdr/team:${KEY_TEAM_AGAIN}`], "the member's removal took the team's key, or kept their own");
+    assert.deepEqual(await spending(TEAMCO, "team-co", USERS.team), answersWith(KEY_TEAM_AGAIN));
   });
   // Every way a disconnect can fail, collected from the real route, then
   // pressed on the real card (the render helper, second run).
   const disconnectReplies: Array<{ label: string; status: number; body: Record<string, unknown> | null }> = [];
   await check("every way a disconnect can fail answers one plain sentence, never a code or the database's words", async () => {
     await login(USERS.code);
-    const reconnect = async () => assert.equal((await connect({ provider: "anthropic", api_key: KEY_CODE })).status, 200);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_CODE[0] })).status, 200);
     const collect = async (label: string, request: () => Promise<{ status: number; body: Record<string, unknown> }>) => {
       const r = await request();
       disconnectReplies.push({ label, status: r.status, body: r.body });
     };
-    await reconnect();
-    await collect("retire fails", () => withHooks([fail(statement("UPDATE", CODECO, account.WORKSPACE_AI_AGENT_KEY, "anthropic"), 1)], () => disconnect("anthropic")));
-    await reconnect();
-    await collect("delete fails", () => withHooks([fail(statement("DELETE", CODECO, "anthropic"), 1)], () => disconnect("anthropic")));
-    await reconnect();
-    const readAfter = (sql: string, args: unknown[]) =>
-      statement("SELECT", CODECO, account.WORKSPACE_AI_AGENT_KEY)(sql, args) && !args.includes(account.LEGACY_WORKSPACE_AI_AGENT_KEY);
-    await collect("read after fails", () => withHooks([fail(readAfter, 1)], () => disconnect("anthropic")));
-    await reconnect();
-    // A key that comes back on the account before every delete.
-    const comesBack: Hook = {
-      at: statement("DELETE", CODECO, "anthropic"),
-      times: 3,
-      run: async () => {
-        await db.execute({
-          sql: "UPDATE agent_model_config SET encrypted_api_key = ?, enabled = 1 WHERE tenant_id = ? AND agent_key = '__workspace__' AND user_id IS NULL",
-          args: [encryptField(KEY_CODE), CODECO],
-        });
-      },
-    };
-    await collect("key keeps coming back", () => withHooks([comesBack], () => disconnect("anthropic")));
+    const before = await keysOn(CODECO);
+    await collect("its one step fails", () => withHooks([breakAt(retireWrite(CODECO))], () => disconnect("anthropic")));
+    await collect("the account cannot be read", () => withHooks([breakAt(stampRead(CODECO))], () => disconnect("anthropic")));
+    assert.deepEqual(await keysOn(CODECO), before, "a failed disconnect changed something");
+    await collect("another window changed the account", () =>
+      withHooks(
+        [
+          hold(disconnectStep(CODECO), async () => {
+            await connect({ provider: "anthropic", api_key: KEY_CODE[1] });
+          }),
+        ],
+        () => disconnect("anthropic"),
+      ),
+    );
+    assert.deepEqual(await spending(CODECO, "code-co", USERS.code), answersWith(KEY_CODE[1]));
     await login(USERS.codeRep);
     await collect("not an owner", () => disconnect("anthropic"));
     await login(null);
@@ -1643,10 +1826,9 @@ async function main() {
     assert.deepEqual(
       disconnectReplies.map((r) => [r.label, r.status]),
       [
-        ["retire fails", 500],
-        ["delete fails", 500],
-        ["read after fails", 500],
-        ["key keeps coming back", 409],
+        ["its one step fails", 500],
+        ["the account cannot be read", 500],
+        ["another window changed the account", 409],
         ["not an owner", 403],
         ["signed out", 401],
       ],
@@ -1654,8 +1836,8 @@ async function main() {
     for (const r of disconnectReplies) {
       assert.equal(r.body?.ok, false, r.label);
       const message = String(r.body?.message ?? "");
-      assert.ok(message.length > 0, `${r.label}: no plain message`);
-      assert.doesNotMatch(message, /[a-z]+_[a-z]+|SQLITE|locked|injected|http/i, `${r.label}: ${message}`);
+      assert.match(message, PLAIN, `${r.label}: not one plain sentence: ${message}`);
+      assert.doesNotMatch(message, /SQLITE|overflow|database|http/i, `${r.label}: ${message}`);
     }
     // And a request that never reached the server, for the card's own sentence.
     disconnectReplies.push({ label: "never reached the server", status: 0, body: null });
@@ -1679,7 +1861,7 @@ async function main() {
       assert.equal(d.shown, expected, `${d.label}: the card showed something else`);
       assert.equal(d.title, null, `${d.label}: the error carries a tooltip`);
       assert.equal(d.refreshed, 1, `${d.label}: the card did not read the server again`);
-      assert.equal(d.connectedAfter, false, `${d.label}: the card stayed on Connected`);
+      assert.equal(d.connectedAfter, false, `${d.label}: the card kept its own Connected over the server's answer`);
     }
     assert.deepEqual(
       pressed.tests.map((t) => [t.label, t.title]),
@@ -1690,92 +1872,9 @@ async function main() {
       ],
     );
   });
-  await check("the backfill landing inside a disconnect never brings the legacy key back", async () => {
-    // Before: the legacy row answers (no account row yet).
-    const before = await slackTurn(BACKFILL_ONE, "backfill-one", "sales", "sdr");
-    assert.ok(before.ok && before.turn.apiKey === KEY_BACKFILL_ONE, "the legacy row did not answer");
-    await login(USERS.backfillOne);
-    // The disconnect retires (no account row: nothing yet), then the backfill
-    // copies the legacy row into a new account row, then the disconnect
-    // deletes the legacy row.
-    let copied = -1;
-    const res = await interleaved(
-      () => disconnect("anthropic"),
-      statement("DELETE", BACKFILL_ONE, "anthropic"),
-      async () => {
-        copied = (await backfill(BACKFILL_ONE)).rowsAffected;
-      },
-    );
-    assert.equal(copied, 1, "the backfill did not copy the legacy row: the interleaving was not exercised");
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.deepEqual(await keysOn(BACKFILL_ONE), [], "the legacy key survived the disconnect");
-    await assertNothingAnswers(BACKFILL_ONE, "backfill-one", USERS.backfillOne);
-  });
-  await check("the backfill landing inside a connect: the new key is the account, the old one is gone, and a second backfill copies nothing", async () => {
-    await login(USERS.backfillTwo);
-    // The connect finds no account row, then the backfill inserts one from
-    // the legacy row, then the connect's own insert meets the unique index.
-    let copied = -1;
-    const res = await interleaved(
-      () => connect({ provider: "anthropic", api_key: KEY_BACKFILL_TWO_NEW }),
-      statement("INSERT", BACKFILL_TWO, account.WORKSPACE_AI_AGENT_KEY),
-      async () => {
-        copied = (await backfill(BACKFILL_TWO)).rowsAffected;
-      },
-    );
-    assert.equal(copied, 1, "the backfill did not copy the legacy row: the interleaving was not exercised");
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    const acct = await account.readWorkspaceAiAccount(BACKFILL_TWO);
-    assert.deepEqual([acct?.source, acct?.provider], ["workspace", "anthropic"]);
-    assert.equal(acct?.encryptedApiKey ? decryptField(acct.encryptedApiKey) : null, KEY_BACKFILL_TWO_NEW);
-    assert.ok(!(await keysOn(BACKFILL_TWO)).some((k) => k.endsWith(KEY_BACKFILL_TWO_OLD)), "the old key is still on a row");
-    const turn = await slackTurn(BACKFILL_TWO, "backfill-two", "sales", "sdr");
-    assert.ok(turn.ok && turn.turn.apiKey === KEY_BACKFILL_TWO_NEW, JSON.stringify(turn));
-    assert.equal((await backfill(BACKFILL_TWO)).rowsAffected, 0, "a second backfill copied the legacy row over the account");
-  });
-  await check("a member's own key and the owner's team account never touch each other, each landing inside the other's request", async () => {
-    await login(USERS.team);
-    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM })).status, 200);
-    // The member has a key for their own chats and replaces it; the owner's
-    // disconnect lands inside the replacement, just before the member's row
-    // is rewritten.
-    await login(USERS.teamRep);
-    assert.equal((await connect({ provider: "anthropic", api_key: KEY_TEAM_REP_OWN, scope: "user" })).status, 200);
-    let ownerOff = null as Awaited<ReturnType<typeof disconnect>> | null;
-    const mine = await interleaved(
-      () => connect({ provider: "anthropic", api_key: KEY_TEAM_REP_NEW, scope: "user" }),
-      statement("UPDATE", TEAMCO, USERS.teamRep.id),
-      async () => {
-        ownerOff = await as(USERS.team, () => disconnect("anthropic"));
-      },
-    );
-    assert.equal(ownerOff!.status, 200, JSON.stringify(ownerOff!.body));
-    assert.equal(mine.status, 200, JSON.stringify(mine.body));
-    assert.deepEqual(await keysOn(TEAMCO), [`sdr/own:${KEY_TEAM_REP_NEW}`], "the owner's disconnect took the member's own key, or left the team's");
-    assert.equal((await q.aiServicesWithKey(TEAMCO)).size, 0, "the member's own key reads Connected for the team");
-    assert.deepEqual([...(await account.readPersonalAiServices(TEAMCO, USERS.teamRep.id))], ["anthropic"]);
-    const slackOff = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
-    assert.deepEqual(slackOff.ok ? `answers with ${slackOff.turn.apiKey}` : slackOff.status, 412, "a Slack mention answered on the member's own key");
-    // The owner connects again; the member's removal of their own key lands
-    // inside it, after the account is saved and before the teammate rows.
-    let removed = null as Awaited<ReturnType<typeof disconnect>> | null;
-    const ownerOn = await as(USERS.team, () =>
-      interleaved(
-        () => connect({ provider: "anthropic", api_key: KEY_TEAM_AGAIN }),
-        statement("SELECT", TEAMCO, "sdr"),
-        async () => {
-          removed = await as(USERS.teamRep, () => disconnect("anthropic", "user"));
-        },
-      ),
-    );
-    assert.equal(removed!.status, 200, JSON.stringify(removed!.body));
-    assert.equal(ownerOn.status, 200, JSON.stringify(ownerOn.body));
-    assert.deepEqual(await keysOn(TEAMCO), [`__workspace__/team:${KEY_TEAM_AGAIN}`, `sdr/team:${KEY_TEAM_AGAIN}`], "the member's removal took the team's key, or kept their own");
-    const slackOn = await slackTurn(TEAMCO, "team-co", "sales", "sdr");
-    assert.ok(slackOn.ok && slackOn.turn.apiKey === KEY_TEAM_AGAIN, JSON.stringify(slackOn));
-  });
 
   console.log(`ai-workspace-account: ${failures === 0 ? "OK" : `${failures} FAILED`}`);
+  finished = true;
   if (failures) {
     console.log("captured console.error (last 15):");
     for (const line of logged.slice(-15)) console.log("   ", line.map((x) => (x instanceof Error ? x.message : typeof x === "string" ? x : JSON.stringify(x))).join(" ").slice(0, 400));

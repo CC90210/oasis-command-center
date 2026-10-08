@@ -14,15 +14,16 @@
  * THE ROW. agent_model_config with agent_key WORKSPACE_AI_AGENT_KEY
  * ("__workspace__") and user_id IS NULL. The team-wide connect
  * (app/api/agent-config/bulk-provider) writes it on every connect, whatever
- * teammates the workspace has. No migration: the partial unique index
+ * teammates the workspace has, together with those teammates' rows in ONE
+ * step (see ONE STEP below). No migration: the partial unique index
  * idx_agent_model_config_default_per_agent (tenant_id, agent_key) WHERE
  * user_id IS NULL keeps it one row per workspace, and agent_key has no CHECK.
  * It is not a teammate: the agent-config routes never list it or accept it as
  * one.
  *
  * DISCONNECT KEEPS THE ROW. Disconnecting the account's provider RETIRES the
- * row (retireWorkspaceAiAccount: key wiped, switched off) instead of deleting
- * it. The row is the record that this workspace connected through Settings,
+ * row (disconnectWorkspaceAccountInOneStep: key wiped, switched off) instead
+ * of deleting it. The row is the record that this workspace connected through Settings,
  * so the legacy row below can never answer for it again: deleting it would
  * have revived whatever older key was still on the legacy row (Codex review,
  * PR #535). A retired row is not usable, so every surface says not connected,
@@ -54,7 +55,10 @@
  * check" is never "not connected".
  */
 import "server-only";
+import type { InStatement, InValue } from "@libsql/client";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { decryptField } from "@/lib/field-encryption";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
 
@@ -187,72 +191,224 @@ export async function readPersonalAiServices(tenantId: string, userId: string): 
 }
 
 /**
- * Save the workspace's AI account (the team-wide connect): update its row, or
- * insert it. A concurrent connect that inserted first (the partial unique
- * index refuses a second row) is updated instead. Never throws.
+ * ONE STEP (PR #535 reviews). A team-wide connect and a disconnect are each ONE
+ * libSQL batch, and a batch runs as one transaction: every row it writes lands,
+ * or none does. A key is never left half-saved, and nothing has to be cleaned
+ * up after a race (five review rounds of look-backs and clean-ups each left a
+ * new half state; this replaces all of them).
+ *
+ * THE VERSION. Each batch is guarded on the account row exactly as the request
+ * read it (its stamp: provider, model, key and on/off switch). Every connect
+ * writes a fresh ciphertext (each encryption is unique) and every disconnect
+ * clears it, so the stamp changes with every write that changes the account:
+ * it is the account's version, with no new column. If another window changed
+ * the account after the read, no statement in the batch applies (the loser
+ * changes nothing) and the caller says so in a plain sentence. The account row
+ * is always the LAST statement, so every statement before it checks the stamp
+ * before the batch changes it. The only state that can recur is "retired", and
+ * a disconnect leaves nothing on that provider behind it, so finding it again
+ * is finding the same thing.
  */
-export async function saveWorkspaceAiAccount(
-  tenantId: string,
-  account: { provider: Provider; model: string; encryptedApiKey: string },
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const db = getServiceSupabase();
-  const payload = {
-    tenant_id: tenantId,
-    user_id: null,
-    agent_key: WORKSPACE_AI_AGENT_KEY,
-    provider: account.provider,
-    model: account.model,
-    enabled: true,
-    encrypted_api_key: account.encryptedApiKey,
+export type AccountStamp =
+  | { present: false }
+  | { present: true; provider: string; model: string; encryptedApiKey: string | null; enabled: number };
+
+/** The libSQL client every one-step write runs on (the store the PostgREST adapter wraps). */
+function oneStepClient() {
+  if (!tursoConfigured()) throw new Error("workspace AI account: the database is not configured");
+  return getTursoClient();
+}
+
+/** The account row as it stands, for the guard of the write that follows. Throws when the read fails. */
+export async function readAccountStamp(tenantId: string): Promise<AccountStamp> {
+  const res = await oneStepClient().execute({
+    sql: "SELECT provider, model, encrypted_api_key, enabled FROM agent_model_config WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL LIMIT 1",
+    args: [tenantId, WORKSPACE_AI_AGENT_KEY],
+  });
+  const row = res.rows[0];
+  if (!row) return { present: false };
+  return {
+    present: true,
+    provider: String(row.provider),
+    model: String(row.model),
+    encryptedApiKey: row.encrypted_api_key === null ? null : String(row.encrypted_api_key),
+    enabled: Number(row.enabled),
   };
-  const findRow = () =>
-    db
-      .from("agent_model_config")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
-      .is("user_id", null)
-      .maybeSingle();
-  try {
-    const found = await findRow();
-    if (found.error) return { ok: false, error: `lookup_failed:${found.error.code || found.error.message}` };
-    const update = async (id: string) => {
-      const { error } = await db.from("agent_model_config").update(payload).eq("id", id);
-      return error ? { ok: false as const, error: error.code || error.message } : { ok: true as const };
+}
+
+/** SQL that holds only while the account row is still exactly `stamp`. */
+function stillAsRead(tenantId: string, stamp: AccountStamp): { sql: string; args: InValue[] } {
+  if (!stamp.present) {
+    return {
+      sql: "NOT EXISTS (SELECT 1 FROM agent_model_config v WHERE v.tenant_id = ? AND v.agent_key = ? AND v.user_id IS NULL)",
+      args: [tenantId, WORKSPACE_AI_AGENT_KEY],
     };
-    const existing = found.data as { id: string } | null;
-    if (existing?.id) return await update(existing.id);
-    const inserted = await db.from("agent_model_config").insert(payload);
-    if (!inserted.error) return { ok: true };
-    const again = await findRow();
-    const raced = again.data as { id: string } | null;
-    if (!again.error && raced?.id) return await update(raced.id);
-    return { ok: false, error: inserted.error.code || inserted.error.message };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return {
+    sql:
+      "EXISTS (SELECT 1 FROM agent_model_config v WHERE v.tenant_id = ? AND v.agent_key = ? AND v.user_id IS NULL" +
+      " AND v.provider IS ? AND v.model IS ? AND v.encrypted_api_key IS ? AND v.enabled IS ?)",
+    args: [tenantId, WORKSPACE_AI_AGENT_KEY, stamp.provider, stamp.model, stamp.encryptedApiKey, stamp.enabled],
+  };
+}
+
+/** Whether `stamp` is a live account holding exactly this key, on this provider and model. */
+export function stampHoldsKey(stamp: AccountStamp, key: { provider: string; model: string; apiKey: string }): boolean {
+  if (!stamp.present || stamp.enabled !== 1 || !stamp.encryptedApiKey) return false;
+  if (stamp.provider !== key.provider || stamp.model !== key.model) return false;
+  try {
+    return decryptField(stamp.encryptedApiKey) === key.apiKey;
+  } catch {
+    return false;
   }
 }
 
 /**
- * The team-wide disconnect of `provider`: when the workspace's account is on
- * it, wipe its key and switch it off, and KEEP the row (see DISCONNECT KEEPS
- * THE ROW above). A workspace with no account row (OASIS until someone
- * connects one here) gets none: nothing changes for it. Never throws.
+ * The team-wide connect, in one step: the teammate rows it stamps (a new row
+ * is switched on; an existing one keeps its prompt, name and on/off switch and
+ * takes the new provider, model and key), the legacy `bravo` workspace row
+ * when the workspace has one and it is not a target (the old team key moves
+ * with the team; that row is only ever updated, never created), then the
+ * account row (switched on). `committed` is false when the account changed
+ * after `stamp` was read: then nothing was written. Throws when the batch
+ * fails, and then nothing was written either.
  */
-export async function retireWorkspaceAiAccount(
-  tenantId: string,
-  provider: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  try {
-    const { error } = await getServiceSupabase()
-      .from("agent_model_config")
-      .update({ enabled: false, encrypted_api_key: null })
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", WORKSPACE_AI_AGENT_KEY)
-      .is("user_id", null)
-      .eq("provider", provider);
-    return error ? { ok: false, error: error.code || error.message } : { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+export async function connectWorkspaceAccountInOneStep(input: {
+  tenantId: string;
+  stamp: AccountStamp;
+  provider: string;
+  model: string;
+  encryptedApiKey: string;
+  agentKeys: string[];
+}): Promise<{ committed: boolean; legacyRowMoved: boolean }> {
+  const { tenantId, stamp, provider, model, encryptedApiKey } = input;
+  const at = new Date().toISOString();
+  const guard = stillAsRead(tenantId, stamp);
+  const stmts: InStatement[] = input.agentKeys.map((agentKey) => ({
+    sql:
+      "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+      ` SELECT ?, NULL, ?, ?, ?, ?, 1, ? WHERE ${guard.sql}` +
+      " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL" +
+      " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = excluded.encrypted_api_key, updated_at = excluded.updated_at",
+    args: [tenantId, agentKey, provider, model, encryptedApiKey, at, ...guard.args],
+  }));
+  const moveLegacyRow = !input.agentKeys.includes(LEGACY_WORKSPACE_AI_AGENT_KEY);
+  if (moveLegacyRow) {
+    stmts.push({
+      sql:
+        "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, updated_at = ?" +
+        ` WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND ${guard.sql}`,
+      args: [provider, model, encryptedApiKey, at, tenantId, LEGACY_WORKSPACE_AI_AGENT_KEY, ...guard.args],
+    });
   }
+  stmts.push(
+    stamp.present
+      ? {
+          sql:
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, enabled = 1, updated_at = ?" +
+            ` WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND ${guard.sql}`,
+          args: [provider, model, encryptedApiKey, at, tenantId, WORKSPACE_AI_AGENT_KEY, ...guard.args],
+        }
+      : {
+          sql:
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+            ` SELECT ?, NULL, ?, ?, ?, ?, 1, ? WHERE ${guard.sql}`,
+          args: [tenantId, WORKSPACE_AI_AGENT_KEY, provider, model, encryptedApiKey, at, ...guard.args],
+        },
+  );
+  const results = await oneStepClient().batch(stmts, "write");
+  return {
+    committed: results[results.length - 1].rowsAffected === 1,
+    legacyRowMoved: moveLegacyRow && results[results.length - 2].rowsAffected === 1,
+  };
+}
+
+/**
+ * The team-wide disconnect of `provider`, in one step: every workspace row on
+ * it goes (as the card's confirmation says), and the account, when it is on
+ * it, is retired: key wiped, switched off, row kept (see DISCONNECT KEEPS THE
+ * ROW). `committed` is false when the account changed after `stamp` was read:
+ * then nothing was removed. Throws when the batch fails, and then nothing was
+ * removed either.
+ */
+export async function disconnectWorkspaceAccountInOneStep(input: {
+  tenantId: string;
+  stamp: AccountStamp;
+  provider: string;
+}): Promise<{ committed: boolean; removed: number }> {
+  const { tenantId, stamp, provider } = input;
+  const guard = stillAsRead(tenantId, stamp);
+  const stmts: InStatement[] = [
+    // Whether the guard held when the batch began (only the last statement
+    // changes the account, so it held for every statement or for none).
+    { sql: `SELECT 1 AS held WHERE ${guard.sql}`, args: guard.args },
+    {
+      sql: `DELETE FROM agent_model_config WHERE tenant_id = ? AND provider = ? AND user_id IS NULL AND agent_key <> ? AND ${guard.sql}`,
+      args: [tenantId, provider, WORKSPACE_AI_AGENT_KEY, ...guard.args],
+    },
+    {
+      sql:
+        "UPDATE agent_model_config SET enabled = 0, encrypted_api_key = NULL, updated_at = ?" +
+        ` WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND provider = ? AND ${guard.sql}`,
+      args: [new Date().toISOString(), tenantId, WORKSPACE_AI_AGENT_KEY, provider, ...guard.args],
+    },
+  ];
+  const results = await oneStepClient().batch(stmts, "write");
+  return { committed: results[0].rows.length === 1, removed: results[1].rowsAffected };
+}
+
+/**
+ * A person's own key ("Just me"), in one step across the teammates it is for:
+ * a new row is switched on; an existing one keeps its prompt, name and on/off
+ * switch. Department chats never use these rows, so no account guard. Throws
+ * when the batch fails (nothing written).
+ */
+export async function savePersonalKeyInOneStep(input: {
+  tenantId: string;
+  userId: string;
+  provider: string;
+  model: string;
+  encryptedApiKey: string;
+  agentKeys: string[];
+}): Promise<void> {
+  const at = new Date().toISOString();
+  await oneStepClient().batch(
+    input.agentKeys.map((agentKey) => ({
+      sql:
+        "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+        " VALUES (?, ?, ?, ?, ?, ?, 1, ?)" +
+        " ON CONFLICT (tenant_id, user_id, agent_key) WHERE user_id IS NOT NULL" +
+        " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = excluded.encrypted_api_key, updated_at = excluded.updated_at",
+      args: [input.tenantId, input.userId, agentKey, input.provider, input.model, input.encryptedApiKey, at],
+    })),
+    "write",
+  );
+}
+
+/**
+ * Read-only, for a connect whose answer never came back (it timed out): is
+ * exactly this key saved now? Team: the account holds it, on this provider
+ * and model. Personal: one of the person's own rows on this provider holds it
+ * (their save is one step, so one means all). Throws when the read fails.
+ */
+export async function keyIsSaved(input: {
+  tenantId: string;
+  userId: string | null;
+  scope: "tenant" | "user";
+  provider: string;
+  model: string;
+  apiKey: string;
+}): Promise<boolean> {
+  if (input.scope === "tenant") return stampHoldsKey(await readAccountStamp(input.tenantId), input);
+  const res = await oneStepClient().execute({
+    sql: "SELECT encrypted_api_key FROM agent_model_config WHERE tenant_id = ? AND user_id = ? AND provider = ? AND encrypted_api_key IS NOT NULL",
+    args: [input.tenantId, input.userId, input.provider],
+  });
+  return res.rows.some((row) => {
+    try {
+      return decryptField(String(row.encrypted_api_key)) === input.apiKey;
+    } catch {
+      return false;
+    }
+  });
 }
