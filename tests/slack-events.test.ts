@@ -1758,6 +1758,47 @@ async function main() {
         await restoreAlpha(generation);
       }
     }
+    // Every other post goes through the same re-check: the line saying a draft waits (with its review card), and a notice.
+    const posting: Array<[string, (through: typeof db) => Promise<{ ok: boolean; reason?: string }>]> = [
+      [
+        "the draft-waits line",
+        async (through) =>
+          (
+            await send.postApprovalRequest(through, {
+              tenantId: ALPHA,
+              teamId: TEAM_A,
+              channelId: "C0CLIENTS",
+              threadTs: "1727700000.000600",
+              department: "client_success",
+              draft: "drafted under the earlier install",
+              approvalId: id,
+              payloadHash: "hash",
+              openUrl: null,
+              reviewer: "UOWNER1",
+              connection: binding,
+            })
+          ).notice,
+      ],
+      [
+        "a notice",
+        (through) =>
+          send.postNotice(through, { tenantId: ALPHA, teamId: TEAM_A, channelId: "C0CLIENTS", threadTs: "1727700000.000700", text: "a notice", connection: binding }),
+      ],
+    ];
+    for (const [what, postIt] of posting) {
+      const racing = reinstallingAt(/^SELECT EXISTS \(SELECT 1 FROM tenant_connections/);
+      const postsBefore = posts.length;
+      const ephemeralsBefore = ephemerals.length;
+      try {
+        const out = await postIt(racing.db);
+        assert.ok(racing.moved(), `${what}: the reinstall landed between the token read and the post`);
+        assert.deepEqual([out.ok, out.reason], [false, "slack_connection_changed"], `${what}: ${JSON.stringify(out)}`);
+        assert.deepEqual([posts.length, ephemerals.length], [postsBefore, ephemeralsBefore], `${what}: nothing posted`);
+      } finally {
+        await tokens.saveBotToken(ALPHA, "conn-slack-a", { bot_token: TOKEN_A, bot_user_id: BOT_A });
+        await restoreAlpha(generation);
+      }
+    }
   });
 
   // Anti-vacuity: the real network is still not reachable from here.

@@ -1390,6 +1390,7 @@ async function main() {
     const due = await store.listConnectionsDueForHealth(db, {
       providers: ["stripe"],
       staleBefore: new Date(Date.now() - rules.HEALTH_RECHECK_AFTER_MS),
+      pendingSettledBefore: new Date(Date.now() - rules.PENDING_CLAIM_SETTLE_MS),
       limit: 50,
     });
     const ticks = [0, 0, 70];
@@ -1404,6 +1405,7 @@ async function main() {
     const stillDue = await store.listConnectionsDueForHealth(db, {
       providers: ["stripe"],
       staleBefore: new Date(Date.now() - rules.HEALTH_RECHECK_AFTER_MS),
+      pendingSettledBefore: new Date(Date.now() - rules.PENDING_CLAIM_SETTLE_MS),
       limit: 50,
     });
     assert.equal(stillDue.length, due.length - 1, "a deferred connection must stay due for the next pass");

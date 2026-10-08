@@ -41,6 +41,7 @@ import { SLACK_APP_FIELDS, SLACK_APP_SERVICE, oasisSlackAppWorkspaceIds, slackAp
 import {
   BOT_TOKEN_FIELD,
   HEALTH_RECHECK_AFTER_MS,
+  PENDING_CLAIM_SETTLE_MS,
   credentialServiceFor,
   isVerifiedHealthy,
   mergeVerdicts,
@@ -431,6 +432,12 @@ function credentialFieldFor(provider: ProviderDef): string {
   throw new Error(`provider_has_no_stored_key:${provider.id}`);
 }
 
+/** A pending claim nothing has written for PENDING_CLAIM_SETTLE_MS: no connect is in flight on it. */
+function pendingClaimSettled(row: ConnectionRow, now: Date): boolean {
+  const at = Date.parse(row.updated_at);
+  return Number.isFinite(at) && at < now.getTime() - PENDING_CLAIM_SETTLE_MS;
+}
+
 /**
  * Probe one stored connection with its own saved credential, compare the
  * account against the pinned one, and record the result. Used by the manual
@@ -443,9 +450,10 @@ function credentialFieldFor(provider: ProviderDef): string {
  * credential is read in one statement with that generation, and the result is
  * written only while the row is still on it. A probe that started before a
  * reinstall or a disconnect therefore records nothing over the newer install
- * (never turning its pending claim "connected"). A pending claim (a connect in
- * flight records its own first probe) and a row being disconnected are not
- * probed at all.
+ * (never turning its pending claim "connected"). A row being disconnected is
+ * not probed, nor is a pending claim younger than PENDING_CLAIM_SETTLE_MS (a
+ * connect in flight records its own first probe); an older pending claim is a
+ * connect whose first probe could not tell, and this probe settles it.
  */
 export async function probeStoredConnection(
   deps: ConnectionsDeps,
@@ -461,7 +469,8 @@ export async function probeStoredConnection(
     flipped: false,
     worsened: false,
   });
-  if (row.status === "pending" || row.status === "disconnecting") return notRecorded();
+  if (row.status === "disconnecting") return notRecorded();
+  if (row.status === "pending" && !pendingClaimSettled(row, deps.now())) return notRecorded();
   const provider = providerForEnv(row.provider, process.env);
   // Slack is checkable through the app its workspace uses, and only that
   // (lib/slack/own-app.ts slackAppFor): OASIS's app for OASIS's own workspace,
@@ -646,8 +655,12 @@ export async function auditConnection(input: {
 // ── The health cron's pass ────────────────────────────────────────────────
 
 export type HealthPassResult = {
+  /** Probes whose result was recorded. */
   checked: number;
+  /** Of those, the ones that came back healthy. */
   healthy: number;
+  /** Listed, but nothing was recorded: the row moved on (a reinstall, a disconnect) before its probe wrote. */
+  skipped: number;
   flipped: Array<{ connection_id: string; provider: string; from: string; to: string; verdict: HealthVerdict }>;
   /** `error` is a stable code (PASS_ERROR_CODES or "probe_threw"); the full error is in the server log only. */
   errors: Array<{ connection_id: string; provider: string; error: string }>;
@@ -732,11 +745,13 @@ export async function runConnectionHealthPass(
     alsoWhereTenantSaved: { provider: "slack", service: SLACK_APP_SERVICE, fields: SLACK_APP_FIELDS, exceptTenantIds: oasisSlackAppWorkspaceIds() },
     alsoForTenants: probed.includes("slack") ? { provider: "slack", tenantIds: oasisSlackAppWorkspaceIds() } : undefined,
     staleBefore: new Date(now.getTime() - HEALTH_RECHECK_AFTER_MS),
+    pendingSettledBefore: new Date(now.getTime() - PENDING_CLAIM_SETTLE_MS),
     limit: opts.limit ?? HEALTH_PASS_LIMIT,
   });
   const result: HealthPassResult = {
     checked: 0,
     healthy: 0,
+    skipped: 0,
     flipped: [],
     errors: [],
     deferred: 0,
@@ -751,6 +766,11 @@ export async function runConnectionHealthPass(
   const probeOne = async (row: ConnectionRow) => {
     try {
       const recorded = await probeStoredConnection(deps, row, "cron", { userId: null, email: null });
+      // Counted by what was recorded, never by the row's earlier verdict.
+      if (!recorded.recorded) {
+        result.skipped += 1;
+        return;
+      }
       result.checked += 1;
       if (recorded.connection.last_health_verdict === "healthy") result.healthy += 1;
       if (recorded.flipped) {

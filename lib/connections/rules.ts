@@ -110,6 +110,14 @@ const HOUR = 60 * MIN;
 export const HEALTH_FRESH_MS = 24 * HOUR;
 /** The cron re-probes a connection whose last check is older than this. */
 export const HEALTH_RECHECK_AFTER_MS = 50 * MIN;
+/**
+ * A pending claim untouched this long is no connect in flight (a connect's
+ * claim, save, route and first probe take seconds): it is one whose first
+ * probe could not tell (Slack timed out, 5xx, 429), and health checks probe it
+ * like any other connection, so it does not stay pending for good. A younger
+ * one is left to the connect that made it.
+ */
+export const PENDING_CLAIM_SETTLE_MS = 15 * MIN;
 /** connection_health_checks rows older than this are deleted by the cron. */
 export const HEALTH_CHECK_RETENTION_MS = 30 * 24 * HOUR;
 /** How long a started OAuth consent may take before its state expires. */

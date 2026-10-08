@@ -102,6 +102,18 @@ export async function slackTokenFor(db: Client, tenantId: string, teamId: string
   return { ok: true, token: token.token, botUserId: token.botUserId, connection: binding };
 }
 
+/**
+ * The token for a post: slackTokenFor, then the connection's generation checked
+ * once more right before it is used, so a disconnect or a reinstall since the
+ * token was read stops the post. Every post in this file goes through here.
+ */
+async function tokenForPost(db: Client, tenantId: string, teamId: string, connection?: SlackConnectionBinding): Promise<Token> {
+  const token = await slackTokenFor(db, tenantId, teamId, connection);
+  if (!token.ok) return token;
+  if (!(await isConnectionAt(db, tenantId, token.connection.id, token.connection.generation))) return connectionChanged();
+  return token;
+}
+
 function slackFailureMessage(error: string): string {
   switch (error) {
     case "not_in_channel":
@@ -124,11 +136,8 @@ function slackFailureMessage(error: string): string {
 }
 
 export async function postSlackReply(db: Client, args: SlackPostArgs, opts: { fetchImpl?: SlackFetch; now?: () => Date } = {}): Promise<SlackPostOutcome> {
-  const token = await slackTokenFor(db, args.tenantId, args.teamId, args.connection ?? undefined);
+  const token = await tokenForPost(db, args.tenantId, args.teamId, args.connection ?? undefined);
   if (!token.ok) return token;
-  // Re-checked right before the post: a disconnect or a reinstall since the
-  // token was read stops the reply here.
-  if (!(await isConnectionAt(db, args.tenantId, token.connection.id, token.connection.generation))) return connectionChanged();
   // Posted as the words that were approved. Slack reads &, < and > in a
   // message as its own markup (<!channel> pings everyone, <@U..> mentions,
   // <https://..|label> hides a link behind a label), none of which the
@@ -326,7 +335,7 @@ export async function postApprovalRequest(
   },
   opts: { fetchImpl?: SlackFetch } = {},
 ): Promise<ApprovalRequestOutcome> {
-  const token = await slackTokenFor(db, input.tenantId, input.teamId, input.connection);
+  const token = await tokenForPost(db, input.tenantId, input.teamId, input.connection);
   if (!token.ok) return { notice: token, review: token };
   const label = departmentLabelOf(input.department);
   const posted = await postMessage(
@@ -367,7 +376,7 @@ export async function postNotice(
   input: { tenantId: string; teamId: string; channelId: string; threadTs: string; text: string; connection: SlackConnectionBinding },
   opts: { fetchImpl?: SlackFetch } = {},
 ): Promise<SlackPostOutcome> {
-  const token = await slackTokenFor(db, input.tenantId, input.teamId, input.connection);
+  const token = await tokenForPost(db, input.tenantId, input.teamId, input.connection);
   if (!token.ok) return token;
   const posted = await postMessage(token.token, { channel: input.channelId, thread_ts: input.threadTs, text: input.text }, { fetchImpl: opts.fetchImpl });
   if (!posted.ok) return { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };

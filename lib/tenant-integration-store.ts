@@ -576,36 +576,96 @@ export async function readTenantCredentialsWhile(
   return Object.keys(values).length ? { ok: true, values } : { ok: false, reason: "missing" };
 }
 
+/** One record a cron lists by prefix (listTenantIntegrationServicesByPrefix). */
+export type PrefixedServiceRecord = {
+  tenantId: string;
+  service: string;
+  /** The fields that decrypted. */
+  values: Record<string, string>;
+  /** A stored field would not decrypt: the record cannot be acted on, and must never be read as empty. */
+  unreadable: boolean;
+  createdAt: string;
+};
+
+function assertServicePrefix(prefix: string): void {
+  if (!prefix || /[%_\\]/.test(prefix)) throw new Error("tenant_credential_prefix_invalid");
+}
+
 /**
- * CROSS-TENANT, system only (a cron). Every service whose name starts with
- * `prefix`, with its fields decrypted, oldest first: how the connection-health
- * cron finds the cleanup records an abandoned Slack install left
- * (lib/slack/install.ts). A field that will not decrypt is left out, logged.
+ * CROSS-TENANT, system only (a cron). Services whose name starts with `prefix`
+ * and that were created before `createdBefore`, least recently tried first
+ * (never tried, then the oldest try: markTenantIntegrationServiceTried), so
+ * records that cannot be settled go to the back of the line and never starve
+ * one that can. Fields decrypted; a field that will not decrypt marks the
+ * record `unreadable` (logged). How the connection-health cron finds the
+ * cleanup records an abandoned Slack install left (lib/slack/install.ts).
  */
 export async function listTenantIntegrationServicesByPrefix(
   db: Client,
-  input: { prefix: string; limit: number },
-): Promise<Array<{ tenantId: string; service: string; values: Record<string, string> }>> {
-  if (!input.prefix || /[%_\\]/.test(input.prefix)) throw new Error("tenant_credential_prefix_invalid");
+  input: { prefix: string; createdBefore: Date; limit: number },
+): Promise<PrefixedServiceRecord[]> {
+  assertServicePrefix(input.prefix);
   const rs = await db.execute({
-    sql: `SELECT tenant_id, service, field_key, encrypted_value FROM tenant_integration_credentials
-          WHERE service IN (
-            SELECT service FROM tenant_integration_credentials WHERE service LIKE ? GROUP BY service ORDER BY MIN(created_at) LIMIT ?
-          )`,
-    args: [`${input.prefix}%`, Math.max(1, Math.min(100, input.limit))],
+    sql: `SELECT k.tenant_id, k.service, k.field_key, k.encrypted_value, d.created_at, d.tried_at
+          FROM tenant_integration_credentials k
+          JOIN (
+            SELECT tenant_id, service, MIN(created_at) AS created_at, MAX(last_tested_at) AS tried_at
+            FROM tenant_integration_credentials
+            WHERE service LIKE ?
+            GROUP BY tenant_id, service
+            HAVING MIN(created_at) < ?
+            ORDER BY MAX(last_tested_at) IS NOT NULL, MAX(last_tested_at), MIN(created_at)
+            LIMIT ?
+          ) d ON d.tenant_id = k.tenant_id AND d.service = k.service`,
+    args: [`${input.prefix}%`, input.createdBefore.toISOString(), Math.max(1, Math.min(100, input.limit))],
   });
-  const out = new Map<string, { tenantId: string; service: string; values: Record<string, string> }>();
+  const out = new Map<string, PrefixedServiceRecord & { triedAt: string | null }>();
   for (const r of rs.rows as unknown as Array<Record<string, unknown>>) {
     const key = `${String(r.tenant_id)}|${String(r.service)}`;
-    const entry = out.get(key) ?? { tenantId: String(r.tenant_id), service: String(r.service), values: {} };
+    const entry = out.get(key) ?? {
+      tenantId: String(r.tenant_id),
+      service: String(r.service),
+      values: {},
+      unreadable: false,
+      createdAt: String(r.created_at),
+      triedAt: r.tried_at === null || r.tried_at === undefined ? null : String(r.tried_at),
+    };
     try {
       entry.values[String(r.field_key)] = decryptField(String(r.encrypted_value));
     } catch (err) {
+      entry.unreadable = true;
       console.error("[tenant-integration-store] listed credential decrypt failed", { tenantId: entry.tenantId, service: entry.service, field: r.field_key, err });
     }
     out.set(key, entry);
   }
-  return [...out.values()];
+  // The order the batch was chosen in (never tried first, then the oldest try).
+  return [...out.values()]
+    .sort((a, b) => (a.triedAt === null ? 0 : 1) - (b.triedAt === null ? 0 : 1) || (a.triedAt ?? "").localeCompare(b.triedAt ?? "") || a.createdAt.localeCompare(b.createdAt))
+    .map(({ triedAt: _triedAt, ...record }) => record);
+}
+
+/** CROSS-TENANT, system only (a cron). Note an attempt on a listed record that did not settle it: it goes to the back of the line. */
+export async function markTenantIntegrationServiceTried(
+  db: Client,
+  input: { tenantId: string; service: string; error: string; now: Date },
+): Promise<void> {
+  await db.execute({
+    sql: `UPDATE tenant_integration_credentials SET last_tested_at = ?, last_test_ok = 0, last_test_error = ? WHERE tenant_id = ? AND service = ?`,
+    args: [input.now.toISOString(), input.error.slice(0, 200), input.tenantId, input.service],
+  });
+}
+
+/** CROSS-TENANT, system only (a cron). How many services with this prefix were created before `createdBefore`. */
+export async function countTenantIntegrationServicesByPrefix(db: Client, input: { prefix: string; createdBefore: Date }): Promise<number> {
+  assertServicePrefix(input.prefix);
+  const rs = await db.execute({
+    sql: `SELECT COUNT(*) AS n FROM (
+            SELECT 1 FROM tenant_integration_credentials WHERE service LIKE ?
+            GROUP BY tenant_id, service HAVING MIN(created_at) < ?
+          )`,
+    args: [`${input.prefix}%`, input.createdBefore.toISOString()],
+  });
+  return Number((rs.rows[0] as unknown as { n: unknown } | undefined)?.n ?? 0);
 }
 
 /**

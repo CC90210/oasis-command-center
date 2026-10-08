@@ -219,20 +219,27 @@ export async function isConnectionAt(db: Client, tenantId: string, connectionId:
 /**
  * CROSS-TENANT, system only. The connections that hold an external account
  * now (not revoked, not being disconnected; a pending claim counts), in any
- * tenant: who may be using a credential an abandoned install also received
- * (Slack hands the SAME bot token to every install of one app in one workspace).
+ * tenant, with their status and generation: who may be using a credential an
+ * abandoned install also received (Slack hands the SAME bot token to every
+ * install of one app in one workspace), and who may be about to store it (a
+ * pending claim whose connect has not saved its token yet).
  */
 export async function listLiveConnectionsForAccount(
   db: Client,
   provider: string,
   externalAccountId: string,
-): Promise<Array<{ id: string; tenantId: string }>> {
+): Promise<Array<{ id: string; tenantId: string; status: ConnectionStatus; generation: number }>> {
   const rs = await db.execute({
-    sql: `SELECT id, tenant_id FROM tenant_connections
+    sql: `SELECT id, tenant_id, status, token_version FROM tenant_connections
           WHERE provider = ? AND external_account_id = ? AND revoked_at IS NULL AND status <> 'disconnecting'`,
     args: [provider, externalAccountId],
   });
-  return rows(rs).map((r) => ({ id: String(r.id), tenantId: String(r.tenant_id) }));
+  return rows(rs).map((r) => ({
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    status: String(r.status) as ConnectionStatus,
+    generation: num(r.token_version),
+  }));
 }
 
 /** The connection is still the pending claim a connect made at `generation` (nothing has moved it on). */
@@ -877,6 +884,14 @@ export async function registerWebhookRoute(
   }
 }
 
+/** The statement that deletes this connection's routes while `guard` holds, for the caller's own batch. */
+export function deleteWebhookRoutesWhile(input: { tenantId: string; connectionId: string; guard: SqlGuard }): InStatement {
+  return {
+    sql: `DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ? AND ${input.guard.sql}`,
+    args: [input.tenantId, input.connectionId, ...input.guard.args],
+  };
+}
+
 /**
  * CROSS-TENANT by nature: a webhook arrives with no session, and this is how
  * it finds its tenant. Only a live connection answers (not revoked, not being
@@ -903,9 +918,12 @@ export async function resolveWebhookRoute(
 
 /**
  * CROSS-TENANT (cron only). Live connections of the given providers whose last
- * check is older than `staleBefore`, never-checked first. Revoked rows, rows
- * being disconnected, and pending claims (a connect in flight, which records
- * its own first probe) are never probed.
+ * check is older than `staleBefore`, never-checked first. Revoked rows and rows
+ * being disconnected are never probed. A pending claim is probed only once it
+ * has been untouched since `pendingSettledBefore` (rules.PENDING_CLAIM_SETTLE_MS):
+ * a younger one is a connect in flight, which records its own first probe; an
+ * older one is a connect whose first probe could not tell, and the next check
+ * settles it.
  */
 export async function listConnectionsDueForHealth(
   db: Client,
@@ -922,6 +940,8 @@ export async function listConnectionsDueForHealth(
     /** Also this provider's connections in exactly these workspaces (Slack: OASIS's own, on OASIS's app). */
     alsoForTenants?: { provider: string; tenantIds: readonly string[] };
     staleBefore: Date;
+    /** A pending claim is due only when its row was last written before this. */
+    pendingSettledBefore: Date;
     limit: number;
   },
 ): Promise<ConnectionRow[]> {
@@ -950,11 +970,12 @@ export async function listConnectionsDueForHealth(
   }
   const rs = await db.execute({
     sql: `SELECT ${CONNECTION_COLUMNS} FROM tenant_connections
-          WHERE (${which.join(" OR ")}) AND revoked_at IS NULL AND status NOT IN ('disconnecting', 'pending')
+          WHERE (${which.join(" OR ")}) AND revoked_at IS NULL AND status <> 'disconnecting'
+            AND (status <> 'pending' OR updated_at < ?)
             AND (last_health_at IS NULL OR last_health_at < ?)
           ORDER BY COALESCE(last_health_at, '') ASC
           LIMIT ?`,
-    args: [...args, input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
+    args: [...args, input.pendingSettledBefore.toISOString(), input.staleBefore.toISOString(), Math.max(1, Math.min(500, input.limit))],
   });
   return rows(rs).map(toConnection);
 }
