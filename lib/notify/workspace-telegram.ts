@@ -68,14 +68,15 @@ async function readField(tenantId: string, fieldKey: "bot_token" | "chat_id"): P
 }
 
 /**
- * Telegram's refusal in words an owner can act on ("Bad Request: chat not
- * found"). The bot token never leaves this function inside it: a network
- * error message may quote the request URL, and the token is part of that URL.
+ * Telegram's refusal in words an owner can act on ("Telegram said: Bad
+ * Request: chat not found"). The bot token never leaves this function inside
+ * it: Telegram may quote the request, and a network error message may quote
+ * the request URL, which carries the token.
  */
 function sendFailureDetail(reason: string | undefined, token: string): string {
   const raw = (reason || "").split(token).join("[token]");
   const http = /^telegram_http_(\d+)(?::\s*([\s\S]*))?$/.exec(raw);
-  if (http) return (http[2]?.trim() || `Telegram answered ${http[1]}`).slice(0, 200);
+  if (http) return `Telegram said: ${(http[2]?.trim() || `HTTP ${http[1]}`).slice(0, 200)}`;
   return "Telegram could not be reached";
 }
 
@@ -86,9 +87,8 @@ function sendFailureDetail(reason: string | undefined, token: string): string {
 export async function sendWorkspaceTelegram(tenantId: string, text: string): Promise<WorkspaceTelegramResult> {
   const id = (tenantId || "").trim();
   if (!id) return { ok: false, reason: "workspace_telegram_not_connected" };
-  const token = await readField(id, "bot_token");
+  const [token, chat] = await Promise.all([readField(id, "bot_token"), readField(id, "chat_id")]);
   if (!token.ok) return token;
-  const chat = await readField(id, "chat_id");
   if (!chat.ok) return chat;
   const sent = await sendTelegram(text, { token: token.value, chatId: chat.value });
   if (sent.ok) return { ok: true };
@@ -96,20 +96,20 @@ export async function sendWorkspaceTelegram(tenantId: string, text: string): Pro
 }
 
 /**
- * The outcome in the words recorded on the alert card ("sent", "not
- * connected", ...). One wording for every caller, so a card and a ticket never
+ * The outcome in the words the alert card shows its owner. One wording for
+ * every caller (lib/notify/alert-route.ts), so a card and a ticket never
  * describe the same failure two ways.
  */
 export function workspaceTelegramOutcome(result: WorkspaceTelegramResult): string {
-  if (result.ok) return "sent";
+  if (result.ok) return "Sent to Telegram";
   switch (result.reason) {
     case "workspace_telegram_not_connected":
-      return "not connected";
+      return "Not sent: no Telegram bot connected";
     case "workspace_telegram_unreadable":
-      return "saved bot could not be read";
+      return "Not sent: the saved Telegram bot could not be read";
     case "workspace_telegram_lookup_failed":
-      return "could not check";
+      return "Not sent: the saved Telegram bot could not be checked";
     default:
-      return `failed: ${result.detail || "Telegram refused it"}`;
+      return `Not sent: ${result.detail || "Telegram refused it"}`;
   }
 }

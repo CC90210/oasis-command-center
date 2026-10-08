@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { queueInferForTenant } from "@/lib/ai/infer";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { CUSTOMER_MESSAGE_KEY } from "@/components/os/landings/feed-model";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -1100,7 +1101,6 @@ async function notifyRep(input: {
     severity: input.severity,
     title: input.title,
     body: input.summary,
-    lane: "operator",
     subjectType: "call_appointment",
     subjectId: input.appointment.id,
     payload: { job_id: input.job.id, intent: input.job.intent },
@@ -1515,6 +1515,15 @@ const WORKSPACE_FEED_POSTED = "workspace_feed_posted";
  *     so the Feed says they opted out rather than that they need a reply.
  * The Feed write is idempotent per job, so a retry after a failed completion
  * cannot post the same text twice; a failed write throws, and the job retries.
+ *
+ * THE CUSTOMER'S WORDS STAY IN ONE KEY. The phone number and the message go
+ * only under CUSTOMER_MESSAGE_KEY, which the Feed and /api/event-feed show to
+ * this workspace's own viewers who may see client identities, and strip for
+ * everyone else. `note`, the line every viewer reads, says nothing about the
+ * customer: BEA's event router copies `note`, `preview` and a few other keys
+ * of every workspace's events into its log on CC's PC
+ * (scripts/core/event_router.py _project). An ordinary text is `info`, not a
+ * warning: it is a customer to answer, not a fault.
  */
 async function handOffToWorkspace(db: Db, job: SmsAgentJob): Promise<ProcessResult> {
   const optedOut = smsAgentCarrierStopRequiresCancellation({
@@ -1527,20 +1536,19 @@ async function handOffToWorkspace(db: Db, job: SmsAgentJob): Promise<ProcessResu
     event_type: optedOut ? "CUSTOMER_OPTED_OUT_OF_TEXTS" : "CUSTOMER_TEXT_NEEDS_REPLY",
     // The Feed's explicit department attribution: texts arrive on leads.
     publisher_agent: "dept:sales",
-    severity: optedOut ? "info" : "warn",
+    severity: "info",
     target_agent: null,
     correlation_id: job.tenant_id,
     idempotency_key: `sms-agent:${job.id}:workspace-feed`,
     payload: {
       tenant_id: job.tenant_id,
-      // The Feed's one-line summary prints `preview`.
-      preview: optedOut
-        ? `${job.from_phone} replied STOP. Texts to this number are off.`
-        : `${job.from_phone}: ${text}`,
+      note: optedOut
+        ? "A customer replied STOP. Texts to that number are off, so do not text them."
+        : "A customer texted your number and is waiting for a reply. Nothing was sent to them automatically.",
       channel: "sms",
-      phone: job.from_phone,
       lead_id: job.lead_id,
       sms_agent_job_id: job.id,
+      [CUSTOMER_MESSAGE_KEY]: { phone: job.from_phone, text },
     },
   });
   if (posted.error && !isUniqueViolationError(posted.error)) {
@@ -1736,7 +1744,6 @@ async function processClaimedJob(
       severity: "warn",
       title: "Inbound SMS has no matching appointment",
       body: `Intent: ${intent}. No calendar action was taken.`,
-      lane: "operator",
       subjectType: "sms_agent_job",
       subjectId: job.id,
       telegram: true,
@@ -2068,7 +2075,6 @@ async function markDeadLetter(db: Db, job: Pick<SmsAgentJob, "id" | "tenant_id" 
     body: oasisVoice
       ? reason
       : "It reached your number and was saved, but it was not handed to your team automatically. Contact OASIS support if this keeps happening.",
-    lane: "operator",
     subjectType: job.appointment_id ? "call_appointment" : "sms_agent_job",
     subjectId: job.appointment_id || job.id,
     telegram: true,

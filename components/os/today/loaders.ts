@@ -66,6 +66,8 @@ import {
   type HotReply,
   type Read,
   type SalesSnapshot,
+  type WorkspaceAlertCard,
+  type WorkspaceAlerts,
 } from "@/components/os/today/model";
 
 /**
@@ -311,6 +313,50 @@ export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionA
       detail: c.last_health_detail,
     })),
   );
+}
+
+/** How many open alert cards Needs you lists; past it the count is a floor. */
+export const WORKSPACE_ALERTS_SHOWN = 10;
+
+/**
+ * The workspace's open alert cards (agent_alerts, lib/notify/agent-alert.ts),
+ * newest first: its own rows only, by tenant id. A workspace whose Telegram
+ * is not connected learns about an alert here and nowhere else. A failed read
+ * is "Couldn't check alerts", never "no alerts".
+ */
+export function loadWorkspaceAlerts(tenantId: string): Promise<Read<WorkspaceAlerts>> {
+  return read("alerts", async () => {
+    // One more than is shown, so "more are open" is known rather than guessed.
+    const res = await getServiceSupabase()
+      .from("agent_alerts")
+      .select("id, title, body, severity, payload, created_at")
+      .eq("tenant_id", tenantId)
+      .is("resolved_at", null)
+      .order("created_at", { ascending: false })
+      .limit(WORKSPACE_ALERTS_SHOWN + 1);
+    if (res.error) throw new Error(`alerts read failed: ${res.error.message}`);
+    const rows = (res.data || []) as Array<Record<string, unknown>>;
+    const cards = rows.slice(0, WORKSPACE_ALERTS_SHOWN).map((row): WorkspaceAlertCard => {
+      let payload = row.payload;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          payload = null;
+        }
+      }
+      const telegram = payload && typeof payload === "object" ? (payload as Record<string, unknown>).telegram : null;
+      return {
+        id: String(row.id),
+        title: String(row.title ?? ""),
+        body: typeof row.body === "string" && row.body.trim() ? row.body : null,
+        severity: String(row.severity ?? "info"),
+        createdAtMs: Number.isFinite(Date.parse(String(row.created_at ?? ""))) ? Date.parse(String(row.created_at)) : null,
+        telegram: typeof telegram === "string" ? telegram : null,
+      };
+    });
+    return { cards, truncated: rows.length > WORKSPACE_ALERTS_SHOWN };
+  });
 }
 
 /**

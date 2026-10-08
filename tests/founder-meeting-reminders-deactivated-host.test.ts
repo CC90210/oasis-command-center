@@ -82,7 +82,7 @@ stubModule(require.resolve("../lib/tcpa-window"), {
   checkTcpaWindow: () => ({ usedFallback: false, withinWindow: true }),
   dispatchByTcpaWindow: async (_check: unknown, effects: { send: () => unknown }) => effects.send(),
 });
-type Alert = { tenantId: string; alertType: string; severity: string; lane: string; payload?: Record<string, unknown> };
+type Alert = { tenantId: string; alertType: string; severity: string; lane?: string; payload?: Record<string, unknown> };
 const alerts: Alert[] = [];
 stubModule(require.resolve("../lib/notify/agent-alert"), {
   writeAgentAlert: async (input: Alert) => void alerts.push(input),
@@ -244,7 +244,9 @@ async function main() {
     assert.equal(alerts[0].tenantId, OASIS);
     assert.equal(alerts[0].alertType, "founder_meeting_sender_deactivated");
     assert.equal(alerts[0].severity, "warn");
-    assert.equal(alerts[0].lane, "operator");
+    // No lane from the caller: OASIS's workspace pages OASIS's operator chat
+    // because the workspace decides (lib/notify/alert-route.ts).
+    assert.equal(alerts[0].lane, undefined);
     assert.deepEqual(alerts[0].payload, {
       notification_ids: ["n-ethan-email-1", "n-ethan-email-2"],
       appointment_ids: ["appt-ethan-1", "appt-ethan-2"],

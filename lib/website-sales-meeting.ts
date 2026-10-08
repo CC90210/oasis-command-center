@@ -1,5 +1,5 @@
 import { countSegments } from "./sms-segments";
-import { brandForTenant } from "./email/brand-for-tenant";
+import { isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i;
@@ -27,10 +27,12 @@ export type MeetingSmsVoice = { prefix: string; timeZone: string };
  * FOUNDER_MEETING_TIMEZONE. Any other workspace gets null, never OASIS's voice
  * by default, and the SMS reply agent answers none of its texts: it hands each
  * one to that workspace's own team instead (lib/sms/reply-agent.ts). Keyed by
- * tenant id through brandForTenant, the map every outbound identity reads.
+ * exact tenant id through isOasisInternalTenant, the same rule that sends
+ * alerts to OASIS's own chat (lib/notify/alert-route.ts), so "is this OASIS"
+ * has one answer.
  */
 export function meetingSmsVoiceFor(tenantId: string | null | undefined): MeetingSmsVoice | null {
-  return brandForTenant({ tenantId }) === "oasis"
+  return isOasisInternalTenant(tenantId)
     ? { prefix: SMS_BRAND_PREFIX, timeZone: FOUNDER_MEETING_TIMEZONE }
     : null;
 }

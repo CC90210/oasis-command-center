@@ -48,13 +48,16 @@
  *
  * LANES ARE OASIS'S, NEVER A CLIENT'S
  * -----------------------------------
- * Every lane below is an OASIS deployment credential. A client workspace's
- * alert never rides one: writeAgentAlert sends it only to the bot that
- * workspace saved under Connections > Telegram (./workspace-telegram.ts), and
- * a workspace with no saved bot gets its in-app card and nothing else. Until
+ * Every lane below is an OASIS deployment credential. An alert's audience is
+ * chosen from its WORKSPACE in one place, ./alert-route.ts: OASIS's own
+ * workspaces ride the "operator" lane, a client workspace's alert goes only to
+ * the bot it saved under Connections > Telegram (./workspace-telegram.ts) or
+ * stays an in-app card, and the retired SunBiz workspace pages nobody. Until
  * 2026-10-02 the lane was chosen per call site, not per workspace, so a
  * client's customers' texts were escalated into CC's DM. A new lane is for a
  * new OASIS audience; a client audience is a workspace bot, never a lane.
+ * tests/workspace-alerts.test.ts fails if a file outside its allow-list names
+ * a lane.
  */
 import "server-only";
 

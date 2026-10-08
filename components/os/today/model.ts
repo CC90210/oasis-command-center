@@ -37,7 +37,7 @@ import { needsAttention } from "@/lib/connections/rules";
 import type { CashCoverage, CoverageAccount } from "@/lib/founders-finances/cash-coverage";
 import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
-import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
+import { CONNECTOR_CATALOG, connectorHref } from "@/lib/os/connectors";
 import { FOUNDER_MEETING_DURATION_MINUTES } from "@/lib/website-sales-meeting";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
@@ -64,6 +64,8 @@ export type TodayBriefPlan = {
   connections: boolean;
   /** Routine health (the Operations card and a failed-routine row): whoever the rail shows Operations to. */
   routines: boolean;
+  /** The workspace's open alert cards (lib/notify/agent-alert.ts): its owners/admins, like connections. */
+  alerts: boolean;
 };
 
 export function todayBriefPlan(input: {
@@ -93,6 +95,9 @@ export function todayBriefPlan(input: {
     // owner/admin (the founder persona) who may see system surfaces and act.
     connections: input.persona === "founder" && caps.canSeeSystemSurfaces && caps.canAct,
     routines: input.departments.has("operations"),
+    // An alert card is the workspace's own (never another's), and resolving
+    // one is an owner's act: the same audience as connections.
+    alerts: input.persona === "founder" && caps.canSeeSystemSurfaces && caps.canAct,
   };
 }
 
@@ -620,10 +625,32 @@ export function cashView(read: Read<CashSnapshot>): CashView {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type NeedsYouTone = "urgent" | "attention" | "info";
-export type NeedsYouIcon = "follow_up" | "sla" | "reply" | "meeting" | "invoice" | "bank" | "connection" | "routine";
+export type NeedsYouIcon = "follow_up" | "sla" | "reply" | "meeting" | "invoice" | "bank" | "connection" | "routine" | "alert";
 
 /** One live connection as Needs you sees it (lib/connections/store listActiveConnections, reduced). */
 export type ConnectionAttention = { provider: string; label: string; status: string; detail: string | null };
+
+/**
+ * One open alert card of this workspace (agent_alerts, read by loaders.ts
+ * loadWorkspaceAlerts). `telegram` is what its Telegram push did, in the words
+ * lib/notify/alert-route.ts records ("Sent to Telegram", "Not sent: no
+ * Telegram bot connected"); null when no push was due.
+ */
+export type WorkspaceAlertCard = {
+  id: string;
+  title: string;
+  body: string | null;
+  severity: string;
+  /** Null when the row's time could not be read: no date is printed rather than a made-up one. */
+  createdAtMs: number | null;
+  telegram: string | null;
+};
+
+/** The newest open cards, and whether more are open than were read (the count is then a floor). */
+export type WorkspaceAlerts = { cards: WorkspaceAlertCard[]; truncated: boolean };
+
+/** The Feed's Needs-you tab, where an alert card is resolved. */
+export const FEED_NEEDS_HREF = "/feed?tab=needs";
 
 export type NeedsYouItem = {
   id: string;
@@ -644,6 +671,8 @@ export type NeedsYouItem = {
    * its own things, which no other row counts.
    */
   subjects?: readonly string[];
+  /** An alert card: the row carries a Resolve button for this agent_alerts id. */
+  resolveAlertId?: string;
 };
 
 /** A lead as a Needs-you subject: the key the shared total counts it by. */
@@ -680,12 +709,43 @@ export function buildNeedsYou(input: {
   connections?: Read<ConnectionAttention[]> | null;
   /** The workspace's routine health. Null/absent = not read for this viewer. */
   routines?: Read<RoutineHealth> | null;
+  /** The workspace's open alert cards. Null/absent = not read for this viewer. */
+  alerts?: Read<WorkspaceAlerts> | null;
   nowMs: number;
   formatTime?: (ms: number) => string;
 }): NeedsYou {
   const time = input.formatTime ?? operatorTime;
   const items: NeedsYouItem[] = [];
   const unavailable: string[] = [];
+
+  // The workspace's own open alert cards: what happened, when, and whether its
+  // Telegram heard about it. A workspace with no bot connected learns about the
+  // alert here (the push said "Not sent: no Telegram bot connected"), and the
+  // row opens Connections > Telegram. Each stays until it is resolved, by its
+  // owner here or by the recovery that closes it (lib/notify/agent-alert.ts).
+  if (input.alerts) {
+    if (!input.alerts.ok) unavailable.push("alerts");
+    else {
+      const { cards, truncated } = input.alerts.value;
+      cards.forEach((a, i) => {
+        const notConnected = a.telegram === "Not sent: no Telegram bot connected";
+        items.push({
+          id: `alert-${a.id}`,
+          tone: a.severity === "urgent" ? "urgent" : a.severity === "warn" ? "attention" : "info",
+          icon: "alert",
+          title: a.title,
+          detail: [a.body, a.createdAtMs !== null ? operatorWhen(a.createdAtMs) : null, a.telegram ?? "Shown here only"]
+            .filter(Boolean)
+            .join(" \u00b7 "),
+          count: null,
+          // More open than were read: the shared total prints a floor.
+          capped: truncated && i === cards.length - 1 ? true : undefined,
+          href: notConnected ? connectorHref("telegram") : FEED_NEEDS_HREF,
+          resolveAlertId: a.id,
+        });
+      });
+    }
+  }
 
   // Approvals first: they are the one thing here only this person can unblock.
   let approvals: ApprovalsBlock | null = null;

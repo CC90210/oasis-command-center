@@ -14,7 +14,7 @@ import "server-only";
 import { readRecentReceiptsByLine } from "./delivery-receipts";
 import { sendableLines, wireDecision, type LineDecision } from "./line-health-core";
 import { canaryStatus } from "./canary";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isRetiredTenant } from "@/lib/tenant/retired";
@@ -96,7 +96,9 @@ function esc(s: string): string {
 }
 
 /**
- * Tell Adon a line was benched, once, on the standing decay ladder.
+ * Tell the workspace a line was benched, once, on the standing decay ladder.
+ * The page goes to that workspace's own audience (lib/notify/alert-route.ts);
+ * until 2026-10-02 every workspace's benched lines paged the SunBiz chat.
  *
  * KEYED ON THE CONDITION, not the message: the alert key is the line plus the
  * wire, so a number that keeps failing re-alerts on the ladder rather than
@@ -139,7 +141,7 @@ export async function announceBenchedLines(
       new Date(nowMs),
     );
     if (!decision.send) continue;
-    await sendTelegram(c.body, { lane: "sunbiz-ops" }).catch(() => undefined);
+    await pushWorkspaceAlert(tenantId, c.body);
     alerted.push(c.key);
     // Recorded regardless of delivery: if Telegram is down we must not spin
     // re-sending on every dispatch tick. The delivery self-test is the separate

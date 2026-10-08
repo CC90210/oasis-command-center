@@ -103,6 +103,8 @@ stubModule(require.resolve("../lib/notify/agent-alert"), {
     agentAlerts.push(input.tenantId);
     return { ok: true };
   },
+  // reconcile-sms closes a recovered tenant's carrier card through this.
+  resolveAgentAlerts: async () => 0,
 });
 stubModule(require.resolve("../lib/integrations/texttorrent-sender"), {
   resolveTextTorrentSenderId: async () => undefined,

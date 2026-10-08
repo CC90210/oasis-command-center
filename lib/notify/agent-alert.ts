@@ -1,30 +1,33 @@
 /**
- * agent-alert.ts — write an operator-visible alert from oasis server code.
+ * agent-alert.ts - write an alert card for a workspace, and page whoever owns
+ * that workspace's alerts.
  *
  * Two surfaces in one call:
- *  1. A durable `agent_alerts` row — rendered in the dashboard System Health
- *     panel and resolvable via POST /api/agent-alerts/[id]/resolve. This is the
- *     record the operator sees and dismisses.
+ *  1. A durable `agent_alerts` row: the card. The workspace's owners see it in
+ *     Needs you (Today and the Feed, components/os/today) and on the manifest
+ *     dashboard, and resolve it with POST /api/agent-alerts/[id]/resolve.
  *  2. For warn/urgent, a Telegram push so a live failure pages someone instead
- *     of waiting to be noticed. WHOSE Telegram depends on whose alert it is:
- *     an OASIS workspace's alert goes on the lane its caller names
- *     (lib/notify/telegram); any other workspace's alert goes only to the bot
- *     that workspace saved (lib/notify/workspace-telegram), and the lane is
- *     ignored. Every lane is an OASIS credential, so before 2026-10-02 a
- *     client's alerts (its customers' texts, escalated by the SMS reply agent)
- *     reached CC's phone and the client heard nothing. What the push did
- *     ("sent", "not connected", "failed: ...") is recorded on the row's
- *     payload as `telegram`.
+ *     of waiting to be noticed. WHOSE Telegram is decided by the workspace and
+ *     nothing else (lib/notify/alert-route.ts): OASIS's own workspaces page
+ *     OASIS's operator chat, any other workspace its own saved bot or nobody
+ *     outside the app, the retired SunBiz workspace nobody. Callers do not name
+ *     a lane: until 2026-10-02 they did, so a client's alerts (its customers'
+ *     texts, escalated by the SMS reply agent) reached CC's phone and the client
+ *     heard nothing. What the push did is recorded on the card's payload as
+ *     `telegram`, in the words the card shows ("Sent to Telegram", "Not sent:
+ *     no Telegram bot connected").
  *
  * The `agent_alerts` schema is owned by the VPS SunBiz-Agent repo (migration
  * 069/health-check convention): columns tenant_id, alert_type, severity
  * ('info'|'warn'|'urgent'), subject_type, subject_id, title, body, payload,
- * created_at, resolved_at. There is no TS insert wrapper elsewhere — this is it.
+ * created_at, resolved_at, resolved_by. There is no TS insert wrapper
+ * elsewhere: this is it.
  *
  * De-duplicated the same way the VPS health-check does: if an UNRESOLVED row for
  * the same (tenant, alert_type, subject) already exists we refresh it instead of
  * inserting a duplicate, so a repeatedly-failing signal (e.g. a bad HMAC secret
- * firing every minute) is ONE open card, not a storm.
+ * firing every minute) is ONE open card, not a storm. A card is closed by its
+ * owner, or by resolveAgentAlerts when the condition behind it recovers.
  *
  * Best-effort by contract: never throws. A monitoring write must not fail the
  * operation it is monitoring.
@@ -32,9 +35,8 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { escapeTelegramHtml, sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
-import { sendWorkspaceTelegram, workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
-import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
+import { escapeTelegramHtml } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 
 export type AlertSeverity = "info" | "warn" | "urgent";
 
@@ -59,19 +61,6 @@ export async function writeAgentAlert(input: {
   severity: AlertSeverity;
   title: string;
   body?: string;
-  /**
-   * Who gets paged for an OASIS workspace's alert. Required, and deliberately
-   * not defaulted.
-   *
-   * OASIS's alerts have two audiences: CC for OASIS matters, Adon/APEX for
-   * SunBiz operations. A default here would decide that on the author's behalf
-   * and be silently wrong for half the callers — which is exactly how SunBiz
-   * scraper alerts ended up in CC's DM on 2026-08-02.
-   *
-   * Ignored for any other workspace: its alert goes to its own saved bot or
-   * nowhere outside the app, never to a lane (see the header).
-   */
-  lane: TelegramLane;
   subjectType?: string;
   subjectId?: string;
   payload?: Record<string, unknown>;
@@ -83,11 +72,8 @@ export async function writeAgentAlert(input: {
    *  notification storm (codex review 2026-07-23). Default false = legacy
    *  behavior (page on every call). */
   telegramOncePerOpen?: boolean;
-}): Promise<{ telegram: string | null }> {
+}): Promise<{ stored: boolean; telegram: string | null }> {
   const nowIso = new Date().toISOString();
-  // OASIS's own workspaces, by id (the same rule that lets them, and only
-  // them, use OASIS's env credentials). Everyone else is a client.
-  const oasisWorkspace = tenantMayUseEnvFallback(input.tenantId);
   // agent_alerts.payload is NOT NULL DEFAULT '{}': an explicit null failed the
   // insert of every alert written without a payload, and the result was never
   // read, so those alerts had no card at all.
@@ -108,6 +94,12 @@ export async function writeAgentAlert(input: {
       .limit(1);
     q = input.subjectId ? q.eq("subject_id", input.subjectId) : q.is("subject_id", null);
     const existing = await q.maybeSingle();
+    if (existing.error) {
+      // Fail closed. Not knowing whether a card is open, a write would open a
+      // duplicate and page again on every call for as long as reads fail.
+      console.error("[agent-alert] open-card lookup failed; alert not written:", existing.error.message);
+      return { stored: false, telegram: null };
+    }
     const open = existing.data as { id: string; payload?: unknown } | null;
     const existingId = open?.id;
     // A refresh rewrites the payload; keep what the last push did until a new
@@ -132,6 +124,7 @@ export async function writeAgentAlert(input: {
       const upd = await db
         .from("agent_alerts")
         .update({ ...row, created_at: nowIso })
+        .eq("tenant_id", input.tenantId)
         .eq("id", existingId);
       if (!upd.error) {
         refreshedExisting = true;
@@ -157,23 +150,14 @@ export async function writeAgentAlert(input: {
   const wantTelegram =
     (input.telegram ?? input.severity !== "info") &&
     !(input.telegramOncePerOpen && refreshedExisting);
-  if (!wantTelegram) return { telegram: null };
+  if (!wantTelegram) return { stored: rowId !== null, telegram: null };
 
   const tag = input.severity === "urgent" ? "🚨" : "⚠️";
   // Telegram HTML mode: a title or body holding "&" or "<" (a sequence or
   // business name) would otherwise be refused as unparseable.
   const text =
     `${tag} ${escapeTelegramHtml(input.title)}` + (input.body ? `\n${escapeTelegramHtml(input.body)}` : "");
-  let telegram: string;
-  if (oasisWorkspace) {
-    const sent = await sendTelegram(text, { lane: input.lane }).catch((err: unknown) => ({
-      ok: false,
-      reason: err instanceof Error ? err.message : "telegram_error",
-    }));
-    telegram = sent.ok ? "sent" : `failed: ${sent.reason || "telegram_error"}`;
-  } else {
-    telegram = workspaceTelegramOutcome(await sendWorkspaceTelegram(input.tenantId, text));
-  }
+  const { outcome: telegram } = await pushWorkspaceAlert(input.tenantId, text);
 
   if (db && rowId) {
     try {
@@ -187,5 +171,37 @@ export async function writeAgentAlert(input: {
       console.error("[agent-alert] push outcome not recorded:", err instanceof Error ? err.message : err);
     }
   }
-  return { telegram };
+  return { stored: rowId !== null, telegram };
+}
+
+/**
+ * Close a workspace's open cards of one kind because the condition behind them
+ * recovered, so its next occurrence opens a new card and pages again. A card
+ * left open would keep a telegramOncePerOpen caller silent through every later
+ * recurrence. Returns how many cards it closed; never throws (0 on a failure,
+ * which is logged).
+ */
+export async function resolveAgentAlerts(input: {
+  tenantId: string;
+  alertType: string;
+  /** Why, kept on the card (agent_alerts.resolved_by). */
+  resolvedBy: string;
+}): Promise<number> {
+  try {
+    const res = await getServiceSupabase()
+      .from("agent_alerts")
+      .update({ resolved_at: new Date().toISOString(), resolved_by: input.resolvedBy })
+      .eq("tenant_id", input.tenantId)
+      .eq("alert_type", input.alertType)
+      .is("resolved_at", null)
+      .select("id");
+    if (res.error) {
+      console.error("[agent-alert] recovery close failed:", res.error.message);
+      return 0;
+    }
+    return ((res.data as unknown[] | null) || []).length;
+  } catch (err) {
+    console.error("[agent-alert] recovery close failed:", err instanceof Error ? err.message : err);
+    return 0;
+  }
 }
