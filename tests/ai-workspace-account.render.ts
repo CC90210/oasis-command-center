@@ -246,18 +246,60 @@ async function main() {
   };
 
   // A "Just me" connect on the mounted card: Google reads as the owner's own
-  // key at once, never Connected, before and after the refresh lands.
+  // key at once, never Connected, before and after the refresh lands. Every
+  // frame before the refresh is drawn from the SAME server answer (the same
+  // props object, as React re-renders between refreshes); the refresh is a
+  // new answer.
   const accounts = framesOf(ProviderAccountsCard);
-  let frame = accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() });
+  const beforeRefresh = { ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() };
+  let frame = accounts(beforeRefresh);
   const connectGoogle = find(card(frame, "google"), "Google's Connect button", (el) => el.type === "button" && typeof el.props.onClick === "function");
   (connectGoogle.props.onClick as () => void)();
-  frame = accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() });
+  frame = accounts(beforeRefresh);
   const dialog = find(frame, "the connect dialog", (el) => typeof el.props.onConnected === "function");
   (dialog.props.onConnected as (p: string, scope: string) => void)("google", "user");
-  out.afterPersonalConnect = renderToStaticMarkup(accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() }));
+  out.afterPersonalConnect = renderToStaticMarkup(accounts(beforeRefresh));
   out.afterPersonalConnectRefresh = renderToStaticMarkup(
     accounts({ ...base, connectedServices: new Set<string>(), personalServices: new Set(["google_ai"]) }),
   );
+
+  // R5-M2 (PR #535 review): this page's own changes last only until the
+  // server's next answer. Connect Anthropic, then OpenRouter: once the server
+  // says only OpenRouter is the account, Anthropic reads Not connected (it used
+  // to read Connected for the page's life). And the dangerous way round: a
+  // stale "disconnected" never draws Not connected over a newer answer that
+  // says Connected.
+  const connectedOn = (f: El, p: string) => /\bConnected\b/.test(plainText(renderToStaticMarkup(card(f, p))).replace(/Not connected/g, ""));
+  const pressConnect = (frames: Frames<Record<string, unknown>>, props: Record<string, unknown>, p: string) => {
+    const f = frames(props);
+    const button = find(card(f, p), `${p}'s Connect button`, (el) => el.type === "button" && typeof el.props.onClick === "function");
+    (button.props.onClick as () => void)();
+    const open = find(frames(props), "the connect dialog", (el) => typeof el.props.onConnected === "function");
+    (open.props.onConnected as (prov: string, scope: string) => void)(p, "tenant");
+  };
+  const overlay: Record<string, unknown> = {};
+  const m2 = framesOf(ProviderAccountsCard) as unknown as Frames<Record<string, unknown>>;
+  const s0 = { ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() };
+  pressConnect(m2, s0, "anthropic");
+  overlay.anthropicBeforeAnswer = connectedOn(m2(s0), "anthropic");
+  const s1 = { ...base, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() };
+  overlay.anthropicAnswered = connectedOn(m2(s1), "anthropic");
+  pressConnect(m2, s1, "openrouter");
+  const both = m2(s1);
+  overlay.bothBeforeAnswer = [connectedOn(both, "anthropic"), connectedOn(both, "openrouter")];
+  const s2 = { ...base, connectedServices: new Set(["openrouter"]), personalServices: new Set<string>() };
+  const settled = m2(s2);
+  overlay.afterOpenRouterAnswer = [connectedOn(settled, "anthropic"), connectedOn(settled, "openrouter")];
+  overlay.header = /Cloud: 1 provider connected/.test(plainText(renderToStaticMarkup(settled)));
+  // The dangerous way round: Anthropic disconnected here, then a newer answer says Connected.
+  const d2 = framesOf(ProviderAccountsCard) as unknown as Frames<Record<string, unknown>>;
+  const a0 = { ...base, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() };
+  const disconnectButton = find(card(d2(a0), "anthropic"), "Anthropic's Disconnect button", (el) => typeof el.props.onDisconnected === "function");
+  (disconnectButton.props.onDisconnected as () => void)();
+  overlay.disconnectedBeforeAnswer = connectedOn(d2(a0), "anthropic");
+  const a1 = { ...base, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() };
+  overlay.newerAnswerSaysConnected = connectedOn(d2(a1), "anthropic");
+  out.overlay = JSON.stringify(overlay);
   // Closing the dialog draws the cards again from the server: a save whose
   // answer never came may have landed after all.
   const closeFrames = framesOf(ProviderAccountsCard);
@@ -568,6 +610,20 @@ async function main() {
   saveAnswer = null;
   delete (globalThis as unknown as { document?: unknown }).document;
   out.plainConnect = JSON.stringify(plain);
+
+  // Settings > AI brain's per-agent notes and the account line
+  // (components/settings/AgentConfigEditor.tsx), from lib/ai/model-registry.ts.
+  const { ModelNoteLine, AccountModelLine } = await import("../components/settings/AgentConfigEditor");
+  const draw = (el: ReactElement) => plainText(renderToStaticMarkup(el)).trim();
+  out.notes = JSON.stringify({
+    gone: draw(React.createElement(ModelNoteLine, { provider: "google", model: "gemini-2.5-pro", audience: "agent" })),
+    current: draw(React.createElement(ModelNoteLine, { provider: "google", model: "gemini-3.8-flash", audience: "agent" })),
+    unknown: draw(React.createElement(ModelNoteLine, { provider: "openrouter", model: "anthropic/claude-sonnet-4", audience: "agent" })),
+    account: draw(React.createElement(AccountModelLine, { account: { provider: "google", model: "gemini-2.5-pro", connected: true } })),
+    accountCurrent: draw(React.createElement(AccountModelLine, { account: { provider: "google", model: "gemini-3.8-flash", connected: true } })),
+    accountUnread: draw(React.createElement(AccountModelLine, { account: null })),
+    accountOff: draw(React.createElement(AccountModelLine, { account: { provider: "google", model: "gemini-2.5-pro", connected: false } })),
+  });
 
   process.stdout.write(JSON.stringify(out));
 }

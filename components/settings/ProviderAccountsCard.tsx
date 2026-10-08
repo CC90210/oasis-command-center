@@ -68,6 +68,25 @@ type Props = {
 // the bridge + AgentConfigEditor and shouldn't pretend it's an account.
 const CARD_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai", "google"];
 
+/** This page's own connects and removals, and the server answer they were made on. */
+type Overlay = { on: Set<string> | null | undefined; changes: ReadonlyMap<string, boolean> };
+const NO_CHANGES: ReadonlyMap<string, boolean> = new Map();
+
+/**
+ * The server's answer with this page's changes laid over it, while that answer
+ * is still the one they were made on. A newer answer (a new prop object: every
+ * router.refresh() hands one back) is the truth, and the changes are dropped.
+ */
+export function laidOver(answer: Set<string> | null | undefined, overlay: Overlay): Set<string> {
+  const out = new Set(answer ?? []);
+  if (overlay.on !== answer) return out;
+  for (const [svc, on] of overlay.changes) {
+    if (on) out.add(svc);
+    else out.delete(svc);
+  }
+  return out;
+}
+
 export function ProviderAccountsCard({
   connectedServices: initialServices,
   personalServices,
@@ -84,29 +103,42 @@ export function ProviderAccountsCard({
   // refresh that followed a connect showed the providers already on file as
   // "Not connected". When the server read failed, `keysKnown` is false and a
   // provider this page has not just connected reads "Couldn't check".
+  //
+  // THE OVERLAY IS ONLY UNTIL THE SERVER ANSWERS (PR #535 review, R5-M2). Each
+  // change is laid over the server answer it was made on (the prop object,
+  // which is new on every refresh), and the next answer replaces it. It used
+  // to stay for the page's life: connect Anthropic, then OpenRouter, and both
+  // read Connected; a stale "disconnected" drew Not connected over a live key.
   const keysKnown = initialServices !== null;
-  const [changedHere, setChangedHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
-  const services = new Set(initialServices ?? []);
-  for (const [svc, connectedNow] of changedHere) {
-    if (connectedNow) services.add(svc);
-    else services.delete(svc);
-  }
+  const [changedHere, setChangedHere] = useState<Overlay>(() => ({ on: initialServices, changes: NO_CHANGES }));
+  const latestServices = useRef(initialServices);
+  latestServices.current = initialServices;
+  const services = laidOver(initialServices, changedHere);
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
   // The viewer's own keys (department chats never use them), with this page's
-  // own personal connects and removals laid over the server's answer.
-  const [personalHere, setPersonalHere] = useState<ReadonlyMap<string, boolean>>(() => new Map());
-  const personal = new Set(personalServices ?? []);
-  for (const [svc, savedNow] of personalHere) {
-    if (savedNow) personal.add(svc);
-    else personal.delete(svc);
-  }
+  // own personal connects and removals laid over the server's answer, until
+  // the next one.
+  const [personalHere, setPersonalHere] = useState<Overlay>(() => ({ on: personalServices, changes: NO_CHANGES }));
+  const latestPersonal = useRef(personalServices);
+  latestPersonal.current = personalServices;
+  const personal = laidOver(personalServices, personalHere);
+  const change = (scope: "tenant" | "user", svc: string, now: boolean | null) => {
+    const latest = scope === "user" ? latestPersonal.current : latestServices.current;
+    const apply = (prev: Overlay): Overlay => {
+      const changes = new Map(prev.on === latest ? prev.changes : NO_CHANGES);
+      if (now === null) changes.delete(svc);
+      else changes.set(svc, now);
+      return { on: latest, changes };
+    };
+    if (scope === "user") setPersonalHere(apply);
+    else setChangedHere(apply);
+  };
 
   function markConnected(p: Provider, scope: "tenant" | "user" = "tenant") {
     const svc = PROVIDER_TO_SERVICE[p];
     if (!svc) return;
     // A key saved "Just me" is the viewer's own: it never reads Connected.
-    if (scope === "user") setPersonalHere((prev) => new Map(prev).set(svc, true));
-    else setChangedHere((prev) => new Map(prev).set(svc, true));
+    change(scope, svc, true);
     // Cross-component refresh: AgentConfigEditor on this same page caches
     // its config list in client state from a fetch() on mount. Without a
     // poke, the per-agent rows below would still show "no key on file"
@@ -125,14 +157,7 @@ export function ProviderAccountsCard({
   // dropped and the server is read again, so the card shows the server's
   // answer and is never left on Connected by mistake.
   function rereadAfterFailure(p: Provider, scope: "tenant" | "user") {
-    const svc = PROVIDER_TO_SERVICE[p];
-    const forget = (prev: ReadonlyMap<string, boolean>) => {
-      const next = new Map(prev);
-      next.delete(svc);
-      return next;
-    };
-    if (scope === "user") setPersonalHere(forget);
-    else setChangedHere(forget);
+    change(scope, PROVIDER_TO_SERVICE[p], null);
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("oasis:agent-configs-changed"));
     }
@@ -302,10 +327,9 @@ export function ProviderAccountsCard({
                         <DisconnectButton
                           provider={p}
                           onDisconnected={() => {
-                            // Optimistically clear it on this page; the
-                            // server source-of-truth will catch up on the
-                            // next refresh.
-                            setChangedHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
+                            // Optimistically clear it on this page, until the
+                            // server's next answer (the refresh below).
+                            change("tenant", PROVIDER_TO_SERVICE[p], false);
                             if (typeof window !== "undefined") {
                               window.dispatchEvent(
                                 new CustomEvent("oasis:agent-configs-changed"),
@@ -326,7 +350,7 @@ export function ProviderAccountsCard({
                       provider={p}
                       scope="user"
                       onDisconnected={() => {
-                        setPersonalHere((prev) => new Map(prev).set(PROVIDER_TO_SERVICE[p], false));
+                        change("user", PROVIDER_TO_SERVICE[p], false);
                         if (typeof window !== "undefined") {
                           window.dispatchEvent(new CustomEvent("oasis:agent-configs-changed"));
                         }
@@ -373,14 +397,21 @@ export function ProviderAccountsCard({
 /** How a connect attempt ended. Every message is one plain sentence. */
 export type ConnectResult =
   | { kind: "saved" }
-  /** The test refused the key (nothing was saved). */
-  | { kind: "refused"; message: string; canSaveAnyway: boolean }
+  /**
+   * The test refused the key (nothing was saved). `proof` is the test's
+   * signed verdict when the provider was down or slow: "Save anyway" sends it
+   * back, so the save route does not test the key again (R5-L3).
+   */
+  | { kind: "refused"; message: string; canSaveAnyway: boolean; proof?: string | null }
   /** The key passed (or was saved anyway) but the save did not go through. */
   | { kind: "failed"; message: string }
   /** The form moved on before the save (stillWanted): nothing was saved. */
   | { kind: "dropped" };
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+/** A route's answer: its status, and its JSON body when it was the route's JSON (`json`). */
+type Answer = { status: number; json: boolean; body: Record<string, unknown> };
 
 /**
  * A refusal that says nothing about the key: the provider was down or slow.
@@ -414,9 +445,16 @@ function saveFailureSentence(body: Record<string, unknown>): string {
  * save: false (the dialog's form moved on, or closed, while the test ran)
  * saves nothing. Each request gives up after `timeoutMs`, so one that hangs
  * can never keep the dialog locked (it cannot be closed while a run is out).
- * A save whose answer never came is then checked with a read (`verify`), so
- * the dialog says what is actually saved: the save is one step on the server,
- * so it landed whole or not at all.
+ * A save whose answer never came, or came back as a server failure (a 5xx, or
+ * a page that is not the route's JSON), is then checked with a read
+ * (`verify`), so the dialog says what is actually saved: the save is one step
+ * on the server, so it landed whole or not at all, and an answer lost after
+ * the commit must not read "not saved" over a key that is (R5-M1).
+ *
+ * The test's signed proof (lib/ai/connect-test-proof.ts) goes with the save,
+ * so the save route, which now tests every key itself (R5-L3), does not test
+ * this one twice. "Save anyway" (`skipTest`) sends the proof of the test that
+ * found the provider down or slow (`proof`), with save_anyway.
  */
 export async function connectProviderKey(
   input: {
@@ -425,12 +463,14 @@ export async function connectProviderKey(
     model: string;
     scope: "tenant" | "user";
     skipTest?: boolean;
+    /** With skipTest: the proof the timed-out test returned. */
+    proof?: string | null;
     stillWanted?: () => boolean;
     timeoutMs?: number;
   },
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): Promise<ConnectResult> {
-  const post = async (url: string, body: Record<string, unknown>) => {
+  const post = async (url: string, body: Record<string, unknown>): Promise<Answer> => {
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const gaveUp = new Promise<never>((_, reject) => {
@@ -449,49 +489,73 @@ export async function connectProviderKey(
         }),
         gaveUp,
       ]);
-      return (await Promise.race([res.json().catch(() => ({})), gaveUp])) as Record<string, unknown>;
+      const parsed = await Promise.race([res.json().then((b: unknown) => ({ b, json: true }), () => ({ b: null, json: false })), gaveUp]);
+      const json = parsed.json && !!parsed.b && typeof parsed.b === "object";
+      return { status: res.status, json, body: json ? (parsed.b as Record<string, unknown>) : {} };
     } finally {
       clearTimeout(timer);
     }
   };
+  let proof = input.skipTest ? (input.proof ?? null) : null;
   if (!input.skipTest) {
     let tested: Record<string, unknown>;
     try {
-      tested = await post("/api/agent-config/test-connection", {
+      tested = (await post("/api/agent-config/test-connection", {
         provider: input.provider,
         api_key: input.apiKey,
         model: input.model,
-      });
+      })).body;
     } catch {
       return { kind: "refused", message: COULD_NOT_TEST, canSaveAnyway: false };
     }
     if (tested.ok !== true) {
       const code = typeof tested.code === "string" ? tested.code : "";
       const message = typeof tested.message === "string" && tested.message.trim() ? tested.message : COULD_NOT_TEST;
-      return { kind: "refused", message, canSaveAnyway: SAVE_ANYWAY_CODES.has(code) };
+      const canSaveAnyway = SAVE_ANYWAY_CODES.has(code);
+      return { kind: "refused", message, canSaveAnyway, proof: canSaveAnyway && typeof tested.tested === "string" ? tested.tested : null };
     }
+    proof = typeof tested.tested === "string" ? tested.tested : null;
   }
   if (input.stillWanted && !input.stillWanted()) return { kind: "dropped" };
-  const theKey = { provider: input.provider, api_key: input.apiKey, model: input.model, scope: input.scope };
-  let saved: Record<string, unknown>;
-  try {
-    saved = await post("/api/agent-config/bulk-provider", theKey);
-  } catch {
-    // No answer (it timed out, or never arrived): the save may still have
-    // landed. Ask the route what is saved now (a read) and say exactly that,
-    // instead of reporting a failure that may be false. The save is one step
-    // on the server, so the answer is all of it or none of it.
-    let check: Record<string, unknown>;
+  const theKey = {
+    provider: input.provider,
+    api_key: input.apiKey,
+    model: input.model,
+    scope: input.scope,
+    ...(proof ? { tested: proof } : {}),
+    ...(input.skipTest ? { save_anyway: true } : {}),
+  };
+  // Ask the route what is saved now (a read) and say exactly that, instead of
+  // reporting a failure that may be false. The save is one step on the
+  // server, so the answer is all of it or none of it.
+  const readBack = async (): Promise<ConnectResult> => {
+    let check: Answer;
     try {
       check = await post("/api/agent-config/bulk-provider", { ...theKey, verify: true });
     } catch {
       return { kind: "failed", message: COULD_NOT_TELL };
     }
-    if (check.ok === true && check.saved === true) return { kind: "saved" };
+    if (check.body.ok === true && check.body.saved === true) return { kind: "saved" };
     // Not saved YET: the abandoned save may still be running on the server
     // and land a moment later, so this is never told as a failure.
-    if (check.ok === true && check.saved === false) return { kind: "failed", message: NOT_SAVED_WHEN_CHECKED };
+    if (check.body.ok === true && check.body.saved === false) return { kind: "failed", message: NOT_SAVED_WHEN_CHECKED };
     return { kind: "failed", message: COULD_NOT_TELL };
+  };
+  let answer: Answer;
+  try {
+    answer = await post("/api/agent-config/bulk-provider", theKey);
+  } catch {
+    // No answer (it timed out, or never arrived): the save may still have landed.
+    return readBack();
+  }
+  const saved = answer.body;
+  // A server failure, or a page that is not the route's answer (the Worker
+  // stopped, or the platform answered for it): the batch may have committed
+  // before it, so the dialog reads what is saved instead of saying "not saved".
+  if (saved.ok !== true && (answer.status >= 500 || !answer.json)) return readBack();
+  if (saved.ok !== true && saved.error === "key_refused") {
+    const message = typeof saved.message === "string" && saved.message.trim() ? saved.message : COULD_NOT_TEST;
+    return { kind: "refused", message, canSaveAnyway: saved.can_save_anyway === true, proof: typeof saved.tested === "string" ? saved.tested : null };
   }
   if (saved.ok !== true) return { kind: "failed", message: saveFailureSentence(saved) };
   // A teammate row that did not update is logged, not shown: the chats run on
@@ -506,8 +570,11 @@ export async function connectProviderKey(
 // Inline connect dialog — single API key input + Save
 // ============================================================================
 
-/** What a run sent: exactly this provider, trimmed key, model and scope. */
-type TestedKey = { provider: Provider; apiKey: string; model: string; scope: "tenant" | "user" };
+/**
+ * What a run sent: exactly this provider, trimmed key, model and scope. A key
+ * kept for "Save anyway" also carries the proof its timed-out test returned.
+ */
+type TestedKey = { provider: Provider; apiKey: string; model: string; scope: "tenant" | "user"; proof?: string | null };
 
 function sameKey(a: TestedKey | null, b: TestedKey): boolean {
   return a !== null && a.provider === b.provider && a.apiKey === b.apiKey && a.model === b.model && a.scope === b.scope;
@@ -582,7 +649,7 @@ export function ConnectProviderDialog({
       return;
     }
     setError(result.message);
-    if (result.kind === "refused" && result.canSaveAnyway) setUntested(target);
+    if (result.kind === "refused" && result.canSaveAnyway) setUntested({ ...target, proof: result.proof ?? null });
   }
 
   async function handleSubmit(e: React.FormEvent) {

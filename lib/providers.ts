@@ -26,6 +26,7 @@ import { fetchWithRetry } from "./retry";
 import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "./ai/usage";
 import { meterRefusalCode } from "./ai/usage-codes";
+import { offeredModels, pickerLabel, resolveCall, type RegistryProvider } from "./ai/model-registry";
 
 export type ChatRole = "system" | "user" | "assistant";
 export type ChatMessage = { role: ChatRole; content: string };
@@ -67,10 +68,19 @@ export type StreamEvent =
  * derive their pickers from this list. Add a provider once, both surfaces
  * pick it up.
  *
- * Per-surface presentation (pretty model labels, taglines, badges) lives
- * here too — separate fields for each surface so the registry stays the
- * canonical source even when the wording differs slightly.
+ * Per-surface presentation (taglines, badges) lives here too: separate fields
+ * for each surface so the registry stays the canonical source even when the
+ * wording differs slightly. The MODEL lists of the four hosted providers are
+ * not typed here: they are lib/ai/model-registry.ts's offered models (the
+ * provider's default first), so a picker can never offer a model that registry
+ * knows is gone. The local-model list stays here: those are tags on the
+ * operator's own machine, which no provider retires.
  * ============================================================================ */
+
+/** A hosted provider's picker list: the registry's offered models, default first. */
+function registryModels(provider: RegistryProvider): Array<{ id: string; label: string }> {
+  return offeredModels(provider).map((m) => ({ id: m.id, label: pickerLabel(m) }));
+}
 export type ProviderRegistryEntry = {
   value: Provider;
   /** Short label used in pickers (Onboarding's tile, AgentConfigEditor's <select>). */
@@ -103,15 +113,7 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
     signup: "https://openrouter.ai/sign-up",
     apiKey: "https://openrouter.ai/keys",
     docs: "https://openrouter.ai/docs/quick-start",
-    models: [
-      { id: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6 (balanced)" },
-      { id: "anthropic/claude-opus-4.7", label: "Claude Opus 4.7 (heavy reasoning)" },
-      { id: "openai/gpt-5.4", label: "GPT-5.4" },
-      { id: "openai/gpt-5.4-mini", label: "GPT-5.4 mini (cheap)" },
-      { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-      { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash (fast)" },
-      { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B" },
-    ],
+    models: registryModels("openrouter"),
     placeholder: "sk-or-v1-...",
     badge: "★ recommended",
     recommended: true,
@@ -124,27 +126,20 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
     signup: "https://console.anthropic.com/signup",
     apiKey: "https://console.anthropic.com/settings/keys",
     docs: "https://docs.anthropic.com/en/api/getting-started",
-    models: [
-      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (balanced)" },
-      { id: "claude-opus-4-7", label: "Claude Opus 4.7 (heavy reasoning)" },
-      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 (fast)" },
-    ],
+    models: registryModels("anthropic"),
     placeholder: "sk-ant-...",
   },
   {
     value: "openai",
     label: "OpenAI Direct",
-    tagline: "GPT-5.x + Codex — pay-as-you-go via OpenAI",
-    hint: "Direct to OpenAI. Use for GPT-5 + Codex.",
+    // GPT-5.3 Codex is deprecated (shutdown 2027-04-01) and no longer offered,
+    // and GPT-6 is not offered yet (lib/ai/model-registry.ts), so neither is promised.
+    tagline: "GPT-5.x models, pay-as-you-go via OpenAI",
+    hint: "Direct to OpenAI. GPT-6 is not offered here yet: its tool calls need OpenAI's newer API.",
     signup: "https://platform.openai.com/signup",
     apiKey: "https://platform.openai.com/api-keys",
     docs: "https://platform.openai.com/docs/quickstart",
-    models: [
-      { id: "gpt-5.4", label: "GPT-5.4" },
-      { id: "gpt-5.4-mini", label: "GPT-5.4 mini (cheap)" },
-      { id: "gpt-5.2", label: "GPT-5.2" },
-      { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
-    ],
+    models: registryModels("openai"),
     placeholder: "sk-proj-...",
   },
   {
@@ -155,10 +150,7 @@ export const PROVIDER_REGISTRY: ProviderRegistryEntry[] = [
     signup: "https://aistudio.google.com/",
     apiKey: "https://aistudio.google.com/apikey",
     docs: "https://ai.google.dev/gemini-api/docs",
-    models: [
-      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash (fast)" },
-    ],
+    models: registryModels("google"),
     placeholder: "AIza...",
   },
   {
@@ -273,6 +265,12 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent>
     yield { type: "error", message: "empty_messages" };
     return;
   }
+  // A saved model the registry knows is gone (retired, served only to past
+  // users, or past its end date) is sent as its replacement on the SAME
+  // provider, with the same key, and the call's ai_usage_events row records
+  // why (fallback_reason). Anything else is sent exactly as asked.
+  const picked = resolveCall(req.provider, req.model, req.meter);
+  if (picked.swap) req = { ...req, model: picked.model, meter: picked.meter };
   switch (req.provider) {
     case "openrouter":
       yield* streamOpenRouter(req);

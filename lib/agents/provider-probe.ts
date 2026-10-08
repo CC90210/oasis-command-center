@@ -41,20 +41,24 @@ import { classifyProviderStatus, failureCopy, type TurnFailureCode } from "@/lib
 import type { Provider } from "@/lib/providers";
 import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "@/lib/ai/usage";
 import { AI_USAGE_UNAVAILABLE, isAiBudgetCode, meterRefusalCode } from "@/lib/ai/usage-codes";
+import { MODEL_REGISTRY, modelFactsForCopy, resolveCall } from "@/lib/ai/model-registry";
 
 export const PROBE_TIMEOUT_MS = 15_000;
 
 /**
- * The cheapest model each provider lists in lib/providers.ts PROVIDER_REGISTRY
- * that is not a reasoning model (a one-token cap on a model that must think
- * first can come back empty or refused for a reason that says nothing about
- * the key).
+ * The model each provider's key is tested on when no model is named: the
+ * registry's probe pick (lib/ai/model-registry.ts probeModel), a cheap model
+ * every account can call that answers a one-token test without a reasoning
+ * step (a one-token cap on a model that must think first can come back empty
+ * or refused for a reason that says nothing about the key). It was
+ * gemini-2.5-flash, which Google serves only to projects that used it before,
+ * so a good key from a new Google project failed its own test.
  */
 export const PROBE_MODEL: Record<Exclude<Provider, "ollama">, string> = {
-  openrouter: "meta-llama/llama-3.3-70b-instruct",
-  anthropic: "claude-haiku-4-5",
-  openai: "gpt-5.4-mini",
-  google: "gemini-2.5-flash",
+  openrouter: MODEL_REGISTRY.openrouter.probeModel,
+  anthropic: MODEL_REGISTRY.anthropic.probeModel,
+  openai: MODEL_REGISTRY.openai.probeModel,
+  google: MODEL_REGISTRY.google.probeModel,
 };
 
 const PROBE_TEXT = "Reply with one word: ok";
@@ -150,8 +154,11 @@ async function timed(fetchImpl: FetchImpl, req: ProbeRequest): Promise<{ res: Re
 /**
  * A refusal, in the owner-facing words a channel would use for it, except the
  * two that are about the MODEL tested: those name it (see WHICH MODEL above).
+ * A model the provider says was not found is named the way a channel names it
+ * (lib/os/channel/outcome.ts): retired, or not available to this AI account,
+ * and what to pick instead.
  */
-async function refusal(res: Response, model: string | null): Promise<ProbeResult> {
+async function refusal(res: Response, model: string | null, provider: Provider): Promise<ProbeResult> {
   const body = await res.text().catch(() => "");
   const code = classifyProviderStatus(res.status, body);
   if (model && code === "provider_403") {
@@ -162,7 +169,7 @@ async function refusal(res: Response, model: string | null): Promise<ProbeResult
     };
   }
   if (model && code === "provider_404") {
-    return { ok: false, code, message: `The model ${model} was not found for this key. Pick another model in AI settings.` };
+    return { ok: false, code, message: failureCopy(code, { canManageAi: true, model: modelFactsForCopy(provider, model) }).sentence };
   }
   return { ok: false, code, message: failureCopy(code, { canManageAi: true }).sentence };
 }
@@ -274,7 +281,7 @@ async function meteredProbe(
     const { res, ms } = await timed(fetchImpl, req);
     if (!res.ok) {
       end = { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
-      return refusal(res, model);
+      return refusal(res, model, provider);
     }
     const body = await res.json().catch(() => null);
     end = { outcome: "ok", usage: probeUsage(provider, body) };
@@ -302,7 +309,7 @@ async function probeOllama(
     // /v1/models is the OpenAI-compatible list both Ollama and LM Studio serve.
     const { res } = await timed(fetchImpl, { url: `${base}/v1/models`, init: { method: "GET", headers: { accept: "application/json" } } });
     // The list is not about any model: its refusal gets the generic words.
-    if (!res.ok) return refusal(res, null);
+    if (!res.ok) return refusal(res, null, "ollama");
     const list = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
     const first = list?.data?.find((m) => typeof m?.id === "string" && m.id);
     model = saved || (first ? String(first.id) : null);
@@ -331,7 +338,10 @@ export async function probeProvider(provider: Provider, key: string, opts: Probe
   const fetchImpl: FetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init));
   const saved = typeof opts.model === "string" && opts.model.trim() ? opts.model.trim() : null;
   if (provider === "ollama") return probeOllama(key, fetchImpl, saved, opts.meter);
-  const model = saved ?? PROBE_MODEL[provider];
-  const req = buildProbeRequest(provider, key, model);
-  return meteredProbe(provider, opts.meter, fetchImpl, req, model, provider === "openrouter" ? OPENROUTER_MIN_MAX_TOKENS : 1);
+  // The model the channels really send (lib/ai/model-registry.ts): a saved
+  // model the registry knows is gone is tested as its replacement, exactly as
+  // every chat sends it, and the probe's ledger row records why.
+  const picked = resolveCall(provider, saved ?? PROBE_MODEL[provider], opts.meter);
+  const req = buildProbeRequest(provider, key, picked.model);
+  return meteredProbe(provider, picked.meter, fetchImpl, req, picked.model, provider === "openrouter" ? OPENROUTER_MIN_MAX_TOKENS : 1);
 }

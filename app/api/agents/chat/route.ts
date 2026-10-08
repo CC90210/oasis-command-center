@@ -77,6 +77,7 @@ import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
 import { classifyStreamError, failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
 import { recordTurnOutcome } from "@/lib/os/channel/turns";
 import type { AiBudgetCode } from "@/lib/ai/usage";
+import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
 
 export const runtime = "nodejs";
@@ -266,18 +267,22 @@ export async function POST(req: NextRequest) {
       });
 
       // One code per failed turn. The client gets the code and one plain
-      // sentence; the provider's own error body is never forwarded.
+      // sentence; the provider's own error body is never forwarded. A model
+      // the provider says was not found is NAMED (with what to pick instead),
+      // so the channel can say which model, not just "the model".
       const outcome: { failure: TurnFailureCode | null } = { failure: null };
       const fail = (code: TurnFailureCode, detail: string | null) => {
         if (outcome.failure) return;
         outcome.failure = code;
         logFailure("stream", ctx, code, {
           provider: t.provider,
+          ...(code === "provider_404" ? { model: t.model } : {}),
           ...(detail && (code === "provider_error" || code === "stream_failed")
             ? { detail: redactAll(detail).slice(0, 160) }
             : {}),
         });
-        send("error", { code, message: failureCopy(code, { canManageAi: false }).sentence });
+        const model = code === "provider_404" ? modelFactsForCopy(t.provider, t.model) : null;
+        send("error", { code, message: failureCopy(code, { canManageAi: false, model }).sentence, ...(model ? { model } : {}) });
       };
       try {
         for await (const ev of streamAgentTurn(t, incoming, 4096)) {

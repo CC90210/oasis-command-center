@@ -41,6 +41,16 @@ import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
+import { MODEL_REGISTRY } from "@/lib/ai/model-registry";
+
+/**
+ * The model a drafted agent suggests: one of the registry's Anthropic tier
+ * picks (lib/ai/model-registry.ts), so a draft never suggests a model that is
+ * gone. It is a hint shown on the agent's page, never sent to a provider.
+ */
+const tierPick = (tier: "fast" | "balanced" | "deep") =>
+  MODEL_REGISTRY.anthropic.models.find((m) => m.offered && m.tier === tier)?.id ?? "";
+const SUGGESTED_MODEL_LINE = `One of: "${tierPick("deep")}", "${tierPick("balanced")}", "${tierPick("fast")}". Pick the first for heavy reasoning, the second for balanced production work, the third for fast/cheap.`;
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,7 +72,7 @@ Schema:
   "short_description": string,  // One sentence (max ~110 chars) for the marketplace tile.
   "description": string,        // 2-4 sentences for the agent detail page.
   "required_tools": string[],   // 0-12 tool slugs the agent will call. Use lower_snake_case. Examples: "supabase_query", "search_repo", "send_email", "twilio_sms", "web_search", "web_fetch", "stripe_query", "calendar_read".
-  "suggested_model": string     // One of: "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5". Pick opus for heavy reasoning, sonnet for balanced production work, haiku for fast/cheap.
+  "suggested_model": string     // ${SUGGESTED_MODEL_LINE}
 }
 
 Guidance:

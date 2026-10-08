@@ -34,8 +34,9 @@ type El = ReactElement<Record<string, unknown>>;
  * that hands the same mounted card new props. renderToStaticMarkup draws a
  * single frame and there is no DOM in the test toolchain, so this stands in
  * for the reconciler for the card's OWN hooks only (it knows useState and
- * nothing else, so a new hook fails loudly here). What it returns is drawn by
- * real React.
+ * useRef, which ProviderAccountsCard uses to lay its own changes over only the
+ * server answer they were made on, and nothing else, so a new hook fails
+ * loudly here). What it returns is drawn by real React.
  */
 function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's useState reads
@@ -50,6 +51,11 @@ function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
         slots[at] = typeof next === "function" ? (next as (prev: unknown) => unknown)(slots[at]) : next;
       };
       return [slots[at], set];
+    },
+    useRef(initial: unknown) {
+      const at = cursor++;
+      if (!(at in slots)) slots[at] = { current: initial };
+      return slots[at];
     },
   };
   return (props: P) => {
