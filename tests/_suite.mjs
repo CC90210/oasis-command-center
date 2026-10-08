@@ -122,6 +122,13 @@ const TESTS = [
   // and no screen showed the answers. Every role in two workspaces against
   // every forms route, the Responses page and its CSV (MKT-02, MKT-05).
   "tests/forms-safe.test.ts",
+  // A stored is_owner of "0" made a member a full admin; a stored grant of 1
+  // read as no. The seven flag shapes through the real Forms and team routes,
+  // and a parser guard that every read of either flag goes through dbBool.
+  "tests/db-bool.test.ts",
+  // A rejected first step of a public form created a lead, or rewrote a
+  // returning merchant's, before the 400. Every rejection, new and existing.
+  "tests/forms-submit-validate-first.test.ts",
   // The form builder was SunBiz-hardcoded for every tenant. Pins the tenant
   // boundary: sun keeps its presets, nobody else ever sees them, unknown
   // tenants get NO stage vocabulary (fail closed).

@@ -27,11 +27,22 @@
  *   4. The Forms list hands its client canEdit for editors only, with each
  *      form's response count; the editor shows the builder only to editors and
  *      works for a member with seats in two workspaces.
+ *   5. A RETIRED workspace (SunBiz, lib/tenant/retired.ts; PR #544 review,
+ *      2026-10-08): its owner and its members alike get 403 workspace_closed
+ *      on every write and the forms table is unchanged; its Forms page is the
+ *      read-only list with the closed sentence (never the SunBiz step cards,
+ *      which only offer changes); the editor says the same; its answers stay
+ *      readable on the Responses page and in the CSV.
+ *   6. The CSV is one stable set (same review): a response that lands between
+ *      two chunk reads is neither exported twice nor allowed to push another
+ *      out, at a chunk boundary inside a run of equal timestamps and at the
+ *      5,000-row cap.
  *
  * Real everything against a local libSQL file (tests/_delivery-harness.ts):
  * real signed sessions, the real Turso adapter, the real route handlers and
- * pages. next/headers, next/navigation, next/link and the two client
- * components the pages mount are the only stand-ins.
+ * pages. next/headers, next/navigation, next/link and the three client
+ * components the pages mount are the only stand-ins; the CSV checks add a
+ * response from inside the real adapter's own read, between two chunks.
  *
  * Run: node --conditions=react-server --import tsx tests/forms-safe.test.ts
  */
@@ -54,12 +65,14 @@ stubPath(require.resolve("next/link"), {
   __esModule: true,
   default: ({ href, children, ...rest }: { href: string; children?: ReactNode }) => createElement("a", { href, ...rest }, children),
 });
-// The two client components the pages mount: markers, so a test reads the
-// props a page hands them without loading the browser half.
+// The client components the pages mount: markers, so a test reads the props a
+// page hands them without loading the browser half.
 const FormsListMarker = Object.assign(() => null, { displayName: "FormsListClient" });
 const FormBuilderMarker = Object.assign(() => null, { displayName: "FormBuilderClient" });
+const SunBizFormsMarker = Object.assign(() => null, { displayName: "SunBizFormsClient" });
 stubPath(join(__dirname, "..", "components", "forms", "FormsListClient.tsx"), { FormsListClient: FormsListMarker });
 stubPath(join(__dirname, "..", "components", "forms", "FormBuilderClient.tsx"), { FormBuilderClient: FormBuilderMarker });
+stubPath(join(__dirname, "..", "components", "forms", "SunBizFormsClient.tsx"), { SunBizFormsClient: SunBizFormsMarker });
 
 type U = { id: string; email: string };
 type RoleCase = { label: string; role: string | null; fullAccess: 0 | 1; edits: boolean; opensForms: boolean; user: U };
@@ -93,6 +106,15 @@ const LEAD_A = "1ead0000-0000-4000-8000-00000000000a";
 const LEAD_B = "1ead0000-0000-4000-8000-00000000000b";
 const LEAD_OASIS = "1ead0000-0000-4000-8000-00000000000d";
 const LEAD_GONE = "1ead0000-0000-4000-8000-0000000000ff";
+/** The retired workspace (SunBiz): its owner and a member, its one form. */
+const SUN_OWNER: U = { id: "0e000000-0000-4000-8000-0000000000a1", email: "owner@sun.test" };
+const SUN_MEMBER: U = { id: "0e000000-0000-4000-8000-0000000000a2", email: "member@sun.test" };
+const FORM_SUN = "f0e00000-0000-4000-8000-00000000000e";
+const LEAD_SUN = "1ead0000-0000-4000-8000-00000000000e";
+/** A workspace of its own for the CSV checks, so no other list moves. */
+const CLIENT_C = "cccccccc-0000-4000-8000-00000000000c";
+const FORM_CSV_BOUNDARY = "f0f00000-0000-4000-8000-0000000000c1";
+const FORM_CSV_CAP = "f0f00000-0000-4000-8000-0000000000c2";
 
 const STEPS = JSON.stringify([
   {
@@ -260,6 +282,44 @@ async function main() {
     ],
     "write",
   );
+  // The retired workspace, provisioned the way SunBiz was (tenant row
+  // "submissions", profile slug "sun", a stored manifest) so its Forms page is
+  // reachable at all; and a workspace for the CSV checks with two big forms.
+  const { SUNBIZ_RETIRED_TENANT_ID: SUN } = await import("../lib/tenant/retired");
+  await db.batch(
+    [
+      {
+        sql: "INSERT INTO tenants (id, slug, name, custom_fields) VALUES (?, 'submissions', 'SunBiz Funding', ?)",
+        args: [SUN, JSON.stringify({ command_center_profile_slug: "sun" })],
+      },
+      {
+        sql: "INSERT INTO tenant_manifests VALUES ('m-sun', ?, 'sun', ?, 1, 1, '2026-01-01', '2026-01-01')",
+        args: [SUN, JSON.stringify(parseManifest(finalizeManifestFromWizard({ template: "custom", slug: "sun", answers: {} })))],
+      },
+      ...[SUN_OWNER, SUN_MEMBER].map((u) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [u.id, u.email] })),
+      profile("p-sun-owner", SUN_OWNER, SUN, "owner", 1, 0, "2026-09-01T00:00:00Z"),
+      profile("p-sun-member", SUN_MEMBER, SUN, "member", 0, 0, "2026-09-01T00:00:00Z"),
+      form(FORM_SUN, SUN, "initial-lead-capture", "Initial Lead Capture"),
+      lead(LEAD_SUN, SUN, "Sunny Lead"),
+      submission("s-sun1", FORM_SUN, SUN, LEAD_SUN, 0, { name: "Sunny Answer", email: "sunny@sun.test" }, "2026-09-08T10:00:00.000Z"),
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-c', 'Client C Exports')", args: [CLIENT_C] },
+      form(FORM_CSV_BOUNDARY, CLIENT_C, "boundary", "Boundary"),
+      form(FORM_CSV_CAP, CLIENT_C, "capped", "Capped"),
+    ],
+    "write",
+  );
+  // Seven answers to each second: a 500-row chunk then ends inside a run of
+  // equal timestamps, which only the (submitted_at, id) cursor gets right.
+  for (const [formId, prefix, count] of [[FORM_CSV_BOUNDARY, "csv-b", 1230], [FORM_CSV_CAP, "csv-c", 5050]] as const) {
+    await db.execute({
+      sql: `WITH RECURSIVE seq(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
+            INSERT INTO form_submissions (id, form_id, tenant_id, lead_id, step_index, payload, submitted_at)
+            SELECT printf('%s-%05d', ?, i), ?, ?, 'lead-csv', 0, json_object('name', 'Row ' || i),
+                   strftime('%Y-%m-%dT%H:%M:%fZ', '2026-10-01 00:00:00', '+' || (i / 7) || ' seconds')
+            FROM seq`,
+      args: [count - 1, prefix, formId, CLIENT_C],
+    });
+  }
 
   const { NextRequest } = await import("next/server");
   const req = (method: string, url: string, body?: unknown) =>
@@ -488,9 +548,18 @@ async function main() {
     assert.equal(access.mayReadFormResponses(narrowed), false);
   });
 
-  await check("canEditForms: founders only, among every persona", () => {
+  await check("canEditForms: founders only, among every persona, and nobody in a retired workspace", () => {
     const personas = ["founder", "manager", "sales", "marketing", "builder", "worker", "readonly", "legacy"] as const;
-    assert.deepEqual(personas.filter((p) => access.canEditForms(p)), ["founder"]);
+    assert.deepEqual(personas.filter((p) => access.canEditForms({ persona: p, tenantId: CLIENT_A })), ["founder"]);
+    assert.deepEqual(personas.filter((p) => access.canEditForms({ persona: p, tenantId: SUN })), []);
+    assert.deepEqual(access.formsEditRefusal({ persona: "founder", tenantId: SUN }), {
+      error: "workspace_closed",
+      message: access.FORMS_WORKSPACE_CLOSED,
+    });
+    assert.deepEqual(access.formsEditRefusal({ persona: "worker", tenantId: CLIENT_A }), {
+      error: "forbidden",
+      message: access.FORMS_EDIT_REFUSED,
+    });
   });
 
   // ── 4. the list and the editor ────────────────────────────────────────────
@@ -538,6 +607,170 @@ async function main() {
     assert.equal(await outcome(() => editPage({ params: Promise.resolve({ id: FORM_A }) })), "404", "the other seat's form opened");
     const minted = await call(mintRoute.POST(req("POST", `/api/forms/${FORM_B}/mint-link`, { lead_id: LEAD_B }), params({ id: FORM_B })));
     assert.equal(minted.status, 200, `mint-link for a two-seat owner: ${minted.text}`);
+  });
+
+  // ── 5. a retired workspace is read-only for everyone ──────────────────────
+  for (const [label, user] of [["its owner", SUN_OWNER], ["a member", SUN_MEMBER]] as const) {
+    await check(`retired workspace, ${label}: every forms write answers 403 workspace_closed and the forms are unchanged`, async () => {
+      await login(user);
+      const before = await formsTable();
+      for (const [what, run] of writes(FORM_SUN)) {
+        const res = await call(run());
+        assert.equal(res.status, 403, `${what}: HTTP ${res.status} ${res.text.slice(0, 160)}`);
+        assert.equal(res.body.error, "workspace_closed", what);
+        assert.equal(res.body.message, access.FORMS_WORKSPACE_CLOSED, `${what} says the workspace is closed`);
+      }
+      assert.equal(await formsTable(), before, "a write landed in a retired workspace");
+    });
+
+    await check(`retired workspace, ${label}: the Forms page is the read-only list with the closed sentence, never the SunBiz step cards`, async () => {
+      await login(user);
+      const got = await outcome(() => formsPage());
+      assert.ok(typeof got === "object", `the page answered ${String(got)}`);
+      assert.equal(propsOf(got.tree, SunBizFormsMarker), null, "the SunBiz step cards (Create from template, editor) were mounted");
+      const props = propsOf(got.tree, FormsListMarker) as {
+        canEdit: boolean;
+        readOnlyNote?: string;
+        responseCounts: Record<string, number | null>;
+        initialRows: Array<{ id: string }>;
+      } | null;
+      assert.ok(props, "the read-only list is mounted");
+      assert.equal(props.canEdit, false);
+      assert.equal(props.readOnlyNote, access.FORMS_WORKSPACE_CLOSED);
+      assert.deepEqual(props.initialRows.map((f) => f.id), [FORM_SUN]);
+      assert.deepEqual(props.responseCounts, { [FORM_SUN]: 1 }, "its answers are counted and linked");
+    });
+  }
+
+  await check("retired workspace: the editor tells its owner the workspace is closed and links the answers, with no builder", async () => {
+    await login(SUN_OWNER);
+    const got = await outcome(() => editPage({ params: Promise.resolve({ id: FORM_SUN }) }));
+    assert.ok(typeof got === "object", String(got));
+    assert.equal(propsOf(got.tree, FormBuilderMarker), null, "the owner of a retired workspace was handed the builder");
+    const strings = textOf(got.tree);
+    assert.ok(strings.includes(access.FORMS_WORKSPACE_CLOSED));
+    assert.ok(strings.includes(`/forms/${FORM_SUN}/responses`), "no way to the answers");
+  });
+
+  await check("retired workspace: its owner still reads the answers, on the Responses page and in the CSV", async () => {
+    await login(SUN_OWNER);
+    const got = await outcome(() => responsesPage({ params: Promise.resolve({ id: FORM_SUN }), searchParams: Promise.resolve({}) }));
+    assert.ok(typeof got === "object", String(got));
+    const text = textOf(got.tree).join("\n");
+    assert.ok(text.includes("Sunny Answer") && text.includes("Sunny Lead"), text.slice(0, 400));
+    const csv = await call(csvRoute.GET(req("GET", `/api/forms/${FORM_SUN}/responses`), params({ id: FORM_SUN })));
+    assert.equal(csv.status, 200, csv.text.slice(0, 200));
+    assert.ok(csv.text.includes("Sunny Answer"));
+  });
+
+  // ── 6. the CSV is one stable set ───────────────────────────────────────────
+  const { answerText, loadResponsesForExport, loadResponsesForm, RESPONSES_EXPORT_LIMIT } = await import("../lib/forms/responses");
+
+  await check("a sensitive answer never prints: a card code or password not at all, a list, file or object under a sensitive name not at all, a number only its last four", () => {
+    assert.equal(answerText("owner_ssn", undefined, "123-45-6789"), "ends in 6789");
+    assert.equal(answerText("tax_id", undefined, 987654321), "ends in 4321");
+    assert.equal(answerText("owner_ssn", undefined, ["123-45-6789"]), "Hidden");
+    assert.equal(answerText("account_number", undefined, { value: "000123456789" }), "Hidden");
+    assert.equal(answerText("ssn_card", undefined, { filename: "ssn-123-45-6789.pdf" }), "Hidden");
+    assert.equal(answerText("password", undefined, "hunter2secret"), "Hidden");
+    assert.equal(answerText("card_cvv", undefined, "12345"), "Hidden");
+    assert.equal(answerText("owner_ssn", undefined, "   "), "");
+    // An ordinary answer is untouched.
+    assert.equal(answerText("notes", undefined, ["a", "b"]), "a, b");
+    assert.equal(answerText("plans", undefined, { filename: "plan.pdf" }), "1 file: plan.pdf");
+  });
+  const { getServiceSupabase } = await import("../lib/supabase-server");
+  type Db = ReturnType<typeof getServiceSupabase>;
+  /**
+   * The real adapter, except that every read of form_submissions, once it has
+   * answered, lets `afterRead` write before the export's next read: a public
+   * submission landing between two chunks.
+   */
+  const insertingBetweenReads = (afterRead: (n: number) => Promise<void>): Db => {
+    const real = getServiceSupabase();
+    let reads = 0;
+    const wrap = (builder: object): object => {
+      const proxy: object = new Proxy(builder, {
+        get(target, prop) {
+          if (prop === "then") {
+            return (onOk?: (v: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+              (target as PromiseLike<unknown>)
+                .then(async (out) => {
+                  reads += 1;
+                  await afterRead(reads);
+                  return out;
+                })
+                .then(onOk, onErr);
+          }
+          const value = Reflect.get(target, prop, target);
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            const result = (value as (...a: unknown[]) => unknown).apply(target, args);
+            return result === target ? proxy : result;
+          };
+        },
+      });
+      return proxy;
+    };
+    return new Proxy(real as object, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop === "from") {
+          return (table: string) => {
+            const builder = (value as (t: string) => object).call(target, table);
+            return table === "form_submissions" ? wrap(builder) : builder;
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as Db;
+  };
+  let lateAnswers = 0;
+  const lateAnswer = (formId: string) =>
+    db.execute({
+      sql: `INSERT INTO form_submissions (id, form_id, tenant_id, lead_id, step_index, payload, submitted_at)
+            VALUES (?, ?, ?, 'lead-late', 0, '{"name":"Late"}', ?)`,
+      args: [`late-${String(++lateAnswers).padStart(3, "0")}`, formId, CLIENT_C, `2026-12-01T00:00:${String(lateAnswers % 60).padStart(2, "0")}.000Z`],
+    });
+  /** The rows the export must hold, read in one statement before it starts. */
+  const snapshot = async (formId: string) =>
+    (
+      await db.execute({
+        sql: "SELECT id FROM form_submissions WHERE tenant_id = ? AND form_id = ? ORDER BY submitted_at DESC, id DESC LIMIT ?",
+        args: [CLIENT_C, formId, RESPONSES_EXPORT_LIMIT],
+      })
+    ).rows.map((r) => String(r.id));
+
+  await check("CSV export: an answer landing between two chunk reads is not exported, and every answer that was there is, once, in order", async () => {
+    const expected = await snapshot(FORM_CSV_BOUNDARY);
+    assert.equal(expected.length, 1230, "precondition: three chunks of rows");
+    const form = await loadResponsesForm(getServiceSupabase(), CLIENT_C, FORM_CSV_BOUNDARY);
+    assert.ok(form);
+    const { rows } = await loadResponsesForExport(
+      insertingBetweenReads(async (n) => {
+        if (n === 1) await lateAnswer(FORM_CSV_BOUNDARY);
+      }),
+      { tenantId: CLIENT_C, form },
+    );
+    const ids = rows.map((r) => r.id);
+    assert.equal(new Set(ids).size, ids.length, `exported twice: ${ids.filter((id, i) => ids.indexOf(id) !== i).slice(0, 5).join(", ")}`);
+    assert.deepEqual(ids, expected, "the export is not the set that was there when it began, newest first");
+  });
+
+  await check("CSV export at the 5,000 cap: with an answer landing after every read, it is exactly the newest 5,000 there when it began", async () => {
+    const expected = await snapshot(FORM_CSV_CAP);
+    assert.equal(expected.length, RESPONSES_EXPORT_LIMIT, "precondition: more answers than the cap");
+    const form = await loadResponsesForm(getServiceSupabase(), CLIENT_C, FORM_CSV_CAP);
+    assert.ok(form);
+    const { rows } = await loadResponsesForExport(
+      insertingBetweenReads(async () => {
+        await lateAnswer(FORM_CSV_CAP);
+      }),
+      { tenantId: CLIENT_C, form },
+    );
+    const ids = rows.map((r) => r.id);
+    assert.equal(new Set(ids).size, ids.length, "an answer was exported twice");
+    assert.deepEqual(ids, expected, "an answer that belonged in the file was pushed out, or a late one let in");
   });
 
   finish("forms-safe");

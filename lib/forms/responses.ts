@@ -18,8 +18,10 @@
  * WHAT IS NEVER PRINTED. A drawn signature is an image: it reads "Signed". A
  * file reads as its file name. A field whose name says it holds a government
  * or bank number (SSN, SIN, tax id, account, routing or card number) shows only
- * its last four characters, the way the lead page shows an SSN. The page and
- * the CSV share answerText, so the two can never disagree on this.
+ * its last four characters, the way the lead page shows an SSN; a card code or
+ * a password shows nothing at all, and a list, file or object under any such
+ * name reads "Hidden". The page and the CSV share answerText, so the two can
+ * never disagree on this.
  */
 import "server-only";
 
@@ -159,28 +161,78 @@ export async function loadResponsesPage(
   return { rows, total, page, pageCount };
 }
 
-/** Every response for the CSV, newest first, up to RESPONSES_EXPORT_LIMIT. Throws on a failed read. */
+/** Where the previous export chunk stopped: its oldest row's (submitted_at, id). */
+type ExportCursor = { at: string; id: string };
+
+/**
+ * Every response for the CSV, newest first, up to RESPONSES_EXPORT_LIMIT. Throws on a failed read.
+ *
+ * ONE STABLE SET (PR #544 review, 2026-10-08). The rows are read in chunks of
+ * EXPORT_CHUNK, and every chunk after the first starts strictly below the row
+ * the previous chunk ended on, ordered by (submitted_at, id): keyset pages, not
+ * offsets. The first chunk's newest row is the cutoff, since every later chunk
+ * reads below its cursor, and the cursor is below that row. Offsets moved when
+ * a public submission landed between two chunk reads: the row at the boundary
+ * was exported twice and, at the cap, the oldest response that belonged in the
+ * file fell out. Now a response that arrives mid-download is simply not in this
+ * file (the next download has it), and every response that was there when the
+ * download began is in it exactly once.
+ *
+ * Each step below the cursor is two plain reads with bound values (the rest of
+ * the cursor's own instant by id, then everything older) rather than one
+ * PostgREST or() string, so no stored timestamp or id can break the filter.
+ */
 export async function loadResponsesForExport(
   db: SupabaseClient,
   input: { tenantId: string; form: ResponsesForm },
 ): Promise<{ rows: FormResponse[]; total: number | null }> {
   const rows: FormResponse[] = [];
   let total: number | null = null;
-  for (let from = 0; from < RESPONSES_EXPORT_LIMIT; from += EXPORT_CHUNK) {
-    const to = Math.min(from + EXPORT_CHUNK, RESPONSES_EXPORT_LIMIT) - 1;
-    const { data, error, count } = await db
+  let cursor: ExportCursor | null = null;
+  const forThisForm = (opts?: { count: "exact" }) =>
+    db
       .from("form_submissions")
-      .select(SUBMISSION_COLUMNS, from === 0 ? { count: "exact" } : undefined)
+      .select(SUBMISSION_COLUMNS, opts)
       .eq("tenant_id", input.tenantId)
-      .eq("form_id", input.form.id)
-      .order("submitted_at", { ascending: false })
-      .order("id", { ascending: false })
-      .range(from, to);
+      .eq("form_id", input.form.id);
+  const read = async (query: PromiseLike<{ data: unknown; error: { message: string } | null; count?: number | null }>) => {
+    const { data, error, count } = await query;
     if (error) throw new Error(`responses export read failed: ${error.message}`);
-    if (from === 0 && typeof count === "number") total = count;
-    const batch = (data || []) as SubmissionRow[];
+    return { batch: (data || []) as SubmissionRow[], count: count ?? null };
+  };
+
+  while (rows.length < RESPONSES_EXPORT_LIMIT) {
+    const take = Math.min(EXPORT_CHUNK, RESPONSES_EXPORT_LIMIT - rows.length);
+    let batch: SubmissionRow[];
+    if (!cursor) {
+      const first = await read(
+        forThisForm({ count: "exact" })
+          .order("submitted_at", { ascending: false })
+          .order("id", { ascending: false })
+          .limit(take),
+      );
+      if (typeof first.count === "number") total = first.count;
+      batch = first.batch;
+    } else {
+      const sameInstant = await read(
+        forThisForm().eq("submitted_at", cursor.at).lt("id", cursor.id).order("id", { ascending: false }).limit(take),
+      );
+      batch = sameInstant.batch;
+      if (batch.length < take) {
+        const older = await read(
+          forThisForm()
+            .lt("submitted_at", cursor.at)
+            .order("submitted_at", { ascending: false })
+            .order("id", { ascending: false })
+            .limit(take - batch.length),
+        );
+        batch = [...batch, ...older.batch];
+      }
+    }
     for (const r of batch) rows.push(toResponse(input.form.steps, r));
-    if (batch.length < to - from + 1) break;
+    if (batch.length < take) break;
+    const last = batch[batch.length - 1];
+    cursor = { at: String(last.submitted_at), id: String(last.id) };
   }
   return { rows, total };
 }
@@ -261,6 +313,8 @@ export function answersFor(steps: FormStep[], stepIndex: number, payload: unknow
 
 const SENSITIVE_FIELD =
   /(^|_)(ssn|sin|social_security|social_insurance|itin|tax_id|tin|account_number|routing_number|transit_number|card_number|cvv|cvc|password)(_|$)/i;
+/** Never shown in any part, not even the last four. */
+const SECRET_FIELD = /(^|_)(cvv|cvc|password)(_|$)/i;
 
 function isFile(value: unknown): value is { filename: string } {
   return !!value && typeof value === "object" && typeof (value as { filename?: unknown }).filename === "string";
@@ -283,6 +337,15 @@ function lastFour(value: string): string {
 /** One answer as text: what the Responses page shows and the CSV holds. "" for no answer. */
 export function answerText(key: string, field: FormField | undefined, raw: unknown): string {
   if (raw === null || raw === undefined) return "";
+  // A sensitive key is settled FIRST, so no formatting below can print it
+  // (CodeRabbit, PR #544): a card code or password shows nothing at all; a
+  // list, file or object under a sensitive key shows nothing of itself; a plain
+  // number or text shows only its last four characters.
+  if (SENSITIVE_FIELD.test(key)) {
+    if (SECRET_FIELD.test(key) || (typeof raw !== "string" && typeof raw !== "number")) return "Hidden";
+    const secret = String(raw).trim();
+    return secret ? lastFour(secret) : "";
+  }
   if (field?.type === "signature" || (typeof raw === "string" && /^data:image\//i.test(raw.trim()))) {
     return typeof raw === "string" && raw.trim() ? "Signed" : "";
   }
@@ -301,7 +364,6 @@ export function answerText(key: string, field: FormField | undefined, raw: unkno
   if (typeof raw === "boolean") return raw ? "Yes" : "No";
   const text = String(raw).trim();
   if (!text) return "";
-  if (SENSITIVE_FIELD.test(key)) return lastFour(text);
   return clip(optionText(field, text));
 }
 

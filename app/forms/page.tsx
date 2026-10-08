@@ -20,11 +20,18 @@
  * print the database driver's message, or tell a client to run a Supabase
  * migration command "on the operator machine".
  *
- * WHO MAY CHANGE (MKT-02, 2026-10-02). canEdit is canEditForms for the
- * session's persona (lib/forms/access.ts), the rule every forms write route
- * enforces: everyone else gets the list and each form's responses without
- * New form, the on/off switch, Edit or Delete. Each row carries its response
- * count (MKT-05); a count that could not be read is null, never a zero.
+ * WHO MAY CHANGE (MKT-02, 2026-10-02). canEdit is formsEditRefusal for the
+ * session's persona and workspace (lib/forms/access.ts), the rule every forms
+ * write route enforces: everyone else gets the list and each form's responses
+ * without New form, the on/off switch, Edit or Delete. Each row carries its
+ * response count (MKT-05); a count that could not be read is null, never a zero.
+ *
+ * A RETIRED WORKSPACE (lib/tenant/retired.ts, PR #544 review 2026-10-08) is
+ * read-only for everyone, its owner included: the same list, its sentence in
+ * place of New form, and every form's answers still readable. The SunBiz step
+ * cards (SunBizFormsClient) only ever offer changes, so they render only for
+ * someone who may make them, which in a retired workspace is nobody; SunBiz is
+ * that workspace.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -35,7 +42,7 @@ import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { FormsListClient } from "@/components/forms/FormsListClient";
 import { SunBizFormsClient } from "@/components/forms/SunBizFormsClient";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
-import { canEditForms } from "@/lib/forms/access";
+import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
 import { AlertCircle } from "lucide-react";
 
@@ -100,6 +107,8 @@ export default async function FormsPage() {
   const responseCounts = result.ok
     ? await countResponsesByForm(getServiceSupabase(), tenantId, result.rows.map((r) => r.id))
     : {};
+  const refusal = formsEditRefusal({ persona: viewer.surface.persona, tenantId });
+  const canEdit = refusal === null;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -115,7 +124,7 @@ export default async function FormsPage() {
         </div>
       )}
 
-      {result.ok && profileSlug === "sun" ? (
+      {result.ok && profileSlug === "sun" && canEdit ? (
         <SunBizFormsClient
           initialRows={result.rows}
           tenantSlug={tenantSlug}
@@ -127,7 +136,8 @@ export default async function FormsPage() {
           tenantSlug={tenantSlug}
           tenantName={tenant?.name ?? null}
           profileSlug={profileSlug}
-          canEdit={canEditForms(viewer.surface.persona)}
+          canEdit={canEdit}
+          readOnlyNote={refusal?.error === "workspace_closed" ? refusal.message : undefined}
           responseCounts={responseCounts}
         />
       ) : null}

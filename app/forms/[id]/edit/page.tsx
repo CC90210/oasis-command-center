@@ -16,8 +16,9 @@
  * (viewer.surface.tenantId). It used to find the workspace with its own
  * user_profiles lookup, which errored for anyone with a seat in two
  * workspaces (a 404 on every form) and could disagree with the list. Someone
- * canEditForms refuses gets a plain notice and a link to the answers, never
- * a builder whose Save the API would refuse.
+ * formsEditRefusal refuses (a member who may not edit, or anyone in a retired
+ * workspace) gets its plain sentence and a link to the answers, never a
+ * builder whose Save the API would refuse.
  */
 
 import { PageHeader } from "@/components/Card";
@@ -27,7 +28,7 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { safe } from "@/lib/api-helpers";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
-import { canEditForms, FORMS_EDIT_REFUSED } from "@/lib/forms/access";
+import { formsEditRefusal } from "@/lib/forms/access";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
@@ -80,12 +81,13 @@ export default async function EditFormPage({
   const row = await loadForm(id, viewer.surface.tenantId);
   if (!row) notFound();
 
-  if (!canEditForms(viewer.surface.persona)) {
+  const refusal = formsEditRefusal({ persona: viewer.surface.persona, tenantId: viewer.surface.tenantId });
+  if (refusal) {
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader
           title={row.name || "Untitled form"}
-          subtitle={FORMS_EDIT_REFUSED}
+          subtitle={refusal.message}
           action={
             <Link
               href="/forms"

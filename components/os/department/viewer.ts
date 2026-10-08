@@ -23,6 +23,7 @@ import { capabilitiesFor, isOasisSurfaceTenant, resolvePersona, type Persona, ty
 import { resolveViewerSurface, type ViewerSurface } from "@/lib/role-surfaces-session";
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 import type { BuildOsNavInput } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 
@@ -132,10 +133,12 @@ export async function resolveMemberNavInput(
     const profile = chooseActiveProfile(rows, null);
     // Fail closed, as resolveSessionContext does: no role is read-only.
     const teamRole = profile.team_role || "read_only";
+    // Both flags through dbBool (lib/db-bool.ts), exactly as resolveSessionContext
+    // reads them: `!!` read a stored "0" as an owner, `=== true` refused a grant.
     const persona = resolvePersona({
       teamRole,
-      isTrueAdmin: !!profile.is_owner || teamRole === "admin" || teamRole === "owner",
-      adminAccess: profile.admin_access === true,
+      isTrueAdmin: dbBool(profile.is_owner) || teamRole === "admin" || teamRole === "owner",
+      adminAccess: dbBool(profile.admin_access),
     });
     const manifest = await getManifest(resolveClientProfileSlug(tenant), tenantId);
     const provisioned = !isUnprovisionedManifest(manifest);

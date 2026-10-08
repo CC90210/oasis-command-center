@@ -7,10 +7,12 @@
  * handles the create flow (POST /api/forms with a starter stub then
  * redirect to the editor) and per-row toggle/delete.
  *
- * canEdit comes from the page (canEditForms, lib/forms/access.ts), the same
- * rule the API enforces. Without it the list draws no New form, no on/off
+ * canEdit comes from the page (formsEditRefusal, lib/forms/access.ts), the
+ * same rule the API enforces. Without it the list draws no New form, no on/off
  * switch, no Edit and no Delete: only the forms, their links and their
  * responses. Each row's Responses count opens /forms/[id]/responses.
+ * readOnlyNote replaces the default "who may change forms" sentence when the
+ * page has a different reason (a retired workspace, where nobody may).
  */
 
 import { useEffect, useState } from "react";
@@ -41,6 +43,7 @@ export function FormsListClient({
   tenantName,
   profileSlug,
   canEdit,
+  readOnlyNote,
   responseCounts,
 }: {
   initialRows: FormRow[];
@@ -52,6 +55,8 @@ export function FormsListClient({
   profileSlug: string | null;
   /** May this viewer create, switch off, edit or delete forms? */
   canEdit: boolean;
+  /** Why not, when the reason is not the viewer's role (a retired workspace). */
+  readOnlyNote?: string;
   /** Responses per form id; null where the count could not be read. */
   responseCounts: Record<string, number | null>;
 }) {
@@ -187,7 +192,7 @@ export function FormsListClient({
           </button>
         ) : (
           <div className="text-xs text-fg-muted">
-            Only owners and admins can create or change forms. You can read every form&apos;s responses.
+            {readOnlyNote ?? <>Only owners and admins can create or change forms. You can read every form&apos;s responses.</>}
           </div>
         )}
       </div>

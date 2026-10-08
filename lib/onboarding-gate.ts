@@ -45,6 +45,8 @@
  * existed carries none and is never gated.
  */
 
+import { dbBool } from "@/lib/db-bool";
+
 export type OnboardingGateProfile = {
   onboarding_completed_at: string | null;
   invited_by: string | null;
@@ -64,7 +66,7 @@ export function shouldRedirectToOnboarding(
   if (profile.tenant_id != null) {
     // Only a positive "not set up" routes the owner; an unknown answer
     // (null/undefined) never traps anyone on a wizard.
-    const owner = profile.is_owner === true || Number(profile.is_owner) === 1;
+    const owner = dbBool(profile.is_owner);
     return owner && opts.workspaceProvisioned === false ? "/onboarding/wizard" : null;
   }
   return profile.invited_by ? "/onboarding/welcome" : null;
