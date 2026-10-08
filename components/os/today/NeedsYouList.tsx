@@ -24,7 +24,7 @@
  * islands). Links keep prefetch off like every rail link.
  */
 import Link from "next/link";
-import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Plug, Receipt, Repeat, Reply } from "lucide-react";
+import { BellRing, CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Plug, Receipt, Repeat, Reply } from "lucide-react";
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
 import {
   isReviewItem,
@@ -45,6 +45,7 @@ const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
   bank: Landmark,
   connection: Plug,
   routine: Repeat,
+  alert: BellRing,
 };
 
 /** Icon colour carries the tone; the words carry the meaning, so colour is never the only signal. */
@@ -68,7 +69,40 @@ function formatCount(n: number, capped = false): string {
   return n > 99 ? "99+" : floorCount(n, capped);
 }
 
+/**
+ * An open alert card of this workspace: what happened, when, and what its
+ * Telegram push did, in full (no truncation: the outcome is the last part).
+ * Resolve posts to the existing route (app/api/agent-alerts/[id]/resolve),
+ * which closes only this workspace's card and sends the page back here. The
+ * form sits beside the link, never inside it.
+ */
+function AlertRow({ item, alertId }: { item: NeedsYouItem; alertId: string }) {
+  const Icon = ICONS[item.icon];
+  return (
+    <li className="flex items-start gap-3 px-4 py-3">
+      <Icon size={16} strokeWidth={1.75} aria-hidden className={`mt-0.5 shrink-0 ${ICON_TONE[item.tone]}`} />
+      <Link
+        href={item.href}
+        prefetch={false}
+        className="min-w-0 flex-1 rounded-sm outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent/60"
+      >
+        <span className="block text-sm font-medium text-fg">{item.title}</span>
+        {item.detail && <span className="mt-0.5 block text-[13px] text-fg-muted">{item.detail}</span>}
+      </Link>
+      <form method="post" action={`/api/agent-alerts/${encodeURIComponent(alertId)}/resolve`} className="shrink-0">
+        <button
+          type="submit"
+          className="rounded-md border border-hairline px-2.5 py-1 text-xs font-medium text-fg transition-colors duration-150 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+        >
+          Resolve
+        </button>
+      </form>
+    </li>
+  );
+}
+
 function NeedsYouRow({ item }: { item: NeedsYouItem }) {
+  if (item.resolveAlertId) return <AlertRow item={item} alertId={item.resolveAlertId} />;
   const Icon = ICONS[item.icon];
   return (
     <li>

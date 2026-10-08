@@ -1,19 +1,22 @@
 /**
- * lib/os/channel/workspace-key.ts — which saved AI key every channel answers on.
+ * lib/os/channel/workspace-key.ts - which saved AI key every channel answers on.
  *
- * A channel (a department channel, or a direct agent chat under /t/<slug>)
- * answers on ONE row of agent_model_config: this workspace's row for
- * CHANNEL_CONFIG_AGENT_KEY with user_id IS NULL. A teammate's personal row, or
- * another agent's row, is never used by a channel.
- *
- * Three places read that row and must read the SAME one:
- *   - app/api/agents/chat/route.ts (the channel itself);
- *   - components/os/department/channel.ts (is the channel ready?);
- *   - app/api/agent-config/test-connection/route.ts ("Test" on a saved key),
- * so the key they name lives here once.
- *
- * PURE: no imports.
+ * MOVED to lib/ai/workspace-account.ts (2026-10-02, AIP-01): a workspace's AI
+ * account is its own row (agent_key "__workspace__", user_id IS NULL), with
+ * the `bravo` workspace row as the legacy fallback, and every channel reads it
+ * through readWorkspaceAiAccount. This file keeps the old export names for
+ * callers on older branches.
  */
 
-/** The agent_model_config.agent_key of the workspace row channels answer on. */
-export const CHANNEL_CONFIG_AGENT_KEY = "bravo";
+export {
+  WORKSPACE_AI_AGENT_KEY,
+  LEGACY_WORKSPACE_AI_AGENT_KEY,
+  readWorkspaceAiAccount,
+  hasUsableKey,
+} from "@/lib/ai/workspace-account";
+
+/**
+ * @deprecated The legacy `bravo` row's agent_key. Reading this row alone
+ * misses the workspace's AI account; read it with readWorkspaceAiAccount.
+ */
+export { LEGACY_WORKSPACE_AI_AGENT_KEY as CHANNEL_CONFIG_AGENT_KEY } from "@/lib/ai/workspace-account";

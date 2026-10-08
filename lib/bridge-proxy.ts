@@ -28,6 +28,7 @@ import {
 } from "./bridge-target-resolver";
 import { bridgeExecToolAllowedForRole } from "./role-gates";
 import { CLAIR_TOOL_NAME, clairCapabilityError, type ClairSession } from "./clair/capability";
+import { dbBool } from "./db-bool";
 
 export type BridgeTarget = _BridgeTarget;
 export const resolveBridgeTarget = _resolveBridgeTarget;
@@ -230,14 +231,16 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     if (!op) return { ok: false, status: 403, error: "no_profile" };
     tenantId = String(op.tenant_id || "");
     teamRole = (op.team_role || "read_only").trim().toLowerCase();
-    if (op.is_owner === true && teamRole !== "owner" && teamRole !== "admin") {
+    // Both flags through dbBool (lib/db-bool.ts): `=== true` refused the stored
+    // integer 1, so neither promotion below ever fired after the Turso cutover.
+    if (dbBool(op.is_owner) && teamRole !== "owner" && teamRole !== "admin") {
       teamRole = "owner";
     }
     // admin_access toggle → promote to admin-equivalent so every downstream
     // role gate (bridgeExecToolAllowedForRole, bridgeDisallowedToolsForRole:
     // bash/write/pm2) treats a toggled agent as a full admin. Mirrors the
     // is_owner promotion above. Admin-toggle design, 2026-07-07.
-    if (op.admin_access === true && teamRole !== "owner" && teamRole !== "admin") {
+    if (dbBool(op.admin_access) && teamRole !== "owner" && teamRole !== "admin") {
       teamRole = "admin";
     }
   } catch {

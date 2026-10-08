@@ -33,11 +33,14 @@ import { Card } from "@/components/Card";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { loadTenantFeed } from "@/components/os/landings/feed-data";
 import {
+  feedDepartmentsFor,
+  feedViewerScope,
   parseFeedDepartment,
   parseFeedTab,
   rowsForTab,
   isShipped,
   visibleFeedRows,
+  withCustomerMessagesFor,
   type FeedTab,
 } from "@/components/os/landings/feed-model";
 import {
@@ -55,8 +58,6 @@ import { NeedsYouRows } from "@/components/os/today/NeedsYouList";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { safe } from "@/lib/api-helpers";
 import { floorCount } from "@/lib/os/count";
-import { OS_DEPARTMENTS } from "@/lib/os/departments";
-import { mayOpenOsHref } from "@/lib/os/nav";
 import type { DepartmentKey } from "@/lib/os/types";
 import { FeedRefresher } from "./refresher";
 
@@ -79,7 +80,7 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
 
   // Chips = the departments this viewer's rail draws. A department they cannot
   // open is neither a filter nor, below, a source of rows.
-  const departments: FeedDepartmentOption[] = OS_DEPARTMENTS.filter((d) => mayOpenOsHref(viewer.navInput, d.href)).map(
+  const departments: FeedDepartmentOption[] = feedDepartmentsFor(viewer.navInput).map(
     (d) => ({ key: d.key, slug: d.slug, label: d.label }),
   );
   const departmentLabels: Partial<Record<DepartmentKey, string>> = Object.fromEntries(
@@ -129,13 +130,15 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
     canSeeTape ? loadTenantFeed({ tenantId }) : Promise.resolve(null),
     tab === "needs" ? loadRecentDecisions({ scope, tenantSlug, department: dept, limit: FEED_DECISIONS_SHOWN }) : Promise.resolve(null),
   ]);
+  // The same scope /api/event-feed applies (feedViewerScope). The rows are this
+  // workspace's own (loadTenantFeed), and a customer's own words stay only for
+  // a viewer who may see client identities.
   const visible =
     feed && feed.ok
-      ? visibleFeedRows(feed.rows, {
-          canSeeTape,
-          canSeeCompanyFinancials: capabilities.canSeeCompanyFinancials,
-          departments: new Set(departments.map((d) => d.key)),
-        })
+      ? withCustomerMessagesFor(
+          visibleFeedRows(feed.rows, feedViewerScope(viewer.navInput, capabilities)),
+          () => capabilities.canSeeClientIdentities,
+        )
       : [];
   const inDept = dept ? rowsForTab(visible, "all", dept) : visible;
   // A count nobody could finish is a floor ("3+"); a floor of 0 is no number at all.

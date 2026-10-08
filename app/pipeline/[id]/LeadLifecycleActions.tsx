@@ -10,6 +10,7 @@ import {
 import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 import { OASIS_LEAD_STAGES, findOasisStage } from "@/lib/oasis-stage-meta";
 import { mayHostAuditCall } from "@/lib/team-roles";
+import { dbBool } from "@/lib/db-bool";
 import {
   AUTOMATION_ADD_ONS,
   WEBSITE_PACKAGES,
@@ -421,7 +422,7 @@ export function LeadLifecycleActions({
         setSystemCalendarFallback(body?.system_calendar_fallback === true);
         const members = body.members as Founder[];
         const next = members.filter(
-          (member: Founder) => member.is_owner || mayHostAuditCall(member.team_role),
+          (member: Founder) => dbBool(member.is_owner) || mayHostAuditCall(member.team_role),
         );
         setFounders(next);
         setFounderRosterState("ready");

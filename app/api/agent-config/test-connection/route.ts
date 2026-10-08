@@ -4,12 +4,12 @@
  * One-shot provider-key validation. Two modes, single endpoint:
  *
  * 1. Test the SAVED key (default — body { provider }):
- *      Reads the key the CHANNELS answer on — the workspace row (user_id IS
- *      NULL) for CHANNEL_CONFIG_AGENT_KEY (lib/os/channel/workspace-key.ts),
- *      the row app/api/agents/chat reads — decrypts it, and probes the model
- *      saved with it. Never a teammate's personal key or another agent's row.
- *      No such key, or one for another provider, is said plainly (404) and
- *      nothing is probed.
+ *      Reads the key the CHANNELS answer on: the workspace's AI account
+ *      (lib/ai/workspace-account.ts readWorkspaceAiAccount, the account
+ *      app/api/agents/chat and Slack mentions read). Decrypts it, and probes
+ *      the model saved with it. Never a teammate's personal key or another
+ *      agent's row. No such key, or one for another provider, is said plainly
+ *      (404) and nothing is probed.
  *
  * 2. Test a PROPOSED key before saving (body { provider, api_key, model? }):
  *      Skips the DB lookup and probes with the supplied key directly so
@@ -20,7 +20,9 @@
  *
  * Auth: session — both modes require a logged-in operator. Mode #2 is
  * NOT a public oracle for credential stuffing; the rate limit + session
- * gate keep it safe.
+ * gate keep it safe. Provider "ollama" (a local model server, whose "key" is
+ * a web address the server calls) is the verified platform operator's only:
+ * anyone else is refused 403 before anything is fetched (AIP-11).
  *
  * THE PROBE IS A REAL ONE-TOKEN COMPLETION (lib/agents/provider-probe.ts),
  * never a model-list GET. Listing models spends nothing, so it proves nothing
@@ -50,6 +52,8 @@
  *   "empty_key"             → mode 2, api_key sent blank (400)
  *   "invalid_model"         → mode 2, model is not a plain model id (400)
  *   "invalid_provider"      → body.provider invalid
+ *   "local_model_not_allowed" -> provider "ollama" from anyone but the
+ *                             verified platform operator (403)
  *
  * Replaces the standalone /api/agent-config/test-key endpoint (deleted
  * 2026-05-23) — that was a duplicate built before realizing this one
@@ -57,13 +61,17 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { decryptField } from "@/lib/field-encryption";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import { probeProvider, type ProbeResult } from "@/lib/agents/provider-probe";
 import { PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
-import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
+import {
+  LOCAL_MODEL_REFUSAL,
+  mayUseLocalModel,
+  readWorkspaceAiAccount,
+  type WorkspaceAiAccount,
+} from "@/lib/ai/workspace-account";
 import { billingForKey, isAiBudgetCode, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
 
 /**
@@ -168,6 +176,14 @@ export async function POST(req: NextRequest) {
   if (!VALID_PROVIDERS.includes(provider)) {
     return NextResponse.json({ ok: false, error: `invalid_provider:${provider}`, code: "invalid_provider" }, { status: 400 });
   }
+  // A local model server's "key" is a web address this server would call:
+  // the verified platform operator's only, in both modes (AIP-11).
+  if (provider === "ollama" && !(await mayUseLocalModel(ctx.userId, ctx.email))) {
+    return NextResponse.json(
+      { ok: false, status: "error", provider, code: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL },
+      { status: 403 },
+    );
+  }
 
   // Mode 2: test the proposed key directly (before save). The api_key
   // field IS the value to test — skip the DB lookup entirely. It is tested on
@@ -197,25 +213,21 @@ export async function POST(req: NextRequest) {
   }
 
   // Mode 1: test the saved key the CHANNELS answer on, and only that key: the
-  // workspace row (user_id IS NULL) for CHANNEL_CONFIG_AGENT_KEY, the same row
-  // app/api/agents/chat and department readiness read. Not a teammate's
-  // personal key and not another agent's row: a green "Test" on either says
-  // nothing about the key every channel sends. The key is tested on the model
-  // saved with it (lib/agents/provider-probe.ts WHICH MODEL).
-  const saved = await getServiceSupabase()
-    .from("agent_model_config")
-    .select("provider, model, encrypted_api_key")
-    .eq("tenant_id", ctx.tenantId)
-    .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
-    .is("user_id", null)
-    .maybeSingle();
-  // A failed read is not "no key on file": the owner would be told to add a
-  // key that is already saved.
-  if (saved.error) {
+  // workspace's AI account (lib/ai/workspace-account.ts), the same account
+  // app/api/agents/chat, Slack mentions and department readiness read. Not a
+  // teammate's personal key and not another agent's row: a green "Test" on
+  // either says nothing about the key every channel sends. The key is tested
+  // on the model saved with it (lib/agents/provider-probe.ts WHICH MODEL).
+  let row: WorkspaceAiAccount | null;
+  try {
+    row = await readWorkspaceAiAccount(ctx.tenantId);
+  } catch (err) {
+    // A failed read is not "no key on file": the owner would be told to add a
+    // key that is already saved.
     console.error("[agent-config.test-connection] saved key could not be read", {
       tenantId: ctx.tenantId,
       provider,
-      error: saved.error.message,
+      error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
       {
@@ -228,8 +240,7 @@ export async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
-  const row = saved.data as { provider: string | null; model: string | null; encrypted_api_key: string | null } | null;
-  const encrypted = row?.encrypted_api_key || null;
+  const encrypted = row?.encryptedApiKey || null;
   if (!encrypted) {
     return NextResponse.json(
       {

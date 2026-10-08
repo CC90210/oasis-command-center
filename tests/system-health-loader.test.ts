@@ -180,7 +180,7 @@ async function main() {
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT NOT NULL DEFAULT '{}', created_at TEXT, updated_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, provider TEXT, encrypted_api_key TEXT,
-      enabled INTEGER, user_id TEXT);
+      enabled INTEGER, user_id TEXT, agent_key TEXT, model TEXT);
   `);
 
   const allOn = {

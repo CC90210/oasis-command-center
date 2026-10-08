@@ -7,6 +7,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import { decideProfileEdit } from "@/lib/profile-edit-policy";
+import { dbBool } from "@/lib/db-bool";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,8 +40,9 @@ export async function PATCH(req: NextRequest) {
   const currentProfile = resolved.profile;
   const decision = decideProfileEdit(body, {
     teamRole: currentProfile.team_role,
-    isOwner: currentProfile.is_owner === true,
-    adminAccess: currentProfile.admin_access === true,
+    // dbBool (lib/db-bool.ts): `=== true` refused the stored 1 for both flags.
+    isOwner: dbBool(currentProfile.is_owner),
+    adminAccess: dbBool(currentProfile.admin_access),
   });
   if (!decision.ok) return bad(decision.status, decision.error);
   const update = decision.update;

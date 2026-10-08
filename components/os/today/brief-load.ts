@@ -48,6 +48,7 @@ import {
   type Read,
   type SalesSnapshot,
   type TodayBriefPlan,
+  type WorkspaceAlerts,
 } from "@/components/os/today/model";
 import {
   loadCash,
@@ -56,6 +57,7 @@ import {
   loadHotReplies,
   loadRoutineHealth,
   loadSales,
+  loadWorkspaceAlerts,
   TODAY_READ_DEADLINE_MS,
   type OperatorDay,
 } from "@/components/os/today/loaders";
@@ -138,6 +140,7 @@ export type NeedsYouReads = {
   approvals: Read<ApprovalsBlock>;
   connections: Read<ConnectionAttention[]> | null;
   routines: Read<RoutineHealth> | null;
+  alerts: Read<WorkspaceAlerts> | null;
 };
 
 export async function loadNeedsYouReads(input: {
@@ -188,8 +191,10 @@ export async function loadNeedsYouReads(input: {
   const routinesP = plan.routines
     ? empireRoutinesFor(viewer, input.isPlatformOperator).then((empire) => loadRoutineHealth(tenantId, empire, day.nowMs))
     : Promise.resolve(null);
+  // This workspace's own open alert cards, for its owners/admins.
+  const alertsP = plan.alerts ? loadWorkspaceAlerts(tenantId) : Promise.resolve(null);
 
-  const [sales, delivery, inbound, cash, approvals, connections, routines] = await Promise.all([
+  const [sales, delivery, inbound, cash, approvals, connections, routines, alerts] = await Promise.all([
     salesP,
     deliveryP,
     inboundP,
@@ -197,8 +202,9 @@ export async function loadNeedsYouReads(input: {
     approvalsP,
     connectionsP,
     routinesP,
+    alertsP,
   ]);
-  return { sales, delivery, inbound, cash, approvals, connections, routines };
+  return { sales, delivery, inbound, cash, approvals, connections, routines, alerts };
 }
 
 /** The one Needs-you list, from the reads above. */

@@ -4,6 +4,7 @@ import { cache } from "react";
 import type { User } from "@supabase/supabase-js";
 import type { UserProfile } from "@/lib/supabase";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 
 export type ActiveUserProfile = UserProfile & {
   team_role?: string | null;
@@ -32,12 +33,13 @@ export function chooseActiveProfile(
   // is authoritative; the primary key is the stable final tiebreaker. We do not
   // blindly prefer a more privileged role, because a stale admin duplicate must
   // not elevate a current sales profile.
+  // dbBool (lib/db-bool.ts): a stored "0" must not rank a seat as the owner's.
   const tier = (row: ActiveUserProfile) =>
-    row.is_owner && row.onboarding_completed_at
+    dbBool(row.is_owner) && row.onboarding_completed_at
       ? 3
       : row.onboarding_completed_at
         ? 2
-        : row.is_owner
+        : dbBool(row.is_owner)
           ? 1
           : 0;
   const updatedAt = (row: ActiveUserProfile) => {

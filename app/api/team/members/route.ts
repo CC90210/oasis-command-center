@@ -16,6 +16,7 @@ import {
   type TeamRole,
 } from "@/lib/team";
 import { roleAllowedForTenant } from "@/lib/role-surfaces";
+import { dbBool } from "@/lib/db-bool";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -267,7 +268,9 @@ export async function GET(req: NextRequest) {
       full_name: m.full_name,
       display_name: m.display_name,
       team_role: m.team_role,
-      is_owner: m.is_owner,
+      // true or false, never the stored 0/1: the browser reads this flag with
+      // `member.is_owner || ...` to pick audit hosts (lib/db-bool.ts).
+      is_owner: dbBool(m.is_owner),
       joined_at: m.joined_at,
       // Always true unless the caller asked for ?include_inactive=1.
       active: isActiveMember(m),

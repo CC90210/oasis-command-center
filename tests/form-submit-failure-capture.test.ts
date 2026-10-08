@@ -6,7 +6,9 @@
  * destroyed pre-insert, no alert, no copy, unrecoverable. These assertions pin
  * the three guarantees Adon asked for on 2026-08-18:
  *   1. the merchant's data is dead-lettered (recoverable),
- *   2. sunbiz-ops is paged immediately on the ONE decay ladder,
+ *   2. the workspace that owns the form is told immediately on the ONE decay
+ *      ladder (who that is, and that it is never an OASIS chat for a client's
+ *      form, is pinned by tests/workspace-alerts.test.ts),
  *   3. Fleet Health stays red until every row is recovered.
  */
 
@@ -133,11 +135,12 @@ assert.ok(
 // reverse storms on a crash-loop).
 {
   const upsertAt = CAPTURE.indexOf('from("health_alert_state").upsert');
-  const sendAt = CAPTURE.indexOf("await sendTelegram(text");
+  const sendAt = CAPTURE.indexOf("await writeAgentAlert(");
   assert.ok(upsertAt > 0 && sendAt > 0 && upsertAt < sendAt, "persist the ladder state before sending");
 }
-// Suppression keys on the CONDITION (tenant/form/source), never the message.
-assert.ok(/`submitfail:\$\{tenantSlug \?\? "unknown"\}\/\$\{formSlug \?\? "unknown"\}\/\$\{input\.source\}`/.test(CAPTURE),
+// Suppression keys on the CONDITION (the verified form's tenant/form, and the
+// source), never the message.
+assert.ok(/`submitfail:\$\{form\.tenantSlug\}\/\$\{form\.formSlug\}\/\$\{input\.source\}`/.test(CAPTURE),
   "the ladder key must be coarse and message-free");
 
 // The beacon endpoint is public (its own middleware entry — the /submit prefix

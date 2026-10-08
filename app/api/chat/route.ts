@@ -793,6 +793,8 @@ export async function POST(req: NextRequest) {
             model,
             apiKey: isOllama ? "" : apiKey,
             baseUrl: isOllama ? apiKey : undefined,
+            // A local model answers for the verified operator only (lib/chat-auth.ts).
+            allowLocalModel: isOperator,
             system: persona,
             messages: messagesForModel,
             meter,

@@ -18,6 +18,7 @@
 import type { Client } from "@libsql/client";
 import type { NextResponse } from "next/server";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { dbBool } from "@/lib/db-bool";
 import { getSeedManifest, isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import {
   claimForDestination,
@@ -81,7 +82,8 @@ export async function computeOnboardingState(
       onboarding_completed_at: row.onboarding_completed_at == null ? null : String(row.onboarding_completed_at),
       invited_by: row.invited_by == null ? null : String(row.invited_by),
       tenant_id: tenantId,
-      is_owner: row.is_owner == null ? null : Number(row.is_owner),
+      // dbBool (lib/db-bool.ts), the gate's own read: Number() turned " 1" into 1.
+      is_owner: dbBool(row.is_owner),
     },
     { workspaceProvisioned },
   );

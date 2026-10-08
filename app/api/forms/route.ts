@@ -11,11 +11,16 @@
  * Public form-submission + view-tracking lives at /api/forms/submit and
  * /api/forms/view — those routes use HMAC bearer auth, not session
  * cookies, so prospects can submit without an OASIS account.
+ *
+ * WHO (MKT-02, 2026-10-02): the workspace is the session's (formsSession,
+ * lib/forms/access.ts); creating a form needs canEditForms, so a member who
+ * may not edit gets 403 before the body is read. Listing stays open to any
+ * member of the workspace: a form's definition holds no one's answers.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { formsSession } from "@/lib/forms/access";
 import { isMissingTableError, isUniqueViolationError, missingTablePayload } from "@/lib/api-helpers";
 import {
   parseFormSteps,
@@ -29,14 +34,10 @@ export const dynamic = "force-dynamic";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 
-async function resolveUserId(): Promise<string | null> {
-  const user = await getSessionUser();
-  return user?.id ?? null;
-}
-
 export async function GET() {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const auth = await formsSession({ edit: false });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
 
   const db = getServiceSupabase();
   const { data, error } = await db
@@ -63,9 +64,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const userId = await resolveUserId();
+  const auth = await formsSession({ edit: true });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
+  const userId = auth.session.userId;
 
   let body: Record<string, unknown>;
   try {

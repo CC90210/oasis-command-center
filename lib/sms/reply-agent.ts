@@ -2,6 +2,8 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { queueInferForTenant } from "@/lib/ai/infer";
+import { isUniqueViolationError } from "@/lib/api-helpers";
+import { CUSTOMER_MESSAGE_KEY } from "@/components/os/landings/feed-model";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -26,7 +28,7 @@ import {
   rescheduleVerifiedFounderMeeting,
   type OpenerAttendee,
 } from "@/lib/website-sales-founder-meeting";
-import { clampSmsBody, withSmsFooter } from "@/lib/website-sales-meeting";
+import { clampSmsBody, meetingSmsVoiceFor, withSmsFooter } from "@/lib/website-sales-meeting";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 
 export type SmsAgentAutonomy = "off" | "propose" | "execute";
@@ -40,7 +42,6 @@ const TURN_WINDOW_MS = 24 * 60 * 60_000;
 const MAX_AGENT_TURNS = 3;
 const MIN_RESCHEDULE_LEAD_MS = 2 * 60 * 60_000;
 const MAX_RESCHEDULE_HORIZON_MS = 21 * 24 * 60 * 60_000;
-const FOUNDER_TIME_ZONE = "America/Toronto";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const SMS_AGENT_PENDING_QUEUE_PAGE_SQL = `SELECT j.* FROM sms_agent_jobs j
@@ -884,26 +885,31 @@ function formatMeetingTime(meetingAt: string, timeZone: string): string {
   }).format(new Date(meetingAt));
 }
 
-async function generateSlots(raw: Turso, appointment: Appointment, nowMs: number): Promise<StoredSlot[]> {
+async function generateSlots(
+  raw: Turso,
+  appointment: Appointment,
+  nowMs: number,
+  timeZone: string,
+): Promise<StoredSlot[]> {
   const slots: StoredSlot[] = [];
   const originalEpoch = Date.parse(appointment.scheduled_for);
   let cursor = Math.ceil((nowMs + MIN_RESCHEDULE_LEAD_MS) / (15 * 60_000)) * 15 * 60_000;
   const end = nowMs + MAX_RESCHEDULE_HORIZON_MS;
   while (cursor <= end && slots.length < 3) {
     if (cursor !== originalEpoch) {
-      const local = zonedParts(cursor, FOUNDER_TIME_ZONE);
+      const local = zonedParts(cursor, timeZone);
       if (local) {
         const preliminary = validateSmsAgentReschedule({
           nowIso: new Date(nowMs).toISOString(),
           proposedLocalIso: local.localIso,
-          timeZone: FOUNDER_TIME_ZONE,
+          timeZone,
           hasHostConflict: false,
         });
         if (preliminary.ok && !await hostHasConflict(raw, appointment, preliminary.meetingAt)) {
           slots.push({
             localIso: local.localIso,
             meetingAt: preliminary.meetingAt,
-            label: formatMeetingTime(preliminary.meetingAt, FOUNDER_TIME_ZONE),
+            label: formatMeetingTime(preliminary.meetingAt, timeZone),
           });
         }
       }
@@ -1095,7 +1101,6 @@ async function notifyRep(input: {
     severity: input.severity,
     title: input.title,
     body: input.summary,
-    lane: "operator",
     subjectType: "call_appointment",
     subjectId: input.appointment.id,
     payload: { job_id: input.job.id, intent: input.job.intent },
@@ -1279,6 +1284,8 @@ async function sendAgentReply(
   conversation: Conversation,
   body: string,
   carrierStopJob: boolean,
+  /** The workspace's own voice (meetingSmsVoiceFor), never a default. */
+  prefix: string,
 ): Promise<{ result: ReplyResult; conversation: Conversation }> {
   if (carrierStopJob) return { result: "suppressed_for_stop", conversation };
   const takeover = await pauseForHumanTakeover(db, raw, job, appointment.lead_id, conversation);
@@ -1292,7 +1299,7 @@ async function sendAgentReply(
     return { result: "paused", conversation: paused };
   }
   const firstInConversation = conversation.agent_turns_24h === 0;
-  const safeBody = clampSmsBody(withSmsFooter(body, { firstInConversation }), 2);
+  const safeBody = clampSmsBody(withSmsFooter(body, { firstInConversation, prefix }), 2, prefix);
   if (isDryRun("twilio")) return { result: "dry_run", conversation };
   if (!await reserveReplySend(db, job)) {
     await alertUncertainReply(job, appointment, "reply_send_already_reserved");
@@ -1484,6 +1491,83 @@ async function executeReschedule(
 
 type ProcessResult = { status: "done" | "escalated" | "pending"; failed?: boolean };
 
+/** What a hand-off records on the job: proposed for a person, posted to the Feed. */
+export const SMS_AGENT_NEEDS_REPLY = "needs_reply";
+const WORKSPACE_FEED_POSTED = "workspace_feed_posted";
+
+/**
+ * A text to a workspace outside OASIS's founder-meeting program (any
+ * workspace but OASIS's own, which have the only verified voice:
+ * meetingSmsVoiceFor). Since #520 any workspace's Twilio number feeds this
+ * queue, and every escalation here used to page OASIS's operator lane: another
+ * business's customers reached CC's phone, the business heard nothing, and a
+ * matched appointment could even be answered as "OASIS AI:" in Toronto time.
+ *
+ * Now the agent answers nothing, classifies nothing and pages nobody outside
+ * the workspace. It posts one Feed item to that workspace (agent_events,
+ * correlation_id = the workspace, the Feed's own scope) and closes the job:
+ *   - an ordinary text: escalated with proposed_action "needs_reply", for the
+ *     workspace's own team to answer. sms_agent_jobs.status has no needs_reply
+ *     value (its CHECK allows pending, running, done, escalated, dead_letter),
+ *     and escalated is its "a person must act" state;
+ *   - a carrier STOP: done. The webhook already honoured the opt-out inline,
+ *     there is no founder meeting to cancel, and nobody may text them back,
+ *     so the Feed says they opted out rather than that they need a reply.
+ * The Feed write is idempotent per job, so a retry after a failed completion
+ * cannot post the same text twice; a failed write throws, and the job retries.
+ *
+ * THE CUSTOMER'S WORDS STAY IN ONE KEY. The phone number and the message go
+ * only under CUSTOMER_MESSAGE_KEY, which the Feed and /api/event-feed show to
+ * this workspace's own viewers who may see client identities, and strip for
+ * everyone else. `note`, the line every viewer reads, says nothing about the
+ * customer: BEA's event router copies `note`, `preview` and a few other keys
+ * of every workspace's events into its log on CC's PC
+ * (scripts/core/event_router.py _project). An ordinary text is `info`, not a
+ * warning: it is a customer to answer, not a fault.
+ */
+async function handOffToWorkspace(db: Db, job: SmsAgentJob): Promise<ProcessResult> {
+  const optedOut = smsAgentCarrierStopRequiresCancellation({
+    intent: job.intent,
+    proposedAction: job.proposed_action,
+    executedAction: job.executed_action,
+  });
+  const text = job.body.replace(/\s+/g, " ").trim().slice(0, 100);
+  const posted = await db.from("agent_events").insert({
+    event_type: optedOut ? "CUSTOMER_OPTED_OUT_OF_TEXTS" : "CUSTOMER_TEXT_NEEDS_REPLY",
+    // The Feed's explicit department attribution: texts arrive on leads.
+    publisher_agent: "dept:sales",
+    severity: "info",
+    target_agent: null,
+    correlation_id: job.tenant_id,
+    idempotency_key: `sms-agent:${job.id}:workspace-feed`,
+    payload: {
+      tenant_id: job.tenant_id,
+      note: optedOut
+        ? "A customer replied STOP. Texts to that number are off, so do not text them."
+        : "A customer texted your number and is waiting for a reply. Nothing was sent to them automatically.",
+      channel: "sms",
+      lead_id: job.lead_id,
+      sms_agent_job_id: job.id,
+      [CUSTOMER_MESSAGE_KEY]: { phone: job.from_phone, text },
+    },
+  });
+  if (posted.error && !isUniqueViolationError(posted.error)) {
+    throw new Error("sms_agent_workspace_feed_write_failed");
+  }
+  const executedAction = appendAction(job.executed_action, WORKSPACE_FEED_POSTED);
+  if (optedOut) {
+    await finishClaimedJob(db, job, { status: "done", executed_action: executedAction, last_error: null });
+    return { status: "done" };
+  }
+  await finishClaimedJob(db, job, {
+    status: "escalated",
+    proposed_action: SMS_AGENT_NEEDS_REPLY,
+    executed_action: executedAction,
+    last_error: null,
+  });
+  return { status: "escalated" };
+}
+
 async function processClaimedJob(
   db: Db,
   raw: Turso,
@@ -1491,6 +1575,11 @@ async function processClaimedJob(
   nowMs: number,
   infer: InferFunction,
 ): Promise<ProcessResult> {
+  // Only a workspace with a verified voice for automated meeting texts runs
+  // the founder-meeting flow below; its prefix and clock come from that voice.
+  const voice = meetingSmsVoiceFor(job.tenant_id);
+  if (!voice) return handOffToWorkspace(db, job);
+  const timeZone = voice.timeZone;
   const carrierJob = {
     intent: job.intent,
     proposedAction: job.proposed_action,
@@ -1595,7 +1684,7 @@ async function processClaimedJob(
       messageSid: job.provider_message_id,
       body: job.body,
       nowIso: classificationReferenceIso,
-      timeZone: FOUNDER_TIME_ZONE,
+      timeZone,
       llmEnabled: (process.env.SMS_AGENT_LLM || "").trim() === "1",
     }, { infer });
   }
@@ -1655,7 +1744,6 @@ async function processClaimedJob(
       severity: "warn",
       title: "Inbound SMS has no matching appointment",
       body: `Intent: ${intent}. No calendar action was taken.`,
-      lane: "operator",
       subjectType: "sms_agent_job",
       subjectId: job.id,
       telegram: true,
@@ -1698,14 +1786,14 @@ async function processClaimedJob(
     const preliminary = validateSmsAgentReschedule({
       nowIso: new Date(nowMs).toISOString(),
       proposedLocalIso,
-      timeZone: FOUNDER_TIME_ZONE,
+      timeZone,
       hasHostConflict: false,
     });
     rescheduleVerdict = preliminary.ok
       ? validateSmsAgentReschedule({
           nowIso: new Date(nowMs).toISOString(),
           proposedLocalIso,
-          timeZone: FOUNDER_TIME_ZONE,
+          timeZone,
           hasHostConflict: await hostHasConflict(raw, appointment, preliminary.meetingAt),
         })
       : preliminary;
@@ -1749,6 +1837,7 @@ async function processClaimedJob(
       conversation,
       "Your meeting has been cancelled. Your OASIS rep will follow up.",
       carrierStopJob,
+      voice.prefix,
     );
     const emailError = await notifyRep({
       job,
@@ -1757,7 +1846,7 @@ async function processClaimedJob(
       severity: "info",
       title: "Client cancelled founder meeting by SMS",
       summary: "The Google Calendar event was cancelled and the lead returned to qualified.",
-      oldTime: formatMeetingTime(appointment.scheduled_for, FOUNDER_TIME_ZONE),
+      oldTime: formatMeetingTime(appointment.scheduled_for, timeZone),
       telegram: true,
     });
     const replyEscalated = smsAgentReplyNeedsEscalation(reply.result);
@@ -1866,8 +1955,9 @@ async function processClaimedJob(
       job,
       appointment,
       conversation,
-      `Your meeting is moved to ${formatMeetingTime(meeting.meetingAt, FOUNDER_TIME_ZONE)}. Join: ${meeting.receipt.meetLink}`,
+      `Your meeting is moved to ${formatMeetingTime(meeting.meetingAt, timeZone)}. Join: ${meeting.receipt.meetLink}`,
       false,
+      voice.prefix,
     );
     const emailError = await notifyRep({
       job,
@@ -1876,8 +1966,8 @@ async function processClaimedJob(
       severity: "info",
       title: "Founder meeting moved by SMS agent",
       summary: "The existing Google event was patched; its Meet link was preserved.",
-      oldTime: formatMeetingTime(appointment.scheduled_for, FOUNDER_TIME_ZONE),
-      newTime: formatMeetingTime(meeting.meetingAt, FOUNDER_TIME_ZONE),
+      oldTime: formatMeetingTime(appointment.scheduled_for, timeZone),
+      newTime: formatMeetingTime(meeting.meetingAt, timeZone),
       telegram: true,
     });
     const replyEscalated = smsAgentReplyNeedsEscalation(reply.result);
@@ -1921,7 +2011,7 @@ async function processClaimedJob(
   }
 
   if (intent === "reschedule" && !proposedLocalIso && autonomy !== "off") {
-    const proposals = await generateSlots(raw, appointment, nowMs);
+    const proposals = await generateSlots(raw, appointment, nowMs, timeZone);
     if (proposals.length < 3) {
       await pageAndEscalate(db, job, appointment, intent, "slot_generation_failed", "human_reschedule_required");
       return { status: "escalated", failed: true };
@@ -1939,7 +2029,7 @@ async function processClaimedJob(
 
   let replyResult: ReplyResult = "dry_run";
   if (replyBody) {
-    const reply = await sendAgentReply(db, raw, job, appointment, conversation, replyBody, carrierStopJob);
+    const reply = await sendAgentReply(db, raw, job, appointment, conversation, replyBody, carrierStopJob, voice.prefix);
     replyResult = reply.result;
     conversation = reply.conversation;
   }
@@ -1973,13 +2063,18 @@ async function processClaimedJob(
 }
 
 async function markDeadLetter(db: Db, job: Pick<SmsAgentJob, "id" | "tenant_id" | "appointment_id">, reason: string) {
+  // writeAgentAlert sends a workspace's alert to that workspace only, so a
+  // client reads this one on its own card and bot: plain words, no worker
+  // internals. OASIS's own wording is unchanged.
+  const oasisVoice = meetingSmsVoiceFor(job.tenant_id) !== null;
   await writeAgentAlert({
     tenantId: job.tenant_id,
     alertType: "sms_agent_dead_letter",
     severity: "urgent",
-    title: "SMS reply agent job needs recovery",
-    body: reason,
-    lane: "operator",
+    title: oasisVoice ? "SMS reply agent job needs recovery" : "A customer's text could not be added to your Feed",
+    body: oasisVoice
+      ? reason
+      : "It reached your number and was saved, but it was not handed to your team automatically. Contact OASIS support if this keeps happening.",
     subjectType: job.appointment_id ? "call_appointment" : "sms_agent_job",
     subjectId: job.appointment_id || job.id,
     telegram: true,

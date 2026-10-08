@@ -181,8 +181,10 @@ async function main() {
     for await (const ev of gen) out.push(ev);
     return out;
   }
+  // A local model is called only with the caller's verified-operator verdict
+  // (lib/providers.ts allowLocalModel): these calls stand for the operator's.
   const chat = (provider: import("../lib/providers").Provider, model: string, m = meter(), maxTokens = 4096) =>
-    drain(streamChat({ provider, model, apiKey: provider === "ollama" ? "" : "k", baseUrl: provider === "ollama" ? "http://127.0.0.1:11434/v1" : undefined, system: "s", messages: [{ role: "user", content: "hello" }], maxTokens, meter: m }));
+    drain(streamChat({ provider, model, apiKey: provider === "ollama" ? "" : "k", baseUrl: provider === "ollama" ? "http://127.0.0.1:11434/v1" : undefined, allowLocalModel: provider === "ollama", system: "s", messages: [{ role: "user", content: "hello" }], maxTokens, meter: m }));
   /** The rows written since `mark`. */
   const newRows = async (mark: number) => (await rows(db)).slice(mark);
   const total = async () => (await rows(db)).length;

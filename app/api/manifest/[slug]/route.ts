@@ -10,6 +10,7 @@ import {
   ManifestPersistenceError,
 } from "@/lib/manifest/persistence";
 import { manifestWriteGuards } from "@/lib/manifest/guards";
+import { dbBool } from "@/lib/db-bool";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -123,11 +124,13 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 403 });
   }
   // Mutating the manifest (tabs / data model / agents) is a full-admin capability.
+  // Both flags through dbBool (lib/db-bool.ts): truthiness read "0" as an owner,
+  // `!== true` refused the stored grant (1).
   if (
-    !profile.is_owner &&
+    !dbBool(profile.is_owner) &&
     profile.team_role !== "admin" &&
     profile.team_role !== "owner" &&
-    profile.admin_access !== true
+    !dbBool(profile.admin_access)
   ) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }

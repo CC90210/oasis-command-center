@@ -399,7 +399,7 @@ async function main() {
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, publisher_agent TEXT, source_agent TEXT,
       correlation_id TEXT, severity TEXT, payload TEXT, published_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, provider TEXT,
-      encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
+      encrypted_api_key TEXT, enabled INTEGER, user_id TEXT, agent_key TEXT, model TEXT);
     CREATE TABLE application_lender_threads (id TEXT PRIMARY KEY, tenant_id TEXT, application_id TEXT, lender_id TEXT,
       recipient_email TEXT, status TEXT, sent_at TEXT);
     CREATE TABLE health_check_runs (id TEXT PRIMARY KEY, tenant_id TEXT, check_id TEXT, verdict TEXT,
@@ -410,7 +410,8 @@ async function main() {
   await db.batch(
     [
       { sql: "INSERT INTO tenant_records VALUES ('l1', ?, 'lead', '{\"stage\":\"won\",\"source\":\"referral\"}', ?, ?)", args: [OASIS, now, now] },
-      { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL)", args: [OASIS] },
+      // OASIS's AI account, on its legacy `bravo` workspace row (lib/ai/workspace-account.ts).
+      { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL, 'bravo', 'claude-sonnet-4-6')", args: [OASIS] },
       // OASIS's founder-booking check passed just now: a readable, healthy board.
       {
         sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-ok', ?, 'calendar.workspace_credential_usable', 'ok', NULL, ?)",

@@ -5,6 +5,7 @@ import { listRecords, listByAssignedScope, type TenantRecord } from "@/lib/manif
 import { SCOPED_ENTITIES } from "@/lib/lead-scope";
 import type { TenantManifest } from "@/lib/manifest/schema";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { loadDashboardAlerts, type AgentAlertRow } from "@/components/manifest/dashboard-alerts";
 import { getRenewalsSummary } from "@/lib/queries";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES, type StageMeta } from "@/lib/sunbiz-stage-meta";
 import { pipelineRowHref } from "@/lib/pipeline-display";
@@ -31,18 +32,6 @@ export function departmentHrefForAgent(slug: string, binding?: { departments?: r
   }
   return "/team/chief-of-staff";
 }
-
-type AgentAlertRow = {
-  id: string;
-  alert_type: string;
-  severity: "info" | "warn" | "urgent";
-  subject_type: string | null;
-  subject_id: string | null;
-  title: string;
-  body: string | null;
-  payload: Record<string, unknown> | null;
-  created_at: string;
-};
 
 type Props = {
   manifest: TenantManifest;
@@ -112,37 +101,8 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
   const rowsByEntity: Record<string, TenantRecord[]> = {};
   for (const { entity, rows } of allRows) rowsByEntity[entity.name] = rows;
 
-  const openAlerts: AgentAlertRow[] = await (async () => {
-    if (!tenantId) return [];
-    try {
-      const sb = getServiceSupabase();
-      const { data, error } = await sb
-        .from("agent_alerts")
-        .select("id, alert_type, severity, subject_type, subject_id, title, body, payload, created_at")
-        .eq("tenant_id", tenantId)
-        .is("resolved_at", null)
-        .order("created_at", { ascending: false })
-        .limit(50);
-      if (error) return [];
-      // Dedupe by alert_type — health_check runs hourly and creates a
-      // new row every 6h even when the underlying issue is unchanged.
-      // Showing 10 stale "Health check: N HIGH" rows is noise; keep
-      // only the most-recent of each type. Operator clears via the
-      // dismiss button which sets resolved_at.
-      const seen = new Set<string>();
-      const deduped: AgentAlertRow[] = [];
-      for (const row of (data || []) as AgentAlertRow[]) {
-        const dedupeKey = `${row.alert_type}:${row.subject_type || ""}:${row.subject_id || ""}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-        deduped.push(row);
-        if (deduped.length >= 10) break;
-      }
-      return deduped;
-    } catch {
-      return [];
-    }
-  })();
+  // The workspace's owners and admins only; empty for everyone else, unread.
+  const openAlerts = await loadDashboardAlerts(tenantId);
 
   const slug = manifest.tenant_slug;
 
