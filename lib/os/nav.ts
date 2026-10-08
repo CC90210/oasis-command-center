@@ -104,6 +104,7 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   { id: "forms", href: "/forms", label: "Forms", icon: "FileCode2", section: "growth", group: "Marketing", audience: "everyone" },
   { id: "ads", href: "/growth/ads", label: "Ads", icon: "Megaphone", section: "growth", group: "Marketing", module: "ads", audience: "everyone" },
   { id: "content", href: "/founders/marketing", label: "Content", icon: "FileText", section: "growth", group: "Marketing", module: "content", oasisOnly: true, audience: "founders_content" },
+  { id: "seo", href: "/seo", label: "Search (SEO)", icon: "FileSearch", section: "growth", group: "Marketing", audience: "operator", oasisOnly: true },
 
   // ── CLIENTS ─────────────────────────────────────────────────────────────
   { id: "clients", href: "/clients", label: "All clients", icon: "Building2", section: "clients", audience: "client_identities" },
