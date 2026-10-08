@@ -4,9 +4,10 @@
  * design sections 2.3, 3.6 and 4.3.
  *
  * WHAT IS PINNED, through the real page against a local libSQL file:
- *   1. NO PAGE, NO CHANGE. With no offer row, and with a draft nobody
- *      published, the page returns exactly today's FormPublicClient element
- *      (the same props, no offer props), and its markup is BYTE-IDENTICAL to
+ *   1. NO PAGE, NO CHANGE. With no offer row, with a draft nobody published,
+ *      with a live page this code cannot read, and with a page layer that
+ *      throws, the page returns exactly today's FormPublicClient element (the
+ *      same props, no offer props), and its markup is BYTE-IDENTICAL to
  *      tests/fixtures/offer-pages/form-only.html, rendered from the component
  *      as it was before offer pages existed (main 34a2944f).
  *   2. A LIVE PAGE draws its sections in the owner's order with their anchors,
@@ -28,7 +29,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-public.test.ts
  */
-import { OASIS, ROOT, USERS, done, formRow, login, offerRow, setupOfferDatabase, step, stubSigner, CONTACT_STEPS } from "./_offer-pages-harness";
+import { OASIS, ROOT, USERS, done, formRow, login, offerRow, setupOfferDatabase, step, stubPath, stubSigner, CONTACT_STEPS } from "./_offer-pages-harness";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -134,6 +135,20 @@ async function main() {
     "write",
   );
 
+  // A page layer that throws (here prepareOfferRender, on request) must still
+  // hand the visitor today's form, never a 500. Installed before the page loads.
+  let failPrepare = false;
+  {
+    const real = await import("../lib/offer-pages/render");
+    stubPath(require.resolve(join(ROOT, "lib", "offer-pages", "render.ts")), {
+      ...real,
+      prepareOfferRender: async (input: Parameters<typeof real.prepareOfferRender>[0]) => {
+        if (failPrepare) throw new Error("offer render exploded");
+        return real.prepareOfferRender(input);
+      },
+    });
+  }
+
   const page = await import("../app/f/[tenant_slug]/[form_slug]/page");
   const { FormPublicClient } = await import("../components/forms/FormPublicClient");
   const { OfferPage } = await import("../components/offer-pages/OfferPage");
@@ -163,6 +178,35 @@ async function main() {
     assert.deepEqual(meta.robots, { index: false, follow: false });
     assert.equal(meta.title, FIXTURE_PROPS.branding.headline, "the plain form's tab title changed");
     assert.equal("description" in meta, false);
+  });
+
+  await step("a live page this code cannot read, or a page layer that throws: still today's page, and said once in the log", async () => {
+    const realError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => void logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    try {
+      // A published copy that is not a page document (a hand edit, a future format).
+      await db.execute({ sql: "UPDATE form_offer_pages SET published = ?, published_version = 1, live = 1 WHERE form_id = ?", args: ["{not json", FIXTURE_PROPS.formId] });
+      const broken = await run("ai-audit");
+      assert.equal(broken.type, FormPublicClient, "an unreadable live page reached the visitor");
+      assert.deepEqual(plain(broken.props), FIXTURE_PROPS);
+      scenarios.brokenDoc = { kind: "form", props: plain(broken.props) };
+      assert.equal(logged.filter((l) => l.includes("[offer-pages] live page unreadable")).length, 1, logged.join("\n"));
+
+      // A readable live page whose preparation throws.
+      await db.execute({ sql: "UPDATE form_offer_pages SET published = ? WHERE form_id = ?", args: [JSON.stringify(liveDoc("Live, but its render fails")), FIXTURE_PROPS.formId] });
+      failPrepare = true;
+      const failing = await run("ai-audit");
+      assert.equal(failing.type, FormPublicClient, "a failing page layer handed the visitor something other than the form");
+      assert.deepEqual(plain(failing.props), FIXTURE_PROPS);
+      scenarios.failingLayer = { kind: "form", props: plain(failing.props) };
+      assert.equal(logged.filter((l) => l.includes("[offer-pages] page layer failed")).length, 1, logged.join("\n"));
+    } finally {
+      failPrepare = false;
+      console.error = realError;
+      // Back to a draft nobody published.
+      await db.execute({ sql: "UPDATE form_offer_pages SET published = NULL, published_version = 0, live = 0 WHERE form_id = ?", args: [FIXTURE_PROPS.formId] });
+    }
   });
 
   await step("a live page: the offer page, with the form in its Book section and the published words", async () => {
@@ -231,10 +275,12 @@ async function main() {
   assert.equal(child.status, 0, `render child failed:\n${child.stderr}`);
   const html = JSON.parse(child.stdout) as Record<string, string>;
 
-  await step("today's page, byte for byte: no row and an unpublished draft render the fixture exactly", () => {
+  await step("today's page, byte for byte: no row, an unpublished draft, an unreadable page and a failing page layer render the fixture exactly", () => {
     assert.equal(html.fixtureForm, FIXTURE_HTML, "FormPublicClient's own markup changed (regenerate the fixture only for an intended change)");
     assert.equal(html.noRow, FIXTURE_HTML, "the page with no offer row is not today's page");
     assert.equal(html.draftOnly, FIXTURE_HTML, "an unpublished draft changed the public page");
+    assert.equal(html.brokenDoc, FIXTURE_HTML, "an unreadable live page changed the public page");
+    assert.equal(html.failingLayer, FIXTURE_HTML, "a page layer that throws changed the public page");
   });
 
   await step("the live page draws its sections in order, with anchors; the menu holds only drawn pinned sections; Book is last", () => {
