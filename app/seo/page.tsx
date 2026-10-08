@@ -1,6 +1,5 @@
-import { requireOperator } from "@/lib/role-surfaces-session";
 import { settle } from "@/lib/seo/client";
-import { seoClient } from "@/lib/seo/occ";
+import { requireSeoOwner, seoClient } from "@/lib/seo/occ";
 import { PageFrame } from "@/components/os/PageFrame";
 import { SitesView } from "@/components/seo/SitesView";
 import { SitesActions } from "@/components/seo/SitesActions";
@@ -8,8 +7,8 @@ import { SitesActions } from "@/components/seo/SitesActions";
 export const dynamic = "force-dynamic";
 
 export default async function SeoSitesPage({ searchParams }: { searchParams: Promise<{ test?: string }> }) {
-  // GATE: requireOperator() as the FIRST statement. The data is never fetched for anyone else.
-  await requireOperator();
+  // GATE: requireSeoOwner() as the FIRST statement (CC and Adon only). The data is never fetched for anyone else.
+  await requireSeoOwner();
   const includeTest = (await searchParams).test === "1";
   const loaded = await settle(async () => (await seoClient()).listSites({ includeTest }));
   return (
