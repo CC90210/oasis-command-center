@@ -50,6 +50,7 @@ import { TODAY_READ_DEADLINE_MS, loadCalendarStatus, loadContentWeek, loadTodayC
 import { briefPlanFor, empireLaneFromCheck, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
 import { operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
+import { connectorHref } from "@/lib/os/connectors";
 import { withDeadline } from "@/lib/os/deadline";
 import { resolveOsModules } from "@/lib/os/modules";
 import { ASK_HREF, mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
@@ -57,8 +58,12 @@ import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import type { UserProfile } from "@/lib/supabase";
 
-/** Where a viewer connects their own Google Calendar today (Settings › Personal). */
-const CALENDAR_CONNECT_HREF = "/settings";
+/**
+ * Where a viewer connects or fixes their own Google account: the Google card's
+ * drawer in Settings > Connections (a member's Connections page shows the same
+ * panel). "/settings" opened Profile, which has no Google panel.
+ */
+const CALENDAR_CONNECT_HREF = connectorHref("google-workspace");
 /** Approval cards drawn inline on Today (design doc §(c) Today, 2); the rest are in the Feed. */
 const TODAY_APPROVALS_SHOWN = 5;
 const FEED_HREF = "/feed";

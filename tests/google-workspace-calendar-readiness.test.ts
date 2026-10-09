@@ -79,8 +79,8 @@ for (const [surface, source] of [
 }
 
 assert(
-  panel.includes("Google Workspace (Gmail + Calendar)"),
-  "Settings must name the work connection by both capabilities",
+  panel.includes("Your own Google account (Gmail + Calendar)"),
+  "Settings must name the work connection by both capabilities, and as the person's own (not the workspace mailbox)",
 );
 assert(
   panel.includes("Reconnect once"),
@@ -90,8 +90,15 @@ assert(
   panel.includes("Connect personal Gmail (monitor only)"),
   "Settings must make the narrower personal-mailbox permission explicit",
 );
+// The words for each state live in ONE resolver (lib/os/connectors.ts
+// personalGoogleStatus, 2026-10-08) that the panel, the Connections card and
+// Today all print, so the mismatch reads the same everywhere.
+const connectorsSource = read("lib/os/connectors.ts");
 assert(
-  panel.includes("Wrong Google account") && panel.includes("expected_work_email"),
+  connectorsSource.includes('label: "Wrong Google account"') &&
+    connectorsSource.includes("your invitations must come from") &&
+    personalStatus.includes("expected_work_email: fact.workEmail") &&
+    panel.includes("<StatusLine status={yourGoogle} />"),
   "Settings must identify the exact work-identity mismatch instead of sending as a personal Gmail account",
 );
 assert(

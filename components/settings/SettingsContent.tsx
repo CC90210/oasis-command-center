@@ -409,8 +409,8 @@ export async function SettingsContent({
           {show("chat-apps") && (
             <SettingsSection
               defaultOpen
-              title="Your Telegram alert bot"
-              subtitle="A bot that belongs only to your login and sends your own alerts to your phone. Set it up once; it is separate from every teammate's."
+              title="Your own Telegram bot"
+              subtitle="A bot that belongs only to your login, separate from the workspace's team bot and every teammate's. OASIS does not send alerts to personal bots yet."
             >
               <SafeBoundary label="Personal Telegram bot">
                 <TelegramConnectCard />
@@ -704,8 +704,8 @@ async function PersonalSettingsView({
       {show("chat-apps") && (
         <SettingsSection
           defaultOpen
-          title="Your Telegram alert bot"
-          subtitle="A bot that belongs only to your login and sends your own alerts to your phone. It does not change the workspace's shared services or a teammate's account."
+          title="Your own Telegram bot"
+          subtitle="A bot that belongs only to your login. It does not change the workspace's team bot or a teammate's account. OASIS does not send alerts to personal bots yet."
         >
           <SafeBoundary label="Personal Telegram bot">
             <TelegramConnectCard />

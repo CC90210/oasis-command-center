@@ -58,8 +58,12 @@ export type SuggestedAsk = { title: string; prompt: string };
 
 /**
  * One app a department works through: the name the owner knows it by, and the
- * Connections hub card it arrives through (a lib/os/connectors.ts slug: Gmail,
- * Google Calendar and Google Meet all come through Google Workspace).
+ * Connections hub card it arrives through (a lib/os/connectors.ts slug). The
+ * chip shows that card's status, so its name must be what the card checks:
+ * the Google Workspace card checks the shared mailbox (a Gmail sign-in), so a
+ * chip named "Google Calendar" or "Google Meet" read "Connected" for a
+ * calendar nothing had checked while Today said it was not connected
+ * (2026-10-08). Calendar and Meet are each person's own Google account.
  */
 export type DepartmentApp = { label: string; connector: string };
 
@@ -82,15 +86,14 @@ const PROFILES: Record<DepartmentKey, DepartmentProfile> = {
   chief_of_staff: {
     purpose: "Your coordinator. Ask for anything; it pulls from every department.",
     connections: [
-      { label: "Google Calendar", connector: "google-workspace" },
+      { label: "Google Workspace", connector: "google-workspace" },
       { label: "Telegram", connector: "telegram" },
     ],
   },
   sales: {
     purpose: "Leads, follow-ups and booked calls.",
     connections: [
-      { label: "Gmail", connector: "google-workspace" },
-      { label: "Google Calendar", connector: "google-workspace" },
+      { label: "Google Workspace", connector: "google-workspace" },
       { label: "Twilio SMS", connector: "twilio" },
     ],
   },
@@ -106,7 +109,7 @@ const PROFILES: Record<DepartmentKey, DepartmentProfile> = {
     purpose: "Projects, support tickets and client health.",
     connections: [
       { label: "Zoom", connector: "zoom" },
-      { label: "Google Meet", connector: "google-workspace" },
+      { label: "Google Workspace", connector: "google-workspace" },
       { label: "Twilio SMS", connector: "twilio" },
     ],
   },

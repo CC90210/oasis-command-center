@@ -5,6 +5,8 @@ import { Card, PageHeader, Tag } from "@/components/Card";
 import { AgentSubscriptionPanel } from "@/components/marketplace/AgentSubscriptionPanel";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
+import { libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getManifestRow } from "@/lib/manifest/persistence";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
@@ -40,7 +42,9 @@ export default async function MarketplaceDetailPage({
   const tenantId = profile?.tenant_id || null;
 
   const agentDef = await getAgentBySlug(agent, tenantId);
-  if (!agentDef) notFound();
+  // An OASIS house agent is in the library for OASIS's founders only
+  // (lib/os/agent-names.ts); anyone else gets the 404 a missing agent gets.
+  if (!agentDef || !libraryOffersAgent(agentDef.slug, await viewerReadsInternalAgentNames())) notFound();
 
   const manifest = await getManifest(normalised);
   const row = await getManifestRow(normalised).catch(() => null);

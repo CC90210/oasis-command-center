@@ -222,14 +222,21 @@ assert.equal(
   false,
   "the personal controls must not create a second titled connection surface inside Credentials",
 );
+// The send path (lib/sms-direct-twilio.ts) checks the live-send switch and the
+// saved keys, never the Test result, so the drawer may not promise that a
+// failed Test keeps texting off (it said "Email-only ... until Twilio passes
+// Test" while texts could go out). Its sentence follows the card's own status.
+const directTwilio = readFileSync(join(root, "lib", "sms-direct-twilio.ts"), "utf8");
 assert.ok(
-    /Email-only: the keys are saved, but texting stays off until Twilio passes Test\./.test(keysPanel) &&
-    keysPanel.includes("twilioVerified") &&
+  !/last_test_ok/.test(directTwilio) &&
+    !/stays off until/.test(keysPanel) &&
+    keysPanel.includes('status?.kind === "connected"') &&
+    keysPanel.includes("a failed Test does not stop them") &&
     testRoute.includes("probeTwilioConnection(") &&
     twilioProbe.includes('status !== "active"') &&
     twilioProbe.includes('"needs_number"') &&
     twilioProbe.includes('"number_lacks_sms"'),
-  "Twilio must remain visibly email-only until its account and sender pass Test",
+  "Twilio's drawer says what the send path really does, from the card's own status",
 );
 assert.ok(
   keysPanel.includes('r.source === "environment" ? "Set by OASIS"') &&

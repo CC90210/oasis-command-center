@@ -4,6 +4,7 @@ import { useState } from "react";
 import { timeAgo } from "@/lib/fmt";
 import type { IntegrationHealth } from "@/lib/supabase";
 import { categorize, CONNECTION_KIND_LABEL, type ConnectionKind } from "@/lib/integrations-registry";
+import { heartbeatVerdict, isPresenceOnlyHeartbeat } from "@/lib/integrations/presence-heartbeat";
 import { ExternalLink, KeyRound, Sparkles, Download, Plug, Package, UserCircle, Check } from "lucide-react";
 import { KeyPasteModal } from "@/components/integrations/KeyPasteModal";
 
@@ -60,46 +61,58 @@ export function IntegrationDot({
   // Everything else reads the heartbeat first, then the key (2026-09-30):
   //   - a ping older than a day is "Stale", whatever status it last carried —
   //     a month-old "healthy" is not a service that works today;
-  //   - "Connected" needs a healthy ping inside the day;
+  //   - "Connected" needs a healthy ping inside the day that came from a real
+  //     check: OASIS's computer reports "healthy" every minute for every key
+  //     NAME in its env file (lib/integrations/presence-heartbeat.ts), and
+  //     that is "Key on file", the same answer the Connections cards give
+  //     for a key nobody has tested (2026-10-08);
   //   - a key on file with no ping is "Key on file": a stored key has never
   //     been shown to work, so it is never "Connected".
-  const pingedAt = health.last_ping_at ? new Date(health.last_ping_at).getTime() : NaN;
-  const hasPing = Number.isFinite(pingedAt);
-  const recentPing = hasPing && Date.now() - pingedAt < 24 * 60 * 60 * 1000;
-  const hasCreds = !!connection?.hasCredentials;
-  const credsUnknown = connection?.hasCredentials === null;
+  // The rule is lib/integrations/presence-heartbeat.ts heartbeatVerdict, so a
+  // test compares this card with the Connections cards for the same facts.
+  const presenceOnly = health.status === "healthy" && isPresenceOnlyHeartbeat(health.metadata);
+  const verdict = heartbeatVerdict(
+    {
+      builtIn: kind === "built_in",
+      status: health.status,
+      lastPingAt: health.last_ping_at,
+      metadata: health.metadata,
+      hasCredentials: connection?.hasCredentials,
+    },
+    Date.now(),
+  );
 
   let stateLabel: string;
   let stateTone: string;
   let stateIcon: React.ReactNode = null;
   let dotColor: string;
-  if (kind === "built_in") {
+  if (verdict === "built_in") {
     stateLabel = "Built-in · ready";
     stateTone = "text-status-engaged";
     dotColor = "bg-status-engaged shadow-[0_0_10px_rgba(16,185,129,0.6)]";
     stateIcon = <Check className="w-3 h-3" />;
-  } else if (hasPing && !recentPing && health.status !== "unconfigured") {
+  } else if (verdict === "stale") {
     stateLabel = "Stale";
     stateTone = "text-status-warm";
     dotColor = "bg-status-warm";
-  } else if (recentPing && health.status === "healthy") {
+  } else if (verdict === "connected") {
     stateLabel = "Connected";
     stateTone = "text-status-engaged";
     dotColor = "bg-status-engaged shadow-[0_0_10px_rgba(16,185,129,0.65)]";
     stateIcon = <Check className="w-3 h-3" />;
-  } else if (health.status === "degraded") {
+  } else if (verdict === "degraded") {
     stateLabel = "Degraded";
     stateTone = "text-status-warm";
     dotColor = "bg-status-warm shadow-[0_0_10px_rgba(245,158,11,0.5)]";
-  } else if (health.status === "down") {
+  } else if (verdict === "down") {
     stateLabel = "Down";
     stateTone = "text-status-hot";
     dotColor = "bg-status-hot shadow-[0_0_10px_rgba(239,68,68,0.5)]";
-  } else if (hasCreds) {
+  } else if (verdict === "key_on_file") {
     stateLabel = "Key on file";
     stateTone = "text-accent";
     dotColor = "bg-accent";
-  } else if (credsUnknown) {
+  } else if (verdict === "unknown") {
     stateLabel = "Couldn't check";
     stateTone = "text-fg-muted";
     dotColor = "bg-fg-faint";
@@ -108,6 +121,8 @@ export function IntegrationDot({
     stateTone = "text-fg-dim";
     dotColor = "bg-fg-faint";
   }
+  const hasCreds = verdict === "key_on_file" || !!connection?.hasCredentials;
+  const credsUnknown = connection?.hasCredentials === null;
 
   // Per-kind primary CTA
   const primaryCta = (() => {
@@ -217,7 +232,10 @@ export function IntegrationDot({
               {stateIcon}
               {stateLabel}
               {health.last_ping_at && health.status !== "unconfigured" && kind !== "built_in" && (
-                <span className="text-fg-muted"> · last ping {timeAgo(health.last_ping_at)}</span>
+                <span className="text-fg-muted">
+                  {presenceOnly ? " · on OASIS's computer, seen " : " · last check-in "}
+                  {timeAgo(health.last_ping_at)}
+                </span>
               )}
             </div>
             {usedBy.length > 0 && (
