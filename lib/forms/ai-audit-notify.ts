@@ -19,6 +19,7 @@ import { AI_AUDIT_STEP_COUNT } from "@/lib/forms/oasis-ai-audit-seed";
 import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { buildAiAuditAlert, composeAiAuditWelcome } from "@/lib/forms/ai-audit-format";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
+import { isFirstSubmissionForLead } from "@/lib/forms/first-submission";
 import type { ScoreBreakdown } from "@/lib/forms/ai-audit-ingest";
 
 /** Distinct source tag → its own idempotency slot, so an ai-audit confirmation
@@ -85,27 +86,10 @@ export async function notifyAiAuditStarted(input: {
 }): Promise<void> {
   const { db, tenantId, formId, leadId, submissionId, answers } = input;
 
-  try {
-    // (tenant_id, lead_id, submitted_at) is indexed — see migration 042.
-    // id is the tiebreak for two rows sharing a timestamp, so the winner
-    // is deterministic even at identical clock values.
-    const { data, error } = await db
-      .from("form_submissions")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("form_id", formId)
-      .eq("lead_id", leadId)
-      .order("submitted_at", { ascending: true })
-      .order("id", { ascending: true })
-      .limit(1);
-
-    // Fail closed on an unreadable result: a missed alert is recoverable
-    // (the lead is still in the pipeline), whereas an alert on every
-    // refresh trains the operator to ignore the channel.
-    if (error || !data?.length || data[0].id !== submissionId) return;
-  } catch {
-    return;
-  }
+  // The first-submission rule (oldest row wins, fail closed) is shared with the
+  // offer-page lead alert, so the two can never disagree about what a new lead
+  // is. See lib/forms/first-submission.ts.
+  if (!(await isFirstSubmissionForLead({ db, tenantId, formId, leadId, submissionId }))) return;
 
   // sendTelegram posts with parse_mode: "HTML", and every value below is
   // typed by a stranger into a public form. Unescaped, a company called

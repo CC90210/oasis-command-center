@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { formsSession } from "@/lib/forms/access";
+import { deleteFormWithOfferPage, offerPagesDb } from "@/lib/offer-pages/store";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -187,6 +188,23 @@ export async function DELETE(
       },
       { status: 409 },
     );
+  }
+  // OFFER PAGES (bravo__203). On the Turso data plane the form and its offer
+  // page row are deleted in ONE batch, so no orphaned page outlives its form
+  // and nothing depends on SQLite enforcing the foreign key. Before the
+  // migration lands the form goes alone, exactly as below.
+  const offers = offerPagesDb();
+  if (offers) {
+    let removed: number;
+    try {
+      removed = await deleteFormWithOfferPage(offers, tenantId, id);
+    } catch (err) {
+      return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    }
+    if (!removed) {
+      return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
   }
   // count: "exact" so a no-op delete (id already gone, or tenant
   // mismatch) surfaces as 404 instead of a silent ok:true that the UI

@@ -64,6 +64,8 @@ import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-fun
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { ingestAiAuditSubmission, scoreAiAuditLead } from "@/lib/forms/ai-audit-ingest";
 import { notifyAiAuditSubmission, notifyAiAuditStarted } from "@/lib/forms/ai-audit-notify";
+import { hasOwnFunnelAlert, notifyOfferLead } from "@/lib/offer-pages/notify";
+import { offerPagesDb } from "@/lib/offer-pages/store";
 import { maybeGenerateApplicationDocument } from "@/lib/forms/application-document";
 import { sendSunbizLeadEvent } from "@/lib/notify/sunbiz-events";
 import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
@@ -564,7 +566,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   const formRow = await db
     .from("forms")
     .select(
-      "id, tenant_id, slug, steps, on_complete_stage, step_outcomes, enabled, redirect_url, tenant:tenants!inner(slug)",
+      "id, tenant_id, slug, name, steps, on_complete_stage, step_outcomes, enabled, redirect_url, tenant:tenants!inner(slug)",
     )
     .eq("id", link.form_id)
     .maybeSingle();
@@ -575,6 +577,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     id: string;
     tenant_id: string;
     slug: string;
+    name: string | null;
     steps: unknown;
     on_complete_stage: string | null;
     step_outcomes: Record<string, string> | null;
@@ -1665,6 +1668,34 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         score,
       });
     });
+  }
+
+  // OFFER PAGES: a new lead on ANY form with an offer page alerts its
+  // workspace (lib/offer-pages/notify.ts). Before this a form made in the
+  // builder alerted nobody. Step 0 only, once per lead (the first-submission
+  // rule notifyAiAuditStarted uses), never for the forms above that alert on
+  // their own, and through the one alert resolver, so a client's lead never
+  // reaches OASIS's Telegram. Inside after(): the visitor never waits on it,
+  // and a form with no offer page costs one indexed read and stops there.
+  if (stepIndex === 0 && !hasOwnFunnelAlert(form)) {
+    const offerAnswers = { ...mergedAnswers };
+    after(() =>
+      notifyOfferLead({
+        db,
+        offers: offerPagesDb(),
+        tenantId: form.tenant_id,
+        formId: form.id,
+        formName: form.name || form.slug,
+        leadId: link.lead_id,
+        submissionId,
+        answers: offerAnswers,
+      }).catch((err) => {
+        console.error("[forms.submit.offer_alert.failed]", {
+          lead_id: link.lead_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }),
+    );
   }
 
   return NextResponse.json({

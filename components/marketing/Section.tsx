@@ -30,12 +30,12 @@ export function Section({
   );
 }
 
+/** The eyebrow's colour is the --accent variable, signal by default (see Cta.tsx). */
+export const EYEBROW_CLASS =
+  "m-eyebrow font-data text-[10px] uppercase tracking-[0.26em] text-[color:var(--accent,#00D4FF)]";
+
 export function Eyebrow({ children }: { children: ReactNode }) {
-  return (
-    <p className="m-eyebrow font-data text-[10px] uppercase tracking-[0.26em] text-signal">
-      {children}
-    </p>
-  );
+  return <p className={EYEBROW_CLASS}>{children}</p>;
 }
 
 export function SectionHead({
