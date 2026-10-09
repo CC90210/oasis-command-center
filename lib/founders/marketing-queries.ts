@@ -184,10 +184,12 @@ export type MarketingSummary = {
   by_track: Record<Track, number>;
   by_status: Record<string, number>;
   open_reviews: number;
-  open_requests: number;
   // No corpus counts since 2026-10-01: the training material is the Training
   // tab's own read (getCorpusStats), so the Library's numbers neither wait on
   // it nor degrade when it fails.
+  // No request count either (D16): with the Requests card gone nothing shows
+  // one, and reading it cost two round trips per Overview and could mark this
+  // whole summary degraded over a number no screen draws.
   /**
    * True when a query FAILED, as opposed to returning nothing.
    *
@@ -218,7 +220,6 @@ export const DEGRADED_MARKETING_SUMMARY: MarketingSummary = {
   by_track: { organic: 0, paid: 0, seo: 0, email: 0 },
   by_status: {},
   open_reviews: 0,
-  open_requests: 0,
   degraded: true,
 };
 
@@ -227,7 +228,6 @@ export const EMPTY_MARKETING_SUMMARY: MarketingSummary = {
   by_track: { organic: 0, paid: 0, seo: 0, email: 0 },
   by_status: {},
   open_reviews: 0,
-  open_requests: 0,
   degraded: false,
 };
 
@@ -369,11 +369,11 @@ export async function getMarketingSummary(
 ): Promise<MarketingSummary> {
   if (!tenantId) return EMPTY_MARKETING_SUMMARY;
   try {
-    // `id` is selected so the review and request counts below can be scoped to
-    // the SAME assets this count describes; without it they silently spanned
-    // every brand on the tenant. Paged, because a short read here would not just
-    // undercount `total` — ownAssetIds is the allowlist those counts use, so it
-    // would quietly drop real work from "waiting on you" too.
+    // `id` is selected so the review count below can be scoped to the SAME
+    // assets this count describes; without it, that count silently spanned
+    // every brand on the tenant. Paged, because a short read here would not
+    // just undercount `total` — ownAssetIds is the allowlist that count uses,
+    // so it would quietly drop real work from "with the marketing agent" too.
     const rows: Array<{ id: string; track: Track; status: string }> = [];
     const outcome = await pageAll<{ id: string; track: Track; status: string }>(
       "summary.assets",
@@ -434,78 +434,33 @@ export async function getMarketingSummary(
     // degraded. Discarding them and reporting 0 was the same lie as above, at
     // smaller scale: "nothing waiting on you" when the query simply broke.
     //
-    // THE THREE COUNTS BELOW RUN TOGETHER (2026-10-01). They need the asset
-    // ids, or nothing, and not each other, but they ran one after another,
-    // with a corpus read behind them: three round trips in a row after the
-    // asset pages, which the Content Overview waited on before it drew
-    // anything. Each chunk loop is still sequential inside itself with the same
-    // stop-on-failure rule, and every `.from()` is still called in the same
-    // order per table. The corpus read left the summary: the training material
-    // is the Training tab's own read (getCorpusStats), so a failure there no
-    // longer degrades the Library's numbers.
-    const openReviewsP = (async () => {
-      let openReviews = 0;
-      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-        const r = await db
-          .from("marketing_review")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId)
-          .is("acted_on_at", null)
-          .in("asset_id", ids);
-        const verdict = classify("summary.reviews", r.error);
-        if (verdict !== "ok") {
-          if (verdict === "broken") degraded = true;
-          break;
-        }
-        openReviews += r.count || 0;
-      }
-      return openReviews;
-    })();
-
-    const requestsBoundP = (async () => {
-      let requestsBound = 0;
-      for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
-        const r = await db
-          .from("marketing_request")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId)
-          .in("status", ["open", "claimed"])
-          .in("asset_id", ids);
-        const verdict = classify("summary.requests", r.error);
-        if (verdict !== "ok") {
-          if (verdict === "broken") degraded = true;
-          break;
-        }
-        requestsBound += r.count || 0;
-      }
-      return requestsBound;
-    })();
-
-    // marketing_request.asset_id IS nullable — "a request not tied to an asset"
-    // is the intended case (see the MATCH SIMPLE note on marketing_request_asset_fk).
-    // An unbound request was typed into THIS portal and names no client asset, so
-    // it belongs to the founders' own queue and is counted. Bound requests follow
-    // their asset's brand. Two counts rather than one `.or()` because the bridge's
-    // `.or()` support is not something this reader should depend on.
-    const [openReviews, requestsBound, requestsUnbound] = await Promise.all([
-      openReviewsP,
-      requestsBoundP,
-      db
-        .from("marketing_request")
+    // ONE COUNT AFTER THE ASSET PAGES. The open-request counts left with the
+    // Requests card (D16): nothing shows them, and a failure on their table
+    // marked this whole summary degraded, which hides the Overview's pipeline
+    // and says "Couldn't load your queue" over a number no screen draws. The
+    // corpus read left on 2026-10-01: the training material is the Training
+    // tab's own read (getCorpusStats).
+    let openReviews = 0;
+    for (const ids of chunk(ownAssetIds, ID_CHUNK)) {
+      const r = await db
+        .from("marketing_review")
         .select("id", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
-        .in("status", ["open", "claimed"])
-        .is("asset_id", null),
-    ]);
-
-    if (classify("summary.requests.unbound", requestsUnbound.error) === "broken") degraded = true;
+        .is("acted_on_at", null)
+        .in("asset_id", ids);
+      const verdict = classify("summary.reviews", r.error);
+      if (verdict !== "ok") {
+        if (verdict === "broken") degraded = true;
+        break;
+      }
+      openReviews += r.count || 0;
+    }
 
     return {
       total: rows.length,
       by_track,
       by_status,
       open_reviews: openReviews,
-      open_requests: requestsBound + (requestsUnbound.count || 0),
       degraded,
     };
   } catch (e) {

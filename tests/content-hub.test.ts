@@ -23,7 +23,8 @@
  *      its layout chain or its imports can render the banner or its chips
  *      (the founders layout no longer mounts it; the Growth layout does).
  *   5. One name. FOUNDERS_NAV, the Overview's <h1> and <title>, every <title>
- *      under the hub, the back links and MarketingToday say Content; no hub
+ *      under the hub and MarketingToday say Content; the Library and
+ *      Performance carry no second "Back to Content" under the tabs; no hub
  *      file calls it "Studio" or "Marketing" in code (comments may say how it
  *      used to be).
  *   6. app/page.tsx renders MarketingToday only behind canSeeMarketing, the
@@ -354,7 +355,7 @@ async function main() {
   });
 
   // ── 5. one name ──────────────────────────────────────────────────────────
-  await check("one name: Content in FOUNDERS_NAV, the h1, every <title>, the back links and MarketingToday; no 'Studio', no 'Marketing · OASIS'", () => {
+  await check("one name: Content in FOUNDERS_NAV, the h1, every <title> and MarketingToday; one way back (the tabs); no 'Studio', no 'Marketing · OASIS'", () => {
     assert.equal(FOUNDERS_NAV.find((n) => n.href === CONTENT_ROOT)?.label, "Content");
     const overview = code("app/founders/marketing/page.tsx");
     assert.match(overview, /title: "Content · OASIS"/, "the Overview's <title>");
@@ -362,9 +363,14 @@ async function main() {
     assert.match(code("app/founders/marketing/library/page.tsx"), /title: "Library · Content · OASIS"/);
     assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Training · Content · OASIS"/);
     assert.match(code("app/founders/marketing/tools/page.tsx"), /title: "Content Tools · Content · OASIS"/);
+    // ONE way back. The Library and Performance each had a "Back to Content"
+    // link under the Content tabs, whose Overview tab already leads there; the
+    // duplicates went (2026-10-02). What is left must say Content.
     for (const page of ["app/founders/marketing/library/page.tsx", "app/founders/marketing/performance/page.tsx"]) {
-      assert.match(code(page), /href="\/founders\/marketing"[^>]*>\s*Back to Content\s*<\/Link>/, `${page}: the back link says Content`);
+      assert.doesNotMatch(stripped(page), /Back to Content|href="\/founders\/marketing"/, `${page}: a second way back under the tabs`);
     }
+    assert.equal(CONTENT_TABS[0].label, "Overview", "the tabs' own way back to the hub");
+    assert.equal(CONTENT_TABS[0].href, CONTENT_ROOT);
     const today = code("components/today/MarketingToday.tsx");
     assert.match(today, /title="Content"/, "MarketingToday's card is Content");
     assert.match(today, />\s*Open Content\s*</, "MarketingToday's button opens Content");

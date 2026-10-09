@@ -193,9 +193,12 @@ export function AssetPublishPanel({
             : "Pick a channel"}
       </button>
 
+      {/* What the poster guarantees, in plain words: the safety checks behind it
+          (the send gateway's kill switch, caps and audit trail) are OASIS's
+          plumbing, not something to read on this screen. */}
       <p className="text-[11px] leading-5 text-fg-dim">
-        Goes through the send gateway — killswitch, daily caps and audit trail all apply. A
-        published post can be deleted, but it cannot be unseen.
+        Posts go out one at a time, within daily limits, and every post is logged. A published
+        post can be deleted, but it cannot be unseen.
       </p>
 
       {msg && (
