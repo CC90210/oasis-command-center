@@ -1,0 +1,268 @@
+{
+  "formId": "f0a1d170-0000-4000-8000-0000000000a1",
+  "formName": "AI Automation Audit",
+  "branding": {
+    "primary_color": "#e8c547",
+    "accent_color": "#faf9f5",
+    "headline": "Find the 20 hours a month you're losing",
+    "subheadline": "Four questions. I'll map where AI actually pays off in your business — and where it doesn't. No pitch deck, no retainer talk until it's obvious it's worth it.",
+    "thanks_message": "Got it. I'm reading this myself, not a bot — expect a specific answer about YOUR bottleneck, not a brochure.",
+    "logo_url": "https://oasisai.work/brand/oasis-mark.png"
+  },
+  "steps": [
+    {
+      "key": "identity",
+      "title": "First — who am I talking to?",
+      "description": "Takes about 20 seconds. I read every one of these personally.",
+      "cta_label": "Next",
+      "fields": [
+        {
+          "name": "name",
+          "label": "Your name",
+          "type": "text",
+          "required": true,
+          "placeholder": "First + last"
+        },
+        {
+          "name": "email",
+          "label": "Work email",
+          "type": "email",
+          "required": true,
+          "placeholder": "you@company.com",
+          "help": "Where the audit lands. I don't add anyone to a newsletter."
+        },
+        {
+          "name": "phone",
+          "label": "Mobile number",
+          "type": "phone",
+          "required": true,
+          "placeholder": "+1 …",
+          "help": "So I can follow up with you personally — I read every one."
+        },
+        {
+          "name": "company",
+          "label": "Company name",
+          "type": "text",
+          "required": true,
+          "placeholder": "Acme HVAC"
+        },
+        {
+          "name": "website",
+          "label": "Website or social handle",
+          "type": "text",
+          "placeholder": "acme.com  ·  @acmehvac",
+          "help": "Optional — but it lets me look at your actual setup before we speak."
+        }
+      ]
+    },
+    {
+      "key": "bottleneck",
+      "title": "Where's the bottleneck right now?",
+      "description": "Be honest about the messy one — that's usually where the money is.",
+      "cta_label": "Next",
+      "fields": [
+        {
+          "name": "automation_goal",
+          "label": "What would you most want AI to take off your plate?",
+          "type": "select",
+          "required": true,
+          "options": [
+            {
+              "value": "sales_leadgen",
+              "label": "Sales & lead gen — finding and following up with prospects"
+            },
+            {
+              "value": "customer_support",
+              "label": "Customer support — answering the same questions all day"
+            },
+            {
+              "value": "workflow_automation",
+              "label": "Workflow automation — the manual admin between systems"
+            },
+            {
+              "value": "agent_fleet",
+              "label": "A custom AI agent fleet — I want the whole operation running itself"
+            }
+          ]
+        },
+        {
+          "name": "bottleneck_detail",
+          "label": "What does that actually look like on a bad week?",
+          "type": "textarea",
+          "placeholder": "e.g. leads sit in the inbox for two days because nobody owns follow-up",
+          "help": "One or two sentences. This is the part I actually use."
+        },
+        {
+          "name": "tried_before",
+          "label": "Tried to fix it before?",
+          "type": "select",
+          "options": [
+            {
+              "value": "never",
+              "label": "No — first time looking at this"
+            },
+            {
+              "value": "diy",
+              "label": "Yes — built something myself, it half-works"
+            },
+            {
+              "value": "hired",
+              "label": "Yes — hired someone, it didn't stick"
+            },
+            {
+              "value": "tools",
+              "label": "Yes — bought tools nobody uses"
+            }
+          ],
+          "help": "No wrong answer. It tells me what NOT to repeat."
+        }
+      ]
+    },
+    {
+      "key": "scale",
+      "title": "How big is the operation?",
+      "description": "Rough is fine. This decides whether AI pays back in weeks or never — I'll tell you straight if it's the latter.",
+      "cta_label": "Next",
+      "fields": [
+        {
+          "name": "monthly_revenue",
+          "label": "Monthly revenue",
+          "type": "select",
+          "options": [
+            {
+              "value": "pre_revenue",
+              "label": "Pre-revenue / just starting"
+            },
+            {
+              "value": "under_10k",
+              "label": "Under $10K/mo"
+            },
+            {
+              "value": "10k_50k",
+              "label": "$10K – $50K/mo"
+            },
+            {
+              "value": "50k_250k",
+              "label": "$50K – $250K/mo"
+            },
+            {
+              "value": "250k_plus",
+              "label": "$250K+/mo"
+            }
+          ]
+        },
+        {
+          "name": "team_size",
+          "label": "Team size",
+          "type": "select",
+          "options": [
+            {
+              "value": "solo",
+              "label": "Just me"
+            },
+            {
+              "value": "2_5",
+              "label": "2 – 5"
+            },
+            {
+              "value": "6_20",
+              "label": "6 – 20"
+            },
+            {
+              "value": "21_100",
+              "label": "21 – 100"
+            },
+            {
+              "value": "100_plus",
+              "label": "100+"
+            }
+          ]
+        },
+        {
+          "name": "budget",
+          "label": "Budget set aside for this?",
+          "type": "select",
+          "options": [
+            {
+              "value": "none_yet",
+              "label": "Nothing yet — exploring what it costs"
+            },
+            {
+              "value": "under_2k",
+              "label": "Under $2K/mo"
+            },
+            {
+              "value": "2k_5k",
+              "label": "$2K – $5K/mo"
+            },
+            {
+              "value": "5k_15k",
+              "label": "$5K – $15K/mo"
+            },
+            {
+              "value": "15k_plus",
+              "label": "$15K+/mo"
+            }
+          ],
+          "help": "Optional. Skipping it doesn't disqualify you — it just changes what I propose."
+        }
+      ]
+    },
+    {
+      "key": "timeline",
+      "title": "Last one — when do you want this working?",
+      "description": "Sets whether I send you the audit or we just get on a call.",
+      "cta_label": "Send me the audit",
+      "fields": [
+        {
+          "name": "timeframe",
+          "label": "Ideal timeline",
+          "type": "select",
+          "required": true,
+          "options": [
+            {
+              "value": "immediate",
+              "label": "Immediately — it's costing me money right now"
+            },
+            {
+              "value": "30_days",
+              "label": "Next 30 days"
+            },
+            {
+              "value": "quarter",
+              "label": "This quarter"
+            },
+            {
+              "value": "exploring",
+              "label": "Just exploring — no timeline yet"
+            }
+          ]
+        },
+        {
+          "name": "wants_call",
+          "label": "Want to skip the back-and-forth and just book a call?",
+          "type": "select",
+          "options": [
+            {
+              "value": "yes",
+              "label": "Yes — send me times"
+            },
+            {
+              "value": "audit_first",
+              "label": "Send the audit first, then we'll talk"
+            }
+          ],
+          "help": "Either is fine. The audit is free regardless."
+        }
+      ]
+    }
+  ],
+  "redirectUrl": null,
+  "token": null,
+  "brand": null,
+  "submissionPath": "/f/oasis-ai-cc/ai-audit",
+  "anonymousInit": {
+    "tenant_slug": "oasis-ai-cc",
+    "form_slug": "ai-audit"
+  }
+}

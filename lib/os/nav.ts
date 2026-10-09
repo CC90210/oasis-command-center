@@ -101,7 +101,10 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   { id: "commissions", href: "/commissions", label: "Commissions", icon: "DollarSign", section: "growth", group: "Sales", module: "commissions", audience: "commissions" },
 
   // ── GROWTH › Marketing ──────────────────────────────────────────────────
-  { id: "forms", href: "/forms", label: "Forms", icon: "FileCode2", section: "growth", group: "Marketing", audience: "everyone" },
+  // "Offers" (CC, 2026-10-08): every form can carry a full landing page now.
+  // The URL stays /forms: /offers is the retired SunBiz lender route (404),
+  // and tests/os-redirects.test.ts fails if anything links to it.
+  { id: "forms", href: "/forms", label: "Offers", icon: "FileCode2", section: "growth", group: "Marketing", audience: "everyone" },
   { id: "ads", href: "/growth/ads", label: "Ads", icon: "Megaphone", section: "growth", group: "Marketing", module: "ads", audience: "everyone" },
   { id: "content", href: "/founders/marketing", label: "Content", icon: "FileText", section: "growth", group: "Marketing", module: "content", oasisOnly: true, audience: "founders_content" },
   { id: "seo", href: "/seo", label: "Search (SEO)", icon: "FileSearch", section: "growth", group: "Marketing", audience: "finance_owner", oasisOnly: true },

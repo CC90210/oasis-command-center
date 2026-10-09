@@ -2,15 +2,24 @@
  * Binds the whiteboard's stroke list (whiteboard-model.ts) to a real canvas.
  *
  * - Input: Pointer Events, one path for mouse, finger and pen. The first
- *   pointer down draws; a second finger is ignored until the first lifts, and
- *   a right or middle click never draws. A cancelled pointer (the phone took
- *   the gesture) ends the stroke where it was.
+ *   pointer down draws; a second finger, or a palm under a pen, is ignored
+ *   until the first lifts, and a right or middle click never draws. The
+ *   drawing pointer is captured, so its moves off the edge of the board and
+ *   its lift anywhere still reach the stroke. A cancelled pointer (the phone
+ *   took the gesture) or a lost capture ends the stroke where it was. If a
+ *   lift never arrives at all, the next primary pointer of the same kind
+ *   finishes that stroke and draws, instead of being ignored for good.
  * - Size: a ResizeObserver on the container, plus a resolution media query for
  *   devicePixelRatio (the window moved to another screen, or the browser was
  *   zoomed). Either one sizes the canvas to the container times the ratio and
  *   draws the whole board again from its strokes.
- * - Keys, anywhere on the page except while typing in a field: E toggles the
- *   eraser, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z and Ctrl+Y redo.
+ * - Keys, anywhere on the page except while typing in a text field: E toggles
+ *   the eraser, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z and Ctrl+Y redo. The
+ *   toolbar's own slider and colour picker take no typing, so the keys still
+ *   work while one of them has focus.
+ * - Leaving: while there is ink on the board, a refresh or a closed tab asks
+ *   first (beforeunload). The listener is attached only then, so an empty
+ *   board leaves the page free for the back/forward cache.
  * - Download: the strokes on the board colour, as a PNG.
  *
  * Every listener it adds, dispose() removes. The browser objects come in
@@ -93,11 +102,17 @@ export type WhiteboardHandle = {
   dispose: () => void;
 };
 
+/** The input types a person types text into; a slider, colour picker, checkbox or button takes none. */
+const TEXT_ENTRY = /^(?:text|search|email|url|tel|password|number|date|time|datetime-local|month|week)$/i;
+
 /** True while the person is typing somewhere, so a letter is text and not a shortcut. */
 function typingIn(target: EventTarget | null): boolean {
-  const el = target as { tagName?: unknown; isContentEditable?: unknown } | null;
+  const el = target as { tagName?: unknown; type?: unknown; isContentEditable?: unknown } | null;
   if (!el || typeof el.tagName !== "string") return false;
-  return el.isContentEditable === true || /^(input|textarea|select)$/i.test(el.tagName);
+  if (el.isContentEditable === true || /^(textarea|select)$/i.test(el.tagName)) return true;
+  if (!/^input$/i.test(el.tagName)) return false;
+  // An input with no type is a text box.
+  return TEXT_ENTRY.test(typeof el.type === "string" && el.type !== "" ? el.type : "text");
 }
 
 /**
@@ -121,11 +136,29 @@ export function mountWhiteboard(
   let started = false;
   let notice: Notice = null;
   let pointerId: number | null = null;
+  let pointerType = "";
   let ratioQuery: RatioQuery | null = null;
+  let guardingLeave = false;
   let disposed = false;
+
+  /** The browser's "Leave site?" question, before a refresh or a closed tab wipes the drawing. */
+  function onBeforeUnload(e: BeforeUnloadEvent): void {
+    e.preventDefault();
+    // Browsers from before preventDefault() counted here ask only when returnValue is set.
+    e.returnValue = true;
+  }
+
+  /** Asks before leaving only while there is ink on the board, so an empty board stays cacheable. */
+  function guardLeave(on: boolean): void {
+    if (on === guardingLeave) return;
+    guardingLeave = on;
+    if (on) env.win.addEventListener("beforeunload", onBeforeUnload);
+    else env.win.removeEventListener("beforeunload", onBeforeUnload);
+  }
 
   function emit(): void {
     if (disposed) return;
+    guardLeave(board.strokes.length > 0);
     onState({
       color,
       size,
@@ -170,12 +203,25 @@ export function mountWhiteboard(
   }
 
   function onPointerDown(e: PointerEvent): void {
-    if (pointerId !== null && pointerId !== e.pointerId) return;
+    // Another pointer while one draws is a second finger or a palm: ignored.
+    // The exception is the new primary pointer of the same kind: the browser
+    // only makes it primary once the drawing one has gone, so that one's lift
+    // was lost, and this pointer takes over instead of being shut out for good.
+    if (pointerId !== null && pointerId !== e.pointerId && !(e.isPrimary && e.pointerType === pointerType)) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     e.preventDefault();
     pointerId = e.pointerId;
-    // A stroke this pointer never lifted from (its pointerup was lost) is
-    // finished here, the way a redraw would show it.
+    pointerType = e.pointerType;
+    try {
+      // Its moves off the edge of the board, and its lift anywhere, now come
+      // to the canvas too: no straight line across the part drawn outside.
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      // The pointer was already gone; the window's pointerup and
+      // pointercancel listeners still end the stroke.
+    }
+    // A stroke whose pointerup was lost is finished here, the way a redraw
+    // would show it.
     if (board.active) drawStrokeEnd(ctx!, board.active);
     const [x, y] = boardPoint(e.clientX, e.clientY, canvas.getBoundingClientRect());
     const stroke = beginStroke(board, erasing ? "eraser" : "pen", color, size, x, y);
@@ -310,6 +356,9 @@ export function mountWhiteboard(
   watchRatio();
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
+  // A lift or a cancel releases the capture after its own event has ended the
+  // stroke, so this one ends a stroke only when the capture went some other way.
+  canvas.addEventListener("lostpointercapture", onPointerEnd);
   env.win.addEventListener("pointerup", onPointerEnd);
   env.win.addEventListener("pointercancel", onPointerEnd);
   env.win.addEventListener("keydown", onKeyDown);
@@ -323,9 +372,11 @@ export function mountWhiteboard(
     ratioQuery = null;
     canvas.removeEventListener("pointerdown", onPointerDown);
     canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("lostpointercapture", onPointerEnd);
     env.win.removeEventListener("pointerup", onPointerEnd);
     env.win.removeEventListener("pointercancel", onPointerEnd);
     env.win.removeEventListener("keydown", onKeyDown);
+    guardLeave(false);
   }
 
   return { setColor, setSize, toggleEraser, undo, redo, clear, download, dispose };

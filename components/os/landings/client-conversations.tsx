@@ -16,13 +16,27 @@
  * gets no composer, and the reason instead (sendBlocked).
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { MessageList, type MessageStatusMap } from "@/components/conversations/MessageList";
 import type { ConversationMessage } from "@/lib/conversation-threading";
 import type { ClientDraft } from "@/lib/os/customers/conversations";
 
 type Recipient = { email: string; label: string };
+
+/**
+ * The record header's "Write to client": it opens the Conversations tab, so it
+ * is not drawn there. The header is the record's layout, which a tab switch
+ * does not render again, so the tab is read from the address bar.
+ */
+export function WriteToClientLink({ customerId }: { customerId: string }) {
+  if (useSearchParams().get("tab") === "conversations") return null;
+  return (
+    <Link href={`/clients/${customerId}?tab=conversations`} prefetch={false} className="btn-secondary">
+      Write to client
+    </Link>
+  );
+}
 
 /** How the composer records a send the mail server could not confirm (lib/os/customers/conversations.ts). */
 const UNCONFIRMED_SEND = "email_delivery_unknown";

@@ -14,12 +14,32 @@
  * No HMAC verification on this route — auth is bound to the form's
  * `enabled` flag and the (tenant_slug, form_slug) uniqueness check in
  * the submit route.
+ *
+ * OFFER PAGES (2026-10-08). When the form has an offer page that is LIVE
+ * (form_offer_pages, bravo__203), this URL draws that page, with this same form
+ * inside its Book section. Otherwise (no row, a draft nobody published, the
+ * table not there yet, or any error in the page layer) it renders exactly what
+ * it always has: the FormPublicClient element below, unchanged.
+ * tests/offer-pages-public.test.ts holds that byte for byte.
+ *
+ * ?offer_preview=1 shows the DRAFT, but only to a signed-in owner or admin of
+ * the form's own workspace (the builder's Preview tab). Everyone else gets the
+ * public page, and a preview never mounts a live form.
+ *
+ * AN OFFER'S NAME IS INTERNAL (the New offer dialog says so). A form with an
+ * offer page and no headline of its own is titled with the workspace's name on
+ * its plain form and in its tab, and a live page whose headline is missing
+ * falls back to the form's own headline, then the workspace's name: never the
+ * form's name. A form with its own headline, and every intake form, renders
+ * exactly as before.
  */
 
 import type { Metadata } from "next";
+import { cache } from "react";
 import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { OfferPage } from "@/components/offer-pages/OfferPage";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -28,7 +48,18 @@ import {
   type FormBranding,
 } from "@/lib/forms/types";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
-import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
+import { publicMarkForTenant, faviconForTenant, publicIdentityForTenant } from "@/lib/tenant/public-identity";
+import { offerPagesDb, readOfferRow, readPublicOfferState, type PublicOfferState } from "@/lib/offer-pages/store";
+import { fallbackHeadline } from "@/lib/offer-pages/operator";
+import { prepareOfferRender, type PreparedOffer } from "@/lib/offer-pages/render";
+import type { OfferPageDoc } from "@/lib/offer-pages/types";
+import { signMediaUrls } from "@/lib/founders/marketing-queries";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
+import { resolveBookingUrl } from "@/lib/booking-link";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { resolvePersona } from "@/lib/role-surfaces";
+import { formsEditRefusal } from "@/lib/forms/access";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -51,13 +82,18 @@ export async function generateMetadata({
   if (!lookup.ok) {
     return { title: "Form", robots: { index: false, follow: false } };
   }
+  const offer = await offerState(lookup.form.tenant_id, lookup.form.id);
   let title = lookup.form.name || "Application";
+  let headline = "";
   try {
-    const branding = parseFormBranding(lookup.form.branding);
-    if (branding.headline) title = branding.headline;
+    headline = parseFormBranding(lookup.form.branding).headline || "";
   } catch {
     // Fall through to form name on parse failure.
   }
+  if (headline) title = headline;
+  // An offer's name is internal: with no headline of its own, its tab says the
+  // workspace's name, never the form's.
+  else if (offer.hasRow) title = (await workspaceDisplayName(lookup.form.tenant_id)) || "Application";
   // The TAB belongs to the tenant too. app/layout.tsx sets one global icon —
   // OASIS AI's — so a SunBiz merchant uploading three months of bank statements
   // saw another company's mark in the browser tab on the most sensitive page in
@@ -67,12 +103,42 @@ export async function generateMetadata({
     tenantId: lookup.form.tenant_id,
     tenantSlug: resolved.tenant_slug,
   });
+  // A live offer page names the tab and the link preview from its own words.
+  // noindex either way (D8): offer pages stay out of search results.
+  const live = offer.live;
+  const description = live ? live.seo.description || live.hero.subheadline : undefined;
+  if (live) title = live.seo.title || live.hero.headline || title;
   return {
     title,
+    ...(description ? { description } : {}),
     robots: { index: false, follow: false },
     ...(icon ? { icons: { icon } } : {}),
   };
 }
+
+/** A form's offer page state, read once per request (metadata and page share it). */
+const offerState = cache(async (tenantId: string, formId: string): Promise<PublicOfferState> => {
+  const db = offerPagesDb();
+  return db ? readPublicOfferState(db, tenantId, formId) : { hasRow: false, live: null };
+});
+
+/**
+ * The workspace's public name: its brand's display name, else its own name;
+ * "" only when it has neither. What an offer falls back to where it would
+ * otherwise show the form's name, which is internal.
+ */
+const workspaceDisplayName = cache(async (tenantId: string): Promise<string> => {
+  const known = publicIdentityForTenant({ tenantId })?.displayName ?? "";
+  if (known) return known;
+  const db = offerPagesDb();
+  if (!db) return "";
+  try {
+    const t = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
+    return String((t.rows[0] as unknown as { name?: unknown } | undefined)?.name ?? "").trim();
+  } catch {
+    return "";
+  }
+});
 
 type RouteParams = {
   tenant_slug: string;
@@ -176,7 +242,7 @@ export default async function AnonymousFormPage({
   // agent blasts texts AND dials, so both params travel together on a link.
   // Passed through raw; lib/forms/lead-source.ts normalizes it server-side on
   // submit, where a bad value becomes "unknown" instead of rejecting the lead.
-  searchParams?: Promise<{ rep?: string; source?: string }>;
+  searchParams?: Promise<{ rep?: string; source?: string; offer_preview?: string }>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
@@ -191,10 +257,54 @@ export default async function AnonymousFormPage({
     notFound();
   }
 
+  const offer = await loadOfferView(result, sp.offer_preview === "1");
+  if (offer) {
+    const tenantId = result.form.tenant_id;
+    const oasis = isOasisInternalTenant(tenantId);
+    return (
+      <OfferPage
+        prepared={offer.prepared}
+        workspaceName={offer.workspaceName}
+        logoUrl={offer.doc.theme.logo === "none" ? null : (result.form.branding.logo_url ?? null)}
+        legalLinks={oasis}
+        // A client workspace has no booking link of its own yet; OASIS's link
+        // must never appear on another company's page.
+        bookingUrl={oasis ? resolveBookingUrl() || null : null}
+        contactEmail={oasis ? CONTACT_EMAIL : null}
+        preview={offer.preview ? { steps: result.form.steps.map((s) => s.title) } : null}
+        form={
+          offer.preview
+            ? null
+            : {
+                formId: result.form.id,
+                // Not drawn inside the Book section, but a client component's
+                // props travel to the browser: the page's own headline, never
+                // the form's internal name.
+                formName: offer.prepared.page.hero.headline,
+                // One accent on the page: the form's buttons follow it.
+                branding: { ...result.form.branding, primary_color: offer.prepared.accent },
+                steps: result.form.steps,
+                redirectUrl: result.form.redirect_url,
+                token: null,
+                brand: consentBrandForTenant(result.tenant_slug, result.form.slug),
+                submissionSource: source,
+                submissionPath: `/f/${result.tenant_slug}/${result.form.slug}`,
+                anonymousInit: {
+                  tenant_slug: result.tenant_slug,
+                  form_slug: result.form.slug,
+                  ...(rep ? { rep } : {}),
+                  ...(source ? { source } : {}),
+                },
+              }
+        }
+      />
+    );
+  }
+
   return (
     <FormPublicClient
       formId={result.form.id}
-      formName={result.form.name}
+      formName={await plainFormName(result)}
       branding={result.form.branding}
       steps={result.form.steps}
       redirectUrl={result.form.redirect_url}
@@ -228,6 +338,86 @@ export default async function AnonymousFormPage({
       }}
     />
   );
+}
+
+type OfferView = { doc: OfferPageDoc; prepared: PreparedOffer; workspaceName: string; preview: boolean };
+
+/**
+ * The name the plain form falls back to when it has no headline of its own
+ * (FormPublicClient: headline = branding.headline || formName). An offer's
+ * name is internal, so an offer's plain form gets the workspace's name. Every
+ * other form passes its own name, exactly as it always has.
+ */
+async function plainFormName(result: Extract<LoadResult, { ok: true }>): Promise<string> {
+  if (result.form.branding.headline) return result.form.name;
+  const { hasRow } = await offerState(result.form.tenant_id, result.form.id);
+  return hasRow ? await workspaceDisplayName(result.form.tenant_id) : result.form.name;
+}
+
+/**
+ * May this session see this form's DRAFT? A signed-in owner or admin of the
+ * form's own workspace, by the rule every forms write uses. Anyone else,
+ * including a signed-in member of another workspace, is an ordinary visitor.
+ */
+async function canPreview(tenantId: string): Promise<boolean> {
+  try {
+    const session = await resolveSessionContext();
+    if (!session.ok || session.tenantId !== tenantId) return false;
+    return formsEditRefusal({ persona: resolvePersona(session), tenantId }) === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The offer page to draw instead of the plain form, or null for the plain form.
+ * Never throws: whatever goes wrong in the page layer, the visitor gets the
+ * form they came for, never a 500.
+ */
+async function loadOfferView(
+  result: Extract<LoadResult, { ok: true }>,
+  previewRequested: boolean,
+): Promise<OfferView | null> {
+  const db = offerPagesDb();
+  if (!db) return null;
+  const { id: formId, tenant_id: tenantId } = result.form;
+  try {
+    let doc: OfferPageDoc | null = null;
+    let preview = false;
+    if (previewRequested && (await canPreview(tenantId))) {
+      const row = await readOfferRow(db, tenantId, formId);
+      if (row.state === "row" && row.row.draft) {
+        doc = row.row.draft;
+        preview = true;
+      }
+    }
+    if (!doc) doc = (await offerState(tenantId, formId)).live;
+    if (!doc) return null;
+    const workspaceName = await workspaceDisplayName(tenantId);
+    const prepared = await prepareOfferRender({
+      db,
+      tenantId,
+      formId,
+      doc,
+      // The form's own headline, read as the Publish gate reads it, then the
+      // workspace's name: never the form's name, which is internal. (The gate
+      // blocks a page with neither; this covers a headline removed later.)
+      fallbackHeadline: fallbackHeadline({ branding: result.form.branding }) || workspaceName,
+      sign: signMediaUrls,
+      // The owner's preview signs its Library videos through the builder's own
+      // route, which reads the draft; the public route reads only what is live.
+      preview,
+      // Read lazily: without an object store a link video simply has no poster.
+      publicUrl: (path) => getServiceSupabase().storage.from("tenant-assets").getPublicUrl(path).data.publicUrl || null,
+    });
+    return { doc, prepared, workspaceName, preview };
+  } catch (err) {
+    console.error("[offer-pages] page layer failed; rendering the form", {
+      form_id: formId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 function FormErrorPage({

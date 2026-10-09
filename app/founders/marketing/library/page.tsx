@@ -164,7 +164,7 @@ export default async function MarketingLibraryPage({
       degraded: true,
     }),
     safe("marketing.library.tabs", getBrandTabCounts(founder.tenantId), {
-      counts: { "oasis-ai": 0, conaugh: 0, music: 0, downloads: 0, clients: 0 },
+      counts: { "oasis-ai": 0, conaugh: 0, downloads: 0, clients: 0 },
       degraded: true,
     }),
   ]);
@@ -234,12 +234,11 @@ export default async function MarketingLibraryPage({
         // this table is a record of what already shipped, never a queue anything
         // draws from. A page showing a Draft -> Scheduled -> Published pipeline
         // invites exactly the opposite reading, so it now states the direction.
+        //
+        // No "Back to Content" link: the Content tabs above every Content page
+        // (ContentTabs) already lead back, and a second way back under them
+        // was a duplicate.
         subtitle="A record of what has already been produced — the daily poster writes here, it never reads from here."
-        action={
-          <Link href="/founders/marketing" className="text-xs font-semibold text-accent hover:underline">
-            Back to Content
-          </Link>
-        }
       />
 
       {/* ── Axis 1: BRAND. Tabs, not pills — this is navigation between separate
@@ -304,12 +303,11 @@ export default async function MarketingLibraryPage({
             None of these {lifecycleTotal} have been posted.
           </span>{" "}
           This library holds produced creative. Your live posts come from the daily
-          poster reading <code className="text-fg-dim">data/post_queue</code>, are a
-          separate stream, and are counted in{" "}
+          poster, which keeps its own queue, and are counted in{" "}
           <Link href="/founders/marketing/performance" className="font-semibold text-accent hover:underline">
             Performance
           </Link>
-          . Nothing here reaches an account until it is posted from the asset page.
+          . Nothing here reaches an account until it is posted from its asset page.
         </div>
       )}
 
@@ -426,7 +424,8 @@ export default async function MarketingLibraryPage({
             {pageCount > 1 && ` · showing ${firstShown}-${lastShown}`}
           </div>
           {/* Phone frames are the default (CC: "the preferred iPhone view");
-              Grid is the plain card grid. The page you are on is kept. */}
+              Grid is the plain card grid, where a video is still a phone
+              (AssetTile). The page you are on is kept. */}
           <div className="flex items-center gap-1" role="group" aria-label="Library layout">
             <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
               <Smartphone className="h-3.5 w-3.5" />
@@ -483,7 +482,9 @@ export default async function MarketingLibraryPage({
                         ? "This brand has no assets in the library yet."
                         : activeGroup.empty
             }
-            hint="Drop links in the Train tab — they are fetched and analysed within a few minutes."
+            // Not "drop links in the Train tab": training material teaches the
+            // marketing agent, it never adds anything to this library.
+            hint="New content appears here when the marketing agent or the daily poster adds it."
           />
         </Card>
       ) : (

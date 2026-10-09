@@ -177,11 +177,15 @@ check("no grid tile renders a <video> on arrival; any tile <video> is preload=\"
     assert.match(drawn.tiles[name], /aria-label="Play Asset title"/, `${name}: the video waits behind a play button`);
   }
   // Every other <video> a tile file can render is preload="none" in source. A
-  // grid tile reaches only these files.
+  // grid tile reaches only these files (PhoneEnlarge and PhoneEnlargeOverlay:
+  // the big phone a tile opens, which draws the tile's own media and no <video>
+  // of its own).
   for (const file of [
     "components/founders/marketing-shared.tsx",
     "components/founders/CarouselFrame.tsx",
     "components/founders/PhoneFrame.tsx",
+    "components/founders/PhoneEnlarge.tsx",
+    "components/founders/PhoneEnlargeOverlay.tsx",
   ]) {
     const src = code(file);
     const elements = src.match(/<video\b[\s\S]*?\/?>/g) ?? [];
@@ -248,7 +252,12 @@ check("the asset page's player is open from the start, shows its first frame, an
   assert.match(p.openAfterHydration, /aria-label="Play Asset title"/, "it waits for its play button");
   const detail = code("app/founders/marketing/asset/[id]/page.tsx");
   assert.match(detail, /<TileVideo\b[^>]*\bvariant="phone"[^>]*\binitialOpen\b/, "the asset page opens its phone player");
-  for (const file of ["components/founders/marketing-shared.tsx", "app/founders/marketing/library/page.tsx"]) {
+  for (const file of [
+    "components/founders/marketing-shared.tsx",
+    "app/founders/marketing/library/page.tsx",
+    "components/founders/PhoneEnlarge.tsx",
+    "components/founders/PhoneEnlargeOverlay.tsx",
+  ]) {
     assert.ok(!/initialOpen/.test(code(file)), `${file}: a Library tile stays a cover until play`);
   }
 });
@@ -293,8 +302,9 @@ check("every tile <img> is lazy, async and sized; a carousel draws its first sli
 
 check("the phone view frames every kind of asset, including the ones with no media", () => {
   for (const [name, html] of Object.entries(drawn.tiles)) {
-    const phone = name.endsWith(":phone");
-    assert.equal(html.includes("data-phone-frame"), phone, `${name}: phone frame only in the phone view`);
+    // The grid frames its videos too (the next check); everything else there is the plain card.
+    const phone = name.endsWith(":phone") || name.startsWith("video");
+    assert.equal(html.includes("data-phone-frame"), phone, `${name}: ${phone ? "a phone" : "the plain card"}`);
   }
   assert.ok(drawn.tiles["copy:phone"].includes("A caption drafted in chat"), "a copy-only asset shows its copy on the phone");
   assert.ok(drawn.tiles["copy:phone"].includes("Text post"));
@@ -304,6 +314,27 @@ check("the phone view frames every kind of asset, including the ones with no med
   }
   assert.match(drawn.tiles["image:phone"], /data-fit="letterbox"/, "a 1:1 card is letterboxed in the tile too");
   assert.match(drawn.tiles["videoPoster:phone"], /data-fit="fill"/, "a 9:16 reel fills the tile");
+});
+
+// CC, 2026-10-01: "make all of these videos that are currently displayed as
+// rectangular shapes into iPhone shapes". The grid's card drew a video in a box
+// at the file's own shape: a rectangle.
+check("the grid draws every video in a phone, never the file's rectangle; pictures and text keep the plain card", () => {
+  for (const name of ["videoPoster:grid", "videoBare:grid", "videoNoRender:grid"]) {
+    const html = drawn.tiles[name];
+    assert.match(html, /aspect-ratio:9 \/ 19\.5/, `${name}: a 9:19.5 phone screen`);
+    assert.doesNotMatch(html, /aspect-ratio:1080 \/ 1920|aspect-\[9\/16\]|aspect-video/, `${name}: the rectangle at the file's shape`);
+    assert.match(html, /data-chrome="instagram"/, `${name}: with the app's own chrome`);
+  }
+  // The phone's tile, as in the phone view: the hook is the caption on the
+  // screen, not repeated under it.
+  for (const name of ["videoPoster:grid", "videoBare:grid"]) {
+    assert.equal(drawn.tiles[name].split("The hook line").length - 1, 1, `${name}: the hook once, as the caption`);
+  }
+  assert.match(drawn.tiles["videoPoster:grid"], /data-fit="fill"/, "a 9:16 reel fills the phone");
+  assert.ok(drawn.tiles["videoNoRender:grid"].includes("Video - no render on file yet"), "a video with no render says so on the phone");
+  assert.match(drawn.tiles["image:grid"], /aspect-ratio:1080 \/ 1080/, "a picture keeps the card at its own shape");
+  assert.match(drawn.tiles["carousel:grid"], /aspect-ratio:1080 \/ 1350/, "and so does a deck");
 });
 
 console.log(`\nlibrary-phone-preview: ${passed} passed, ${failed} failed`);

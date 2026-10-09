@@ -69,6 +69,16 @@ type Props = {
    * Every seeded value stays editable.
    */
   prefill?: Record<string, unknown> | null;
+  /**
+   * "page" (default): the form IS the page, with its own <main>, logo and
+   * headline, exactly as every form has always rendered.
+   * "embedded": the form sits inside an offer page's Book section
+   * (components/offer-pages/OfferBook.tsx), which has its own <main>, header
+   * and heading, so this draws only the steps, the card and the notes.
+   */
+  chrome?: "page" | "embedded";
+  /** Told after each step the server accepted; `finished` on the last one. */
+  onStepSubmitted?: (stepIndex: number, finished: boolean) => void;
 };
 
 type SubmitResponse = {
@@ -219,6 +229,8 @@ export function FormPublicClient({
   submissionPath,
   prefill,
   brand,
+  chrome = "page",
+  onStepSubmitted,
 }: Props) {
   const consentIdemKey = useConsentIdempotencyKey();
   const consentDone = useRef(false);
@@ -777,6 +789,7 @@ export function FormPublicClient({
         tokenRef.current = data.minted_token;
         setToken(data.minted_token);
       }
+      onStepSubmitted?.(currentStep, data.next_step === null || data.next_step === undefined);
 
       // Next-step navigation OR final-step completion.
       if (data.next_step !== null && data.next_step !== undefined) {
@@ -849,35 +862,12 @@ export function FormPublicClient({
         footer: "We\u2019ve emailed you this link as well, so you can come back to it.",
       };
 
-  return (
-    <main
-      className={`min-h-screen ${isLight ? "form-light" : "bg-bg-deep"} text-fg flex items-start sm:items-center justify-center px-4 py-10`}
-    >
-      <div className="w-full max-w-xl space-y-6">
-        {/* Brand header — logo if the tenant set one, otherwise a clean
-            branded sun mark so the form reads as the brand (not the
-            internal form name). */}
-        <header className="text-center space-y-3">
-          {branding.logo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
-          ) : null}
-          <div className="space-y-2">
-            <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
-            <div
-              className="mx-auto h-0.5 w-12 rounded-full"
-              style={{ background: primary }}
-            />
-          </div>
-          {branding.subheadline && (
-            <p className="mx-auto max-w-sm text-sm leading-relaxed text-fg-muted">
-              {branding.subheadline}
-            </p>
-          )}
-        </header>
-
-        {/* Step indicator */}
-        {steps.length > 1 && (
+  // The step indicator, the card and the notes: the whole form when it sits in
+  // an offer page's Book section (chrome="embedded"), and the same three,
+  // unchanged, under the form's own header when it is the page. Split out so
+  // the two shapes cannot drift; the page shape renders byte for byte as before
+  // (tests/offer-pages-public.test.ts compares it with the markup it had).
+  const stepIndicator = steps.length > 1 && (
           <div className="flex items-center justify-center gap-1.5">
             {steps.map((_, idx) => (
               <div
@@ -898,10 +888,14 @@ export function FormPublicClient({
               Step {currentStep + 1} / {steps.length}
             </span>
           </div>
-        )}
+  );
 
-        {/* Body */}
-        <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg">
+  // The form's card. Inside an offer page the Book section's card is the one
+  // surface (components/offer-pages/OfferPage.tsx), so the embedded form draws
+  // no card of its own; on its own page it is exactly the card it always was.
+  const cardClass = chrome === "embedded" ? undefined : "rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg";
+  const body = (
+        <div className={cardClass}>
           {done ? (
             /*
              * TWO ENDINGS, and which one shows is load-bearing (Adon,
@@ -1017,7 +1011,10 @@ export function FormPublicClient({
             </>
           )}
         </div>
+  );
 
+  const notes = (
+    <>
         {/* Footer note — light, brand-neutral reassurance. Tenant-agnostic copy:
             this renders on every tenant's public form (SunBiz funding + CC's
             personal-brand funnel), so it must not be funding-specific. */}
@@ -1045,6 +1042,51 @@ export function FormPublicClient({
             on the public-facing page. If a tenant wants attribution
             they can render it via branding.subheadline or extend
             FormBranding with a footer_label field. */}
+    </>
+  );
+
+  if (chrome === "embedded") {
+    return (
+      <div className="w-full space-y-5">
+        {stepIndicator}
+        {body}
+        {notes}
+      </div>
+    );
+  }
+
+  return (
+    <main
+      className={`min-h-screen ${isLight ? "form-light" : "bg-bg-deep"} text-fg flex items-start sm:items-center justify-center px-4 py-10`}
+    >
+      <div className="w-full max-w-xl space-y-6">
+        {/* Brand header — logo if the tenant set one, otherwise a clean
+            branded sun mark so the form reads as the brand (not the
+            internal form name). */}
+        <header className="text-center space-y-3">
+          {branding.logo_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
+          ) : null}
+          <div className="space-y-2">
+            <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
+            <div
+              className="mx-auto h-0.5 w-12 rounded-full"
+              style={{ background: primary }}
+            />
+          </div>
+          {branding.subheadline && (
+            <p className="mx-auto max-w-sm text-sm leading-relaxed text-fg-muted">
+              {branding.subheadline}
+            </p>
+          )}
+        </header>
+
+        {stepIndicator}
+
+        {body}
+
+        {notes}
       </div>
     </main>
   );

@@ -58,6 +58,24 @@ const TABS_PCT = 100 - STATUS_PCT - REEL_PCT;
 
 const ICON = "h-[6.4cqw] w-[6.4cqw] text-white [filter:drop-shadow(0_1px_1px_rgba(0,0,0,0.6))]";
 
+/**
+ * What the phone draws around an asset. Exported so the big phone
+ * (components/founders/PhoneEnlarge.tsx) is handed the same shape the tile was
+ * drawn with, and cannot drift from it.
+ */
+export type PhoneFrameShape = {
+  mediaW?: number | null;
+  mediaH?: number | null;
+  aspect?: string | null;
+  /** The account line. The asset's brand name as stored - never a made-up handle. */
+  handle: string;
+  /** The asset's own copy (its hook). Clamped to two lines, as the apps do. */
+  caption?: string | null;
+  chrome?: PhoneChrome;
+  /** Outline the parts of the reel the app's own UI covers. */
+  guides?: boolean;
+};
+
 export function PhoneFrame({
   mediaW,
   mediaH,
@@ -69,17 +87,7 @@ export function PhoneFrame({
   label,
   children,
   className = "",
-}: {
-  mediaW?: number | null;
-  mediaH?: number | null;
-  aspect?: string | null;
-  /** The account line. The asset's brand name as stored - never a made-up handle. */
-  handle: string;
-  /** The asset's own copy (its hook). Clamped to two lines, as the apps do. */
-  caption?: string | null;
-  chrome?: PhoneChrome;
-  /** Outline the parts of the reel the app's own UI covers. */
-  guides?: boolean;
+}: PhoneFrameShape & {
   /** What the frame shows, for assistive tech. */
   label: string;
   children: ReactNode;
@@ -263,7 +271,9 @@ export function PhoneTextCard({
   return (
     <div className="flex h-full w-full flex-col justify-center gap-[3cqw] bg-neutral-900 px-[8cqw] text-left">
       <span className="text-[3cqw] font-semibold text-white/60">{kicker}</span>
-      <p className="m-0 line-clamp-6 text-[5.6cqw] font-semibold leading-[1.25] text-white">{text}</p>
+      {/* Clamped to six lines; the title carries the rest, so a long post can
+          still be read in full by hovering it. */}
+      <p title={text} className="m-0 line-clamp-6 text-[5.6cqw] font-semibold leading-[1.25] text-white">{text}</p>
       {note ? <span className="text-[3cqw] text-white/50">{note}</span> : null}
     </div>
   );

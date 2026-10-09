@@ -9,9 +9,12 @@
  *
  *   1. Performance resolves after the founder gate with NO post_analytics read;
  *      its numbers sit behind one Suspense boundary whose fallback is an honest
- *      loading line (aria-busy, no digits), and they come from ONE bounded read
- *      of the stored snapshot. A failed read says so inside that section while
- *      the frame still renders, whether the read returns an error or throws.
+ *      loading line (aria-busy, no digits), and they come from two reads of the
+ *      stored snapshot, side by side: the window (bounded) and each channel's
+ *      last post (one row per channel), so every connected channel is listed,
+ *      a quiet one with how long ago it last posted, and LinkedIn in
+ *      impressions. A failed read says so inside that section while the frame
+ *      still renders, whether the read returns an error or throws.
  *   2. The budget: not one fetch() while a Content page renders, frame or
  *      numbers. The database here is a local libSQL file, so any fetch at all
  *      would be a third party (Zernio, Meta, a sync run inline).
@@ -23,13 +26,15 @@
  *      yet".
  *   4. Overview: no card waits on another tab's data. The frame (title and the
  *      Performance card, which needs no read) arrives after the gate alone;
- *      the queue, the Library, Training and Requests cards each have their own
+ *      the queue and the Library and Training cards each have their own
  *      boundary; the Training card reads only the training material and opens
  *      the Training tab, and a failed or thrown read of it stays in that card;
  *      one request reads the Library's summary once (React cache(), under
- *      React's own server renderer); Requests says what a request is and who
- *      acts on it; no persona name on any branch of the copy (work queued for
- *      the agent, nothing awaiting a verdict, a failed read).
+ *      React's own server renderer); there is no Requests card and the summary
+ *      reads no request count (D16: nothing files or reads a request), only the
+ *      asset pages and the review count; no persona or vendor name on any branch of
+ *      the copy (work queued for the agent, nothing awaiting a verdict, a
+ *      failed read).
  *
  * Real code paths: the real founder gate (a signed session checked against a
  * local libSQL file), the real readers and the real PostgREST bridge.
@@ -311,7 +316,8 @@ async function main() {
     assert.deepEqual(statements.filter((s) => /post_analytics/.test(s)), [], "nor anything the frame renders");
     const text = textOf(frame);
     assert.match(text, /Performance/);
-    assert.match(text, /Back to Content/);
+    assert.match(text, /Last 30 days, per channel/);
+    assert.doesNotMatch(text, /Back to Content/, "one way back: the Content tabs above the page");
     const boundaries = hosts(frame).filter((h) => h.type === "suspense");
     assert.equal(boundaries.length, 1, "one boundary around the numbers");
     const fallback = boundaries[0].props.fallback;
@@ -321,18 +327,64 @@ async function main() {
   });
 
   // ── 1b. ...then the real numbers from one bounded read ──────────────────
-  await check("the numbers stream from ONE bounded read of the stored snapshot, this tenant and window only", async () => {
+  await check("the numbers stream from two bounded reads of the stored snapshot, this tenant only: the window, and each channel's last post", async () => {
     const boundary = hosts(frame).find((h) => h.type === "suspense")!;
     statements.length = 0;
     const numbers = await resolve(boundary.props.pending, false);
     const reads = statements.filter((s) => /post_analytics/.test(s));
-    assert.equal(reads.length, 1, `one read: ${statements.join(" | ")}`);
-    assert.match(reads[0], /LIMIT (?:\d+|\?)/, "bounded");
+    assert.equal(reads.length, 2, `two reads: ${statements.join(" | ")}`);
+    const windowRead = reads.find((s) => /LIMIT (?:\d+|\?)/.test(s));
+    assert.ok(windowRead, `the window is bounded: ${reads.join(" | ")}`);
+    const lastRead = reads.find((s) => /GROUP BY platform/.test(s));
+    assert.ok(lastRead, `each channel's last post, one row per channel: ${reads.join(" | ")}`);
+    assert.match(lastRead!, /WHERE tenant_id = \?/, "scoped to this tenant");
     const text = textOf(numbers);
     assert.match(text, /2 posts · last 30 days/, text.slice(0, 300));
     assert.match(text, /2,000/, "1,200 + 800 views: the other tenant's 99,999 and the 45-day-old 50,000 are not in it");
     assert.doesNotMatch(text, /99,999|50,000|51,200/);
     assert.match(text, /1 post published\s+recently has no numbers yet/, "the unmeasured post is reported, not summed");
+    assert.doesNotMatch(text, /Zernio|provenance/, "the posting account, not its vendor; no jargon");
+  });
+
+  // -- 1b'. every connected channel, the quiet ones included -----------------
+  // CC's own account: TikTok and YouTube have not posted since 2026-08-21, and
+  // the page used to drop them, while LinkedIn read "0 views" beside the
+  // impressions it reports. Rows added here, removed after.
+  await check("every connected channel is listed: a quiet one with how long ago it last posted, none on record said so, LinkedIn in impressions", async () => {
+    await raw.batch(
+      [
+        {
+          sql: `INSERT INTO post_analytics (id, tenant_id, zernio_post_id, platform_post_id, platform, views, impressions, likes,
+                  content_excerpt, published_at, last_synced_at, measured_at)
+                VALUES ('q1', ?, 'z-q1', 'pp-q1', 'linkedin', 0, 400, 3, 'a text post', ?, ?, ?),
+                       ('q2', ?, 'z-q2', 'pp-q2', 'twitter', 90, 90, 1, 'an old post', ?, ?, ?)`,
+          args: [OASIS, daysAgo(4), daysAgo(0), daysAgo(0), OASIS, daysAgo(60), daysAgo(0), daysAgo(0)],
+        },
+      ],
+      "write",
+    );
+    try {
+      const el = await PerformancePage();
+      const tree = await resolve(el, false);
+      const channel = (p: string) => {
+        const row = hosts(tree).find((h) => h.props["data-channel"] === p);
+        assert.ok(row, `the ${p} row is listed`);
+        return textOf(row);
+      };
+      const x = channel("twitter");
+      assert.match(x, /^X/, "named as the app names it");
+      assert.match(x, /No posts in the last 30 days/);
+      assert.match(x, /Last posted 60 days ago/, "the quiet channel says how long");
+      const linkedin = channel("linkedin");
+      assert.match(linkedin, /400 impressions/, "LinkedIn in the impressions it reports");
+      assert.doesNotMatch(linkedin, /views/, "not 0 views");
+      assert.match(channel("threads"), /No post on record yet/, "a connected channel that never posted is listed, and says so");
+      assert.match(channel("youtube"), /Numbers not in yet/, "posted, numbers on their way: not a zero");
+      assert.match(channel("instagram"), /1,200 views/);
+      assert.doesNotMatch(channel("instagram"), /Last posted/, "an active channel needs no line");
+    } finally {
+      await raw.execute("DELETE FROM post_analytics WHERE id IN ('q1', 'q2')");
+    }
   });
 
   // ── 1c. a failed read stays inside its section ───────────────────────────
@@ -342,8 +394,9 @@ async function main() {
       const el = await PerformancePage();
       const tree = await resolve(el, false);
       const text = textOf(tree);
-      assert.match(text, /Back to Content/, "the frame");
+      assert.match(text, /Last 30 days, per channel/, "the frame");
       assert.match(text, /Could not load these numbers right now/);
+      assert.ok(!hosts(tree).some((h) => h.props["data-channel"]), "no channel list drawn from a read that failed");
       assert.doesNotMatch(text, /\[founders:|server log/, "no log tag or server talk on the screen");
       assert.match(text, /Could not read the metrics/);
       assert.doesNotMatch(text, /Nothing published in the last 30 days/, "a failure is not an empty month");
@@ -370,7 +423,7 @@ async function main() {
     const log = await serverLog(async () => {
       text = textOf(await resolve(await Page(), false));
     });
-    assert.match(text, /Back to Content/, "the frame");
+    assert.match(text, /Last 30 days, per channel/, "the frame");
     assert.match(text, /Could not load these numbers right now/);
     assert.doesNotMatch(text, /\[founders:|server log/, "no log tag or server talk on the screen");
     assert.match(text, /Could not read the metrics/);
@@ -461,15 +514,19 @@ async function main() {
     overview = await resolve(el, true);
     assert.deepEqual(statements.filter((s) => /marketing_/.test(s)), [], "the frame waits on no marketing read");
     const boundaries = hosts(overview).filter((h) => h.type === "suspense");
-    assert.equal(boundaries.length, 5, "subtitle, the queue, and the Library, Training and Requests cards");
+    assert.equal(boundaries.length, 4, "subtitle, the queue, and the Library and Training cards");
     for (const b of boundaries) assert.doesNotMatch(textOf(b.props.fallback), /\d/, "no number in a placeholder");
     const frameText = textOf(overview);
     assert.match(frameText, /Content/);
-    assert.match(frameText, /Performance.*Per channel, with provenance.*Views, engagement and retention/s, "the Performance card needs no read");
+    assert.match(
+      frameText,
+      /Performance.*Per channel.*Each connected channel's views \(impressions on\s+LinkedIn\) and\s+engagement, and how long ago a quiet one last posted\.\s+Pulled from your\s+posting account/s,
+      "the Performance card needs no read, and names the posting account, not its vendor",
+    );
     assert.ok(hosts(overview).some((h) => h.type === "a" && h.props.href === "/founders/marketing/performance"), "and links to its tab");
   });
 
-  await check("the Training card reads only the training material; the Library, Requests and queue sections read the Library's summary", async () => {
+  await check("the Training card reads only the training material; the Library card and the queue read the Library's summary", async () => {
     const boundaries = hosts(overview).filter((h) => h.type === "suspense");
     const read = async (b: Host) => {
       statements.length = 0;
@@ -490,7 +547,7 @@ async function main() {
       ["/founders/marketing/train"],
       "the card opens the Training tab, whose words it uses",
     );
-    const library = out.find((o) => /A record of what shipped/.test(o.text))!;
+    const library = out.find((o) => /What has been produced/.test(o.text))!;
     assert.match(library.text, /3 assets stored\./, "OASIS's own brand, this tenant: m1-m3, not the Warner asset or another tenant's");
     assert.ok(library.tables.includes("marketing_asset"));
     const queue = out.find((o) => /Needs you/.test(o.text))!;
@@ -498,51 +555,43 @@ async function main() {
     assert.doesNotMatch(queue.text, /Couldn't load your queue/);
   });
 
-  await check("the summary's three counts run together after the asset read, not one after another", async () => {
+  // D16 took the Requests card away, and with it every screen that showed a
+  // request count; the summary went on reading two of them on every Overview,
+  // and a failure on that table marked the whole summary degraded, which hides
+  // the pipeline and says "Couldn't load your queue" (review of #542, F5).
+  await check("the summary reads the asset pages and the review count, and no table the Overview does not show", async () => {
     const { getMarketingSummary } = await import("../lib/founders/marketing-queries");
-    let requestAsked!: () => void;
-    const requestSeen = new Promise<void>((r) => (requestAsked = r));
+    const read: string[] = [];
     const fake = {
       from(table: string) {
-        let head = false;
+        read.push(table);
         const api: Record<string, unknown> = {
-          select(_c: string, o?: { head?: boolean }) { head = Boolean(o?.head); return api; },
-          eq: () => api, is: () => api, in: () => api, order: () => api, range: () => api,
+          select: () => api, eq: () => api, is: () => api, in: () => api, order: () => api, range: () => api,
           then(done: (v: unknown) => void) {
             if (table === "marketing_asset") return done({ error: null, data: [{ id: "a1", track: "organic", status: "draft" }] });
-            if (table === "marketing_request") { requestAsked(); return done({ error: null, count: 0 }); }
-            // The review count answers only once a request count has been asked
-            // for: run one after the other, the summary would never resolve.
-            if (table === "marketing_review") { void requestSeen.then(() => done({ error: null, count: 1 })); return; }
-            return done(head ? { error: null, count: 0 } : { error: null, data: [] });
+            if (table === "marketing_review") return done({ error: null, count: 1 });
+            // Every other table is broken: reading one would degrade the summary.
+            return done({ error: { code: "57014", message: "canceling statement due to statement timeout" }, data: null, count: null });
           },
         };
         return api;
       },
     } as unknown as Parameters<typeof getMarketingSummary>[1];
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const summary = await Promise.race([
-        getMarketingSummary("t", fake),
-        new Promise<never>((_, fail) => {
-          timer = setTimeout(() => fail(new Error("the request count waited for the review count")), 2000);
-        }),
-      ]);
-      assert.equal(summary.open_reviews, 1);
-      assert.equal(summary.degraded, false);
-    } finally {
-      clearTimeout(timer);
-    }
+    const summary = await getMarketingSummary("t", fake);
+    assert.deepEqual([...new Set(read)].sort(), ["marketing_asset", "marketing_review"], `read: ${read.join(", ")}`);
+    assert.equal(summary.open_reviews, 1);
+    assert.equal(summary.degraded, false, "a table no screen shows cannot mark the Library's numbers degraded");
+    assert.ok(!("open_requests" in summary), "no request count, since nothing shows one");
   });
 
-  await check("Requests says what a request is and who acts on it; nothing on the Overview names a persona", async () => {
+  // D16 (approved 2026-10-01): the Requests card counted a queue nothing can
+  // add to and nothing reads, so it read "None open." for ever. It is gone.
+  await check("no Requests card; the Training card says what it is; nothing on the Overview names a persona or a vendor", async () => {
     const text = textOf(await resolve(await MarketingPage(), false));
-    assert.match(text, /Requests/);
-    assert.match(text, /Jobs for the marketing agent, not for you/);
-    assert.match(text, /A request is a job for the marketing agent, such as .make three TikTok hooks for\s+the system ad., so the agent acts on it, not you\./);
-    assert.match(text, /None open\./);
+    assert.doesNotMatch(text, /Requests|Jobs for the marketing agent|None open\./, "the Requests card is gone");
     assert.match(text, /Training material.*What the marketing agent learns from/s);
     assert.doesNotMatch(text, PERSONA, `a persona name or pronoun on the Overview: ${text.match(PERSONA)?.[0]}`);
+    assert.doesNotMatch(text, /Zernio|provenance/, "the posting account, not its vendor; no jargon");
   });
 
   // The seed has work awaiting CC's verdict and nothing queued for the agent,
@@ -562,10 +611,12 @@ async function main() {
     );
     try {
       const text = textOf(await resolve(await MarketingPage(), false));
-      assert.match(text, /2 with the marketing agent/, "the review and the request, queued for the agent");
+      // The review only: requests left the count with the Requests card (D16).
+      assert.match(text, /1 with the marketing agent/, "the open review, queued for the agent");
       assert.match(text, /Nothing waiting on you/);
-      assert.match(text, /the most useful thing you can give it\./);
-      assert.match(text, /1 open\./, "the Requests card counts the open request");
+      assert.match(text, /Approve or archive each one; archived items can be restored\./, "only the buttons that exist");
+      assert.doesNotMatch(text, /ask for changes|reject it/, "there is no such button");
+      assert.doesNotMatch(text, /1 open\./, "no Requests card");
       assert.doesNotMatch(text, PERSONA, `a persona name or pronoun: ${text.match(PERSONA)?.[0]}`);
     } finally {
       await raw.batch(
@@ -579,14 +630,14 @@ async function main() {
       );
     }
     // A broken Library read (a table of that name without the columns the
-    // readers select): the queue, the Library and Requests each say so.
+    // readers select): the queue and the Library each say so.
     await raw.execute("ALTER TABLE marketing_asset RENAME TO marketing_asset_away");
     await raw.execute("CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT)");
     try {
       const text = textOf(await resolve(await MarketingPage(), false));
       assert.match(text, /Couldn't load your queue/);
       assert.match(text, /Couldn't read the library\./);
-      assert.match(text, /Couldn't read your requests\./);
+      assert.doesNotMatch(text, /requests/i, "no Requests card to fail");
       assert.doesNotMatch(text, PERSONA, `a persona name or pronoun: ${text.match(PERSONA)?.[0]}`);
     } finally {
       await raw.execute("DROP TABLE marketing_asset");
@@ -641,8 +692,8 @@ async function main() {
     assert.ok(log.some((l) => l.includes(THROWN)), `the reason is in the server log: ${log.join(" | ")}`);
   });
 
-  // The subtitle, the queue, and the Library and Requests cards all show the
-  // Library's summary; readSummary is React cache()d, so one request reads it
+  // The subtitle, the queue and the Library card all show the Library's
+  // summary; readSummary is React cache()d, so one request reads it
   // once. The small renderer above has no request scope (cache() passes
   // straight through outside one), so this renders the Overview with React's
   // own server renderer, the one Next streams pages with.
