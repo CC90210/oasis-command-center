@@ -51,6 +51,7 @@ import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type Worksp
 import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
 import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
+import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -210,9 +211,14 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // verdict; for anyone else (and for every Slack mention) it is no usable
   // account, so no request to its address is ever made (Codex review, PR #535).
   const localModelAllowed = req.localModelAllowed === true;
+  // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
+  // AI account's, as Settings > AI brain shows and switches them. A manifest
+  // binding's model_override used to win here, a second place choosing a
+  // department's model that no screen showed (no stored manifest carried one
+  // on 2026-10-09); it no longer chooses anything.
   if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
     provider = cfg.provider;
-    model = binding?.model_override || cfg.model;
+    model = cfg.model;
     try {
       apiKey = decryptField(cfg.encryptedApiKey);
     } catch {
@@ -230,7 +236,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       };
     }
     provider = fallback.provider;
-    model = binding?.model_override || fallback.model;
+    model = fallback.model;
     apiKey = fallback.apiKey;
     keySource = "platform";
   }
@@ -311,7 +317,11 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
 }
 
 /** The provider stream for a prepared turn (the web route relays it as SSE). */
-export function streamAgentTurn(turn: PreparedTurn, messages: readonly ChatMessage[], maxTokens = 4096): AsyncGenerator<StreamEvent> {
+export function streamAgentTurn(
+  turn: PreparedTurn,
+  messages: readonly ChatMessage[],
+  maxTokens = DEPARTMENT_REPLY_MAX_TOKENS,
+): AsyncGenerator<StreamEvent> {
   const isOllama = turn.provider === "ollama";
   return streamChat({
     provider: turn.provider,

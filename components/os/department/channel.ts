@@ -30,7 +30,8 @@ import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
-import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAccountChangedAt, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -52,6 +53,14 @@ export type ChannelState =
       lastTurn: LastTurn;
       /** Owners/admins: may open AI settings, so failures carry the fix link. */
       canManageAi: boolean;
+      /**
+       * What answers in this channel: the workspace AI account's provider and
+       * model, as Settings > AI brain shows and switches them
+       * (lib/ai/department-brain.ts). Owners and admins only, the people who
+       * choose it there; null for anyone else, or when the platform key (the
+       * verified operator's fallback) answers instead of an account.
+       */
+      brain?: DepartmentBrain | null;
     }
   | {
       kind: "not_connected";
@@ -109,37 +118,45 @@ async function providerReady(
   tenantId: string,
   authUserId: string | null,
   email: string | null,
-): Promise<ProviderReadiness> {
+): Promise<{ readiness: ProviderReadiness; brain: DepartmentBrain | null; accountChangedAt: string | null }> {
+  let changedAt: string | null = null;
   try {
-    const account = await readWorkspaceAiAccount(tenantId);
+    // When the account last changed never fails the read (null = unknown).
+    const [account, at] = await Promise.all([readWorkspaceAiAccount(tenantId), readWorkspaceAccountChangedAt(tenantId)]);
+    changedAt = at;
     if (
       hasUsableKey(account) &&
       (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
     ) {
-      return "ready";
+      return { readiness: "ready", brain: departmentBrain(account), accountChangedAt: changedAt };
     }
   } catch (err) {
     console.error("[os.channel.provider]", err);
-    return "unknown";
+    return { readiness: "unknown", brain: null, accountChangedAt: null };
   }
-  return operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email))
-    ? "ready"
-    : "none";
+  const readiness: ProviderReadiness =
+    operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email)) ? "ready" : "none";
+  return { readiness, brain: null, accountChangedAt: changedAt };
 }
 
 /**
  * The two workspace-wide halves of "can a channel answer": a slug the chat
  * route accepts, and an AI provider. One read for every channel on a page (the
- * AI Team roster asks once for all departments).
+ * AI Team roster asks once for all departments). `brain` is what answers (the
+ * account's provider and model, lib/ai/department-brain.ts); `accountChangedAt`
+ * is when that account last changed, which retires older failures (lastTurnOn).
  */
-export async function workspaceChatReadiness(
-  viewer: OsViewer,
-): Promise<{ slug: string | null; provider: ProviderReadiness }> {
-  const [slug, provider] = await Promise.all([
+export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
+  slug: string | null;
+  provider: ProviderReadiness;
+  brain: DepartmentBrain | null;
+  accountChangedAt: string | null;
+}> {
+  const [slug, ready] = await Promise.all([
     workspaceChatSlug(viewer.surface.tenantId),
     providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email),
   ]);
-  return { slug, provider };
+  return { slug, provider: ready.readiness, brain: ready.brain, accountChangedAt: ready.accountChangedAt };
 }
 
 /**
@@ -157,17 +174,19 @@ export async function readWorkspaceTurns(tenantId: string): Promise<TurnOutcomes
  * against the whole workspace's (lib/os/channel/outcome.ts channelFailure,
  * which leaves "no AI account connected" to providerReady). A table not yet
  * migrated reads as "nothing recorded"; any other failed read is `unknown`,
- * never "ok".
+ * never "ok". A failure recorded before the AI account last changed
+ * (`accountChangedAt`) is about an account or model the channels no longer
+ * send, and is not shown (channelFailure).
  */
-export function lastTurnOn(read: TurnOutcomesRead, channelKey: string): LastTurn {
+export function lastTurnOn(read: TurnOutcomesRead, channelKey: string, accountChangedAt: string | null = null): LastTurn {
   if (!read.ok) return read.reason === "table_missing" ? { kind: "ok" } : { kind: "unknown" };
-  const failure = channelFailure(read.value, channelKey);
+  const failure = channelFailure(read.value, channelKey, accountChangedAt);
   return failure ? { kind: "failed", code: failure.code } : { kind: "ok" };
 }
 
 /** This department's last turn (lastTurnOn, on its department channel key). */
-export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey): LastTurn {
-  return lastTurnOn(read, departmentChannelKey(department));
+export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey, accountChangedAt: string | null = null): LastTurn {
+  return lastTurnOn(read, departmentChannelKey(department), accountChangedAt);
 }
 
 export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer): Promise<ChannelState> {
@@ -178,7 +197,7 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
   }
   const owner = viewer.surface.persona === "founder";
   const tenantId = viewer.surface.tenantId;
-  const [{ slug, provider }, agent, turns] = await Promise.all([
+  const [{ slug, provider, brain, accountChangedAt }, agent, turns] = await Promise.all([
     workspaceChatReadiness(viewer),
     getAgentBySlug(binding.agentSlug, tenantId),
     readWorkspaceTurns(tenantId),
@@ -217,7 +236,8 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
     department: dept.key,
     agentSlug: agent.slug,
     greeting: binding.greeting,
-    lastTurn: lastTurnFrom(turns, dept.key),
+    lastTurn: lastTurnFrom(turns, dept.key, accountChangedAt),
     canManageAi: owner,
+    brain: owner ? brain : null,
   };
 }

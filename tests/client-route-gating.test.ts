@@ -559,7 +559,9 @@ async function main() {
         serverText: visibleText(ai, new Set([AgentMarketplaceCard, AgentConfigEditor, ProfileEditor])).join("\n"),
       };
       assert.ok(captured[who].marketplace, "the workspace agents card is on the page");
-      assert.ok(captured[who].agentConfig, "the provider override editor is on the page");
+      // "Override an agent's provider" was removed 2026-10-09: AI brain is the one place that chooses the department brain.
+      assert.equal(captured[who].agentConfig, null, "the removed per-agent override table is back on the page");
+      assert.doesNotMatch(captured[who].serverText, /Override an agent/, "the removed section's title is back");
       assert.ok(captured[who].profileEditor, "the profile editor is on the page");
     });
   }
@@ -598,7 +600,7 @@ async function main() {
   const identity = await import("../lib/os/channel/identity");
   await check("Settings > AI brain, client owner: no persona name, no 'empire', no 'C-suite'", () => {
     const c = captured.client;
-    const pageText = [c.serverText, readable(html.client.marketplace), readable(html.client.agentConfig)].join("\n");
+    const pageText = [c.serverText, readable(html.client.marketplace)].join("\n");
     assert.doesNotMatch(pageText, PERSONA_NAMES, `persona or OASIS-internal wording on a client's Settings > AI brain:\n${pageText.match(PERSONA_NAMES)?.[0]}`);
     // The runtime guard knows every persona in the registry (W4a, S2-14).
     assert.ok(!identity.namesPersona(pageText), `a persona on a client's Settings > AI brain: ${pageText.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
@@ -675,8 +677,7 @@ async function main() {
     // (#497): its neutral teammates lead Sales and Client Success, the only
     // departments a client's tabs bind. No house agent (bravo, atlas, maven) runs there.
     const card = readable(html.client.marketplace);
-    const overrides = readable(html.client.agentConfig);
-    for (const text of [card, overrides, readable(html.client.profileEditor)]) {
+    for (const text of [card, readable(html.client.profileEditor)]) {
       assert.doesNotMatch(text, /Chief of Staff|Marketing|Finance|Operations/, "a department the client's tabs call not set up (or do not have)");
     }
     assert.match(card, /Sales/, "the Sales teammate is named for its department");
@@ -704,10 +705,9 @@ async function main() {
   await check("Settings, a self-signup whose manifest binds bravo, atlas and maven: no house agent is offered, no persona is named", () => {
     const c = captured.signup;
     assert.deepEqual(c.profileEditor?.tenantAgents, [], "the Profile picker offered a house agent");
-    assert.deepEqual(c.agentConfig?.agentKeys, [], "the provider overrides offered a house agent");
+    assert.equal(c.agentConfig, null, "the removed provider overrides are back");
     const texts: Record<string, string> = {
       profile: readable(html.signup.profileEditor),
-      overrides: readable(html.signup.agentConfig),
       card: readable(html.signup.marketplace),
       server: c.serverText,
     };
@@ -723,7 +723,7 @@ async function main() {
     const viewerAccess = { persona: "founder", canSeePersonalSettings: true, canSeeTeamPerformance: false, canSeeSystemSurfaces: true, degraded: false };
     const props = (section: string) => ({ section, viewerAccess }) as unknown as Parameters<typeof SettingsContent>[0];
     assert.deepEqual(propsOf(await SettingsContent(props("profile")), ProfileEditor)?.tenantAgents, [], "the Profile picker offered the legacy list's house agent");
-    assert.deepEqual(propsOf(await SettingsContent(props("ai")), AgentConfigEditor)?.agentKeys, [], "the provider overrides offered it");
+    assert.equal(propsOf(await SettingsContent(props("ai")), AgentConfigEditor), null, "the removed provider overrides are back");
   });
   // W4a review R3 (and the hidden-card gap): when the workspace's manifest
   // cannot be read, the seed answers for the shell, which for a client is the
@@ -747,10 +747,10 @@ async function main() {
   await check("an agent with no roster name reads 'AI teammate' in the Profile picker and the overrides, never its slug, persona or role", () => {
     const out = renderClient({
       marketplace: null,
-      agentConfig: { ...captured.client.agentConfig, agentKeys: ["bravo", "atlas"], agentLabels: {} },
+      agentConfig: null,
       profileEditor: { ...captured.client.profileEditor, tenantAgents: ["bravo", "atlas"], agentNames: {} },
     });
-    for (const id of ["profileEditor", "agentConfig"]) {
+    for (const id of ["profileEditor"]) {
       const text = readable(out[id]);
       assert.match(text, /AI teammate/, id);
       assert.doesNotMatch(text, PERSONA_NAMES, `${id}: ${text.match(PERSONA_NAMES)?.[0]}`);
@@ -759,7 +759,7 @@ async function main() {
   });
   await check("Settings > AI brain, OASIS owner: its five department leads by department name, no add-ons, never a persona", () => {
     const text = readable(html.cc.marketplace);
-    const all = [captured.cc.serverText, text, readable(html.cc.agentConfig)].join("\n");
+    const all = [captured.cc.serverText, text].join("\n");
     assert.doesNotMatch(all, PERSONA_NAMES);
     assert.ok(!identity.namesPersona(all), `a persona on OASIS's Settings > AI brain: ${all.match(identity.PERSONA_NAME_PATTERN)?.[0]}`);
     // Decision 21: CC's own agents (Personal assistant, Contracts, Commerce,

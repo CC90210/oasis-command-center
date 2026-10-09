@@ -386,9 +386,14 @@ async function main() {
     assert.equal(f([t("dept:sales", false, "provider_402", "2026-09-29T10:00:00Z"), t("dept:marketing", true, null, "2026-09-29T11:00:00Z")], "dept:sales"), null);
     // An older success does not clear a newer refusal.
     assert.deepEqual(f([t("dept:marketing", true, null, "2026-09-29T09:00:00Z"), t("dept:sales", false, "provider_401", "2026-09-29T10:00:00Z")], "dept:marketing"), { code: "provider_401" });
-    // A channel's own failure (a model the provider does not know) is not cleared by another channel.
-    assert.deepEqual(f([t("dept:sales", false, "provider_404", "2026-09-29T10:00:00Z"), t("dept:marketing", true, null, "2026-09-29T11:00:00Z")], "dept:sales"), { code: "provider_404" });
-    assert.equal(f([t("dept:sales", false, "provider_404", "2026-09-29T10:00:00Z")], "dept:marketing"), null);
+    // A model the provider does not know is the ACCOUNT's model since every
+    // channel sends the one model AI brain sets (2026-10-09): it fails every
+    // channel, and a newer success anywhere clears it.
+    assert.equal(f([t("dept:sales", false, "provider_404", "2026-09-29T10:00:00Z"), t("dept:marketing", true, null, "2026-09-29T11:00:00Z")], "dept:sales"), null);
+    assert.deepEqual(f([t("dept:sales", false, "provider_404", "2026-09-29T10:00:00Z")], "dept:marketing"), { code: "provider_404" });
+    // A channel's own failure (the reply broke off) is not cleared by another channel.
+    assert.deepEqual(f([t("dept:sales", false, "stream_failed", "2026-09-29T10:00:00Z"), t("dept:marketing", true, null, "2026-09-29T11:00:00Z")], "dept:sales"), { code: "stream_failed" });
+    assert.equal(f([t("dept:sales", false, "stream_failed", "2026-09-29T10:00:00Z")], "dept:marketing"), null);
     // An unknown code is a failure, never "Working".
     assert.deepEqual(f([t("dept:sales", false, "from_a_newer_build", "2026-09-29T10:00:00Z")], "dept:sales"), { code: "from_a_newer_build" });
     assert.equal(f([], "dept:sales"), null);
@@ -628,12 +633,14 @@ async function main() {
   });
   await check("a custom teammate's own refused turn is its own: App channel · not working until its chat answers", async () => {
     await login(USERS.partner);
-    // Its direct chat (no department) asks for a model the provider does not
-    // know: a failure of that chat, not of the account.
-    provider = () => new Response('{"type":"error","error":{"type":"not_found_error","message":"model: x"}}', { status: 404 });
+    // Its direct chat (no department) comes back with an empty reply: a
+    // failure of that chat, not of the account. (A model the provider does not
+    // know is the ACCOUNT's model since 2026-10-09: every channel sends the one
+    // model AI brain sets, so a 404 is account-wide; see "the last turn" above.)
+    provider = () => anthropicOk("");
     const failed = parseSse(await (await post(say({ agent_slug: CUSTOM_SLUG }))).text());
-    assert.equal(failed.find((e) => e.event === "error")?.data.code, "provider_404");
-    assert.ok((await outcomes(OASIS)).includes(`agent:${CUSTOM_SLUG}=failed:provider_404`), JSON.stringify(await outcomes(OASIS)));
+    assert.equal(failed.find((e) => e.event === "error")?.data.code, "reply_empty");
+    assert.ok((await outcomes(OASIS)).includes(`agent:${CUSTOM_SLUG}=failed:reply_empty`), JSON.stringify(await outcomes(OASIS)));
     const after = await customWeb(USERS.partner);
     assert.equal(after.web, "not_working", "a green Web check over the custom chat's own failed turn");
     // The departments are not dragged down by it: their channels answer.
@@ -860,7 +867,8 @@ async function main() {
     assert.doesNotMatch(src, /\/v1\/models|\/v1beta\/models\?|api\/tags/, "a model-list probe is back");
     // Each probe is metered for the SESSION's workspace (lib/ai/usage.ts, surface "probe").
     assert.match(src, /probeProvider\(provider, proposedKey, \{ model, meter: probeMeter\(provider, ctx\.tenantId, ctx\.userId\) \}\)/);
-    assert.match(src, /probeProvider\(provider, plain, \{ model: row\?\.model, meter: probeMeter\(provider, ctx\.tenantId, ctx\.userId\) \}\)/);
+    // The saved account's Test is a short department answer (2026-10-09), not a one-token ping.
+    assert.match(src, /probeDepartmentAnswer\(provider, plain, \{ model: row\?\.model, meter: probeMeter\(provider, ctx\.tenantId, ctx\.userId\) \}\)/);
   });
   const testKey = async (body: Record<string, unknown>) => {
     const res = await testConnection.POST(
@@ -893,6 +901,8 @@ async function main() {
             VALUES ('c-solo', ?, NULL, 'bravo', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)`,
       args: [SOLO, encryptField(SOLO_WORKSPACE_KEY), stamp],
     });
+    // The saved account's Test is a short department answer: it needs answer text.
+    provider = () => anthropicOk("I can help with priorities and follow-ups.");
     const tested = await testKey({ provider: "anthropic" });
     assert.equal(tested.body.ok, true, JSON.stringify(tested.body));
     assert.equal(sent.length, 1);

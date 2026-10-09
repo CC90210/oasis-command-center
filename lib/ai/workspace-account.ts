@@ -149,6 +149,33 @@ export async function readWorkspaceAiAccount(tenantId: string): Promise<Workspac
 }
 
 /**
+ * When the workspace's AI account last changed (a connect, a model switch, a
+ * disconnect): the updated_at of the row readWorkspaceAiAccount answers on.
+ * A channel failure recorded before it was about an account or model the
+ * channels no longer send (components/os/department/channel.ts lastTurnOn).
+ * NEVER throws: null (unknown) on any failure, and then every recorded
+ * failure counts, as before. A read of its own, so a missing column can never
+ * make the account itself unreadable.
+ */
+export async function readWorkspaceAccountChangedAt(tenantId: string): Promise<string | null> {
+  try {
+    const { data, error } = await getServiceSupabase()
+      .from("agent_model_config")
+      .select("agent_key, updated_at")
+      .eq("tenant_id", tenantId)
+      .is("user_id", null)
+      .in("agent_key", [WORKSPACE_AI_AGENT_KEY, LEGACY_WORKSPACE_AI_AGENT_KEY]);
+    if (error) throw new Error(error.message);
+    const rows = (data || []) as Array<{ agent_key?: string | null; updated_at?: unknown }>;
+    const row = rows.find((r) => r.agent_key === WORKSPACE_AI_AGENT_KEY) ?? rows.find((r) => r.agent_key === LEGACY_WORKSPACE_AI_AGENT_KEY);
+    return typeof row?.updated_at === "string" && row.updated_at ? row.updated_at : null;
+  } catch (err) {
+    console.error("[workspace-account.changed_at]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
+/**
  * The key a signed-in person's own AI tools answer on (the agent builder, the
  * manifest editor): a key they saved for their own chats, as before, else the
  * workspace's AI account. null = neither is usable. Throws when a read fails.
@@ -397,6 +424,51 @@ export async function disconnectWorkspaceAccountInOneStep(input: {
   ];
   const results = await oneStepClient().batch(stmts, "write");
   return { committed: results[0].rows.length === 1, removed: results[1].rowsAffected };
+}
+
+/**
+ * Switch the model the workspace's AI account sends, on the SAME provider and
+ * key (Settings > AI brain, app/api/agent-config/workspace-model), in ONE
+ * statement: every workspace row on that provider holding exactly the key read
+ * (the account row, the legacy `bravo` row when that is the account, and the
+ * teammate rows a connect stamped with it: the key moves with the team, and so
+ * does its model). The ciphertext is the guard: a reconnect (a new ciphertext)
+ * or a disconnect (no key) after the read matches nothing, and the answer is
+ * committed: false. A teammate given its OWN key keeps its model. Throws when
+ * the statement fails; then nothing changed.
+ */
+export async function changeWorkspaceModelInOneStep(input: {
+  tenantId: string;
+  account: Pick<UsableAiAccount, "source" | "provider" | "encryptedApiKey">;
+  model: string;
+}): Promise<{ committed: boolean; changed: string[] }> {
+  const { tenantId, account, model } = input;
+  const answering = account.source === "legacy" ? LEGACY_WORKSPACE_AI_AGENT_KEY : WORKSPACE_AI_AGENT_KEY;
+  // The answering row itself must still hold this key on this provider, or
+  // nothing moves: a retired account (key wiped) whose teammates still carry
+  // the old key must not have just those teammates switched (CodeRabbit, #561).
+  // The guard reads provider and key, never the model this statement changes.
+  const res = await oneStepClient().execute({
+    sql:
+      "UPDATE agent_model_config SET model = ?, updated_at = ?" +
+      " WHERE tenant_id = ? AND user_id IS NULL AND provider = ? AND encrypted_api_key = ?" +
+      " AND EXISTS (SELECT 1 FROM agent_model_config AS answering WHERE answering.tenant_id = ? AND answering.agent_key = ?" +
+      " AND answering.user_id IS NULL AND answering.provider = ? AND answering.encrypted_api_key = ?)" +
+      " RETURNING agent_key",
+    args: [
+      model,
+      new Date().toISOString(),
+      tenantId,
+      account.provider,
+      account.encryptedApiKey,
+      tenantId,
+      answering,
+      account.provider,
+      account.encryptedApiKey,
+    ],
+  });
+  const changed = res.rows.map((r) => String(r.agent_key));
+  return { committed: changed.includes(answering), changed };
 }
 
 /**

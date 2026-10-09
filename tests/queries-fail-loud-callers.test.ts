@@ -361,11 +361,11 @@ async function main() {
     const accounts = one(client, "ProviderAccountsCard");
     assert.equal(accounts.connectedServices, null);
     assert.equal(accounts.bridgeOnline, null);
-    assert.equal(one(client, "AgentConfigEditor").globallyConnectedServices, null);
-    assert.equal(one(client, "AgentConfigEditor").bridgeOnline, null);
+    // What powers the departments could not be read either: nothing is claimed.
+    assert.equal(accounts.brain, undefined);
     assert.equal(one(client, "LocalCliProvidersCard").serverBridgeOnline, null);
-    assert.match(text, /Tool access: couldn't check the bridge/);
-    assert.doesNotMatch(text, /Tool access: cloud only/);
+    // The per-agent override section (and its "Tool access" tag) was removed 2026-10-09.
+    assert.doesNotMatch(text, /Tool access:|Override an agent/);
   });
   // Last in phase 1: it leaves both cron tables in place for phase 2.
   await check("/operations: Failed automations sums two counts, so either one unread keeps it Couldn't check", async () => {
@@ -448,7 +448,9 @@ async function main() {
     const settings = await render(await SettingsContent({ section: "ai" }));
     assert.equal(one(settings.client, "ProviderAccountsCard").bridgeOnline, false);
     assert.ok(one(settings.client, "ProviderAccountsCard").connectedServices instanceof Set);
-    assert.match(settings.text, /Tool access: cloud only/);
+    // The "Tool access" tag left with the per-agent override section (2026-10-09);
+    // the offline bridge is the local CLI card's own reading.
+    assert.equal(one(settings.client, "LocalCliProvidersCard").serverBridgeOnline, false);
     assert.equal((await (await shellStatus.GET()).json()).bridgeOnline, false);
   });
 

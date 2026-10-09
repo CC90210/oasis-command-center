@@ -45,6 +45,9 @@ import {
 } from "lucide-react";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
+import { brainLine, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { isRegistryProvider, modelChoices, modelNote } from "@/lib/ai/model-registry";
+import { switchWorkspaceModel } from "@/components/settings/workspace-model-switch";
 
 type Props = {
   /** Set of services-with-key resolved server-side via aiServicesWithKey():
@@ -61,6 +64,13 @@ type Props = {
   canManageTeam: boolean;
   /** The server's verified platform-operator verdict. Only the operator is offered the bridge install. */
   canInstallBridge: boolean;
+  /**
+   * What powers the departments: the workspace AI account's provider and the
+   * model its requests send (lib/ai/department-brain.ts), the same words every
+   * department channel header shows. null = no account answers; undefined =
+   * the read failed (nothing is claimed).
+   */
+  brain?: DepartmentBrain | null;
 };
 
 // Providers that get a card on this surface. Ollama is intentionally hidden
@@ -93,6 +103,7 @@ export function ProviderAccountsCard({
   bridgeOnline,
   canManageTeam,
   canInstallBridge,
+  brain,
 }: Props) {
   const router = useRouter();
   // What the cards draw is the server's latest answer (the prop, which every
@@ -221,6 +232,20 @@ export function ProviderAccountsCard({
         </div>
       </div>
 
+      {/* THE one place that decides what powers the departments (CC,
+          2026-10-09): the provider and model, as every department channel
+          header names them, and the switch. */}
+      {/* Keyed by what is saved, so a change from anywhere (a switch, another
+          window, a reconnect) starts the picker on the model really saved. */}
+      {brain && (
+        <DepartmentBrainPanel
+          key={`${brain.provider}:${brain.savedModel ?? brain.model}`}
+          brain={brain}
+          canManageTeam={canManageTeam}
+          onSwitched={() => router.refresh()}
+        />
+      )}
+
       <div className="grid sm:grid-cols-2 gap-3">
         {CARD_PROVIDERS.map((p) => {
           const reg = PROVIDER_REGISTRY.find((r) => r.value === p);
@@ -320,13 +345,6 @@ export function ProviderAccountsCard({
                   <>
                     <span className="text-fg-dim text-[10px]">·</span>
                     <TestConnectionButton provider={p} />
-                    <span className="text-fg-dim text-[10px]">·</span>
-                    <Link
-                      href="#agents"
-                      className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1"
-                    >
-                      Per-agent ↓
-                    </Link>
                     {canManageTeam && (
                       <>
                         <span className="text-fg-dim text-[10px]">·</span>
@@ -784,9 +802,7 @@ export function ConnectProviderDialog({
               ))}
             </select>
             <div className="text-[11px] text-fg-dim mt-1.5">
-              Applied to every agent. Override per-agent under{" "}
-              <span className="font-mono">/settings#agents</span> if a specific
-              agent should use a different model on the same provider.
+              Every department uses this model. You can switch it later here, without pasting the key again.
             </div>
           </div>
 
@@ -979,12 +995,100 @@ function DisconnectButton({
 }
 
 /**
- * TestConnectionButton — sends a one-token message with the key on file
- * (/api/agent-config/test-connection) and reports latency, or why the
- * provider refused, inline. A model-list call would pass a drained or bad
- * key; a real completion fails exactly when a chat would. Operator-facing
- * health check for already-saved keys; complements validate-on-save at the
- * connect step.
+ * What powers the departments, and the switch: "Your departments use Google
+ * Gemini, Gemini 3.8 Flash", the model picker an owner or admin uses to change
+ * it (the provider's offered models, lib/ai/model-registry.ts), and how to
+ * change provider. The same words (lib/ai/department-brain.ts brainLine) head
+ * every department channel.
+ */
+export function DepartmentBrainPanel({
+  brain,
+  canManageTeam,
+  onSwitched,
+}: {
+  brain: DepartmentBrain;
+  canManageTeam: boolean;
+  onSwitched: () => void;
+}) {
+  const saved = brain.savedModel ?? brain.model;
+  const [model, setModel] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const choices = isRegistryProvider(brain.provider) ? modelChoices(brain.provider, saved) : [];
+  const note = modelNote(brain.provider, saved, { audience: "departments" });
+
+  async function go() {
+    setBusy(true);
+    setResult(null);
+    const r = await switchWorkspaceModel(model);
+    setBusy(false);
+    if (r.ok) {
+      setResult({ ok: true, text: `Your departments now use ${r.label}.` });
+      onSwitched();
+    } else {
+      setResult({ ok: false, text: r.message });
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-status-engaged/30 bg-status-engaged/5 p-4 space-y-2" data-testid="department-brain">
+      <div className="text-sm text-fg">
+        Your departments use <span className="font-bold">{brainLine(brain)}</span>.
+      </div>
+      {note && <p className="text-[11px] text-status-warm leading-relaxed">{note.sentence}</p>}
+      {canManageTeam && choices.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <label className="text-[11px] text-fg-muted" htmlFor="department-model">
+            Model
+          </label>
+          <select
+            id="department-model"
+            value={model}
+            onChange={(e) => {
+              setModel(e.target.value);
+              setResult(null);
+            }}
+            disabled={busy}
+            className="select !py-1 !text-xs max-w-full"
+          >
+            {choices.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => void go()}
+            disabled={busy || model === saved}
+            className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5 disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+            {busy ? "Testing a short answer..." : "Switch model"}
+          </button>
+        </div>
+      )}
+      {result && (
+        <p role={result.ok ? "status" : "alert"} className={`text-[11px] leading-relaxed ${result.ok ? "text-status-engaged" : "text-status-warm"}`}>
+          {result.text}
+        </p>
+      )}
+      <p className="text-[11px] text-fg-dim leading-relaxed">
+        {canManageTeam
+          ? "Before a switch, we test the new model with one short department answer and change nothing if it fails. To use another provider, connect its key on its card below: your departments move to it once its test passes."
+          : "An owner or admin changes the model or provider here."}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * TestConnectionButton — asks the saved account for one short DEPARTMENT
+ * ANSWER (/api/agent-config/test-connection, lib/agents/provider-probe.ts
+ * probeDepartmentAnswer) and reports how long it took, or why it failed, in
+ * the test's own sentence. A one-token ping passed on a model whose every
+ * department reply came back empty (2026-10-09); this fails exactly when a
+ * department turn would.
  */
 const TEST_FALLBACK = "The key couldn't be tested just now. Try again in a moment.";
 
@@ -1035,7 +1139,7 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
         onClick={go}
         disabled={busy}
         className="text-[11px] text-fg-muted hover:text-fg inline-flex items-center gap-1 disabled:opacity-50"
-        title="Sends a one-word test message with the saved key. Costs a fraction of a cent."
+        title="Asks for one short department answer with the saved key and model, the way your departments do. Costs about a cent."
       >
         {busy ? (
           <Loader2 className="w-3 h-3 animate-spin" />
@@ -1047,7 +1151,7 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
         Test
       </button>
       {result?.kind === "ok" && (
-        <span className="text-[10px] text-status-engaged" title={`Ping succeeded at ${new Date(result.at).toLocaleTimeString()}`}>
+        <span className="text-[10px] text-status-engaged" title={`A department answer came back at ${new Date(result.at).toLocaleTimeString()}`}>
           ({result.latency}ms)
         </span>
       )}

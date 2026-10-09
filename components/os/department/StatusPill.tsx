@@ -77,6 +77,17 @@ export function headerStatus(status: DepartmentStatus, channel: ChannelState): D
   return channel.kind === "ready" ? withLastTurn(status, channel.lastTurn) : status;
 }
 
+/**
+ * The header after a turn this page just finished (components/os/department/
+ * turn-event.ts): the same rule as headerStatus, with that turn as the
+ * channel's last. A success clears whatever failure the page loaded with; a
+ * failure says why. A channel that is not ready keeps its header.
+ */
+export function headerAfterTurn(status: DepartmentStatus, channelReady: boolean, turn: { ok: boolean; code?: string }): DepartmentStatus {
+  if (!channelReady) return status;
+  return withLastTurn(status, turn.ok ? { kind: "ok" } : { kind: "failed", code: turn.code || "provider_error" });
+}
+
 export function StatusPill({ status }: { status: DepartmentStatus }) {
   if (status.kind === "needs_you") {
     return (

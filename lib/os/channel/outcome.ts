@@ -39,6 +39,11 @@ export const TURN_FAILURE_CODES = [
   // The reply broke off.
   "provider_error", //         an error we could not read a status from
   "stream_failed", //          the stream threw mid-reply
+  // The provider answered 200 and the reply had NO answer text
+  // (lib/providers.ts EmptyReplyKind): never a success.
+  "reply_empty_thinking", //   the output budget went to thinking (finish MAX_TOKENS / length)
+  "reply_blocked", //          a safety or content filter stopped it
+  "reply_empty", //            it ended normally with nothing in it
   // The workspace's monthly AI budget (lib/ai/usage.ts): no provider was asked.
   "ai_budget_exhausted", //    the month's cap is used (HTTP 402)
   "ai_budget_unpriced_model", // a cap is set and the model has no verified price (HTTP 402)
@@ -58,6 +63,10 @@ export function isTurnFailureCode(code: unknown): code is TurnFailureCode {
  * a reply that broke off) are the channel's own until that channel answers.
  */
 const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
+  // Every channel sends the account's ONE model (lib/os/department-agent.ts
+  // reads no per-department model since 2026-10-09), so a model the provider
+  // does not know fails them all, and a success anywhere proves it is known.
+  "provider_404",
   "key_unreadable",
   "provider_401",
   "provider_402",
@@ -125,11 +134,16 @@ export function classifyProviderStatus(status: number, detail: string): TurnFail
  *   `missing_api_key`                                        no key reached it
  *   `ai_budget_exhausted` / `ai_budget_unpriced_model`       the budget refused it
  *                                                            (lib/ai/usage-codes.ts)
+ *   `empty_reply:thinking|blocked|empty`                     a 200 with no answer text
+ *                                                            (lib/providers.ts EmptyReplyKind)
  */
 export function classifyStreamError(message: string): TurnFailureCode {
   const msg = String(message || "");
   if (msg === "missing_api_key") return "agent_not_configured";
   if (msg === "ai_budget_exhausted" || msg === "ai_budget_unpriced_model") return msg;
+  if (msg === "empty_reply:thinking") return "reply_empty_thinking";
+  if (msg === "empty_reply:blocked") return "reply_blocked";
+  if (msg === "empty_reply:empty") return "reply_empty";
   const busy = /^(?:provider|local_model)_temporarily_unavailable:(?:[a-z]+_)?(\d{3})\b/.exec(msg);
   if (busy) return classifyProviderStatus(Number(busy[1]), "");
   const refused = /^(?:openrouter|anthropic|openai|google|ollama)_(\d{3}):([\s\S]*)$/.exec(msg);
@@ -244,6 +258,22 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
     short: "the last reply stopped partway",
     fix: null,
   },
+  reply_empty_thinking: {
+    sentence:
+      "The AI model used its whole answer budget thinking and sent no answer. Try again, or pick a faster model in AI settings.",
+    short: "the AI model used its answer budget thinking",
+    fix: OPEN_AI_SETTINGS,
+  },
+  reply_blocked: {
+    sentence: "The AI provider's safety filter blocked this reply. Rephrase the message and try again.",
+    short: "the provider's safety filter blocked the last reply",
+    fix: null,
+  },
+  reply_empty: {
+    sentence: "The AI model sent back an empty reply. Try again.",
+    short: "the AI model sent back an empty reply",
+    fix: null,
+  },
   // Same words as lib/ai/usage-codes.ts AI_BUDGET_SENTENCES (tests/ai-usage-ledger.test.ts
   // pins them equal; this file stays import-free).
   ai_budget_exhausted: {
@@ -328,10 +358,22 @@ export type TurnOutcome = {
  * A code this build does not know is treated as the channel's own failure: an
  * unknown outcome is shown as a failure, never as "Working". A 412 ("no AI
  * account connected") is skipped in both steps (saysNothingAboutTheKey).
+ *
+ * `accountChangedAt` is when the workspace's AI account last changed (a new
+ * key, provider or model). A failure recorded BEFORE it was about an account
+ * the channels no longer send, so it says nothing now: it is skipped, and the
+ * header shows no stale "model not found" after the model was switched
+ * (CC, 2026-10-09). null = not known: every record counts, as before.
  */
-export function channelFailure(outcomes: readonly TurnOutcome[], channelKey: string): { code: string } | null {
+export function channelFailure(
+  outcomes: readonly TurnOutcome[],
+  channelKey: string,
+  accountChangedAt: string | null = null,
+): { code: string } | null {
+  const changed = accountChangedAt ? Date.parse(accountChangedAt) : NaN;
+  const stale = (o: TurnOutcome) => !o.ok && Number.isFinite(changed) && Date.parse(o.at) < changed;
   const newest = outcomes
-    .filter((o) => !saysNothingAboutTheKey(o))
+    .filter((o) => !saysNothingAboutTheKey(o) && !stale(o))
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const accountVerdict = newest.find((o) => o.ok || (isTurnFailureCode(o.code) && isAccountScoped(o.code)));
   if (accountVerdict && !accountVerdict.ok) return { code: String(accountVerdict.code) };

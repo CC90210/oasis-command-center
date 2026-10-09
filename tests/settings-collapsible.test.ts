@@ -22,8 +22,14 @@ import test from "node:test";
 const ROOT = process.cwd();
 const SETTINGS = readFileSync(join(ROOT, "components/settings/SettingsContent.tsx"), "utf8");
 
-/** Sections that must be reachable by fragment, and who links to them. */
-const ANCHORED = ["providers", "agents"];
+/**
+ * Sections that must be reachable by fragment, and who links to them.
+ * `#agents` ("Override an agent's provider") was removed 2026-10-09: the links
+ * that pointed at it now point at #providers, where the model is chosen, and
+ * the old fragment still forwards to the AI brain page
+ * (components/settings/settings-sections.ts LEGACY_SETTINGS_ANCHORS).
+ */
+const ANCHORED = ["providers"];
 
 test("the settings page is built from collapsible sections", () => {
   const sections = SETTINGS.split("<SettingsSection").length - 1;

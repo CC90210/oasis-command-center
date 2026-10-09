@@ -278,7 +278,7 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
   type WebOn = { web: Exclude<WebState, "not_set_up" | "off">; webReason: string | null };
   const webOn = (channelKeys: readonly string[]): WebOn => {
     if (web !== "ready") return { web, webReason: null };
-    const last = channelKeys.map((k) => lastTurnOn(turns, k));
+    const last = channelKeys.map((k) => lastTurnOn(turns, k, readiness.accountChangedAt));
     const failed = last.find((t): t is Extract<typeof t, { kind: "failed" }> => t.kind === "failed");
     if (failed) return { web: "not_working", webReason: failureCopy(failed.code, { canManageAi: false }).short };
     if (last.some((t) => t.kind === "unknown")) return { web: "unknown", webReason: null };

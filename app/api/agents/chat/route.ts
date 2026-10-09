@@ -80,6 +80,7 @@ import type { AiBudgetCode } from "@/lib/ai/usage";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
+import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -294,7 +295,7 @@ export async function POST(req: NextRequest) {
         send("error", { code, message: failureCopy(code, { canManageAi: false, model }).sentence, ...(model ? { model } : {}) });
       };
       try {
-        for await (const ev of streamAgentTurn(t, incoming, 4096)) {
+        for await (const ev of streamAgentTurn(t, incoming, DEPARTMENT_REPLY_MAX_TOKENS)) {
           if (ev.type === "delta") {
             send("delta", { text: ev.text });
           } else if (ev.type === "done") {

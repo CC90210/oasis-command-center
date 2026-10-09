@@ -24,8 +24,14 @@
  * a web address the server calls) is the verified platform operator's only:
  * anyone else is refused 403 before anything is fetched (AIP-11).
  *
- * THE PROBE IS A REAL ONE-TOKEN COMPLETION (lib/agents/provider-probe.ts),
- * never a model-list GET. Listing models spends nothing, so it proves nothing
+ * MODE 1 IS A SHORT DEPARTMENT ANSWER (lib/agents/provider-probe.ts
+ * probeDepartmentAnswer, 2026-10-09): a department-sized prompt on the
+ * department reply budget, green only with answer text, so "Test" fails where
+ * the departments would (a one-token ping passed on Gemini 3.8 Flash while
+ * every department reply came back empty). MODE 2 (a pasted key, before it is
+ * saved) stays a real one-token completion: it checks the key.
+ *
+ * NEITHER IS A MODEL-LIST GET. Listing models spends nothing, so it proves nothing
  * about the account: OpenRouter answers GET /models with 200 for no key or a
  * bad key, and a zero-balance Anthropic key lists models and then refuses every
  * message. Those were false greens over keys every channel was failing on.
@@ -64,7 +70,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { decryptField } from "@/lib/field-encryption";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
-import { probeProvider, type ProbeResult } from "@/lib/agents/provider-probe";
+import { probeDepartmentAnswer, probeProvider, type ProbeResult } from "@/lib/agents/provider-probe";
 import { PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
 import {
   LOCAL_MODEL_REFUSAL,
@@ -303,9 +309,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // The saved account's Test is a short DEPARTMENT ANSWER (lib/agents/
+  // provider-probe.ts probeDepartmentAnswer), not a one-token ping: it passes
+  // only when a department turn on this key and model would get answer text.
   return respond(
     provider,
     plain,
-    await probeProvider(provider, plain, { model: row?.model, meter: probeMeter(provider, ctx.tenantId, ctx.userId) }),
+    await probeDepartmentAnswer(provider, plain, { model: row?.model, meter: probeMeter(provider, ctx.tenantId, ctx.userId) }),
   );
 }

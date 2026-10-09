@@ -13,11 +13,12 @@
  *      encrypted_api_key, that key + its provider/model are used and
  *      cfgScope is "user".
  *
- *   2. TENANT DEFAULT (agent_model_config row where user_id IS NULL):
- *      Workspace-wide default. Set by "AI Setup" (bulk-provider writes
- *      identical rows for every enabled chat agent) and by per-agent
- *      "Override an Agent's Provider" edits at scope=tenant. Used when
- *      no user override exists. cfgScope is "tenant".
+ *   2. THE WORKSPACE AI ACCOUNT (lib/ai/workspace-account.ts, since
+ *      2026-10-09): the provider, model and key every department chat uses,
+ *      set in Settings > AI brain. The agent's own workspace row (user_id IS
+ *      NULL) only says whether it is switched on and carries its extra
+ *      instructions; its provider and key no longer route anything (the
+ *      per-agent override table that set them was removed). cfgScope "tenant".
  *
  *   3. PLATFORM FALLBACK (operatorPlatformFallback env var):
  *      Last-resort default for the VERIFIED platform operator only
@@ -45,7 +46,7 @@ import { getServiceSupabase } from "./supabase-server";
 import { decryptField } from "./field-encryption";
 import { operatorPlatformFallback } from "./operator-credentials";
 import { isPlatformOperatorForAuthUser } from "./platform-operator";
-import { LOCAL_MODEL_PROVIDER, LOCAL_MODEL_REFUSAL } from "./ai/workspace-account";
+import { LOCAL_MODEL_PROVIDER, LOCAL_MODEL_REFUSAL, hasUsableKey, readWorkspaceAiAccount } from "./ai/workspace-account";
 
 export type ChatAuthContext = {
   tenantId: string;
@@ -77,7 +78,7 @@ export type ChatAuthContext = {
 };
 
 export type ChatAuthError = {
-  status: 401 | 403 | 412 | 500;
+  status: 401 | 403 | 412 | 500 | 503;
   code:
     | "no_tenant"
     | "agent_disabled"
@@ -85,7 +86,8 @@ export type ChatAuthError = {
     | "agent_not_configured"
     | "admin_no_platform_key"
     | "key_decrypt_failed"
-    | "local_model_not_allowed";
+    | "local_model_not_allowed"
+    | "config_unavailable";
   detail?: string;
 };
 
@@ -147,16 +149,76 @@ export async function resolveChatContext(
   const displayNameOverride: string | null =
     (userOverride.data?.display_name_override as string | null) || null;
 
-  const cfg = userOverride.data?.encrypted_api_key ? userOverride.data : tenantDefault.data;
-  const cfgScope: "user" | "tenant" | null = userOverride.data?.encrypted_api_key
-    ? "user"
-    : tenantDefault.data
-      ? "tenant"
-      : null;
-
   // Keyed on the auth user, not the email alone: the platform key bills OASIS,
   // and anyone could register an unclaimed alias. Fails closed (logged).
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
+
+  // ONE SOURCE (2026-10-09). Settings > AI brain no longer offers a per-agent
+  // provider override: every department answers on the workspace AI account
+  // (lib/ai/department-brain.ts), and a per-agent row that held its own key
+  // and provider would keep spending on a key no screen shows. So, when the
+  // person has no key of their own, the provider, model and KEY come from the
+  // workspace AI account (lib/ai/workspace-account.ts readWorkspaceAiAccount),
+  // as every department chat's do. The agent's own row still says whether the
+  // agent is switched on and carries its extra instructions; its provider,
+  // model and key are kept (nothing is deleted) and no longer route anything.
+  if (!userOverride.data?.encrypted_api_key) {
+    const agentRow = tenantDefault.data;
+    if (agentRow && !agentRow.enabled) {
+      return { ok: false, status: 403, code: "agent_disabled" };
+    }
+    let account: Awaited<ReturnType<typeof readWorkspaceAiAccount>>;
+    try {
+      account = await readWorkspaceAiAccount(tenantId);
+    } catch (err) {
+      return { ok: false, status: 503, code: "config_unavailable", detail: err instanceof Error ? err.message : "config_unavailable" };
+    }
+    const cfgOverride = (agentRow?.system_prompt_override as string | null) || null;
+    if (hasUsableKey(account)) {
+      if (account.provider === LOCAL_MODEL_PROVIDER && !isOperator) {
+        return { ok: false, status: 403, code: "local_model_not_allowed", detail: LOCAL_MODEL_REFUSAL };
+      }
+      let apiKey: string;
+      try {
+        apiKey = decryptField(account.encryptedApiKey);
+      } catch (err) {
+        return { ok: false, status: 500, code: "key_decrypt_failed", detail: err instanceof Error ? err.message : "key_decrypt_failed" };
+      }
+      return {
+        ok: true,
+        tenantId,
+        provider: account.provider,
+        model: account.model,
+        apiKey,
+        cfgOverride,
+        displayNameOverride,
+        isOperator,
+        cfgScope: "tenant",
+        keySource: "tenant",
+      };
+    }
+    // No usable workspace account: the verified operator's platform key, or
+    // a typed 412 for anyone else (they must never bill the platform owner).
+    const fallback = isOperator ? operatorPlatformFallback() : null;
+    if (!fallback) {
+      return { ok: false, status: 412, code: isOperator ? "admin_no_platform_key" : "agent_not_configured" };
+    }
+    return {
+      ok: true,
+      tenantId,
+      provider: fallback.provider,
+      model: fallback.model,
+      apiKey: fallback.apiKey,
+      cfgOverride,
+      displayNameOverride,
+      isOperator,
+      cfgScope: agentRow ? "tenant" : null,
+      keySource: "platform",
+    };
+  }
+
+  const cfg = userOverride.data;
+  const cfgScope: "user" | "tenant" | null = "user";
   let provider: Provider;
   let model: string;
   let apiKey = "";

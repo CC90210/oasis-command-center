@@ -5,7 +5,8 @@ import Link from "next/link";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
 import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
-import { failureCopy, type FailureModel } from "@/lib/os/channel/outcome";
+import { AI_SETTINGS_HREF, failureCopy, isTurnFailureCode, type FailureModel } from "@/lib/os/channel/outcome";
+import { announceTurn } from "@/components/os/department/turn-event";
 
 /** The `model` of a route error event (app/api/agents/chat), when it is well formed. */
 function asFailureModel(raw: unknown): FailureModel | null {
@@ -47,6 +48,12 @@ type Props = {
   /** The channel's last recorded turn failed with this code: say so before
    *  the next message is typed. */
   initialFailure?: string | null;
+  /**
+   * What answers in this channel, in Settings > AI brain's own words
+   * ("Google Gemini, Gemini 3.8 Flash", lib/ai/department-brain.ts), with a
+   * link to change it there. Set by a department channel for owners and admins.
+   */
+  poweredBy?: string | null;
 };
 
 // sessionStorage key for plan mode. Per-tab so a tenant-preview reload
@@ -88,6 +95,7 @@ export function AgentChat({
   department,
   canManageAi = false,
   initialFailure = null,
+  poweredBy = null,
 }: Props) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
@@ -247,6 +255,9 @@ export function AgentChat({
           const body = (await res.json().catch(() => ({}))) as { error?: string };
           setFailure(body.error || `http_${res.status}`);
           dropEmptyPlaceholder();
+          // A refusal that is a verdict on the channel (no account, the month's
+          // budget) redraws the department header; a route hiccup does not.
+          if (department && isTurnFailureCode(body.error)) announceTurn({ department, ok: false, code: body.error });
           return;
         }
 
@@ -328,6 +339,12 @@ export function AgentChat({
           // that did not answer; say so rather than leave nothing.
           if (!streamFailure) setFailure("empty_reply");
         }
+        // The department header shows this turn, as the route recorded it: a
+        // reply clears an old failure, a failure says why (turn-event.ts).
+        if (department) {
+          if (streamFailure) announceTurn({ department, ok: false, code: streamFailure });
+          else if (assistantText.trim()) announceTurn({ department, ok: true });
+        }
       } catch (err) {
         console.error("[agent-chat.send]", err);
         setFailure("network");
@@ -401,10 +418,22 @@ export function AgentChat({
               ● PLAN MODE
             </button>
           )}
-          {modelLabel && (
-            <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">
-              {modelLabel}
-            </span>
+          {poweredBy ? (
+            // The one source: the AI account AI brain shows and switches.
+            <Link
+              href={AI_SETTINGS_HREF}
+              prefetch={false}
+              title="Change it in Settings > AI brain"
+              className="text-[11px] text-fg-dim hover:text-fg underline-offset-2 hover:underline"
+            >
+              {poweredBy}
+            </Link>
+          ) : (
+            modelLabel && (
+              <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">
+                {modelLabel}
+              </span>
+            )
           )}
         </div>
       </div>
