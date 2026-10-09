@@ -233,7 +233,6 @@ async function main() {
     assert.equal(providers.openaiReasons("gpt-4-turbo"), false);
     assert.equal(providers.openaiReasons("gpt-3.5-turbo"), false);
     assert.equal(providers.openaiReasons("gpt-5.1"), false, "gpt-5.1 defaults to no reasoning");
-    assert.equal(providers.openaiReasons("gpt-5-chat-latest"), false);
     play(sse([[null, { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }], [null, "[DONE]"]]));
     await chat("openai", "gpt-4-turbo");
     assert.equal((JSON.parse(sent[0].body) as { max_completion_tokens: number }).max_completion_tokens, 4096);

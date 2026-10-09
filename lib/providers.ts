@@ -391,11 +391,11 @@ export function emptyReplyKind(finish: FinishKind | null): EmptyReplyKind {
 export const THINKING_HEADROOM_TOKENS = 4096;
 
 /**
- * GPT-5-family models that do not reason by default: gpt-5.1 defaults to
- * reasoning effort "none" (OpenAI's model page), and gpt-5-chat-latest is a
- * non-reasoning chat model (CodeRabbit, #561).
+ * GPT-5-family models the registry knows that do not reason by default:
+ * gpt-5.1 defaults to reasoning effort "none" (OpenAI's model page;
+ * CodeRabbit, #561).
  */
-const OPENAI_NON_REASONING_MODELS: ReadonlySet<string> = new Set(["gpt-5.1", "gpt-5-chat-latest"]);
+const OPENAI_NON_REASONING_MODELS: ReadonlySet<string> = new Set(["gpt-5.1"]);
 
 /** OpenAI's reasoning models (GPT-5.x, GPT-6, the o-series): their reasoning counts against the output cap. */
 export function openaiReasons(model: string): boolean {
