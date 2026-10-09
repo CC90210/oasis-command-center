@@ -73,6 +73,7 @@ import {
   type WorkspaceAiAccount,
 } from "@/lib/ai/workspace-account";
 import { billingForKey, isAiBudgetCode, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
+import { signConnectTest, type ConnectTestSubject } from "@/lib/ai/connect-test-proof";
 
 /**
  * The probe spends, so it is metered like any model call (surface "probe"):
@@ -128,14 +129,22 @@ function inferShapeHint(provider: Provider, key: string): string {
   return "";
 }
 
-function respond(provider: Provider, key: string, result: ProbeResult): NextResponse {
+/**
+ * A pasted key's test result. `proof` (mode 2 only) is what the save route
+ * accepts instead of testing the key again (lib/ai/connect-test-proof.ts): a
+ * pass, or a provider that was down or slow (which only "Save anyway" may
+ * save). A refusal gets none.
+ */
+function respond(provider: Provider, key: string, result: ProbeResult, proof?: ConnectTestSubject): NextResponse {
   if (result.ok) {
+    const tested = proof ? signConnectTest(proof, "passed") : null;
     return NextResponse.json({
       ok: true,
       status: "ok",
       provider,
       latency_ms: result.latency_ms,
       provider_response_ms: result.latency_ms,
+      ...(tested ? { tested } : {}),
     });
   }
   // The shape hint explains a refused key, or a local "key" that is not a URL.
@@ -143,6 +152,8 @@ function respond(provider: Provider, key: string, result: ProbeResult): NextResp
     result.code === "provider_401" || (provider === "ollama" && result.code === "network")
       ? inferShapeHint(provider, key)
       : "";
+  const unreachable = result.code === "provider_5xx" || result.code === "timeout";
+  const tested = proof && unreachable ? signConnectTest(proof, "unreachable") : null;
   return NextResponse.json(
     {
       ok: false,
@@ -150,6 +161,7 @@ function respond(provider: Provider, key: string, result: ProbeResult): NextResp
       provider,
       message: hint ? `${result.message} ${hint}` : result.message,
       code: result.code,
+      ...(tested ? { tested } : {}),
     },
     // The month's AI budget refused the probe: nothing was sent to the provider.
     isAiBudgetCode(result.code) ? { status: 402 } : undefined,
@@ -209,6 +221,9 @@ export async function POST(req: NextRequest) {
       provider,
       proposedKey,
       await probeProvider(provider, proposedKey, { model, meter: probeMeter(provider, ctx.tenantId, ctx.userId) }),
+      // A proof for the model this key will be saved with: a key tested with
+      // no model named proves nothing about the one it is saved on.
+      model ? { tenantId: ctx.tenantId, userId: ctx.userId, provider, model, apiKey: proposedKey } : undefined,
     );
   }
 

@@ -91,6 +91,13 @@ function saysNothingAboutTheKey(o: TurnOutcome): boolean {
 const BILLING_WORDS = /credit|balance|billing|insufficient|quota|payment|funds/i;
 /** Wording a provider uses for a bad key on a status that is not 401 (Google answers 400). */
 const BAD_KEY_WORDS = /api[ _-]?key not valid|invalid api[ _-]?key|invalid x-api-key|incorrect api key|api_key_invalid/i;
+/**
+ * Wording a provider uses for a model that is gone or unknown on a status that
+ * is not 404: OpenRouter answers 400 "<slug> is not a valid model ID" for a
+ * model it removed (researched 2026-10-08). Checked AFTER the bad-key and
+ * billing words, so neither of those is ever read as a model problem.
+ */
+const MODEL_GONE_WORDS = /is not a valid model id/i;
 
 /** An HTTP status plus the provider's error body, reduced to one code. */
 export function classifyProviderStatus(status: number, detail: string): TurnFailureCode {
@@ -103,6 +110,7 @@ export function classifyProviderStatus(status: number, detail: string): TurnFail
   if (status >= 400) {
     if (BAD_KEY_WORDS.test(detail)) return "provider_401";
     if (BILLING_WORDS.test(detail)) return "provider_400_credit";
+    if (MODEL_GONE_WORDS.test(detail)) return "provider_404";
     return "provider_400";
   }
   return "provider_error";
@@ -202,7 +210,12 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
     fix: OPEN_AI_SETTINGS,
   },
   provider_404: {
-    sentence: "The AI model this channel uses was not found. Pick another model in AI settings.",
+    // A 404 on a model call means the provider retired the model, or this AI
+    // account may not use it (Google answers that way for its 2.5 models to
+    // any project that never used them). It never means a bad key or no
+    // credit: those have their own codes and words above.
+    sentence:
+      "The AI model this channel uses was not found: the provider has retired it or does not offer it to this AI account. Pick another model in AI settings.",
     short: "the AI model was not found",
     fix: OPEN_AI_SETTINGS,
   },
@@ -253,13 +266,35 @@ const UNKNOWN: FailureCopy = {
 };
 
 /**
+ * The model a "not found" names, as data (lib/ai/model-registry.ts
+ * modelFactsForCopy builds it; this file stays import-free): its name, who
+ * offers it, and a model to pick instead.
+ */
+export type FailureModel = { label: string; vendor?: string | null; suggestion?: string | null };
+
+/** provider_404 with the model it was about: named, why, and what to pick. */
+function modelNotFound(m: FailureModel): { sentence: string; short: string } {
+  const pick = m.suggestion ? `Pick another model in AI settings, such as ${m.suggestion}.` : "Pick another model in AI settings.";
+  return {
+    sentence: `The AI model ${m.label} was not found: ${m.vendor || "the provider"} has retired it or does not offer it to this AI account. ${pick}`,
+    short: `the AI model ${m.label} was not found`,
+  };
+}
+
+/**
  * The copy for a code: a turn failure, or one of the route's own refusals.
  * `canManageAi` is whether the viewer may open AI settings (owners/admins); for
  * anyone else the fix link would 404, so the sentence says who can fix it.
+ * `model`, when the caller knows which model a provider_404 was about, names
+ * it; every other code ignores it.
  */
-export function failureCopy(code: string | null | undefined, opts: { canManageAi: boolean }): FailureCopy {
+export function failureCopy(
+  code: string | null | undefined,
+  opts: { canManageAi: boolean; model?: FailureModel | null },
+): FailureCopy {
   if (isTurnFailureCode(code)) {
-    const c = COPY[code];
+    const named = code === "provider_404" && opts.model?.label ? modelNotFound(opts.model) : null;
+    const c = named ? { ...COPY[code], ...named } : COPY[code];
     if (!c.fix) return { ...c };
     return opts.canManageAi ? { ...c } : { sentence: c.sentence + OWNER_CAN_FIX, short: c.short, fix: null };
   }
