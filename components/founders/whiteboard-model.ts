@@ -30,14 +30,26 @@ export const DEFAULT_COLOR: string = PALETTE[0].color;
 export const DEFAULT_SIZE = 4;
 export const MIN_SIZE = 1;
 export const MAX_SIZE = 50;
-/** Matches `bg-bg-deep`, so a download is the board the presenter saw. */
-export const BOARD_BG = "#0a0c10";
+/**
+ * The board's colour on screen: the container's `bg-bg-deep`, which is
+ * --c-bg-deep (7 7 8) in app/globals.css. A download is filled with it, so the
+ * picture is the board the presenter saw; tests/oasis-whiteboard.test.ts reads
+ * the token from globals.css, so the two cannot drift apart.
+ */
+export const BOARD_BG = "#070708";
 /** The eraser is this much wider than the pen at the same size setting. */
 export const ERASER_SCALE = 2.5;
 /** The pen's soft edge, as canvas shadowBlur in board pixels. */
 export const PEN_GLOW = 4;
 /** iOS Safari draws nothing at all on a canvas over 4096 x 4096 device pixels. */
 export const MAX_CANVAS_PIXELS = 4096 * 4096;
+/**
+ * A pointer sample closer than this to the stroke's last point, in board
+ * pixels, is dropped. A pen held still keeps reporting (pressure, tilt) and a
+ * slow drag is sampled faster than it moves; both would only add points that
+ * every redraw (Undo, Redo, a resize) has to paint again.
+ */
+export const MIN_POINT_GAP = 1.5;
 
 export type Tool = "pen" | "eraser";
 
@@ -98,11 +110,17 @@ export function beginStroke(board: Board, tool: Tool, color: string, size: numbe
   return stroke;
 }
 
-/** Adds a point to the open stroke; null when no stroke is open (it was cleared or undone mid-draw). */
+/**
+ * Adds a point to the open stroke. Null when nothing was added: no stroke is
+ * open (it was cleared or undone mid-draw), or the point is within
+ * MIN_POINT_GAP of the stroke's last point.
+ */
 export function extendStroke(board: Board, x: number, y: number): Stroke | null {
   const stroke = board.active;
   if (!stroke) return null;
-  stroke.points.push(x, y);
+  const p = stroke.points;
+  if (Math.hypot(x - p[p.length - 2], y - p[p.length - 1]) < MIN_POINT_GAP) return null;
+  p.push(x, y);
   return stroke;
 }
 
@@ -213,12 +231,17 @@ function applyBrush(ctx: BoardContext, stroke: Stroke): void {
  * previous point (the standalone whiteboard's smoothing). Live drawing calls
  * this once per new point, a full redraw calls it from 0, and both issue the
  * same calls, so a redrawn board looks exactly like the one drawn live.
+ *
+ * The brush is set once per call, not once per point: nothing in the loop
+ * changes it, and a full redraw of a long session paints tens of thousands of
+ * points.
  */
 export function drawStroke(ctx: BoardContext, stroke: Stroke, from = 0): void {
   const p = stroke.points;
   const count = p.length / 2;
-  for (let i = Math.max(0, from); i < count; i += 1) {
-    applyBrush(ctx, stroke);
+  const start = Math.max(0, from);
+  if (start < count) applyBrush(ctx, stroke);
+  for (let i = start; i < count; i += 1) {
     ctx.beginPath();
     if (i === 0) {
       ctx.arc(p[0], p[1], strokeWidth(stroke) / 2, 0, Math.PI * 2);

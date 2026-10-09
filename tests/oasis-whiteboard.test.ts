@@ -23,6 +23,16 @@
  *     control has a 44 x 44 px target at phone and desktop widths, and the
  *     colour and eraser buttons carry aria-pressed.
  *
+ * Review round 3 (after #545 merged): keys work while the slider or colour
+ * picker has focus; the browser asks before a refresh wipes a board with ink;
+ * pointer capture (a mouse that leaves the board and comes back, a lost lift,
+ * a palm under a pen); thinner strokes and one brush setting per stroke; the
+ * download's background is --c-bg-deep; and checks for the controls no test
+ * moved before (Brush size, the eraser's width, the 2x download). The fake
+ * pointers behave like a browser's: isPrimary, implicit touch capture,
+ * lostpointercapture after a lift, and no mouse move off the canvas unless it
+ * is captured.
+ *
  * Run: node --conditions=react-server --import tsx tests/oasis-whiteboard.test.ts
  */
 import assert from "node:assert/strict";
@@ -34,6 +44,8 @@ import ts from "typescript";
 import {
   BOARD_BG,
   MAX_CANVAS_PIXELS,
+  MIN_POINT_GAP,
+  PEN_GLOW,
   backingScale,
   backingSize,
   beginStroke,
@@ -251,8 +263,22 @@ class RasterCanvas {
   readonly ctx: RasterCtx = new RasterCtx(this);
   readonly listeners = new Listeners();
   rect = { left: 0, top: 0 };
+  /** Its size on the page in CSS px; a mouse off it reaches it only while captured. Null: everywhere is on it. */
+  cssBox: (() => { width: number; height: number }) | null = null;
+  /** Pointers it holds: setPointerCapture, or a touch's implicit capture. */
+  readonly captured = new Set<number>();
   encodeFails = false;
   encodes = 0;
+  setPointerCapture(id: number) {
+    this.captured.add(id);
+  }
+  /** Like a browser: releasing a pointer it held fires lostpointercapture at it. */
+  releasePointerCapture(id: number) {
+    if (this.captured.delete(id)) this.listeners.dispatch("lostpointercapture", { type: "lostpointercapture", pointerId: id });
+  }
+  hasPointerCapture(id: number) {
+    return this.captured.has(id);
+  }
   get width() {
     return this.w;
   }
@@ -339,6 +365,8 @@ class FakeWindow {
   readonly queries: FakeQuery[] = [];
   readonly ResizeObserver = FakeResizeObserver;
   devicePixelRatio = 1;
+  /** The pointers the browser has down right now: id to kind. */
+  readonly down = new Map<number, string>();
   addEventListener(type: string, fn: Fn) {
     this.events.add(type, fn);
   }
@@ -410,15 +438,23 @@ function resize(container: FakeContainer, width: number, height: number) {
   for (const ro of FakeResizeObserver.live) if (ro.targets.includes(container)) ro.callback();
 }
 
-type PointerOpts = { id?: number; type?: "mouse" | "touch" | "pen"; button?: number; buttons?: number };
-type FakePointer = { defaultPrevented: boolean };
+/** `lost`: the browser ends the pointer, but its pointerup or pointercancel (and the capture release) never reach the board. */
+type PointerOpts = { id?: number; type?: "mouse" | "touch" | "pen"; button?: number; buttons?: number; lost?: boolean };
+type FakePointer = { defaultPrevented: boolean; isPrimary: boolean };
 
 function pointer(canvas: RasterCanvas, win: FakeWindow, type: string, x: number, y: number, o: PointerOpts = {}): FakePointer {
   const ending = type === "pointerup" || type === "pointercancel";
+  const id = o.id ?? 1;
+  const kind = o.type ?? "mouse";
+  // Like a browser: a pointer is primary when no other pointer of its kind is down.
+  const isPrimary = ![...win.down].some(([other, k]) => other !== id && k === kind);
+  if (type === "pointerdown") win.down.set(id, kind);
+  if (ending) win.down.delete(id);
   const e = {
     type,
-    pointerId: o.id ?? 1,
-    pointerType: o.type ?? "mouse",
+    pointerId: id,
+    pointerType: kind,
+    isPrimary,
     button: o.button ?? 0,
     buttons: o.buttons ?? (ending ? 0 : 1),
     clientX: canvas.rect.left + x,
@@ -428,10 +464,27 @@ function pointer(canvas: RasterCanvas, win: FakeWindow, type: string, x: number,
       e.defaultPrevented = true;
     },
   };
-  // pointerdown and pointermove are heard on the canvas; pointerup and
-  // pointercancel bubble to the window, where the board listens for them.
-  if (ending) win.events.dispatch(type, e);
-  else canvas.listeners.dispatch(type, e);
+  if (o.lost) {
+    canvas.captured.delete(id);
+    return e;
+  }
+  // pointerup and pointercancel bubble to the window, where the board listens
+  // for them; then the browser releases the capture (lostpointercapture).
+  if (ending) {
+    win.events.dispatch(type, e);
+    canvas.releasePointerCapture(id);
+    return e;
+  }
+  if (type === "pointerdown") {
+    // A touch is captured by what it lands on before any listener runs.
+    if (kind === "touch") canvas.captured.add(id);
+    canvas.listeners.dispatch(type, e);
+    return e;
+  }
+  // A move reaches the canvas while it is over the canvas, or anywhere while the canvas holds that pointer.
+  const box = canvas.cssBox?.();
+  const over = !box || (x >= 0 && y >= 0 && x < box.width && y < box.height);
+  if (over || canvas.captured.has(id)) canvas.listeners.dispatch(type, e);
   return e;
 }
 
@@ -475,6 +528,8 @@ function rig(width = 400, height = 300, dpr = 1): Rig {
   // The canvas sits below the page header and the toolbar, not at the window's corner.
   canvas.rect = { left: 120, top: 310 };
   const container: FakeContainer = { clientWidth: width, clientHeight: height };
+  // It fills its container (absolute inset-0).
+  canvas.cssBox = () => ({ width: container.clientWidth, height: container.clientHeight });
   const states: WhiteboardState[] = [];
   const env: SurfaceEnv = {
     win: win as unknown as SurfaceEnv["win"],
@@ -561,6 +616,37 @@ function firstVersionBoard(width: number, height: number, dpr: number, points: A
   drawStroke(ctx, s);
   for (const [x, y] of points.slice(1)) drawStroke(ctx, extendStroke(board, x, y)!, s.points.length / 2 - 1);
   return { canvas, container, doc };
+}
+
+/** A 2D context that only counts: brush settings written, paths, paints, and the brush each paint used. */
+function countingContext() {
+  const state: Record<string, unknown> = { globalCompositeOperation: "source-over", shadowBlur: 0, shadowColor: "" };
+  const tally = { sets: 0, beginPath: 0, stroke: 0, fill: 0 };
+  const paints: Array<{ op: unknown; blur: unknown; shadow: unknown; color: unknown }> = [];
+  const paint = (style: string) =>
+    paints.push({ op: state.globalCompositeOperation, blur: state.shadowBlur, shadow: state.shadowColor, color: state[style] });
+  const methods: Record<string, () => void> = {
+    beginPath: () => {
+      tally.beginPath += 1;
+    },
+    stroke: () => {
+      tally.stroke += 1;
+      paint("strokeStyle");
+    },
+    fill: () => {
+      tally.fill += 1;
+      paint("fillStyle");
+    },
+  };
+  const ctx = new Proxy({} as Record<string, unknown>, {
+    get: (_t, k: string) => methods[k] ?? (k in state ? state[k] : () => undefined),
+    set: (_t, k: string, v: unknown) => {
+      tally.sets += 1;
+      state[k] = v;
+      return true;
+    },
+  });
+  return { ctx: ctx as unknown as BoardContext, tally, paints };
 }
 
 // -- A minimal React hook runtime, to run OasisWhiteboard's own effect --------
@@ -771,6 +857,39 @@ async function main() {
     assert.deepEqual(boardPoint(520, 410, { left: 120, top: 310 }), [400, 100]);
   });
 
+  // -- review round 3: a long session stays cheap to redraw ----------------
+  await check("model: a pen held still adds no points, a slow drag keeps one per MIN_POINT_GAP, and a redraw sets the brush once per stroke", () => {
+    const b = createBoard();
+    beginStroke(b, "pen", SKY, 4, 10, 10);
+    for (let i = 0; i < 50; i += 1) assert.equal(extendStroke(b, 10.4, 10.3), null, "a pen held still (only its pressure changing) adds nothing");
+    assert.equal(extendStroke(b, 11, 11), null, "nor does a move shorter than the gap");
+    assert.ok(extendStroke(b, 10 + MIN_POINT_GAP, 10), "a move of the gap is a new point");
+    for (let x = 12; x <= 112; x += 0.5) extendStroke(b, x, 10);
+    endStroke(b);
+    const kept = b.strokes[0].points;
+    assert.ok(kept.length / 2 >= 60 && kept.length / 2 <= 75, `a slow 100 px drag sampled every half pixel keeps about one point per 1.5 px, not one per sample: ${kept.length / 2}`);
+    assert.ok(112 - kept[kept.length - 2] < MIN_POINT_GAP, "and still reaches to within the gap of where the pointer went");
+
+    // About ten minutes of ink: 300 strokes of 120 points, every seventh one the eraser.
+    const big = createBoard();
+    for (let s = 0; s < 300; s += 1) {
+      beginStroke(big, s % 7 === 6 ? "eraser" : "pen", SKY, 4, 0, s);
+      for (let i = 1; i < 120; i += 1) extendStroke(big, i * 3, s + (i % 2));
+      endStroke(big);
+    }
+    const { ctx, tally, paints } = countingContext();
+    renderBoard(ctx, big, { width: 400, height: 300, scale: 1 });
+    assert.equal(tally.fill, 300, "each stroke still paints its first dot");
+    assert.equal(tally.stroke, 300 * 120, "and its 119 curves plus the last stretch, so a redraw matches the board drawn live");
+    assert.equal(tally.beginPath, tally.stroke + tally.fill, "one path per paint");
+    assert.ok(tally.sets <= 300 * 16, `brush settings written by one redraw: ${tally.sets} (one per point was over 200,000)`);
+    const pens = paints.filter((p) => p.op === "source-over");
+    const erasers = paints.filter((p) => p.op === "destination-out");
+    assert.ok(pens.length > 0 && erasers.length > 0);
+    assert.ok(pens.every((p) => p.blur === PEN_GLOW && p.shadow === SKY && p.color === SKY), "every pen paint has its colour and its soft glow");
+    assert.ok(erasers.every((p) => p.blur === 0), "the eraser cuts with no glow");
+  });
+
   // -- Codex HIGH 1: a resize lost the drawing -----------------------------
   await check("a resize never loses the drawing: drawn by the right edge, shrunk, grown back, it is all there (and the first version lost it)", () => {
     const pts = line(720, 790, 200);
@@ -862,9 +981,11 @@ async function main() {
       r.board.clear();
       r.board.clear();
       flush();
+      assert.equal(r.last().notice, "cleared");
       r.board.undo();
       assert.equal(r.at(90, 60), SKY);
       assert.equal(r.last().empty, false);
+      assert.equal(r.last().notice, null, "Undo takes the 'Board cleared' line away: the board is back");
     });
   });
 
@@ -896,6 +1017,28 @@ async function main() {
     assert.equal(r.at(150, 150), SKY);
     r.board.setColor(GREEN);
     assert.equal(r.last().erasing, false, "picking a colour puts the pen back");
+  });
+
+  await check("Brush size: kept to 1..50 and rounded, a non-number ignored, the next stroke drawn that wide; the eraser cuts 2.5x wider", () => {
+    const r = rig(400, 300);
+    assert.equal(r.last().size, 4, "it starts at the default");
+    r.board.setSize(0);
+    assert.equal(r.last().size, 1, "never below 1");
+    r.board.setSize(80);
+    assert.equal(r.last().size, 50, "never above 50");
+    r.board.setSize(Number.NaN);
+    assert.equal(r.last().size, 50, "a value that is not a number changes nothing");
+    r.board.setSize(19.6);
+    assert.equal(r.last().size, 20, "rounded to a whole pixel");
+    r.stroke(line(50, 350, 100));
+    assert.equal(r.at(200, 108), SKY, "a size-20 pen covers 10 px each side of its line");
+    assert.equal(r.at(200, 112), null, "and no more");
+    r.board.setSize(4);
+    r.board.toggleEraser();
+    r.stroke(line(100, 300, 100));
+    assert.equal(r.at(200, 104), null, "a size-4 eraser is 10 px wide, so it cuts 5 px each side");
+    assert.equal(r.at(200, 107), SKY, "and leaves the ink 7 px away");
+    assert.equal(r.at(200, 93), SKY);
   });
 
   await check("a stroke ends where the pointer lifted, live and after a redraw (CodeRabbit: a quick flick stopped halfway)", () => {
@@ -951,6 +1094,69 @@ async function main() {
     assert.equal(r.at(250, 280), null, "a mouse released outside the window draws no more");
   });
 
+  // -- review round 3: pointers that leave, or never lift ------------------
+  await check("a mouse stroke that runs off the board and back is one line, not a straight cut across the gap (pointer capture)", () => {
+    const r = rig(400, 300);
+    pointer(r.canvas, r.win, "pointerdown", 350, 100);
+    assert.equal(r.canvas.hasPointerCapture(1), true, "the canvas holds the pointer that draws");
+    pointer(r.canvas, r.win, "pointermove", 390, 100);
+    pointer(r.canvas, r.win, "pointermove", 450, 50);
+    pointer(r.canvas, r.win, "pointermove", 450, 250);
+    pointer(r.canvas, r.win, "pointermove", 390, 250);
+    pointer(r.canvas, r.win, "pointerup", 390, 250);
+    assert.equal(r.at(390, 175), null, "no straight line joins where it left the board to where it came back");
+    assert.equal(r.at(395, 250), SKY, "it finished where the mouse lifted");
+    resize(r.container, 500, 300);
+    assert.equal(r.at(450, 150), SKY, "the part drawn off the edge was kept, and shows on a wider board");
+  });
+
+  await check("a lift that never arrives does not lock the board: the next finger finishes that stroke and draws; a palm under a pen still draws nothing", () => {
+    const r = rig(400, 300);
+    pointer(r.canvas, r.win, "pointerdown", 40, 60, { type: "touch", id: 3 });
+    pointer(r.canvas, r.win, "pointermove", 100, 60, { type: "touch", id: 3 });
+    pointer(r.canvas, r.win, "pointerup", 100, 60, { type: "touch", id: 3, lost: true });
+    assert.equal(r.at(95, 60), null, "still open: its last stretch is drawn when it ends");
+    r.stroke(line(40, 140, 200), { type: "touch", id: 4 });
+    assert.equal(r.at(90, 200), SKY, "the next finger draws (before: every other finger was ignored until a reload)");
+    assert.equal(r.at(95, 60), SKY, "and the stroke that never lifted is finished up to where the finger was");
+    r.board.undo();
+    assert.equal(r.at(90, 200), null);
+    assert.equal(r.at(95, 60), SKY, "each is its own Undo step");
+
+    pointer(r.canvas, r.win, "pointerdown", 100, 120);
+    pointer(r.canvas, r.win, "pointermove", 200, 120);
+    pointer(r.canvas, r.win, "pointerup", 200, 120, { lost: true });
+    assert.equal(r.at(190, 120), null);
+    pointer(r.canvas, r.win, "pointerdown", 100, 250);
+    assert.equal(r.at(190, 120), SKY, "the same mouse pressed again finishes its unlifted stroke first");
+    pointer(r.canvas, r.win, "pointerup", 100, 250);
+
+    const pen = rig(400, 300);
+    pointer(pen.canvas, pen.win, "pointerdown", 40, 150, { type: "pen", id: 21 });
+    pointer(pen.canvas, pen.win, "pointermove", 80, 150, { type: "pen", id: 21 });
+    const palm = pointer(pen.canvas, pen.win, "pointerdown", 300, 250, { type: "touch", id: 40 });
+    assert.equal(palm.isPrimary, true, "the palm is the first touch, so the browser calls it primary");
+    pointer(pen.canvas, pen.win, "pointermove", 350, 250, { type: "touch", id: 40 });
+    pointer(pen.canvas, pen.win, "pointermove", 120, 150, { type: "pen", id: 21 });
+    pointer(pen.canvas, pen.win, "pointerup", 350, 250, { type: "touch", id: 40 });
+    pointer(pen.canvas, pen.win, "pointerup", 120, 150, { type: "pen", id: 21 });
+    assert.equal(pen.at(325, 250), null, "a palm resting on the screen while the pen draws does not draw");
+    assert.equal(pen.at(115, 150), SKY, "and the pen's stroke went on to where it lifted");
+  });
+
+  await check("a pointer whose capture is taken away ends its stroke where it was, and draws no more", () => {
+    const r = rig(400, 300);
+    pointer(r.canvas, r.win, "pointerdown", 40, 30, { type: "pen", id: 7 });
+    pointer(r.canvas, r.win, "pointermove", 100, 30, { type: "pen", id: 7 });
+    r.canvas.releasePointerCapture(7);
+    assert.equal(r.at(95, 30), SKY, "finished up to where the pen was");
+    assert.equal(r.last().canUndo, true);
+    pointer(r.canvas, r.win, "pointermove", 200, 30, { type: "pen", id: 7 });
+    assert.equal(r.at(150, 30), null, "the pen draws no more until it is put down again");
+    r.stroke([[60, 120], [120, 120]], { type: "pen", id: 7 });
+    assert.equal(r.at(115, 120), SKY, "put down again, it draws");
+  });
+
   await check("keys: E toggles the eraser, Ctrl/Cmd+Z undoes, Ctrl+Shift+Z and Ctrl+Y redo; never while typing", () => {
     const r = rig(400, 300);
     r.stroke(line(40, 120, 50));
@@ -979,6 +1185,64 @@ async function main() {
     assert.equal(r.at(80, 50), SKY, "Ctrl+Z in a text box is that box's undo");
   });
 
+  await check("keys still work while the Brush size slider or the colour picker has focus (review round 3), and never while typing in a text field", () => {
+    const r = rig(400, 300);
+    r.stroke(line(40, 120, 50));
+    const slider = { tagName: "INPUT", type: "range", isContentEditable: false };
+    const picker = { tagName: "INPUT", type: "color", isContentEditable: false };
+    const z = keydown(r.win, "z", { ctrl: true, target: slider });
+    assert.equal(z.defaultPrevented, true);
+    assert.equal(r.at(80, 50), null, "Ctrl+Z right after dragging Brush size undoes, as the board's hint promises");
+    keydown(r.win, "z", { ctrl: true, shift: true, target: picker });
+    assert.equal(r.at(80, 50), SKY, "Ctrl+Shift+Z from the colour picker redoes");
+    keydown(r.win, "e", { target: slider });
+    assert.equal(r.last().erasing, true, "E from the slider is the eraser");
+    keydown(r.win, "e", { target: picker });
+    assert.equal(r.last().erasing, false, "and from the colour picker");
+    keydown(r.win, "e", { target: { tagName: "BUTTON", isContentEditable: false } });
+    assert.equal(r.last().erasing, true, "and from a toolbar button");
+    keydown(r.win, "e");
+
+    for (const type of ["text", "search", "email", "url", "tel", "password", "number", "date", undefined]) {
+      const field = { tagName: "INPUT", type, isContentEditable: false };
+      keydown(r.win, "e", { target: field });
+      assert.equal(r.last().erasing, false, `E typed into an input of type ${type ?? "(none)"} is a letter`);
+      const typed = keydown(r.win, "z", { ctrl: true, target: field });
+      assert.equal(typed.defaultPrevented, false, `Ctrl+Z in an input of type ${type ?? "(none)"} is the field's own undo`);
+    }
+    assert.equal(r.at(80, 50), SKY, "nothing typed into a field undid the board");
+  });
+
+  // -- review round 3: leaving the page ------------------------------------
+  await check("leaving: with ink on the board a refresh or a closed tab asks first; an empty board asks nothing and listens for nothing", () => {
+    const r = rig(400, 300);
+    const leave = () => {
+      const e = {
+        type: "beforeunload",
+        returnValue: "" as unknown,
+        defaultPrevented: false,
+        preventDefault() {
+          e.defaultPrevented = true;
+        },
+      };
+      r.win.events.dispatch("beforeunload", e);
+      return e;
+    };
+    assert.equal(leave().defaultPrevented, false, "an empty board lets the page go");
+    assert.ok(!r.win.events.types().includes("beforeunload"), "and adds no listener, so Back and Forward can keep the page cached");
+    r.stroke(line(40, 140, 60));
+    const asked = leave();
+    assert.equal(asked.defaultPrevented, true, "ink on the board: the browser asks before a refresh or close wipes it");
+    assert.ok(asked.returnValue, "including browsers that only look at returnValue");
+    r.board.clear();
+    assert.equal(leave().defaultPrevented, false, "after Clear the board is empty: nothing to lose");
+    r.board.undo();
+    assert.equal(leave().defaultPrevented, true, "Undo brought the drawing back, so it asks again");
+    r.board.dispose();
+    assert.equal(leave().defaultPrevented, false, "a board that has left the page never holds the page");
+    assert.equal(r.win.attached(), 0);
+  });
+
   // -- download ------------------------------------------------------------
   await check("Download: today's file name, everything drawn (even past a shrunken edge), the board colour behind it and under erased ink", () => {
     const r = rig(800, 400);
@@ -1004,6 +1268,27 @@ async function main() {
     r.board.download();
     assert.equal(r.doc.anchors.length, 1, "a picture the browser could not make is not offered as a file");
     assert.equal(r.last().notice, "download_failed", "the board says so instead");
+    r.doc.encodeFails = false;
+    r.board.download();
+    assert.equal(r.doc.anchors.length, 2, "the next try saves the picture");
+    assert.equal(r.last().notice, null, "and the failure line goes away");
+
+    // A 2x screen (a phone, a retina laptop) saves a 2x picture, as sharp as the board looked.
+    const hi = rig(400, 300, 2);
+    hi.stroke(line(100, 300, 150));
+    hi.board.download();
+    const pic = hi.doc.canvases.find((c) => c.encodes > 0)!;
+    assert.equal(pic.width, 800, "twice the board's width in pixels");
+    assert.equal(pic.height, 600);
+    assert.equal(pic.colorAt(400, 300), SKY, "the stroke at its place on the 2x picture");
+  });
+
+  await check("the download's background is the colour the board shows on screen: --c-bg-deep in app/globals.css", () => {
+    const css = readFileSync(join(root, "app/globals.css"), "utf8");
+    const m = /--c-bg-deep:\s*(\d+)\s+(\d+)\s+(\d+)\s*;/.exec(css);
+    assert.ok(m, "app/globals.css defines --c-bg-deep");
+    const hex = `#${m!.slice(1, 4).map((c) => Number(c).toString(16).padStart(2, "0")).join("")}`;
+    assert.equal(BOARD_BG, hex, "BOARD_BG is the token behind the board's bg-bg-deep");
   });
 
   // -- unmount -------------------------------------------------------------
@@ -1011,20 +1296,27 @@ async function main() {
     const r = rig(400, 300);
     const ro = FakeResizeObserver.live[FakeResizeObserver.live.length - 1];
     assert.deepEqual(ro.targets, [r.container], "the board watches its container's size");
-    assert.deepEqual(r.canvas.listeners.types(), ["pointerdown", "pointermove"]);
+    assert.deepEqual(r.canvas.listeners.types(), ["lostpointercapture", "pointerdown", "pointermove"]);
     assert.deepEqual(r.win.events.types(), ["keydown", "pointercancel", "pointerup"]);
     assert.equal(r.win.queryListeners(), 1, "and the screen's pixel ratio");
+    r.stroke(line(40, 140, 60));
+    assert.deepEqual(r.win.events.types(), ["beforeunload", "keydown", "pointercancel", "pointerup"], "with ink on the board, the leave question too");
     r.board.dispose();
     assert.equal(r.canvas.listeners.count(), 0, "canvas listeners removed");
     assert.equal(r.win.attached(), 0, "window and media-query listeners removed");
     assert.equal(ro.disconnected, true, "the ResizeObserver is disconnected");
     const before = r.states.length;
+    const inked = r.canvas.inked();
     pointer(r.canvas, r.win, "pointerdown", 10, 10);
     keydown(r.win, "e");
     r.win.setRatio(2);
     resize(r.container, 200, 200);
-    assert.equal(r.states.length, before, "no state reaches an unmounted page");
-    assert.equal(r.canvas.inked(), 0);
+    r.board.setColor(GREEN);
+    r.board.setSize(9);
+    r.board.toggleEraser();
+    assert.equal(r.states.length, before, "no state reaches an unmounted page, even from a late toolbar call");
+    assert.equal(r.win.attached(), 0, "and nothing is attached again");
+    assert.equal(r.canvas.inked(), inked);
   });
 
   // -- the component itself ------------------------------------------------
@@ -1056,12 +1348,22 @@ async function main() {
       const cleanup = pendingEffects[0]();
       assert.equal(typeof cleanup, "function", "the effect returns its cleanup");
       assert.equal(canvas.width, 400, "the effect sized the canvas to its container");
+      const hint = (t: unknown) => nodes(t).find((n) => n.type === "p" && n.props["aria-live"] === "polite")!;
+      const slider = (t: unknown) => nodes(t).find((n) => n.type === "input" && n.props.type === "range")!;
+      tree = render();
+      assert.match(String(hint(tree).props.className), /\bopacity-75\b/, "the how-to hint shows on an empty board");
 
+      (slider(tree).props.onChange as (e: unknown) => void)({ target: { value: "12" } });
+      tree = render();
+      assert.equal(slider(tree).props.value, 12, "moving the Brush size slider sets the size");
       for (const [type, x] of [["pointerdown", 40], ["pointermove", 80], ["pointermove", 120], ["pointerup", 120]] as const) {
         pointer(canvas, win, type, x, 60);
       }
       assert.equal(canvas.colorAt(80, 60), SKY, "a stroke drawn on the page's canvas");
+      assert.equal(canvas.colorAt(80, 65), SKY, "at the size the slider set (12 px: 6 each side)");
+      assert.equal(canvas.colorAt(80, 68), null);
       tree = render();
+      assert.match(String(hint(tree).props.className), /\bopacity-0\b/, "the hint goes once the first stroke starts");
       assert.equal(button(tree, "Clear").props.disabled, false);
       assert.equal(button(tree, "Redo").props.disabled, true);
       (button(tree, "Clear").props.onClick as () => void)();
@@ -1142,6 +1444,8 @@ async function main() {
 
     const page = tagsOf(m.page);
     const canvas = page.find((t) => t.name === "canvas")!;
+    const boardBox = page.filter((t) => t.name === "div" && t.index < canvas.index).pop()!;
+    assert.ok(classesOf(boardBox).includes("bg-bg-deep"), "the board shows bg-bg-deep behind its transparent canvas: the colour a download is filled with");
     assert.equal(canvas.attrs.role, "img");
     assert.match(canvas.attrs["aria-label"], /Whiteboard/);
     assert.ok(classesOf(canvas).includes("touch-none"), "a finger on the board draws instead of scrolling the page");
