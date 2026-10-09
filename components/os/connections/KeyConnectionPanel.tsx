@@ -42,8 +42,9 @@ async function post(url: string, body?: unknown): Promise<{ ok: boolean; status:
 function serverMessage(r: { status: number; data: Record<string, unknown> | null }, fallback: string): string {
   const message = r.data?.message;
   if (typeof message === "string" && message.trim()) return message;
-  const error = r.data?.error;
-  return typeof error === "string" ? `${fallback} (${error}).` : `${fallback} (HTTP ${r.status}).`;
+  // A bare code is for the logs; the owner reads what to do.
+  console.error("[connections.key_panel]", r.status, r.data?.error);
+  return `${fallback}. Try again in a minute.`;
 }
 
 export function KeyConnectionPanel({

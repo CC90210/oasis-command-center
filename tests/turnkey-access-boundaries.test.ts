@@ -28,7 +28,6 @@ for (const path of [
   "app/api/esign/envelopes/[id]/route.ts",
   "app/api/esign/envelopes/[id]/send/route.ts",
   "app/api/esign/envelopes/[id]/remind/route.ts",
-  "app/api/agent-alerts/[id]/resolve/route.ts",
   "app/api/notify/telegram-identity/route.ts",
   "app/api/integrations/keys/route.ts",
   "app/api/integrations/keys/test/route.ts",
@@ -39,6 +38,12 @@ for (const path of [
 ]) {
   includesAll(path, ["canAccessSharedTenantResource"]);
 }
+
+// Resolving an alert card is narrower than a shared resource: the workspace's
+// owners and admins only, the audience Needs you shows a card to (2026-10-08;
+// the shared rule admitted every member of a client workspace). Refusals for a
+// rep, a member and a read-only seat are proven in tests/workspace-alerts.test.ts.
+includesAll("app/api/agent-alerts/[id]/resolve/route.ts", ["resolveViewerSurface", "mayManageWorkspaceAlerts"]);
 
 for (const path of [
   "app/api/credentials/custom/route.ts",

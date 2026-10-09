@@ -63,7 +63,7 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     service: "twilio",
     label: "Twilio",
     description:
-      "Your own Twilio account. Texting stays off until the Account SID, the Auth Token (or an API key), and a From Number or Messaging Service SID are saved and pass Test.",
+      "Your own Twilio account: the Account SID, the Auth Token (or an API key), and a From Number or Messaging Service SID. Texts go out only while live texting is switched on; run Test before that, because a failed Test does not stop them.",
     fields: [
       // Twilio SIDs are two letters and 32 hex characters, usually lower case
       // (^AC[0-9a-fA-F]{32}$ in Twilio's API spec). alphanum_uppercase refused
@@ -105,10 +105,10 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     service: "gws",
     label: "Google Workspace (Gmail)",
     description:
-      "Shared outbound email through the Google Workspace mailbox that owns the App Password. Environment setup requires GMAIL_USER + GMAIL_APP_PASSWORD.",
+      "The workspace's shared mailbox: email goes out from the Google Workspace address that owns the App Password. Test signs in to Gmail with both.",
     fields: [
       { key: "app_password", label: "App Password", sensitive: true, hint: "Generate at myaccount.google.com/apppasswords" },
-      { key: "from_address", label: "Workspace email / SMTP user", sensitive: false, validation: "email", hint: "The Google Workspace address that generated this App Password (GMAIL_USER in environment-based setup)." },
+      { key: "from_address", label: "Workspace email address", sensitive: false, validation: "email", hint: "The Google Workspace address that created this App Password." },
     ],
   },
   {
@@ -151,9 +151,9 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "telegram",
     label: "Telegram Bridge",
-    description: "Shared operational notifications through a BotFather bot and one destination chat.",
+    description: "The workspace's team bot: one bot made in BotFather and the one chat it writes to. Test asks Telegram for both.",
     fields: [
-      { key: "bot_token", label: "Bot Token", sensitive: true, hint: "Format: <digits>:<base64>" },
+      { key: "bot_token", label: "Bot Token", sensitive: true, hint: "BotFather sends it when you create the bot. It looks like 123456789:AAE... (numbers, a colon, then letters)." },
       { key: "chat_id", label: "Destination Chat ID", sensitive: false, hint: "The numeric user, group, or channel ID that receives workspace notifications (often starts with -100 for channels)." },
     ],
   },

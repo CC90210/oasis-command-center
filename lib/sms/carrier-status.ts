@@ -231,7 +231,40 @@ export type BreakerVerdict = {
   consecutiveFailures: number;
   failRatio: number;
   sample: number;
+  /**
+   * The newest terminal receipt (delivered or failed), or null when there is
+   * none: an empty or pending-only history, an unreadable one, or a bypassed
+   * breaker that read nothing. Optional so a verdict built elsewhere stays
+   * valid; absent reads as null.
+   */
+  newestTerminal?: { status: CarrierStatus; at: number } | null;
+  /** SMS_BREAKER_DISABLED switched the breaker off: "not halted" then proves nothing. */
+  bypassed?: boolean;
 };
+
+/**
+ * What a verdict PROVES about the route, for closing its outage card.
+ *
+ * "Not halted" is not "recovered": it is also the answer for an empty or
+ * pending-only history (nothing terminal yet), for a failing route still
+ * under the halt thresholds, and for a breaker switched off by
+ * SMS_BREAKER_DISABLED. Closing the card on any of those (2026-10-08 review)
+ * hid a live outage, and the next refresh opened a new card and paged as if
+ * the outage were new. Only `delivering` (the newest terminal receipt is a
+ * delivery, so it is newer than every failure) is evidence that it came back.
+ */
+export type RouteEvidence = "halted" | "bypassed" | "no_evidence" | "failing" | "delivering";
+
+export function routeEvidence(
+  v: Pick<BreakerVerdict, "halt"> & Partial<Pick<BreakerVerdict, "newestTerminal" | "bypassed">>,
+): RouteEvidence {
+  if (v.bypassed) return "bypassed";
+  if (v.halt) return "halted";
+  const newest = v.newestTerminal?.status;
+  if (newest === "delivered") return "delivering";
+  if (newest === "failed") return "failing";
+  return "no_evidence";
+}
 
 /**
  * Should we keep sending?
@@ -261,6 +294,7 @@ export function breakerVerdict(
       consecutiveFailures: 0,
       failRatio: 0,
       sample: 0,
+      newestTerminal: null,
     };
   }
 
@@ -270,8 +304,12 @@ export function breakerVerdict(
     .sort((a, b) => b.at - a.at);
 
   if (terminal.length === 0) {
-    return { halt: false, halfOpen: false, reason: "no terminal receipts yet", consecutiveFailures: 0, failRatio: 0, sample: 0 };
+    return {
+      halt: false, halfOpen: false, reason: "no terminal receipts yet", consecutiveFailures: 0, failRatio: 0, sample: 0,
+      newestTerminal: null,
+    };
   }
+  const newestTerminal = { status: terminal[0].status, at: terminal[0].at };
 
   /**
    * Is it time to test whether the route came back?
@@ -307,6 +345,7 @@ export function breakerVerdict(
       consecutiveFailures: consecutive,
       failRatio: ratio,
       sample: terminal.length,
+      newestTerminal,
     });
   }
   if (terminal.length >= minSample && ratio >= failRatioLimit) {
@@ -316,6 +355,7 @@ export function breakerVerdict(
       consecutiveFailures: consecutive,
       failRatio: ratio,
       sample: terminal.length,
+      newestTerminal,
     });
   }
   return {
@@ -325,6 +365,7 @@ export function breakerVerdict(
     consecutiveFailures: consecutive,
     failRatio: ratio,
     sample: terminal.length,
+    newestTerminal,
   };
 }
 

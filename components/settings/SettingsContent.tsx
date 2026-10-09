@@ -38,6 +38,7 @@ import {
   getActiveProfile,
   getTenant,
   aiServicesWithKey,
+  personalAiServicesWithKey,
   getBridgeOnline,
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
@@ -233,9 +234,15 @@ export async function SettingsContent({
   // Workspace agents read the AI Team's own roster (components/os/aiteam/
   // roster.ts loadWorkspaceRoster), so the two pages list the same teammates.
   const needsRoster = show("ai") && !!manifest && !!profile?.tenant_id;
-  const [connectedAiSet, bridgeOnline, roster] = await Promise.all([
+  // connectedAiSet: the workspace's AI account, the key every department chat
+  // uses. personalAiSet: keys the viewer saved for their own chats only, shown
+  // apart because department chats don't use them (lib/ai/workspace-account.ts).
+  const [connectedAiSet, personalAiSet, bridgeOnline, roster] = await Promise.all([
     needsAiKeys
       ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
+      : Promise.resolve(new Set<string>()),
+    needsAiKeys
+      ? safe("settings.personal_ai_keys", personalAiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
     needsBridge
       ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), null)
@@ -402,8 +409,8 @@ export async function SettingsContent({
           {show("chat-apps") && (
             <SettingsSection
               defaultOpen
-              title="Your Telegram alert bot"
-              subtitle="A bot that belongs only to your login and sends your own alerts to your phone. Set it up once; it is separate from every teammate's."
+              title="Your own Telegram bot"
+              subtitle="A bot that belongs only to your login, separate from the workspace's team bot and every teammate's. OASIS does not send alerts to personal bots yet."
             >
               <SafeBoundary label="Personal Telegram bot">
                 <TelegramConnectCard />
@@ -426,6 +433,7 @@ export async function SettingsContent({
               <SafeBoundary label="AI provider accounts">
                 <ProviderAccountsCard
                   connectedServices={connectedAiSet}
+                  personalServices={personalAiSet}
                   bridgeOnline={bridgeOnline}
                   canManageTeam={canManageTenant}
                   canInstallBridge={isOperator}
@@ -696,8 +704,8 @@ async function PersonalSettingsView({
       {show("chat-apps") && (
         <SettingsSection
           defaultOpen
-          title="Your Telegram alert bot"
-          subtitle="A bot that belongs only to your login and sends your own alerts to your phone. It does not change the workspace's shared services or a teammate's account."
+          title="Your own Telegram bot"
+          subtitle="A bot that belongs only to your login. It does not change the workspace's team bot or a teammate's account. OASIS does not send alerts to personal bots yet."
         >
           <SafeBoundary label="Personal Telegram bot">
             <TelegramConnectCard />

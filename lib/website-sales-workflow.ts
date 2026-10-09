@@ -5,6 +5,7 @@ import {
   roleMayOperateOasisSalesLead,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { mayQuoteAndClose } from "@/lib/team-roles";
+import { dbBool } from "@/lib/db-bool";
 import type { LeadSourceTrack } from "@/lib/website-sales-comp";
 import { canonicalFromRepDisposition } from "./call-disposition";
 
@@ -177,7 +178,9 @@ export function mayCreditAdminVerifiedCloser(input: {
     typeof value === "string" && USER_ID.test(value.trim()) ? value.trim().toLowerCase() : "";
   const candidate = normalizeUserId(input.candidateUserId);
   const frozenOpener = normalizeUserId(input.frozenOpenerUserId);
-  if (!candidate || input.isOwner === true || input.isOwner === 1) return false;
+  // isOwner is the profile's is_owner as stored: dbBool (lib/db-bool.ts) also
+  // counts the string "1" as an owner, which `=== true || === 1` missed.
+  if (!candidate || dbBool(input.isOwner)) return false;
   if (!mayQuoteAndClose(input.liveTeamRole)) return false;
 
   const auditHost = normalizeUserId(input.auditHostUserId);

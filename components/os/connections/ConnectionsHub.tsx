@@ -180,9 +180,10 @@ export function ConnectionsHub({
           } else if (status === "denied") {
             setBanner({ tone: "err", text: "Connection cancelled." });
           } else if (status) {
+            if (!POPUP_ERRORS[reason || ""]) console.error("[connections.popup]", def.slug, reason);
             setBanner({
               tone: "err",
-              text: POPUP_ERRORS[reason || ""] ?? `${def.name} could not connect (${reason || "unknown error"}).`,
+              text: POPUP_ERRORS[reason || ""] ?? `${def.name} did not finish connecting. Try again in a minute.`,
             });
           }
           // Re-read every status from the server either way: a popup closed with

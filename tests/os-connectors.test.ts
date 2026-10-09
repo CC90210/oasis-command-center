@@ -36,7 +36,6 @@ import {
   type ConnectionFact,
   type ConnectorDef,
   type ConnectorFacts,
-  type HeartbeatFact,
   type KeyRowFact,
 } from "../lib/os/connectors";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
@@ -178,10 +177,15 @@ for (const def of CONNECTOR_CATALOG) {
     ...(src.kind === "tenant_keys" ? [...(src.requireAny ?? []), ...(src.credentialAlternatives ?? []).flat()] : []),
   ];
   for (const f of named) assert.ok(fields.has(f), `${def.slug}: "${src.service}.${f}" is not a stored field`);
-  if (src.kind === "workspace_heartbeat") {
-    assert.match(factsSource, new RegExp(`"${src.service}"`), `${def.slug}: heartbeats for ${src.service} are never loaded`);
-  }
 }
+// No card is proven by a heartbeat any more (2026-10-08): the Google and
+// Telegram heartbeats only said a key NAME was in an env file on OASIS's
+// computer, and read as "Connected, verified just now".
+assert.ok(
+  CONNECTOR_CATALOG.every((d) => !d.live || ["tenant_connection", "tenant_keys", "oauth_tokens"].includes(d.live.source.kind)),
+  "a card reads a check or a connection, never a heartbeat",
+);
+assert.doesNotMatch(factsSource, /from\("integrations_health"\)/, "the facts loader reads no heartbeat");
 
 // Hostile facts: every service anyone could name, every field present, every
 // test passing a minute ago, every heartbeat healthy a minute ago.
@@ -198,8 +202,7 @@ const GREEN: ConnectorFacts = {
       service, field_key, has_value: true, last_tested_at: iso(MIN), last_test_ok: true,
     })),
   ),
-  heartbeats: [...everyService].map((service): HeartbeatFact => ({ service, status: "healthy", last_ping_at: iso(MIN) })),
-  personalGoogleLinked: true,
+  personalGoogle: { linked: true, calendarScope: true, address: "me@hostile.test", workEmail: "me@hostile.test" },
   // A connected, freshly verified framework connection for EVERY slug — a
   // coming-soon card handed one must still say coming soon.
   connections: [...everyService].map((provider): ConnectionFact => ({
@@ -231,22 +234,23 @@ assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN,
 
 // Every lookup failed: "status unavailable" for every live card — never
 // "not connected", never "connected".
-const FAILED: ConnectorFacts = { keyRows: null, heartbeats: null, personalGoogleLinked: null, connections: null };
+const FAILED: ConnectorFacts = { keyRows: null, personalGoogle: null, connections: null };
 for (const def of CONNECTOR_CATALOG) {
   const s = resolveConnectorStatus(def, FAILED, NOW);
   assert.equal(s.kind, def.live ? "unknown" : "coming_soon", `${def.slug}: a failed lookup resolved to "${s.kind}"`);
 }
-// Only the heartbeat read failing is still unknown for a heartbeat-backed card.
-assert.equal(
-  resolveConnectorStatus(connectorBySlug("telegram")!, { ...GREEN, heartbeats: null }, NOW).kind,
-  "unknown",
-);
+// Only the key read failing is still unknown for a key-backed card.
+assert.equal(resolveConnectorStatus(connectorBySlug("telegram")!, { ...GREEN, keyRows: null }, NOW).kind, "unknown");
 
 // Only the connections read failing is still unknown for a framework card.
 assert.equal(resolveConnectorStatus(connectorBySlug("stripe")!, { ...GREEN, connections: null }, NOW).kind, "unknown");
 
 // Nothing saved at all: honestly not connected.
-const EMPTY: ConnectorFacts = { keyRows: [], heartbeats: [], personalGoogleLinked: false, connections: [] };
+const EMPTY: ConnectorFacts = {
+  keyRows: [],
+  personalGoogle: { linked: false, calendarScope: false, address: null, workEmail: "me@workspace.test" },
+  connections: [],
+};
 for (const slug of LIVE) {
   assert.equal(resolveConnectorStatus(connectorBySlug(slug)!, EMPTY, NOW).kind, "not_connected", slug);
 }
@@ -273,10 +277,17 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   const failedHealth = connectionsHealth(FAILED, NOW);
   assert.deepEqual([failedHealth.setUp, failedHealth.unknown], [0, LIVE.length], "every built card unknown when every read failed");
   assert.equal(connectionsDot(failedHealth), null, "a failed read draws no dot");
-  const gwsOnly: ConnectorFacts = { ...EMPTY, heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }] };
+  // The shared mailbox passed its Test a minute ago.
+  const gwsOnly: ConnectorFacts = {
+    ...EMPTY,
+    keyRows: [
+      keyRow("gws", "app_password", { last_test_ok: true, last_tested_at: iso(MIN) }),
+      keyRow("gws", "from_address", { last_test_ok: true, last_tested_at: iso(MIN) }),
+    ],
+  };
   assert.deepEqual(connectionsHealth(gwsOnly, NOW), { setUp: 1, attention: 0, connected: 1, unknown: 0 });
   assert.equal(connectionsDot(connectionsHealth(gwsOnly, NOW)), "ok", "one proven app and nothing else set up: green");
-  const unverified: ConnectorFacts = { ...gwsOnly, keyRows: twilioKeys() };
+  const unverified: ConnectorFacts = { ...gwsOnly, keyRows: [...gwsOnly.keyRows!, ...twilioKeys()] };
   assert.deepEqual(connectionsHealth(unverified, NOW), { setUp: 2, attention: 0, connected: 1, unknown: 0 });
   assert.equal(connectionsDot(connectionsHealth(unverified, NOW)), null, "a saved key nobody tested is not proven, so no green");
   const expired: ConnectorFacts = {
@@ -299,18 +310,23 @@ const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
   // or the rail draws no dot (lib/os/deadline.ts, W0).
   assert.match(layout, /withDeadline\(\s*loadConnectorFacts\(\{[^}]*\}\)\.then\([\s\S]*?\),\s*RAIL_CONNECTIONS_DEADLINE_MS,\s*"layout\.connections",\s*\)/);
   assert.match(layout, /const RAIL_CONNECTIONS_DEADLINE_MS = 2_500;/);
-  // The Operations tile counts the same statuses, as the WORKSPACE's number:
-  // the viewer's own Google link is left out (W2A-R5), and the tile links an
-  // owner or admin to the hub.
+  // The Operations tile counts the same statuses from the same facts, and the
+  // tile links an owner or admin to the hub.
   assert.match(
     read("components/os/department/numbers.ts"),
-    /connectionTile\(connectionsHealth\(\{ \.\.\.facts, personalGoogleLinked: null \}, Date\.now\(\)\), viewer\.surface\.persona === "founder"\)/,
+    /connectionTile\(connectionsHealth\(facts, Date\.now\(\)\), viewer\.surface\.persona === "founder"\)/,
   );
-  // Why it is left out: the same workspace, one person with their own Google
-  // linked, would count an app set up that the workspace has not set up.
-  const linked: ConnectorFacts = { ...EMPTY, personalGoogleLinked: true };
-  assert.equal(connectionsHealth(linked, NOW).setUp, 1, "precondition: a personal link counts as set up on the hub");
-  assert.equal(connectionsHealth({ ...linked, personalGoogleLinked: null }, NOW).setUp, 0);
+  // It is the WORKSPACE's number, whoever looks (W2A-R5): a person's own
+  // Google account, ready, wrong or missing, never changes a card's kind, so
+  // the rail and the tile (which used to drop it) cannot count differently.
+  for (const personalGoogle of [
+    { linked: true, calendarScope: true, address: "me@workspace.test", workEmail: "me@workspace.test" },
+    { linked: true, calendarScope: true, address: "other@gmail.test", workEmail: "me@workspace.test" },
+    null,
+  ]) {
+    assert.deepEqual(connectionsHealth({ ...EMPTY, personalGoogle }, NOW), connectionsHealth(EMPTY, NOW));
+    assert.deepEqual(connectionsHealth({ ...unverified, personalGoogle }, NOW), connectionsHealth(unverified, NOW));
+  }
 }
 
 // A saved key nobody tested is set up, not connected.
@@ -374,50 +390,66 @@ assert.equal(
   "configured",
 );
 
+// Google's shared mailbox and the Telegram team bot are proven by their own
+// Test, exactly as Twilio is (2026-10-08): never by a heartbeat.
 const gws = connectorBySlug("google-workspace")!;
-const gwsKeys = [keyRow("gws", "app_password"), keyRow("gws", "from_address")];
-// A healthy heartbeat older than 24h proves nothing about today.
-assert.notEqual(
-  resolveConnectorStatus(gws, {
-    ...EMPTY,
-    keyRows: gwsKeys,
-    heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(25 * HOUR) }],
-  }, NOW).kind,
-  "connected",
-);
-// Nor does one stamped in the future.
-assert.notEqual(
-  resolveConnectorStatus(gws, {
-    ...EMPTY,
-    keyRows: gwsKeys,
-    heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(-HOUR) }],
-  }, NOW).kind,
-  "connected",
-);
-// A fresh failing heartbeat is attention.
+const telegram = connectorBySlug("telegram")!;
+const gwsKeys = (over: Partial<KeyRowFact> = {}) => [keyRow("gws", "app_password", over), keyRow("gws", "from_address", over)];
+const tgKeys = (over: Partial<KeyRowFact> = {}) => [keyRow("telegram", "bot_token", over), keyRow("telegram", "chat_id", over)];
+const label = (def: ConnectorDef, facts: ConnectorFacts) => {
+  const s = resolveConnectorStatus(def, facts, NOW);
+  return `${s.kind} | ${s.label}`;
+};
+assert.equal(label(gws, { ...EMPTY, keyRows: gwsKeys() }), "configured | Set up · not tested yet");
+assert.equal(label(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }) }), "connected | Connected · verified 1m ago");
 assert.equal(
-  resolveConnectorStatus(gws, {
-    ...EMPTY,
-    keyRows: gwsKeys,
-    heartbeats: [{ service: "gws", status: "down", last_ping_at: iso(MIN) }],
-  }, NOW).kind,
-  "attention",
+  label(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "smtp_auth_failed" }) }),
+  "attention | Could not sign in to Gmail",
 );
-// Your own Google link is real, but it never makes the WORKSPACE connected.
-assert.notEqual(
-  resolveConnectorStatus(gws, { keyRows: [], heartbeats: [], personalGoogleLinked: true, connections: [] }, NOW).kind,
+assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(HOUR) }) }), "connected | Connected · verified 1h ago");
+assert.equal(
+  label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "telegram_http_401" }) }),
+  "attention | Bot token not accepted",
+);
+assert.equal(
+  label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "telegram_chat_http_403" }) }),
+  "attention | Bot not in the chat",
+);
+// A code with a detail after a colon is looked up by its name, and an
+// unreachable provider is no verdict on the keys.
+assert.equal(
+  label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "network_error: getaddrinfo ENOTFOUND" }) }),
+  "configured | Set up · Telegram did not answer the last Test",
+);
+// OASIS's own server values: no check of them is ever recorded, so the card
+// says so, never "verified" and never "not tested yet".
+for (const def of [gws, telegram]) {
+  const env = def === gws ? gwsKeys({ source: "environment" }) : tgKeys({ source: "environment" });
+  assert.equal(label(def, { ...EMPTY, keyRows: env }), "configured | Set up on OASIS's server · not verified", def.slug);
+}
+assert.equal(
+  label(twilio, { ...EMPTY, keyRows: twilioKeys({ source: "environment" }) }),
+  "configured | Set up on OASIS's server · not verified",
+  "Twilio's server values follow the same rule",
+);
+// Your own Google account is real, but it never changes the WORKSPACE card's
+// state: it is reported in the detail line, in personalGoogleStatus's words.
+const wrongAccount = { linked: true, calendarScope: true, address: "other@gmail.test", workEmail: "me@workspace.test" };
+const yours = resolveConnectorStatus(gws, { ...EMPTY, personalGoogle: wrongAccount }, NOW);
+assert.deepEqual([yours.kind, yours.label], ["not_connected", "No shared mailbox"]);
+assert.match(yours.detail ?? "", /Your own Google account: Wrong Google account\./);
+const ready = { linked: true, calendarScope: true, address: "me@workspace.test", workEmail: "me@workspace.test" };
+assert.deepEqual(
+  [resolveConnectorStatus(gws, { ...EMPTY, personalGoogle: ready }, NOW).kind, resolveConnectorStatus(gws, { ...EMPTY, personalGoogle: ready }, NOW).label],
+  ["not_connected", "Your account connected · no shared mailbox"],
+);
+assert.equal(
+  resolveConnectorStatus(gws, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }), personalGoogle: null }, NOW).kind,
   "connected",
+  "a personal read that failed never changes the mailbox's state",
 );
-// A heartbeat for one service never lights up another.
-assert.notEqual(
-  resolveConnectorStatus(connectorBySlug("telegram")!, {
-    keyRows: [keyRow("telegram", "bot_token"), keyRow("telegram", "chat_id")],
-    heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }],
-    personalGoogleLinked: true,
-    connections: [],
-  }, NOW).kind,
-  "connected",
-);
+// One service's check never lights up another.
+assert.notEqual(label(telegram, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }) }).split(" | ")[0], "connected");
 
 // The UI cannot upgrade a status: no component under the hub or Settings
 // writes a "connected" kind of its own, the hub reads a missing status as
@@ -449,7 +481,7 @@ const slackDef = connectorBySlug("slack")!;
 assert.deepEqual(slackDef.live?.source, { kind: "tenant_connection", provider: "slack" });
 assert.deepEqual(slackDef.live?.connect, { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" });
 assert.equal(
-  resolveConnectorStatus(slackDef, { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [], appNotConfigured: ["slack"] }, Date.now()).label,
+  resolveConnectorStatus(slackDef, { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: ["slack"] }, Date.now()).label,
   "Slack app not configured yet",
 );
 assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
@@ -459,7 +491,9 @@ assert.match(read("app/settings/chat-apps/page.tsx"), /Telegram teammates are no
 assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /Phase 2|Coming soon/);
 assert.match(read("app/settings/notifications/page.tsx"), /Choosing what notifies you is not built yet/);
 assert.doesNotMatch(read("app/settings/notifications/page.tsx"), /Phase 2|arrives with/);
-assert.match(read("components/os/aiteam/TeammateRow.tsx"), /Telegram · alerts only/);
+// The AI Team names Telegram only where the workspace has a team bot set up
+// (the Telegram card's own status), never as a fixed line on every row.
+assert.match(read("components/os/aiteam/TeammateRow.tsx"), /\{telegramSetUp && <li className="text-fg-dim">Telegram · alerts only<\/li>\}/);
 assert.doesNotMatch(read("components/os/aiteam/TeammateRow.tsx"), /Phase 2/);
 // The connector drawer's coming-soon note is the state too, not a date:
 // "scheduled for the next release" promised a release nobody had scheduled.

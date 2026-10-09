@@ -14,10 +14,15 @@
  *
  * Field schema conforms exactly to lib/forms/types.ts FormField / FormStep
  * shapes — same validator that /api/forms POST runs.
+ *
+ * WHO (MKT-02, 2026-10-02): creating a form from a template is creating a
+ * form, so it needs canEditForms (formsSession, lib/forms/access.ts) and
+ * files it in the session's workspace, like POST /api/forms.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { formsSession } from "@/lib/forms/access";
 import { getFormTheme } from "@/lib/forms/themes";
 import {
   SUNBIZ_SLUGS,
@@ -42,24 +47,11 @@ export async function POST(
   _req: NextRequest,
   ctx: { params: Promise<{ step: string }> },
 ) {
-  const user = await getSessionUser();
-  if (!user) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
+  const auth = await formsSession({ edit: true });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
 
   const db = getServiceSupabase();
-
-  // Resolve tenant
-  const profileRow = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId =
-    (profileRow.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
-  if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 401 });
-  }
 
   const { step } = await ctx.params;
 
@@ -91,7 +83,7 @@ export async function POST(
       on_complete_stage: template.on_complete_stage,
       step_outcomes: template.step_outcomes,
       enabled: true,
-      created_by: user.id,
+      created_by: auth.session.userId,
     })
     .select("id")
     .single();

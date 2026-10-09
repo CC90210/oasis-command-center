@@ -6,6 +6,7 @@ import { ManifestEditorChat } from "@/components/manifest/ManifestEditorChat";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getManifestRow } from "@/lib/manifest/persistence";
 import { requireOwnedTenantSlug } from "@/lib/tenant-access";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -33,6 +34,8 @@ export default async function ManifestEditorPage({
   const manifest = await getManifest(normalised);
   const row = await getManifestRow(normalised).catch(() => null);
   const version = row?.version ?? 0;
+  // How the editor names this workspace's agents (lib/os/agent-names.ts).
+  const internalNames = await viewerReadsInternalAgentNames();
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -57,6 +60,7 @@ export default async function ManifestEditorPage({
         slug={normalised}
         initialManifest={manifest}
         initialVersion={version}
+        internalNames={internalNames}
       />
     </div>
   );

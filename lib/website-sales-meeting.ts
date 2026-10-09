@@ -1,4 +1,5 @@
 import { countSegments } from "./sms-segments";
+import { isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i;
@@ -13,6 +14,28 @@ export type FounderReminderKind = "reminder_60" | "reminder_30" | "ten_minute";
 export const SMS_STOP_FOOTER =
   "Reply STOP to opt out. HELP for help. Msg & data rates may apply.";
 const SMS_BRAND_PREFIX = "OASIS AI:";
+
+/** Who an automated meeting text speaks for, and the clock its times read in. */
+export type MeetingSmsVoice = { prefix: string; timeZone: string };
+
+/**
+ * The voice of a workspace's automated meeting texts, or null when it has
+ * none.
+ *
+ * Only OASIS's own workspaces run the founder-meeting program, and only their
+ * sender identity is verified for automated texts: "OASIS AI:", in
+ * FOUNDER_MEETING_TIMEZONE. Any other workspace gets null, never OASIS's voice
+ * by default, and the SMS reply agent answers none of its texts: it hands each
+ * one to that workspace's own team instead (lib/sms/reply-agent.ts). Keyed by
+ * exact tenant id through isOasisInternalTenant, the same rule that sends
+ * alerts to OASIS's own chat (lib/notify/alert-route.ts), so "is this OASIS"
+ * has one answer.
+ */
+export function meetingSmsVoiceFor(tenantId: string | null | undefined): MeetingSmsVoice | null {
+  return isOasisInternalTenant(tenantId)
+    ? { prefix: SMS_BRAND_PREFIX, timeZone: FOUNDER_MEETING_TIMEZONE }
+    : null;
+}
 
 export type FounderMeetingContact = {
   name: string | null;
@@ -121,23 +144,27 @@ export function founderMeetingDedupeKey(
   return `${appointmentId}:${revision}:${kind}:${channel}`;
 }
 
-function withBrandPrefix(body: string): string {
+function withBrandPrefix(body: string, prefix: string): string {
   const trimmed = body.trim();
-  if (!trimmed) return SMS_BRAND_PREFIX;
-  if (trimmed.toUpperCase().startsWith(SMS_BRAND_PREFIX)) return trimmed;
-  return `${SMS_BRAND_PREFIX} ${trimmed}`;
+  if (!trimmed) return prefix;
+  if (trimmed.toUpperCase().startsWith(prefix.toUpperCase())) return trimmed;
+  return `${prefix} ${trimmed}`;
 }
 
+/**
+ * `prefix` is the sender's voice (meetingSmsVoiceFor). Left out, it is OASIS's:
+ * the founder-meeting reminders, which only OASIS's own program sends.
+ */
 export function withSmsFooter(
   body: string,
-  input: { firstInConversation: boolean },
+  input: { firstInConversation: boolean; prefix?: string },
 ): string {
-  const branded = withBrandPrefix(body);
+  const branded = withBrandPrefix(body, input.prefix ?? SMS_BRAND_PREFIX);
   if (!input.firstInConversation || branded.includes(SMS_STOP_FOOTER)) return branded;
   return `${branded}\n${SMS_STOP_FOOTER}`;
 }
 
-export function clampSmsBody(body: string, maxSegments = 2): string {
+export function clampSmsBody(body: string, maxSegments = 2, prefix: string = SMS_BRAND_PREFIX): string {
   if (!Number.isInteger(maxSegments) || maxSegments < 1) {
     throw new Error("invalid_sms_segment_budget");
   }
@@ -157,7 +184,7 @@ export function clampSmsBody(body: string, maxSegments = 2): string {
   const meetLink = original.match(/https:\/\/meet\.google\.com\/[a-z0-9-]+/i)?.[0] ?? null;
   const hasFooter = original.includes(SMS_STOP_FOOTER);
   const protectedMessage = [
-    `${SMS_BRAND_PREFIX} Meeting reminder.`,
+    `${prefix} Meeting reminder.`,
     meetLink ? `Join: ${meetLink}` : null,
     hasFooter ? SMS_STOP_FOOTER : null,
   ].filter(Boolean).join("\n");

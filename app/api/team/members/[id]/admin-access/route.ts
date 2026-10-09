@@ -21,6 +21,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, isTrueAdminRole } from "@/lib/team";
+import { dbBool } from "@/lib/db-bool";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,7 +54,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (!target) return bad(404, "member_not_found");
   // Tenant isolation + owner carve-out.
   if (target.tenant_id !== session.tenantId) return bad(403, "forbidden");
-  if (target.is_owner) return bad(403, "cannot_toggle_owner");
+  if (dbBool(target.is_owner)) return bad(403, "cannot_toggle_owner");
 
   const { error: uErr } = await supa
     .from("user_profiles")

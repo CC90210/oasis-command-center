@@ -3,7 +3,9 @@ import { cookies, headers } from "next/headers";
 import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
 import { MainShell } from "@/components/MainShell";
-import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";
+// From a plain module, never the "use client" hook: <head> must arrive as a
+// string, not a chunk reference React waits on (lib/sidebar-boot.ts, #418).
+import { SIDEBAR_BOOT_SCRIPT } from "@/lib/sidebar-boot";
 import { getActiveProfile, getTenant } from "@/lib/queries";
 import { resolvePrimaryAgent } from "@/lib/shell-status";
 import { safe } from "@/lib/api-helpers";

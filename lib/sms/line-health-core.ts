@@ -44,8 +44,24 @@ export type LineDecision = {
   reason: string;
 };
 
-function newestFirst(samples: LineSample[]): LineSample[] {
+function newestFirst<S extends Pick<LineSample, "status" | "at">>(samples: S[]): S[] {
   return samples.filter((s) => s.status === "delivered" || s.status === "failed").sort((a, b) => b.at - a.at);
+}
+
+/**
+ * The newest carrier verdict in a history: "delivered", "failed", or null when
+ * there is none (no receipts, or only pending/unknown ones).
+ *
+ * A delivery here is the only evidence that a benched line, or a halted wire,
+ * works again: it is newer than every failure in the history. "Not benched" is
+ * weaker. A line's failures age out of the window and it reads "not benched"
+ * with nothing proving it delivers, and an outage card closed on that pages
+ * again as new the next time it fails.
+ */
+export function newestVerdict(samples: Array<Pick<LineSample, "status" | "at">>): "delivered" | "failed" | null {
+  const newest = newestFirst(samples)[0];
+  if (!newest) return null;
+  return newest.status === "delivered" ? "delivered" : "failed";
 }
 
 /**

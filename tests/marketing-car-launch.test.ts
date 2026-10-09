@@ -66,8 +66,27 @@ assert.match(
 assert.match(stage, /onFailRef\.current\?\.\(\)/, "CarStage no longer reports failure");
 assert.match(
   stage,
-  /try \{\s*THREE = await import\("three"\);\s*\} catch/,
+  /try \{\s*THREE = await loadThree\(\);\s*\} catch/,
   "the three.js import is unguarded again — a 404 chunk strands the page silently",
+);
+
+// -- three.js stays out of the server bundle --------------------------------
+
+// `typeof window` is "undefined" when the server compiles this client
+// component for SSR, so webpack drops loadThree's import branch unread and the
+// Cloudflare Worker never bundles three.js (about 1 MB it could never run: the
+// import is only reached from an effect). An import anywhere else in the file
+// puts it back in the Worker, against a hard 64 MiB upload limit.
+assert.match(
+  stage,
+  /function loadThree\(\)[^{]*\{\s*return typeof window === "undefined"\s*\?\s*Promise\.reject\([^)]*\)\)?\s*:\s*import\("three"\);\s*\}/,
+  "the three.js import is no longer browser-only: the server bundle carries three.js again",
+);
+const stageCode = stage.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'])\/\/.*$/gm, "$1");
+assert.equal(
+  (stageCode.match(/(?<!typeof )import\(\s*["']three["']\s*\)/g) || []).length,
+  1,
+  "three.js is imported outside loadThree(), so the server bundle carries it again",
 );
 assert.match(
   builder,

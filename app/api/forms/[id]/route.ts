@@ -11,11 +11,16 @@
  *          (rare; only used during cleanup). A workspace's support desk
  *          intake form is refused with 409 support_desk_form; the list's
  *          on/off toggle pauses it instead (lib/delivery/desks.ts).
+ *
+ * WHO (MKT-02, 2026-10-02): the workspace is the session's (formsSession,
+ * lib/forms/access.ts), and every read and write carries its tenant_id, so
+ * another workspace's form id is a 404. PATCH and DELETE need canEditForms:
+ * a member who may not edit gets 403 and the form is untouched.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveTenantId } from "@/lib/api-auth";
+import { formsSession } from "@/lib/forms/access";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -30,8 +35,9 @@ export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const auth = await formsSession({ edit: false });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
   const { id } = await ctx.params;
 
   const db = getServiceSupabase();
@@ -54,8 +60,9 @@ export async function PATCH(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const auth = await formsSession({ edit: true });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
   const { id } = await ctx.params;
 
   let body: Record<string, unknown>;
@@ -134,15 +141,20 @@ export async function PATCH(
   }
 
   const db = getServiceSupabase();
+  // maybeSingle: no row means the id is not this workspace's form (or is
+  // gone), which is a 404, not the driver's "no rows" error as a 500.
   const { data, error } = await db
     .from("forms")
     .update(patch)
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .select()
-    .single();
+    .maybeSingle();
   if (error) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+  if (!data) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true, form: data });
 }
@@ -151,8 +163,9 @@ export async function DELETE(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenantId = await resolveTenantId();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const auth = await formsSession({ edit: true });
+  if (!auth.ok) return auth.response;
+  const tenantId = auth.session.tenantId;
   const { id } = await ctx.params;
 
   const db = getServiceSupabase();

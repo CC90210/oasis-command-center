@@ -18,6 +18,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { aiServicesWithKey } from "@/lib/queries";
+import { readPersonalAiServices } from "@/lib/ai/workspace-account";
 import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
 import { connectorHref } from "@/lib/os/connectors";
 import type { ManifestRequiredService } from "@/lib/manifest/schema";
@@ -49,7 +50,7 @@ const DEFAULT_REQUIRED_SERVICES: ManifestRequiredService[] = [
     label: "AI provider key (Anthropic / OpenRouter / Gemini / OpenAI)",
     kind: "ai_provider",
     detail:
-      "Powers backend automations + Claude-driven workflows. Chat itself uses your local bridge + CLI; this key is for the cron / agent loops.",
+      "No AI account is connected for the whole team yet, so department chats and Slack mentions cannot answer.",
   },
 ];
 
@@ -144,8 +145,10 @@ export async function loadReadinessReport(args: {
           .in("service", credentialServices)
           .then((r) => (r.data || []) as { service: string }[])
       : Promise.resolve([] as { service: string }[]),
-    // null = the key read failed (aiServicesWithKey throws): the item says
-    // "Couldn't check", never "No AI provider key on file".
+    // The workspace's AI account (lib/ai/workspace-account.ts): the key every
+    // department chat uses, never a teammate's personal key. null = the key
+    // read failed (aiServicesWithKey throws): the item says "Couldn't check",
+    // never "No AI provider key on file".
     needsAiCheck
       ? aiServicesWithKey(tenantId).catch((err) => {
           console.error("[setup-readiness] AI key read failed", err instanceof Error ? err.message : err);
@@ -181,13 +184,26 @@ export async function loadReadinessReport(args: {
         continue;
       }
       const haveAny = aiKeySet.size > 0;
+      // A key the viewer saved for their own chats is reported apart: it does
+      // not make the workspace connected, and saying nothing would hide why.
+      // A failed read only drops this note (logged); the status stands.
+      const personalOnly =
+        !haveAny && userId
+          ? ((
+              await readPersonalAiServices(tenantId, userId).catch((err) => {
+                console.error("[setup-readiness] personal AI key read failed", err instanceof Error ? err.message : err);
+                return null;
+              })
+            )?.size ?? 0) > 0
+          : false;
       tenant.push({
         key: `tenant.${req.service}`,
         label: req.label,
         status: haveAny ? "ok" : "warn",
         detail: haveAny
           ? `Connected: ${Array.from(aiKeySet).sort().join(", ")}.`
-          : req.detail || "No AI provider key on file — backend automations cannot run.",
+          : (req.detail || "No AI provider key on file — backend automations cannot run.") +
+            (personalOnly ? " Your personal key is saved, but department chats don't use it." : ""),
         cta: haveAny
           ? undefined
           : req.cta || { href: "/settings#agents", label: "Add AI key" },

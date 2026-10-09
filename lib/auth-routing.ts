@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { dbBool } from "@/lib/db-bool";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { safeInternalPath } from "@/lib/turso-auth-admin";
 import { finalizeInviteProfile, type InviteProfilePlan } from "@/lib/invite-profile-finalization";
@@ -167,14 +168,15 @@ function chooseProfileForLogin(
     }
   }
 
+  // dbBool (lib/db-bool.ts): a stored "0" must not pick a seat as the owner's.
   return (
     candidates.find((row) => {
       const brand = (row.brand || "").toLowerCase();
-      return row.is_owner && row.primary_agent === "bravo" && brand.includes("oasis");
+      return dbBool(row.is_owner) && row.primary_agent === "bravo" && brand.includes("oasis");
     }) ||
-    candidates.find((row) => row.is_owner && row.onboarding_completed_at) ||
+    candidates.find((row) => dbBool(row.is_owner) && row.onboarding_completed_at) ||
     candidates.find((row) => row.onboarding_completed_at) ||
-    candidates.find((row) => row.is_owner) ||
+    candidates.find((row) => dbBool(row.is_owner)) ||
     candidates[0]
   );
 }

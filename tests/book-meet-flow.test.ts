@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   BOOK_MEET_COPY,
+  needsFreshBookingId,
   DEFAULT_CLIENT_AGENDA,
   KIND_SENTENCE,
   bookMeetBlockedReason,
@@ -233,7 +234,7 @@ async function main() {
   }
   for (const text of Object.values(KIND_SENTENCE)) assert.doesNotMatch(text, /—/);
   assert.match(bookMeetMessage("something_new", "unconfirmed"), /not confirmed/);
-  assert.match(KIND_SENTENCE.unconfirmed, /15 minutes/);
+  assert.match(KIND_SENTENCE.unconfirmed, /20 minutes/);
   assert.doesNotMatch(readFileSync("lib/web-leads/book-meet-flow.ts", "utf8"), /—/, "no em dash in the flow module");
 
   // 14. Call Mode cursor after a booking (Review Focus 2).
@@ -276,6 +277,39 @@ async function main() {
     assert.equal(rc.result.kind === "fix" ? rc.result.field : null, "dnc");
     assert.match(BOOK_MEET_COPY.do_not_call, /owner asked/i);
   }
+
+  // Codex P1 on #533: a retry of a booking id that already reached the server
+  // must reach the route's idempotent replay even though the lead now reads as
+  // already_booked; a NEW booking (bookingMayExist false) is still refused.
+  {
+    const BOOKED_CTX: HttpResult = { status: 200, body: { ok: true, stage: "founder_meeting_booked", canBook: false, blocked: "already_booked", doNotCall: false } };
+    const replay = fakeIO({ getContext: [BOOKED_CTX], patchBooking: [{ status: 200, body: { ...BOOKED.body, idempotent: true } }] });
+    const r = await runBookMeetFlow(draft(), ids, { outcomeSaved: true, bookingMayExist: true }, replay.io, null);
+    assert.equal(r.result.kind, "booked", "the replay finishes the existing booking");
+    assert.deepEqual(replay.calls.map((c) => c.op), ["getContext", "patchBooking"]);
+    assert.equal(replay.calls[1].body!.requestId, ids.bookingRequestId, "the replay reuses the SAME booking id");
+    const fresh = fakeIO({ getContext: [BOOKED_CTX], patchBooking: [BOOKED] });
+    const f = await runBookMeetFlow(draft(), ids, { outcomeSaved: true }, fresh.io, null);
+    assert.equal(f.result.kind, "blocked", "a new booking on an already-booked lead is refused before the PATCH");
+    assert.deepEqual(fresh.calls.map((c) => c.op), ["getContext"]);
+  }
+
+  // Codex P2 on #536: a cancelled attempt is spent; classify it retry-safe (not
+  // "unconfirmed", which would resend the dead id) and ask for a fresh id.
+  {
+    const { io } = fakeIO({ getContext: [CTX], patchBooking: [{ status: 503, body: { ok: false, error: "booking_request_cancelled" } }] });
+    const { result } = await runBookMeetFlow(draft(), ids, { outcomeSaved: true }, io, null);
+    assert.equal(result.kind, "retry_safe");
+    assert.equal(needsFreshBookingId(result), true);
+    assert.equal(needsFreshBookingId({ kind: "unconfirmed", code: "calendar_create_failed", message: "" }), false);
+    const panel = readFileSync("components/web-leads/BookMeetPanel.tsx", "utf8");
+    assert.match(panel, /bookingMayExist: sentBookingRef\.current === attempt\.booking/, "the panel tells the flow when a retry is a replay");
+    assert.match(panel, /needsFreshBookingId\(result\)\)\s*\{\s*idsRef\.current = \{ \.\.\.attempt, bookingSig: "" \}/, "the panel renews the booking id after a cancelled attempt");
+  }
+
+  // An organiser mismatch can follow a created Google event that is then
+  // cancelled: the copy must not let a rep tell the client nothing was sent.
+  assert.match(BOOK_MEET_COPY.calendar_organizer_mismatch, /cancelled automatically within 20 minutes/);
 
   console.log("book-meet-flow: OK");
 }

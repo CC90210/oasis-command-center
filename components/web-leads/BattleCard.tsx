@@ -59,7 +59,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import localFont from "next/font/local";
-import { ArrowLeft, ChevronDown, ExternalLink, Phone } from "lucide-react";
+import { ArrowLeft, CalendarCheck, ChevronDown, ExternalLink, Phone } from "lucide-react";
 import type { AuditResult, CheckResult, DimensionProfile, UrlVerification, RecheckStatus } from "@/lib/web-leads/audit";
 import { assessTrust, type TrustAssessment } from "@/lib/web-leads/trust";
 import type { CompetitorContext } from "@/lib/web-leads/competitors";
@@ -69,6 +69,7 @@ import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/we
 import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
+import { BookMeetPanel } from "./BookMeetPanel";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { ObjectionConsole } from "./ObjectionConsole";
 import { BattleSection, BattleSections, SectionToolbar } from "./BattleSection";
@@ -478,6 +479,17 @@ export function BattleCard({
   const [recheckPost, setRecheckPost] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
+  // Book the Meet opens in place, above the call outcomes. The Hero's button
+  // opens it and scrolls there, so a rep who is mid-sentence at the top of the
+  // card does not have to hunt for it.
+  const [bookOpen, setBookOpen] = useState(false);
+  const bookRef = useRef<HTMLDivElement>(null);
+  const openBooking = () => {
+    setBookOpen(true);
+    window.requestAnimationFrame(() =>
+      bookRef.current?.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" }),
+    );
+  };
   // One presence enqueue per lead per mount -- see the effect below.
   const presenceAskedRef = useRef(false);
   // What the card actually knows about that enqueue, which is what the
@@ -537,6 +549,7 @@ export function BattleCard({
     presenceAskedRef.current = false;
     setPresenceAsk({ status: "idle" });
     setPresencePolls(0);
+    setBookOpen(false);
   }, [leadId]);
 
   // ON-DEMAND presence (phase 2): opening a card whose presence blob is
@@ -674,7 +687,7 @@ export function BattleCard({
 
   return (
     <div className={`${displayFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
-      <Hero lead={lead} audit={audit} competitors={competitors} canMutate={canMutate} embedded={embedded} scoreHidden={Boolean(trust.hide)} />
+      <Hero lead={lead} audit={audit} competitors={competitors} canMutate={canMutate} embedded={embedded} scoreHidden={Boolean(trust.hide)} onBookMeet={canMutate ? openBooking : undefined} />
       <BattleSections>
         <div className={embedded ? "space-y-4 pt-4" : "mx-auto max-w-6xl space-y-4 px-4 pb-16 pt-4 lg:px-8"}>
           <SectionToolbar />
@@ -807,6 +820,24 @@ export function BattleCard({
                 heading. Deliberately NOT collapsible: this is the card's one
                 write surface, and the transfer to the pipeline must never be
                 sitting behind a closed drawer when the call ends. */}
+            {/* Book the Meet sits ABOVE the outcome buttons in the same plain
+                Panel: never collapsible, for the same reason the call log is
+                not. Only for a rep who may work this lead. */}
+            <div id="book-meet" ref={bookRef} className={canMutate ? "mb-4 scroll-mt-24" : "scroll-mt-24"}>
+              {canMutate && (
+                bookOpen ? (
+                  <BookMeetPanel leadId={leadId} businessName={lead.name} variant="card" onClose={() => setBookOpen(false)} />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setBookOpen(true)}
+                    className="flex min-h-14 w-full items-center justify-center gap-2 rounded-lg border border-accent bg-accent px-4 text-base font-bold text-white transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:min-h-11 sm:text-sm"
+                  >
+                    <CalendarCheck className="h-4 w-4" aria-hidden />Book the Meet
+                  </button>
+                )
+              )}
+            </div>
             <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
           </Panel>
         </div>
@@ -856,7 +887,7 @@ function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
  * everything here is information.
  */
 function Hero({
-  lead, audit, competitors, canMutate, embedded = false, scoreHidden = false,
+  lead, audit, competitors, canMutate, embedded = false, scoreHidden = false, onBookMeet,
 }: {
   lead: WebLead;
   audit: AuditResult;
@@ -866,6 +897,9 @@ function Hero({
   /** Trust said the stored score cannot be stood behind: render no number
    *  anywhere, including here and the percentile it feeds. */
   scoreHidden?: boolean;
+  /** Opens Book the Meet further down the card. Absent for anyone who may
+   *  not work this lead, so the button is not rendered at all. */
+  onBookMeet?: () => void;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
   return (
@@ -924,6 +958,15 @@ function Hero({
                 >
                   <ExternalLink className="h-4 w-4" />View website
                 </a>
+              )}
+              {onBookMeet && (
+                <button
+                  type="button"
+                  onClick={onBookMeet}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-accent bg-bg-panel px-4 text-sm font-semibold text-fg transition-colors hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:py-3"
+                >
+                  <CalendarCheck className="h-4 w-4" aria-hidden />Book the Meet
+                </button>
               )}
             </div>
           </div>

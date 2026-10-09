@@ -681,10 +681,12 @@ async function main() {
     "sms_reschedule_meeting",
     "status IN ('pending','running')",
     'agent_source: "sms_reply_agent"',
-    'lane: "operator"',
   ]) {
     assert(workerSource.includes(required), `worker must include ${required}`);
   }
+  // Whose Telegram an escalation reaches is the workspace's, decided in
+  // lib/notify/alert-route.ts; the worker never names a lane.
+  assert.doesNotMatch(workerSource, /\blane:\s*["']/);
   assert.match(workerSource, /\.eq\("status", "pending"\)[\s\S]*?\.maybeSingle\(\)/, "jobs are claimed by CAS");
   assert.match(
     workerSource,
