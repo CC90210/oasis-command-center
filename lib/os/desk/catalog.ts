@@ -261,11 +261,14 @@ export const DEPARTMENT_PALETTES: Readonly<Record<DepartmentKey, readonly DeskTo
 
 /**
  * The tools a department's turn is offered. Plan mode (the channel's /plan)
- * keeps the reads and drops every proposal: plan mode is research only.
+ * keeps the reads and drops every proposal: plan mode is research only. A
+ * member who may not act (canAct false: read_only) gets no proposal either;
+ * ./tools.ts enforces the same rule again when a tool runs.
  */
-export function deskPalette(dept: DepartmentKey, opts: { planMode?: boolean } = {}): DeskTool[] {
+export function deskPalette(dept: DepartmentKey, opts: { planMode?: boolean; canAct?: boolean } = {}): DeskTool[] {
   const names = DEPARTMENT_PALETTES[dept] ?? [];
-  return names.map((n) => DESK_TOOLS[n]).filter((t) => !(opts.planMode && t.kind === "proposal"));
+  const proposals = !opts.planMode && opts.canAct !== false;
+  return names.map((n) => DESK_TOOLS[n]).filter((t) => proposals || t.kind !== "proposal");
 }
 
 /**

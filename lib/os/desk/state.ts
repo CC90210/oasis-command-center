@@ -25,8 +25,7 @@ import { departmentProfile } from "@/components/os/department/config";
 import { loadDepartmentNumbers } from "@/components/os/department/numbers";
 import { loadTenantRoutines, type Read } from "@/components/os/department/routines";
 import type { RoutineRow } from "@/components/os/department/routine-rules";
-import { loadPendingApprovals } from "@/components/os/approvals/load";
-import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
+import { deskApprovals } from "./proposals";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import {
   CONNECTOR_CATALOG,
@@ -122,16 +121,8 @@ export async function loadDepartmentState(viewer: OsViewer, dept: OsDepartment, 
   const wantsPipeline = dept.key === "sales" || dept.key === "chief_of_staff";
   const [numbers, approvals, pipeline, tickets, routines, connections] = await Promise.all([
     timed("numbers", async () => loadDepartmentNumbers(dept, viewer, await routinesRead)),
-    timed("approvals", async () => {
-      const r = await loadPendingApprovals({
-        scope: approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput }),
-        tenantSlug: viewer.surface.tenantSlug,
-        department: dept.key === "chief_of_staff" ? null : dept.key,
-        limit: 5,
-      });
-      if (!r.ok) throw new Error("approvals read failed");
-      return r.value;
-    }),
+    // An owner or admin: Needs you's cards; anyone else: their own drafts (./proposals.ts).
+    timed("approvals", () => deskApprovals(viewer, dept.key === "chief_of_staff" ? null : dept.key, 5)),
     wantsPipeline ? timed("pipeline", async () => readPipeline(viewer)) : Promise.resolve(null),
     dept.key === "client_success" ? timed("tickets", () => loadOpenTickets(viewer, nowMs)) : Promise.resolve(null),
     dept.key === "operations"
@@ -157,7 +148,7 @@ export async function loadDepartmentState(viewer: OsViewer, dept: OsDepartment, 
     tiles: numbers.ok ? numbers.value.tiles : null,
     attention: numbers.ok ? numbers.value.attention.map((a) => ({ label: a.label, count: a.count })) : null,
     approvals: approvals.ok
-      ? { total: approvals.value.total, items: approvals.value.items.map((a) => ({ title: a.title, department: a.department_label })) }
+      ? { total: approvals.value.total, own: approvals.value.own, items: approvals.value.items.map((a) => ({ title: a.title, department: a.department })) }
       : null,
     connections: connections.ok ? connections.value : null,
   };

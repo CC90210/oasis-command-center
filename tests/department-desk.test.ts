@@ -33,6 +33,12 @@ process.env.TURSO_DB_PATH = dbFile;
 delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
 delete process.env.LEAD_SCOPING_MODE;
+// A credential-shaped env value (lib/secret-redaction.ts snapshots these on
+// first use), and one workspace-vault value, planted in workspace data below:
+// neither may reach a provider request or the browser.
+const ENV_SECRET = "sk-desk-env-secret-0123456789abcdef";
+const VAULT_SECRET = "vault-desk-secret-zyxwvutsrqpo";
+process.env.DESK_FIXTURE_API_KEY = ENV_SECRET;
 
 function stub(request: string, exports: Record<string, unknown>) {
   const p = require.resolve(request);
@@ -102,7 +108,27 @@ async function main() {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT, agent_key TEXT, name TEXT, description TEXT,
       schedule TEXT, enabled INTEGER, last_run_at TEXT, last_run_status TEXT, created_at TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT, team_role TEXT,
+      full_name TEXT, display_name TEXT);
   `);
+  // The approvals tables as the migrations write them (and the ledger they mirror into).
+  const splitSql = (sql: string) => {
+    const out: string[] = [];
+    let buf: string[] = [];
+    for (const line of sql.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("--")) continue;
+      buf.push(line);
+      if (t.endsWith(";")) {
+        out.push(buf.join("\n").trim().replace(/;$/, ""));
+        buf = [];
+      }
+    }
+    if (buf.join("").trim()) out.push(buf.join("\n").trim());
+    return out;
+  };
+  for (const stmt of splitSql(readFileSync(join(process.cwd(), "database/turso/bravo__186_os_approvals.sql"), "utf8"))) await db.execute(stmt);
+  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__190_ledger_core.sql"), "utf8"));
   const past = new Date(Date.now() - 3 * 86_400_000).toISOString();
   const now = new Date().toISOString();
   const lead = (id: string, tenant: string, data: Record<string, unknown>) => ({
@@ -441,6 +467,134 @@ async function main() {
   });
   await check("a signed-out or unreadable viewer gets no workspace data either", async () => {
     const g = await groundDepartmentTurn({ turn: baseTurn("google"), viewer: { ok: false, reason: "degraded" }, maxTokens: 256, plainStream });
+    assert.equal(g?.tools.on, false);
+    assert.doesNotMatch(String(g?.system), /Harbor Bakery/);
+  });
+
+  console.log("Drafts: who may propose, and whose draft a revision may replace");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const acmeOtherRep = viewerFor(ACME, "acme-roofing", "sales", OTHER_REP) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const acmeReadOnly = viewerFor(ACME, "acme-roofing", "readonly", "0e000000-0000-4000-8000-000000000009") as any;
+  const draft = (extra: Record<string, unknown> = {}) => ({ to: "lee@harbor.test", subject: "Following up", body: "Hi Lee, checking in.", ...extra });
+  const pendingCards = async () =>
+    (await db.execute("SELECT id, status, idempotency_key FROM approvals ORDER BY created_at, id")).rows.map((r) => ({ id: String(r.id), status: String(r.status), key: String(r.idempotency_key) }));
+  let repCardId = "";
+  await check("a rep's draft is one pending card, owned by that rep", async () => {
+    assert.equal(acmeRep.surface.capabilities.canAct, true);
+    const r = await deskToolset({ viewer: acmeRep, dept: dept("sales"), agentSlug: "sdr" }).execute("propose_email", draft());
+    assert.equal(r.is_error, false, r.content);
+    repCardId = JSON.parse(r.content).approval_id;
+    const card = (await pendingCards()).find((c) => c.id === repCardId);
+    assert.equal(card?.status, "pending");
+    assert.ok(card?.key.startsWith(`desk:${REP}:`), card?.key);
+  });
+  await check("a read-only member is never offered a draft, and cannot create or revise one when it runs", async () => {
+    assert.equal(acmeReadOnly.surface.capabilities.canAct, false);
+    const tools = deskToolset({ viewer: acmeReadOnly, dept: dept("client_success"), agentSlug: "customer-support" });
+    assert.ok(!tools.tools.some((t) => t.name === "propose_email"));
+    const before = (await pendingCards()).length;
+    const create = await tools.execute("propose_email", draft({ subject: "From read-only" }));
+    const revise = await tools.execute("propose_email", draft({ subject: "Replaced", revises_approval_id: repCardId }));
+    assert.equal(create.is_error, true);
+    assert.equal(revise.is_error, true);
+    assert.equal((await pendingCards()).length, before);
+    assert.equal((await pendingCards()).find((c) => c.id === repCardId)?.status, "pending");
+  });
+  await check("a member whose role lost 'act' mid-turn is refused when the draft runs, not only when it is offered", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const v = viewerFor(ACME, "acme-roofing", "sales", REP) as any;
+    v.surface = { ...v.surface, capabilities: { ...v.surface.capabilities } };
+    const tools = deskToolset({ viewer: v, dept: dept("sales"), agentSlug: "sdr" });
+    assert.ok(tools.tools.some((t) => t.name === "propose_email"));
+    v.surface.capabilities.canAct = false;
+    const before = (await pendingCards()).length;
+    const r = await tools.execute("propose_email", draft({ subject: "Too late" }));
+    assert.equal(JSON.parse(r.content).error, "read_only_member_cannot_propose");
+    assert.equal((await pendingCards()).length, before);
+  });
+  await check("the draft function itself refuses a member who may not act, whoever calls it", async () => {
+    const { proposeDeskEmail } = await import("../lib/os/desk/proposals");
+    const before = (await pendingCards()).length;
+    await assert.rejects(() => proposeDeskEmail(acmeReadOnly, dept("client_success"), "customer-support", draft({ subject: "Direct" }), new Date()), /proposer_may_not_act/);
+    assert.equal((await pendingCards()).length, before);
+  });
+  await check("another rep on the same Sales agent cannot replace that rep's pending draft", async () => {
+    const r = await deskToolset({ viewer: acmeOtherRep, dept: dept("sales"), agentSlug: "sdr" }).execute("propose_email", draft({ subject: "Hijack", revises_approval_id: repCardId }));
+    assert.equal(r.is_error, true);
+    assert.match(r.content, /supersedes_not_yours/);
+    assert.equal((await pendingCards()).find((c) => c.id === repCardId)?.status, "pending");
+  });
+  await check("another rep's approvals list and summary never show that rep's draft; the rep's own do", async () => {
+    const other = await deskToolset({ viewer: acmeOtherRep, dept: dept("sales"), agentSlug: "sdr" }).execute("approvals_list", {});
+    assert.doesNotMatch(other.content, new RegExp(repCardId));
+    assert.equal(JSON.parse(other.content).waiting, 0);
+    const own = await deskToolset({ viewer: acmeRep, dept: dept("sales"), agentSlug: "sdr" }).execute("approvals_list", {});
+    assert.match(own.content, new RegExp(repCardId));
+    const otherState = renderDepartmentState(await loadDepartmentState(acmeOtherRep, dept("sales")), { on: true, tools: catalog.deskPalette("sales") });
+    assert.match(otherState, /Drafts this person proposed, still waiting: 0/);
+    assert.doesNotMatch(otherState, /Following up/);
+  });
+  await check("the rep revises their own draft; an owner may revise it too", async () => {
+    const own = await deskToolset({ viewer: acmeRep, dept: dept("sales"), agentSlug: "sdr" }).execute("propose_email", draft({ subject: "Following up, v2", revises_approval_id: repCardId }));
+    assert.equal(own.is_error, false, own.content);
+    const v2 = JSON.parse(own.content).approval_id;
+    const byOwner = await deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr" }).execute("propose_email", draft({ subject: "Following up, v3", revises_approval_id: v2 }));
+    assert.equal(byOwner.is_error, false, byOwner.content);
+  });
+
+  console.log("Secrets never reach the provider or the browser");
+  await check("env and workspace-vault secrets in workspace data are scrubbed from the prompt, every tool result and the reply", async () => {
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data, created_at, updated_at) VALUES ('lead-acme-secret', ?, 'lead', ?, ?, ?)",
+      args: [ACME, JSON.stringify({ name: `Secretive Co ${ENV_SECRET}`, company: `Vaulted ${VAULT_SECRET}`, stage: "contacted", next_action_at: past }), now, now],
+    });
+    sent = [];
+    steps = [
+      () => sse([{ data: { candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "leads_search", args: { query: "Secretive" } } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 } } }]),
+      () =>
+        sse([
+          { data: { candidates: [{ content: { role: "model", parts: [{ text: `The key is ${ENV_SECRET.slice(0, 10)}` }] } }] } },
+          { data: { candidates: [{ content: { role: "model", parts: [{ text: `${ENV_SECRET.slice(10)} and ${VAULT_SECRET}.` }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 6, candidatesTokenCount: 2 } } },
+        ]),
+    ];
+    const g = await groundDepartmentTurn({
+      turn: baseTurn("google"),
+      viewer: acmeOwner,
+      maxTokens: 256,
+      plainStream,
+      loadVault: async () => [{ key: "ACME_VAULT", value: VAULT_SECRET }],
+    });
+    assert.ok(g);
+    const browser: string[] = [];
+    let replyText = "";
+    for await (const ev of g.stream([{ role: "user", content: "Any secrets?" }])) {
+      browser.push(JSON.stringify(ev));
+      if (ev.type === "delta") replyText += ev.text;
+    }
+    const requests = JSON.stringify(sent.map((s) => s.body));
+    assert.equal(sent.length, 2);
+    for (const secret of [ENV_SECRET, VAULT_SECRET]) {
+      assert.ok(!g.system.includes(secret), "prompt");
+      assert.ok(!requests.includes(secret), "provider request");
+      assert.ok(!browser.join("").includes(secret), "browser events");
+    }
+    assert.match(requests, /\[REDACTED:DESK_FIXTURE_API_KEY\]/);
+    assert.match(requests, /\[REDACTED:ACME_VAULT\]/);
+    assert.ok(!replyText.includes(ENV_SECRET) && !replyText.includes(VAULT_SECRET));
+    assert.match(replyText, /The key is \[REDACTED:DESK_FIXTURE_API_KEY\] and \[REDACTED:ACME_VAULT\]\./);
+    await db.execute("DELETE FROM tenant_records WHERE id = 'lead-acme-secret'");
+  });
+  await check("a vault read that fails sends no workspace data at all", async () => {
+    const g = await groundDepartmentTurn({
+      turn: baseTurn("google"),
+      viewer: acmeOwner,
+      maxTokens: 256,
+      plainStream,
+      loadVault: async () => {
+        throw new Error("vault down");
+      },
+    });
     assert.equal(g?.tools.on, false);
     assert.doesNotMatch(String(g?.system), /Harbor Bakery/);
   });

@@ -37,7 +37,10 @@ import {
   type StreamYield,
   type ToolContext,
 } from "@/lib/cloud-tool-runner";
-import { deskPalette, deskToolLabel, deskToolSupport } from "./catalog";
+import type { InjectedToolset } from "@/lib/cloud-tool-runner";
+import { redactAll, redactTenantVaultSecrets, StreamingRedactor, type VaultSecret } from "@/lib/secret-redaction";
+import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import { deskToolLabel, deskToolSupport } from "./catalog";
 import { loadDepartmentState } from "./state";
 import { INJECTION_GUARD } from "@/lib/llm-input-boundary";
 import { renderDepartmentState, type DeskStateFacts, type DeskToolsInfo } from "./state-render";
@@ -86,6 +89,8 @@ export type GroundArgs = {
   plainStream: PlainStream;
   /** Tests inject the state loader. */
   loadState?: typeof loadDepartmentState;
+  /** Tests inject the workspace vault read (lib/chat-persistence.ts). */
+  loadVault?: (tenantId: string) => Promise<VaultSecret[]>;
 };
 
 function sentence(reason: string): string {
@@ -107,6 +112,28 @@ function ungrounded(args: GroundArgs, dept: OsDepartment, reason: string): DeskG
 
 async function* plain(args: GroundArgs, turn: DeskTurn, messages: readonly ChatMessage[]): AsyncGenerator<DeskEvent> {
   for await (const ev of args.plainStream(turn, messages, args.maxTokens)) yield ev;
+}
+
+/**
+ * Reply text through lib/secret-redaction.ts StreamingRedactor (env secrets and
+ * this workspace's vault values), the same guard the operator chat streams
+ * through: a secret split across two deltas is still caught, and whatever the
+ * redactor holds back is flushed before any other event.
+ */
+async function* redactedStream(source: AsyncGenerator<DeskEvent>, vault: VaultSecret[]): AsyncGenerator<DeskEvent> {
+  const redactor = new StreamingRedactor(vault);
+  for await (const ev of source) {
+    if (ev.type === "delta") {
+      const safe = redactor.push(ev.text);
+      if (safe) yield { type: "delta", text: safe };
+      continue;
+    }
+    const rest = redactor.flush();
+    if (rest) yield { type: "delta", text: rest };
+    yield ev.type === "error" ? { type: "error", message: redactAll(ev.message) } : ev;
+  }
+  const tail = redactor.flush();
+  if (tail) yield { type: "delta", text: tail };
 }
 
 async function* fromLoop(source: AsyncGenerator<StreamYield>): AsyncGenerator<DeskEvent> {
@@ -155,27 +182,47 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
     ? deskToolSupport(turn.provider)
     : ({ on: false, reason: "this AI brain runs outside the Command Center, where it cannot look things up in the workspace" } as const);
   let facts: DeskStateFacts;
+  let vault: VaultSecret[];
   try {
-    facts = await (args.loadState ?? loadDepartmentState)(viewer, dept);
+    [facts, vault] = await Promise.all([
+      (args.loadState ?? loadDepartmentState)(viewer, dept),
+      (args.loadVault ?? fetchTenantVaultSecretsForRedaction)(viewer.surface.tenantId),
+    ]);
   } catch (err) {
-    // Each read already fails on its own; this is the loader itself breaking.
+    // Each read already fails on its own; this is the loader itself breaking,
+    // or the vault read that redaction needs: no workspace data goes out
+    // unredacted, so the turn goes out with none.
     console.error("[os.desk.state]", { tenantId: turn.tenantId, department: dept.key, error: err instanceof Error ? err.message : String(err) });
     return ungrounded(args, dept, `the ${dept.label} page could not be read this turn`);
   }
-  const palette = deskPalette(dept.key, { planMode });
+  // Workspace data reaches the provider only after the env-secret and the
+  // workspace-vault scrubs (lib/secret-redaction.ts), the same pair every
+  // other chat path applies: a key pasted into a lead's notes, a ticket or a
+  // routine name is replaced before the request is built.
+  const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+
+  const toolset = deskToolset({ viewer, dept, agentSlug: turn.agentSlug, planMode });
+  const palette = toolset.palette;
   const info: DeskToolsInfo = support.on ? { on: true, tools: palette } : { on: false, reason: support.reason, tools: palette };
-  const system = turn.system + renderDepartmentState(facts, info);
+  const system = turn.system + scrub(renderDepartmentState(facts, info));
   const grounded: DeskTurn = { ...turn, system };
 
   if (!support.on) {
     return {
       system,
       tools: { on: false, labels: [], note: `Looking things up is off: ${support.reason}. Answers use this page's summary only.` },
-      stream: (messages) => plain(args, grounded, messages),
+      stream: (messages) => redactedStream(plain(args, grounded, messages), vault),
     };
   }
 
-  const toolset = deskToolset({ viewer, dept, agentSlug: turn.agentSlug, planMode });
+  // Every tool result is scrubbed the same way before it joins the request.
+  const scrubbedTools: InjectedToolset = {
+    tools: toolset.tools,
+    execute: async (name, input) => {
+      const r = await toolset.execute(name, input);
+      return { ...r, content: scrub(r.content), summary: scrub(r.summary) };
+    },
+  };
   const ctx: ToolContext = {
     tenantId: viewer.surface.tenantId,
     userId: viewer.surface.userId,
@@ -190,25 +237,23 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
       const history = messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      const toolset = scrubbedTools;
+      let loop: AsyncGenerator<StreamYield>;
       if (turn.provider === "anthropic") {
-        return fromLoop(
-          streamAnthropicWithTools({ apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens: args.maxTokens, meter: turn.meter, toolset }, ctx),
-        );
-      }
-      if (turn.provider === "openai" || turn.provider === "openrouter") {
+        loop = streamAnthropicWithTools({ apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens: args.maxTokens, meter: turn.meter, toolset }, ctx);
+      } else if (turn.provider === "openai" || turn.provider === "openrouter") {
         // GPT-5.x and the o-series spend reasoning tokens against the cap
         // (lib/providers.ts streamOpenAI): the answer keeps its budget.
         const maxTokens = args.maxTokens + (turn.provider === "openai" && openaiReasons(turn.model) ? THINKING_HEADROOM_TOKENS : 0);
-        return fromLoop(
-          streamOpenAICompatibleWithTools(
-            { provider: turn.provider, apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens, meter: turn.meter, toolset },
-            ctx,
-          ),
+        loop = streamOpenAICompatibleWithTools(
+          { provider: turn.provider, apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens, meter: turn.meter, toolset },
+          ctx,
         );
+      } else {
+        loop = streamGeminiWithTools({ apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens: args.maxTokens, meter: turn.meter, toolset });
       }
-      return fromLoop(
-        streamGeminiWithTools({ apiKey: turn.apiKey, model: turn.model, system, messages: history, maxTokens: args.maxTokens, meter: turn.meter, toolset }),
-      );
+      // What the model writes back is scrubbed on its way to the browser too.
+      return redactedStream(fromLoop(loop), vault);
     },
   };
 }

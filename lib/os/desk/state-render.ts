@@ -21,7 +21,8 @@
  */
 
 import { INJECTION_GUARD, wrapUntrusted } from "@/lib/llm-input-boundary";
-import type { DeskTool } from "./catalog";
+import { DEPARTMENT_PALETTES, DESK_TOOLS, type DeskTool } from "./catalog";
+import type { DepartmentKey } from "@/lib/os/types";
 
 export const STATE_MAX_CHARS = 7000;
 export const LIST_MAX = 8;
@@ -47,7 +48,7 @@ export type DeskStateFacts = {
   /** The page's Needs-you lines; null when they could not be read. */
   attention: ReadonlyArray<{ label: string; count: number }> | null;
   /** Approval cards waiting for this person; null when they could not be read. */
-  approvals: { total: number; items: ReadonlyArray<{ title: string; department: string | null }> } | null;
+  approvals: { total: number; own?: boolean; items: ReadonlyArray<{ title: string; department: string | null }> } | null;
   /** Sales and Chief of Staff. Absent: not this department. Null: could not be read. Undefined scope: none. */
   pipeline?:
     | {
@@ -118,7 +119,7 @@ export function stateDataLines(f: DeskStateFacts): string[] {
 
   if (f.approvals === null) lines.push("Approvals waiting: could not be read this turn");
   else {
-    lines.push(`Approvals waiting for this person: ${f.approvals.total}`);
+    lines.push(f.approvals.own ? `Drafts this person proposed, still waiting: ${f.approvals.total}` : `Approvals waiting for this person: ${f.approvals.total}`);
     for (const a of f.approvals.items.slice(0, 5)) lines.push(`- ${cut(a.title)}${a.department ? ` (${a.department})` : ""}`);
   }
 
@@ -196,7 +197,14 @@ export function capabilityLines(f: DeskStateFacts, tools: DeskToolsInfo): string
   }
   const connected = (f.connections ?? []).filter((c) => c.connected).map((c) => c.name);
   if (connected.length > 0) {
-    lines.push(`Connected apps: ${connected.join(", ")}. You cannot send messages, emails or posts through them from this chat yourself; you can only propose drafts for approval${tools.on ? "" : " (not this turn)"}.`);
+    const canPropose = tools.on && tools.tools.some((t) => t.kind === "proposal");
+    lines.push(
+      `Connected apps: ${connected.join(", ")}. You cannot send messages, emails or posts through them from this chat yourself; ${canPropose ? "you can only propose drafts for approval" : "you cannot propose drafts in this chat either"}.`,
+    );
+  }
+  const departmentProposes = (DEPARTMENT_PALETTES[f.department.key as DepartmentKey] ?? []).some((n) => DESK_TOOLS[n].kind === "proposal");
+  if (tools.on && departmentProposes && !tools.tools.some((t) => t.kind === "proposal")) {
+    lines.push("You cannot propose drafts in this chat: this person's role is read-only, or the channel is in plan mode.");
   }
   lines.push("You cannot send anything, change or delete a record, move money or run a routine from this chat.");
   return lines;

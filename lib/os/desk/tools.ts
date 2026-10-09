@@ -25,8 +25,6 @@ import { departmentGate } from "@/components/os/department/gate";
 import { loadDepartmentNumbers } from "@/components/os/department/numbers";
 import { loadTenantRoutines } from "@/components/os/department/routines";
 import { routineHealth } from "@/components/os/department/routine-rules";
-import { loadPendingApprovals } from "@/components/os/approvals/load";
-import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
 import { ACTIVE_PROJECT_STAGES, slaStatus } from "@/lib/delivery/rules";
@@ -34,7 +32,8 @@ import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { listCalendars, listEvents } from "@/lib/calendar/store";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { loadThreadMessages } from "@/lib/lead-interactions-queries";
-import { executeTool, stripModelSuppliedTenant, type InjectedToolset, type ToolResultBlock } from "@/lib/cloud-tool-runner";
+import { stripModelSuppliedTenant, type InjectedToolset, type ToolResultBlock } from "@/lib/cloud-tool-runner";
+import { deskApprovals, mayProposeFrom, proposeDeskEmail, ProposalRefused } from "./proposals";
 import { DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
 import { followUpsFrom, leadLine, openLead, readPipeline, searchLeads } from "./reads";
 import { deskDeliveryViewer, loadDeskConnections } from "./state";
@@ -193,18 +192,15 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${h.on} of ${h.total} on`);
     }
     case "approvals_list": {
+      // An owner or admin: what Needs you shows them. Anyone else: only the
+      // drafts they proposed themselves (./proposals.ts).
       const d = text(input.department) ? targetDepartment(ctx, input.department) : ctx.dept;
-      const r = await loadPendingApprovals({
-        scope: approvalScopeFromViewer({ surface: v.surface, navInput: v.navInput }),
-        tenantSlug: v.surface.tenantSlug,
-        department: d.key === "chief_of_staff" ? null : d.key,
-        limit: 15,
-      });
-      if (!r.ok) throw new Error("approvals_could_not_be_read");
+      const r = await deskApprovals(v, d.key === "chief_of_staff" ? null : d.key, 15);
       return result(name, {
-        waiting: r.value.total,
-        cards: r.value.items.map((a) => ({ id: a.id, title: a.title, department: a.department_label, kind: a.action_label, created_at: a.created_at })),
-      }, `${r.value.total} waiting`);
+        scope: r.own ? "drafts you proposed" : "waiting for you in Needs you",
+        waiting: r.total,
+        cards: r.items,
+      }, `${r.total} waiting`);
     }
     case "finance_get_metric": {
       // The Finance page's own two locks (numbers.ts financeNumbers).
@@ -257,15 +253,10 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${list.length} apps`);
     }
     case "propose_email": {
-      // The approval-gated draft every workspace already has: one approvals
-      // card, nothing sent (lib/cloud-tool-runner.ts toolProposeEmail). The
-      // card is filed under THIS department.
-      const r = await executeTool(
-        "propose_email",
-        { to: input.to, subject: input.subject, body: input.body, lead_id: input.lead_id, revises_approval_id: input.revises_approval_id, department: ctx.dept.key },
-        { tenantId: v.surface.tenantId, userId: v.surface.userId, agentKey: ctx.agentSlug, authUserId: v.authUserId ?? v.surface.userId, isAdmin: v.surface.persona === "founder" },
-      );
-      return { ...r, summary: r.is_error ? r.summary : `${DESK_TOOLS.propose_email.label}: waiting in Needs you` };
+      // One approvals card under THIS department, owned by the person asking;
+      // nothing is sent (./proposals.ts).
+      const out = await proposeDeskEmail(v, ctx.dept, ctx.agentSlug, input, new Date(nowMs));
+      return result(name, out, "waiting in Needs you");
     }
     default: {
       const unhandled: never = name;
@@ -279,7 +270,9 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
  * mode: reads only), and a dispatcher that refuses anything else.
  */
 export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: DeskTool[] } {
-  const palette = deskPalette(ctx.dept.key, { planMode: ctx.planMode });
+  // A member who may not act (read_only) is never offered a proposal.
+  const canAct = mayProposeFrom(ctx.viewer);
+  const palette = deskPalette(ctx.dept.key, { planMode: ctx.planMode, canAct });
   const allowed = new Set<string>(palette.map((t) => t.name));
   return {
     palette,
@@ -289,11 +282,15 @@ export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: 
         console.error("[os.desk.tools] refused a tool outside the department palette", { tool: name, department: ctx.dept.key, tenantId: ctx.viewer.surface.tenantId });
         return refused(name, "tool_not_in_this_department");
       }
+      // Enforced again here, not only by the offer: a proposal needs a member who may act.
+      if (DESK_TOOLS[name as DeskToolName].kind === "proposal" && !mayProposeFrom(ctx.viewer)) {
+        return refused(name, "read_only_member_cannot_propose");
+      }
       const input = stripModelSuppliedTenant(rawInput && typeof rawInput === "object" ? rawInput : {});
       try {
         return await run(name as DeskToolName, input, ctx);
       } catch (err) {
-        if (err instanceof NotAvailable) return refused(name, err.message);
+        if (err instanceof NotAvailable || err instanceof ProposalRefused) return refused(name, err.message);
         console.error("[os.desk.tools] tool failed", { tool: name, department: ctx.dept.key, error: err instanceof Error ? err.message : String(err) });
         return { content: JSON.stringify({ error: "could_not_be_read", tool: name }), is_error: true, summary: `${DESK_TOOLS[name as DeskToolName].label}: could not be read` };
       }
