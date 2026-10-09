@@ -37,11 +37,12 @@
  * completion is.
  */
 import "server-only";
-import { classifyProviderStatus, failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
-import type { Provider } from "@/lib/providers";
+import { classifyProviderStatus, classifyStreamError, failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
+import { streamChat, type Provider } from "@/lib/providers";
 import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "@/lib/ai/usage";
 import { AI_USAGE_UNAVAILABLE, isAiBudgetCode, meterRefusalCode } from "@/lib/ai/usage-codes";
-import { MODEL_REGISTRY, modelFactsForCopy, resolveCall } from "@/lib/ai/model-registry";
+import { MODEL_REGISTRY, modelFactsForCopy, resolveCall, resolveModelForCall } from "@/lib/ai/model-registry";
+import { DEPARTMENT_REPLY_MAX_TOKENS, DEPARTMENT_TEST_ASK, DEPARTMENT_TEST_SYSTEM } from "@/lib/os/channel/reply-budget";
 
 export const PROBE_TIMEOUT_MS = 15_000;
 
@@ -328,6 +329,82 @@ async function probeOllama(
     },
   };
   return meteredProbe("ollama", meter, fetchImpl, req, model, 1);
+}
+
+/** How long the department-answer Test waits for a whole reply. */
+export const DEPARTMENT_TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Settings > AI brain's "Test" on the SAVED account (app/api/agent-config/
+ * test-connection, mode 1): one short department answer, the way a department
+ * turn asks for it, through the same request builder (lib/providers.ts
+ * streamChat): a department-sized system prompt, an ordinary ask, the
+ * department reply budget (lib/os/channel/reply-budget.ts), the same thinking
+ * settings. It passes only when the reply has ANSWER TEXT.
+ *
+ * WHY NOT THE ONE-TOKEN PROBE. A one-token completion proves the key and the
+ * model are accepted, and nothing about an answer: on 2026-10-09 Gemini 3.8
+ * Flash answered every one-token Test while every department reply came back
+ * empty, its whole budget spent thinking. A Test that cannot fail where the
+ * departments fail is the false green this file exists to prevent. It costs a
+ * few hundred tokens, metered like any call (surface "probe").
+ *
+ * A local model server (Ollama) keeps the probe above: the cloud cannot reach a
+ * server on the operator's machine.
+ */
+export async function probeDepartmentAnswer(
+  provider: Provider,
+  key: string,
+  opts: { model?: string | null; meter: ModelCallMeter; stream?: typeof streamChat; timeoutMs?: number },
+): Promise<ProbeResult> {
+  if (provider === "ollama") return probeProvider(provider, key, { model: opts.model, meter: opts.meter });
+  const saved = typeof opts.model === "string" && opts.model.trim() ? opts.model.trim() : PROBE_MODEL[provider];
+  // The model the request really sends (streamChat swaps a gone model the same way).
+  const model = resolveModelForCall(provider, saved).model;
+  const started = Date.now();
+  const it = (opts.stream ?? streamChat)({
+    provider,
+    model: saved,
+    apiKey: key,
+    system: DEPARTMENT_TEST_SYSTEM,
+    messages: [{ role: "user", content: DEPARTMENT_TEST_ASK }],
+    maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
+    meter: opts.meter,
+  });
+  const got: { text: string; failure: string | null } = { text: "", failure: null };
+  const read = (async () => {
+    for await (const ev of it) {
+      if (ev.type === "delta") got.text += ev.text;
+      else if (ev.type === "error") {
+        got.failure = ev.message;
+        break;
+      }
+    }
+    return "read" as const;
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = await Promise.race([
+    read,
+    new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), opts.timeoutMs ?? DEPARTMENT_TEST_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (waited === "timeout") {
+    // Close the stream: its meter records the call as cancelled when it ends.
+    void it.return(undefined).catch(() => undefined);
+    return {
+      ok: false,
+      code: "timeout",
+      message: `The AI model did not finish a short answer within ${Math.round((opts.timeoutMs ?? DEPARTMENT_TEST_TIMEOUT_MS) / 1000)} seconds. Try again in a minute, or pick a faster model.`,
+    };
+  }
+  if (got.failure !== null) {
+    const code = classifyStreamError(got.failure);
+    const named = code === "provider_404" ? modelFactsForCopy(provider, model) : null;
+    return { ok: false, code, message: failureCopy(code, { canManageAi: true, model: named }).sentence };
+  }
+  if (!got.text.trim()) return { ok: false, code: "reply_empty", message: failureCopy("reply_empty", { canManageAi: true }).sentence };
+  return { ok: true, latency_ms: Date.now() - started, model };
 }
 
 /**

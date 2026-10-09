@@ -27,6 +27,7 @@ import { PlugZap } from "lucide-react";
 import { AgentChat } from "@/components/agents/AgentChat";
 import { useComposer } from "./ComposerContext";
 import type { ChannelState } from "./channel";
+import { brainLine } from "@/lib/ai/department-brain";
 
 function fillComposer(root: HTMLElement | null, text: string): void {
   const box = root?.querySelector("textarea");
@@ -82,6 +83,8 @@ export function DepartmentChannel({ label, state }: { label: string; state: Chan
         greeting={state.greeting}
         canManageAi={state.canManageAi}
         initialFailure={state.lastTurn.kind === "failed" ? state.lastTurn.code : null}
+        // Owners and admins: the people who choose it in Settings > AI brain.
+        poweredBy={state.canManageAi && state.brain ? brainLine(state.brain) : null}
       />
     </section>
   );

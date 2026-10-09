@@ -22,7 +22,8 @@ import type { ChannelState } from "./channel";
 import { ComposerProvider } from "./ComposerContext";
 import { DepartmentChannel } from "./DepartmentChannel";
 import { OverviewPanel, type OverviewPanelProps } from "./OverviewPanel";
-import { StatusPill, headerStatus, type DepartmentStatus } from "./StatusPill";
+import { headerStatus, type DepartmentStatus } from "./StatusPill";
+import { LiveStatusPill } from "./LiveStatusPill";
 
 export type DepartmentTabProps = {
   dept: OsDepartment;
@@ -41,7 +42,13 @@ export function DepartmentTab({ dept, purpose, status, channel, prefill, overvie
   // account that could not be checked reads Couldn't check.
   const header = headerStatus(status, channel);
   return (
-    <PageFrame title={dept.label} subtitle={purpose} actions={<StatusPill status={header} />}>
+    <PageFrame
+      title={dept.label}
+      subtitle={purpose}
+      // Redrawn by the channel's own turns (LiveStatusPill), so a reply that
+      // arrives clears an old failure without a reload.
+      actions={<LiveStatusPill department={dept.key} status={status} channelReady={ready} initial={header} />}
+    >
       {/* Keyed by department: moving from Sales to Marketing is the same page
           component with new params, and without a key AgentChat would carry
           Sales' conversation — and its history — into Marketing's agent. A new

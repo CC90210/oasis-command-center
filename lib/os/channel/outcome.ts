@@ -63,6 +63,10 @@ export function isTurnFailureCode(code: unknown): code is TurnFailureCode {
  * a reply that broke off) are the channel's own until that channel answers.
  */
 const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
+  // Every channel sends the account's ONE model (lib/os/department-agent.ts
+  // reads no per-department model since 2026-10-09), so a model the provider
+  // does not know fails them all, and a success anywhere proves it is known.
+  "provider_404",
   "key_unreadable",
   "provider_401",
   "provider_402",
@@ -354,10 +358,22 @@ export type TurnOutcome = {
  * A code this build does not know is treated as the channel's own failure: an
  * unknown outcome is shown as a failure, never as "Working". A 412 ("no AI
  * account connected") is skipped in both steps (saysNothingAboutTheKey).
+ *
+ * `accountChangedAt` is when the workspace's AI account last changed (a new
+ * key, provider or model). A failure recorded BEFORE it was about an account
+ * the channels no longer send, so it says nothing now: it is skipped, and the
+ * header shows no stale "model not found" after the model was switched
+ * (CC, 2026-10-09). null = not known: every record counts, as before.
  */
-export function channelFailure(outcomes: readonly TurnOutcome[], channelKey: string): { code: string } | null {
+export function channelFailure(
+  outcomes: readonly TurnOutcome[],
+  channelKey: string,
+  accountChangedAt: string | null = null,
+): { code: string } | null {
+  const changed = accountChangedAt ? Date.parse(accountChangedAt) : NaN;
+  const stale = (o: TurnOutcome) => !o.ok && Number.isFinite(changed) && Date.parse(o.at) < changed;
   const newest = outcomes
-    .filter((o) => !saysNothingAboutTheKey(o))
+    .filter((o) => !saysNothingAboutTheKey(o) && !stale(o))
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const accountVerdict = newest.find((o) => o.ok || (isTurnFailureCode(o.code) && isAccountScoped(o.code)));
   if (accountVerdict && !accountVerdict.ok) return { code: String(accountVerdict.code) };
