@@ -196,6 +196,23 @@ for (const notPublic of ["/api/internal/supportx", "/api/internal/support-admin"
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only /api/internal/support/* is public`);
 }
 
+// The tool runner (BEA, on CC's PC) posts to five routes under
+// /api/internal/tools/, each HMAC-gated inside (lib/tools/runner-auth.ts). Same
+// rule as the support desk: the prefix with its slash is public, nothing near
+// it, and the Tools section's own routes (/api/tools/*) keep the session gate.
+for (const runner of [
+  "/api/internal/tools/claim",
+  "/api/internal/tools/heartbeat",
+  "/api/internal/tools/upload-url",
+  "/api/internal/tools/complete",
+  "/api/internal/tools/fail",
+]) {
+  assert.equal(isPublic(runner), true, `${runner} is HMAC-gated inside its route and MUST bypass session middleware`);
+}
+for (const notPublic of ["/api/internal/tools", "/api/internal/toolsx/claim", "/api/internal/tools-admin", "/api/tools/run", "/api/tools/jobs"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/tools/* is public`);
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.

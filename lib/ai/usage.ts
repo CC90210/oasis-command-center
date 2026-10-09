@@ -145,6 +145,8 @@ export const USAGE_SURFACES = [
   "gmail_templates.solara", // /api/gmail-templates/[id]/solara, variant writer
   "probe", //                lib/agents/provider-probe.ts, Settings "Test"
   "document_extract", //     lib/ai-document-extractor.ts
+  "tools.learn_from_link", // lib/tools/worker/learn-from-link.ts, Content > Tools "Learn from a link"
+  "tools.repurpose_post", //  lib/tools/worker/repurpose-post.ts, Content > Tools "Repurpose a post"
 ] as const;
 export type UsageSurface = (typeof USAGE_SURFACES)[number] | `infer:${string}`;
 const INFER_SURFACE_RE = /^infer:[A-Za-z0-9_.:-]{1,100}$/;
