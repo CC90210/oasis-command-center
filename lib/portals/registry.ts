@@ -41,7 +41,7 @@ export type PortalSection = {
   enabled: boolean;
   /**
    * A sub-section chip belongs to one top-level destination and renders only
-   * while the viewer is inside it. Without this, Marketing's Library / Train /
+   * while the viewer is inside it. Without this, Marketing's Library / Content Tools /
    * Performance chips sat in the header of every founders page, Finances
    * included — and Finances has its own tab bar.
    */
@@ -167,7 +167,12 @@ export const FOUNDERS_PORTAL: Portal = {
   sections: [
     ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true, ...(n.audience ? { audience: n.audience } : {}) })),
     { href: "/founders/marketing/library", label: "Library", enabled: true, parent: "/founders/marketing" },
-    { href: "/founders/marketing/train", label: "Train", enabled: true, parent: "/founders/marketing" },
+    // Content Tools replaced the Training entry 2026-10-06 — the whiteboard
+    // lives there now. The Train PAGE was not deleted: /founders/marketing/train
+    // still resolves by direct URL, it simply no longer earns a nav slot. The
+    // sub-nav the operator actually sees on Content pages is ContentTabs
+    // (components/founders/ContentTabs.tsx); this list is the banner-side copy.
+    { href: "/founders/marketing/tools", label: "Content Tools", enabled: true, parent: "/founders/marketing" },
     // Enabled: the page exists and reads real numbers now. It was greyed since the
     // portal shipped, captioned "Phase 5", while Zernio had been collecting the
     // metrics the whole time — 68 of 79 published posts carry non-zero data.

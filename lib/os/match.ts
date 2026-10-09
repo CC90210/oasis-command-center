@@ -55,7 +55,10 @@ export const PATH_ALIASES: ReadonlyArray<{
     tabs: {
       "": "Overview",
       library: "Library",
+      // train is a crumb but no longer a tab (Content Tools took its slot,
+      // 2026-10-06); the page still resolves by direct URL.
       train: "Training",
+      tools: "Content Tools",
       performance: "Performance",
       asset: "Asset",
     },

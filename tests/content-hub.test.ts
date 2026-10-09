@@ -3,8 +3,8 @@
  * OS shell (2026-10-01): ContentTabs, its layout, the breadcrumb alias, the
  * hidden founders banner, and one name for the hub.
  *
- *   1. ContentTabs lists Overview · Library · Training · Performance in that
- *      order, each a founders page that gates itself; the active tab is the
+ *   1. ContentTabs lists Overview · Library · Content Tools · Performance in
+ *      that order, each a founders page that gates itself; the active tab is the
  *      longest matching one, Overview only on its exact path (an asset page
  *      lights no tab); every tab is a Link with aria-current on the active one;
  *      the bar scrolls on a phone (overflow-x-auto) and carries no founders
@@ -178,14 +178,15 @@ async function main() {
   const { foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
 
   // ── 1. the tabs ──────────────────────────────────────────────────────────
-  await check("ContentTabs: Overview · Library · Training · Performance, each a founders page that gates itself", () => {
+  await check("ContentTabs: Overview · Library · Content Tools · Performance, each a founders page that gates itself", () => {
     assert.equal(CONTENT_ROOT, "/founders/marketing");
-    // "Training", a noun, since 2026-10-01 ("Train" left CC asking what it did);
-    // the route stays /train so no link or bookmark breaks.
-    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Training", "Performance"]);
+    // Content Tools took the Training tab's slot on 2026-10-06 (the whiteboard
+    // moved in). The /train PAGE still exists by direct URL — the Overview's
+    // Training card links to it — it is simply no longer a tab.
+    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Content Tools", "Performance"]);
     assert.deepEqual(
       CONTENT_TABS.map((t) => t.href),
-      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/train`, `${CONTENT_ROOT}/performance`],
+      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/tools`, `${CONTENT_ROOT}/performance`],
     );
     for (const t of CONTENT_TABS) {
       const page = `app${t.href}/page.tsx`;
@@ -200,9 +201,10 @@ async function main() {
     assert.equal(activeContentTab("/founders/marketing"), CONTENT_ROOT);
     assert.equal(activeContentTab("/founders/marketing/library"), `${CONTENT_ROOT}/library`);
     assert.equal(activeContentTab("/founders/marketing/library/anything"), `${CONTENT_ROOT}/library`);
-    assert.equal(activeContentTab("/founders/marketing/train"), `${CONTENT_ROOT}/train`);
+    assert.equal(activeContentTab("/founders/marketing/tools"), `${CONTENT_ROOT}/tools`);
     assert.equal(activeContentTab("/founders/marketing/performance"), `${CONTENT_ROOT}/performance`);
-    for (const p of ["/founders/marketing/asset/a_1", "/founders/marketing/arthrisil", "/founders/marketingx", "/founders/finances", "/money", "/"]) {
+    // /train still resolves but is no longer a tab, so it lights none.
+    for (const p of ["/founders/marketing/train", "/founders/marketing/asset/a_1", "/founders/marketing/arthrisil", "/founders/marketingx", "/founders/finances", "/money", "/"]) {
       assert.equal(activeContentTab(p), null, `${p} lights no Content tab`);
     }
   });
@@ -260,8 +262,8 @@ async function main() {
     }
     assert.deepEqual(
       Object.keys(alias!.tabs).filter((k) => !segs.includes(k)),
-      ["asset"],
-      "Asset is a crumb but not a tab; nothing else is known to only one of them",
+      ["train", "asset"],
+      "Train and Asset are crumbs but not tabs; nothing else is known to only one of them",
     );
     const rows = [
       { id: "today", href: "/", label: "Today" },
@@ -360,6 +362,7 @@ async function main() {
     assert.match(overview, /<PageHeader\s+title="Content"/, "the Overview's <h1>");
     assert.match(code("app/founders/marketing/library/page.tsx"), /title: "Library · Content · OASIS"/);
     assert.match(code("app/founders/marketing/train/page.tsx"), /title: "Training · Content · OASIS"/);
+    assert.match(code("app/founders/marketing/tools/page.tsx"), /title: "Content Tools · Content · OASIS"/);
     // ONE way back. The Library and Performance each had a "Back to Content"
     // link under the Content tabs, whose Overview tab already leads there; the
     // duplicates went (2026-10-02). What is left must say Content.
