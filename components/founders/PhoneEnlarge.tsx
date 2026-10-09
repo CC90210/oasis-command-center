@@ -26,13 +26,13 @@
  *
  * TWO MODULES. This one is the part every tile needs on arrival: the state,
  * the slot, the Enlarge button. The big phone itself (the dialog, PhoneFrame
- * for the browser, its icons, the focus trap) is PhoneEnlargeOverlay.tsx,
- * fetched in the browser only - when the pointer or keyboard first reaches a
- * tile, so it is usually there before the press - and never compiled for the
- * server. The first version compiled it for server rendering in every Content
- * route and measured 64,582 KiB in CI on 2026-10-02: 129 KiB over main and
- * past the Worker's 64,512 KiB upload budget. If the fetch fails (offline, or
- * an old page after a deploy), the tile says so instead of doing nothing.
+ * for the browser, its icons, the focus trap) is PhoneEnlargeOverlay.tsx. It
+ * only exists after a click, which the server never sees, so it is fetched in
+ * the browser only - when the pointer or keyboard first reaches a tile, so it
+ * is usually there before the press - and the server compile never carries
+ * it (with this change the Worker gained no chunk and no async load, CI
+ * 2026-10-09). If the fetch fails (offline, or an old page after a deploy),
+ * the tile says so instead of doing nothing.
  *
  * The context is made on first use, not at import: React's server build (the
  * react-server condition the page tests run under, which loads this file

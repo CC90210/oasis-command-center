@@ -387,9 +387,8 @@ async function main() {
   });
 
   // The big phone only exists after a click, so its code is the browser's
-  // alone. Compiled for server rendering, it was copied into every Content
-  // route and put the first version of this change 129 KiB over main, past
-  // the Worker's upload budget (CI, 2026-10-02).
+  // alone: the server compile must never carry it (the Worker's upload budget
+  // is the whole app's).
   await check("the big phone's code never reaches the server: fetched in the browser only, when the viewer reaches for a tile", () => {
     const shell = code("components/founders/PhoneEnlarge.tsx");
     assert.match(

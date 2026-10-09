@@ -6,14 +6,12 @@
  * PhoneEnlarge.tsx); the server never compiles it.
  *
  * WHY ITS OWN MODULE. Nothing here can run on the server: it exists only after
- * a click. And the server build copies a module into every route that uses it
- * when it misses webpack's sharing limits (PR #531 found lib/api-auth.ts
- * emitted 161 times). Compiled for server rendering in each Content route, this
- * code, PhoneFrame for the browser, its icons and the focus trap put the first
- * version of this change 129 KiB over main in CI (2026-10-02), past the
- * Worker's upload budget. Behind loadBigPhone's `typeof window` test the server
- * compile drops it, and the browser fetches it once, as one small chunk shared
- * by every tile.
+ * a click. Behind loadBigPhone's `typeof window` test the server compile drops
+ * it (the Worker gained no chunk and no async load for it, CI 2026-10-09), and
+ * the browser fetches it once, as one small chunk shared by every tile. The
+ * Worker's upload budget (64,512 KiB) is the whole app's: this change's first
+ * version measured 70 KiB past it on 2026-10-02, before main's own diet (PR
+ * #531) made room, and browser-only code has no business in it.
  *
  * KEYBOARD AND FOCUS. A modal dialog. Focus moves to Close when it opens; Tab
  * and Shift+Tab stay inside it (focus-trap.ts, the Connections drawer's trap);
