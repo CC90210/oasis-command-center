@@ -12,11 +12,9 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/supabase-server";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
-import {
-  getUserIntegrationBundleForStatus,
-  listUserIntegrationStatus,
-} from "@/lib/user-integration-store";
-import { hasRequiredScope } from "@/lib/integrations/google-calendar";
+import { listUserIntegrationStatus } from "@/lib/user-integration-store";
+import { readPersonalGoogleFact, PERSONAL_GOOGLE_SERVICE } from "@/lib/integrations/personal-google";
+import { personalGoogleStatus } from "@/lib/os/connectors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,9 +34,6 @@ export async function GET() {
     );
   }
   const tenantId = profile.profile?.tenant_id;
-  const expectedWorkEmail = String(
-    profile.profile?.email || "",
-  ).trim().toLowerCase();
   if (!tenantId) {
     return NextResponse.json({ ok: true, availability: "available", statuses: [] });
   }
@@ -63,40 +58,29 @@ export async function GET() {
   }
   // Always return the work connection's readiness shape. A missing row means
   // disconnected; a refresh token without Calendar scope means reconnect once.
-  if (!services.gmail_oauth) services.gmail_oauth = { connected: false };
+  if (!services[PERSONAL_GOOGLE_SERVICE]) services[PERSONAL_GOOGLE_SERVICE] = { connected: false };
 
-  // Hydrate user-visible Gmail fields (address, expiry) for the panel
-  // without leaking the tokens themselves. Bundle returns plaintext —
-  // we filter down to just the non-sensitive bits.
+  // The person's own Google account, through the one reader and resolver every
+  // screen uses (lib/integrations/personal-google.ts, lib/os/connectors.ts
+  // personalGoogleStatus): the panel, the Connections card and Today say the
+  // same words. Every flag below is derived from that one state, so they can
+  // never disagree with it. Non-secret fields only: never a token.
   let statuses;
   try {
     statuses = await Promise.all(
       Object.entries(services).map(async ([service, { connected }]) => {
-        if (service === "gmail_oauth") {
-          const bundle = await getUserIntegrationBundleForStatus(tenantId, user.id, "gmail_oauth");
-          const workspaceConnected = Boolean(bundle.refresh_token);
-          const calendarConnected =
-            workspaceConnected &&
-            // Same predicate the booking uses: the broader auth/calendar scope
-            // contains calendar.events, and reporting a more-privileged
-            // connection as not-connected is the #331 defect on another surface.
-            hasRequiredScope(bundle.scope) &&
-            Boolean(expectedWorkEmail) &&
-            String(bundle.gmail_address || "").trim().toLowerCase() === expectedWorkEmail;
-          const calendarIdentityMismatch =
-            workspaceConnected &&
-            Boolean(expectedWorkEmail) &&
-            Boolean(bundle.gmail_address) &&
-            String(bundle.gmail_address).trim().toLowerCase() !== expectedWorkEmail;
+        if (service === PERSONAL_GOOGLE_SERVICE) {
+          const fact = await readPersonalGoogleFact(tenantId, user.id);
+          const status = personalGoogleStatus(fact);
           return {
             service,
-            connected: workspaceConnected,
-            gmail_address: bundle.gmail_address || null,
-            expires_at: bundle.expires_at || null,
-            calendar_connected: calendarConnected,
-            calendar_reconnect_required: workspaceConnected && !calendarConnected,
-            calendar_identity_mismatch: calendarIdentityMismatch,
-            expected_work_email: expectedWorkEmail || null,
+            connected: fact.linked,
+            gmail_address: fact.address,
+            calendar_connected: status.state === "ready",
+            calendar_reconnect_required: status.state === "reconnect" || status.state === "wrong_account",
+            calendar_identity_mismatch: status.state === "wrong_account",
+            expected_work_email: fact.workEmail,
+            status: { state: status.state, kind: status.kind, label: status.label, detail: status.detail ?? null },
           };
         }
         return { service, connected };

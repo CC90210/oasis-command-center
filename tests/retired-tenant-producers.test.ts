@@ -103,6 +103,8 @@ stubModule(require.resolve("../lib/notify/agent-alert"), {
     agentAlerts.push(input.tenantId);
     return { ok: true };
   },
+  // reconcile-sms closes a recovered tenant's carrier card through this.
+  resolveAgentAlerts: async () => 0,
 });
 stubModule(require.resolve("../lib/integrations/texttorrent-sender"), {
   resolveTextTorrentSenderId: async () => undefined,
@@ -388,13 +390,16 @@ async function main() {
   await check("reconcile-sms route: an empty receipt queue no longer drags SunBiz in", async () => {
     openReceiptTenants = [];
     reconciledTenants.length = 0;
+    // OASIS's benched-line control above writes its card; this run must add none.
+    const alertsBefore = agentAlerts.length;
     const { GET } = await import("../app/api/cron/reconcile-sms/route");
     const res = await GET(new NextRequest("http://localhost/api/cron/reconcile-sms", { headers: cronHeaders }));
     const body = (await res.json()) as { ok: boolean; tenants: number };
     assert.equal(res.status, 200);
     assert.equal(body.tenants, 0);
     assert.deepEqual(reconciledTenants, []);
-    assert.deepEqual(agentAlerts, []);
+    assert.deepEqual(agentAlerts.slice(alertsBefore), []);
+    assert.ok(!agentAlerts.includes(SUNBIZ), "an alert was written for the retired workspace");
   });
 
   // ── Operator-email agent: agent_email_snapshots ──────────────────────────

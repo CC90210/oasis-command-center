@@ -71,7 +71,7 @@ stubModule(require.resolve("../lib/integrations/gmail-oauth-send"), {
     };
   },
 });
-type Alert = { tenantId: string; alertType: string; lane: string; subjectId?: string; body?: string };
+type Alert = { tenantId: string; alertType: string; lane?: string; subjectId?: string; body?: string };
 const alerts: Alert[] = [];
 stubModule(require.resolve("../lib/notify/agent-alert"), {
   writeAgentAlert: async (input: Alert) => void alerts.push(input),
@@ -290,7 +290,10 @@ async function main() {
     const paged = alertsFor("ethan-resched");
     assert.equal(paged.length, 1, JSON.stringify(alerts));
     assert.equal(paged[0].alertType, "sms_agent_human_review");
-    assert.equal(paged[0].lane, "operator");
+    // No lane from the caller: OASIS's workspace pages OASIS's operator chat
+    // because the workspace decides (lib/notify/alert-route.ts).
+    assert.equal(paged[0].tenantId, TENANT);
+    assert.equal(paged[0].lane, undefined);
     assert.match(String(paged[0].body), /meeting_host_deactivated/);
   });
 

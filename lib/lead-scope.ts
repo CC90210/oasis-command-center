@@ -12,6 +12,8 @@
  * (the NO_LEADS sentinel matches nothing) rather than the full pool.
  */
 
+import { dbBool } from "@/lib/db-bool";
+
 /** assigned_to value that can never match a real auth_user_id (UUID) — used
  *  to force an empty result set when a viewer's identity is unresolved. */
 export const NO_LEADS = "__no_access__";
@@ -65,7 +67,8 @@ export function isTrueAdmin(
   profile: { is_owner?: boolean | null; team_role?: string | null } | null | undefined,
 ): boolean {
   if (!profile) return false;
-  return !!profile.is_owner || profile.team_role === "admin" || profile.team_role === "owner";
+  // dbBool (lib/db-bool.ts): `!!` read a stored string "0" as an owner.
+  return dbBool(profile.is_owner) || profile.team_role === "admin" || profile.team_role === "owner";
 }
 
 /** Is this user_profiles row an admin (sees all leads / has admin CAPABILITIES)?
@@ -81,7 +84,8 @@ export function isAdminProfile(
     | undefined,
 ): boolean {
   if (!profile) return false;
-  return isTrueAdmin(profile) || profile.admin_access === true;
+  // dbBool: `=== true` refused the stored grant, the integer 1.
+  return isTrueAdmin(profile) || dbBool(profile.admin_access);
 }
 
 /**

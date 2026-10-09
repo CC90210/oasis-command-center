@@ -11,8 +11,13 @@
  * state (lib/slack/status.ts): the channels mapped to the department, "by
  * @mention" when none is, "not connected", or "app not set up" where OASIS's
  * Slack app is not on this deployment. Custom teammates do not answer in Slack,
- * so their rows say nothing about it. Telegram carries alerts only today: no
- * teammate answers there, and the row says that rather than naming a phase.
+ * so their rows say nothing about it. When the Slack card itself says the
+ * connection needs attention or could not be checked, the row says the card's
+ * words instead of the channels (lib/os/connectors.ts connectionProblem): a
+ * mapped channel on an expired connection answers nobody. Telegram carries
+ * alerts only today: no teammate answers there, and the row says that only
+ * where the workspace has a Telegram team bot set up (the Telegram card's own
+ * status), never as a fixed line.
  *
  * ON / OFF (W4a, S2-06). An owner or admin gets a real switch on every
  * teammate that has one (the page passes a TeammateToggle as `control`: POST
@@ -83,7 +88,22 @@ function slackLabel(slack: SlackHome): string {
   }
 }
 
-export function Homes({ web, webReason, slack }: { web: WebState; webReason?: string | null; slack?: SlackHome }) {
+export function Homes({
+  web,
+  webReason,
+  slack,
+  slackProblem,
+  telegramSetUp,
+}: {
+  web: WebState;
+  webReason?: string | null;
+  slack?: SlackHome;
+  /** The Slack card's own words when its connection is a problem (connectionProblem); null when it is fine. */
+  slackProblem?: string | null;
+  /** The workspace has a Telegram team bot set up (connectionSetUp of the Telegram card). */
+  telegramSetUp?: boolean;
+}) {
+  const slackAnswers = !!slack && (slack.kind === "channels" || slack.kind === "mention_only");
   return (
     <ul aria-label="Where it lives" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4">
       <li
@@ -94,12 +114,13 @@ export function Homes({ web, webReason, slack }: { web: WebState; webReason?: st
         {web === "ready" && <Check className="h-3.5 w-3.5 text-status-engaged" strokeWidth={2} aria-hidden />}
         {webLabel(web, webReason)}
       </li>
-      {slack && (
-        <li className={slack.kind === "channels" || slack.kind === "mention_only" ? "text-fg-muted" : "text-fg-dim"}>
-          {slackLabel(slack)}
-        </li>
-      )}
-      <li className="text-fg-dim">Telegram · alerts only</li>
+      {slack &&
+        (slackAnswers && slackProblem ? (
+          <li className="text-status-warm">Slack · {slackProblem}</li>
+        ) : (
+          <li className={slackAnswers ? "text-fg-muted" : "text-fg-dim"}>{slackLabel(slack)}</li>
+        ))}
+      {telegramSetUp && <li className="text-fg-dim">Telegram · alerts only</li>}
     </ul>
   );
 }
@@ -112,6 +133,8 @@ export function TeammateRow({
   web,
   webReason,
   slack,
+  slackProblem,
+  telegramSetUp,
   href,
   badge,
   control,
@@ -126,6 +149,10 @@ export function TeammateRow({
   webReason?: string | null;
   /** Where it lives in Slack; absent for teammates that do not answer there. */
   slack?: SlackHome;
+  /** The Slack card's words when its connection is a problem; null when it is fine. */
+  slackProblem?: string | null;
+  /** The workspace has a Telegram team bot set up. */
+  telegramSetUp?: boolean;
   /** Where the name links: the teammate's channel or chat. */
   href?: string | null;
   /** A short state word on the right, e.g. "On" / "Off", for a viewer with no switch. */
@@ -162,7 +189,7 @@ export function TeammateRow({
             ))}
           </div>
         )}
-        <Homes web={web} webReason={webReason} slack={slack} />
+        <Homes web={web} webReason={webReason} slack={slack} slackProblem={slackProblem} telegramSetUp={telegramSetUp} />
       </div>
       {control
         ? control

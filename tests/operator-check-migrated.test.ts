@@ -527,9 +527,13 @@ async function behaviouralChecks() {
     assert.equal(res.status, 200);
     return ((await res.json()) as { rows: Array<{ id: string }> }).rows.map((r) => r.id).sort();
   };
-  await check("event feed: the squatter reads only its own tenant", async () => {
+  await check("event feed: the squatter never reads another tenant (its unprovisioned workspace has no Feed: 403)", async () => {
     await login(USERS.squatter);
-    assert.deepEqual(await feed(), ["ev-squat"]);
+    // The route answers what the /feed page shows (2026-10-02): an
+    // unprovisioned workspace's rail has no Feed, so it reads no events at all.
+    const res = await eventFeed.GET(new NextRequest("http://localhost/api/event-feed?since_minutes=60"));
+    assert.equal(res.status, 403);
+    assert.doesNotMatch(await res.text(), /OASIS-ONLY-EVENT|ev-oasis/);
   });
   await check("event feed: the operator still reads every tenant", async () => {
     await login(USERS.cc);

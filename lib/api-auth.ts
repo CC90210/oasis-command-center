@@ -21,6 +21,7 @@
 
 import { getSessionUser } from "./supabase-server";
 import { resolveActiveProfileForUser } from "./active-profile-resolver";
+import { dbBool } from "./db-bool";
 
 /**
  * Resolve the active tenant_id from the request's session cookie.
@@ -91,9 +92,14 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   // To grant write access, assign the user an explicit role — don't rely on a default.
   const teamRole = profile.team_role || "read_only";
   // PERMANENT admin by base role — the escalation-guard predicate.
-  const isTrueAdmin = !!profile.is_owner || teamRole === "admin" || teamRole === "owner";
+  // Both flags are read with dbBool (lib/db-bool.ts): true, 1 and "1" are yes,
+  // anything else is no. `!!is_owner` read the string "0" as an owner and made
+  // an ordinary member a full admin (PR #544 review, 2026-10-08); a strict
+  // `=== true` read the stored integer 1 as no, so every admin_access grant
+  // resolved to false after the Turso cutover.
+  const isTrueAdmin = dbBool(profile.is_owner) || teamRole === "admin" || teamRole === "owner";
   // Additive full-admin grant: an admin toggled this agent to admin_access.
-  const adminAccess = profile.admin_access === true;
+  const adminAccess = dbBool(profile.admin_access);
   return {
     ok: true,
     userId: user.id,

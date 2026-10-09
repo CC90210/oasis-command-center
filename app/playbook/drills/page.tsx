@@ -1,4 +1,5 @@
-import { requirePlaybookReader } from "@/lib/playbook-access";
+import { isFounderPlaybookHref, requirePlaybookReader } from "@/lib/playbook-access";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
@@ -272,8 +273,10 @@ export default async function DrillsPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
   // The departments this viewer may open (the rail's gate): a rep is never
-  // handed an "Ask Finance" or a "Marketing channel" link that 404s.
+  // handed an "Ask Finance" or a "Marketing channel" link that 404s. Nor a
+  // link to a founders' page (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS).
   const open = await openAskDepartments();
+  const founder = await viewerReadsInternalAgentNames();
   const core = DRILLS.filter((d) => d.intensity === "core");
   const advanced = DRILLS.filter((d) => d.intensity === "advanced");
 
@@ -328,7 +331,7 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {core.map((d) => (
-            <DrillCard key={d.num} drill={d} open={open} />
+            <DrillCard key={d.num} drill={d} open={open} founder={founder} />
           ))}
         </div>
       </Card>
@@ -340,7 +343,7 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {advanced.map((d) => (
-            <DrillCard key={d.num} drill={d} open={open} />
+            <DrillCard key={d.num} drill={d} open={open} founder={founder} />
           ))}
         </div>
       </Card>
@@ -354,16 +357,19 @@ export default async function DrillsPage() {
   );
 }
 
-function DrillCard({ drill: d, open }: { drill: Drill; open: readonly string[] }) {
+function DrillCard({ drill: d, open, founder }: { drill: Drill; open: readonly string[]; founder: boolean }) {
   const Icon = DRILL_ICONS[d.icon];
   // The drill's prompt goes to the department that answers for its agent
   // (lib/os/chat-href.ts); the channel prefills it and never sends it. Only
   // when the viewer may open that department; a department channel link
-  // follows the same rule.
+  // follows the same rule, and a founders' page is linked for a founder only.
   const chatDept = d.chat ? departmentForAgent(d.chat.agent) : null;
   const chatHref = d.chat && chatDept ? askIfOpen(chatDept, d.chat.prompt, open) : null;
   const linkSlug = d.link ? teamSlugOf(d.link.href) : null;
-  const link = d.link && (linkSlug === null || open.includes(linkSlug)) ? d.link : null;
+  const link =
+    d.link && (linkSlug === null || open.includes(linkSlug)) && (founder || !isFounderPlaybookHref(d.link.href))
+      ? d.link
+      : null;
   return (
     <Card>
       <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">

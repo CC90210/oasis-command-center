@@ -12,6 +12,7 @@ import "server-only";
 
 import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 
 export type WizardCaller = { id: string; tenant_id: string; team_role: string; is_owner: unknown };
 
@@ -33,7 +34,8 @@ export async function wizardAccess(user: { id: string; email?: string | null }):
   if (!profile?.tenant_id) {
     return { ok: false, status: 403, error: "no_tenant", reason: "Your account is not linked to a workspace yet." };
   }
-  const owner = profile.is_owner === true || Number(profile.is_owner) === 1;
+  // dbBool (lib/db-bool.ts): Number() also read " 1", "1.0" and "0x1" as yes.
+  const owner = dbBool(profile.is_owner);
   const operator = owner ? false : (await resolvePlatformOperatorForAuthUser(user.id, user.email ?? null)).operator;
   if (!owner && !operator) {
     return {

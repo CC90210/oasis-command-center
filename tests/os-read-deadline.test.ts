@@ -258,6 +258,7 @@ async function main() {
     const KNOWN_LIB_IMPORTS = new Set([
       "@/lib/dates",                 // pure
       "@/lib/goals/oasis-money",     // the money read, pinned above
+      "@/lib/os/connectors",         // pure (connectorHref: the Google panel's address)
       "@/lib/os/deadline",           // the helper
       "@/lib/os/modules",            // pure
       "@/lib/os/nav",                // pure

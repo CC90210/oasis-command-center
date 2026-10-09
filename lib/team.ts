@@ -3,6 +3,7 @@ import { cache } from "react";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
+import { dbBool } from "@/lib/db-bool";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import {
   finalizeInviteProfile,
@@ -179,10 +180,10 @@ function memberPreferenceScore(member: MemberRow): number {
     // that won here would take the person's live row with it and they would
     // vanish from every live list although they still work here.
     (isActiveMember(member) ? 10_000 : 0) +
-    (member.is_owner ? 1_000 : 0) +
+    (dbBool(member.is_owner) ? 1_000 : 0) +
     (member.team_role === "owner" ? 500 : 0) +
     (member.team_role === "admin" ? 400 : 0) +
-    (member.admin_access ? 200 : 0) +
+    (dbBool(member.admin_access) ? 200 : 0) +
     (member.auth_user_id ? 50 : 0) +
     (cleanMemberName(member.display_name) ? 20 : 0) +
     (cleanMemberName(member.full_name) ? 10 : 0)
@@ -222,12 +223,17 @@ export function canonicalizeTenantMembers(rows: MemberRow[]): MemberRow[] {
       email,
       display_name: displayName,
       full_name: fullName,
+      // The two flags leave here as real booleans, as MemberRow declares them,
+      // whatever shape the store handed back (lib/db-bool.ts). Every roster
+      // consumer, and the members JSON the browser reads, gets true or false.
+      is_owner: dbBool(row.is_owner),
+      admin_access: dbBool(row.admin_access),
     });
   }
 
   return canonical.sort(
     (left, right) =>
-      Number(right.is_owner) - Number(left.is_owner) ||
+      Number(dbBool(right.is_owner)) - Number(dbBool(left.is_owner)) ||
       left.joined_at.localeCompare(right.joined_at) ||
       left.id.localeCompare(right.id),
   );
@@ -332,8 +338,10 @@ export async function getSessionContext(): Promise<SessionContext | null> {
     profileId: data.id,
     tenantId: data.tenant_id,
     teamRole: (data.team_role as TeamRole) ?? "member",
-    isOwner: !!data.is_owner,
-    adminAccess: data.admin_access === true,
+    // dbBool (lib/db-bool.ts), the same read lib/api-auth.ts makes: `!!` let the
+    // string "0" pass as an owner, `=== true` refused every stored grant (1).
+    isOwner: dbBool(data.is_owner),
+    adminAccess: dbBool(data.admin_access),
   };
 }
 
@@ -381,8 +389,8 @@ export async function getOasisSalesRepRoster(
   const roster = canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
     (member) =>
       Boolean(member.auth_user_id?.trim()) &&
-      member.is_owner !== true &&
-      member.admin_access !== true &&
+      !dbBool(member.is_owner) &&
+      !dbBool(member.admin_access) &&
       isOasisPipelineRepRole(member.team_role) &&
       // A deactivated manager also loses their cross-rep read boundary here.
       (options.includeInactive === true || isActiveMember(member)),
@@ -449,7 +457,7 @@ export async function getOasisPipelineAssignmentRoster(tenantId: string): Promis
   const reps = members.filter(
     (member) =>
       !isOasisPipelineAssignmentMember(member) &&
-      member.is_owner !== true &&
+      !dbBool(member.is_owner) &&
       isOasisPipelineRepRole(member.team_role),
   );
   return [...founders, ...reps];
@@ -726,7 +734,7 @@ export async function setMemberRole(args: {
     .single();
   if (tErr || !target) throw new Error("member_not_found");
   if (target.tenant_id !== args.tenantId) throw new Error("forbidden");
-  if (target.is_owner) throw new Error("cannot_demote_owner");
+  if (dbBool(target.is_owner)) throw new Error("cannot_demote_owner");
 
   const { error } = await supa
     .from("user_profiles")
@@ -756,7 +764,7 @@ export async function removeMember(args: {
     .single();
   if (tErr || !target) throw new Error("member_not_found");
   if (target.tenant_id !== args.tenantId) throw new Error("forbidden");
-  if (target.is_owner) throw new Error("cannot_remove_owner");
+  if (dbBool(target.is_owner)) throw new Error("cannot_remove_owner");
 
   const { error } = await supa
     .from("user_profiles")

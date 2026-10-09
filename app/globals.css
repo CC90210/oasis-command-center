@@ -96,6 +96,26 @@ body {
   }
 }
 
+/* The collapsed desktop rail, and the button that reopens it, follow
+   html[data-sidebar] (set by the boot script before first paint), not React
+   state. React reads the stored choice only after hydrating, because a first
+   render that differs from the server's is React error #418
+   (lib/useSidebarCollapsed.ts); a rule keyed on React state would show the
+   open rail for a moment on every page load. The id selector outranks the
+   rail's md:translate-x-0 utility, so the rail stays off-screen until the
+   attribute says expanded. Used by components/SidebarShell.tsx. */
+.os-rail-reopen {
+  display: none;
+}
+@media (min-width: 768px) {
+  html[data-sidebar="collapsed"] #sidebar-drawer {
+    transform: translateX(-100%);
+  }
+  html[data-sidebar="collapsed"] .os-rail-reopen {
+    display: inline-flex;
+  }
+}
+
 /* Native <select> popups paint their OWN background, and `color-scheme: dark`
  * above stops covering it the moment an author background lands on the select.
  * A picker styled `bg-transparent text-fg` -- which is how you make a select

@@ -12,10 +12,11 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
-import { sendTelegram } from "@/lib/notify/telegram";
-import { writeAgentAlert } from "@/lib/notify/agent-alert";
+import { resolveAgentAlerts, writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
+import { routeEvidence, type RouteEvidence } from "@/lib/sms/carrier-status";
+import { closeRecoveredLineCards } from "@/lib/sms/line-health";
 import { refreshDestinationHealth } from "@/lib/sms/destination-health";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
@@ -28,10 +29,6 @@ export const dynamic = "force-dynamic";
 // NO deadline, inside whatever was left of 60s. Headroom here plus the loop
 // deadline below ends the flood without touching the shared health lib.
 export const maxDuration = 300;
-
-function esc(s: string): string {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
@@ -141,13 +138,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // Page through writeAgentAlert, NOT raw sendTelegram. This cron runs every
     // 15 minutes, so a raw send would produce up to 96 identical pages a day for
     // one ongoing outage. telegramOncePerOpen fires once per open condition and
-    // goes quiet until it clears, which is the standing alert-decay rule.
+    // goes quiet until it clears, which is the standing alert-decay rule. Whose
+    // chat is paged is the workspace's (lib/notify/alert-route.ts); this route
+    // named the SunBiz lane for every workspace until 2026-10-02.
     for (const t of halted) {
       const v = breakers[t];
       await writeAgentAlert({
         tenantId: t,
         alertType: "sms_carrier_route_dead",
-        lane: "sunbiz-ops",
         severity: "urgent",
         title: "SMS halted — the carrier is refusing our sends",
         body:
@@ -158,14 +156,61 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       }).catch(() => undefined);
     }
 
-    if (r.errors.length) {
-      await sendTelegram(
-        `⚪ <b>SMS reconcile had errors</b>\n${esc(r.errors.slice(0, 3).join("; ")).slice(0, 400)}`,
-        { lane: "sunbiz-ops" },
-      ).catch(() => undefined);
+    // RECOVERY CLOSES THE CARD, ON EVIDENCE ONLY. Left open forever,
+    // telegramOncePerOpen would keep every later outage silent; closed too
+    // early, the outage is hidden and the next refresh pages as if it were new.
+    // "Not halted" is not evidence: an empty or pending-only history and a
+    // breaker switched off by SMS_BREAKER_DISABLED answer it too
+    // (routeEvidence, lib/sms/carrier-status.ts). The card closes only when
+    // the newest terminal receipt is a delivery sent after the card was last
+    // written, i.e. after the route was last seen failing.
+    const recovered: string[] = [];
+    const routeEvidenceByTenant: Record<string, RouteEvidence> = {};
+    for (const t of tenants) {
+      const verdict = breakers[t];
+      const evidence = routeEvidence(verdict);
+      routeEvidenceByTenant[t] = evidence;
+      if (evidence !== "delivering") continue;
+      const closed = await resolveAgentAlerts({
+        tenantId: t,
+        alertType: "sms_carrier_route_dead",
+        resolvedBy: "auto: a text delivered after the failures",
+        createdBefore: verdict.newestTerminal ? new Date(verdict.newestTerminal.at).toISOString() : undefined,
+      });
+      if (closed > 0) recovered.push(t);
     }
 
-    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breakers, halted, destination_health: destinationHealth });
+    // A benched number's or a halted wire's card closes the same way: on a
+    // delivery, judged by the same rules that benched it (lib/sms/line-health.ts).
+    const linesRecovered: Record<string, string[]> = {};
+    for (const t of tenants) {
+      const back = await closeRecoveredLineCards(t);
+      if (back.length > 0) linesRecovered[t] = back;
+    }
+
+    // Each workspace's reconcile errors are that workspace's card and its own
+    // audience, once per open card. They used to go, every tick and every
+    // workspace's together, to the SunBiz chat.
+    for (const t of tenants) {
+      const errors = perTenant[t]?.errors ?? [];
+      if (errors.length === 0) {
+        await resolveAgentAlerts({ tenantId: t, alertType: "sms_reconcile_errors", resolvedBy: "auto: reconcile ran clean" });
+        continue;
+      }
+      await writeAgentAlert({
+        tenantId: t,
+        alertType: "sms_reconcile_errors",
+        severity: "warn",
+        title: "Text delivery checks had errors",
+        body: errors.slice(0, 3).join("; ").slice(0, 400),
+        telegramOncePerOpen: true,
+      }).catch(() => undefined);
+    }
+
+    return NextResponse.json({
+      ok: true, tenants: tenants.length, ...r, breakers, halted, recovered,
+      route_evidence: routeEvidenceByTenant, lines_recovered: linesRecovered, destination_health: destinationHealth,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[reconcile-sms] failed", message);

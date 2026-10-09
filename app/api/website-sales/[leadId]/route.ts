@@ -3,6 +3,7 @@ import { mayHostAuditCall, mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 import { WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, isSellableAutomation, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
 import {
   dispositionPatch,
@@ -210,8 +211,7 @@ async function resolveCreditedCloserManager(
   if (
     manager.error ||
     !manager.data ||
-    manager.data.is_owner === true ||
-    manager.data.is_owner === 1
+    dbBool(manager.data.is_owner)
   ) {
     throw new Error(manager.error
       ? `manager_relationship_lookup_failed:${manager.error.message}`
@@ -614,7 +614,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     }
     if (
       !auditHost.data ||
-      (!auditHost.data.is_owner && !mayHostAuditCall(auditHost.data.team_role))
+      (!dbBool(auditHost.data.is_owner) && !mayHostAuditCall(auditHost.data.team_role))
     ) return NextResponse.json({ok:false,error:"audit_host_not_authorized"},{status:400});
     const auditHostEmail = typeof auditHost.data.email === "string" ? auditHost.data.email.trim() : "";
     if (!auditHostEmail || !auditHostEmail.includes("@")) {
@@ -693,7 +693,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       booked_founder:founderUserId,
       audit_host_user_id:founderUserId,
       audit_host_email:auditHostEmail,
-      audit_host_role:String(auditHost.data.team_role || (auditHost.data.is_owner ? "owner" : "closer")),
+      audit_host_role:String(auditHost.data.team_role || (dbBool(auditHost.data.is_owner) ? "owner" : "closer")),
       audit_duration_minutes:15,
       calendar_event_status:"verified",
       calendar_confirmation_method:"server_google_calendar_api",
@@ -1072,7 +1072,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             assignedTo:assignedUserId,
             recordedAuditHostRole,
             liveTeamRole:closerProfile.data.team_role,
-            isOwner:closerProfile.data.is_owner,
+            isOwner:dbBool(closerProfile.data.is_owner),
           })
         ) {
           trustedCloserUserId = frozenCloser;

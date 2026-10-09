@@ -10,6 +10,7 @@ import { manifestExists } from "@/lib/manifest/loader";
 import { withQuery } from "@/lib/os/redirects";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireOwnedTenantSlug } from "@/lib/tenant-access";
+import { dbBool } from "@/lib/db-bool";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -47,12 +48,14 @@ export default async function MarketplaceBuildPage({
     | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
   // Creating an agent is a full-admin capability — honors the admin_access grant.
+  // Both flags through dbBool (lib/db-bool.ts): truthiness read "0" as an owner,
+  // `=== true` refused the stored grant (1).
   const isAdmin =
     !!profile &&
-    (profile.is_owner ||
+    (dbBool(profile.is_owner) ||
       profile.team_role === "admin" ||
       profile.team_role === "owner" ||
-      profile.admin_access === true);
+      dbBool(profile.admin_access));
 
   let editing: Awaited<ReturnType<typeof getAgentBySlug>> = null;
   if (edit && profile?.tenant_id) {

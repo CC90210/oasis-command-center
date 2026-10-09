@@ -27,11 +27,10 @@ import { manifestExists } from "@/lib/manifest/loader";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
-import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
+import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -95,9 +94,10 @@ export async function workspaceChatSlug(tenantId: string): Promise<string | null
 
 /**
  * The route's provider rule, exactly:
- *   - the WORKSPACE `bravo` row in agent_model_config (user_id IS NULL: a
- *     teammate's personal key never answers a shared channel), enabled, with
- *     a key; or
+ *   - the workspace's AI account (lib/ai/workspace-account.ts, the one row
+ *     lib/os/department-agent.ts reads; never a teammate's personal key),
+ *     enabled, with a key; a local model account counts only for the verified
+ *     operator, as the route only lets it answer for them; or
  *   - the verified operator (isPlatformOperatorForAuthUser: alias AND an OASIS
  *     owner/admin profile by auth id) WHEN a platform key is configured. Being
  *     the operator is not a key: with no platform key the route answers 412,
@@ -111,19 +111,13 @@ async function providerReady(
   email: string | null,
 ): Promise<ProviderReadiness> {
   try {
-    const res = await getServiceSupabase()
-      .from("agent_model_config")
-      .select("enabled, encrypted_api_key")
-      .eq("tenant_id", tenantId)
-      .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
-      .is("user_id", null)
-      .maybeSingle();
-    if (res.error) {
-      console.error("[os.channel.provider]", res.error);
-      return "unknown";
+    const account = await readWorkspaceAiAccount(tenantId);
+    if (
+      hasUsableKey(account) &&
+      (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
+    ) {
+      return "ready";
     }
-    const row = res.data as { enabled: unknown; encrypted_api_key: string | null } | null;
-    if (row && (row.enabled === true || row.enabled === 1) && !!row.encrypted_api_key) return "ready";
   } catch (err) {
     console.error("[os.channel.provider]", err);
     return "unknown";
