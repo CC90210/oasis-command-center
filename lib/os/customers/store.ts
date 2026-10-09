@@ -40,6 +40,8 @@ import {
   type ContactInput,
   type CustomerLifecycle,
 } from "@/lib/os/customers/rules";
+import { isRetiredClientRef, notRetiredTenantSql, readNotRetired } from "@/lib/os/customers/retired";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /** A page of rows never exceeds this; one more is read to detect truncation. */
 export const CUSTOMER_LIST_LIMIT = 500;
@@ -181,7 +183,9 @@ export type CustomerFilters = {
  * The workspace's clients. `withDelivery` adds each client's open tickets,
  * active projects and latest ticket from the workspace's OWN desk (same
  * tenant_id): pass it only for a viewer who may read that desk, so a count
- * they may not see is null (an em dash), never a 0.
+ * they may not see is null (an em dash), never a 0. Archived records are
+ * listed only with `includeArchived`; a record linked to a retired business's
+ * workspace is never listed (lib/os/customers/retired.ts).
  */
 export async function listCustomers(
   db: Client,
@@ -221,16 +225,21 @@ export async function listCustomers(
       (SELECT MAX(t.created_at) FROM support_tickets t
          WHERE t.tenant_id = c.tenant_id AND t.customer_id = c.id) AS last_ticket_at`
     : "";
-  const rs = await db.execute({
-    sql: `SELECT c.*${delivery}
-          FROM customers c
-          WHERE ${where.join(" AND ")}
-          ORDER BY CASE c.lifecycle WHEN 'onboarding' THEN 0 WHEN 'active' THEN 1 WHEN 'paused' THEN 2
-                                    WHEN 'prospect' THEN 3 ELSE 4 END,
-                   c.updated_at DESC, c.id
-          LIMIT ${CUSTOMER_LIST_LIMIT + 1}`,
-    args,
-  });
+  // A record linked to a retired business's workspace is not a client, under
+  // Include archived too (lib/os/customers/retired.ts). The guard is the last
+  // condition, so its arguments follow every other filter's.
+  const rs = await readNotRetired("c.client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT c.*${delivery}
+            FROM customers c
+            WHERE ${[...where, guard.sql].join(" AND ")}
+            ORDER BY CASE c.lifecycle WHEN 'onboarding' THEN 0 WHEN 'active' THEN 1 WHEN 'paused' THEN 2
+                                      WHEN 'prospect' THEN 3 ELSE 4 END,
+                     c.updated_at DESC, c.id
+            LIMIT ${CUSTOMER_LIST_LIMIT + 1}`,
+      args: [...args, ...guard.args],
+    }),
+  );
   const all = rows(rs).map((r) => ({
     ...mapCustomer(r),
     open_ticket_count: opts.withDelivery ? nOrNull(r.open_ticket_count) ?? 0 : null,
@@ -260,6 +269,23 @@ export async function getCustomerBySourceLead(db: Client, tenantId: string, lead
   });
   const r = rows(rs)[0];
   return r ? mapCustomer(r) : null;
+}
+
+/**
+ * Is this deal about a retired business: does its data.client_tenant_id name
+ * a retired workspace (lib/os/customers/retired.ts)? The same test
+ * convertLeadToCustomer refuses with, for the deal page's client card. A deal
+ * that is not in this workspace's pipeline is not.
+ */
+export async function isLeadAboutRetiredBusiness(db: Client, tenantId: string, leadId: string): Promise<boolean> {
+  requireTenant(tenantId);
+  const lead = rows(
+    await db.execute({
+      sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead' LIMIT 1",
+      args: [tenantId, leadId],
+    }),
+  )[0];
+  return lead ? isRetiredClientRef(parseJson<Record<string, unknown>>(lead.data, {}, "tenant_records.data")) : false;
 }
 
 /**
@@ -297,18 +323,24 @@ async function getCustomerByEmail(db: Client, tenantId: string, email: string): 
   return r ? mapCustomer(r) : null;
 }
 
-/** Id + name pairs for pickers (ticket and project "Client" selects). Active records only. */
+/**
+ * Id + name pairs for pickers (ticket and project "Client" selects). Active
+ * records only; one linked to a retired business's workspace is never offered
+ * (lib/os/customers/retired.ts).
+ */
 export async function listCustomerOptions(
   db: Client,
   tenantId: string,
 ): Promise<Array<{ value: string; label: string; email: string | null }>> {
   requireTenant(tenantId);
-  const rs = await db.execute({
-    sql: `SELECT id, display_name, primary_email FROM customers
-          WHERE tenant_id = ? AND archived_at IS NULL
-          ORDER BY display_name COLLATE NOCASE, id LIMIT ${CUSTOMER_LIST_LIMIT}`,
-    args: [tenantId],
-  });
+  const rs = await readNotRetired("client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT id, display_name, primary_email FROM customers
+            WHERE tenant_id = ? AND archived_at IS NULL AND ${guard.sql}
+            ORDER BY display_name COLLATE NOCASE, id LIMIT ${CUSTOMER_LIST_LIMIT}`,
+      args: [tenantId, ...guard.args],
+    }),
+  );
   return rows(rs).map((r) => ({ value: String(r.id), label: String(r.display_name ?? ""), email: s(r.primary_email) }));
 }
 
@@ -339,52 +371,60 @@ export async function listContacts(db: Client, tenantId: string, customerId: str
 /**
  * Which client does this email belong to? The client's primary address first,
  * then a contact's. Ambiguity (the address is a contact at two clients) is
- * never guessed through: no client. Used by the support intake, so the email
- * here is UNVERIFIED — the link it makes is the team's internal bookkeeping,
- * never a grant of access to anything.
+ * never guessed through: no client. A record linked to a retired business's
+ * workspace is never matched (lib/os/customers/retired.ts). Used by the
+ * support intake, so the email here is UNVERIFIED — the link it makes is the
+ * team's internal bookkeeping, never a grant of access to anything.
  */
 export async function matchCustomerByEmail(db: Client, tenantId: string, email: string): Promise<string | null> {
   requireTenant(tenantId);
   const norm = normalizeEmail(email);
   if (!norm) return null;
-  const primary = await db.execute({
-    sql: "SELECT id FROM customers WHERE tenant_id = ? AND primary_email = ? AND archived_at IS NULL LIMIT 1",
-    args: [tenantId, norm],
-  });
+  const primary = await readNotRetired("client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT id FROM customers WHERE tenant_id = ? AND primary_email = ? AND archived_at IS NULL AND ${guard.sql} LIMIT 1`,
+      args: [tenantId, norm, ...guard.args],
+    }),
+  );
   if (primary.rows.length) return String(rows(primary)[0].id);
   const contacts = rows(
-    await db.execute({
-      sql: `SELECT DISTINCT cc.customer_id FROM customer_contacts cc
-            JOIN customers c ON c.id = cc.customer_id AND c.tenant_id = cc.tenant_id
-            WHERE cc.tenant_id = ? AND cc.email = ? AND c.archived_at IS NULL
-            LIMIT 2`,
-      args: [tenantId, norm],
-    }),
+    await readNotRetired("c.client_tenant_id", (guard) =>
+      db.execute({
+        sql: `SELECT DISTINCT cc.customer_id FROM customer_contacts cc
+              JOIN customers c ON c.id = cc.customer_id AND c.tenant_id = cc.tenant_id
+              WHERE cc.tenant_id = ? AND cc.email = ? AND c.archived_at IS NULL AND ${guard.sql}
+              LIMIT 2`,
+        args: [tenantId, norm, ...guard.args],
+      }),
+    ),
   );
   return contacts.length === 1 ? String(contacts[0].customer_id) : null;
 }
 
 /**
  * Is this email one of this workspace's current clients: a client's primary
- * address or a contact's, archived records not counted? Existence, not
- * identity. An address listed at two clients (a bookkeeper who serves both) is
- * a client's address, where matchCustomerByEmail answers "no client" because it
- * must not guess WHICH client. Tells support mail from sales mail
- * (lib/os/approvals/executors.ts emailPurposeFor).
+ * address or a contact's, archived records and records linked to a retired
+ * business's workspace not counted? Existence, not identity. An address listed
+ * at two clients (a bookkeeper who serves both) is a client's address, where
+ * matchCustomerByEmail answers "no client" because it must not guess WHICH
+ * client. Tells support mail from sales mail (lib/os/approvals/executors.ts
+ * emailPurposeFor).
  */
 export async function isCustomerEmail(db: Client, tenantId: string, email: string): Promise<boolean> {
   requireTenant(tenantId);
   const norm = normalizeEmail(email);
   if (!norm) return false;
-  const rs = await db.execute({
-    sql: `SELECT 1 FROM customers WHERE tenant_id = ? AND primary_email = ? AND archived_at IS NULL
-          UNION ALL
-          SELECT 1 FROM customer_contacts cc
-            JOIN customers c ON c.id = cc.customer_id AND c.tenant_id = cc.tenant_id
-           WHERE cc.tenant_id = ? AND cc.email = ? AND c.archived_at IS NULL
-          LIMIT 1`,
-    args: [tenantId, norm, tenantId, norm],
-  });
+  const rs = await readNotRetired("c.client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT 1 FROM customers c WHERE c.tenant_id = ? AND c.primary_email = ? AND c.archived_at IS NULL AND ${guard.sql}
+            UNION ALL
+            SELECT 1 FROM customer_contacts cc
+              JOIN customers c ON c.id = cc.customer_id AND c.tenant_id = cc.tenant_id
+             WHERE cc.tenant_id = ? AND cc.email = ? AND c.archived_at IS NULL AND ${guard.sql}
+            LIMIT 1`,
+      args: [tenantId, norm, ...guard.args, tenantId, norm, ...guard.args],
+    }),
+  );
   return rs.rows.length > 0;
 }
 
@@ -789,7 +829,12 @@ export async function linkWorkToCustomer(
 
 export type ConvertResult =
   | { ok: true; customer: Customer; created: boolean; linkedBy: "source_lead" | "email" | null }
-  | { ok: false; status: 404 | 409; error: "lead_not_found" | "lead_not_won" | "email_belongs_to_another_client"; existingId?: string | null };
+  | {
+      ok: false;
+      status: 404 | 409;
+      error: "lead_not_found" | "lead_not_won" | "email_belongs_to_another_client" | "retired_business";
+      existingId?: string | null;
+    };
 
 /**
  * "Convert to client": a won lead in THIS workspace's pipeline becomes a client
@@ -804,6 +849,11 @@ export type ConvertResult =
  * deal was marked won is the same client: it is linked to the lead (its
  * source_lead_id set) rather than duplicated. One that already came from a
  * DIFFERENT lead is refused with its id, so the team decides.
+ *
+ * A RETIRED BUSINESS. A deal whose data.client_tenant_id is a retired tenant
+ * (lib/os/customers/retired.ts) is refused, 409 retired_business, before its
+ * stage is looked at and before a record made from it earlier is handed back:
+ * nothing is created, merged or linked for it, and it is never "converted".
  */
 export async function convertLeadToCustomer(
   db: Client,
@@ -813,17 +863,17 @@ export async function convertLeadToCustomer(
   now: Date,
 ): Promise<ConvertResult> {
   requireTenant(tenantId);
-  const existing = await getCustomerBySourceLead(db, tenantId, leadId);
-  if (existing) return { ok: true, customer: existing, created: false, linkedBy: "source_lead" };
-
   const lead = rows(
     await db.execute({
       sql: "SELECT id, data FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead' LIMIT 1",
       args: [tenantId, leadId],
     }),
   )[0];
-  if (!lead) return { ok: false, status: 404, error: "lead_not_found" };
-  const data = parseJson<Record<string, unknown>>(lead.data, {}, "tenant_records.data");
+  const data = lead ? parseJson<Record<string, unknown>>(lead.data, {}, "tenant_records.data") : null;
+  if (data && isRetiredClientRef(data)) return { ok: false, status: 409, error: "retired_business" };
+  const existing = await getCustomerBySourceLead(db, tenantId, leadId);
+  if (existing) return { ok: true, customer: existing, created: false, linkedBy: "source_lead" };
+  if (!data) return { ok: false, status: 404, error: "lead_not_found" };
   if (!isConvertibleLeadStage(data.stage)) return { ok: false, status: 409, error: "lead_not_won" };
 
   const from = customerFromLead(data);
@@ -932,14 +982,20 @@ export async function endEngagement(
 
 export type LinkWorkspaceResult =
   | { ok: true; customer: Customer; changed: boolean }
-  | { ok: false; error: "not_found" | "client_tenant_not_found" | "client_tenant_is_this_workspace" | "client_tenant_taken"; existingId?: string | null };
+  | {
+      ok: false;
+      error: "not_found" | "client_tenant_not_found" | "client_tenant_is_this_workspace" | "client_tenant_taken" | "retired_business";
+      existingId?: string | null;
+    };
 
 /**
  * Link a client record to the client's own workspace (customers.client_tenant_id,
  * migration bravo__195), or unlink it with null. The CALLER decides who may:
- * the route allows the platform operator only. The tenant must exist and may
- * not be the business's own workspace; one workspace belongs to one client
- * record per business (a unique index, not a pre-check).
+ * the route allows the platform operator only. The tenant must exist, may not
+ * be the business's own workspace and may not be a retired business
+ * (retired_business, lib/os/customers/retired.ts); one workspace belongs to
+ * one client record per business (a unique index, not a pre-check). Unlinking
+ * is always allowed.
  */
 export async function setClientWorkspace(
   db: Client,
@@ -953,6 +1009,7 @@ export async function setClientWorkspace(
   if (!cur) return { ok: false, error: "not_found" };
   if (clientTenantId !== null) {
     if (clientTenantId === tenantId) return { ok: false, error: "client_tenant_is_this_workspace" };
+    if (isRetiredTenant(clientTenantId)) return { ok: false, error: "retired_business" };
     const t = await db.execute({ sql: "SELECT id FROM tenants WHERE id = ? LIMIT 1", args: [clientTenantId] });
     if (t.rows.length === 0) return { ok: false, error: "client_tenant_not_found" };
   }
@@ -975,16 +1032,18 @@ export async function setClientWorkspace(
 
 /**
  * The workspaces a record may be linked to: every tenant except the business's
- * own, by name. Operator-only surface (the caller gates it).
+ * own and the retired ones (lib/os/customers/retired.ts), by name.
+ * Operator-only surface (the caller gates it).
  */
 export async function listLinkableWorkspaces(
   db: Client,
   tenantId: string,
 ): Promise<Array<{ id: string; name: string; slug: string | null }>> {
   requireTenant(tenantId);
+  const live = notRetiredTenantSql("id");
   const rs = await db.execute({
-    sql: "SELECT id, name, slug FROM tenants WHERE id <> ? ORDER BY name COLLATE NOCASE, id LIMIT 1000",
-    args: [tenantId],
+    sql: `SELECT id, name, slug FROM tenants WHERE id <> ? AND ${live.sql} ORDER BY name COLLATE NOCASE, id LIMIT 1000`,
+    args: [tenantId, ...live.args],
   });
   return rows(rs).map((r) => ({ id: String(r.id), name: String(r.name ?? ""), slug: s(r.slug) }));
 }

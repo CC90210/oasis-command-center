@@ -21,6 +21,7 @@ import {
   type TicketStatus,
 } from "@/lib/delivery/rules";
 import { useDeliveryAction, type Option } from "@/components/delivery/useDeliveryAction";
+import { ClientWorkspaceOptions } from "@/components/delivery/client-workspace-options";
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? <p className="text-sm text-status-hot" role="alert">{error}</p> : null;
@@ -305,10 +306,7 @@ export function TicketControls({
           <label>
             <span className="label">Client portal workspace</span>
             <select className="select" value={ticket.client_tenant_id ?? ""} disabled={busy} onChange={(e) => patch({ client_tenant_id: e.target.value || null })}>
-              <option value="">None</option>
-              {clientTenants.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
+              <ClientWorkspaceOptions current={ticket.client_tenant_id} options={clientTenants} noneLabel="None" />
             </select>
           </label>
         )}

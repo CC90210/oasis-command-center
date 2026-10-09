@@ -32,7 +32,7 @@ import {
   serverError,
 } from "@/lib/delivery/session";
 import {
-  clientTenantExists,
+  clientTenantChangeAllowed,
   getTicket,
   listTicketComments,
   profileContact,
@@ -100,7 +100,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       // Client workspaces are OASIS's vendor relationship; no other desk has them.
       if (!isOasisDesk(viewer)) return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
     }
-    if (changes.client_tenant_id && !(await clientTenantExists(db, changes.client_tenant_id))) {
+    if (!(await clientTenantChangeAllowed(db, changes.client_tenant_id, access.ticket.client_tenant_id))) {
       return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
     }
     const author = { userId: viewer.userId, name: (await profileContact(db, viewer.userId, viewer.tenantId)).name };

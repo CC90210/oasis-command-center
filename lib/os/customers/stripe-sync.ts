@@ -19,7 +19,10 @@
  * with neither a name nor an email is skipped: nothing is invented.
  *
  * STATUS. "active" while any subscription is active, trialing or past_due;
- * otherwise "churned" (Past).
+ * otherwise "churned" (Past). The founder chooses from that: each person is
+ * listed with their subscription status and last payment, Active ticked and
+ * Past not, and only the people ticked are imported (CC, 2026-10-02: "I want
+ * to be able to just import one because some of them are inactive").
  *
  * IDEMPOTENT. A Stripe customer that already has a record is skipped. A record
  * with the same email and no Stripe customer is LINKED (its stripe_customer_id
@@ -53,12 +56,21 @@ export type StripeCustomerGroup = {
   name: string | null;
   email: string | null;
   lifecycle: CustomerLifecycle;
+  /**
+   * What the founder chooses by. The status of a live subscription (active,
+   * trialing, past_due) when there is one, else the newest subscription's
+   * (e.g. canceled); null when the books hold no subscription for them.
+   */
+  subscription_status: string | null;
+  /** The newest live payment's time; null when the books hold none. */
+  last_paid_at: string | null;
 };
 
 /**
  * One group per Stripe customer. The name and email are the most recent
  * non-empty values any of its rows carries (subscriptions first, then
- * payments), exactly as Stripe sent them.
+ * payments), exactly as Stripe sent them. The subscription status and last
+ * payment come from the same rows.
  */
 export async function stripeCustomerGroups(db: Client): Promise<StripeCustomerGroup[]> {
   const [subs, pays] = await Promise.all([
@@ -77,10 +89,20 @@ export async function stripeCustomerGroups(db: Client): Promise<StripeCustomerGr
       args: [BUSINESS_ENTITY_ID],
     }),
   ]);
-  const groups = new Map<string, StripeCustomerGroup & { active: boolean }>();
+  type Building = StripeCustomerGroup & { liveStatus: string | null; newestStatus: string | null };
+  const groups = new Map<string, Building>();
   const touch = (r: Row) => {
     const id = String(r.stripe_customer_id);
-    const g = groups.get(id) ?? { stripe_customer_id: id, name: null, email: null, lifecycle: "churned" as CustomerLifecycle, active: false };
+    const g: Building = groups.get(id) ?? {
+      stripe_customer_id: id,
+      name: null,
+      email: null,
+      lifecycle: "churned",
+      subscription_status: null,
+      last_paid_at: null,
+      liveStatus: null,
+      newestStatus: null,
+    };
     // Rows arrive newest first, so the first non-empty value wins.
     g.name = g.name ?? clean(r.customer_name);
     g.email = g.email ?? normalizeEmail(r.customer_email);
@@ -89,11 +111,20 @@ export async function stripeCustomerGroups(db: Client): Promise<StripeCustomerGr
   };
   for (const r of rows(subs)) {
     const g = touch(r);
-    if (MRR_STATUSES.has(String(r.status ?? ""))) g.active = true;
+    const status = clean(r.status);
+    g.newestStatus = g.newestStatus ?? status;
+    if (status && MRR_STATUSES.has(status)) g.liveStatus = g.liveStatus ?? status;
   }
-  for (const r of rows(pays)) touch(r);
+  for (const r of rows(pays)) {
+    const g = touch(r);
+    g.last_paid_at = g.last_paid_at ?? clean(r.at);
+  }
   return [...groups.values()]
-    .map(({ active, ...g }) => ({ ...g, lifecycle: (active ? "active" : "churned") as CustomerLifecycle }))
+    .map(({ liveStatus, newestStatus, ...g }) => ({
+      ...g,
+      lifecycle: (liveStatus ? "active" : "churned") as CustomerLifecycle,
+      subscription_status: liveStatus ?? newestStatus,
+    }))
     .sort((a, b) => a.stripe_customer_id.localeCompare(b.stripe_customer_id));
 }
 
@@ -140,6 +171,8 @@ export type ImportResult = {
   linked: string[];
   skipped: number;
   conflicts: Array<{ stripe_customer_id: string; customerId: string | null }>;
+  /** Stripe customers the founder was shown and left unticked: not imported, by their choice. */
+  declined: string[];
   /** Stripe customers the founder was not shown (they reached the books after the list was opened): not imported. */
   unreviewed: string[];
   /** Stripe customers whose action changed since the founder reviewed it (a create is now a link, or back): not imported. */
@@ -153,9 +186,12 @@ export type ConfirmedImport = ReadonlyMap<string, "create" | "link">;
  * Carry out what the founder CONFIRMED, and nothing else. The plan is read
  * again (so nothing is written from a stale picture), and each create or link
  * runs only when the founder was shown that same Stripe customer with that
- * same action: the privacy confirmation covered the people listed, not whoever
+ * same action: the privacy confirmation covered the people ticked, not whoever
  * reached the books between the preview and the click. The rest is reported
- * (unreviewed, changed) for the founder to review again.
+ * for the founder: `declined` (shown and left unticked, their choice; the
+ * dialog sends them), `unreviewed` (never shown) and `changed` (shown with a
+ * different action), so "left out by you" is never confused with "arrived
+ * after you looked".
  *
  * Each record goes through the customers store, so it is tenant-scoped,
  * unique-index guarded and ledgered (customer.created, origin "import") like
@@ -168,9 +204,11 @@ export async function runStripeImport(
   actor: string | null,
   now: Date,
   confirmed: ConfirmedImport,
+  /** The Stripe customers the founder was shown and left unticked. */
+  declined: ReadonlySet<string> = new Set(),
 ): Promise<ImportResult> {
   const plan = await planStripeImport(db, tenantId);
-  const out: ImportResult = { created: [], linked: [], skipped: 0, conflicts: [], unreviewed: [], changed: [] };
+  const out: ImportResult = { created: [], linked: [], skipped: 0, conflicts: [], declined: [], unreviewed: [], changed: [] };
   for (const item of plan) {
     const g = item.group;
     if (item.action === "skip") {
@@ -183,7 +221,8 @@ export async function runStripeImport(
     }
     const shown = confirmed.get(g.stripe_customer_id);
     if (!shown) {
-      out.unreviewed.push(g.stripe_customer_id);
+      if (declined.has(g.stripe_customer_id)) out.declined.push(g.stripe_customer_id);
+      else out.unreviewed.push(g.stripe_customer_id);
       continue;
     }
     if (shown !== item.action) {

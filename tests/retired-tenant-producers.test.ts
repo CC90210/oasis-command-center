@@ -665,6 +665,293 @@ async function main() {
     assert.equal(await countFor("email_click_events", OASIS), 1);
   });
 
+  // ── Clients: a retired business is never a client (lib/os/customers/retired.ts) ──
+  // SunBiz reaches Clients through OASIS's own records ABOUT it, not through
+  // its own tenant: a won deal in OASIS's pipeline (data.client_tenant_id), a
+  // client record linked to its workspace, the operator's Link workspace menu.
+  // CC, 2026-10-02: "It says that SunBiz and Breeze are clients, and they're
+  // not." Every read and write below has an OASIS control that still works.
+  const CLIENT_LIVE = "c0c0c0c0-0000-4000-8000-0000000000c0";
+  const retiredClients = await import("../lib/os/customers/retired");
+  await check("isRetiredClientRef: a record naming SunBiz as its business is retired, in any case; others and blanks are not", () => {
+    assert.equal(retiredClients.isRetiredClientRef({ client_tenant_id: SUNBIZ }), true);
+    assert.equal(retiredClients.isRetiredClientRef({ client_tenant_id: ` ${SUNBIZ.toUpperCase()}\n` }), true);
+    for (const ref of [{ client_tenant_id: OASIS }, { client_tenant_id: CLIENT_LIVE }, { client_tenant_id: null }, { client_tenant_id: 42 }, {}, null, undefined]) {
+      assert.equal(retiredClients.isRetiredClientRef(ref), false, JSON.stringify(ref));
+    }
+    const where = retiredClients.notRetiredTenantSql("c.client_tenant_id");
+    assert.equal(where.sql, "(c.client_tenant_id IS NULL OR lower(c.client_tenant_id) NOT IN (?))");
+    assert.deepEqual(where.args, [SUNBIZ]);
+    assert.throws(() => retiredClients.notRetiredTenantSql("id OR 1=1"), /not a column name/);
+  });
+
+  const clientsModel = await import("../components/os/landings/clients-model");
+  await check("buildClientRows: a won or ended deal about a retired business is neither a client to convert nor a past one; OASIS's deals still are", () => {
+    const built = clientsModel.buildClientRows({
+      leads: [
+        { id: "sb-won", data: { stage: "launched", company: "SunBiz", name: "Ezra", client_tenant_id: SUNBIZ } },
+        { id: "sb-ended", data: { stage: "churned", company: "SunBiz Past", client_tenant_id: SUNBIZ.toUpperCase() } },
+        { id: "oa-won", data: { stage: "launched", company: "Harbour Dental" } },
+        { id: "oa-linked", data: { stage: "won", company: "Live Client Co", client_tenant_id: CLIENT_LIVE } },
+      ],
+      projects: [],
+      tickets: [],
+    });
+    assert.deepEqual(built.rows.map((r) => r.name).sort(), ["Harbour Dental", "Live Client Co"]);
+    assert.deepEqual(built.past, [], "not a past client either");
+  });
+  await check("buildClientRows: a project or ticket naming a retired business's workspace is neither a client nor 'unlinked'; a live client's still counts", () => {
+    const project = (id: string, clientTenantId: string, name: string) => ({
+      id, title: `${name} site`, lead_id: null, client_tenant_id: clientTenantId, client_tenant_name: name,
+      client_name: null, client_email: null, stage: "building", last_client_update_at: null,
+    });
+    const ticket = (id: string, projectId: string | null, clientTenantId: string | null, email: string | null = null) => ({
+      id, project_id: projectId, client_tenant_id: clientTenantId, client_email: email,
+      created_at: "2026-10-01T00:00:00.000Z", last_public_reply_at: null,
+    });
+    const built = clientsModel.buildClientRows({
+      leads: [],
+      projects: [project("p-sb", SUNBIZ.toUpperCase(), "SunBiz"), project("p-live", CLIENT_LIVE, "Live Client Co")],
+      tickets: [
+        ticket("t-sb-project", "p-sb", null), // on SunBiz's project, naming no workspace itself
+        ticket("t-sb-tenant", null, SUNBIZ), // naming SunBiz's workspace
+        ticket("t-live", "p-live", CLIENT_LIVE), // control: a live client's
+        ticket("t-nobody", null, null, "who@nowhere.test"), // control: from nobody known
+      ],
+    });
+    assert.deepEqual(built.rows.map((r) => r.name), ["Live Client Co"], "SunBiz is listed as a client");
+    assert.equal(built.rows[0].openTickets, 1, "control: the live client's ticket");
+    assert.equal(built.rows[0].activeProjects, 1, "control: the live client's project");
+    assert.equal(built.unlinkedTickets, 1, "only the ticket from nobody is unlinked: SunBiz's two are not counted at all");
+    assert.deepEqual(built.past, []);
+  });
+
+  // The customers store, on its real migrations (bravo__188 customers, the
+  // bravo__190 ledger, bravo__195 client_tenant_id). 188 adds customer_id to
+  // the delivery tables, so their bare shapes come first.
+  await seed.executeMultiple(`
+    CREATE TABLE delivery_projects (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT, updated_at TEXT);
+    CREATE TABLE support_tickets (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT, client_email TEXT,
+      status TEXT, created_at TEXT, updated_at TEXT);
+  `);
+  for (const f of ["bravo__188_os_customers.sql", "bravo__190_ledger_core.sql", "bravo__195_customers_links.sql"]) {
+    await seed.executeMultiple(read(join(__dirname, "..", "database", "turso", f)));
+  }
+  await seed.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-live', 'Live Client Co')", args: [CLIENT_LIVE] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-sb-won', ?, 'lead', ?), ('lead-oa-won', ?, 'lead', ?)",
+    args: [
+      OASIS,
+      JSON.stringify({ stage: "launched", company: "SunBiz", name: "Ezra", email: "ezra@sunbiz.test", client_tenant_id: SUNBIZ }),
+      OASIS,
+      JSON.stringify({ stage: "launched", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test" }),
+    ],
+  });
+  const customers = await import("../lib/os/customers/store");
+  const T_CLIENTS = new Date("2026-10-02T12:00:00.000Z");
+  const record = (display_name: string, primary_email: string) => ({
+    display_name, primary_email, company_name: null, primary_phone: null, lifecycle: "active" as const,
+    owner_user_id: null, stripe_customer_id: null, tags: [], custom_fields: {},
+  });
+  const writes = async () => ({
+    customers: Number((await rows("SELECT COUNT(*) AS n FROM customers"))[0].n),
+    contacts: Number((await rows("SELECT COUNT(*) AS n FROM customer_contacts"))[0].n),
+    ledger: Number((await rows("SELECT COUNT(*) AS n FROM outcome_events"))[0].n),
+    links: (await rows("SELECT id, client_tenant_id FROM customers ORDER BY id")).map((r) => `${r.id}=${r.client_tenant_id}`).join(","),
+  });
+  const made = async (r: Awaited<ReturnType<typeof customers.createCustomer>>) => {
+    assert.ok(r.ok, JSON.stringify(r));
+    return r.customer;
+  };
+  // Records linked before the guard existed: one to SunBiz's workspace (stored
+  // in capitals, as some callers type it), one to a live client's workspace.
+  const sunbizRecord = await made(await customers.createCustomer(seed, OASIS, record("SunBiz (old link)", "ops@sunbiz.test"), OASIS_USER, T_CLIENTS));
+  const liveRecord = await made(await customers.createCustomer(seed, OASIS, record("Live Client Co", "owner@live.test"), OASIS_USER, T_CLIENTS));
+  const plainRecord = await made(await customers.createCustomer(seed, OASIS, record("Unlinked Co", "hello@unlinked.test"), OASIS_USER, T_CLIENTS));
+  await seed.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [SUNBIZ.toUpperCase(), sunbizRecord.id] });
+  await seed.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [CLIENT_LIVE, liveRecord.id] });
+
+  await check("listCustomers: a record linked to a retired business's workspace is never listed, under Include archived too", async () => {
+    const listed = (await customers.listCustomers(seed, OASIS, {})).rows.map((r) => r.id);
+    assert.ok(!listed.includes(sunbizRecord.id), "the SunBiz-linked record is listed as a client");
+    assert.ok(listed.includes(liveRecord.id) && listed.includes(plainRecord.id), "control: linked and unlinked live clients are listed");
+    // "li" matches all three names, so only the guard can leave the SunBiz one out.
+    const active = (await customers.listCustomers(seed, OASIS, { lifecycle: "active", q: "li" })).rows.map((r) => r.id);
+    assert.ok(!active.includes(sunbizRecord.id) && active.includes(liveRecord.id) && active.includes(plainRecord.id), "the guard holds under a status filter and a search");
+    const everything = (await customers.listCustomers(seed, OASIS, { includeArchived: true })).rows.map((r) => r.id);
+    assert.ok(!everything.includes(sunbizRecord.id), "Include archived lists it: a retired business is never a client");
+    assert.ok(everything.includes(liveRecord.id) && everything.includes(plainRecord.id), "control: Include archived lists the others");
+  });
+
+  // The pickers, matchers and validators that offer, guess or accept a client.
+  const deliveryStore = await import("../lib/delivery/store");
+  await customers.addContact(seed, OASIS, sunbizRecord.id, { name: "Ezra", email: "ezra@sunbiz.test", phone: null, role: null }, T_CLIENTS);
+  await customers.addContact(seed, OASIS, liveRecord.id, { name: "Lee", email: "lee@live.test", phone: null, role: null }, T_CLIENTS);
+  await check("listCustomerOptions and deskCustomerExists: a record linked to a retired business is never a ticket's or project's Client; the others are", async () => {
+    const options = (await customers.listCustomerOptions(seed, OASIS)).map((o) => o.value);
+    assert.ok(!options.includes(sunbizRecord.id), "the SunBiz-linked record is a Client option");
+    assert.ok(options.includes(liveRecord.id) && options.includes(plainRecord.id), "control: the other records are options");
+    assert.equal(await deliveryStore.deskCustomerExists(seed, OASIS, sunbizRecord.id), false, "a ticket or project may name the SunBiz-linked record");
+    assert.equal(await deliveryStore.deskCustomerExists(seed, OASIS, liveRecord.id), true, "control");
+  });
+  await check("matchCustomerByEmail and isCustomerEmail: neither the main address nor a contact of a record linked to a retired business matches", async () => {
+    for (const email of ["ops@sunbiz.test", "Ezra@Sunbiz.test"]) {
+      assert.equal(await customers.matchCustomerByEmail(seed, OASIS, email), null, `${email} is matched to the SunBiz-linked record`);
+      assert.equal(await customers.isCustomerEmail(seed, OASIS, email), false, `${email} counts as a client's address`);
+    }
+    // Controls: the live client's main address and its contact, the unlinked one's address.
+    assert.equal(await customers.matchCustomerByEmail(seed, OASIS, "owner@live.test"), liveRecord.id);
+    assert.equal(await customers.matchCustomerByEmail(seed, OASIS, "lee@live.test"), liveRecord.id);
+    assert.equal(await customers.matchCustomerByEmail(seed, OASIS, "hello@unlinked.test"), plainRecord.id);
+    assert.equal(await customers.isCustomerEmail(seed, OASIS, "lee@live.test"), true);
+    assert.equal(await customers.isCustomerEmail(seed, OASIS, "owner@live.test"), true);
+  });
+  await check("listClientTenants and clientTenantExists: a retired business's workspace is never a project's or ticket's client workspace; a live one is", async () => {
+    const listed = (await deliveryStore.listClientTenants(seed)).map((t) => t.id);
+    assert.ok(!listed.includes(SUNBIZ), "SunBiz is offered as a client workspace");
+    assert.ok(listed.includes(CLIENT_LIVE), "control: a live client's workspace is offered");
+    assert.ok(!listed.includes(OASIS), "OASIS is not its own client");
+    assert.equal(await deliveryStore.clientTenantExists(seed, SUNBIZ), false, "a project or ticket may name SunBiz's workspace");
+    assert.equal(await deliveryStore.clientTenantExists(seed, CLIENT_LIVE), true, "control");
+  });
+
+  await check("convertLeadToCustomer: a won deal about a retired business is refused (409 retired_business) and writes nothing", async () => {
+    const before = await writes();
+    const r = await customers.convertLeadToCustomer(seed, OASIS, "lead-sb-won", OASIS_USER, T_CLIENTS);
+    assert.deepEqual(r, { ok: false, status: 409, error: "retired_business" });
+    assert.deepEqual(await writes(), before, "no record, contact, ledger row or link");
+  });
+  await check("convertLeadToCustomer: a retired business's deal that already became a record is still refused, never handed back as converted", async () => {
+    // As in production: SunBiz's deal was filed under Past (a record made from
+    // it) on 2026-10-07, before the archive step names its workspace on it.
+    await seed.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-sb-made', ?, 'lead', ?)",
+      args: [OASIS, JSON.stringify({ stage: "launched", company: "SunBiz", client_tenant_id: SUNBIZ })],
+    });
+    const earlier = await made(await customers.createCustomer(seed, OASIS, { ...record("SunBiz (made earlier)", "past@sunbiz.test"), source_lead_id: "lead-sb-made" }, OASIS_USER, T_CLIENTS));
+    const before = await writes();
+    const r = await customers.convertLeadToCustomer(seed, OASIS, "lead-sb-made", OASIS_USER, T_CLIENTS);
+    assert.deepEqual(r, { ok: false, status: 409, error: "retired_business" }, `the earlier record ${earlier.id} was handed back`);
+    assert.deepEqual(await writes(), before);
+    // Control: OASIS's own deal with a record is still converted idempotently.
+    await seed.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-oa-made', ?, 'lead', ?)",
+      args: [OASIS, JSON.stringify({ stage: "launched", company: "Made Co" })],
+    });
+    const mine = await made(await customers.createCustomer(seed, OASIS, { ...record("Made Co", "hi@made.test"), source_lead_id: "lead-oa-made" }, OASIS_USER, T_CLIENTS));
+    const again = await customers.convertLeadToCustomer(seed, OASIS, "lead-oa-made", OASIS_USER, T_CLIENTS);
+    assert.ok(again.ok && again.customer.id === mine.id && again.created === false, JSON.stringify(again));
+  });
+
+  await check("listLinkableWorkspaces: a retired business's workspace is never offered; live ones are, OASIS's own is not", async () => {
+    const offered = (await customers.listLinkableWorkspaces(seed, OASIS)).map((w) => w.id);
+    assert.ok(!offered.includes(SUNBIZ), "SunBiz is offered in Link workspace");
+    assert.ok(offered.includes(CLIENT_LIVE), "control: a live client's workspace is offered");
+    assert.ok(!offered.includes(OASIS));
+  });
+
+  await check("setClientWorkspace: linking a retired business's workspace is refused in any case and changes nothing", async () => {
+    for (const id of [SUNBIZ, SUNBIZ.toUpperCase()]) {
+      assert.deepEqual(await customers.setClientWorkspace(seed, OASIS, plainRecord.id, id, T_CLIENTS), { ok: false, error: "retired_business" });
+    }
+    assert.equal((await customers.getCustomer(seed, OASIS, plainRecord.id))!.client_tenant_id, null);
+  });
+
+  // The routes. Only the session is a stand-in (a signed-in OASIS founder who
+  // is the platform operator): the route handlers, the store and the SQL are real.
+  // next/navigation's real module needs the client router context, which does
+  // not exist under react-server; the session code only uses its throwing
+  // helpers (the same stand-in as tests/_delivery-harness.ts).
+  stubModule(require.resolve("next/navigation"), {
+    notFound: () => {
+      throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+    },
+    redirect: (url: string) => {
+      throw new Error(`NEXT_REDIRECT;${url}`);
+    },
+  });
+  const realSession = await import("../lib/os/customers/session");
+  stubModule(require.resolve("../lib/os/customers/session"), {
+    ...realSession,
+    resolveClientsViewer: async () => ({
+      tenantId: OASIS, tenantSlug: "oasis-ai-cc", userId: OASIS_USER, persona: "founder",
+      oasis: true, canRead: true, canWrite: true, desk: null,
+    }),
+  });
+  const realApiAuth = await import("../lib/api-auth");
+  stubModule(require.resolve("../lib/api-auth"), {
+    ...realApiAuth,
+    resolveSessionContext: async () => ({ ok: true, userId: OASIS_USER, email: "conaugh@oasisai.work", tenantId: OASIS }),
+  });
+  const realOperator = await import("../lib/platform-operator");
+  stubModule(require.resolve("../lib/platform-operator"), { ...realOperator, isPlatformOperatorForAuthUser: async () => true });
+  const convertRoute = await import("../app/api/customers/convert/route");
+  const linkRoute = await import("../app/api/clients/[id]/link-workspace/route");
+  const postJson = async (
+    handler: (req: never, ctx: never) => Promise<Response>,
+    url: string,
+    body: unknown,
+    ctx?: unknown,
+  ) => {
+    const res = await handler(
+      new NextRequest(`http://localhost${url}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }) as never,
+      ctx as never,
+    );
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+
+  await check("POST /api/customers/convert: a deal about a retired business answers 409 retired_business, in words, and writes nothing", async () => {
+    const before = await writes();
+    const r = await postJson(convertRoute.POST as never, "/api/customers/convert", { lead_id: "lead-sb-won" });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "retired_business");
+    assert.match(String(r.body.message), /retired/);
+    assert.deepEqual(await writes(), before);
+  });
+  await check("POST /api/customers/convert: control — OASIS's own won deal still becomes a client record", async () => {
+    const r = await postJson(convertRoute.POST as never, "/api/customers/convert", { lead_id: "lead-oa-won" });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.created, true);
+  });
+  const linkTo = (id: string, clientTenantId: string) =>
+    postJson(linkRoute.POST as never, `/api/clients/${id}/link-workspace`, { client_tenant_id: clientTenantId, confirmed: true }, { params: Promise.resolve({ id }) });
+  await check("POST /api/clients/[id]/link-workspace: the retired workspace answers 409 retired_business and nothing is linked", async () => {
+    const r = await linkTo(plainRecord.id, SUNBIZ);
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "retired_business");
+    assert.equal((await customers.getCustomer(seed, OASIS, plainRecord.id))!.client_tenant_id, null);
+  });
+  await check("POST /api/clients/[id]/link-workspace: control — a live client's workspace still links", async () => {
+    await seed.execute({ sql: "UPDATE customers SET client_tenant_id = NULL WHERE id = ?", args: [liveRecord.id] });
+    const r = await linkTo(plainRecord.id, CLIENT_LIVE);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal((await customers.getCustomer(seed, OASIS, plainRecord.id))!.client_tenant_id, CLIENT_LIVE);
+  });
+
+  // "Not yet client records" reads won deals through loadClientSources. The
+  // delivery half asks the session, which this file has none of: it answers
+  // "not allowed", and only the won-deal read is under test here.
+  const realDeliverySession = await import("../lib/delivery/session");
+  stubModule(require.resolve("../lib/delivery/session"), {
+    ...realDeliverySession,
+    getDeliveryAccess: async () => ({ ok: false, status: 401, error: "not_signed_in" }),
+  });
+  const { loadClientSources } = await import("../components/os/landings/clients-data");
+  await check("loadClientSources: a won deal about a retired business is never read in as a client; OASIS's own still is", async () => {
+    const sources = await loadClientSources({
+      oasis: true,
+      surface: { ok: true, tenantId: OASIS, capabilities: { canSeeAllPipeline: true } },
+    } as never);
+    assert.equal(sources.wonDeals.state, "ok", JSON.stringify(sources.wonDeals));
+    const ids = sources.wonDeals.state === "ok" ? sources.wonDeals.rows.map((r) => r.id) : [];
+    assert.ok(!ids.includes("lead-sb-won"), "the SunBiz deal is read in as a won deal");
+    assert.ok(ids.includes("lead-oa-won"), "control: OASIS's own launched deal is read in");
+  });
+
   // Every write for the retired tenant, across the whole file: none.
   await check("across every path above, no table holds a row written for the retired tenant", async () => {
     const tables = [
@@ -676,6 +963,22 @@ async function main() {
     assert.equal(await countFor("agent_events", SUNBIZ, "correlation_id"), 0, "agent_events has a SunBiz row");
     // lead_interactions holds only the fixture row seeded above.
     assert.deepEqual((await rows("SELECT id FROM lead_interactions WHERE tenant_id = ?", [SUNBIZ])).map((r) => r.id), ["msg-sunbiz-0001"]);
+  });
+  // Clients writes OASIS's own rows ABOUT a business (tenant_id is OASIS), so a
+  // count under SunBiz's tenant could never fail there. What must hold is that
+  // no path above made SunBiz a client: by its workspace, or from its deal.
+  await check("across the Clients paths above, no client record, contact or ledger row names the retired business", async () => {
+    assert.deepEqual(
+      (await rows("SELECT id FROM customers WHERE lower(client_tenant_id) = ?", [SUNBIZ])).map((r) => r.id),
+      [sunbizRecord.id],
+      "only the record linked by hand before the guard existed names SunBiz's workspace",
+    );
+    assert.deepEqual(await rows("SELECT id FROM customers WHERE source_lead_id = 'lead-sb-won'"), [], "a client record was made from the SunBiz deal");
+    assert.deepEqual(
+      (await rows("SELECT event_key FROM outcome_events WHERE deal_id = 'lead-sb-won' OR customer_id = ?", [sunbizRecord.id])).map((r) => r.event_key),
+      ["customer.created"],
+      "the ledger holds anything about SunBiz beyond the fixture record's own customer.created",
+    );
   });
 
   if (failures) {

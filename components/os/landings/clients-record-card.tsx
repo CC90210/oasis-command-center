@@ -7,7 +7,9 @@
  * workspace's manifest lead record) without changing anything else on them:
  * nothing is drawn unless the deal is in a won stage
  * (lib/os/customers/rules.ts CONVERTIBLE_LEAD_STAGES) AND the viewer may see
- * client identities in the workspace the deal belongs to. Then it says one of:
+ * client identities in the workspace the deal belongs to, and nothing is
+ * drawn for a retired business (lib/os/customers/retired.ts): not for its
+ * deal, not for a record linked to its workspace. Then it says one of:
  *   - "Client record: <name>" with a link, when the deal already is one;
  *   - "Convert to client" (owners and admins), which creates the record linked
  *     by source_lead_id — idempotent, see /api/customers/convert;
@@ -21,7 +23,8 @@ import "server-only";
 import Link from "next/link";
 import { ConvertToClientButton } from "@/components/os/landings/clients-actions";
 import { isConvertibleLeadStage } from "@/lib/os/customers/rules";
-import { getCustomerBySourceLead, isMissingCustomersSchema, type Customer } from "@/lib/os/customers/store";
+import { getCustomerBySourceLead, isLeadAboutRetiredBusiness, isMissingCustomersSchema, type Customer } from "@/lib/os/customers/store";
+import { isRetiredClientRef } from "@/lib/os/customers/retired";
 import { getCustomersDb, resolveClientsViewer } from "@/lib/os/customers/session";
 import { CUSTOMER_LIFECYCLE_LABELS } from "@/lib/os/customers/rules";
 
@@ -46,11 +49,21 @@ export async function ClientRecordCard({
     found = { state: "error" };
   } else {
     try {
-      const customer = await getCustomerBySourceLead(db, viewer.tenantId, leadId);
+      const [customer, retiredDeal] = await Promise.all([
+        getCustomerBySourceLead(db, viewer.tenantId, leadId),
+        isLeadAboutRetiredBusiness(db, viewer.tenantId, leadId),
+      ]);
+      // A retired business is never a client (lib/os/customers/retired.ts):
+      // its deal would be refused "Convert to client", and a record linked to
+      // its workspace opens as not found. No card for either.
+      if (retiredDeal || isRetiredClientRef(customer)) return null;
       found = customer ? { state: "record", customer } : { state: "none" };
     } catch (err) {
-      if (isMissingCustomersSchema(err)) found = { state: "not_set_up" };
-      else {
+      if (isMissingCustomersSchema(err)) {
+        // The card says only that client records aren't available; the reason is here.
+        console.error("[os.clients.record_card] client records are not set up: the customers table is missing", err);
+        found = { state: "not_set_up" };
+      } else {
         console.error("[os.clients.record_card]", err);
         found = { state: "error" };
       }
@@ -67,7 +80,7 @@ export async function ClientRecordCard({
             : found.state === "none"
               ? "This deal is won. As a client it carries its tickets, projects, files and activity in one place."
               : found.state === "not_set_up"
-                ? "Client records are not set up in this database yet (migration bravo__188)."
+                ? "Client records aren't available right now. The error has been logged."
                 : "Couldn't check for a client record. The error has been logged."}
         </p>
       </div>
