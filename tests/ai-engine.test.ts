@@ -563,7 +563,15 @@ async function main() {
   });
 
   await check("the channel renders its label as that link, and its messages as bubbles with room to read (rendered)", () => {
-    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-engine.render.ts"], { encoding: "utf8", timeout: 120_000 });
+    // The render needs whole React: drop the suite's react-server condition,
+    // which CI passes down through NODE_OPTIONS (as tests/ai-workspace-account.test.ts does).
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-engine.render.ts"], { encoding: "utf8", env, timeout: 120_000 });
     assert.equal(r.status, 0, r.stderr || r.stdout);
     const html = JSON.parse(r.stdout.trim().split("\n").pop() || "{}") as Record<string, string>;
     assert.match(html.header, /<a (?=[^>]*data-testid="channel-engine")(?=[^>]*href="\/settings\/ai#engine")[^>]*>/);
