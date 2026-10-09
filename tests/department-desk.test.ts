@@ -39,6 +39,7 @@ delete process.env.LEAD_SCOPING_MODE;
 const ENV_SECRET = "sk-desk-env-secret-0123456789abcdef";
 const VAULT_SECRET = "vault-desk-secret-zyxwvutsrqpo";
 process.env.DESK_FIXTURE_API_KEY = ENV_SECRET;
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "department-desk-field-key-long-enough-0001";
 
 function stub(request: string, exports: Record<string, unknown>) {
   const p = require.resolve(request);
@@ -110,6 +111,8 @@ async function main() {
       schedule TEXT, enabled INTEGER, last_run_at TEXT, last_run_status TEXT, created_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT, team_role TEXT,
       full_name TEXT, display_name TEXT);
+    CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
+      service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
   `);
   // The approvals tables as the migrations write them (and the ledger they mirror into).
   const splitSql = (sql: string) => {
@@ -597,6 +600,61 @@ async function main() {
     });
     assert.equal(g?.tools.on, false);
     assert.doesNotMatch(String(g?.system), /Harbor Bakery/);
+  });
+
+  await check("the production vault reader: a stored secret is read and scrubbed", async () => {
+    const { encryptField } = await import("../lib/field-encryption");
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'custom', 'acme_vault', ?)",
+      args: [ACME, encryptField(VAULT_SECRET)],
+    });
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data, created_at, updated_at) VALUES ('lead-acme-vault', ?, 'lead', ?, ?, ?)",
+      args: [ACME, JSON.stringify({ name: `Vault Lead ${VAULT_SECRET}`, stage: "contacted", next_action_at: past }), now, now],
+    });
+    const g = await groundDepartmentTurn({ turn: baseTurn("google"), viewer: acmeOwner, maxTokens: 256, plainStream });
+    assert.equal(g?.tools.on, true);
+    assert.ok(!String(g?.system).includes(VAULT_SECRET));
+    assert.match(String(g?.system), /Vault Lead \[REDACTED:ACME_VAULT\]/);
+  });
+  await check("a vault read that ANSWERS an error (not a throw) sends no workspace data", async () => {
+    const { fetchTenantVaultSecretsForRedaction } = await import("../lib/chat-persistence");
+    await db.execute("ALTER TABLE tenant_integration_credentials RENAME TO tic_unavailable");
+    try {
+      await assert.rejects(() => fetchTenantVaultSecretsForRedaction(ACME), /vault_read_failed/);
+      const g = await groundDepartmentTurn({ turn: baseTurn("google"), viewer: acmeOwner, maxTokens: 256, plainStream });
+      assert.equal(g?.tools.on, false);
+      assert.doesNotMatch(String(g?.system), /Harbor Bakery|Vault Lead/);
+    } finally {
+      await db.execute("ALTER TABLE tic_unavailable RENAME TO tenant_integration_credentials");
+      await db.execute("DELETE FROM tenant_records WHERE id = 'lead-acme-vault'");
+    }
+  });
+
+  console.log("Routines are the Operations page's data");
+  await check("Chief of Staff offers routines to an owner, and returns them", async () => {
+    const tools = deskToolset({ viewer: acmeOwner, dept: dept("chief_of_staff"), agentSlug: "cos" });
+    assert.ok(tools.tools.some((t) => t.name === "routines_status"));
+    const r = await tools.execute("routines_status", {});
+    assert.match(r.content, /Morning lead sweep/);
+  });
+  await check("Chief of Staff never offers routines to a sales member or a read-only member, and refuses them", async () => {
+    for (const v of [acmeRep, acmeReadOnly]) {
+      const tools = deskToolset({ viewer: v, dept: dept("chief_of_staff"), agentSlug: "cos" });
+      assert.ok(!tools.tools.some((t) => t.name === "routines_status"), v.surface.persona);
+      const r = await tools.execute("routines_status", {});
+      assert.equal(r.is_error, true);
+      assert.doesNotMatch(r.content, /Morning lead sweep/);
+    }
+  });
+  await check("the routines handler itself checks the Operations gate (a role changed mid-turn)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const v = viewerFor(ACME, "acme-roofing", "founder", OWNER) as any;
+    const tools = deskToolset({ viewer: v, dept: dept("chief_of_staff"), agentSlug: "cos" });
+    assert.ok(tools.tools.some((t) => t.name === "routines_status"));
+    v.navInput = acmeRep.navInput;
+    const r = await tools.execute("routines_status", {});
+    assert.equal(JSON.parse(r.content).error, "routines_not_available_to_you");
   });
 
   console.log("Wiring");

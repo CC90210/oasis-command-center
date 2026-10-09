@@ -50,6 +50,12 @@ export type DeskToolContext = {
   nowMs?: () => number;
 };
 
+/** The Operations page's own gate (components/os/department/gate.ts): owners and admins. */
+export function mayOpenOperations(viewer: OsViewer): boolean {
+  const ops = OS_DEPARTMENTS.find((d) => d.key === "operations");
+  return !!ops && departmentGate(ops.slug, viewer.navInput) !== null;
+}
+
 class NotAvailable extends Error {
   constructor(reason: string) {
     super(reason);
@@ -180,6 +186,9 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${active.length} active`);
     }
     case "routines_status": {
+      // Routines are the Operations page's data: its gate (owners and
+      // admins), whichever department asks (Chief of Staff is open to members).
+      if (!mayOpenOperations(v)) throw new NotAvailable("routines_not_available_to_you");
       const r = await loadTenantRoutines(v.surface.tenantId);
       if (!r.ok) throw new Error("routines_could_not_be_read");
       const h = routineHealth(r.value, nowMs);
@@ -272,7 +281,10 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
 export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: DeskTool[] } {
   // A member who may not act (read_only) is never offered a proposal.
   const canAct = mayProposeFrom(ctx.viewer);
-  const palette = deskPalette(ctx.dept.key, { planMode: ctx.planMode, canAct });
+  // Routines only for someone the Operations page opens for (Chief of Staff
+  // lists them for owners and admins, not for members).
+  const routines = mayOpenOperations(ctx.viewer);
+  const palette = deskPalette(ctx.dept.key, { planMode: ctx.planMode, canAct }).filter((t) => routines || t.name !== "routines_status");
   const allowed = new Set<string>(palette.map((t) => t.name));
   return {
     palette,

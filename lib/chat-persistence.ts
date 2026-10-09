@@ -49,6 +49,11 @@ export async function fetchTenantVaultSecretsForRedaction(
     .select("field_key, encrypted_value")
     .eq("tenant_id", tenantId)
     .eq("service", VAULT_CUSTOM_SERVICE);
+  // A read that failed is not "this workspace has no secrets": answering []
+  // would let a caller send text it never scrubbed. Callers that may degrade
+  // to env-only redaction say so with their own .catch (the chat routes); a
+  // department turn sends no workspace data instead (lib/os/desk/turn.ts).
+  if (r.error) throw new Error(`vault_read_failed: ${r.error.message ?? "unknown"}`);
   const out: VaultSecret[] = [];
   for (const row of (r.data || []) as { field_key: string; encrypted_value: string }[]) {
     if (!row.encrypted_value) continue;
