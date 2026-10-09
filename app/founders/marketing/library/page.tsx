@@ -164,7 +164,7 @@ export default async function MarketingLibraryPage({
       degraded: true,
     }),
     safe("marketing.library.tabs", getBrandTabCounts(founder.tenantId), {
-      counts: { "oasis-ai": 0, conaugh: 0, music: 0, clients: 0 },
+      counts: { "oasis-ai": 0, conaugh: 0, music: 0, downloads: 0, clients: 0 },
       degraded: true,
     }),
   ]);

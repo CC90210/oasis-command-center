@@ -333,9 +333,13 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
     "the label may be renamed freely; the slug is data and must not move");
   assert.deepEqual(
     BRAND_GROUPS.map((g) => g.label),
-    ["OASIS AI", "Personal", "Music", "Clients"],
-    "the four tabs CC asked for, in order",
+    ["OASIS AI", "Personal", "Music", "Downloads", "Clients"],
+    "the four tabs CC asked for, in order, and Downloads (the Toolkit's downloaded videos) before the residual Clients",
   );
+  // A downloaded video is someone else's work with unknown rights: it lands in
+  // its own tab, never OASIS's own, and never the residual Clients tab.
+  assert.equal(brandGroupFor("downloads"), "downloads");
+  assert.equal(isOwnBrand("downloads"), false, "a download is never OASIS's own work");
 
   // ── provenance reads as a person ──────────────────────────────────────────
   // Adon co-founds OASIS AI and contributes to this library, so "added by" has
