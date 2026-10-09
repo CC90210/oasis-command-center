@@ -229,6 +229,10 @@ async function main() {
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
+    -- The workspace vault list_proposals scrubs against (lib/chat-persistence.ts):
+    -- a read that fails is refused, not an empty vault, so the table must exist.
+    CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
+      service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, publisher_agent TEXT, source_agent TEXT,
       target_agent TEXT, severity TEXT, correlation_id TEXT, payload TEXT, published_at TEXT, created_at TEXT,
       status TEXT);

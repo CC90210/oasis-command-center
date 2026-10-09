@@ -52,6 +52,7 @@ export const METERED_CALL_SITES = new Map<string, number>([
   ["lib/cloud-tool-runner.ts", 3], //   the Anthropic tool loop; the OpenAI-compatible loop's two URLs (OpenRouter, OpenAI)
   ["lib/agents/provider-probe.ts", 5], // Settings "Test": Anthropic, Google, OpenAI, OpenRouter, Ollama
   ["lib/ai-document-extractor.ts", 1], // document extraction
+  ["lib/os/desk/gemini-loop.ts", 1], // a department turn's Gemini function-calling loop (tests/department-desk.test.ts: one ledger row per request)
 ]);
 /** The subscription router records its own rows (its transport is gated by the other test). */
 const RECORDING_ROUTERS = new Set(["lib/ai/infer.ts"]);

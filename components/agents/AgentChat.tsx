@@ -7,6 +7,7 @@ import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/c
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
 import { failureCopy, isTurnFailureCode, type FailureModel } from "@/lib/os/channel/outcome";
 import { announceTurn } from "@/components/os/department/turn-event";
+import { deskToolsNote } from "@/lib/os/desk/catalog";
 import { ENGINE_SETTINGS_HREF, isEngineSpend, spendTag, type EngineLabel } from "@/lib/ai/agent-engine";
 import { CHAT_LIST_CLASS, CHAT_VIA_CLASS, chatBubbleClass, chatRowClass } from "./chat-layout";
 
@@ -120,6 +121,10 @@ export function AgentChat({
   const [failure, setFailure] = useState<string | null>(initialFailure);
   // The model a "not found" was about, as the route named it (its error event).
   const [failureModel, setFailureModel] = useState<FailureModel | null>(null);
+  // A department turn's lookups (app/api/agents/chat `tool` events) and, when
+  // lookups are off for this AI account, why (the `agent` event's `tools`).
+  const [toolsNote, setToolsNote] = useState<string | null>(null);
+  const [lookups, setLookups] = useState<string[]>([]);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
@@ -141,6 +146,7 @@ export function AgentChat({
       if (!trimmed || streaming) return;
       setFailure(null);
       setFailureModel(null);
+      setLookups([]);
 
       // Slash commands — intercepted client-side, never hit the server.
       // Scoped to the commands this chat offers (chatCommands): anything
@@ -308,6 +314,7 @@ export function AgentChat({
               continue;
             }
             if (eventName === "agent" && payload && typeof payload === "object") {
+              setToolsNote(deskToolsNote((payload as { tools?: unknown }).tools));
               const model = (payload as { model?: string }).model || null;
               setModelLabel(model);
               // Stamp the assistant placeholder with what ran it (and whose
@@ -346,6 +353,11 @@ export function AgentChat({
               streamFailure = (payload as { code?: string }).code || "provider_error";
               setFailureModel(asFailureModel((payload as { model?: unknown }).model));
               setFailure(streamFailure);
+            } else if (eventName === "tool" && payload && typeof payload === "object") {
+              const label = (payload as { label?: unknown; phase?: unknown }).label;
+              if ((payload as { phase?: unknown }).phase === "start" && typeof label === "string" && label) {
+                setLookups((prev) => (prev.includes(label) ? prev : [...prev, label]));
+              }
             }
           }
         }
@@ -464,6 +476,10 @@ export function AgentChat({
         </div>
       </div>
 
+      {toolsNote && (
+        <div className="border-b border-bg-border px-5 py-2 text-[11px] text-fg-dim">{toolsNote}</div>
+      )}
+
       {poweredBy?.note && (
         <p className="border-b border-hairline px-5 py-2 text-[11px] leading-snug text-status-warm">{poweredBy.note}</p>
       )}
@@ -506,6 +522,10 @@ export function AgentChat({
           );
         })}
       </div>
+
+      {lookups.length > 0 && (
+        <div className="mx-5 mb-2 text-[11px] text-fg-dim">Looked up: {lookups.join(", ")}</div>
+      )}
 
       {failureText && (
         <div
