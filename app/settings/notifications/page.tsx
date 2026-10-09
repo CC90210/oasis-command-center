@@ -54,7 +54,7 @@ export default async function SettingsNotificationsPage() {
   const nowMs = Date.now();
   const [workspaceBot, yours] = await Promise.all([
     viewer.access.canManage && telegram
-      ? loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId }).then((facts) =>
+      ? loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId, personal: false }).then((facts) =>
           resolveConnectorStatus(telegram, facts, nowMs),
         )
       : Promise.resolve(null),

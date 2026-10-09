@@ -14,7 +14,7 @@
  *
  * WHAT IT READS (all scoped to the session's workspace):
  *   - bridge_pairings: the paired computers and when each last checked in
- *     (online under 90 s, idle under 5 min, else offline);
+ *     (online, idle or offline by the one rule, lib/devices/presence.ts);
  *   - the Command Center's own view of the bridge: the same probe
  *     /api/bridge/health makes, server-side with the bearer, in plain words;
  *   - integrations_health service "guard_substrate": the guard summary the

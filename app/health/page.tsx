@@ -10,7 +10,7 @@
  * Top to bottom, one plain sentence per card on what it means for CC:
  *   1. The verdict: is everything protected, and when did the computer last
  *      check in.
- *   2. Your computer: the paired machines (online < 90 s, idle < 5 min) and
+ *   2. Your computer: the paired machines (lib/devices/presence.ts) and
  *      whether the Command Center itself can reach the bridge.
  *   3. Safety guards: the five guards on the operator's machine, as that
  *      machine reports them. "Not reported yet" / "Not verified since T",

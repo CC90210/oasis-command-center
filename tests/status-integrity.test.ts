@@ -664,6 +664,62 @@ async function main() {
     assert.doesNotMatch(words, /The team bot is set up/);
   });
 
+  // -- 5f. Today's Needs you reads the cards: every app that needs the owner, and the alerts' Telegram note --
+  await check("Needs you lists every Connections card that needs the owner, in the card's words (not only Stripe, Slack and Jev), and an alert's Telegram note follows the Telegram card", async () => {
+    const { loadConnectionAlerts, loadTelegramCard } = await import("../components/os/today/loaders");
+    const model = await import("../components/os/today/model");
+    for (const [tenant, who] of [[CLIENT_A, USERS.clientA], [CLIENT_B, USERS.clientB]] as const) {
+      const cards = await loadConnectorStatuses({ tenantId: tenant, userId: who.id });
+      const read = await loadConnectionAlerts(tenant);
+      assert.ok(read.ok, "the connection rows read");
+      const needs = model.buildNeedsYou({ sales: null, delivery: null, inbound: null, cash: null, connections: read, nowMs: Date.now() });
+      const rows = needs.items.filter((i) => i.icon === "connection");
+      const attention = Object.entries(cards).filter(([, s]) => s.kind === "attention");
+      assert.deepEqual(rows.map((r) => r.id).sort(), attention.map(([slug]) => `connection-${slug}`).sort(), "a row for every card that needs the owner, and no other");
+      for (const [slug] of attention) {
+        const row = rows.find((r) => r.id === `connection-${slug}`)!;
+        // The card's own words for the workspace (the hub's Google card adds a line about the viewer's own account).
+        const card = await loadWorkspaceConnectorStatus(tenant, slug);
+        assert.equal(row.detail, card?.detail ?? card?.label, `${slug}: the row says what the card says`);
+        assert.equal(row.href, connectors.connectorHref(slug));
+      }
+    }
+    // Client A: the Google mailbox's refused sign-in and the expired Slack key; Client B: its rejected bot.
+    const a = (await loadConnectionAlerts(CLIENT_A)) as { ok: true; value: Array<{ slug: string; urgent: boolean }> };
+    assert.deepEqual(a.value.map((r) => [r.slug, r.urgent]).sort(), [["google-workspace", false], ["slack", true]]);
+    const b = (await loadConnectionAlerts(CLIENT_B)) as { ok: true; value: Array<{ slug: string; label: string }> };
+    assert.deepEqual(b.value.map((r) => [r.slug, r.label]), [["telegram", "Bot token not accepted"]]);
+
+    // An alert's Telegram note: the push's record, and the card's answer for whether the bot works now.
+    const alert = (telegram: string | null) => ({
+      ok: true as const,
+      value: { cards: [{ id: "al-1", title: "A text could not be filed", body: null, severity: "warn", createdAtMs: null, telegram }], truncated: false },
+    });
+    const noteFor = (telegram: string | null, card: { kind: string; label: string } | null) => {
+      const item = model
+        .buildNeedsYou({ sales: null, delivery: null, inbound: null, cash: null, alerts: alert(telegram), telegramCard: card ? { ok: true, value: card } : null, nowMs: Date.now() })
+        .items.find((i) => i.resolveAlertId === "al-1")!;
+      return [item.detail, item.href];
+    };
+    const setup = connectors.connectorHref("telegram");
+    const noBot = "Not sent: no Telegram bot connected";
+    assert.deepEqual(noteFor(noBot, null), [noBot, setup], "card not read: the record as it was");
+    assert.deepEqual(noteFor(noBot, { kind: "not_connected", label: "Not connected" }), [noBot, setup]);
+    assert.deepEqual(noteFor(noBot, { kind: "connected", label: "Connected · verified 2m ago" }), ["Not sent: no Telegram bot was connected then", model.FEED_NEEDS_HREF]);
+    const clientBCard = await loadTelegramCard(CLIENT_B);
+    assert.ok(clientBCard.ok);
+    assert.deepEqual(
+      noteFor("Not sent: Telegram said: Unauthorized", clientBCard.value),
+      ["Not sent to Telegram. The Telegram card says: Bot token not accepted", setup],
+      "a rejected token is said in the card's words",
+    );
+    assert.deepEqual(noteFor("Sent to Telegram", clientBCard.value), ["Sent to Telegram", model.FEED_NEEDS_HREF]);
+    assert.deepEqual(noteFor(null, clientBCard.value), ["Shown here only", model.FEED_NEEDS_HREF]);
+    // Today reads the Telegram card beside the alerts, for the same viewers.
+    const brief = read("components/os/today/brief-load.ts");
+    assert.match(brief, /const telegramCardP = plan\.alerts \? loadTelegramCard\(tenantId, day\.nowMs\) : Promise\.resolve\(null\);/);
+  });
+
   // -- 5e. The handoff form reads a host's Google through the one reader (U6) ------------------
   await check("the handoff form's host list says what Settings says about each host's own Google, and adds only a live check of a ready one", async () => {
     const membersRoute = await import("../app/api/team/members/route");
@@ -730,16 +786,26 @@ async function main() {
     assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), connectors.connectionsHealth(noOne, Date.now()));
     assert.match(read("app/layout.tsx"), /connectionsDot\(connectionsHealth\(facts, Date\.now\(\)\)\)/);
     assert.match(read("components/os/department/numbers.ts"), /connectionTile\(connectionsHealth\(facts, Date\.now\(\)\), /);
+    // A count needs no read of the viewer's own Google (F5): the light read skips
+    // it (CC has one connected) and counts the same.
+    const full = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
+    const light = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id, personal: false });
+    assert.ok(full.personalGoogle?.linked, "the full read sees CC's own Google");
+    assert.equal("personalGoogle" in light, false, "the light read did not skip the personal read");
+    assert.deepEqual(connectors.connectionsHealth(light, Date.now()), connectors.connectionsHealth(full, Date.now()));
+    for (const f of ["app/layout.tsx", "components/os/department/numbers.ts", "app/settings/notifications/page.tsx", "app/settings/chat-apps/page.tsx"]) {
+      assert.match(read(f), /loadConnectorFacts\(\{[^}]*personal: false \}\)/, `${f} reads the viewer's own Google for a count`);
+    }
   });
 
   // -- 7. Every surface reads the one resolver (the wiring the checks above rely on) ----------
   await check("every status surface is wired to the one resolver, and no screen keeps a rule of its own", async () => {
     const dept = read("app/team/[dept]/page.tsx");
     assert.match(dept, /status: connectorFacts && def \? resolveConnectorStatus\(def, connectorFacts, nowMs\) : null/);
-    assert.match(
-      dept,
-      /connectionProblem\(\s*connectorFacts\s*\? resolveConnectorStatus\(slackDef, connectorFacts, nowMs\)\s*: await loadWorkspaceConnectorStatus\(tenantId, "slack", nowMs\),?\s*\)/,
-    );
+    assert.match(dept, /connectionProblem\(connectorFacts \? resolveConnectorStatus\(slackDef, connectorFacts, nowMs\) : slackCardAlone\)/);
+    // ...the Slack card alone read in the page's one batch, never after it (F5).
+    assert.match(dept, /binding\.kind === "agent" && !chipFacts \? loadWorkspaceConnectorStatus\(tenantId, "slack"\) : Promise\.resolve\(null\),\s*\]\);/);
+    assert.doesNotMatch(dept, /await loadWorkspaceConnectorStatus/);
     assert.match(dept, /const slackProblem =\s*binding\.kind === "agent" && slackPresence\.kind === "connected" && slackDef\s*\?/);
     assert.match(dept, /slack: binding\.kind === "agent" \? slackHomeFor\(slackPresence, \[dept\.key\]\) : null,\s*slackProblem,/);
     const roster = read("components/os/aiteam/roster.ts");
@@ -747,7 +813,9 @@ async function main() {
       roster,
       /channels: \{\s*slackProblem: connectionProblem\(slackCard\),\s*telegramSetUp: connectionSetUp\(telegramCard\),\s*telegramProblem: connectionProblem\(telegramCard\),?\s*\}/,
     );
-    assert.match(roster, /slackPresence\.kind === "connected" \? loadWorkspaceConnectorStatus\(tenantId, "slack"\) : Promise\.resolve\(null\),\s*loadWorkspaceConnectorStatus\(tenantId, "telegram"\),/);
+    // Both cards in the roster's one batch (F5), the Slack card used only where Slack is installed.
+    assert.match(roster, /loadSlackPresence\(.*tenantId\),\s*loadWorkspaceConnectorStatus\(tenantId, "slack"\),\s*loadWorkspaceConnectorStatus\(tenantId, "telegram"\),\s*\]\);/);
+    assert.match(roster, /const slackCard = slackPresence\.kind === "connected" \? slackCardRead : null;/);
     // The light loader is the same resolver over the same reads as the hub.
     const facts = read("components/os/connections/connector-facts.ts");
     assert.match(facts, /export async function loadWorkspaceConnectorStatus[\s\S]*?return resolveConnectorStatus\(/);

@@ -539,7 +539,8 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   }
   const page = read("app/team/[dept]/page.tsx");
   assert.match(page, /status: connectorFacts && def \? resolveConnectorStatus\(def, connectorFacts, nowMs\) : null/);
-  assert.match(page, /canManageConnections && profile\.connections\.length > 0\s*\? loadConnectorFacts\(/, "only owners and admins read the facts");
+  assert.match(page, /const chipFacts = canManageConnections && profile\.connections\.length > 0;/, "only owners and admins read the facts");
+  assert.match(page, /chipFacts \? loadConnectorFacts\(/);
   const panel = read("components/os/department/OverviewPanel.tsx");
   assert.match(panel, /\{app\.status && <StatusLine status=\{app\.status\} \/>\}/);
   // The three code sites that still said no connection-health source exists.

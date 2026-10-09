@@ -244,21 +244,21 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     .map((t) => ({ teammate: t, depts: open.filter((d) => t.departments.includes(d.key)) }))
     .filter((l) => l.depts.length > 0);
 
-  const [readiness, agents, custom, turns, slackPresence] = await Promise.all([
+  // The Slack and Telegram cards' own statuses (Settings > Connections) are read
+  // in the same batch as the roster, not after it (PR #553 review F5): neither
+  // depends on it. The Slack card is used only where Slack is installed (the
+  // only case a row names channels); the Telegram card always (a row names
+  // Telegram only when it is set up).
+  const [readiness, agents, custom, turns, slackPresence, slackCardRead, telegramCard] = await Promise.all([
     workspaceChatReadiness(viewer),
     Promise.all(shown.map((l) => getAgentBySlug(l.teammate.slug, tenantId))),
     loadCustomTeammates(tenantId, teammates),
     readWorkspaceTurns(tenantId),
     loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
-  ]);
-  // The Slack and Telegram cards' own statuses (Settings > Connections), read
-  // after the roster so the page keeps its database reads bounded: the Slack
-  // card only where Slack is installed (the only case a row names channels),
-  // the Telegram card always (a row names Telegram only when it is set up).
-  const [slackCard, telegramCard] = await Promise.all([
-    slackPresence.kind === "connected" ? loadWorkspaceConnectorStatus(tenantId, "slack") : Promise.resolve(null),
+    loadWorkspaceConnectorStatus(tenantId, "slack"),
     loadWorkspaceConnectorStatus(tenantId, "telegram"),
   ]);
+  const slackCard = slackPresence.kind === "connected" ? slackCardRead : null;
   // Key readiness, the same answer the channel gets: no slug or no key is Not
   // connected; an AI settings read that failed is unknown, not "not connected".
   const web: "ready" | "not_connected" | "unknown" = !readiness.slug

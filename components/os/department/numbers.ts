@@ -564,7 +564,8 @@ async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>)
   const [health, facts] = await Promise.all([
     routineHealthFor(viewer, routines),
     // The hub's own facts: each read fails on its own and reads as "could not be checked".
-    loadConnectorFacts({ tenantId: viewer.surface.tenantId, userId: viewer.surface.userId }),
+    // A count of workspace cards: no personal read.
+    loadConnectorFacts({ tenantId: viewer.surface.tenantId, userId: viewer.surface.userId, personal: false }),
   ]);
   return {
     tiles: [

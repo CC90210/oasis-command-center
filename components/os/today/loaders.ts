@@ -34,7 +34,8 @@ import { momentumMetrics, priorityInbound } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
-import { personalGoogleStatus } from "@/lib/os/connectors";
+import { CONNECTOR_CATALOG, personalGoogleStatus, resolveConnectorStatus, type ConnectorStatus } from "@/lib/os/connectors";
+import { loadConnectorFacts, loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
 import { loadEmpireRoutines, loadTenantRoutines } from "@/components/os/department/routines";
 import { empireReadFor, mergeRoutineReads, routineHealth, type EmpireLane, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
@@ -42,7 +43,6 @@ import { overview } from "@/lib/founders-finances/reports-io";
 import { formatCents } from "@/lib/founders-finances/money";
 import { getTursoClient } from "@/lib/turso";
 import { listActiveConnections } from "@/lib/connections/store";
-import { providerById } from "@/lib/connections/registry";
 import { getTenantIntegrationPresenceForStatus } from "@/lib/tenant-integration-store";
 import { toDateKey } from "@/lib/calendar/dates";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
@@ -301,19 +301,50 @@ export function loadRoutineHealth(tenantId: string, empire: EmpireLane, nowMs: n
 }
 
 /**
- * The workspace's live Connections-framework connections, for Needs you — the
- * same tenant-scoped reader the Connections hub uses. Read fresh on every
- * render, so a connection that recovers drops off without anything clearing it.
+ * Every Connections card that needs the owner, for Needs you: the hub's own
+ * facts through the one resolver (lib/os/connectors.ts), so a row says what
+ * its card says. It used to read the framework connections alone, so a
+ * rejected Telegram bot or a refused Gmail password reached the rail's dot and
+ * the Operations tile but never Needs you. Read fresh on every render, so a
+ * card that recovers drops off without anything clearing it. A facts read that
+ * failed makes the whole source "Couldn't check", never an all-clear.
  */
-export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionAttention[]>> {
-  return read("connections", async () =>
-    (await listActiveConnections(getTursoClient(), tenantId)).map((c) => ({
-      provider: c.provider,
-      label: providerById(c.provider)?.label ?? c.provider,
-      status: c.status,
-      detail: c.last_health_detail,
-    })),
-  );
+export function loadConnectionAlerts(tenantId: string, nowMs: number = Date.now()): Promise<Read<ConnectionAttention[]>> {
+  return read("connections", async () => {
+    const facts = await loadConnectorFacts({ tenantId, userId: "", personal: false });
+    if (facts.keyRows === null || facts.connections === null || facts.serverChecks === null) {
+      throw new Error("a connection facts read failed (logged by connector-facts)");
+    }
+    const live = facts.connections;
+    const out: ConnectionAttention[] = [];
+    for (const def of CONNECTOR_CATALOG) {
+      if (!def.live) continue;
+      const status = resolveConnectorStatus(def, facts, nowMs);
+      if (status.kind !== "attention") continue;
+      const source = def.live.source;
+      const row = source.kind === "tenant_connection" ? live.find((c) => c.provider === source.provider && c.status !== "revoked") : undefined;
+      out.push({
+        slug: def.slug,
+        name: def.name,
+        label: status.label,
+        detail: status.detail ?? null,
+        urgent: row?.status === "expired" || row?.status === "error",
+      });
+    }
+    return out;
+  });
+}
+
+/**
+ * The workspace's Telegram card, for the alert rows' Telegram note: whether
+ * the bot works now is the card's answer, not the push's old record.
+ */
+export function loadTelegramCard(tenantId: string, nowMs: number = Date.now()): Promise<Read<ConnectorStatus>> {
+  return read("telegram card", async () => {
+    const status = await loadWorkspaceConnectorStatus(tenantId, "telegram", nowMs);
+    if (!status) throw new Error("the Telegram card is missing from the catalog");
+    return status;
+  });
 }
 
 /** How many open alert cards Needs you lists; past it the count is a floor. */

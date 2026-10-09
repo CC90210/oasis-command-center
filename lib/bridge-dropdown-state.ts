@@ -4,7 +4,7 @@
  * Inputs:
  *   - bridgeOnline:        client probe result (true / false / null=inflight)
  *   - serverBridgeOnline:  server-rendered prop from getBridgeOnline() —
- *                          bridge_pairings.last_seen_at < 5min
+ *                          the one online rule (lib/devices/presence.ts)
  *
  * Outputs one of four states:
  *   - "online"    bridge fully reachable; CLI options enabled, no suffix

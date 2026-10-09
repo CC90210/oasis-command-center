@@ -74,7 +74,8 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
 
   // Every status comes from the Connections hub's own facts and resolver, never
   // built here. The shared team-alerts bot is owners and admins only.
-  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId });
+  // No card here is Google's, so the viewer's own Google is not read.
+  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId, personal: false });
   const slackCardStatus = slack ? resolveConnectorStatus(slack, facts, nowMs) : null;
   // This workspace's ways into Slack that are not built yet, as the
   // Connections drawer states them (resolved for its kind of workspace).

@@ -820,8 +820,12 @@ export type ConnectorFacts = {
    * whose values are on the server then says "status unavailable". Absent: none.
    */
   serverChecks?: readonly ServerCheckFact[] | null;
-  /** The viewer's own Google connection, or null when it could not be read. */
-  personalGoogle: PersonalGoogleFact | null;
+  /**
+   * The viewer's own Google connection, or null when it could not be read.
+   * Absent: not read for this screen (a count or a card that is not Google's),
+   * so no card says anything about it.
+   */
+  personalGoogle?: PersonalGoogleFact | null;
   /** The tenant's live Connections-framework connections. */
   connections: readonly ConnectionFact[] | null;
   /**
@@ -1239,7 +1243,7 @@ export function resolveConnectorStatus(
   }
   if (!facts.keyRows) return UNKNOWN;
   const workspace = keyedStatus(source, facts.keyRows, facts.serverChecks === undefined ? [] : facts.serverChecks, nowMs, def.name);
-  if (def.yourAccount !== "google") return workspace;
+  if (def.yourAccount !== "google" || facts.personalGoogle === undefined) return workspace;
   // Google also has a per-person connection. The card is the WORKSPACE's
   // shared mailbox, and its state is only that; the viewer's own account is
   // reported beside it, in the same words Settings and Today use for it

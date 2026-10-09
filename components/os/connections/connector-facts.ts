@@ -115,17 +115,25 @@ async function loadConnections(tenantId: string): Promise<ConnectionFact[] | nul
 export async function loadConnectorFacts(input: {
   tenantId: string;
   userId: string;
+  /**
+   * Read the viewer's own Google connection (the default). A screen that only
+   * counts the workspace's cards or shows cards other than Google's (the
+   * rail's dot, the Operations tile, Notifications, Chat apps) passes false:
+   * no card's kind depends on it, and the read decrypts the person's Google
+   * token bundle and reads their profile on every page (PR #553 review F5).
+   */
+  personal?: boolean;
 }): Promise<ConnectorFacts> {
   const [keyRows, personalGoogle, connections, serverChecks] = await Promise.all([
     loadKeyRows(input.tenantId),
-    loadPersonalGoogle(input.tenantId, input.userId),
+    input.personal === false ? Promise.resolve(undefined) : loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
     loadServerChecks(input.tenantId),
   ]);
   return {
     keyRows,
     serverChecks,
-    personalGoogle,
+    ...(personalGoogle === undefined ? {} : { personalGoogle }),
     connections,
     appNotConfigured: appNotConfiguredProviders(),
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
@@ -158,9 +166,9 @@ export async function loadWorkspaceConnectorStatus(
   return resolveConnectorStatus(
     def,
     {
+      // No personal read: no workspace card's state depends on the viewer.
       keyRows,
       serverChecks,
-      personalGoogle: null,
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),

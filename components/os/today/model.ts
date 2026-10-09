@@ -33,7 +33,6 @@ import { WON_STAGES } from "@/lib/oasis-board-summary-rules";
 import { OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
 import { formatOperatorDate } from "@/lib/dates";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
-import { needsAttention } from "@/lib/connections/rules";
 import type { CashCoverage, CoverageAccount } from "@/lib/founders-finances/cash-coverage";
 import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
@@ -629,8 +628,48 @@ export function cashView(read: Read<CashSnapshot>): CashView {
 export type NeedsYouTone = "urgent" | "attention" | "info";
 export type NeedsYouIcon = "follow_up" | "sla" | "reply" | "meeting" | "invoice" | "bank" | "connection" | "routine" | "alert";
 
-/** One live connection as Needs you sees it (lib/connections/store listActiveConnections, reduced). */
-export type ConnectionAttention = { provider: string; label: string; status: string; detail: string | null };
+/**
+ * One Connections card that needs the owner, as Needs you lists it: the card's
+ * own words from the one resolver (loaders.ts loadConnectionAlerts over
+ * lib/os/connectors.ts resolveConnectorStatus), so a row and its card never
+ * differ. Every app counts: a rejected Telegram bot or a refused Gmail
+ * password, not only the framework connections.
+ */
+export type ConnectionAttention = {
+  /** The card's slug: the row opens its drawer. */
+  slug: string;
+  /** The app's name. */
+  name: string;
+  /** The card's label and detail. */
+  label: string;
+  detail: string | null;
+  /** A connection the provider stopped accepting or that errored, not a gap a check found. */
+  urgent: boolean;
+};
+
+/** The note that says a push did not go out because no bot was connected (lib/notify/workspace-telegram.ts). */
+const NO_BOT_NOTE = "Not sent: no Telegram bot connected";
+
+/**
+ * An alert row's Telegram note. What happened to the push is the alert's own
+ * record; whether the workspace's bot works NOW is the Telegram card's answer
+ * (Settings > Connections), so the row never sends an owner to set up a bot
+ * the card says is set up, nor calls a rejected token "not connected". `fix`:
+ * the row opens the Telegram card. A card that was not read, or could not be
+ * checked, leaves the record as it is.
+ */
+export function alertTelegramNote(
+  push: string | null,
+  card: { kind: string; label: string } | null,
+): { text: string; fix: boolean } {
+  if (push === null) return { text: "Shown here only", fix: false };
+  const noBot = push === NO_BOT_NOTE;
+  if (!card || card.kind === "unknown" || card.kind === "coming_soon" || !push.startsWith("Not sent")) return { text: push, fix: noBot };
+  if (card.kind === "not_connected") return { text: NO_BOT_NOTE, fix: true };
+  if (card.kind === "attention") return { text: `Not sent to Telegram. The Telegram card says: ${card.label}`, fix: true };
+  // Set up now (connected, or set up and not yet tested).
+  return { text: noBot ? "Not sent: no Telegram bot was connected then" : push, fix: false };
+}
 
 /**
  * One open alert card of this workspace (agent_alerts, read by loaders.ts
@@ -713,6 +752,8 @@ export function buildNeedsYou(input: {
   routines?: Read<RoutineHealth> | null;
   /** The workspace's open alert cards. Null/absent = not read for this viewer. */
   alerts?: Read<WorkspaceAlerts> | null;
+  /** The workspace's Telegram card, for the alert rows' Telegram note. Null/absent = not read. */
+  telegramCard?: Read<{ kind: string; label: string }> | null;
   nowMs: number;
   formatTime?: (ms: number) => string;
 }): NeedsYou {
@@ -729,20 +770,22 @@ export function buildNeedsYou(input: {
     if (!input.alerts.ok) unavailable.push("alerts");
     else {
       const { cards, truncated } = input.alerts.value;
+      // Whether the bot works now is the Telegram card's answer (alertTelegramNote).
+      const telegramCard = input.telegramCard?.ok ? input.telegramCard.value : null;
       cards.forEach((a, i) => {
-        const notConnected = a.telegram === "Not sent: no Telegram bot connected";
+        const note = alertTelegramNote(a.telegram, telegramCard);
         items.push({
           id: `alert-${a.id}`,
           tone: a.severity === "urgent" ? "urgent" : a.severity === "warn" ? "attention" : "info",
           icon: "alert",
           title: a.title,
-          detail: [a.body, a.createdAtMs !== null ? operatorWhen(a.createdAtMs) : null, a.telegram ?? "Shown here only"]
+          detail: [a.body, a.createdAtMs !== null ? operatorWhen(a.createdAtMs) : null, note.text]
             .filter(Boolean)
             .join(" \u00b7 "),
           count: null,
           // More open than were read: the shared total prints a floor.
           capped: truncated && i === cards.length - 1 ? true : undefined,
-          href: notConnected ? connectorHref("telegram") : FEED_NEEDS_HREF,
+          href: note.fix ? connectorHref("telegram") : FEED_NEEDS_HREF,
           resolveAlertId: a.id,
         });
       });
@@ -756,21 +799,20 @@ export function buildNeedsYou(input: {
     else approvals = input.approvals.value;
   }
 
-  // A connection in an attention status (lib/connections/rules needsAttention)
+  // Every Connections card that needs the owner, in the card's own words,
   // stays here until it recovers; the list is read fresh, so recovery clears it.
   if (input.connections) {
     if (!input.connections.ok) unavailable.push("connection health");
     else {
       for (const c of input.connections.value) {
-        if (!needsAttention(c.status)) continue;
         items.push({
-          id: `connection-${c.provider}`,
-          tone: c.status === "degraded" ? "attention" : "urgent",
+          id: `connection-${c.slug}`,
+          tone: c.urgent ? "urgent" : "attention",
           icon: "connection",
-          title: `${c.label} connection needs attention`,
-          detail: c.detail ?? "Open Settings › Connections to see what the last check found.",
+          title: `${c.name} connection needs attention`,
+          detail: c.detail ?? c.label,
           count: null,
-          href: CONNECTIONS_HREF,
+          href: connectorHref(c.slug),
         });
       }
     }

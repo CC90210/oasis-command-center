@@ -28,6 +28,7 @@ import { KNOWN_INTEGRATIONS } from "./integrations-registry";
 import { getDbBackend } from "./db";
 import { isMissingTableError } from "./api-helpers";
 import type { TenantRecord } from "./manifest/data";
+import { isOnline } from "./devices/presence";
 import {
   recentLeadsTurso,
   pipelineBreakdownTurso,
@@ -144,7 +145,8 @@ export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
       }
     | null;
   if (!row?.last_seen_at) return { online: false, tools: null };
-  const online = Date.now() - new Date(row.last_seen_at).getTime() < 5 * 60 * 1000;
+  // The one online rule every screen uses (lib/devices/presence.ts).
+  const online = isOnline(row.last_seen_at, Date.now());
   // tools[] processing — empty array means "bridge online but never
   // ran the new daemon (pre-Phase-F)". Fall back to null so /api/chat
   // treats as "no filter, use the TOOL_DEFINITIONS hardcoded defaults."

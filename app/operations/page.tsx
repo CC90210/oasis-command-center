@@ -31,20 +31,14 @@ import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou } from "@/lib/admin/attention";
+import { machineState, type MachineState } from "@/lib/devices/presence";
 
 export const dynamic = "force-dynamic";
 
 const FRESH_AGENT_MS = 15 * 60 * 1000;
-// Bridge ping cadence is 60s (see app/api/automations/background-workers/route.ts
-// — `claude-bridge-ping` heartbeats every minute). 90s = one-miss tolerance.
-// Anything beyond 90s but under 5 min counts as "idle" (heartbeat skipped a
-// beat, daemon probably still alive); >5 min is fully "offline".
-//
-// Previous value of 5 min for the online cutoff was the bug CC saw: a
-// machine that had pinged ~3 min before sleeping would still show "online
-// · 3m ago" — visually contradicting the fact that the machine was off.
-const FRESH_BRIDGE_MS = 90 * 1000;
-const IDLE_BRIDGE_MS = 5 * 60 * 1000;
+// A paired machine is online, idle or offline by the one rule every screen
+// uses (lib/devices/presence.ts machineState); this page kept its own 90 s and
+// 5 min cutoffs while Devices said 5 min and Background workers 2 min.
 
 type AgentSnap = {
   agent_name: string;
@@ -185,6 +179,8 @@ export default async function OperationsPage({
   const familySet = new Set(FAMILY_AGENT_KEYS);
   const enabled = agentNamesForOps.filter((key) => familySet.has(resolveAgentKey(key)));
   const now = Date.now();
+  // Online machines by the one rule; the header counts only those, never idle ones.
+  const onlineCount = (pairings ?? []).filter((p) => machineState(p.last_seen_at, now) === "online").length;
 
   // "All clear" is /health's "Nothing needs you" (lib/admin/attention.ts
   // needsYouCount): every alarm count read and zero, and no outcome-check
@@ -200,8 +196,8 @@ export default async function OperationsPage({
           pairings === null ? (
             <Tag tone="neutral">Bridges: couldn&apos;t check</Tag>
           ) : (
-            <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
-              {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
+            <Tag tone={onlineCount > 0 ? "engaged" : "warm"}>
+              {onlineCount} bridge{onlineCount === 1 ? "" : "s"} online
             </Tag>
           )
         }
@@ -280,7 +276,7 @@ export default async function OperationsPage({
           <EmptyState
             message="No machines paired yet."
             cta={
-              <Link href="/settings" className="btn-primary inline-flex items-center gap-1">
+              <Link href="/settings/devices" className="btn-primary inline-flex items-center gap-1">
                 Open Settings → Devices
               </Link>
             }
@@ -331,7 +327,7 @@ export default async function OperationsPage({
         title="Local CLI status"
         subtitle="Which AI command-line tools your computer's bridge found, and whether each is signed in, as the bridge last reported."
       >
-        <BridgeCliPanel serverBridgeOnline={pairings === null ? null : pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
+        <BridgeCliPanel serverBridgeOnline={pairings === null ? null : onlineCount > 0} />
       </Card>
 
       <Card
@@ -458,18 +454,7 @@ function isFresh(ts: string | null, now: number, threshold: number): boolean {
   return now - new Date(ts).getTime() < threshold;
 }
 
-/**
- * Three-state freshness for paired bridge machines. The 90s "online" cutoff
- * is one-miss tolerance against the daemon's 60s heartbeat cadence. The
- * 5-minute "idle" cutoff acknowledges that occasional network jitter can
- * stretch the ping interval without meaning the daemon is dead. Beyond
- * 5 minutes we call it offline — the daemon has either died or the
- * machine is genuinely off.
- */
-function bridgeState(ts: string | null, now: number): "online" | "idle" | "offline" {
-  if (!ts) return "offline";
-  const age = now - new Date(ts).getTime();
-  if (age < FRESH_BRIDGE_MS) return "online";
-  if (age < IDLE_BRIDGE_MS) return "idle";
-  return "offline";
+/** A paired machine's state, by the one rule (lib/devices/presence.ts). */
+function bridgeState(ts: string | null, now: number): MachineState {
+  return machineState(ts, now);
 }
