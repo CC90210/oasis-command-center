@@ -14,12 +14,14 @@ import { CHAT_LIST_CLASS, CHAT_VIA_CLASS, chatBubbleClass, chatRowClass } from "
 /** The "via" footer of an answer, from the route's `agent` event: what ran it and whose credits it spent. */
 export function viaLine(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
-  const p = payload as { runs_on?: unknown; spend?: unknown; model?: unknown; fell_back_from?: unknown };
+  const p = payload as { runs_on?: unknown; spend?: unknown; model?: unknown; fell_back_from?: unknown; engine_not_used?: unknown };
   const what = typeof p.runs_on === "string" && p.runs_on.trim() ? p.runs_on.trim() : typeof p.model === "string" && p.model ? p.model : null;
   if (!what) return null;
   const parts = [what];
   if (isEngineSpend(p.spend)) parts.push(spendTag(p.spend));
   if (typeof p.fell_back_from === "string" && p.fell_back_from) parts.push(`${p.fell_back_from} could not be reached`);
+  // The API account answers by design here: say so, never "could not be reached".
+  else if (typeof p.engine_not_used === "string" && p.engine_not_used) parts.push(`${p.engine_not_used} is not used for this chat`);
   return parts.join(" - ");
 }
 

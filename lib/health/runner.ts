@@ -26,6 +26,7 @@ import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
 import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
+import { DEPARTMENT_CHAT_CHECKS } from "./department-chat-checks";
 import { healthAlertStateKey } from "./alert-state-key";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
@@ -40,8 +41,10 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...tenantOutcomeChecks(), ...OASIS_GLOBAL_CHECKS];
+  return [...tenantOutcomeChecks(), ...OASIS_GLOBAL_CHECKS, ...DEPARTMENT_CHAT_CHECKS];
 }
+
+export { DEPARTMENT_CHAT_CHECKS };
 
 /**
  * OASIS-global infrastructure checks, persisted under the OASIS tenant and

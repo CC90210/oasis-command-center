@@ -278,6 +278,7 @@ const LANE_ALLOWED: Readonly<Record<string, string>> = {
   "lib/health/form-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/calendar-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/worker-reporter-checks.ts": "estate health checks, run only under OASIS's own workspace",
+  "lib/health/department-chat-checks.ts": "department-chat health checks; the route pages only a workspace alertAudienceFor() resolves to OASIS's operator chat, every other workspace is recorded without a page",
   "lib/health/drip-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/deploy-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/forms/oasis-funnel-notify.ts": "OASIS's own funnel on oasisai.work: always OASIS's workspace",

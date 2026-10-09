@@ -450,16 +450,30 @@ async function main() {
     assert.equal(req2.body.agent, "atlas");
   });
 
-  await check("OASIS with the computer NOT reachable: the AI account answers, and the turn says what was chosen", async () => {
-    const prepared = await oasisTurn("sales", "sdr", async () => null);
+  await check("OASIS with the computer NOT reachable for someone entitled to it: the AI account answers, and the turn says it could not be reached", async () => {
+    const prepared = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
     assert.ok(prepared.ok, JSON.stringify(prepared));
     if (!prepared.ok) return;
     assert.equal(prepared.turn.engine.kind, "api");
     assert.equal(prepared.turn.engine.fellBackFrom, "Codex on your paired computer");
+    assert.equal(prepared.turn.engine.notUsedFor, null);
     assert.equal(prepared.turn.engine.spend, "api_credits");
-    // A Slack mention (no resolver) does the same.
-    const slack = await oasisTurn("sales", "sdr", null);
-    assert.ok(slack.ok && slack.turn.engine.kind === "api" && slack.turn.engine.fellBackFrom !== null);
+    // A gate that THROWS is the same: the person may use the computer and it did not answer.
+    const threw = await oasisTurn("sales", "sdr", async () => {
+      throw new Error("gate down");
+    });
+    assert.ok(threw.ok && threw.turn.engine.kind === "api" && threw.turn.engine.fellBackFrom === "Codex on your paired computer");
+  });
+
+  await check("an API turn that is the RULE is not a fallback and never says 'could not be reached': a Slack mention, a teammate the gate refuses", async () => {
+    // Slack never passes a resolver; bridgeCallerForSession answers null for a teammate it does not admit.
+    for (const bridge of [null, async () => null]) {
+      const prepared = await oasisTurn("sales", "sdr", bridge);
+      assert.ok(prepared.ok, JSON.stringify(prepared));
+      if (!prepared.ok || prepared.turn.engine.kind !== "api") return assert.fail("not an API turn");
+      assert.equal(prepared.turn.engine.fellBackFrom, null, "by design is not a fault");
+      assert.equal(prepared.turn.engine.notUsedFor, "Codex on your paired computer");
+    }
   });
 
   await check("the harness path is OASIS-only: a client workspace on an app engine is answered by its API account, even with a reachable bridge", async () => {
@@ -486,7 +500,8 @@ async function main() {
     assert.ok(agentEv, JSON.stringify(evs));
     assert.equal(agentEv.data.spend, "api_credits");
     assert.match(String(agentEv.data.runs_on), /\(API\)$/);
-    assert.equal(agentEv.data.fell_back_from, "Claude Code on your paired computer", "the reply says the chosen app did not answer");
+    assert.equal(agentEv.data.fell_back_from, undefined, "a client workspace has no harness yet: the app was never going to answer, so nothing 'could not be reached'");
+    assert.equal(agentEv.data.engine_not_used, "Claude Code on your paired computer");
     assert.equal(agentEv.data.model, undefined, "the model id stays operator detail");
     await store.saveAgentEngine(ALPHA, { kind: "api" });
   });
@@ -529,6 +544,264 @@ async function main() {
     assert.equal(sent[0].body?.system, prepared.turn.system);
     assert.ok(sent.every((s) => s.url.startsWith(BRIDGE)));
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  // -- The ledger sees the engine (CC, 2026-10-09: the product catches its own errors) --
+  // lib/health/department-chat-checks.ts reads ai_usage_events. A turn that fell
+  // back from the chosen engine, and a turn that ran on the paired computer,
+  // used to leave nothing to read.
+  const usageRows = async () =>
+    (await db.execute("SELECT * FROM ai_usage_events ORDER BY occurred_at, id")).rows.map((r) => ({ ...r }) as Record<string, unknown>);
+  const drainTurn = async (turn: Parameters<typeof streamAgentTurn>[0]) => {
+    const out = [];
+    for await (const ev of streamAgentTurn(turn, [{ role: "user", content: "How is the pipeline?" }])) out.push(ev);
+    return out;
+  };
+  const bridgeTurnFor = async () => {
+    const prepared = await oasisTurn("sales", "sdr", async () => ccCaller);
+    assert.ok(prepared.ok && prepared.turn.engine.kind !== "api", JSON.stringify(prepared));
+    if (!prepared.ok) throw new Error("not prepared");
+    return prepared.turn;
+  };
+
+  const apiAnswers = () => {
+    answer = (s) => (s.url.includes("anthropic.com") ? anthropicOk("Answered by the API account.") : new Response("x", { status: 599 }));
+  };
+
+  await check("a turn that REALLY fell back (entitled, computer unavailable) records engine_unreachable:<app> on its API call", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const prepared = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
+    assert.ok(prepared.ok && prepared.turn.engine.kind === "api" && prepared.turn.engine.fellBackFrom !== null);
+    if (!prepared.ok) return;
+    apiAnswers();
+    await drainTurn(prepared.turn);
+    const rows = await usageRows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].fallback_reason, "engine_unreachable:codex");
+    assert.equal(rows[0].billing_mode, "byo_key", "the API account answered and is billed as before");
+    assert.equal(rows[0].outcome, "ok");
+    // A local engine says "local".
+    await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
+    const local = await oasisTurn("sales", "sdr", async () => ({ unavailable: "gate_error" as const }));
+    assert.ok(local.ok);
+    if (!local.ok) return;
+    await db.execute("DELETE FROM ai_usage_events");
+    apiAnswers();
+    await drainTurn(local.turn);
+    assert.equal((await usageRows())[0].fallback_reason, "engine_unreachable:local");
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("FALSE-POSITIVE GUARD: a Slack mention, a teammate the gate refuses, and a client workspace on an app engine record NO fallback", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    for (const bridge of [null, async () => null]) {
+      const prepared = await oasisTurn("sales", "sdr", bridge);
+      assert.ok(prepared.ok);
+      if (!prepared.ok) return;
+      apiAnswers();
+      await drainTurn(prepared.turn);
+    }
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude" });
+    const client = await clientTurn(async () => ({ ...ccCaller, tenantId: ALPHA }));
+    assert.ok(client.ok);
+    if (client.ok) {
+      apiAnswers();
+      await drainTurn(client.turn);
+    }
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    const rows = await usageRows();
+    assert.equal(rows.length, 3, "one row per answered turn");
+    assert.deepEqual(rows.map((r) => [r.outcome, r.fallback_reason]), [["ok", null], ["ok", null], ["ok", null]]);
+  });
+
+  await check("bridgeResolutionForSession: 'no' by design is null, an entitled person with no bridge is unavailable, a thrown gate is unavailable", async () => {
+    const target = { baseUrl: BRIDGE, bearerToken: "t" };
+    const via = (gate: () => Promise<unknown>) => bridgeTurn.bridgeResolutionForSession(OASIS, gate as never);
+    assert.deepEqual(await via(async () => ({ ok: true, target, tenantId: OASIS, tenantSlug: "oasis-ai-cc", userId: "u", teamRole: "owner", isOperator: true })), { target, tenantId: OASIS, userId: "u", teamRole: "owner" });
+    assert.equal(await via(async () => ({ ok: true, target, tenantId: ALPHA, tenantSlug: "alpha-co", userId: "u", teamRole: "owner", isOperator: false })), null, "another workspace's session");
+    assert.equal(await via(async () => ({ ok: false, status: 403, error: "bridge_not_enabled_for_tenant" })), null, "a teammate the gate does not admit");
+    assert.equal(await via(async () => ({ ok: false, status: 401, error: "unauthenticated" })), null);
+    assert.deepEqual(await via(async () => ({ ok: false, status: 503, error: "bridge_not_configured", isOperator: true })), { unavailable: "not_set_up" });
+    assert.deepEqual(await via(async () => { throw new Error("db down"); }), { unavailable: "gate_error" });
+    // The caller-only resolver (the engine routes) keeps its meaning: anything but a caller is null.
+    assert.equal(await bridgeTurn.bridgeCallerForSession(OASIS, (async () => ({ ok: false, status: 503, error: "bridge_not_configured", isOperator: true })) as never), null);
+    assert.equal((await bridgeTurn.bridgeCallerForSession(OASIS, (async () => ({ ok: true, target, tenantId: OASIS, tenantSlug: "oasis-ai-cc", userId: "u", teamRole: "owner", isOperator: true })) as never))?.userId, "u");
+  });
+
+  await check("the reply footer says 'not used for this chat' by design and 'could not be reached' only for a real fallback", async () => {
+    const { viaLine } = await import("../components/agents/AgentChat");
+    const base = { runs_on: "anthropic (API)", spend: "api_credits" };
+    assert.match(String(viaLine({ ...base, fell_back_from: "Codex on your paired computer" })), /Codex on your paired computer could not be reached$/);
+    const byDesign = String(viaLine({ ...base, engine_not_used: "Codex on your paired computer" }));
+    assert.match(byDesign, /Codex on your paired computer is not used for this chat$/);
+    assert.ok(!/could not be reached/.test(byDesign));
+  });
+
+  await check("a department turn refused BEFORE any model is asked leaves a failed zero-cost row: no account, an unreadable key, unreadable settings", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    // 1. App chosen, computer unavailable, and no AI account behind it: the whole outage.
+    await db.execute({ sql: "UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'bravo'", args: [OASIS] });
+    try {
+      const down = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
+      assert.ok(!down.ok && down.status === 412 && down.error === "agent_not_configured", JSON.stringify(down));
+      if (!down.ok) assert.match(String(down.extra?.hint), /can't be reached/);
+      const byDesign = await oasisTurn("sales", "sdr", async () => null);
+      assert.ok(!byDesign.ok && byDesign.status === 412);
+      if (!byDesign.ok) assert.match(String(byDesign.extra?.hint), /isn't used for this chat/);
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET enabled = 1 WHERE tenant_id = ? AND agent_key = 'bravo'", args: [OASIS] });
+    }
+    let rows = await usageRows();
+    assert.equal(rows.length, 2);
+    for (const r of rows) {
+      assert.deepEqual(
+        [r.provider, r.model, r.billing_mode, r.surface, r.department_key, r.outcome, r.error_code, r.cost_micro_usd, r.reserved_micro_usd],
+        ["bridge", "codex", "subscription", "agents.chat", "sales", "error", "agent_not_configured", 0, null],
+      );
+    }
+    // 2. A saved key that cannot be decrypted.
+    await db.execute("DELETE FROM ai_usage_events");
+    await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = 'not-a-cipher' WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [ALPHA] });
+    try {
+      const bad = await clientTurn(null);
+      assert.ok(!bad.ok && bad.error === "key_unreadable", JSON.stringify(bad));
+      // A chat that is no department's writes nothing: only department turns are watched.
+      const direct = await prepareAgentTurn({ tenantId: ALPHA, tenantSlug: "alpha-co", agentSlug: "sdr", department: null, operator: { name: "O", email: USERS.alpha.email }, platformFallback: null, revealModel: false, userId: USERS.alpha.id, bridge: null });
+      assert.ok(!direct.ok && direct.error === "key_unreadable");
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = ? WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [anthCipher, ALPHA] });
+    }
+    rows = await usageRows();
+    assert.deepEqual(rows.map((r) => [r.error_code, r.department_key, r.provider, r.billing_mode, r.cost_micro_usd]), [["key_unreadable", "sales", "anthropic", "byo_key", 0]]);
+    // 3. The workspace's AI settings cannot be read.
+    await db.execute("DELETE FROM ai_usage_events");
+    await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_hidden");
+    try {
+      const gone = await clientTurn(null);
+      assert.ok(!gone.ok && gone.error === "config_unavailable", JSON.stringify(gone));
+    } finally {
+      await db.execute("ALTER TABLE agent_model_config_hidden RENAME TO agent_model_config");
+    }
+    assert.deepEqual((await usageRows()).map((r) => [r.error_code, r.department_key]), [["config_unavailable", "sales"]]);
+  });
+
+  await check("a turn answered by its chosen engine records no fallback; a model swap and an engine fallback are BOTH kept, joined with +", async () => {
+    const { meterWithFallbackReason, resolveCall } = await import("../lib/ai/model-registry");
+    const { engineFallbackReason } = engineLib;
+    const seen: Array<string | null | undefined> = [];
+    const spy = {
+      context: {} as never,
+      totals: () => ({ calls: 0, costMicroUsd: 0, unknownCostCalls: 0 }),
+      begin: async (call: { fallbackReason?: string | null }) => {
+        seen.push(call.fallbackReason);
+        return { finish: async () => undefined };
+      },
+    };
+    const begin = { provider: "anthropic", model: "m", maxOutputTokens: 1, promptBytes: 1 };
+    const engineOnly = meterWithFallbackReason(spy, engineFallbackReason({ kind: "cli", cli: "claude" }));
+    await engineOnly.begin(begin);
+    const retired = resolveCall("anthropic", "claude-3-5-sonnet-20241022", engineOnly);
+    assert.ok(retired.swap, "the saved model is gone, so it is swapped");
+    await retired.meter.begin(begin);
+    const swapOnly = resolveCall("anthropic", "claude-3-5-sonnet-20241022", spy);
+    await swapOnly.meter.begin(begin);
+    assert.equal(seen[0], "engine_unreachable:claude");
+    assert.equal(seen[1], `${retired.swap!.fallbackReason}+engine_unreachable:claude`);
+    assert.equal(seen[2], swapOnly.swap!.fallbackReason, "without an engine fallback the swap reason is unchanged");
+    assert.equal(engineFallbackReason({ kind: "local", model: "llama3.3" }), "engine_unreachable:local");
+    assert.equal(meterWithFallbackReason(spy, null), spy, "no reason, no wrapper");
+    // An engine that answered writes nothing of the kind (next test reads the row).
+  });
+
+  await check("a department turn on the paired computer writes exactly ONE row: provider bridge, the app named, cost 0, no reservation", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const turn = await bridgeTurnFor();
+    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
+    const events = await drainTurn(turn);
+    assert.deepEqual(events, [{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }], "the turn's events are unchanged");
+    const rows = await usageRows();
+    assert.equal(rows.length, 1, "one row per bridge turn");
+    const r = rows[0];
+    assert.deepEqual(
+      [r.provider, r.model, r.surface, r.auth_kind, r.billing_mode, r.department_key, r.outcome, r.error_code, r.fallback_reason],
+      ["bridge", "codex", "agents.chat", "subscription", "subscription", "sales", "ok", null, null],
+    );
+    assert.equal(r.cost_micro_usd, 0);
+    assert.equal(r.cost_source, "none");
+    assert.equal(r.reserved_micro_usd, null, "nothing reserved");
+    assert.equal(r.expires_at, null);
+    assert.equal(Number(r.output_tokens), 5, "the bridge reported none: characters / 4, rounded up, so a reply with words is never 0");
+    assert.ok(r.latency_ms !== null && Number(r.latency_ms) >= 0, "latency runs from the start of the turn");
+  });
+
+  await check("the bridge's own token counts are recorded when it reports them; a local model is named and billed local", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
+    const turn = await bridgeTurnFor();
+    answer = () => sse([["delta", { text: "local hi" }], ["done", { input_tokens: 31, output_tokens: 9 }]]);
+    await drainTurn(turn);
+    const [r] = await usageRows();
+    assert.deepEqual([r.provider, r.model, r.auth_kind, r.billing_mode, r.outcome], ["bridge", "llama3.3", "local", "local", "ok"]);
+    assert.deepEqual([Number(r.input_tokens), Number(r.output_tokens)], [31, 9]);
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("a bridge turn that fails writes a failure row with the channel's code; an EMPTY reply is a failure, never ok", async () => {
+    const turn = await bridgeTurnFor();
+    const run = async (respond: () => Response) => {
+      await db.execute("DELETE FROM ai_usage_events");
+      answer = respond;
+      await drainTurn(turn);
+      const rows = await usageRows();
+      assert.equal(rows.length, 1);
+      return rows[0];
+    };
+    const down = await run(() => {
+      throw new TypeError("fetch failed");
+    });
+    assert.deepEqual([down.outcome, down.error_code, down.cost_micro_usd], ["error", "bridge_unreachable", 0]);
+    const cli = await run(() => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]));
+    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_failed"]);
+    const http = await run(() => new Response("no", { status: 503 }));
+    assert.deepEqual([http.outcome, http.error_code], ["error", "bridge_unreachable"]);
+    const empty = await run(() => sse([["done", { input_tokens: 5, output_tokens: 0 }]]));
+    assert.deepEqual([empty.outcome, empty.error_code, Number(empty.output_tokens)], ["error", "empty_reply_empty", 0]);
+    const blank = await run(() => sse([["delta", { text: "   " }], ["done", {}]]));
+    assert.equal(blank.outcome, "error", "whitespace is not an answer");
+  });
+
+  await check("a bridge turn reserves no budget: a workspace at its cap still answers on its paired computer, and no reservation is left", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const month = new Date().toISOString().slice(0, 7);
+    await db.execute({
+      sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
+            VALUES (?, ?, 1, 0, 1, ?, ?)`,
+      args: [OASIS, month, stamp, stamp],
+    });
+    try {
+      const turn = await bridgeTurnFor();
+      answer = () => bridgeOk("Still answering.");
+      const events = await drainTurn(turn);
+      assert.equal(events[0].type, "delta");
+      const rows = await usageRows();
+      assert.deepEqual(rows.map((r) => [r.outcome, r.reserved_micro_usd]), [["ok", null]]);
+      assert.equal(rows.filter((r) => r.outcome === "pending").length, 0);
+      const budget = (await db.execute({ sql: "SELECT reserved_micro_usd FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] })).rows[0];
+      assert.equal(Number(budget.reserved_micro_usd), 0, "the cap's reserved total did not move");
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
+    }
+  });
+
+  await check("a consumer that stops reading leaves a cancelled row, not an ok one", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const turn = await bridgeTurnFor();
+    answer = () => bridgeOk("A long answer the reader walks away from.");
+    for await (const ev of streamAgentTurn(turn, [{ role: "user", content: "hi" }])) {
+      if (ev.type === "delta") break;
+    }
+    const [r] = await usageRows();
+    assert.equal(r.outcome, "cancelled");
   });
 
   await check("one rule for who runs which app: a member is pinned to Claude Code with its tools switched off; the proxy route uses the same rule", () => {

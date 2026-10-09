@@ -50,6 +50,32 @@ export type DripCheck = {
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
   /**
+   * Observe AND explain, for a check whose alert has to name WHAT is wrong
+   * (which departments, which error codes), not just count it. describe() only
+   * ever sees a CheckResult, so the explanation travels in `reason`: when this
+   * is present runCheck calls it INSTEAD of observe and the returned `reason`
+   * replaces evaluate()'s generic one, including for a null observation, so a
+   * failed read says why it failed. The reason also lands in
+   * health_check_runs, which makes the history answer "what was broken then".
+   * `observe` is still required (baseline_drop history replays it); a check
+   * using this should make it return `observeDetailed(...).observed`.
+   */
+  observeDetailed?: (
+    db: Db,
+    tenantId: string,
+    endMs: number,
+  ) => Promise<{
+    observed: number | null;
+    reason: string;
+    /**
+     * The worst verdict this observation may produce. A rule grades a number;
+     * only the check knows that THIS number is a settled-down aftermath that
+     * deserves a notice, not a page (a department that failed and answers again).
+     * Never lifts a verdict, never touches check_broken.
+     */
+    capAt?: "degraded";
+  }>;
+  /**
    * Rebuild the rule at EVALUATION time.
    *
    * DRIP_CHECKS is a module-level const, so a threshold computed inside `rule`
@@ -589,7 +615,17 @@ export async function runCheck(
   nowMs: number,
   historyDays = 14,
 ): Promise<CheckResult> {
-  const observed = await check.observe(db, tenantId, nowMs);
+  let observed: number | null;
+  let detail: string | null = null;
+  let capAt: "degraded" | undefined;
+  if (check.observeDetailed) {
+    const d = await check.observeDetailed(db, tenantId, nowMs);
+    observed = d.observed;
+    detail = d.reason;
+    capAt = d.capAt;
+  } else {
+    observed = await check.observe(db, tenantId, nowMs);
+  }
   // A live threshold beats the one captured at import. See DripCheck.resolveRule.
   const rule = check.resolveRule ? check.resolveRule() : check.rule;
   const history: number[] = [];
@@ -601,5 +637,7 @@ export async function runCheck(
       if (v !== null) history.push(v);
     }
   }
-  return evaluate(check.id, rule, observed, history);
+  const graded = evaluate(check.id, rule, observed, history);
+  const result = capAt === "degraded" && graded.verdict === "failing" ? { ...graded, verdict: "degraded" as const } : graded;
+  return detail ? { ...result, reason: detail } : result;
 }
