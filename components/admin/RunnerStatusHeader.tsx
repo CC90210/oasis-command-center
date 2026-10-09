@@ -24,12 +24,13 @@ import Link from "next/link";
 import { timeAgo } from "@/lib/fmt";
 import { describeWarmFailure, type WarmStatusBody } from "@/lib/admin/warm-pool";
 import { CLI_STATUS_ROUTE } from "@/components/BridgeCliPanel";
+import { cliStatusState } from "@/lib/bridge-cli-status";
 
 const POLL_MS = 20_000;
 const WARM_STATUS_ROUTE = "/api/bridge/warm-status";
 
 type CliBody =
-  | { ok: true; data: Record<string, { installed: boolean; authenticated: boolean }> }
+  | { ok: true; data: Record<string, { installed: boolean; authenticated: boolean; checked?: boolean }> }
   | { ok: false; reason: string };
 
 export type RunnerSnapshot = {
@@ -45,8 +46,9 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
   let computerTone: "ok" | "warn" | "neutral" = "neutral";
   let pool = "Checking the warm pool…";
   if (snap.warm && "error" in snap.warm) {
-    computer = "Couldn't check your computer just now.";
-    pool = "Couldn't check the warm pool just now.";
+    const late = snap.warm.error === "timeout";
+    computer = late ? "Couldn't check your computer: no answer in 12 seconds." : "Couldn't check your computer just now.";
+    pool = late ? "Couldn't check the warm pool: no answer in 12 seconds." : "Couldn't check the warm pool just now.";
   } else if (snap.warm) {
     const { status, body } = snap.warm;
     // undefined: the route could not read the pairings (it stopped before
@@ -72,16 +74,25 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
       : describeWarmFailure(body, status);
   }
   let tools = "Checking your AI tools…";
-  if (snap.cli && "error" in snap.cli) tools = "Couldn't check your AI tools just now.";
+  if (snap.cli && "error" in snap.cli) {
+    tools = snap.cli.error === "timeout" ? "Couldn't check your AI tools: no answer in 12 seconds." : "Couldn't check your AI tools just now.";
+  }
   else if (snap.cli) {
     const { status, body } = snap.cli;
     if (status === 401) tools = "You're signed out.";
     else if (body.ok) {
-      const signedIn = Object.entries(body.data).filter(([, v]) => v.installed && v.authenticated).map(([k]) => CLI_LABEL[k] ?? k);
-      const notSigned = Object.entries(body.data).filter(([, v]) => v.installed && !v.authenticated).map(([k]) => CLI_LABEL[k] ?? k);
+      // lib/bridge-cli-status.ts's words: a check that did not finish is "not confirmed", never "not signed in".
+      const named = (want: string) =>
+        Object.entries(body.data)
+          .filter(([, v]) => cliStatusState({ installed: v.installed, authenticated: v.authenticated, checked: v.checked === true }) === want)
+          .map(([k]) => CLI_LABEL[k] ?? k);
+      const signedIn = named("ready");
+      const notSigned = named("needs_sign_in");
+      const unconfirmed = named("unknown");
       tools =
         (signedIn.length ? `Signed in: ${signedIn.join(", ")}` : "No AI tool is signed in") +
-        (notSigned.length ? `. Installed, not signed in: ${notSigned.join(", ")}` : "");
+        (notSigned.length ? `. Needs sign-in: ${notSigned.join(", ")}` : "") +
+        (unconfirmed.length ? `. Sign-in not confirmed: ${unconfirmed.join(", ")}` : "");
     } else if (body.reason === "missing") tools = "Your computer hasn't reported its AI tools yet.";
     else if (body.reason === "stale") tools = "The last report of your AI tools is more than 5 minutes old.";
     else tools = "Couldn't read your computer's AI tool report.";
@@ -89,13 +100,26 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
   return { computer, tools, pool, computerTone };
 }
 
-async function read<T>(url: string): Promise<{ status: number; body: T } | { error: string }> {
+/**
+ * How long one read may take. These reads had no limit, and the strip set both
+ * lines from ONE Promise.all: a request that never answered (the warm-pool read
+ * waits on the computer's bridge) left "Checking your computer..." AND
+ * "Checking your AI tools..." on screen for good (CC, 2026-10-09). Each read
+ * now gives up after this, and each line updates on its own.
+ */
+export const RUNNER_READ_TIMEOUT_MS = 12_000;
+
+export async function readRunner<T>(
+  url: string,
+  fetchImpl: (url: string, init: RequestInit) => Promise<Response> = (u, i) => fetch(u, i),
+): Promise<{ status: number; body: T } | { error: string }> {
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetchImpl(url, { cache: "no-store", signal: AbortSignal.timeout(RUNNER_READ_TIMEOUT_MS) });
     return { status: res.status, body: (await res.json()) as T };
   } catch (e) {
     console.error("[runner_status_header]", url, e);
-    return { error: e instanceof Error ? e.message : "fetch_failed" };
+    const name = e instanceof Error ? e.name : "";
+    return { error: name === "TimeoutError" || name === "AbortError" ? "timeout" : e instanceof Error ? e.message : "fetch_failed" };
   }
 }
 
@@ -105,8 +129,9 @@ export function RunnerStatusHeader() {
   useEffect(() => {
     let alive = true;
     const tick = async () => {
-      const [warm, cli] = await Promise.all([read<WarmStatusBody>(WARM_STATUS_ROUTE), read<CliBody>(CLI_STATUS_ROUTE)]);
-      if (alive) setSnap({ warm, cli });
+      // Each line on its own: a slow read never holds the other one.
+      void readRunner<WarmStatusBody>(WARM_STATUS_ROUTE).then((warm) => alive && setSnap((s) => ({ ...s, warm })));
+      void readRunner<CliBody>(CLI_STATUS_ROUTE).then((cli) => alive && setSnap((s) => ({ ...s, cli })));
     };
     void tick();
     const id = setInterval(() => void tick(), POLL_MS);

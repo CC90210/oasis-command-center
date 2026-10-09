@@ -52,6 +52,11 @@ import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelC
 import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
+import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import { bridgeEngineLine, harnessEngineLine, spendFor, type AgentEngineChoice, type EngineSpend } from "@/lib/ai/agent-engine";
+import { harnessForDepartment } from "@/lib/admin/harness-targets";
+import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
+import { streamBridgeTurn, type BridgeCaller, type BridgeEngine } from "@/lib/ai/bridge-turn";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -81,7 +86,35 @@ export type AgentTurnRequest = {
    * is no: such an account is treated as no usable account.
    */
   localModelAllowed?: boolean;
+  /**
+   * The paired computer, reachable for this person: the caller's resolver runs
+   * the coding harness's own bridge gate (lib/bridge-proxy.ts
+   * authorizeBridgeRequest) for this workspace, only when an engine there is
+   * chosen. Absent, or answering null (a Slack mention, a person the gate
+   * refuses, no bridge set up): an engine on the paired computer cannot answer, and the
+   * workspace's API account answers instead, saying so (TurnEngine.fellBackFrom).
+   */
+  bridge?: (() => Promise<BridgeCaller | null>) | null;
 };
+
+/**
+ * What a turn runs on (lib/ai/agent-engine.ts): the API account (or the
+ * platform key), or an AI app / local model on the paired computer. `runsOn`
+ * is the plain words every reply footer shows; `spend` says whose credits or
+ * plan it uses. `fellBackFrom` names the engine that was chosen but could not
+ * be reached for this person, when the API account answered in its place.
+ */
+export type TurnEngine =
+  | { kind: "api"; runsOn: string; spend: EngineSpend; fellBackFrom: string | null }
+  | (BridgeEngine & {
+      runsOn: string;
+      spend: EngineSpend;
+      caller: BridgeCaller;
+      tenantSlug: string;
+      fellBackFrom: null;
+      /** The department's agent harness the app runs in (lib/admin/harness-targets.ts). */
+      harness: { agent: string; department: string; label: string };
+    });
 
 export type PreparedTurn = {
   tenantId: string;
@@ -105,6 +138,8 @@ export type PreparedTurn = {
   revealModel: boolean;
   /** Carried to lib/providers.ts, which calls a local model server only with it. */
   localModelAllowed: boolean;
+  /** What the turn runs on; kind "api" is a hosted provider call (streamChat). */
+  engine: TurnEngine;
 };
 
 export type PrepareRefusal = {
@@ -171,12 +206,16 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // binds to that department (config.ts departmentChannelFor), so a department
   // label is never pinned on another agent, and a lead switched off answers
   // nothing.
+  // OASIS's own workspace: its department turns may run in the department's
+  // agent harness on the paired computer (lib/admin/harness-targets.ts).
+  let oasisWorkspace = false;
   if (dept) {
     // getTenant answers null when the tenants read fails. That is not "not
     // OASIS": judging the binding on it would refuse OASIS's own departments.
     const tenant = await getTenant(tenantId);
     if (!tenant?.slug) return { ok: false, status: 503, error: "workspace_unavailable" };
-    const lead = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug), manifest });
+    oasisWorkspace = isOasisSurfaceTenant(tenant.slug);
+    const lead = departmentChannelFor(dept.key, { oasis: oasisWorkspace, manifest });
     if (lead.kind !== "agent" || lead.agentSlug !== agentSlug) {
       return { ok: false, status: 400, error: "department_agent_mismatch" };
     }
@@ -194,8 +233,9 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // owner connected for the whole team, whatever teammates the workspace has.
   // A teammate's personal key never answers a shared channel.
   let cfg: WorkspaceAiAccount | null;
+  let chosen: AgentEngineChoice;
   try {
-    cfg = await readWorkspaceAiAccount(tenantId);
+    [cfg, chosen] = await Promise.all([readWorkspaceAiAccount(tenantId), readAgentEngine(tenantId)]);
   } catch (err) {
     // A failed read is not "no key": answering 412 would send the owner to
     // connect an account that is already connected.
@@ -211,12 +251,31 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // verdict; for anyone else (and for every Slack mention) it is no usable
   // account, so no request to its address is ever made (Codex review, PR #535).
   const localModelAllowed = req.localModelAllowed === true;
-  // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
-  // AI account's, as Settings > AI brain shows and switches them. A manifest
-  // binding's model_override used to win here, a second place choosing a
-  // department's model that no screen showed (no stored manifest carried one
-  // on 2026-10-09); it no longer chooses anything.
-  if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+  // WHAT POWERS YOUR AGENTS (lib/ai/agent-engine.ts): an AI app or local model
+  // on the paired computer answers when the caller can reach it for this
+  // person; then no key, no API credits and no budget are involved. Otherwise
+  // the API account below answers, and the reply says what was chosen instead.
+  const bridgeEngine: BridgeEngine | null = chosen.kind === "api" ? null : chosen;
+  // The harness path is OASIS's department channels only, until client
+  // harness packs exist: anyone else on a CLI engine is answered by the API
+  // account (in-app desk agent), and the turn says so.
+  const target = dept && oasisWorkspace ? harnessForDepartment(dept.key) : null;
+  const harness = target && dept ? { agent: target.agent, department: dept.label, label: target.departments } : null;
+  // Asked only when an engine on the paired computer is chosen; a gate that
+  // throws is "can't be reached", never a crash of the turn.
+  const caller = bridgeEngine && harness && req.bridge ? await req.bridge().catch(() => null) : null;
+  const viaBridge = bridgeEngine && harness && caller ? { engine: bridgeEngine, caller, harness } : null;
+  const fellBackFrom = bridgeEngine && !viaBridge ? bridgeEngineLine(bridgeEngine) : null;
+  if (viaBridge) {
+    // Named for the logs and the operator's model detail; no key is sent.
+    provider = hasUsableKey(cfg) ? cfg.provider : "anthropic";
+    model = bridgeEngineLine(viaBridge.engine);
+  } else if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+    // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
+    // AI account's, as Settings > AI brain shows and switches them. A manifest
+    // binding's model_override used to win here, a second place choosing a
+    // department's model that no screen showed (no stored manifest carried one
+    // on 2026-10-09); it no longer chooses anything.
     provider = cfg.provider;
     model = cfg.model;
     try {
@@ -232,7 +291,11 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
         ok: false,
         status: 412,
         error: "agent_not_configured",
-        extra: { hint: "Connect an AI account in Settings > AI brain before chatting here." },
+        extra: {
+          hint: fellBackFrom
+            ? `Your agents run on ${fellBackFrom}, which can't be reached for this chat, and no AI account is connected to answer instead.`
+            : "Connect an AI account in Settings > AI brain before chatting here.",
+        },
       };
     }
     provider = fallback.provider;
@@ -244,9 +307,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // The month's AI budget (lib/ai/usage.ts): a workspace already at its cap is
   // refused before a model is called, and it is recorded as the channel's last
   // turn, because it is a verdict every channel shares.
+  // A turn on the paired computer spends no API credits, so no budget applies.
   const billing = billingForKey(provider, keySource);
   try {
-    const exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
+    const exhausted = viaBridge ? null : await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
     if (exhausted) {
       return { ok: false, status: 402, error: exhausted, recordAs: exhausted, agentSlug: agent.slug, channelKey };
     }
@@ -281,19 +345,34 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // replacement on the same provider and key, and the meter records why
   // (lib/ai/model-registry.ts). Resolved here, not only where the request is
   // built, so the turn names the model it really sends.
-  const picked = resolveCall(
-    provider,
-    model,
-    modelCallMeter({
-      tenantId,
-      surface: "agents.chat",
-      ...billing,
-      departmentKey: dept?.key ?? null,
-      teammateId: agent.slug,
-      userId: req.userId,
-      jobId: req.jobId ?? null,
-    }),
-  );
+  const meter = modelCallMeter({
+    tenantId,
+    surface: "agents.chat",
+    ...billing,
+    departmentKey: dept?.key ?? null,
+    teammateId: agent.slug,
+    userId: req.userId,
+    jobId: req.jobId ?? null,
+  });
+  // A turn on the paired computer sends no hosted model: nothing to resolve or meter.
+  const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, meter);
+  const brain = keySource === "tenant" && hasUsableKey(cfg) ? departmentBrain({ provider, model: picked.model }) : null;
+  const engine: TurnEngine = viaBridge
+    ? {
+        ...viaBridge.engine,
+        runsOn: harnessEngineLine(viaBridge.engine, viaBridge.harness.label),
+        spend: spendFor(viaBridge.engine),
+        caller: viaBridge.caller,
+        tenantSlug,
+        fellBackFrom: null,
+        harness: viaBridge.harness,
+      }
+    : {
+        kind: "api",
+        runsOn: keySource === "platform" ? "the OASIS platform key" : brain ? `${brainLine(brain)} (API)` : `${provider} (API)`,
+        spend: keySource === "platform" ? "platform" : "api_credits",
+        fellBackFrom,
+      };
 
   return {
     ok: true,
@@ -312,6 +391,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       meter: picked.meter,
       revealModel: req.revealModel,
       localModelAllowed,
+      engine,
     },
   };
 }
@@ -322,6 +402,19 @@ export function streamAgentTurn(
   messages: readonly ChatMessage[],
   maxTokens = DEPARTMENT_REPLY_MAX_TOKENS,
 ): AsyncGenerator<StreamEvent> {
+  // The paired computer (lib/ai/bridge-turn.ts): the same SSE shape, no key.
+  if (turn.engine.kind !== "api") {
+    return streamBridgeTurn({
+      caller: turn.engine.caller,
+      engine: turn.engine.kind === "cli" ? { kind: "cli", cli: turn.engine.cli } : { kind: "local", model: turn.engine.model },
+      agentSlug: turn.agentSlug,
+      tenantSlug: turn.engine.tenantSlug,
+      system: turn.system,
+      messages,
+      maxTokens,
+      harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
+    });
+  }
   const isOllama = turn.provider === "ollama";
   return streamChat({
     provider: turn.provider,
