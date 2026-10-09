@@ -16,4 +16,4 @@ export const LOCAL_CLI_SCOPE =
   "The AI command-line tools on your paired computer. They answer only the Coding harness (Admin > Coding harness) when it runs on that computer. Your departments do not use them: what powers your departments is the AI account and model in AI setup above. Setup commands run directly only when this dashboard is opened on that computer; elsewhere the card shows the exact command to run there.";
 
 export const LOCAL_CLI_PICKER_SCOPE =
-  "Which tool answers the Coding harness when it runs on this computer (it also sets the Coding harness's own picker). It never changes what your departments use.";
+  "Which tool answers the Coding harness when it runs on the paired computer (it also sets the Coding harness's own picker). It never changes what your departments use.";

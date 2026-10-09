@@ -226,6 +226,15 @@ async function main() {
     assert.deepEqual(await chat("openai", "gpt-5.6-terra"), [{ type: "error", message: "empty_reply:thinking" }]);
     // GPT-5.x reasons before it answers, counted in max_completion_tokens: the headroom is added.
     assert.equal((JSON.parse(sent[0].body) as { max_completion_tokens: number }).max_completion_tokens, 4096 + providers.THINKING_HEADROOM_TOKENS);
+    // Only reasoning models get the headroom: a non-reasoning model reserves no budget it never uses.
+    assert.equal(providers.openaiReasons("gpt-5.6-terra"), true);
+    assert.equal(providers.openaiReasons("gpt-6-luna"), true);
+    assert.equal(providers.openaiReasons("o4-mini"), true);
+    assert.equal(providers.openaiReasons("gpt-4-turbo"), false);
+    assert.equal(providers.openaiReasons("gpt-3.5-turbo"), false);
+    play(sse([[null, { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }], [null, "[DONE]"]]));
+    await chat("openai", "gpt-4-turbo");
+    assert.equal((JSON.parse(sent[0].body) as { max_completion_tokens: number }).max_completion_tokens, 4096);
     play(sse([[null, { choices: [{ delta: {}, finish_reason: "content_filter" }] }], [null, "[DONE]"]]));
     assert.deepEqual(await chat("openrouter", "anthropic/claude-sonnet-5.5"), [{ type: "error", message: "empty_reply:blocked" }]);
     // A normal Claude reply is unchanged.
@@ -348,6 +357,8 @@ async function main() {
     assert.match(settings, /brain=\{aiBrain\}/);
     const card = readFileSync(join(ROOT, "components/settings/ProviderAccountsCard.tsx"), "utf8");
     assert.match(card, /Your departments use <span className="font-bold">\{brainLine\(brain\)\}<\/span>\./);
+    // A change from anywhere restarts the picker on the model really saved.
+    assert.match(card, /key=\{`\$\{brain\.provider\}:\$\{brain\.savedModel \?\? brain\.model\}`\}/);
     // The local CLI choice is not read by anything that powers a department.
     for (const rel of ["lib/os/department-agent.ts", "components/os/department/channel.ts", "lib/providers.ts", "app/api/agents/chat/route.ts", "lib/ai/department-brain.ts"]) {
       assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), /cli-runtime|readCliRuntime|cliRuntime/, `${rel} reads the local CLI choice`);
@@ -439,6 +450,19 @@ async function main() {
     assert.deepEqual(out, { committed: false, changed: [] });
     assert.deepEqual(await models(), ["a-account:gemini-3.5-flash-lite"]);
   });
+  await check("a switch read before the account was retired moves no teammate still on the old key", async () => {
+    await seed([
+      ["a-account", null, account.WORKSPACE_AI_AGENT_KEY, "google", "gemini-3.5-flash-lite", "C1"],
+      ["b-sdr", null, "sdr", "google", "gemini-3.5-flash-lite", "C1"],
+    ]);
+    const read = await account.readWorkspaceAiAccount(CLIENT);
+    assert.ok(account.hasUsableKey(read));
+    // Another window retires the account (key wiped); the teammate row keeps the old key.
+    await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = NULL, enabled = 0 WHERE id = 'a-account'", args: [] });
+    const out = await account.changeWorkspaceModelInOneStep({ tenantId: CLIENT, account: read, model: "gemini-3.8-flash" });
+    assert.deepEqual(out, { committed: false, changed: [] });
+    assert.deepEqual(await models(), ["a-account:gemini-3.5-flash-lite", "b-sdr:gemini-3.5-flash-lite"]);
+  });
   await check("OASIS's legacy row is its account: a switch moves it", async () => {
     await seed([["l-bravo", null, account.LEGACY_WORKSPACE_AI_AGENT_KEY, "google", "gemini-3.5-flash-lite", "C3"]]);
     const read = await account.readWorkspaceAiAccount(CLIENT);
@@ -498,6 +522,8 @@ async function main() {
     const cli = await import("../components/settings/local-cli-scope");
     assert.match(cli.LOCAL_CLI_SCOPE, /They answer only the Coding harness \(Admin > Coding harness\) when it runs on that computer\. Your departments do not use them/);
     assert.match(cli.LOCAL_CLI_PICKER_SCOPE, /It never changes what your departments use\./);
+    // The bridge may run on another computer than this browser (hosted mode): "the paired computer".
+    assert.doesNotMatch(cli.LOCAL_CLI_SCOPE + cli.LOCAL_CLI_PICKER_SCOPE, /this computer/);
     const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
     assert.doesNotMatch(src, /Active CLI|title="Local AI CLIs"/, "the card's old wording, which read as choosing the department brain");
     assert.match(src, /subtitle=\{LOCAL_CLI_SCOPE\}/);

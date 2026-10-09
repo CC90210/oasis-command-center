@@ -235,7 +235,16 @@ export function ProviderAccountsCard({
       {/* THE one place that decides what powers the departments (CC,
           2026-10-09): the provider and model, as every department channel
           header names them, and the switch. */}
-      {brain && <DepartmentBrainPanel brain={brain} canManageTeam={canManageTeam} onSwitched={() => router.refresh()} />}
+      {/* Keyed by what is saved, so a change from anywhere (a switch, another
+          window, a reconnect) starts the picker on the model really saved. */}
+      {brain && (
+        <DepartmentBrainPanel
+          key={`${brain.provider}:${brain.savedModel ?? brain.model}`}
+          brain={brain}
+          canManageTeam={canManageTeam}
+          onSwitched={() => router.refresh()}
+        />
+      )}
 
       <div className="grid sm:grid-cols-2 gap-3">
         {CARD_PROVIDERS.map((p) => {

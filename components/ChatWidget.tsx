@@ -1384,7 +1384,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   const composerPlaceholder = !ready
     ? cfg?.provider === "ollama"
       ? "Install the desktop bridge to use local Ollama models"
-      : "Configure this agent's provider + API key in Settings → Agents"
+      : "Connect an AI account in Settings → AI brain"
     : `Message ${targetLabels?.[agent] ?? agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
   function reset() {
@@ -3398,11 +3398,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               )}
               {error === "agent_disabled" && (
                 <div className="text-xs text-fg-muted font-sans">
-                  This agent is disabled. Open{" "}
+                  This agent is switched off for this workspace. Open{" "}
                   <Link href="/settings#providers" className="text-accent underline">
-                    Settings → Agents
+                    Settings → AI brain
                   </Link>{" "}
-                  and flip its enabled toggle.
+                  to check your workspace agents.
                 </div>
               )}
               {error === "rate_limited" && (

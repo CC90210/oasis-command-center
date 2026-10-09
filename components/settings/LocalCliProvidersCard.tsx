@@ -277,7 +277,7 @@ export function LocalCliProvidersCard({
 
   return (
     <Card
-      title="Coding harness: AI tools on your computer"
+      title="Coding harness: AI tools on your paired computer"
       subtitle={LOCAL_CLI_SCOPE}
       action={
         <button
@@ -393,13 +393,13 @@ export function LocalCliProvidersCard({
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <div className="text-xs font-bold uppercase tracking-wider text-fg">
-                  Coding harness on this computer uses
+                  Coding harness on the paired computer uses
                 </div>
                 <div className="text-[11px] text-fg-muted mt-0.5 leading-snug">
                   {LOCAL_CLI_PICKER_SCOPE}
                 </div>
               </div>
-              <div role="radiogroup" aria-label="Coding harness on this computer uses" className="flex flex-wrap gap-1.5">
+              <div role="radiogroup" aria-label="Coding harness on the paired computer uses" className="flex flex-wrap gap-1.5">
                 {CARDS.map((card) => {
                   const info = state.data[card.key];
                   const ready = info.installed && info.authenticated;
@@ -412,7 +412,7 @@ export function LocalCliProvidersCard({
                       aria-checked={selected}
                       onClick={() => chooseCli(card.key)}
                       disabled={!ready}
-                      title={ready ? `Use ${card.label} for the Coding harness on this computer` : `${card.label} isn't ready yet`}
+                      title={ready ? `Use ${card.label} for the Coding harness on the paired computer` : `${card.label} isn't ready yet`}
                       className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-md border transition-colors ${
                         selected
                           ? "border-accent bg-accent/15 text-accent"

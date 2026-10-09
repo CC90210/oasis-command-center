@@ -390,6 +390,11 @@ export function emptyReplyKind(finish: FinishKind | null): EmptyReplyKind {
  */
 export const THINKING_HEADROOM_TOKENS = 4096;
 
+/** OpenAI's reasoning models (GPT-5.x, GPT-6, the o-series): their reasoning counts against the output cap. */
+export function openaiReasons(model: string): boolean {
+  return /^(?:gpt-[5-9](?:[.-]|$)|o\d(?:-|$))/.test(model);
+}
+
 /** Gemini 3.x takes thinkingConfig.thinkingLevel; 2.5 and older do not (a 400). */
 export function geminiTakesThinkingLevel(model: string): boolean {
   return /^gemini-3(?:[.-]|$)/.test(model);
@@ -664,9 +669,11 @@ function streamOpenAI(req: ChatRequest): AsyncGenerator<StreamEvent> {
   if (req.system) messages.push({ role: "system", content: req.system });
   messages.push(...req.messages);
 
-  // GPT-5.x and later reason before they answer, and those reasoning tokens
-  // count against max_completion_tokens: the answer's budget plus the headroom.
-  const maxTokens = (req.maxTokens ?? 4096) + THINKING_HEADROOM_TOKENS;
+  // GPT-5.x and later (and the o-series) reason before they answer, and those
+  // reasoning tokens count against max_completion_tokens: the answer's budget
+  // plus the headroom, on those models only (a non-reasoning model would only
+  // reserve budget it never uses; CodeRabbit, #561).
+  const maxTokens = (req.maxTokens ?? 4096) + (openaiReasons(req.model) ? THINKING_HEADROOM_TOKENS : 0);
   return metered(req.meter, {
     provider: "openai",
     model: req.model,

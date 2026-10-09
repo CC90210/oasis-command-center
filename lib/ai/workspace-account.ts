@@ -444,12 +444,28 @@ export async function changeWorkspaceModelInOneStep(input: {
 }): Promise<{ committed: boolean; changed: string[] }> {
   const { tenantId, account, model } = input;
   const answering = account.source === "legacy" ? LEGACY_WORKSPACE_AI_AGENT_KEY : WORKSPACE_AI_AGENT_KEY;
+  // The answering row itself must still hold this key on this provider, or
+  // nothing moves: a retired account (key wiped) whose teammates still carry
+  // the old key must not have just those teammates switched (CodeRabbit, #561).
+  // The guard reads provider and key, never the model this statement changes.
   const res = await oneStepClient().execute({
     sql:
       "UPDATE agent_model_config SET model = ?, updated_at = ?" +
       " WHERE tenant_id = ? AND user_id IS NULL AND provider = ? AND encrypted_api_key = ?" +
+      " AND EXISTS (SELECT 1 FROM agent_model_config AS answering WHERE answering.tenant_id = ? AND answering.agent_key = ?" +
+      " AND answering.user_id IS NULL AND answering.provider = ? AND answering.encrypted_api_key = ?)" +
       " RETURNING agent_key",
-    args: [model, new Date().toISOString(), tenantId, account.provider, account.encryptedApiKey],
+    args: [
+      model,
+      new Date().toISOString(),
+      tenantId,
+      account.provider,
+      account.encryptedApiKey,
+      tenantId,
+      answering,
+      account.provider,
+      account.encryptedApiKey,
+    ],
   });
   const changed = res.rows.map((r) => String(r.agent_key));
   return { committed: changed.includes(answering), changed };
