@@ -16,6 +16,7 @@
 import { useEffect, useState } from "react";
 import { Save, Eye, EyeOff, Check, AlertCircle, ExternalLink, Sparkles, ChevronDown, ChevronUp, Cpu, Cloud, KeyRound } from "lucide-react";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE } from "@/lib/providers";
+import { defaultModelFor, isRegistryProvider, modelChoices, modelInfo, modelNote, type NoteAudience } from "@/lib/ai/model-registry";
 import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 // Settings/Agents picker derives from the same single-source registry as
@@ -23,6 +24,23 @@ import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 // signup/apiKey/docs links — same shape this component consumes. See
 // lib/providers.ts for the canonical definition.
 const PROVIDER_OPTIONS = PROVIDER_REGISTRY;
+
+/**
+ * A row's model options. For the four hosted providers, the registry's offered
+ * models plus the row's own value when it is not one of them, labelled as
+ * what it is (lib/ai/model-registry.ts modelChoices): a select whose value
+ * matches no option draws its FIRST option, so the row read as a model it is
+ * not on, and a save could then put that model back. A local model server's
+ * tags are its own list, with the saved tag shown as itself too.
+ */
+export function rowModelOptions(provider: string, current: string): Array<{ id: string; label: string }> {
+  if (isRegistryProvider(provider)) return modelChoices(provider, current);
+  const listed = PROVIDER_REGISTRY.find((p) => p.value === provider)?.models ?? [];
+  return current && !listed.some((m) => m.id === current) ? [{ id: current, label: `${current} (saved)` }, ...listed] : listed;
+}
+
+/** The workspace's AI account as GET /api/agent-config reports it (never its key). */
+type AccountFacts = { provider: string; model: string; connected: boolean };
 
 type AgentConfig = {
   agent_key: string;
@@ -139,6 +157,7 @@ export function AgentConfigEditor({
   const globalKeysKnown = globallyConnectedServices !== null;
   const globalServiceSet = new Set(globallyConnectedServices ?? []);
   const [configs, setConfigs] = useState<Record<string, AgentConfig>>({});
+  const [account, setAccount] = useState<AccountFacts | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped from the cross-component event below (oasis:agent-configs-changed)
   // when bulk-provider-connect from /settings#providers writes new rows
@@ -157,7 +176,7 @@ export function AgentConfigEditor({
           k,
           {
             provider: "openrouter",
-            model: "anthropic/claude-sonnet-4",
+            model: defaultModelFor("openrouter"),
             apiKey: "",
             enabled: true,
             override: "",
@@ -184,7 +203,7 @@ export function AgentConfigEditor({
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j.ok) {
           // Surface the failure to the operator — otherwise the rows stay at
-          // their hardcoded defaults (openrouter / claude-sonnet-4) and the
+          // their defaults (OpenRouter, on its default model) and the
           // operator may "save" over their actual stored config.
           const msg = j.error || `status ${r.status}`;
           console.error("[agent_config_editor.load]", msg);
@@ -194,6 +213,8 @@ export function AgentConfigEditor({
         const map: Record<string, AgentConfig> = {};
         for (const c of j.configs as AgentConfig[]) map[c.agent_key] = c;
         setConfigs(map);
+        const a = j.account as AccountFacts | null | undefined;
+        setAccount(a && typeof a.provider === "string" && typeof a.model === "string" ? a : null);
         setRows((prev) => {
           const next = { ...prev };
           for (const key of agentKeys) {
@@ -422,6 +443,7 @@ export function AgentConfigEditor({
               by default. Fill in a key here only if you want THIS agent to use
               a different provider or a different key. Leaving the key field
               blank keeps whatever&apos;s already on file.
+              <AccountModelLine account={account} />
             </>
           ) : !globalKeysKnown ? (
             <>
@@ -544,12 +566,13 @@ export function AgentConfigEditor({
                   onChange={(e) => patchRow(key, { model: e.target.value })}
                   className="select"
                 >
-                  {provOpt.models.map((m) => (
+                  {rowModelOptions(row.provider, row.model).map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.label}
                     </option>
                   ))}
                 </select>
+                <ModelNoteLine provider={row.provider} model={row.model} audience="agent" />
               </label>
               {(() => {
                 // Resolve "is this row using the AI Setup default key
@@ -907,6 +930,55 @@ export function AgentConfigEditor({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The one plain sentence for a saved model that is not simply one the pickers
+ * offer (lib/ai/model-registry.ts modelNote): gone and already replaced at
+ * call time, ending soon, older, or not on the list at all. No hooks, so a
+ * test can draw it directly.
+ */
+export function ModelNoteLine({ provider, model, audience }: { provider: string; model: string; audience: NoteAudience }) {
+  const note = modelNote(provider, model, { audience });
+  if (!note) return null;
+  const urgent = note.kind === "gone" || note.kind === "ending";
+  return (
+    <span role={urgent ? "status" : undefined} className={`block text-[11px] leading-relaxed normal-case tracking-normal ${urgent ? "text-status-warm" : "text-fg-dim"}`}>
+      {note.sentence}
+    </span>
+  );
+}
+
+/**
+ * The workspace AI account's model in the overrides banner: the model the
+ * department chats are saved on, and, when the registry knows it is gone or
+ * going, what they really use. Nothing when the account read failed or no
+ * account is connected: a sentence about a model nobody read would be a guess.
+ */
+export function AccountModelLine({ account }: { account: AccountFacts | null }) {
+  if (!account || !account.connected || !account.model) return null;
+  const label = modelInfo(account.provider, account.model)?.label ?? account.model;
+  const note = modelNote(account.provider, account.model, { audience: "departments" });
+  const gone = note?.kind === "gone";
+  return (
+    <span className="block mt-1.5">
+      {gone ? (
+        <>
+          Saved model: <span className="text-fg">{label}</span>.
+        </>
+      ) : (
+        <>
+          Your departments use <span className="text-fg">{label}</span>.
+        </>
+      )}
+      {note && (
+        <span role={gone || note.kind === "ending" ? "status" : undefined} className={gone || note.kind === "ending" ? "text-status-warm" : undefined}>
+          {" "}
+          {note.sentence}
+        </span>
+      )}
+    </span>
   );
 }
 

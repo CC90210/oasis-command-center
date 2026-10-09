@@ -211,7 +211,10 @@ const KEY_PROMPT = [
 const KEY_LOOK = ["sk-ant-look-first-0300", "sk-ant-look-second-0301"] as const;
 const KEY_CODE = ["sk-ant-code-key-0400", "sk-ant-code-other-window-0401"] as const;
 
+/** Who is signed in (the session cookie's person), for the test's own key-test proofs. */
+let currentUser: U | null = null;
 async function login(user: U | null) {
+  currentUser = user;
   if (!user) {
     sessionCookie = undefined;
     return;
@@ -507,7 +510,25 @@ async function main() {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   const jsonOf = async (res: Response) => ({ status: res.status, body: (await res.json()) as Record<string, unknown> });
-  const connect = async (body: Record<string, unknown>) => jsonOf(await bulk.POST(req("/api/agent-config/bulk-provider", "POST", body)));
+  // The save route tests every key itself unless the request carries
+  // test-connection's proof of that test (lib/ai/connect-test-proof.ts, R5-L3).
+  // `connect` stands for the dialog AFTER its test passed: it carries the proof
+  // test-connection would have signed, so the suite's saves are not each
+  // tested again. `connectUntested` is a request with no proof at all.
+  const { signConnectTest } = await import("../lib/ai/connect-test-proof");
+  const registry = await import("../lib/ai/model-registry");
+  async function proven(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!currentUser || typeof body.api_key !== "string" || "tested" in body || body.verify === true) return body;
+    const seat = await db.execute({ sql: "SELECT tenant_id FROM user_profiles WHERE auth_user_id = ? LIMIT 1", args: [currentUser.id] });
+    const tenantId = seat.rows[0]?.tenant_id;
+    if (!tenantId) return body;
+    const prov = String(body.provider || "");
+    const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : registry.isRegistryProvider(prov) ? registry.defaultModelFor(prov) : "";
+    const proof = signConnectTest({ tenantId: String(tenantId), userId: currentUser.id, provider: prov, model, apiKey: body.api_key.trim() }, "passed");
+    return proof ? { ...body, tested: proof } : body;
+  }
+  const connect = async (body: Record<string, unknown>) => jsonOf(await bulk.POST(req("/api/agent-config/bulk-provider", "POST", await proven(body))));
+  const connectUntested = async (body: Record<string, unknown>) => jsonOf(await bulk.POST(req("/api/agent-config/bulk-provider", "POST", body)));
   const testKey = async (body: Record<string, unknown>) =>
     jsonOf(await testConnection.POST(req("/api/agent-config/test-connection", "POST", body)));
   const say = (over: Record<string, unknown>) => ({ messages: [{ role: "user", content: "How is the pipeline today?" }], ...over });
@@ -791,7 +812,9 @@ async function main() {
       [
         {
           url: "/api/agent-config/bulk-provider",
-          body: { provider: "anthropic", api_key: "sk-ant-tested-key-A", model: "claude-opus-4-7", scope: "tenant" },
+          // save_anyway: the route itself now tests every key (R5-L3), and saves
+          // an untested one only when the owner chose this.
+          body: { provider: "anthropic", api_key: "sk-ant-tested-key-A", model: "claude-opus-4-7", scope: "tenant", save_anyway: true },
         },
       ],
       "Save anyway saved something other than the timed-out key and model, or tested again",
@@ -1014,6 +1037,9 @@ async function main() {
     // What the dialog itself sends and shows, driven in the render helper (it
     // used to be read off the dialog's source text).
     const dialogSent = JSON.parse(html.plainConnect ?? "{}") as Record<string, unknown>;
+    // The dialog's default model is the registry's (lib/ai/model-registry.ts):
+    // on Anthropic, Claude Sonnet 4.6 until a 5.x model has run through this app.
+    assert.equal(registry.defaultModelFor("anthropic"), "claude-sonnet-4-6");
     assert.deepEqual(
       dialogSent.calls,
       [
@@ -1415,8 +1441,18 @@ async function main() {
   };
   appClient.batch = async function (this: object, stmts: Stmt[], mode?: string) {
     const list = await applyHooks(stmts);
-    return (Object.getPrototypeOf(this) as { batch: (s: Stmt[], m?: string) => Promise<unknown> }).batch.call(this, list, mode);
+    const result = await (Object.getPrototypeOf(this) as { batch: (s: Stmt[], m?: string) => Promise<unknown> }).batch.call(this, list, mode);
+    // A batch that COMMITTED and whose answer was then lost (R5-M1): the
+    // write is in the database, and the caller gets an error anyway.
+    const lost = lostAnswers.find((h) => h.times > 0 && list.some((s) => h.at(sqlOf(s), argsOf(s))));
+    if (lost && !insideHook) {
+      lost.times -= 1;
+      throw new Error("the connection dropped after the commit (stand-in)");
+    }
+    return result;
   };
+  /** Batches whose answer is lost after they commit (once each). */
+  let lostAnswers: Array<{ at: Hook["at"]; times: number }> = [];
   async function withHooks<T>(added: Hook[], request: () => Promise<T>): Promise<T> {
     hooks.push(...added);
     try {
@@ -1446,11 +1482,13 @@ async function main() {
   /** `who`'s request, run while another person's request is held (their own session). */
   const as = async <T>(who: U, request: () => Promise<T>): Promise<T> => {
     const held = sessionCookie;
+    const heldUser = currentUser;
     await login(who);
     try {
       return await request();
     } finally {
       sessionCookie = held;
+      currentUser = heldUser;
     }
   };
   const has = (args: unknown[], ...values: string[]) => values.every((v) => args.includes(v));
@@ -1626,13 +1664,16 @@ async function main() {
       },
     );
     assert.equal(some!.status, 200, JSON.stringify(some!.body));
-    assert.deepEqual(some!.body.applied_to, ["sdr"]);
+    // It named the Sales lead; Client Success moved with the team's key (R5-M3, below).
+    assert.deepEqual(some!.body.applied_to, ["sdr", "customer-support"]);
     assert.equal(all.status, 409, JSON.stringify(all.body));
-    // The Sales-lead-only connect is the account; Client Success kept the key
-    // it had (that connect named only the Sales lead); nothing of the other landed.
+    // The Sales-lead-only connect is the account; nothing of the other landed.
+    // Client Success held the team's PREVIOUS key (the account's), so it moved
+    // with the team even though that connect named only the Sales lead (PR
+    // #535 review, R5-M3: it used to keep the old key, unseen on any card).
     assert.deepEqual(await keysOn(PROMPTCO), [
       `__workspace__/team:${KEY_PROMPT[5]}`,
-      `customer-support/team:${KEY_PROMPT[3]}`,
+      `customer-support/team:${KEY_PROMPT[5]}`,
       `sdr/team:${KEY_PROMPT[5]}`,
     ]);
     assert.deepEqual(await spending(PROMPTCO, "prompt-co", USERS.prompt), answersWith(KEY_PROMPT[5]));
@@ -1873,6 +1914,33 @@ async function main() {
   await check("closing the connect dialog has the cards read the server again", () => {
     assert.equal(html.closeRefreshes, "1", "the card did not read the server again when the dialog closed");
   });
+  await check("R5-M2: the card's own changes last only until the server's next answer, so it never contradicts the server", () => {
+    assert.deepEqual(JSON.parse(html.overlay ?? "{}"), {
+      anthropicBeforeAnswer: true, // flipped at once, before the refresh lands
+      anthropicAnswered: true,
+      bothBeforeAnswer: [true, true],
+      afterOpenRouterAnswer: [false, true], // the server says OpenRouter only: Anthropic is Not connected
+      header: true, // "Cloud: 1 provider connected"
+      disconnectedBeforeAnswer: false,
+      newerAnswerSaysConnected: true, // a stale "disconnected" never covers a live key
+      afterDiscardedRender: true, // a render React threw away never takes a click's change with it
+    });
+  });
+  await check("Settings says what each saved model is doing, from the same registry the calls use", () => {
+    const notes = Object.fromEntries(
+      Object.entries(JSON.parse(html.notes ?? "{}") as Record<string, string>).map(([k, v]) => [k, v.replace(/&#x27;|&#39;/g, "'")]),
+    );
+    assert.equal(notes.gone, "Google no longer offers Gemini 2.5 Pro to new accounts; this agent now uses Gemini 3.8 Flash.");
+    assert.equal(notes.current, "", "a current model got a note");
+    assert.match(notes.unknown, /^anthropic\/claude-sonnet-4 is not on our list of OpenRouter models, so we can't say whether OpenRouter still offers it\./);
+    assert.equal(
+      notes.account,
+      "Saved model: Gemini 2.5 Pro . Google no longer offers Gemini 2.5 Pro to new accounts; your departments now use Gemini 3.8 Flash.",
+    );
+    assert.equal(notes.accountCurrent, "Your departments use Gemini 3.8 Flash .");
+    assert.equal(notes.accountUnread, "", "a model line was drawn from an account nobody read");
+    assert.equal(notes.accountOff, "", "a model line was drawn for an account that is not connected");
+  });
   await check("the card shows only that sentence, and draws itself again from the server after a failed disconnect", () => {
     assert.ok(disconnectReplies.length > 1, "no replies were collected");
     const testReplies = [
@@ -1902,6 +1970,444 @@ async function main() {
         ["refused with a sentence", "Your AI account refused the request. Check its billing or key."],
       ],
     );
+  });
+
+  // -- 12. The model registry, and the #535 follow-ups --------------------------
+  // lib/ai/model-registry.ts on every channel; the PR #535 review's R5-M1
+  // (a failed answer after a commit), R5-M3 (a teammate left on the old key)
+  // and R5-L3 (the route tests the key itself). R5-M2 is the render below.
+  const GONECO = "d2d2d2d2-0000-4000-8000-0000000000d2";
+  const MOVECO = "d3d3d3d3-0000-4000-8000-0000000000d3";
+  const LOSTCO = "d5d5d5d5-0000-4000-8000-0000000000d5";
+  const PROVECO = "d6d6d6d6-0000-4000-8000-0000000000d6";
+  const MORE = {
+    gone: u(21, "owner@gone.test"),
+    move: u(22, "owner@move.test"),
+    moveAdmin: u(23, "admin@move.test"),
+    lost: u(24, "owner@lost.test"),
+    prove: u(25, "owner@prove.test"),
+    proveRep: u(26, "rep@prove.test"),
+    goneRep: u(28, "rep@gone.test"),
+  } as const;
+  const KEY_GONE = "AIza-gone-workspace-key-0600";
+  const KEY_MOVE_ANT = "sk-ant-move-team-key-0601";
+  const KEY_MOVE_OR = "sk-or-v1-move-team-key-0602";
+  const KEY_MOVE_OWN = "sk-ant-move-outreach-own-0603";
+  const KEY_LOST = ["sk-ant-lost-first-0604", "sk-ant-lost-second-0605", "sk-ant-lost-third-0606", "sk-ant-lost-own-0607"] as const;
+  const KEY_PROVE = ["sk-ant-prove-refused-0608", "sk-ant-prove-down-0609", "sk-ant-prove-good-0610"] as const;
+  await db.batch(
+    [
+      ...Object.values(MORE).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
+      ...workspace(GONECO, "gone-co", "Gone Co"),
+      ...workspace(MOVECO, "move-co", "Move Co"),
+      ...workspace(LOSTCO, "lost-co", "Lost Co"),
+      ...workspace(PROVECO, "prove-co", "Prove Co"),
+      profile("p-gone", MORE.gone, GONECO, "owner", 1, ["sdr"]),
+      // A sales rep of the same workspace: not an owner or admin, so not one who can pick another model.
+      profile("p-gone-rep", MORE.goneRep, GONECO, "closer", 0, ["sdr"]),
+      // R5-M3's two admins: their teammate lists differ (agents_enabled is per person).
+      profile("p-move", MORE.move, MOVECO, "owner", 1, ["sdr", "customer-support"]),
+      { ...profile("p-move-admin", MORE.moveAdmin, MOVECO, "admin", 0, ["sdr"]) },
+      profile("p-lost", MORE.lost, LOSTCO, "owner", 1, ["sdr"]),
+      profile("p-prove", MORE.prove, PROVECO, "owner", 1, ["sdr"]),
+      profile("p-prove-rep", MORE.proveRep, PROVECO, "closer", 0, ["sdr"]),
+      // GONECO's account was saved on Google's gemini-2.5-pro, the model
+      // Google now serves only to projects that used it before.
+      configRow(GONECO, null, account.WORKSPACE_AI_AGENT_KEY, "google", "gemini-2.5-pro", KEY_GONE),
+    ],
+    "write",
+  );
+  await db.execute({ sql: "UPDATE user_profiles SET admin_access = 1 WHERE id = 'p-move-admin'", args: [] });
+  const googleOk = (text: string) =>
+    new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 2 } })}\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+
+  await check("a department turn on a saved model Google no longer offers to new accounts sends Gemini 3.8 Flash, same key, and the ledger says why", async () => {
+    const slack = await slackTurn(GONECO, "gone-co", "sales", "sdr");
+    assert.ok(slack.ok, JSON.stringify(slack));
+    if (!slack.ok) return;
+    assert.deepEqual([slack.turn.provider, slack.turn.model, slack.turn.apiKey], ["google", "gemini-3.8-flash", KEY_GONE]);
+    assert.equal(slack.turn.swap?.savedModel, "gemini-2.5-pro");
+    await login(MORE.gone);
+    sent = [];
+    provider = () => googleOk("Pipeline is moving.");
+    const events = parseSse(await (await chatTurn({ agent_slug: "sdr", department: "sales" })).text());
+    assert.deepEqual(events.map((e) => e.event), ["agent", "delta", "usage", "done"], JSON.stringify(events));
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].url, /\/models\/gemini-3\.8-flash:streamGenerateContent/, "the gone model was sent");
+    assert.equal(keyOf(sent[0]), KEY_GONE, "another key was sent");
+    const usageRows = await db.execute({
+      sql: "SELECT provider, model, fallback_reason, outcome FROM ai_usage_events WHERE tenant_id = ? AND surface = 'agents.chat' ORDER BY id",
+      args: [GONECO],
+    });
+    assert.deepEqual(
+      usageRows.rows.map((r) => [r.provider, r.model, r.fallback_reason, r.outcome]),
+      [["google", "gemini-3.8-flash", "model_access_limited:gemini-2.5-pro", "ok"]],
+    );
+    // What Settings tells the owner, from the same registry the call used.
+    const listed = await jsonOf(await agentConfig.GET(req("/api/agent-config", "GET")));
+    assert.deepEqual(listed.body.account, { provider: "google", model: "gemini-2.5-pro", connected: true });
+    assert.equal(
+      registry.modelNote("google", String((listed.body.account as { model: string }).model), { audience: "departments" })?.sentence,
+      "Google no longer offers Gemini 2.5 Pro to new accounts; your departments now use Gemini 3.8 Flash.",
+    );
+  });
+  await check("a model the provider says was not found is named to whoever can pick another (an owner or admin), and to nobody else", async () => {
+    await db.execute({ sql: "UPDATE agent_model_config SET model = 'gemini-9-nope' WHERE tenant_id = ? AND agent_key = ?", args: [GONECO, account.WORKSPACE_AI_AGENT_KEY] });
+    try {
+      await login(MORE.gone);
+      sent = [];
+      provider = () => new Response('{"error":{"code":404,"message":"models/gemini-9-nope is not found for API version v1beta","status":"NOT_FOUND"}}', { status: 404 });
+      const events = parseSse(await (await chatTurn({ agent_slug: "sdr", department: "sales" })).text());
+      const err = events.find((e) => e.event === "error");
+      assert.equal(err?.data.code, "provider_404", JSON.stringify(events));
+      assert.equal(
+        err?.data.message,
+        "The AI model gemini-9-nope was not found: Google has retired it or does not offer it to this AI account. Pick another model in AI settings, such as Gemini 3.8 Flash. An owner or admin can fix this in Settings.",
+      );
+      assert.deepEqual(err?.data.model, { label: "gemini-9-nope", vendor: "Google", suggestion: "Gemini 3.8 Flash" });
+      assert.doesNotMatch(JSON.stringify(err?.data), /NOT_FOUND|v1beta/, "the provider's own words reached the channel");
+      // A sales rep of the same workspace cannot change the model: the plain
+      // sentence, and no model id anywhere in the event (PR #555 review: the
+      // route keeps the model id from anyone it is not for).
+      await login(MORE.goneRep);
+      sent = [];
+      const repEvents = parseSse(await (await chatTurn({ agent_slug: "sdr", department: "sales" })).text());
+      const repErr = repEvents.find((e) => e.event === "error");
+      assert.equal(sent.length, 1, "the rep's turn never reached the provider");
+      assert.equal(repErr?.data.code, "provider_404", JSON.stringify(repEvents));
+      assert.equal(
+        repErr?.data.message,
+        "The AI model this channel uses was not found: the provider has retired it or does not offer it to this AI account. Pick another model in AI settings. An owner or admin can fix this in Settings.",
+      );
+      assert.equal(repErr?.data.model, undefined, "the model was named to a rep");
+      assert.doesNotMatch(JSON.stringify(repEvents), /gemini-9-nope/, "the model id reached a rep");
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET model = 'gemini-2.5-pro' WHERE tenant_id = ? AND agent_key = ?", args: [GONECO, account.WORKSPACE_AI_AGENT_KEY] });
+    }
+  });
+  await check("Settings can never save a model the registry knows is gone, and lists a saved value as itself", async () => {
+    await login(MORE.gone);
+    const before = await keysOn(GONECO);
+    const refused = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-pro", api_key: "AIza-new-row-key-0611" })));
+    assert.equal(refused.status, 400, JSON.stringify(refused.body));
+    assert.deepEqual(refused.body, {
+      ok: false,
+      error: "model_not_offered",
+      message: "Google no longer offers Gemini 2.5 Pro to new accounts. Pick Gemini 3.8 Flash or another listed model.",
+    });
+    const ending = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "openrouter", model: "google/gemini-2.5-pro", api_key: "sk-or-v1-new-row-0612" })));
+    assert.equal(ending.status, 400, "a model OpenRouter removes in 12 days was saved");
+    assert.deepEqual(await keysOn(GONECO), before, "a refused save wrote a row");
+    // A model the registry does not know is the owner's call (OpenRouter has hundreds).
+    const unknownModel = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "openrouter", model: "some-vendor/new-model", api_key: "sk-or-v1-new-row-0613" })));
+    assert.equal(unknownModel.status, 200, JSON.stringify(unknownModel.body));
+    await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = 'sdr'", args: [GONECO] });
+    // A row ALREADY on a gone model keeps it through an edit that does not
+    // change it (CodeRabbit on #555): nothing is put back, and its calls
+    // already send the replacement. Changing to another gone model is refused.
+    await db.execute({
+      sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'sdr', 'google', 'gemini-2.5-pro', ?, 1, ?)",
+      args: [GONECO, encryptField("AIza-sdr-row-0620"), stamp],
+    });
+    try {
+      const switchedOff = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-pro", enabled: false })));
+      assert.equal(switchedOff.status, 200, `an edit of a row on a gone model was refused: ${JSON.stringify(switchedOff.body)}`);
+      const rekeyed = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-pro", api_key: "AIza-sdr-new-0621" })));
+      assert.equal(rekeyed.status, 200, JSON.stringify(rekeyed.body));
+      const toAnotherGone = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "google", model: "gemini-2.5-flash" })));
+      assert.equal(toAnotherGone.status, 400, "a change to another gone model was saved");
+      const saved = (await rows(GONECO)).find((r) => r.agent_key === "sdr");
+      assert.deepEqual([saved?.model, saved?.key, saved?.enabled], ["gemini-2.5-pro", "AIza-sdr-new-0621", 1]);
+    } finally {
+      await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = 'sdr'", args: [GONECO] });
+    }
+    // The connect route too: a gone model is refused before any key is tested.
+    sent = [];
+    const connectGone = await connect({ provider: "google", api_key: "AIza-connect-0614", model: "gemini-2.5-flash" });
+    assert.equal(connectGone.status, 400);
+    assert.equal(connectGone.body.message, "Google no longer offers Gemini 2.5 Flash to new accounts. Pick Gemini 3.5 Flash-Lite or another listed model.");
+    assert.equal(sent.length, 0);
+    // And a model whose tool calls do not work through this app (OpenAI's GPT-6
+    // on Chat Completions), by a hand-built request: it would pass a key test
+    // and then fail every tool-using chat (PR #555 review).
+    const beforeGpt6 = await keysOn(GONECO);
+    const connectGpt6 = await connect({ provider: "openai", api_key: "sk-proj-connect-0622", model: "gpt-6.1-sol" });
+    assert.equal(connectGpt6.status, 400, JSON.stringify(connectGpt6.body));
+    assert.equal(connectGpt6.body.error, "model_not_offered");
+    const rowGpt6 = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "openai", model: "gpt-6-luna", api_key: "sk-proj-row-0623" })));
+    assert.equal(rowGpt6.status, 400, JSON.stringify(rowGpt6.body));
+    assert.equal(rowGpt6.body.error, "model_not_offered");
+    assert.equal(sent.length, 0, "a key was tested on a model that cannot be saved");
+    assert.deepEqual(await keysOn(GONECO), beforeGpt6, "a refused save wrote a row");
+    // The per-agent picker lists the saved value as itself, first, then the offered models.
+    const { rowModelOptions } = await import("../components/settings/AgentConfigEditor");
+    const options = rowModelOptions("google", "gemini-2.5-pro");
+    assert.deepEqual(options[0], { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro (saved, no longer offered)", offered: false });
+    assert.ok(options.slice(1).every((o) => registry.modelInfo("google", o.id)?.offered), "a gone model is offered");
+    assert.equal(rowModelOptions("google", "gemini-3.8-flash").filter((o) => o.id === "gemini-3.8-flash").length, 1);
+    assert.deepEqual(rowModelOptions("ollama", "qwen3:8b")[0], { id: "qwen3:8b", label: "qwen3:8b (saved)" });
+  });
+
+  await check("R5-M3: a connect moves every teammate still on the account's previous key; a teammate's own key stays", async () => {
+    await login(MORE.move);
+    assert.equal((await connect({ provider: "anthropic", api_key: KEY_MOVE_ANT })).status, 200);
+    // A teammate the owner gave its OWN key (a per-agent override).
+    await db.execute({
+      sql: `INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
+            VALUES (?, NULL, 'outreach', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)`,
+      args: [MOVECO, encryptField(KEY_MOVE_OWN), stamp],
+    });
+    assert.deepEqual((await keysOn(MOVECO)).sort(), [
+      `${account.WORKSPACE_AI_AGENT_KEY}/team:${KEY_MOVE_ANT}`,
+      `customer-support/team:${KEY_MOVE_ANT}`,
+      `outreach/team:${KEY_MOVE_OWN}`,
+      `sdr/team:${KEY_MOVE_ANT}`,
+    ]);
+    // The second admin's own teammate list is only the Sales lead.
+    await login(MORE.moveAdmin);
+    const moved = await connect({ provider: "openrouter", api_key: KEY_MOVE_OR });
+    assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    assert.deepEqual((moved.body.applied_to as string[]).sort(), ["customer-support", "sdr"], "the moved teammate is not reported");
+    const after = await rows(MOVECO);
+    assert.deepEqual(
+      after.filter((r) => r.key !== null).map((r) => `${r.agent_key}:${r.provider}:${r.key}`).sort(),
+      [
+        `${account.WORKSPACE_AI_AGENT_KEY}:openrouter:${KEY_MOVE_OR}`,
+        `customer-support:openrouter:${KEY_MOVE_OR}`,
+        `outreach:anthropic:${KEY_MOVE_OWN}`,
+        `sdr:openrouter:${KEY_MOVE_OR}`,
+      ],
+    );
+    assert.ok(!after.some((r) => r.key === KEY_MOVE_ANT), "the replaced Anthropic key is still stored on a teammate");
+    // The teammate's per-agent chat answers on the team's account now, not a key no card shows.
+    assert.equal(await perAgentChat(MORE.move, "customer-support"), `answers with ${KEY_MOVE_OR}`);
+    assert.equal(await perAgentChat(MORE.move, "outreach"), `answers with ${KEY_MOVE_OWN}`);
+  });
+  await check("R5-M3 on a workspace with only the legacy row: teammates on the legacy row's key move with it", async () => {
+    const LEGACY2 = "d7d7d7d7-0000-4000-8000-0000000000d7";
+    const owner = u(27, "owner@legacy2.test");
+    const oldCipher = encryptField("sk-or-v1-legacy2-old-0615");
+    await db.batch(
+      [
+        { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [owner.id, owner.email] },
+        ...workspace(LEGACY2, "legacy2-co", "Legacy Two"),
+        profile("p-legacy2", owner, LEGACY2, "owner", 1, ["sdr"]),
+        // One old connect wrote ONE ciphertext to the legacy row and a teammate.
+        { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'bravo', 'openrouter', 'anthropic/claude-sonnet-4.6', ?, 1, ?)", args: [LEGACY2, oldCipher, stamp] },
+        { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'customer-support', 'openrouter', 'anthropic/claude-sonnet-4.6', ?, 1, ?)", args: [LEGACY2, oldCipher, stamp] },
+      ],
+      "write",
+    );
+    await login(owner);
+    const res = await connect({ provider: "anthropic", api_key: "sk-ant-legacy2-new-0616" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(
+      (await rows(LEGACY2)).map((r) => `${r.agent_key}:${r.provider}:${r.key}`).sort(),
+      [
+        `${account.WORKSPACE_AI_AGENT_KEY}:anthropic:sk-ant-legacy2-new-0616`,
+        "bravo:anthropic:sk-ant-legacy2-new-0616",
+        "customer-support:anthropic:sk-ant-legacy2-new-0616",
+        "sdr:anthropic:sk-ant-legacy2-new-0616",
+      ],
+    );
+  });
+  await check("a connect whose account changed after it was read moves nothing: not a teammate still on the old key, not the legacy row", async () => {
+    // The race (PR #555 review; #535 review R5-L2): the one-time model update
+    // (scripts/update-saved-models.ts --apply) moves the account, a teammate
+    // and the legacy row off a gone model, KEEPING their keys, after a connect
+    // read the account and before its one step runs. The connect's read is
+    // stale, so none of it may land. The teammate still holds the account's
+    // previous key, so only the account guard stops the team move from putting
+    // it on the new key while the account stays on the old one.
+    const GUARDCO = "d8d8d8d8-0000-4000-8000-0000000000d8";
+    const owner = u(29, "owner@guard.test");
+    const teamCipher = encryptField("AIza-guard-team-0630");
+    const legacyCipher = encryptField("AIza-guard-legacy-0631");
+    const row = (agentKey: string, cipher: string) => ({
+      sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, ?, 'google', 'gemini-2.5-pro', ?, 1, ?)",
+      args: [GUARDCO, agentKey, cipher, stamp],
+    });
+    await db.batch(
+      [
+        { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [owner.id, owner.email] },
+        ...workspace(GUARDCO, "guard-co", "Guard Co"),
+        profile("p-guard", owner, GUARDCO, "owner", 1, ["sdr"]),
+        row(account.WORKSPACE_AI_AGENT_KEY, teamCipher),
+        row("customer-support", teamCipher),
+        row("bravo", legacyCipher),
+      ],
+      "write",
+    );
+    await login(owner);
+    const res = await interleaved(
+      () => connect({ provider: "anthropic", api_key: "sk-ant-guard-new-0632" }),
+      connectStep(GUARDCO),
+      async () => {
+        await db.execute({
+          sql: "UPDATE agent_model_config SET model = 'gemini-3.8-flash', updated_at = ? WHERE tenant_id = ? AND user_id IS NULL AND provider = 'google' AND model = 'gemini-2.5-pro'",
+          args: [new Date().toISOString(), GUARDCO],
+        });
+      },
+    );
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.deepEqual(
+      (await rows(GUARDCO)).map((r) => `${r.agent_key}:${r.provider}:${r.model}:${r.key}`).sort(),
+      [
+        `${account.WORKSPACE_AI_AGENT_KEY}:google:gemini-3.8-flash:AIza-guard-team-0630`,
+        "bravo:google:gemini-3.8-flash:AIza-guard-legacy-0631",
+        "customer-support:google:gemini-3.8-flash:AIza-guard-team-0630",
+      ],
+      "a statement of the stale connect landed",
+    );
+  });
+
+  await check("R5-M1: a connect whose batch commits and then loses its answer is told as saved, never 'Nothing was changed'", async () => {
+    await login(MORE.lost);
+    const lose = { at: connectStep(LOSTCO), times: 1 };
+    lostAnswers = [lose];
+    let res: Awaited<ReturnType<typeof connect>>;
+    try {
+      res = await connect({ provider: "anthropic", api_key: KEY_LOST[0] });
+    } finally {
+      lostAnswers = [];
+    }
+    assert.equal(lose.times, 0, "the batch's answer was never lost: the step proved nothing");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.ok, true);
+    assert.deepEqual(await spending(LOSTCO, "lost-co", MORE.lost), answersWith(KEY_LOST[0]));
+    // A batch that really failed (rolled back): "Nothing was changed" is true, and said.
+    await login(MORE.lost);
+    const failedRes = await withHooks([breakAt(accountWrite(LOSTCO))], () => connect({ provider: "anthropic", api_key: KEY_LOST[1] }));
+    assert.equal(failedRes.status, 500);
+    assert.equal(failedRes.body.message, "The key couldn't be saved just now. Nothing was changed. Try again in a moment.");
+    assert.deepEqual(await spending(LOSTCO, "lost-co", MORE.lost), answersWith(KEY_LOST[0]));
+    // The answer is lost AND the read-back fails: it says it could not tell.
+    await login(MORE.lost);
+    let reads = 0;
+    lostAnswers = [{ at: connectStep(LOSTCO), times: 1 }];
+    let unknown: Awaited<ReturnType<typeof connect>>;
+    try {
+      unknown = await withHooks(
+        [{ at: (sql, args) => stampRead(LOSTCO)(sql, args) && ++reads === 2, times: 1, breakIt: true }],
+        () => connect({ provider: "anthropic", api_key: KEY_LOST[2] }),
+      );
+    } finally {
+      lostAnswers = [];
+    }
+    assert.equal(unknown.status, 503, JSON.stringify(unknown.body));
+    assert.equal(unknown.body.message, "We couldn't check whether the key was saved. Close this and look at the card in a moment.");
+    // A personal save whose answer is lost, read back the same way.
+    await login(MORE.lost);
+    lostAnswers = [{ at: personalStep(LOSTCO, MORE.lost.id), times: 1 }];
+    let personal: Awaited<ReturnType<typeof connect>>;
+    try {
+      personal = await connect({ provider: "anthropic", api_key: KEY_LOST[3], scope: "user" });
+    } finally {
+      lostAnswers = [];
+    }
+    assert.equal(personal.status, 200, JSON.stringify(personal.body));
+  });
+  await check("R5-M1: the dialog reads back after a server failure or a page that is not the route's answer, not only after a throw", async () => {
+    const ok = new Response(JSON.stringify({ ok: true, tested: "v1.passed.1.x" }), { status: 200 });
+    const run = async (saveAnswer: () => Response, verifyAnswer: Record<string, unknown> | null) => {
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const result = await connectProviderKey({ provider: "anthropic", apiKey: "sk-ant-dialog-0617", model: "claude-sonnet-5-5", scope: "tenant" }, async (url, init) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push({ url, body });
+        if (url.endsWith("/test-connection")) return ok.clone();
+        if (body.verify === true) {
+          if (!verifyAnswer) throw new Error("the read never arrived");
+          return new Response(JSON.stringify(verifyAnswer), { status: 200 });
+        }
+        return saveAnswer();
+      });
+      return { result, verified: calls.filter((c) => c.body.verify === true).length, saveBody: calls.find((c) => c.url.endsWith("/bulk-provider"))?.body };
+    };
+    // The Worker stopped after the commit: the platform answered with an HTML page.
+    const html502 = await run(() => new Response("<html>502 Bad Gateway</html>", { status: 502 }), { ok: true, saved: true });
+    assert.deepEqual([html502.result, html502.verified], [{ kind: "saved" }, 1]);
+    // The route's own 500 after it read back "not saved".
+    const json500 = await run(() => new Response(JSON.stringify({ ok: false, message: "The key couldn't be saved just now. Nothing was changed. Try again in a moment." }), { status: 500 }), { ok: true, saved: false });
+    assert.deepEqual([json500.result, json500.verified], [{ kind: "failed", message: "The key wasn't saved when we checked. Close this, look at the card in a moment, and connect again if it doesn't show it." }, 1]);
+    // The read itself fails: it says it could not tell.
+    const noRead = await run(() => new Response("", { status: 503 }), null);
+    assert.deepEqual(noRead.result, { kind: "failed", message: "We couldn't check whether the key was saved. Close this and look at the card in a moment." });
+    // A refusal the route ANSWERED (a 409, a 403) is not read back: it is the answer.
+    const conflict = await run(() => new Response(JSON.stringify({ ok: false, error: "conflict", message: "The AI account was changed in another window while this key saved, so nothing was changed. Check the card, then connect again if you still want this key." }), { status: 409 }), { ok: true, saved: true });
+    assert.equal(conflict.verified, 0);
+    assert.equal(conflict.result.kind, "failed");
+    // The test's proof goes with the save (R5-L3: the route does not test it twice).
+    assert.equal(html502.saveBody?.tested, "v1.passed.1.x");
+  });
+
+  await check("R5-L3: the save route tests the key itself; a refused key is never saved, and 'Save anyway' needs a down provider", async () => {
+    await login(MORE.prove);
+    // No proof, and the provider refuses the key: nothing saved, the test's own sentence.
+    sent = [];
+    provider = () => new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }), { status: 401 });
+    const refused = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[0] });
+    assert.equal(refused.status, 422, JSON.stringify(refused.body));
+    assert.deepEqual([refused.body.error, refused.body.code, refused.body.message, refused.body.can_save_anyway], [
+      "key_refused",
+      "provider_401",
+      "Your AI account refused the request. Check its billing or key.",
+      false,
+    ]);
+    assert.equal(sent.length, 1, "the route did not test the key");
+    assert.equal(keyOf(sent[0]), KEY_PROVE[0]);
+    assert.equal(sent[0].body?.model, registry.defaultModelFor("anthropic"), "the key was tested on another model than it would be saved with");
+    assert.deepEqual(await keysOn(PROVECO), [], "a refused key was saved");
+    // The provider is down: not saved unless the request says save_anyway.
+    provider = () => new Response("upstream", { status: 503 });
+    const down = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[1] });
+    assert.equal(down.status, 422);
+    assert.equal(down.body.can_save_anyway, true);
+    assert.equal(typeof down.body.tested, "string", "no proof came back for Save anyway");
+    assert.deepEqual(await keysOn(PROVECO), []);
+    // Save anyway with the proof the down test returned: saved without testing again.
+    sent = [];
+    const anyway = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[1], tested: down.body.tested, save_anyway: true });
+    assert.equal(anyway.status, 200, JSON.stringify(anyway.body));
+    assert.equal(sent.length, 0, "a down provider's proof was tested again");
+    // A "down" proof without save_anyway is not enough.
+    sent = [];
+    provider = () => new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }), { status: 401 });
+    const notAnyway = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[1], tested: down.body.tested });
+    assert.equal(notAnyway.status, 422);
+    assert.equal(sent.length, 1);
+    // A proof only speaks for exactly what was tested: another key, model or person is tested again.
+    const { signConnectTest: sign } = await import("../lib/ai/connect-test-proof");
+    const subject = { tenantId: PROVECO, userId: MORE.prove.id, provider: "anthropic", model: registry.defaultModelFor("anthropic"), apiKey: KEY_PROVE[2] };
+    for (const [label, proof] of [
+      ["another key", sign({ ...subject, apiKey: "sk-ant-someone-else-0618" }, "passed")],
+      ["another model", sign({ ...subject, model: "claude-opus-5-5" }, "passed")],
+      ["another person", sign({ ...subject, userId: MORE.proveRep.id }, "passed")],
+      ["another workspace", sign({ ...subject, tenantId: LOSTCO }, "passed")],
+      ["an expired test", sign(subject, "passed", Date.now() - 11 * 60_000)],
+      ["a forged one", `v1.passed.${Date.now() + 60_000}.AAAA`],
+    ] as const) {
+      sent = [];
+      const r = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[2], tested: proof });
+      assert.equal(r.status, 422, `${label}: saved untested`);
+      assert.equal(sent.length, 1, `${label}: the route did not test the key`);
+    }
+    // The real proof for exactly this test: saved, with no second test.
+    sent = [];
+    const good = await connectUntested({ provider: "anthropic", api_key: KEY_PROVE[2], tested: sign(subject, "passed") });
+    assert.equal(good.status, 200, JSON.stringify(good.body));
+    assert.equal(sent.length, 0, "a key with a proof of its test was tested again");
+    assert.deepEqual(await spending(PROVECO, "prove-co", MORE.prove), answersWith(KEY_PROVE[2]));
+    // And test-connection is what signs it, for the pasted key and its model only.
+    await login(MORE.prove);
+    provider = answering("ok");
+    const tested = await testKey({ provider: "anthropic", api_key: "sk-ant-pasted-0619", model: "claude-haiku-5-5" });
+    assert.equal(tested.body.ok, true);
+    assert.equal(typeof tested.body.tested, "string");
+    const unnamed = await testKey({ provider: "anthropic", api_key: "sk-ant-pasted-0619" });
+    assert.equal(unnamed.body.tested, undefined, "a key tested on no named model got a proof for one");
   });
 
   console.log(`ai-workspace-account: ${failures === 0 ? "OK" : `${failures} FAILED`}`);

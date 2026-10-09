@@ -77,6 +77,8 @@ import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
 import { classifyStreamError, failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
 import { recordTurnOutcome } from "@/lib/os/channel/turns";
 import type { AiBudgetCode } from "@/lib/ai/usage";
+import { modelFactsForCopy } from "@/lib/ai/model-registry";
+import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
 
 export const runtime = "nodejs";
@@ -208,7 +210,12 @@ export async function POST(req: NextRequest) {
 
   // The model id is operator detail, and the platform key bills OASIS: both
   // for the verified operator only (lib/platform-operator.ts). Read once.
+  // One exception, below: a model the provider says was not found is named to
+  // the people who can pick another one (PR #555 review).
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
+  // An owner or admin (lib/lead-scope.ts isAdminProfile: the founder persona,
+  // the rule the channel's AI settings link follows) may change the model.
+  const canManageAi = isAdminProfile(profile);
   const fallback = isOperator ? operatorPlatformFallback() : null;
   // Hardwired per-account override (lib/operator-name.ts) wins, e.g. the Matt
   // account's operator.name resolves to "Uri".
@@ -266,18 +273,25 @@ export async function POST(req: NextRequest) {
       });
 
       // One code per failed turn. The client gets the code and one plain
-      // sentence; the provider's own error body is never forwarded.
+      // sentence; the provider's own error body is never forwarded. A model
+      // the provider says was not found is NAMED (with what to pick instead)
+      // to whoever can pick another, an owner or admin or the verified
+      // operator, so the channel says which model, not just "the model".
+      // Anyone else gets the plain sentence and no model: the id is the
+      // workspace's configuration, theirs only to report (PR #555 review).
       const outcome: { failure: TurnFailureCode | null } = { failure: null };
       const fail = (code: TurnFailureCode, detail: string | null) => {
         if (outcome.failure) return;
         outcome.failure = code;
         logFailure("stream", ctx, code, {
           provider: t.provider,
+          ...(code === "provider_404" ? { model: t.model } : {}),
           ...(detail && (code === "provider_error" || code === "stream_failed")
             ? { detail: redactAll(detail).slice(0, 160) }
             : {}),
         });
-        send("error", { code, message: failureCopy(code, { canManageAi: false }).sentence });
+        const model = code === "provider_404" && (canManageAi || t.revealModel) ? modelFactsForCopy(t.provider, t.model) : null;
+        send("error", { code, message: failureCopy(code, { canManageAi: false, model }).sentence, ...(model ? { model } : {}) });
       };
       try {
         for await (const ev of streamAgentTurn(t, incoming, 4096)) {
