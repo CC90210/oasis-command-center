@@ -16,6 +16,9 @@
  *                            before a model is called
  *   modelCallMeter           every call is one ai_usage_events row, under this
  *                            tool's surface, the person and the run
+ *   resolveCall              a saved model the registry knows is gone is sent
+ *                            as its replacement on the same provider, and the
+ *                            row records why (lib/ai/model-registry.ts)
  *   streamChat               the text is collected; an error event, a throw or
  *                            no text at all is a failure with a code
  *
@@ -39,6 +42,7 @@ import {
   isAiBudgetCode,
   modelCallMeter,
 } from "@/lib/ai/usage";
+import { resolveCall } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 
 export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post";
@@ -101,21 +105,25 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
     return { ok: false, code: AI_USAGE_UNAVAILABLE };
   }
 
-  const meter = modelCallMeter(
-    { tenantId: call.tenantId, surface: call.surface, ...billing, userId: call.userId, jobId: call.jobId },
-    { db: deps.usageDb },
+  // The saved model, unless the registry knows it is gone: then its replacement
+  // on the same provider and key, and the meter records why. Resolved here (as
+  // prepareAgentTurn does) so the run names the model it really sent.
+  const picked = resolveCall(
+    account.provider,
+    account.model,
+    modelCallMeter({ tenantId: call.tenantId, surface: call.surface, ...billing, userId: call.userId, jobId: call.jobId }, { db: deps.usageDb }),
   );
 
   let text = "";
   try {
     for await (const ev of deps.stream({
       provider: account.provider,
-      model: account.model,
+      model: picked.model,
       apiKey,
       system: call.system,
       messages: [{ role: "user", content: call.prompt }],
       maxTokens: call.maxTokens,
-      meter,
+      meter: picked.meter,
     })) {
       if (ev.type === "delta") text += ev.text;
       else if (ev.type === "error") {
@@ -131,5 +139,5 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
   }
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, code: "ai_failed" };
-  return { ok: true, text: trimmed, provider: account.provider, model: account.model };
+  return { ok: true, text: trimmed, provider: account.provider, model: picked.model };
 }

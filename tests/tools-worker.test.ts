@@ -174,6 +174,16 @@ async function main() {
     );
   });
 
+  await check("a saved model the registry knows is gone is sent as its replacement, and the run and the usage row say so", async () => {
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }), { ...ACCOUNT, model: "gemini-2.5-pro" });
+    const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));
+    assert.equal(j.status, "done", JSON.stringify(j));
+    assert.equal(ai.seen.calls[0].model, "gemini-3.8-flash", "the request sends the replacement");
+    assert.equal(j.result?.model, "gemini-3.8-flash", "the run names the model it really sent");
+    const row = (await db.execute({ sql: "SELECT model, fallback_reason FROM ai_usage_events WHERE job_id = ?", args: [j.id] })).rows[0];
+    assert.deepEqual([row.model, row.fallback_reason], ["gemini-3.8-flash", "model_access_limited:gemini-2.5-pro"]);
+  });
+
   await check("no usable AI account (none, switched off, a local model, unreadable): the run fails with its own line and no model is called", async () => {
     const cases: Array<[WorkspaceAiAccount | null | Error, string, string]> = [
       [null, "ai_account_missing", "Connect an AI account in Settings > AI brain to use this tool."],
