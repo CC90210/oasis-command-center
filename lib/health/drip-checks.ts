@@ -60,7 +60,21 @@ export type DripCheck = {
    * `observe` is still required (baseline_drop history replays it); a check
    * using this should make it return `observeDetailed(...).observed`.
    */
-  observeDetailed?: (db: Db, tenantId: string, endMs: number) => Promise<{ observed: number | null; reason: string }>;
+  observeDetailed?: (
+    db: Db,
+    tenantId: string,
+    endMs: number,
+  ) => Promise<{
+    observed: number | null;
+    reason: string;
+    /**
+     * The worst verdict this observation may produce. A rule grades a number;
+     * only the check knows that THIS number is a settled-down aftermath that
+     * deserves a notice, not a page (a department that failed and answers again).
+     * Never lifts a verdict, never touches check_broken.
+     */
+    capAt?: "degraded";
+  }>;
   /**
    * Rebuild the rule at EVALUATION time.
    *
@@ -603,10 +617,12 @@ export async function runCheck(
 ): Promise<CheckResult> {
   let observed: number | null;
   let detail: string | null = null;
+  let capAt: "degraded" | undefined;
   if (check.observeDetailed) {
     const d = await check.observeDetailed(db, tenantId, nowMs);
     observed = d.observed;
     detail = d.reason;
+    capAt = d.capAt;
   } else {
     observed = await check.observe(db, tenantId, nowMs);
   }
@@ -621,6 +637,7 @@ export async function runCheck(
       if (v !== null) history.push(v);
     }
   }
-  const result = evaluate(check.id, rule, observed, history);
+  const graded = evaluate(check.id, rule, observed, history);
+  const result = capAt === "degraded" && graded.verdict === "failing" ? { ...graded, verdict: "degraded" as const } : graded;
   return detail ? { ...result, reason: detail } : result;
 }

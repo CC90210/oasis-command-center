@@ -35,9 +35,16 @@
  * looks like a reading. A READ that fails is the opposite: check_broken with
  * the reason, never ok (checks-core evaluate: an errored check is not a pass).
  *
- * WINDOW. 6 hours, ending at the run time. Rule (b) therefore keeps a past
- * burst of failures visible for up to 6 h after a fix, until healthy turns
- * outnumber it; the alert says whether each department is answering again.
+ * WINDOW. 6 hours, ending at the run time. A burst of failures stays in the
+ * window after a fix, so rule (b) (the failure RATE) can never page on its own:
+ * it only counts while some department's latest turn is still failing, which is
+ * rule (a). Once every department answers again it is a degraded "recovered at"
+ * notice for DEPARTMENT_CHAT_RECOVERY_NOTICE_MS, then clear.
+ *
+ * TOOL STEPS. One tool-using turn is several rows. A step that called a tool is
+ * never an empty reply, so writers record its output as unknown (NULL), not 0
+ * (lib/os/desk/gemini-loop.ts); "ok with 0 output" is reserved for a step that
+ * produced nothing.
  *
  * RUNNING. These are not in OASIS_GLOBAL_CHECKS: that list runs under one
  * tenant, and each workspace must be graded on its own turns (own
@@ -63,6 +70,12 @@ export const DEPARTMENT_CHAT_WINDOW_MS = 6 * 60 * 60_000;
 export const DEPARTMENT_CHAT_FAILURE_RATE = 0.5;
 /** ...but only on at least this many turns; one failure in one turn is rule (a)'s job. */
 export const DEPARTMENT_CHAT_MIN_TURNS_FOR_RATE = 2;
+/**
+ * After the last failure, a department chat that answers again everywhere stays
+ * a (degraded) notice this long, then clears: two check cycles to be seen, not
+ * the rest of the 6 h window. Rule (b) alone can never page (failing).
+ */
+export const DEPARTMENT_CHAT_RECOVERY_NOTICE_MS = 30 * 60_000;
 /** A busy workspace's window is bounded; newest rows are read first, so the latest turns always count. */
 const READ_LIMIT = 5000;
 
@@ -113,6 +126,9 @@ const CODE_WORDS: Record<string, string> = {
   bridge_unreachable: "the paired computer could not be reached",
   cli_failed: "the AI app on the paired computer could not answer",
   provider_400_credit: "the AI account is out of credits",
+  agent_not_configured: "no AI account is connected for this workspace to answer with",
+  key_unreadable: "the saved AI key could not be read",
+  config_unavailable: "the workspace's AI settings could not be read",
 };
 
 /** One failed turn in words the owner can act on, with the raw code kept for whoever debugs it. */
@@ -194,6 +210,9 @@ export type DepartmentChatReading = {
   /** Departments whose most recent turn failed (rule a). */
   failingNow: number;
   departments: number;
+  /** The newest failed turn, and the first good turn after it (null while a failure is still the latest word). */
+  lastFailureAt: string | null;
+  recoveredAt: string | null;
 };
 
 /** Newest first; a stable tie-break keeps two turns in the same millisecond deterministic. */
@@ -228,7 +247,19 @@ export function gradeDepartmentTurns(allTurns: readonly DepartmentTurn[]): Depar
     (a, b) => Number(b.latestFailed) - Number(a.latestFailed) || b.failures.length - a.failures.length
       || a.department.localeCompare(b.department),
   );
-  return { graded: graded.length, failed, rateTripped, trouble, failingNow: failingNow.length, departments: all.length };
+  const lastFailure = graded.find(isFailedTurn) ?? null;
+  // graded is newest first, so the LAST good turn newer than the failure is the earliest one.
+  const afterFailure = lastFailure ? graded.filter((t) => !isFailedTurn(t) && t.occurredAt > lastFailure.occurredAt) : [];
+  return {
+    graded: graded.length,
+    failed,
+    rateTripped,
+    trouble,
+    failingNow: failingNow.length,
+    departments: all.length,
+    lastFailureAt: lastFailure?.occurredAt ?? null,
+    recoveredAt: afterFailure.length ? afterFailure[afterFailure.length - 1].occurredAt : null,
+  };
 }
 
 function pct(n: number, d: number): number {
@@ -255,6 +286,20 @@ export function outcomesReason(reading: DepartmentChatReading, nowMs: number, wo
   return [
     `${workspace ? `${workspace}: ` : ""}department chat is broken for ${names}.`,
     `Last 6 h: ${reading.failed} of ${reading.graded} turns failed (${pct(reading.failed, reading.graded)}%).`,
+    ...reading.trouble.map((s) => troubleLine(s, nowMs)),
+  ].join("\n");
+}
+
+/**
+ * The notice for a burst that has ended: every department's latest turn is
+ * healthy, but turns failed in the window. Says when it recovered and how much
+ * failed, then the departments it hit.
+ */
+export function recoveryReason(reading: DepartmentChatReading, nowMs: number, workspace: string | null): string {
+  return [
+    `${workspace ? `${workspace}: ` : ""}department chat recovered at ${fmtWhen(reading.recoveredAt ?? reading.lastFailureAt ?? "", nowMs)} ` +
+      `after ${reading.failed} failed turn(s); every department is answering again.`,
+    `Last 6 h: ${reading.failed} of ${reading.graded} turns failed (${pct(reading.failed, reading.graded)}%); last failure ${fmtWhen(reading.lastFailureAt ?? "", nowMs)}.`,
     ...reading.trouble.map((s) => troubleLine(s, nowMs)),
   ].join("\n");
 }
@@ -370,7 +415,9 @@ export const DEPARTMENT_CHAT_CHECKS: DripCheck[] = [
     describe: (r) =>
       r.verdict === "check_broken"
         ? r.reason
-        : `${r.reason}\nCheck the AI engine: ${chatLink()}`,
+        : r.verdict === "degraded"
+          ? r.reason
+          : `${r.reason}\nCheck the AI engine: ${chatLink()}`,
   },
   {
     id: "department_chat_fallback",
@@ -392,7 +439,7 @@ async function outcomesObservation(
   db: Db,
   tenantId: string,
   endMs: number,
-): Promise<{ observed: number | null; reason: string }> {
+): Promise<{ observed: number | null; reason: string; capAt?: "degraded" }> {
   const read = await readDepartmentTurns(db, tenantId, endMs);
   if (!read.ok) return readFailed("ai_usage_events", read.error);
   const reading = gradeDepartmentTurns(read.turns);
@@ -404,6 +451,21 @@ async function outcomesObservation(
         `${reading.graded} department chat turn(s) across ${reading.departments} department(s) in the last 6 h; ` +
         `${reading.failed} failed; the latest turn of every department was healthy`,
     };
+  }
+  if (reading.failingNow === 0) {
+    // Rule (b) alone: turns failed in the window but every department's latest
+    // word is healthy. Rule (a) owns the page, so this is never failing: a
+    // notice while the failure is fresh, then clear.
+    const lastFailureMs = Date.parse(reading.lastFailureAt ?? "");
+    if (!Number.isFinite(lastFailureMs) || endMs - lastFailureMs > DEPARTMENT_CHAT_RECOVERY_NOTICE_MS) {
+      return {
+        observed: 0,
+        reason:
+          `${reading.graded} department chat turn(s) in the last 6 h; ${reading.failed} failed earlier, ` +
+          `and every department is answering again (last failure ${fmtWhen(reading.lastFailureAt ?? "", endMs)})`,
+      };
+    }
+    return { observed: reading.failed, reason: recoveryReason(reading, endMs, await workspaceLabel(db, tenantId)), capAt: "degraded" };
   }
   return {
     // Departments to name; the rate rule alone still counts as at least one.

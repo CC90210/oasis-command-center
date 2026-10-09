@@ -161,15 +161,41 @@ export function bridgeTurnRequest(input: {
  * the role from the profile). null when the gate refuses, when no bridge is set
  * up, or when the gate's workspace is not the one the turn is for. Never throws.
  */
-export async function bridgeCallerForSession(tenantId: string): Promise<BridgeCaller | null> {
+export async function bridgeCallerForSession(tenantId: string, authorize?: BridgeGate): Promise<BridgeCaller | null> {
+  const r = await bridgeResolutionForSession(tenantId, authorize);
+  return r && "target" in r ? r : null;
+}
+
+type BridgeGate = () => Promise<import("@/lib/bridge-proxy").BridgeAuthResult>;
+
+/**
+ * A person the gate lets use the paired computer, for whom it cannot be used
+ * right now: `not_set_up` (the workspace has no bridge address) or `gate_error`
+ * (the gate itself threw). That is a real outage to report, unlike the gate
+ * simply saying no.
+ */
+export type BridgeUnavailable = { unavailable: "not_set_up" | "gate_error" };
+
+/**
+ * bridgeCallerForSession with the reason kept. null is the gate saying NO by
+ * design (a teammate who may not use the computer, another workspace's
+ * session): the API account answering them is the rule, not a fault. A
+ * BridgeUnavailable is a person who may use the computer and cannot.
+ */
+export async function bridgeResolutionForSession(tenantId: string, authorize?: BridgeGate): Promise<BridgeCaller | BridgeUnavailable | null> {
   try {
-    const { authorizeBridgeRequest } = await import("@/lib/bridge-proxy");
+    // `authorize` is a test seam; the default is the coding harness's own gate.
+    const authorizeBridgeRequest = authorize ?? (await import("@/lib/bridge-proxy")).authorizeBridgeRequest;
     const auth = await authorizeBridgeRequest();
-    if (!auth.ok || auth.tenantId !== tenantId) return null;
-    return { target: auth.target, tenantId: auth.tenantId, userId: auth.userId, teamRole: auth.teamRole };
+    if (auth.ok) {
+      if (auth.tenantId !== tenantId) return null;
+      return { target: auth.target, tenantId: auth.tenantId, userId: auth.userId, teamRole: auth.teamRole };
+    }
+    // bridge_not_configured is only ever answered to a caller who passed the tenant gate.
+    return auth.error === "bridge_not_configured" ? { unavailable: "not_set_up" } : null;
   } catch (err) {
     console.error("[bridge-turn.caller]", { tenantId, error: err instanceof Error ? err.message : String(err) });
-    return null;
+    return { unavailable: "gate_error" };
   }
 }
 

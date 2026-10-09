@@ -25,48 +25,14 @@ import {
   checkFleetHeartbeat,
   OASIS_GLOBAL_CHECKS,
   ESTATE_WIDE_CHECKS,
-  DEPARTMENT_CHAT_CHECKS,
-  type RunSummary,
 } from "@/lib/health/runner";
-import { departmentChatTenantIds } from "@/lib/health/department-chat-checks";
-import { alertAudienceFor } from "@/lib/notify/alert-route";
-import { worstVerdict } from "@/lib/health/checks-core";
+import { brokenSummary, runDepartmentChatHealth } from "@/lib/health/department-chat-run";
+import { worstVerdict, type CheckResult } from "@/lib/health/checks-core";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-/**
- * Department chat, once per workspace that had a department turn in the last 6
- * h (OASIS always). Per tenant, not under OASIS: each workspace is graded on its
- * own turns, with its own alert ladder and history. Needs the ai_usage_events
- * ledger only, so it adds nothing to the calendar probe's wall-clock budget.
- *
- * WHO IS PAGED. An alert's audience is a property of the workspace
- * (lib/notify/alert-route.ts), and these checks name CC's operator chat. So
- * only a workspace that resolves to OASIS's operator chat pages; any other is
- * graded and recorded (health_check_runs) with notify off. A client whose own
- * AI key ran dry is that client's to fix, not a page to CC, and paging a
- * client's bot needs the workspace-alert path, which the lane-based runner
- * does not have yet.
- */
-async function runDepartmentChat(notify: boolean): Promise<Array<{ tenantId: string; summary: RunSummary }>> {
-  const { tenantIds, error } = await departmentChatTenantIds();
-  // OASIS is still graded below. A ledger that is down fails that run as
-  // check_broken and pages; this line covers only a narrower failure of the
-  // tenant list, which would otherwise leave client workspaces unwatched.
-  if (error) console.error("[health-check] department chat tenant discovery failed", error);
-  return Promise.all(
-    tenantIds.map(async (tenantId) => ({
-      tenantId,
-      summary: await runHealthChecks(tenantId, {
-        notify: notify && alertAudienceFor(tenantId) === "oasis_operator",
-        checks: DEPARTMENT_CHAT_CHECKS,
-      }),
-    })),
-  );
-}
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
@@ -92,18 +58,46 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // checks graded SunBiz only, so they stop with it. The estate-wide checks
     // that had ridden along (production serves main, alert delivery, the form
     // dead-letter table) now run under the OASIS tenant instead.
+    //
+    // ONE PIECE FAILING MUST NOT SILENCE THE REST (review of PR #569). Each
+    // piece below is guarded on its own: a throw is logged, reported as a
+    // check_broken result for that piece, and the other summaries still come
+    // back (and the calendar probe still reaches its cleanup). The route then
+    // answers 500 so the scheduler records the failure.
+    const failedPieces: string[] = [];
+    const guard = <T,>(piece: string, work: Promise<T>, broken: (reason: string) => T): Promise<T> =>
+      work.catch((err: unknown) => {
+        console.error(`[health-check] ${piece} failed`, err);
+        failedPieces.push(piece);
+        return broken(`${piece} threw: ${err instanceof Error ? err.message : String(err)}`);
+      });
     const [calendarSummary, estateSummary, heartbeat, departmentRuns] = await Promise.all([
-      runHealthChecks(WEBDEV_TENANT_ID, {
-        notify,
-        checks: OASIS_GLOBAL_CHECKS,
-      }),
-      runHealthChecks(WEBDEV_TENANT_ID, {
-        notify,
-        checks: ESTATE_WIDE_CHECKS,
-      }),
-      checkFleetHeartbeat(getServiceSupabase()),
-      runDepartmentChat(notify),
+      guard(
+        "calendar",
+        runHealthChecks(WEBDEV_TENANT_ID, {
+          notify,
+          checks: OASIS_GLOBAL_CHECKS,
+        }),
+        (reason) => brokenSummary("health.calendar_run", reason),
+      ),
+      guard(
+        "estate",
+        runHealthChecks(WEBDEV_TENANT_ID, {
+          notify,
+          checks: ESTATE_WIDE_CHECKS,
+        }),
+        (reason) => brokenSummary("health.estate_run", reason),
+      ),
+      guard(
+        "fleet_heartbeat",
+        checkFleetHeartbeat(getServiceSupabase()),
+        (reason): CheckResult => ({ id: "fleet.heartbeat", verdict: "check_broken", observed: NaN, baseline: null, reason }),
+      ),
+      // Department chat: once per workspace with department turns, bounded and
+      // isolated per workspace (lib/health/department-chat-run.ts).
+      runDepartmentChatHealth({ notify }),
     ]);
+    if (departmentRuns.some((d) => d.failed)) failedPieces.push("department_chat");
     // A client workspace's ids carry its tenant so two workspaces' rows differ.
     const tag = (tenantId: string, id: string) => (tenantId === WEBDEV_TENANT_ID ? id : `${tenantId.slice(0, 8)}:${id}`);
     const departmentResults = departmentRuns.flatMap((d) =>
@@ -111,7 +105,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const results = [...estateSummary.results, ...calendarSummary.results, ...departmentResults];
 
     return NextResponse.json({
-      ok: true,
+      ok: failedPieces.length === 0,
+      ...(failedPieces.length ? { failed_pieces: failedPieces } : {}),
       worst: worstVerdict(results),
       ran: estateSummary.ran + calendarSummary.ran + departmentRuns.reduce((n, d) => n + d.summary.ran, 0),
       alerted: [
@@ -128,7 +123,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       results: results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
       })),
-    });
+    }, { status: failedPieces.length ? 500 : 200 });
   } catch (err) {
     // The route failing is itself a monitoring failure. Return 500 so the
     // Cloudflare runtime and scheduler record a failure rather than a cheerful 200.

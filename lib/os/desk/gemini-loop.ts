@@ -157,10 +157,18 @@ export async function* streamGeminiWithTools(req: GeminiToolLoopRequest): AsyncG
       }
       if (iterAnswered) answered = true;
       // The last step of a turn that never answered is a failed call.
+      // A step that called a tool DID produce output, so a reported 0 is the
+      // provider leaving the function call out of its count (candidates absent,
+      // no thinking), not an empty reply. Recorded as 0 it would grade as an
+      // empty success; recorded as unknown (null) it cannot, and its cost reads
+      // as unknown rather than a guess. Emptiness is a property of the TURN
+      // (the check "ok, no text" above), never of one tool step.
+      const stepUsage: ModelUsage | null =
+        !complete ? null : calls.length > 0 && ledger.outputTokens === 0 ? { ...ledger, outputTokens: null } : ledger;
       end =
         calls.length === 0 && !answered
           ? { outcome: "error", errorCode: `empty_reply_${emptyReplyKind(finish)}`, usage: complete ? ledger : null }
-          : { outcome: "ok", usage: complete ? ledger : null };
+          : { outcome: "ok", usage: stepUsage };
     } catch (err) {
       end = { outcome: "error", errorCode: "stream_failed", usage: null };
       throw err;

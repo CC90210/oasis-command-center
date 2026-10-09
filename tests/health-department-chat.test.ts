@@ -145,6 +145,7 @@ async function main() {
   const { allChecks, OASIS_GLOBAL_CHECKS, ESTATE_WIDE_CHECKS, runHealthChecks } = await import("../lib/health/runner");
   const { evaluate } = await import("../lib/health/checks-core");
   const { meteredBridgeTurn } = await import("../lib/os/department-agent");
+  const { runDepartmentChatHealth, DEPARTMENT_CHAT_FANOUT, brokenSummary } = await import("../lib/health/department-chat-run");
   const { modelCallMeter, billingForBridge } = await import("../lib/ai/usage");
 
   const supa = getServiceSupabase();
@@ -166,10 +167,15 @@ async function main() {
       assert.ok(!list.some((c) => c.id.startsWith("department_chat_")), "a per-workspace check would run under one tenant");
     }
     const route = readFileSync(join(ROOT, "app/api/cron/health-check/route.ts"), "utf8");
-    assert.match(route, /checks:\s*DEPARTMENT_CHAT_CHECKS/);
-    assert.match(route, /departmentChatTenantIds\(\)/);
+    const runModule = readFileSync(join(ROOT, "lib/health/department-chat-run.ts"), "utf8");
+    assert.match(route, /runDepartmentChatHealth\(\{ notify \}\)/);
+    assert.match(runModule, /checks: DEPARTMENT_CHAT_CHECKS/);
+    assert.match(runModule, /departmentChatTenantIds/);
     // Another workspace's chat is graded and recorded, never paged into OASIS's operator chat.
-    assert.match(route, /notify:\s*notify && alertAudienceFor\(tenantId\) === "oasis_operator"/);
+    assert.match(runModule, /notify: opts\.notify && alertAudienceFor\(tenantId\) === "oasis_operator"/);
+    // One piece throwing must not drop the others' summaries: each is guarded, and the route still answers 500.
+    for (const piece of ["calendar", "estate", "fleet_heartbeat"]) assert.match(route, new RegExp(`guard\\(\\s*"${piece}"`), `${piece} is not guarded`);
+    assert.match(route, /status: failedPieces\.length \? 500 : 200/);
   });
 
   await check("warn_above_zero: 0 is ok, a count is DEGRADED (never failing), an unreadable value is check_broken", () => {
@@ -236,26 +242,55 @@ async function main() {
     assert.equal((await run(outcomes)).verdict, "ok");
   });
 
-  await check("3 of 4 turns failed (latest of each department ok) -> failing on the rate, saying who is answering again", async () => {
+  await check("RULE (b) NEVER PAGES: 3 of 4 turns failed but every department's latest turn is ok -> DEGRADED 'recovered at', never failing", async () => {
     await reset();
     await seed(
-      { dept: "sales", minsAgo: 10 }, // latest is fine
+      { dept: "sales", minsAgo: 10 }, // latest is fine: recovered at 17:50
+      { dept: "sales", minsAgo: 25, outcome: "error", error: "empty_reply_thinking" },
       { dept: "sales", minsAgo: 60, outcome: "error", error: "empty_reply_thinking" },
-      { dept: "sales", minsAgo: 90, outcome: "error", error: "empty_reply_thinking" },
-      { dept: "sales", minsAgo: 120, outcome: "error", error: "stream_failed" },
+      { dept: "sales", minsAgo: 90, outcome: "error", error: "stream_failed" },
     );
     const r = await run(outcomes);
-    assert.equal(r.verdict, "failing");
-    assert.equal(r.observed, 1, "the rate rule alone still counts as one thing to fix");
+    assert.equal(r.verdict, "degraded", "an ended burst must not hold a failing page for the rest of the window");
+    assert.equal(r.observed, 3);
+    assert.match(r.reason, /department chat recovered at 17:50 UTC, 10m ago after 3 failed turn\(s\); every department is answering again\./);
     assert.match(r.reason, /Last 6 h: 3 of 4 turns failed \(75%\)/);
     assert.match(r.reason, /Sales: answering again after 3 failed turn\(s\)/);
     assert.match(r.reason, /spent its whole answer budget thinking/);
+    assert.ok(!/Check the AI engine/.test(outcomes.describe(r)), "a recovery notice is not a call to fix anything");
   });
 
-  await check("exactly 50% over two turns trips the rate; 1 failure of 3 (latest ok) does not", async () => {
+  await check("...and it CLEARS: the same burst with its last failure over 30 minutes old is ok", async () => {
     await reset();
-    await seed({ dept: "sales", minsAgo: 5 }, { dept: "sales", minsAgo: 30, outcome: "error", error: "stream_failed" });
-    assert.equal((await run(outcomes)).verdict, "failing");
+    await seed(
+      { dept: "sales", minsAgo: 10 },
+      { dept: "sales", minsAgo: 50, outcome: "error", error: "empty_reply_thinking" },
+      { dept: "sales", minsAgo: 80, outcome: "error", error: "empty_reply_thinking" },
+      { dept: "sales", minsAgo: 110, outcome: "error", error: "stream_failed" },
+    );
+    const r = await run(outcomes);
+    assert.equal(r.verdict, "ok");
+    assert.equal(r.observed, 0);
+    assert.match(r.reason, /3 failed earlier, and every department is answering again/);
+  });
+
+  await check("rule (a) still pages when a department's LATEST turn failed, even with the rate also tripped", async () => {
+    await reset();
+    await seed(
+      { dept: "sales", minsAgo: 5, outcome: "error", error: "stream_failed" },
+      { dept: "sales", minsAgo: 25, outcome: "error", error: "stream_failed" },
+      { dept: "sales", minsAgo: 45 },
+      { dept: "marketing", minsAgo: 15 },
+    );
+    const r = await run(outcomes);
+    assert.equal(r.verdict, "failing");
+    assert.match(r.reason, /Sales: failing now/);
+  });
+
+  await check("exactly 50% over two turns with the latest ok is a recovery notice (never a page); 1 failure of 3 is ok", async () => {
+    await reset();
+    await seed({ dept: "sales", minsAgo: 5 }, { dept: "sales", minsAgo: 20, outcome: "error", error: "stream_failed" });
+    assert.equal((await run(outcomes)).verdict, "degraded");
     await reset();
     await seed({ dept: "sales", minsAgo: 5 }, { dept: "sales", minsAgo: 30 }, { dept: "sales", minsAgo: 60, outcome: "error", error: "stream_failed" });
     assert.equal((await run(outcomes)).verdict, "ok");
@@ -517,6 +552,88 @@ async function main() {
     const row = (await db.execute("SELECT provider, model, billing_mode FROM ai_usage_events")).rows[0];
     assert.deepEqual([row.provider, row.model, row.billing_mode], ["bridge", "llama3.3", "local"]);
     assert.equal((await nowRun(outcomes)).verdict, "failing");
+  });
+
+  // ── refusals before any model is asked ───────────────────────────────────
+  await check("a department turn refused before a model was asked alerts, in words", async () => {
+    for (const [code, words] of [
+      ["agent_not_configured", /no AI account is connected for this workspace to answer with \(agent_not_configured\)/],
+      ["key_unreadable", /the saved AI key could not be read \(key_unreadable\)/],
+      ["config_unavailable", /the workspace's AI settings could not be read \(config_unavailable\)/],
+    ] as const) {
+      await reset();
+      await seed({ dept: "operations", minsAgo: 2, outcome: "error", error: code, out: null });
+      const r = await run(outcomes);
+      assert.equal(r.verdict, "failing", code);
+      assert.match(r.reason, words);
+    }
+  });
+
+  // ── a tool step is not an empty reply ────────────────────────────────────
+  await check("a tool-using turn whose tool step recorded no output count (NULL) and whose answer step has words grades ok", async () => {
+    await reset();
+    await seed({ dept: "sales", minsAgo: 4, out: null }, { dept: "sales", minsAgo: 3 }, { dept: "sales", minsAgo: 40, out: null }, { dept: "sales", minsAgo: 39 });
+    assert.equal((await run(outcomes)).verdict, "ok");
+  });
+
+  // ── isolation and bounds of the per-workspace run ───────────────────────
+  const OTHER = "9d9d9d9d-0000-4000-8000-00000000009d";
+  await check("a workspace whose run throws is logged and recorded check_broken for THAT workspace; the others still return, and only OASIS may page", async () => {
+    await db.execute("DELETE FROM health_check_runs");
+    const notifyBy: Record<string, boolean> = {};
+    const run2 = async (tenantId: string, opts: { notify?: boolean }) => {
+      notifyBy[tenantId] = opts.notify === true;
+      if (tenantId === CLIENT) throw new Error("health_alert_state upsert failed");
+      return runHealthChecks(tenantId, { ...(opts as object), sendTelegramImpl: (async () => ({ ok: true })) as never });
+    };
+    const logged: unknown[][] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a);
+    let out;
+    try {
+      out = await runDepartmentChatHealth({ notify: true, nowMs: NOW, discover: async () => ({ tenantIds: [OASIS, CLIENT, OTHER], error: null }), run: run2 as never });
+    } finally {
+      console.error = realError;
+    }
+    assert.deepEqual(out.map((o) => [o.tenantId, o.failed]), [[OASIS, false], [CLIENT, true], [OTHER, false]]);
+    assert.equal(out[1].summary.worst, "check_broken");
+    assert.match(out[1].summary.results[0].reason, /health_alert_state upsert failed/);
+    assert.equal(out[0].summary.ran, 2, "OASIS's real checks ran");
+    assert.ok(logged.some((l) => String(l[0]).includes("department chat run failed")), "the failure was logged with its error");
+    const rec = (await db.execute({ sql: "SELECT verdict, check_id, reason FROM health_check_runs WHERE tenant_id = ? AND verdict = 'check_broken'", args: [CLIENT] })).rows;
+    assert.equal(rec.length, 1, "recorded as check_broken for the failing workspace");
+    assert.equal(rec[0].check_id, "department_chat_outcomes");
+    assert.deepEqual(notifyBy, { [OASIS]: true, [CLIENT]: false, [OTHER]: false }, "a workspace that is not OASIS's own never pages the operator chat");
+  });
+
+  await check("the per-workspace fan-out is bounded", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const ids = Array.from({ length: 13 }, (_, i) => `t${i}`);
+    const slow = async (tenantId: string) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return brokenSummary("x", tenantId);
+    };
+    const out = await runDepartmentChatHealth({ notify: false, discover: async () => ({ tenantIds: ids, error: null }), run: slow as never });
+    assert.equal(out.length, 13, "every workspace is still graded");
+    assert.ok(peak <= DEPARTMENT_CHAT_FANOUT && peak > 1, `peak concurrency ${peak}`);
+    assert.equal(DEPARTMENT_CHAT_FANOUT, 5);
+  });
+
+  await check("a failed tenant discovery is logged and OASIS is still graded", async () => {
+    const logged: unknown[][] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a);
+    try {
+      const out = await runDepartmentChatHealth({ notify: false, discover: async () => ({ tenantIds: [OASIS], error: "boom" }), run: (async () => brokenSummary("x", "ran")) as never });
+      assert.equal(out.length, 1);
+    } finally {
+      console.error = realError;
+    }
+    assert.ok(logged.some((l) => String(l[0]).includes("tenant discovery failed")));
   });
 
   // ── pure grading and wording ─────────────────────────────────────────────

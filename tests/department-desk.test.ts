@@ -427,6 +427,23 @@ async function main() {
     assert.deepEqual(events.at(-1), { type: "error", message: "empty_reply:thinking" });
   });
 
+  await check("a Gemini tool step that reports 0 output tokens is NOT recorded as 0: it called a tool, so it is not an empty reply (the health check would page on it)", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const usage = await import("../lib/ai/usage");
+    const real = usage.modelCallMeter({ tenantId: ACME, surface: "agents.chat", ...usage.billingForKey("google", "tenant"), departmentKey: "sales", teammateId: "sdr", userId: OWNER, jobId: null });
+    steps = [
+      // A functionCall-only step; the usage block leaves the function call out of the count (no candidatesTokenCount, thoughts 0).
+      () => sse([{ data: { candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "pipeline_summary", args: {} } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 40, thoughtsTokenCount: 0 } } }]),
+      () => sse([{ data: { candidates: [{ content: { role: "model", parts: [{ text: "Two leads." }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 70, candidatesTokenCount: 4 } } }]),
+    ];
+    const events: Array<Record<string, unknown>> = [];
+    for await (const ev of streamGeminiWithTools({ apiKey: "k", model: "gemini-3.8-flash", system: "s", messages: [{ role: "user", content: "pipeline?" }], maxTokens: 256, meter: real, toolset: salesTools })) events.push(ev as never);
+    assert.equal(events.at(-1)?.type, "done", "the turn answered");
+    const rows = (await db.execute("SELECT outcome, input_tokens, output_tokens FROM ai_usage_events ORDER BY occurred_at, id")).rows;
+    assert.deepEqual(rows.map((r) => [r.outcome, r.output_tokens === null ? null : Number(r.output_tokens)]), [["ok", null], ["ok", 4]], "the tool step's output is unknown, never 0; the answer step keeps its count");
+    assert.ok(!rows.some((r) => r.outcome === "ok" && r.output_tokens !== null && Number(r.output_tokens) === 0), "no ok row with 0 output");
+  });
+
   console.log("Grounding a turn");
   const baseTurn = (provider: string, tenantId = ACME) => ({
     tenantId,

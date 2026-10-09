@@ -55,7 +55,7 @@
  *
  * Response: text/event-stream SSE
  *   event: agent       data: { display_name, agent_slug | department, model?,
- *                              runs_on?, spend?, fell_back_from? }
+ *                              runs_on?, spend?, fell_back_from?, engine_not_used? }
  *                      (model only for the verified operator; runs_on/spend,
  *                      what answered and on whose credits, for owners, admins
  *                      and the operator: lib/ai/agent-engine.ts)
@@ -85,7 +85,7 @@ import type { AiBudgetCode } from "@/lib/ai/usage";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
-import { bridgeCallerForSession } from "@/lib/ai/bridge-turn";
+import { bridgeResolutionForSession } from "@/lib/ai/bridge-turn";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { groundDepartmentTurn } from "@/lib/os/desk/turn";
 import { resolveOsViewer } from "@/components/os/department/viewer";
@@ -250,7 +250,7 @@ export async function POST(req: NextRequest) {
     chatMode: body.chat_mode,
     // What powers your agents may be an AI app on the paired computer: reached
     // by the coding harness's own gate, asked only when that is the choice.
-    bridge: () => bridgeCallerForSession(tenantId),
+    bridge: () => bridgeResolutionForSession(tenantId),
   });
   if (!prepared.ok) {
     // A refusal that is a verdict on the workspace's AI account (an unreadable
@@ -300,7 +300,12 @@ export async function POST(req: NextRequest) {
         // (lib/ai/agent-engine.ts), for owners, admins and the operator: the
         // people who choose it in Settings > AI brain.
         ...(t.revealModel || canManageAi
-          ? { runs_on: t.engine.runsOn, spend: t.engine.spend, ...(t.engine.fellBackFrom ? { fell_back_from: t.engine.fellBackFrom } : {}) }
+          ? {
+              runs_on: t.engine.runsOn,
+              spend: t.engine.spend,
+              ...(t.engine.fellBackFrom ? { fell_back_from: t.engine.fellBackFrom } : {}),
+              ...(t.engine.notUsedFor ? { engine_not_used: t.engine.notUsedFor } : {}),
+            }
           : {}),
       });
 

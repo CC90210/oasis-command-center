@@ -450,16 +450,30 @@ async function main() {
     assert.equal(req2.body.agent, "atlas");
   });
 
-  await check("OASIS with the computer NOT reachable: the AI account answers, and the turn says what was chosen", async () => {
-    const prepared = await oasisTurn("sales", "sdr", async () => null);
+  await check("OASIS with the computer NOT reachable for someone entitled to it: the AI account answers, and the turn says it could not be reached", async () => {
+    const prepared = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
     assert.ok(prepared.ok, JSON.stringify(prepared));
     if (!prepared.ok) return;
     assert.equal(prepared.turn.engine.kind, "api");
     assert.equal(prepared.turn.engine.fellBackFrom, "Codex on your paired computer");
+    assert.equal(prepared.turn.engine.notUsedFor, null);
     assert.equal(prepared.turn.engine.spend, "api_credits");
-    // A Slack mention (no resolver) does the same.
-    const slack = await oasisTurn("sales", "sdr", null);
-    assert.ok(slack.ok && slack.turn.engine.kind === "api" && slack.turn.engine.fellBackFrom !== null);
+    // A gate that THROWS is the same: the person may use the computer and it did not answer.
+    const threw = await oasisTurn("sales", "sdr", async () => {
+      throw new Error("gate down");
+    });
+    assert.ok(threw.ok && threw.turn.engine.kind === "api" && threw.turn.engine.fellBackFrom === "Codex on your paired computer");
+  });
+
+  await check("an API turn that is the RULE is not a fallback and never says 'could not be reached': a Slack mention, a teammate the gate refuses", async () => {
+    // Slack never passes a resolver; bridgeCallerForSession answers null for a teammate it does not admit.
+    for (const bridge of [null, async () => null]) {
+      const prepared = await oasisTurn("sales", "sdr", bridge);
+      assert.ok(prepared.ok, JSON.stringify(prepared));
+      if (!prepared.ok || prepared.turn.engine.kind !== "api") return assert.fail("not an API turn");
+      assert.equal(prepared.turn.engine.fellBackFrom, null, "by design is not a fault");
+      assert.equal(prepared.turn.engine.notUsedFor, "Codex on your paired computer");
+    }
   });
 
   await check("the harness path is OASIS-only: a client workspace on an app engine is answered by its API account, even with a reachable bridge", async () => {
@@ -486,7 +500,8 @@ async function main() {
     assert.ok(agentEv, JSON.stringify(evs));
     assert.equal(agentEv.data.spend, "api_credits");
     assert.match(String(agentEv.data.runs_on), /\(API\)$/);
-    assert.equal(agentEv.data.fell_back_from, "Claude Code on your paired computer", "the reply says the chosen app did not answer");
+    assert.equal(agentEv.data.fell_back_from, undefined, "a client workspace has no harness yet: the app was never going to answer, so nothing 'could not be reached'");
+    assert.equal(agentEv.data.engine_not_used, "Claude Code on your paired computer");
     assert.equal(agentEv.data.model, undefined, "the model id stays operator detail");
     await store.saveAgentEngine(ALPHA, { kind: "api" });
   });
@@ -549,27 +564,125 @@ async function main() {
     return prepared.turn;
   };
 
-  await check("a turn that fell back from the chosen engine records engine_unreachable:<app> on its API call", async () => {
+  const apiAnswers = () => {
+    answer = (s) => (s.url.includes("anthropic.com") ? anthropicOk("Answered by the API account.") : new Response("x", { status: 599 }));
+  };
+
+  await check("a turn that REALLY fell back (entitled, computer unavailable) records engine_unreachable:<app> on its API call", async () => {
     await db.execute("DELETE FROM ai_usage_events");
-    const prepared = await oasisTurn("sales", "sdr", async () => null);
+    const prepared = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
     assert.ok(prepared.ok && prepared.turn.engine.kind === "api" && prepared.turn.engine.fellBackFrom !== null);
     if (!prepared.ok) return;
-    answer = (s) => (s.url.includes("anthropic.com") ? anthropicOk("Answered by the API account.") : new Response("x", { status: 599 }));
+    apiAnswers();
     await drainTurn(prepared.turn);
     const rows = await usageRows();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].fallback_reason, "engine_unreachable:codex");
     assert.equal(rows[0].billing_mode, "byo_key", "the API account answered and is billed as before");
     assert.equal(rows[0].outcome, "ok");
-    // A Slack mention (no resolver) falls back the same way; a local engine says "local".
+    // A local engine says "local".
     await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
-    const slack = await oasisTurn("sales", "sdr", null);
-    assert.ok(slack.ok);
-    if (!slack.ok) return;
+    const local = await oasisTurn("sales", "sdr", async () => ({ unavailable: "gate_error" as const }));
+    assert.ok(local.ok);
+    if (!local.ok) return;
     await db.execute("DELETE FROM ai_usage_events");
-    await drainTurn(slack.turn);
+    apiAnswers();
+    await drainTurn(local.turn);
     assert.equal((await usageRows())[0].fallback_reason, "engine_unreachable:local");
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("FALSE-POSITIVE GUARD: a Slack mention, a teammate the gate refuses, and a client workspace on an app engine record NO fallback", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    for (const bridge of [null, async () => null]) {
+      const prepared = await oasisTurn("sales", "sdr", bridge);
+      assert.ok(prepared.ok);
+      if (!prepared.ok) return;
+      apiAnswers();
+      await drainTurn(prepared.turn);
+    }
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude" });
+    const client = await clientTurn(async () => ({ ...ccCaller, tenantId: ALPHA }));
+    assert.ok(client.ok);
+    if (client.ok) {
+      apiAnswers();
+      await drainTurn(client.turn);
+    }
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    const rows = await usageRows();
+    assert.equal(rows.length, 3, "one row per answered turn");
+    assert.deepEqual(rows.map((r) => [r.outcome, r.fallback_reason]), [["ok", null], ["ok", null], ["ok", null]]);
+  });
+
+  await check("bridgeResolutionForSession: 'no' by design is null, an entitled person with no bridge is unavailable, a thrown gate is unavailable", async () => {
+    const target = { baseUrl: BRIDGE, bearerToken: "t" };
+    const via = (gate: () => Promise<unknown>) => bridgeTurn.bridgeResolutionForSession(OASIS, gate as never);
+    assert.deepEqual(await via(async () => ({ ok: true, target, tenantId: OASIS, tenantSlug: "oasis-ai-cc", userId: "u", teamRole: "owner", isOperator: true })), { target, tenantId: OASIS, userId: "u", teamRole: "owner" });
+    assert.equal(await via(async () => ({ ok: true, target, tenantId: ALPHA, tenantSlug: "alpha-co", userId: "u", teamRole: "owner", isOperator: false })), null, "another workspace's session");
+    assert.equal(await via(async () => ({ ok: false, status: 403, error: "bridge_not_enabled_for_tenant" })), null, "a teammate the gate does not admit");
+    assert.equal(await via(async () => ({ ok: false, status: 401, error: "unauthenticated" })), null);
+    assert.deepEqual(await via(async () => ({ ok: false, status: 503, error: "bridge_not_configured", isOperator: true })), { unavailable: "not_set_up" });
+    assert.deepEqual(await via(async () => { throw new Error("db down"); }), { unavailable: "gate_error" });
+    // The caller-only resolver (the engine routes) keeps its meaning: anything but a caller is null.
+    assert.equal(await bridgeTurn.bridgeCallerForSession(OASIS, (async () => ({ ok: false, status: 503, error: "bridge_not_configured", isOperator: true })) as never), null);
+    assert.equal((await bridgeTurn.bridgeCallerForSession(OASIS, (async () => ({ ok: true, target, tenantId: OASIS, tenantSlug: "oasis-ai-cc", userId: "u", teamRole: "owner", isOperator: true })) as never))?.userId, "u");
+  });
+
+  await check("the reply footer says 'not used for this chat' by design and 'could not be reached' only for a real fallback", async () => {
+    const { viaLine } = await import("../components/agents/AgentChat");
+    const base = { runs_on: "anthropic (API)", spend: "api_credits" };
+    assert.match(String(viaLine({ ...base, fell_back_from: "Codex on your paired computer" })), /Codex on your paired computer could not be reached$/);
+    const byDesign = String(viaLine({ ...base, engine_not_used: "Codex on your paired computer" }));
+    assert.match(byDesign, /Codex on your paired computer is not used for this chat$/);
+    assert.ok(!/could not be reached/.test(byDesign));
+  });
+
+  await check("a department turn refused BEFORE any model is asked leaves a failed zero-cost row: no account, an unreadable key, unreadable settings", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    // 1. App chosen, computer unavailable, and no AI account behind it: the whole outage.
+    await db.execute({ sql: "UPDATE agent_model_config SET enabled = 0 WHERE tenant_id = ? AND agent_key = 'bravo'", args: [OASIS] });
+    try {
+      const down = await oasisTurn("sales", "sdr", async () => ({ unavailable: "not_set_up" as const }));
+      assert.ok(!down.ok && down.status === 412 && down.error === "agent_not_configured", JSON.stringify(down));
+      if (!down.ok) assert.match(String(down.extra?.hint), /can't be reached/);
+      const byDesign = await oasisTurn("sales", "sdr", async () => null);
+      assert.ok(!byDesign.ok && byDesign.status === 412);
+      if (!byDesign.ok) assert.match(String(byDesign.extra?.hint), /isn't used for this chat/);
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET enabled = 1 WHERE tenant_id = ? AND agent_key = 'bravo'", args: [OASIS] });
+    }
+    let rows = await usageRows();
+    assert.equal(rows.length, 2);
+    for (const r of rows) {
+      assert.deepEqual(
+        [r.provider, r.model, r.billing_mode, r.surface, r.department_key, r.outcome, r.error_code, r.cost_micro_usd, r.reserved_micro_usd],
+        ["bridge", "codex", "subscription", "agents.chat", "sales", "error", "agent_not_configured", 0, null],
+      );
+    }
+    // 2. A saved key that cannot be decrypted.
+    await db.execute("DELETE FROM ai_usage_events");
+    await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = 'not-a-cipher' WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [ALPHA] });
+    try {
+      const bad = await clientTurn(null);
+      assert.ok(!bad.ok && bad.error === "key_unreadable", JSON.stringify(bad));
+      // A chat that is no department's writes nothing: only department turns are watched.
+      const direct = await prepareAgentTurn({ tenantId: ALPHA, tenantSlug: "alpha-co", agentSlug: "sdr", department: null, operator: { name: "O", email: USERS.alpha.email }, platformFallback: null, revealModel: false, userId: USERS.alpha.id, bridge: null });
+      assert.ok(!direct.ok && direct.error === "key_unreadable");
+    } finally {
+      await db.execute({ sql: "UPDATE agent_model_config SET encrypted_api_key = ? WHERE tenant_id = ? AND agent_key = '__workspace__'", args: [anthCipher, ALPHA] });
+    }
+    rows = await usageRows();
+    assert.deepEqual(rows.map((r) => [r.error_code, r.department_key, r.provider, r.billing_mode, r.cost_micro_usd]), [["key_unreadable", "sales", "anthropic", "byo_key", 0]]);
+    // 3. The workspace's AI settings cannot be read.
+    await db.execute("DELETE FROM ai_usage_events");
+    await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_hidden");
+    try {
+      const gone = await clientTurn(null);
+      assert.ok(!gone.ok && gone.error === "config_unavailable", JSON.stringify(gone));
+    } finally {
+      await db.execute("ALTER TABLE agent_model_config_hidden RENAME TO agent_model_config");
+    }
+    assert.deepEqual((await usageRows()).map((r) => [r.error_code, r.department_key]), [["config_unavailable", "sales"]]);
   });
 
   await check("a turn answered by its chosen engine records no fallback; a model swap and an engine fallback are BOTH kept, joined with +", async () => {
