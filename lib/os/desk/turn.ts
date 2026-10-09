@@ -186,7 +186,9 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
   try {
     [facts, vault] = await Promise.all([
       (args.loadState ?? loadDepartmentState)(viewer, dept),
-      (args.loadVault ?? fetchTenantVaultSecretsForRedaction)(viewer.surface.tenantId),
+      // COMPLETE or nothing: an entry that cannot be decrypted fails the read,
+      // so no summary goes out scrubbed of only some secrets.
+      (args.loadVault ?? ((id: string) => fetchTenantVaultSecretsForRedaction(id, { requireComplete: true })))(viewer.surface.tenantId),
     ]);
   } catch (err) {
     // Each read already fails on its own; this is the loader itself breaking,

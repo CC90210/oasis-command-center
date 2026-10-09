@@ -631,6 +631,33 @@ async function main() {
     }
   });
 
+  await check("a vault entry that cannot be decrypted sends no workspace data (a partial scrub is not sent)", async () => {
+    const { fetchTenantVaultSecretsForRedaction } = await import("../lib/chat-persistence");
+    const { encryptField } = await import("../lib/field-encryption");
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data, created_at, updated_at) VALUES ('lead-acme-vault2', ?, 'lead', ?, ?, ?)",
+      args: [ACME, JSON.stringify({ name: `Vault Lead ${VAULT_SECRET}`, stage: "contacted", next_action_at: past }), now, now],
+    });
+    // One good entry, one whose ciphertext is corrupt.
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (id, tenant_id, service, field_key, encrypted_value) VALUES ('corrupt-1', ?, 'custom', 'broken_key', ?)",
+      args: [ACME, `${encryptField("another-secret-value-123").slice(0, -6)}XXXXXX`],
+    });
+    try {
+      // The chat routes' lenient read still answers the entries it can decrypt.
+      assert.ok((await fetchTenantVaultSecretsForRedaction(ACME)).some((s) => s.value === VAULT_SECRET));
+      await assert.rejects(() => fetchTenantVaultSecretsForRedaction(ACME, { requireComplete: true }), /vault_incomplete/);
+      sent = [];
+      const g = await groundDepartmentTurn({ turn: baseTurn("google"), viewer: acmeOwner, maxTokens: 256, plainStream });
+      assert.equal(g?.tools.on, false);
+      assert.doesNotMatch(String(g?.system), /Harbor Bakery|Vault Lead|REDACTED:ACME_VAULT/);
+      assert.equal(sent.length, 0, "no provider request was built from workspace data");
+    } finally {
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE id = 'corrupt-1'");
+      await db.execute("DELETE FROM tenant_records WHERE id = 'lead-acme-vault2'");
+    }
+  });
+
   console.log("Routines are the Operations page's data");
   await check("Chief of Staff offers routines to an owner, and returns them", async () => {
     const tools = deskToolset({ viewer: acmeOwner, dept: dept("chief_of_staff"), agentSlug: "cos" });

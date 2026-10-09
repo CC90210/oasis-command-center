@@ -41,6 +41,13 @@ import { VAULT_CUSTOM_SERVICE } from "./tenant-integration-store";
  */
 export async function fetchTenantVaultSecretsForRedaction(
   tenantId: string,
+  /**
+   * requireComplete: a vault entry that cannot be decrypted makes the whole
+   * read fail (throws vault_incomplete) instead of being skipped. A caller
+   * that would otherwise send workspace data scrubbed of only SOME secrets
+   * (a department turn, lib/os/desk/turn.ts) asks for this and sends none.
+   */
+  opts: { requireComplete?: boolean } = {},
 ): Promise<VaultSecret[]> {
   if (!tenantId) return [];
   const service = getServiceSupabase();
@@ -63,6 +70,8 @@ export async function fetchTenantVaultSecretsForRedaction(
         value: decryptField(row.encrypted_value),
       });
     } catch (err) {
+      // A caller that must not send a partial scrub fails the whole read.
+      if (opts.requireComplete) throw new Error(`vault_incomplete: an entry could not be decrypted (${row.field_key})`);
       // Don't let one corrupt ciphertext drop the entire redaction
       // pass — the model could still leak OTHER vault entries we
       // CAN decrypt. Log and continue.
