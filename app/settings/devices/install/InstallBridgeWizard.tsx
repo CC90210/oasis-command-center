@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
 import { operatorBridgeCommand } from "@/lib/bridge-install-command";
+import { setupHref } from "@/lib/setup-links";
 import {
   bridgeInstallCommands,
   bridgeRestartCommand,
@@ -263,7 +264,7 @@ export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
               Open a chat
             </Link>
             <Link
-              href="/settings#devices"
+              href={setupHref("bridge_devices")}
               className="btn-secondary inline-flex items-center gap-2"
             >
               Manage devices

@@ -15,6 +15,7 @@ import { headers } from "next/headers";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { DesktopLinkClient } from "./client";
+import { setupHref } from "@/lib/setup-links";
 
 export const dynamic = "force-dynamic";
 
@@ -44,9 +45,9 @@ export default async function DesktopLinkPage({ searchParams }: { searchParams: 
     return (
       <Shell title="Almost there — finish provisioning first">
         <p className="text-fg-muted text-sm leading-relaxed">
-          Your account doesn&apos;t have a tenant yet. Open the dashboard at <code className="text-accent">/settings</code> and complete provisioning, then come back to this page.
+          Your account doesn&apos;t have a tenant yet. Finish setting up your workspace, then come back to this page.
         </p>
-        <a href="/settings" className="mt-6 inline-block btn-secondary">Open Settings</a>
+        <a href={setupHref("workspace_setup")} className="mt-6 inline-block btn-secondary">Finish setting up</a>
       </Shell>
     );
   }

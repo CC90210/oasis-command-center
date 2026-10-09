@@ -35,6 +35,9 @@ import { deriveDropdownState } from "@/lib/bridge-dropdown-state";
 // What this card shows. It chooses nothing: what powers your agents AND the
 // coding harness is the one setting above (What powers your agents).
 import { LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
+// Operator-only card (mounted under show("ai") && isOperator), so the
+// operator links are taken from the registry without a viewer check.
+import { setupHref } from "@/lib/setup-links";
 import {
   AGENTS_RUN_ON_UNKNOWN_NOTE,
   CLI_SIGN_IN,
@@ -353,7 +356,7 @@ export function LocalCliProvidersCard({
               The paired bridge is online, matching the sidebar, but its latest CLI inventory has not reached this workspace yet. Refresh after the next heartbeat; installed status is unknown—not offline.
             </p>
             <Link
-              href="/settings#devices"
+              href={setupHref("bridge_devices")}
               className="mt-2 inline-flex text-xs font-bold text-accent hover:text-accent-bright"
             >
               View paired devices →
@@ -379,7 +382,7 @@ export function LocalCliProvidersCard({
                 click, not a set of directions. */}
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Link
-                href="/settings/devices/install"
+                href={setupHref("bridge_install")}
                 className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5"
               >
                 <Terminal className="w-3 h-3" />

@@ -564,7 +564,7 @@ async function main() {
     const fresh = marketing({ ok: true, value: { published: 0, lastSyncedAt: null, zernioConnected: false } });
     assert.deepEqual(
       [fresh.status, fresh.metric.kind, fresh.connection],
-      ["Connect a social account", "no_data", { label: "Social posting", state: "not_connected", note: "Not connected", href: "/settings/connections" }],
+      ["Connect a social account", "no_data", { label: "Social posting", state: "not_connected", note: "Not connected", href: "/settings/connections?app=zernio" }],
     );
     const text = render(createElement(DepartmentCard, { card: fresh }));
     assert.doesNotMatch(text, /Zernio|Nothing synced|(^|\s)0(\s|$)/, `an unconnected tool read as a broken sync: ${text}`);

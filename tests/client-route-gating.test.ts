@@ -1043,7 +1043,7 @@ async function main() {
     const member = ReactNS.createElement(AiNotSetUpNotice, { feature: "AI scoring", canConfigureAi: false });
     const ownerText = deepText(owner, new Set()).join(" ").replace(/\s+/g, " ");
     const memberText = deepText(member, new Set()).join(" ").replace(/\s+/g, " ");
-    assert.equal(AI_SETTINGS_HREF, "/settings/ai");
+    assert.equal(AI_SETTINGS_HREF, "/settings/ai#providers");
     assert.match(ownerText, /AI scoring isn't set up for this workspace/);
     assert.ok(ownerText.includes(AI_SETTINGS_HREF), "an owner is linked to Settings > AI brain");
     assert.ok(!memberText.includes(AI_SETTINGS_HREF), "a non-owner is not sent to a page they cannot open");

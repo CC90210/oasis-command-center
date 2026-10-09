@@ -462,7 +462,10 @@ export function AgentChat({
               </span>
             </Link>
           ) : (
-            modelLabel && (
+            modelLabel &&
+            // The engine choice is an owner's or admin's (Settings > AI brain
+            // answers anyone else with a 404), so a member sees the label only.
+            (canManageAi ? (
               <Link
                 href={ENGINE_SETTINGS_HREF}
                 prefetch={false}
@@ -471,7 +474,9 @@ export function AgentChat({
               >
                 {modelLabel}
               </Link>
-            )
+            ) : (
+              <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">{modelLabel}</span>
+            ))
           )}
         </div>
       </div>

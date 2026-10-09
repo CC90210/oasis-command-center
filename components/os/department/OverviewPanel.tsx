@@ -22,10 +22,11 @@ import type { Read } from "./routines";
 import { SuggestedAsks } from "./SuggestedAsks";
 import type { SlackHome } from "@/lib/slack/status";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { setupHref } from "@/lib/setup-links";
 import type { ConnectionProblem, ConnectorStatus } from "@/lib/os/connectors";
 
-const CONNECTIONS_HREF = "/settings/connections";
-const CHAT_APPS_HREF = "/settings/chat-apps";
+const CONNECTIONS_HREF = setupHref("connections");
+const CHAT_APPS_HREF = setupHref("chat_apps");
 const ROUTINES_SHOWN = 6;
 
 /**

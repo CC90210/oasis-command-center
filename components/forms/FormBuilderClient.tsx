@@ -25,6 +25,7 @@ import {
   Save,
   Trash2,
 } from "lucide-react";
+import { setupHref } from "@/lib/setup-links";
 import { FormRenderer } from "./FormRenderer";
 import { VisualFieldsEditor } from "./VisualFieldsEditor";
 import {
@@ -365,7 +366,7 @@ export function FormBuilderClient({ initialForm, profileSlug }: Props) {
             <p className="text-[11px] text-fg-dim mt-1">
               New forms inherit the logo you set in{" "}
               <a
-                href="/settings"
+                href={setupHref("brand")}
                 className="text-accent hover:text-accent-bright underline underline-offset-2"
               >
                 Settings → Branding

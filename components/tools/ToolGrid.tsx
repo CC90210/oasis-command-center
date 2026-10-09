@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "@/lib/clipboard";
 import { CORPUS_LABEL_COPY, type CorpusLabel } from "@/lib/founders/ingest-core";
 import { toolByKey } from "@/lib/tools/registry";
+import { setupHref } from "@/lib/setup-links";
 import type { CatalogTool, JobView, ToolCatalog } from "@/lib/tools/types";
 import {
   AI_UNREADABLE,
@@ -64,7 +65,7 @@ export function ToolGrid({
   runEndpoint = "/api/tools/run",
   jobsEndpoint = "/api/tools/jobs",
   assetHrefPrefix,
-  settingsAiHref = "/settings/ai",
+  settingsAiHref = setupHref("ai_account"),
   showCodes = false,
   className = "",
 }: ToolGridProps) {

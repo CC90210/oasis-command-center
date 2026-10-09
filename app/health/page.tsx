@@ -44,6 +44,7 @@ import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
 import { formatAgo, loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
 import { redirect } from "next/navigation";
+import { setupHref } from "@/lib/setup-links";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -287,7 +288,7 @@ function ComputerCard({ system, now }: { system: SystemHealth; now: number }) {
       ) : system.machines.length === 0 ? (
         <p className="text-sm text-fg-muted">
           No computer is paired with this workspace. Pair one in{" "}
-          <Link href="/settings" className="text-accent hover:underline">Settings › Devices</Link>.
+          <Link href={setupHref("bridge_devices")} className="text-accent hover:underline">Settings › Devices</Link>.
         </p>
       ) : (
         <ul className="divide-y divide-hairline">

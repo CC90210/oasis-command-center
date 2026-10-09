@@ -37,6 +37,7 @@ import type { CashCoverage, CoverageAccount } from "@/lib/founders-finances/cash
 import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { CONNECTOR_CATALOG, connectorHref } from "@/lib/os/connectors";
+import { setupHref } from "@/lib/setup-links";
 import { FOUNDER_MEETING_DURATION_MINUTES } from "@/lib/website-sales-meeting";
 import { mayManageWorkspaceAlerts } from "@/lib/notify/alert-access";
 
@@ -1111,9 +1112,11 @@ export type DeptCardModel = {
 };
 
 /** Where an owner connects the tools a department reads (Settings › Connections). */
-export const CONNECTIONS_HREF = "/settings/connections";
+export const CONNECTIONS_HREF = setupHref("connections");
+/** Marketing's "Connect a social account": the social-posting app's own card (lib/setup-links.ts). */
+export const SOCIAL_CONNECT_HREF = setupHref("connector:zernio");
 /** Where Stripe is pinned for the Finances book today. */
-export const FINANCE_STRIPE_HREF = "/founders/finances/settings#stripe";
+export const FINANCE_STRIPE_HREF = setupHref("finance_stripe");
 
 /**
  * The Finance card's Stripe line. Not pinned = "Not connected" with the way to
@@ -1326,7 +1329,7 @@ function departmentCard(
             tone: "quiet",
             status: "Connect a social account",
             metric: { kind: "no_data", label: "No social account is connected yet" },
-            connection: { label: SOCIAL_SOURCE_LABEL, state: "not_connected", note: "Not connected", href: CONNECTIONS_HREF },
+            connection: { label: SOCIAL_SOURCE_LABEL, state: "not_connected", note: "Not connected", href: SOCIAL_CONNECT_HREF },
           };
         }
         // Connected, and no post has synced yet: "0 published" would read as

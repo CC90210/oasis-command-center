@@ -32,6 +32,7 @@ import "server-only";
 import type { KpiTileProps } from "@/components/os/KpiTile";
 import type { OsDepartment } from "@/lib/os/departments";
 import { formatOperatorDate } from "@/lib/dates";
+import { setupHref } from "@/lib/setup-links";
 import { formatMoney } from "@/lib/fmt";
 import { listRecords } from "@/lib/manifest/data";
 import { momentumMetrics } from "@/lib/queries";
@@ -98,7 +99,7 @@ export type DepartmentNumbers = {
   needsYou?: { total: number; capped: boolean };
 };
 
-const CONNECTIONS_HREF = "/settings/connections";
+const CONNECTIONS_HREF = setupHref("connections");
 const WEEK_MS = 7 * 86_400_000;
 
 async function read<T>(label: string, fn: () => Promise<T>): Promise<Read<T>> {
@@ -449,7 +450,7 @@ async function financeNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
   }
   const money = await loadOasisMoney(viewer.surface.tenantId, "os.department.finance");
   // Only the finance owners can open Finances › Settings, where Stripe is pinned.
-  const stripeHref = isFinanceOwnerEmail(viewer.email) ? "/founders/finances/settings" : undefined;
+  const stripeHref = isFinanceOwnerEmail(viewer.email) ? setupHref("finance_stripe") : undefined;
   const goal = money.goal;
   const progress = money.progress;
   return {
