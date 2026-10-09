@@ -35,7 +35,15 @@ import { deriveDropdownState } from "@/lib/bridge-dropdown-state";
 // What this card shows. It chooses nothing: what powers your agents AND the
 // coding harness is the one setting above (What powers your agents).
 import { LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
-import { CLI_SIGN_IN, CLI_STATE_LABEL, cliStatusState, type CliState } from "@/lib/bridge-cli-status";
+import {
+  AGENTS_RUN_ON_UNKNOWN_NOTE,
+  CLI_SIGN_IN,
+  CLI_STATE_LABEL,
+  cliStatusState,
+  machinesOfBody,
+  type CliMachineSnapshot,
+  type CliState,
+} from "@/lib/bridge-cli-status";
 
 type CliInfo = {
   installed: boolean;
@@ -56,7 +64,7 @@ type ProbeState =
   | { kind: "loading" }
   | { kind: "bridge_unreachable" }
   | { kind: "error"; message: string }
-  | { kind: "ok"; data: CliStatusResponse };
+  | { kind: "ok"; machines: CliMachineSnapshot[]; agentsRunOn: string | null };
 
 const CARDS: Array<{
   key: keyof CliStatusResponse;
@@ -97,12 +105,16 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
     const body = (await r.json()) as {
       ok?: boolean;
       data?: CliStatusResponse;
+      machines?: CliMachineSnapshot[];
+      agents_run_on?: string | null;
       reason?: string;
     };
-    if (!body.ok || !body.data) {
+    // One entry per paired computer; a body from before that has one `data`.
+    const machines = body.ok ? machinesOfBody(body) : [];
+    if (machines.length === 0) {
       return { kind: "bridge_unreachable" };
     }
-    return { kind: "ok", data: body.data };
+    return { kind: "ok", machines, agentsRunOn: body.agents_run_on ?? null };
   } catch (err) {
     // AbortError fires when the 10s timeout in the caller elapses. The
     // previous return `{ kind: "loading" }` left the spinner forever
@@ -265,12 +277,10 @@ export function LocalCliProvidersCard({
       try {
         const next = await probeCliStatus(new AbortController().signal);
         setState(next);
-        if (
-          next.kind === "ok" &&
-          next.data[provider]?.installed &&
-          next.data[provider]?.authenticated
-        ) {
-          setActionMessage({ kind: "ok", text: `${CLI_SIGN_IN[provider].label} is signed in and ready.` });
+        const ready = next.kind === "ok" ? next.machines.find((m) => m.data[provider]?.installed && m.data[provider]?.authenticated) : undefined;
+        if (next.kind === "ok" && ready) {
+          const where = next.machines.length > 1 && ready.label ? ` on ${ready.label}` : "";
+          setActionMessage({ kind: "ok", text: `${CLI_SIGN_IN[provider].label} is signed in and ready${where}.` });
           return;
         }
       } finally {
@@ -399,9 +409,24 @@ export function LocalCliProvidersCard({
               harness is the one setting above, What powers your agents. These
               cards are the paired computer's report, with each app's
               Connect / Reconnect. */}
+        {state.machines.length > 1 && (
+          <p className="mb-3 text-[11px] text-fg-muted leading-relaxed" data-testid="cli-agents-run-on">
+            {state.agentsRunOn
+              ? `Your agents run on ${state.machines.find((m) => m.id === state.agentsRunOn)?.label ?? "the marked computer"}.`
+              : `${AGENTS_RUN_ON_UNKNOWN_NOTE} Each computer is shown with its own status.`}
+          </p>
+        )}
+        {state.machines.map((machine) => (
+        <div key={machine.id ?? "this-computer"} className="mb-4 last:mb-0" data-cli-machine={machine.id ?? "unlabeled"}>
+        {machine.label && (
+          <div className="mb-2 flex items-center gap-2 text-xs font-bold text-fg">
+            <span>{machine.label}</span>
+            {state.agentsRunOn !== null && state.agentsRunOn === machine.id && <Tag tone="engaged">Your agents run here</Tag>}
+          </div>
+        )}
         <div className="grid sm:grid-cols-3 gap-3">
           {CARDS.map((card) => {
-            const info = state.data[card.key];
+            const info = machine.data[card.key];
             const s = statusFor(info);
             const cs = cliState(info);
             return (
@@ -507,6 +532,8 @@ export function LocalCliProvidersCard({
             );
           })}
         </div>
+        </div>
+        ))}
         </>
       )}
     </Card>
