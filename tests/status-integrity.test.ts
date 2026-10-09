@@ -34,6 +34,12 @@
  *                       line, Today's calendar line (loader + rendered).
  *   Slack               the Connections card, the department Slack line and the
  *                       AI Team row (rendered).
+ *   OASIS's server      a Test of the Telegram bot OASIS sets on its server,
+ *   values              through the real Test route: saved where every screen
+ *                       reads it, and the form's notice in the card's words; a
+ *                       save or a removal clears it. OASIS's mailbox: its own
+ *                       sender's real Gmail sign-ins, which the bridge's
+ *                       key-name scan (the real ping route) never erases.
  *   Workspace counts    the rail's dot and the Operations tile.
  *
  * Real pages, routes and loaders on a local libSQL file (tests/_delivery-
@@ -76,6 +82,8 @@ process.env.OASIS_TELEGRAM_BOT_TOKEN = "123456789:status-integrity-oasis-bot-tok
 process.env.OASIS_TELEGRAM_CHAT_ID = "555000111";
 process.env.GMAIL_USER = "ops@oasisai.work";
 process.env.GMAIL_APP_PASSWORD = "abcdabcdabcdabcd";
+// No other server value of OASIS's: the workspace counts below are Telegram and Google only.
+for (const k of ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_MESSAGING_SERVICE_SID", "STRIPE_SECRET_KEY", "LATE_API_KEY"]) delete process.env[k];
 const SLACK_ENV = {
   SLACK_CLIENT_ID: "1234.5678",
   SLACK_CLIENT_SECRET: "status-integrity-slack-client-secret",
@@ -149,8 +157,13 @@ async function main() {
       "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY ("id"));
     CREATE UNIQUE INDEX "tic_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
+    -- integrations_health as it is live (Turso, read 2026-10-08), foreign keys dropped.
     CREATE TABLE integrations_health (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
-      profile_id TEXT, service TEXT, status TEXT, last_ping_at TEXT, last_error TEXT, metadata TEXT);
+      profile_id TEXT, service TEXT NOT NULL, status TEXT NOT NULL, last_ping_at TEXT, last_error TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    CREATE UNIQUE INDEX "integrations_health_profile_id_service_key" ON integrations_health (profile_id, service);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT,
+      bridge_token_hash TEXT, last_seen_at TEXT, last_seen_ip TEXT, revoked_at TEXT, tool_capabilities TEXT);
     CREATE TABLE user_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       tenant_id TEXT, user_id TEXT, service TEXT, field_key TEXT, encrypted_value TEXT,
       last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT, created_at TEXT, updated_at TEXT);
@@ -269,11 +282,11 @@ async function main() {
       ]);
     }
     assert.deepEqual(rows.map((r) => r.setUp), [true, true, false]);
-    // What each one is, in plain words: OASIS's own server values cannot say
-    // "verified" (no check of them is recorded); Client A's passed its Test.
+    // What each one is, in plain words: OASIS's own server values are not
+    // "verified" until a Test of them passes; Client A's passed its Test.
     await login(USERS.cc);
     const oasis = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).telegram;
-    assert.deepEqual([oasis.kind, oasis.label], ["configured", "Set up on OASIS's server · not verified"], "the env-key heartbeat must not read as verified");
+    assert.deepEqual([oasis.kind, oasis.label], ["configured", "Set up on OASIS's server · not tested yet"], "the env-key heartbeat must not read as verified");
     const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).telegram;
     assert.deepEqual([client.kind, client.label], ["connected", "Connected · verified 5m ago"]);
   });
@@ -309,7 +322,7 @@ async function main() {
     // CC's example, exactly: his workspace bot is set up, his own bot is not,
     // and the page says which is which instead of "Telegram is not set up".
     assert.equal(ccYours.label, "Not set up");
-    assert.equal(workspace.label, "Set up on OASIS's server · not verified");
+    assert.equal(workspace.label, "Set up on OASIS's server · not tested yet");
     const page = await NotificationsPage();
     const words = textOf(page);
     assert.match(words, /Workspace Telegram bot/);
@@ -392,6 +405,192 @@ async function main() {
     ]);
     assert.equal(card.label, "Key no longer accepted");
     assert.doesNotMatch(text(markup.dept), /Answers @mentions|answers an @mention/);
+  });
+
+  // -- 5b. OASIS's own server values: a Test is what the card says (PR #553 review F1, W1) --
+  // The values OASIS sets on its server have no saved row, so a Test of them used
+  // to land nowhere: a pass never turned the card green, a refusal changed
+  // nothing, and the form pointed at "the status above", which could not change.
+  const { NextRequest } = await import("next/server");
+  const testRoute = await import("../app/api/integrations/keys/test/route");
+  const keysRoute = await import("../app/api/integrations/keys/route");
+  const { testResultNotice } = await import("../components/os/connections/test-notice");
+  const post = (url: string, method: "POST" | "DELETE", body: unknown, headers: Record<string, string> = {}) =>
+    new NextRequest(`https://oasisai.work${url}`, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const runTest = async (service: string) => {
+    const res = await testRoute.POST(post("/api/integrations/keys/test", "POST", { service }));
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+  const notice = (service: string, appName: string, r: { body: Json }) =>
+    testResultNotice({ service, appName, ok: r.body.ok === true, data: r.body, requestFailure: "(no Test ran)" });
+  const oasisTelegram = async () => (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).telegram;
+  // Telegram, stubbed: the bot answers or refuses its token; nothing else is reachable.
+  let telegramAnswer: "ok" | "refused" = "ok";
+  const offline = globalThis.fetch;
+  const telegramStub = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith("https://api.telegram.org/bot") && url.includes("/getMe")) {
+      return telegramAnswer === "ok"
+        ? Response.json({ ok: true, result: { username: "oasis_team_bot" } })
+        : new Response(JSON.stringify({ ok: false }), { status: 401 });
+    }
+    if (url.startsWith("https://api.telegram.org/bot") && url.includes("/getChat")) return Response.json({ ok: true, result: { title: "OASIS HQ" } });
+    throw new Error(`network disabled in test: ${url.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  await check("OASIS's own Telegram bot: a Test is saved where every screen reads it; a pass is Connected, a refused token says so in the card's words, in the form too", async () => {
+    await login(USERS.cc);
+    globalThis.fetch = telegramStub;
+    try {
+      // Before migration bravo__205 the Test runs, but its result has nowhere to
+      // go: the route says so, the form says the status above does not show it,
+      // and the card is unchanged (never "Status unavailable").
+      telegramAnswer = "ok";
+      const before = await runTest("telegram");
+      assert.deepEqual([before.status, before.body.ok, before.body.recorded], [200, true, false]);
+      assert.match(notice("telegram", "Telegram", before).text, /OASIS could not save this result, so the status above does not show it\.$/);
+      assert.equal(kl(await oasisTelegram()), "configured | Set up on OASIS's server · not tested yet");
+
+      await db.executeMultiple(read("database/turso/bravo__205_tenant_integration_checks.sql"));
+
+      // A refused token: the card says what the check found, and the form says the same words.
+      telegramAnswer = "refused";
+      const refused = await runTest("telegram");
+      assert.deepEqual([refused.body.ok, refused.body.error, refused.body.recorded], [false, "telegram_http_401", true]);
+      const refusedCard = await oasisTelegram();
+      assert.equal(kl(refusedCard), "attention | Bot token not accepted");
+      const refusedNotice = notice("telegram", "Telegram", refused);
+      assert.deepEqual(refusedNotice, { tone: "err", text: `${refusedCard.label}. ${refusedCard.detail}` }, "the form's notice is the card's words");
+      assert.doesNotMatch(refusedNotice.text, /status above says|telegram_http/);
+
+      // A pass: Connected on every screen that answers for the team bot.
+      telegramAnswer = "ok";
+      const passed = await runTest("telegram");
+      assert.deepEqual([passed.body.ok, passed.body.recorded], [true, true]);
+      assert.match(notice("telegram", "Telegram", passed).text, /^The check with Telegram passed: @oasis_team_bot \S OASIS HQ\.$/);
+      const [notifWorkspace] = await notifications();
+      agree("Telegram team bot after a passing Test (OASIS)", [
+        ["Settings > Connections", kl(await oasisTelegram())],
+        ["Settings > Chat apps", kl(await chatAppsTelegram())],
+        ["Settings > Notifications (workspace bot)", kl(notifWorkspace)],
+        ["AI Team's reader (loadWorkspaceConnectorStatus)", kl(await loadWorkspaceConnectorStatus(OASIS, "telegram"))],
+      ]);
+      assert.equal(kl(await oasisTelegram()), "connected | Connected · verified just now");
+      assert.match((await oasisTelegram()).detail ?? "", /details set on OASIS's own server and passed/);
+      // Nothing was saved on the key rows: the result is the workspace's check.
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ?", args: [OASIS] })).rows[0].n), 0);
+    } finally {
+      globalThis.fetch = offline;
+    }
+  });
+
+  await check("a saved or removed value clears the server values' last Test, so a pass never describes values it did not test", async () => {
+    await login(USERS.cc);
+    const checks = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_checks WHERE tenant_id = ?", args: [OASIS] })).rows[0].n);
+    const retest = async () => {
+      globalThis.fetch = telegramStub;
+      try {
+        telegramAnswer = "ok";
+        assert.equal((await runTest("telegram")).body.recorded, true);
+      } finally {
+        globalThis.fetch = offline;
+      }
+    };
+    // CC pastes his own bot token over the server's: the pass above tested the server's.
+    const saved = await keysRoute.POST(post("/api/integrations/keys", "POST", { service: "telegram", field_key: "bot_token", value: "222222222:oasis-replacement-bot-token-000000" }));
+    assert.equal(saved.status, 200, JSON.stringify(await saved.clone().json()));
+    assert.equal(await checks(), 0, "saving cleared the server values' last Test");
+    assert.equal(kl(await oasisTelegram()), "configured | Set up · not tested yet");
+    // Tested with his token (and the server's chat): both results are kept, and it is Connected.
+    await retest();
+    assert.equal(await checks(), 1);
+    assert.equal(kl(await oasisTelegram()), "connected | Connected · verified just now");
+    // He removes his token: the server's is in use again, and nothing has tested it.
+    const removed = await keysRoute.DELETE(post("/api/integrations/keys", "DELETE", { service: "telegram", field_key: "bot_token" }));
+    assert.equal(removed.status, 200);
+    assert.equal(await checks(), 0, "removing cleared the last Test, which tested his token");
+    assert.equal(kl(await oasisTelegram()), "configured | Set up on OASIS's server · not tested yet");
+    // Tested again, it is Connected again.
+    await retest();
+    assert.equal(kl(await oasisTelegram()), "connected | Connected · verified just now");
+  });
+
+  // -- 5c. OASIS's mailbox: its sender's real sign-ins, never erased by the key-name scan (W5) --
+  await check("the bridge's key-name scan never erases a real check: OASIS's sender's refused sign-in survives it and the Google card says so; its next good send is 'last send worked', and the rail can turn green", async () => {
+    const { sha256 } = await import("../lib/api-helpers");
+    const pingRoute = await import("../app/api/bridge/ping/route");
+    const { mailboxSendCheck } = await import("../lib/integrations/server-checks");
+    await db.execute({
+      sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash) VALUES ('bp-cc', ?, ?, 'CCPC', ?)",
+      args: [OASIS, USERS.cc.id, sha256("status-integrity-bridge-token")],
+    });
+    const scan = { via: "env_key_present" };
+    const bridgePing = async () => {
+      const res = await pingRoute.POST(post("/api/bridge/ping", "POST", {
+        services: {
+          gws: { status: "healthy", metadata: { ...scan, env_key: "GMAIL_APP_PASSWORD" } },
+          telegram: { status: "healthy", metadata: { ...scan, env_key: "TELEGRAM_BOT_TOKEN" } },
+          wise: { status: "healthy", metadata: { ...scan, env_key: "WISE_API_TOKEN" } },
+        },
+      }, { authorization: "Bearer status-integrity-bridge-token" }));
+      assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+      return (await res.json()) as Json;
+    };
+    const ccRow = async (service: string) =>
+      (await db.execute({ sql: "SELECT status, last_error, metadata, last_ping_at FROM integrations_health WHERE profile_id = ? AND service = ?", args: [`p-${USERS.cc.id}`, service] })).rows[0];
+    const google = async () => (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id }))["google-workspace"];
+
+    // Before any real send, the scan's own rows are presence, and presence is never a check.
+    assert.equal(kl(await google()), "configured | Set up on OASIS's server · not tested yet");
+
+    // OASIS's sender is refused at sign-in (what BEA's ping_integration writes).
+    const refusedAt = at(4 * 60_000);
+    await db.execute({
+      sql: "UPDATE integrations_health SET status = 'down', last_error = 'SMTP authentication failed', metadata = ?, last_ping_at = ? WHERE profile_id = ? AND service = 'gws'",
+      args: [JSON.stringify({ _host: "CCPC", _argv: "send_gateway.py" }), refusedAt, `p-${USERS.cc.id}`],
+    });
+    const first = await bridgePing();
+    // The scan kept the real result, refreshed its own row and created a new one.
+    assert.deepEqual([first.services_recorded, first.real_results_kept], [2, 1]);
+    const kept = await ccRow("gws");
+    assert.deepEqual([kept.status, kept.last_error, kept.last_ping_at], ["down", "SMTP authentication failed", refusedAt]);
+    assert.equal((await ccRow("telegram")).status, "healthy");
+    assert.equal(JSON.parse(String((await ccRow("wise")).metadata)).via, "env_key_present");
+    const refusedCard = await google();
+    assert.equal(kl(refusedCard), "attention | Could not sign in to Gmail");
+    assert.match(refusedCard.detail ?? "", /Gmail refused the App Password the last time OASIS sent an email from this mailbox/);
+    assert.doesNotMatch(refusedCard.detail ?? "", /SMTP|send_gateway|GMAIL_/);
+    // System health reads the same row: not connected either.
+    assert.equal(heartbeatVerdict({ builtIn: false, status: String(kept.status), lastPingAt: String(kept.last_ping_at), metadata: kept.metadata, hasCredentials: true }, Date.now()), "down");
+
+    // Its next send goes out: "last send worked", and the scan keeps that too.
+    await db.execute({
+      sql: "UPDATE integrations_health SET status = 'healthy', last_error = NULL, metadata = ?, last_ping_at = ? WHERE profile_id = ? AND service = 'gws'",
+      args: [JSON.stringify({ source: "send_gateway.smtp_send", _host: "CCPC" }), at(60_000), `p-${USERS.cc.id}`],
+    });
+    assert.equal((await bridgePing()).real_results_kept, 1);
+    assert.equal(JSON.parse(String((await ccRow("gws")).metadata)).source, "send_gateway.smtp_send");
+    assert.equal(kl(await google()), "connected | Connected · last send worked 1m ago");
+
+    // The rail: every app OASIS has set up (Telegram, Google) is proven, so its dot is green (W2).
+    const facts = await loadConnectorFacts({ tenantId: OASIS, userId: USERS.cc.id });
+    assert.deepEqual(connectors.connectionsHealth(facts, Date.now()), { setUp: 2, attention: 0, connected: 2, unknown: 0 });
+    assert.equal(connectors.connectionsDot(connectors.connectionsHealth(facts, Date.now())), "ok");
+
+    // Only a real Gmail sign-in is a check of the mailbox; a key name never is.
+    const t = at(60_000);
+    const as = (status: string, metadata: unknown, last_error: string | null = null) => mailboxSendCheck({ status, last_ping_at: t, last_error, metadata });
+    assert.equal(as("healthy", { via: "env_key_present" }), null);
+    assert.equal(as("healthy", JSON.stringify({ via: "local_install", source: "send_gateway.smtp_send" })), null);
+    assert.equal(as("healthy", {}), null, "a healthy row that names no send");
+    assert.equal(as("healthy", { source: "send_gateway.gmail_api" }), null, "a send as a person's own Google account");
+    assert.equal(as("degraded", {}, "timed out"), null);
+    assert.equal(as("down", {}, "gmail_api: 401"), null);
+    assert.deepEqual(as("healthy", JSON.stringify({ source: "send_gateway.smtp_send" })), { service: "gws", via: "send", checked_at: t, ok: true, code: null });
+    assert.deepEqual(as("down", {}, "SMTP authentication failed"), { service: "gws", via: "send", checked_at: t, ok: false, code: "send_auth_failed" });
+    // A client workspace never reads OASIS's sender (its own rows are presence anyway).
+    assert.equal((await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id }))["google-workspace"].label, "Could not sign in to Gmail");
+    assert.equal((await loadConnectorFacts({ tenantId: CLIENT_A, userId: USERS.clientA.id })).serverChecks?.length, 0);
   });
 
   // -- 6. The workspace counts ------------------------------------------------------------

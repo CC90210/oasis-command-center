@@ -13,11 +13,13 @@
  * them into words.
  *
  * NEVER A FAKE GREEN. A connector is "connected" only when a real check proved
- * it: a passing connection test that actually called the provider, or a live
- * health check of a Connections-framework connection. A saved key that nothing
- * checked is "set up", a failed lookup is "status unavailable" (unknown is not
- * disconnected), and an app with no status source is "coming soon" whatever
- * the facts say — the resolver returns before it ever reads them.
+ * it: a passing connection test that actually called the provider (under a
+ * week old, KEY_CHECK_FRESH_MS), a send OASIS's own sender made from its
+ * mailbox, or a live health check of a Connections-framework connection. A
+ * saved key that nothing checked is "set up", a failed lookup is "status
+ * unavailable" (unknown is not disconnected), and an app with no status source
+ * is "coming soon" whatever the facts say — the resolver returns before it ever
+ * reads them.
  *
  * ONE ANSWER PER INTEGRATION (2026-10-08). Every screen that says whether an
  * app is connected reads it from here: the hub, Chat apps, Notifications, AI
@@ -79,7 +81,8 @@ export type ConnectorIcon =
  *                        bot, Twilio). `verifiable: false` means the "test"
  *                        for this service only checks presence, so it can never
  *                        prove a connection. Values OASIS sets on its own
- *                        server are never tested here, and say so.
+ *                        server have no saved row: their checks come from
+ *                        lib/integrations/server-checks.ts (ServerCheckFact).
  *   oauth_tokens         OAuth tokens in the shared store. Authorised, but not
  *                        re-checked on page load (that would be a provider call
  *                        per render).
@@ -186,7 +189,7 @@ export function connectorHref(slug: string): string {
   return `/settings/connections?app=${encodeURIComponent(slug)}`;
 }
 
-type TestState = { kind: "attention" | "configured"; label: string; detail: string };
+export type TestState = { kind: "attention" | "configured"; label: string; detail: string };
 
 /**
  * The Google mailbox card's words for a FAILED Test, keyed by the code the Test
@@ -200,6 +203,14 @@ export const GOOGLE_TEST_STATES: Readonly<Record<string, TestState>> = {
     label: "Could not sign in to Gmail",
     detail:
       "The last Test could not sign in to Gmail with this address and App Password. Check both (2-Step Verification must be on for an App Password), save them again, then run Test.",
+  },
+  // OASIS's own email sender was refused at sign-in the last time it sent from
+  // the mailbox (lib/integrations/server-checks.ts mailboxSendCheck).
+  send_auth_failed: {
+    kind: "attention",
+    label: "Could not sign in to Gmail",
+    detail:
+      "Gmail refused the App Password the last time OASIS sent an email from this mailbox. Check it (2-Step Verification must be on for an App Password), save it again, then run Test.",
   },
   missing_smtp_fields: {
     kind: "attention",
@@ -765,6 +776,22 @@ export type PersonalGoogleFact = {
   workEmail: string | null;
 };
 
+/**
+ * A real check of the details OASIS sets on its own server, which have no saved
+ * key row for a Test result to land on (lib/integrations/server-checks.ts):
+ * the workspace's latest Test of the app ("test"), or, for the Google mailbox,
+ * the last time OASIS's own email sender signed in to Gmail to send ("send").
+ * Never a heartbeat that only says a key name is on OASIS's computer.
+ */
+export type ServerCheckFact = {
+  service: string;
+  via: "test" | "send";
+  checked_at: string;
+  ok: boolean;
+  /** The failed check's code, looked up in the card's failureStates. */
+  code: string | null;
+};
+
 /** The viewer's own Telegram bot (user_integration_credentials telegram_bot): presence only. */
 export type PersonalTelegramFact = {
   /** A bot token Telegram accepted is saved. */
@@ -780,6 +807,12 @@ export type PersonalTelegramFact = {
  */
 export type ConnectorFacts = {
   keyRows: readonly KeyRowFact[] | null;
+  /**
+   * The real checks of the values OASIS sets on its own server (ServerCheckFact),
+   * read for OASIS's own workspaces only. Null when that read failed: a card
+   * whose values are on the server then says "status unavailable". Absent: none.
+   */
+  serverChecks?: readonly ServerCheckFact[] | null;
   /** The viewer's own Google connection, or null when it could not be read. */
   personalGoogle: PersonalGoogleFact | null;
   /** The tenant's live Connections-framework connections. */
@@ -813,6 +846,23 @@ export function formatVerifiedAgo(iso: string | null, nowMs: number): string {
   return new Date(then).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
 }
 
+/** "Oct 1, 2026": the day a check ran, for a pass too old to count as connected. */
+function formatCheckDate(iso: string): string {
+  return new Date(Date.parse(iso)).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
+}
+
+/**
+ * How long a passing check of an app's keys counts as "Connected" (2026-10-08).
+ * Nothing re-checks these keys on its own: a Test runs when a person presses
+ * it, and OASIS's mailbox is re-checked only when it sends. Stripe's card,
+ * which OASIS re-checks every hour, allows a day; a day here would turn every
+ * card grey the morning after its Test though nothing changed. A week bounds
+ * how long a token revoked at the provider (a bot token reset in BotFather, an
+ * App Password removed in Google) can still read "Connected" to seven days, for
+ * at most one Test a week. Past it the card says when it was last checked.
+ */
+export const KEY_CHECK_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+
 const UNKNOWN: ConnectorStatus = {
   kind: "unknown",
   label: "Status unavailable",
@@ -841,15 +891,62 @@ function testCodeKey(code: string | null | undefined): string | null {
   return key || null;
 }
 
+/**
+ * A failed Test's plain words for one app's keys, from the code the Test
+ * returned: the same words the app's card shows once the result is recorded.
+ * Null when the app names no words for that code.
+ */
+export function testFailureWords(service: string, code: string | null | undefined): TestState | null {
+  const key = testCodeKey(code);
+  if (!key) return null;
+  for (const def of CONNECTOR_CATALOG) {
+    const source = def.live?.source;
+    if (source?.kind !== "tenant_keys" || source.service !== service || !source.failureStates) continue;
+    if (Object.prototype.hasOwnProperty.call(source.failureStates, key)) return source.failureStates[key];
+  }
+  return null;
+}
+
+/** The newest real check of one app's server-set values, or null. */
+function newestServerCheck(checks: readonly ServerCheckFact[], service: string): ServerCheckFact | null {
+  let best: ServerCheckFact | null = null;
+  let bestMs = -Infinity;
+  for (const c of checks) {
+    const ms = Date.parse(c.checked_at);
+    if (c.service !== service || !Number.isFinite(ms) || ms <= bestMs) continue;
+    best = c;
+    bestMs = ms;
+  }
+  return best;
+}
+
 function keyedStatus(
   source: Extract<ConnectorStatusSource, { kind: "tenant_keys" | "oauth_tokens" }>,
   keyRows: readonly KeyRowFact[],
+  serverChecks: readonly ServerCheckFact[] | null,
   nowMs: number,
   appName: string,
 ): ConnectorStatus {
-  const rows = keyRows.filter((r) => r.service === source.service);
+  const own = keyRows.filter((r) => r.service === source.service);
+  if (!own.some((r) => r.has_value)) return { kind: "not_connected", label: "Not connected" };
+
+  // Values OASIS sets on its own server (source "environment") have no saved
+  // row for a Test to record on. Their newest real check stands in as their
+  // result (lib/integrations/server-checks.ts): the workspace's last Test of
+  // them or, for Google, the last time OASIS's own sender signed in to send. A
+  // saved value keeps its own result. A check that could not be read leaves
+  // the card unknown, never "not tested".
+  const onServer = source.kind === "tenant_keys" && own.some((r) => r.has_value && r.source === "environment");
+  if (onServer && serverChecks === null) return UNKNOWN;
+  const check = onServer ? newestServerCheck(serverChecks ?? [], source.service) : null;
+  const rows: readonly KeyRowFact[] = check
+    ? own.map((r) =>
+        r.has_value && r.source === "environment"
+          ? { ...r, last_tested_at: check.checked_at, last_test_ok: check.ok, last_test_error: check.code }
+          : r,
+      )
+    : own;
   const present = (field: string) => rows.some((r) => r.field_key === field && r.has_value);
-  if (!rows.some((r) => r.has_value)) return { kind: "not_connected", label: "Not connected" };
 
   const requireAny = source.kind === "tenant_keys" ? source.requireAny : undefined;
   const alternatives = source.kind === "tenant_keys" ? source.credentialAlternatives : undefined;
@@ -919,21 +1016,48 @@ function keyedStatus(
     rows.filter((r) => r.last_test_ok === true).map((r) => r.last_tested_at),
   );
   if (verifiedAt) {
+    // The pass is OASIS's own sender's last send (Google on OASIS's server),
+    // not a Test: the card says which.
+    const bySend = check?.via === "send" && check.ok && check.checked_at === verifiedAt;
+    // An old pass is not "Connected" forever (KEY_CHECK_FRESH_MS).
+    if (nowMs - Date.parse(verifiedAt) > KEY_CHECK_FRESH_MS) {
+      const day = formatCheckDate(verifiedAt);
+      return bySend
+        ? {
+            kind: "configured",
+            label: `Set up · last send worked ${day}`,
+            detail: `OASIS last sent an email from this mailbox on ${day}, more than a week ago. Run Test to check it now.`,
+          }
+        : {
+            kind: "configured",
+            label: `Set up · last tested ${day}`,
+            detail: `The last Test passed on ${day}, more than a week ago. Nothing re-checks these keys on its own: run Test to check them now.`,
+          };
+    }
+    const ago = formatVerifiedAgo(verifiedAt, nowMs);
+    if (bySend) {
+      return {
+        kind: "connected",
+        label: `Connected · last send worked ${ago}`,
+        detail: `OASIS's own email sender signed in to Gmail and sent an email from this mailbox ${ago}.`,
+      };
+    }
     return {
       kind: "connected",
-      label: `Connected · verified ${formatVerifiedAgo(verifiedAt, nowMs)}`,
-      detail: "The last connection test called the provider and passed.",
+      label: `Connected · verified ${ago}`,
+      detail:
+        check?.ok && check.checked_at === verifiedAt
+          ? `The last Test checked the ${appName} details set on OASIS's own server and passed.`
+          : "The last connection test called the provider and passed.",
     };
   }
   // Every value is OASIS's own, set on its server (an OASIS workspace with
-  // nothing saved here). A Test checks those values with the provider when it
-  // is pressed, but its result has no saved row to land on, so nothing here
-  // can ever say "verified" or "not tested yet" about them.
+  // nothing saved here), and no check of them is recorded yet.
   if (rows.filter((r) => r.has_value).every((r) => r.source === "environment")) {
     return {
       kind: "configured",
-      label: "Set up on OASIS's server · not verified",
-      detail: `This workspace uses ${appName} details set on OASIS's own server. No check of them is recorded here: Test checks them with ${appName} when you press it.`,
+      label: "Set up on OASIS's server · not tested yet",
+      detail: `This workspace uses ${appName} details set on OASIS's own server. Run Test so OASIS checks them with ${appName}.`,
     };
   }
   return {
@@ -1107,7 +1231,7 @@ export function resolveConnectorStatus(
     return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }
   if (!facts.keyRows) return UNKNOWN;
-  const workspace = keyedStatus(source, facts.keyRows, nowMs, def.name);
+  const workspace = keyedStatus(source, facts.keyRows, facts.serverChecks === undefined ? [] : facts.serverChecks, nowMs, def.name);
   if (def.yourAccount !== "google") return workspace;
   // Google also has a per-person connection. The card is the WORKSPACE's
   // shared mailbox, and its state is only that; the viewer's own account is

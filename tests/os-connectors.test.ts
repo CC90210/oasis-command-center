@@ -25,6 +25,9 @@ import { join } from "node:path";
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
+  GOOGLE_TEST_STATES,
+  KEY_CHECK_FRESH_MS,
+  TELEGRAM_TEST_STATES,
   connectionsDot,
   connectionsHealth,
   connectorBySlug,
@@ -33,11 +36,14 @@ import {
   glyphColor,
   contrastOnTile,
   resolveConnectorStatus,
+  testFailureWords,
   type ConnectionFact,
   type ConnectorDef,
   type ConnectorFacts,
   type KeyRowFact,
+  type ServerCheckFact,
 } from "../lib/os/connectors";
+import { TWILIO_FAILURE_STATES } from "../lib/twilio/shared";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import { findIntegrationSchema, findTenantManuallyEditableIntegrationSchema } from "../lib/tenant-integration-schemas";
 import { providerById } from "../lib/connections/registry";
@@ -421,17 +427,90 @@ assert.equal(
   label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: false, last_tested_at: iso(MIN), last_test_error: "network_error: getaddrinfo ENOTFOUND" }) }),
   "configured | Set up · Telegram did not answer the last Test",
 );
-// OASIS's own server values: no check of them is ever recorded, so the card
-// says so, never "verified" and never "not tested yet".
+// OASIS's own server values with no check recorded yet: set up, never
+// "verified", and the card says where the values are.
 for (const def of [gws, telegram]) {
   const env = def === gws ? gwsKeys({ source: "environment" }) : tgKeys({ source: "environment" });
-  assert.equal(label(def, { ...EMPTY, keyRows: env }), "configured | Set up on OASIS's server · not verified", def.slug);
+  assert.equal(label(def, { ...EMPTY, keyRows: env }), "configured | Set up on OASIS's server · not tested yet", def.slug);
 }
 assert.equal(
   label(twilio, { ...EMPTY, keyRows: twilioKeys({ source: "environment" }) }),
-  "configured | Set up on OASIS's server · not verified",
+  "configured | Set up on OASIS's server · not tested yet",
   "Twilio's server values follow the same rule",
 );
+
+// ─── Server values carry their own real checks (PR #553 review F1, W1, W2, W5) ─
+// A Test of a value OASIS sets on its server used to land nowhere: a pass could
+// never turn the card green and a failure showed nothing. Their checks
+// (lib/integrations/server-checks.ts) now stand in as their result.
+{
+  const check = (service: string, over: Partial<ServerCheckFact> = {}): ServerCheckFact => ({
+    service, via: "test", checked_at: iso(5 * MIN), ok: true, code: null, ...over,
+  });
+  const envTg = tgKeys({ source: "environment" });
+  const envGws = gwsKeys({ source: "environment" });
+  const withChecks = (keyRows: KeyRowFact[], serverChecks: ServerCheckFact[] | null): ConnectorFacts => ({ ...EMPTY, keyRows, serverChecks });
+
+  // A passing Test turns OASIS's own Telegram bot "Connected", and says what it checked.
+  const passed = resolveConnectorStatus(telegram, withChecks(envTg, [check("telegram")]), NOW);
+  assert.equal(`${passed.kind} | ${passed.label}`, "connected | Connected · verified 5m ago");
+  assert.match(passed.detail ?? "", /details set on OASIS's own server and passed/);
+  // A failed Test says what it found, in the card's words.
+  assert.equal(
+    label(telegram, withChecks(envTg, [check("telegram", { ok: false, code: "telegram_http_401" })])),
+    "attention | Bot token not accepted",
+  );
+  assert.equal(
+    label(twilio, withChecks(twilioKeys({ source: "environment" }), [check("twilio", { ok: false, code: "needs_number" })])),
+    `${TWILIO_FAILURE_STATES.needs_number.kind} | ${TWILIO_FAILURE_STATES.needs_number.label}`,
+  );
+  // Another app's check never lights this one; a saved value keeps its own result.
+  assert.equal(label(telegram, withChecks(envTg, [check("gws")])), "configured | Set up on OASIS's server · not tested yet");
+  assert.equal(label(telegram, withChecks(tgKeys(), [check("telegram")])), "configured | Set up · not tested yet");
+  // A check that could not be read is unknown for server values only.
+  assert.equal(label(telegram, withChecks(envTg, null)), "unknown | Status unavailable");
+  assert.equal(label(telegram, withChecks(tgKeys({ last_test_ok: true, last_tested_at: iso(MIN) }), null)), "connected | Connected · verified 1m ago");
+
+  // Google: OASIS's own sender's last send is a real check of the mailbox, and
+  // the newest real check wins, whichever kind it is.
+  const sent = check("gws", { via: "send", checked_at: iso(3 * MIN) });
+  const refused = check("gws", { via: "send", ok: false, code: "send_auth_failed", checked_at: iso(3 * MIN) });
+  const viaSend = resolveConnectorStatus(gws, withChecks(envGws, [sent]), NOW);
+  assert.equal(`${viaSend.kind} | ${viaSend.label}`, "connected | Connected · last send worked 3m ago");
+  assert.match(viaSend.detail ?? "", /signed in to Gmail and sent an email from this mailbox 3m ago/);
+  const refusedCard = resolveConnectorStatus(gws, withChecks(envGws, [refused]), NOW);
+  assert.equal(`${refusedCard.kind} | ${refusedCard.label}`, "attention | Could not sign in to Gmail");
+  assert.match(refusedCard.detail ?? "", /the last time OASIS sent an email from this mailbox/);
+  assert.equal(label(gws, withChecks(envGws, [check("gws", { checked_at: iso(HOUR) }), refused])), "attention | Could not sign in to Gmail", "a newer refusal outranks an older pass");
+  assert.equal(label(gws, withChecks(envGws, [refused, check("gws", { checked_at: iso(MIN) })])), "connected | Connected · verified 1m ago", "a newer Test outranks an older refusal");
+
+  // The rail's dot can be green for OASIS once every app set up is proven (W2).
+  const oasisProven = withChecks([...envTg, ...envGws], [check("telegram"), sent]);
+  assert.deepEqual(connectionsHealth(oasisProven, NOW), { setUp: 2, attention: 0, connected: 2, unknown: 0 });
+  assert.equal(connectionsDot(connectionsHealth(oasisProven, NOW)), "ok");
+  assert.equal(connectionsDot(connectionsHealth(withChecks([...envTg, ...envGws], [check("telegram")]), NOW)), null, "one unproven app: no green");
+
+  // An old pass is not "Connected" forever (U3): past KEY_CHECK_FRESH_MS the card
+  // says when it was last checked, and the dot stops counting it as proven.
+  const DAY = 24 * HOUR;
+  assert.equal(KEY_CHECK_FRESH_MS, 7 * DAY);
+  const day = (msAgo: number) => new Date(NOW - msAgo).toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" });
+  assert.equal(label(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(6 * DAY) }) }), "connected | Connected · verified 6d ago");
+  const stale = resolveConnectorStatus(telegram, { ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(8 * DAY) }) }, NOW);
+  assert.equal(`${stale.kind} | ${stale.label}`, `configured | Set up · last tested ${day(8 * DAY)}`);
+  assert.match(stale.detail ?? "", /more than a week ago/);
+  assert.equal(label(telegram, withChecks(envTg, [check("telegram", { checked_at: iso(8 * DAY) })])), `configured | Set up · last tested ${day(8 * DAY)}`);
+  assert.equal(label(gws, withChecks(envGws, [check("gws", { via: "send", checked_at: iso(9 * DAY) })])), `configured | Set up · last send worked ${day(9 * DAY)}`);
+  assert.equal(connectionsDot(connectionsHealth({ ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(8 * DAY) }) }, NOW)), null);
+
+  // The form's words for a failed Test are the card's words for the same code.
+  assert.equal(testFailureWords("telegram", "telegram_http_401")?.label, "Bot token not accepted");
+  assert.equal(testFailureWords("telegram", "network_error: getaddrinfo ENOTFOUND")?.label, TELEGRAM_TEST_STATES.network_error.label);
+  assert.equal(testFailureWords("gws", "smtp_auth_failed")?.detail, GOOGLE_TEST_STATES.smtp_auth_failed.detail);
+  assert.equal(testFailureWords("twilio", "needs_number")?.label, TWILIO_FAILURE_STATES.needs_number.label);
+  assert.equal(testFailureWords("telegram", "missing_bot_token"), null);
+  assert.equal(testFailureWords("telegram", "smtp_auth_failed"), null, "one app's words never answer for another");
+}
 // Your own Google account is real, but it never changes the WORKSPACE card's
 // state: it is reported in the detail line, in personalGoogleStatus's words.
 const wrongAccount = { linked: true, calendarScope: true, address: "other@gmail.test", workEmail: "me@workspace.test" };

@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
+import { testResultNotice } from "@/components/os/connections/test-notice";
 import type { ConnectorStatus } from "@/lib/os/connectors";
 
 type Row = {
@@ -163,23 +164,10 @@ export function ServiceKeysForm({
   const test = () =>
     run("test", async () => {
       const r = await send("POST", "/api/integrations/keys/test", { service });
-      const detail = typeof r.data?.detail === "string" ? r.data.detail : null;
-      // A plain-state answer (Twilio) is shown as the provider check put it.
-      // Anything else names no code: the Status above, re-read after this,
-      // says in plain words what the check found.
-      const message = typeof r.data?.message === "string" ? r.data.message : null;
-      setNotice(
-        message
-          ? { tone: r.ok ? "ok" : "err", text: detail ? `${message} ${detail}` : message }
-          : r.ok
-            ? {
-                tone: "ok",
-                // Telegram names the bot and the chat it reached: the one thing
-                // that shows the alerts land where the owner reads them.
-                text: service === "telegram" && detail ? `The check with ${appName} passed: ${detail}.` : `The check with ${appName} passed.`,
-              }
-            : { tone: "err", text: `The check with ${appName} did not pass. The status above says what it found.` },
-      );
+      // What the check found, in the card's own words (test-notice.ts). The
+      // result is saved where the card reads it, so the Status above shows it
+      // after this re-read; when it could not be saved, the notice says so.
+      setNotice(testResultNotice({ service, appName, ok: r.ok, data: r.data, requestFailure: r.msg }));
       await reload();
       onChanged();
     });

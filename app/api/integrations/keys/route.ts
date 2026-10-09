@@ -8,6 +8,11 @@
  *
  * Auth: session-cookie → tenant. Only `owner` / `admin` team roles
  * can mutate; everyone in the tenant can read presence.
+ *
+ * A save or a removal changes which values the app uses, so the workspace's
+ * last Test of the values set on OASIS's server no longer describes them and
+ * is cleared (lib/integrations/server-checks.ts): the card then says "not
+ * tested yet" instead of carrying a pass that tested other values.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -19,6 +24,7 @@ import {
   listTenantIntegrationStatus,
   tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
+import { clearIntegrationCheck } from "@/lib/integrations/server-checks";
 import {
   findTenantManuallyEditableIntegrationSchema,
   validateIntegrationValue,
@@ -100,6 +106,7 @@ export async function POST(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
+  await clearIntegrationCheck(sess.tenantId, service);
   // Twilio: the webhooks find this workspace by its saved sender's routing row
   // (lib/twilio/sender-route.ts), so the row follows every save.
   const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_saved") : undefined;
@@ -144,6 +151,7 @@ export async function DELETE(req: NextRequest) {
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
   }
+  await clearIntegrationCheck(sess.tenantId, service);
   // A removed Twilio sender stops routing incoming texts to this workspace.
   const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_removed") : undefined;
   return NextResponse.json({ ok: true, ...(routing ? { routing } : {}) });

@@ -83,6 +83,8 @@ const keysPanel = readFileSync(
   join(root, "components", "os", "connections", "ServiceKeysForm.tsx"),
   "utf8",
 );
+// What the form says after Test (tests/status-integrity.test.ts drives it with the real route's JSON).
+const testNotice = readFileSync(join(root, "components", "os", "connections", "test-notice.ts"), "utf8");
 const connectorDrawer = readFileSync(
   join(root, "components", "os", "connections", "ConnectorDrawer.tsx"),
   "utf8",
@@ -240,7 +242,8 @@ assert.ok(
 );
 assert.ok(
   keysPanel.includes('r.source === "environment" ? "Set by OASIS"') &&
-    keysPanel.includes("passed.") &&
+    keysPanel.includes("testResultNotice(") &&
+    testNotice.includes("passed.") &&
     testRoute.includes("await transport.verify()"),
   "deployment-backed Google Workspace must render configured and support a side-effect-free SMTP auth test",
 );
