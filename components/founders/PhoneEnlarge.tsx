@@ -24,42 +24,36 @@
  * Both learn where they are from enlargeSlotContext(), not from props: the
  * media is drawn by the server, and a server element cannot carry a callback.
  *
- * NOTHING LOADS UNTIL PLAY. The big phone mounts the caller's media afresh. A
- * Library video there is a cover until its play button is pressed, unless the
- * big phone was opened BY a play press; that rule and its test
- * (tests/library-phone-preview.test.ts) are why the Library opens in seconds,
- * not minutes. Nothing is mounted at all until the phone is opened.
+ * TWO MODULES. This one is the part every tile needs on arrival: the state,
+ * the slot, the Enlarge button. The big phone itself (the dialog, PhoneFrame
+ * for the browser, its icons, the focus trap) is PhoneEnlargeOverlay.tsx,
+ * fetched in the browser only - when the pointer or keyboard first reaches a
+ * tile, so it is usually there before the press - and never compiled for the
+ * server. The first version compiled it for server rendering in every Content
+ * route and measured 64,582 KiB in CI on 2026-10-02: 129 KiB over main and
+ * past the Worker's 64,512 KiB upload budget. If the fetch fails (offline, or
+ * an old page after a deploy), the tile says so instead of doing nothing.
  *
- * KEYBOARD AND FOCUS. A modal dialog. Focus moves to Close when it opens; Tab
- * and Shift+Tab stay inside it (focus-trap.ts, the Connections drawer's trap);
- * Esc, Close and a click outside the phone close it; and focus goes back to the
- * button that opened it - recorded at open, because Safari does not focus a
- * button on click. The page behind does not scroll while it is open. The fade
- * and the rise run only when the viewer has not asked for reduced motion.
- *
- * SIZE. The frame is 2.106 times as tall as it is wide (a 9:19.5 screen inside
- * a bezel of 2.6% of the width on every side), so the tallest phone that fits
- * is the viewport height over 2.11. From `sm` up it takes the full height, with
- * Close beside it; below that it takes the width and leaves room above it for
- * Close. A 1280x800 window: 356 x 751 px. A 390x844 phone: 347 x 731 px.
+ * The context is made on first use, not at import: React's server build (the
+ * react-server condition the page tests run under, which loads this file
+ * through marketing-shared) has no createContext.
  */
 
 import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type Context,
   type ReactNode,
 } from "react";
-import { createPortal } from "react-dom";
-import { Maximize2, X } from "lucide-react";
+import { Maximize2 } from "lucide-react";
 
-import { PhoneFrame, type PhoneFrameShape } from "@/components/founders/PhoneFrame";
-import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
+import type { PhoneFrameShape } from "@/components/founders/PhoneFrame";
+import type { BigPhoneProps } from "@/components/founders/PhoneEnlargeOverlay";
 
 /** How the big phone starts: whether its video plays, and from which second. */
 export type EnlargeStart = { play: boolean; at: number };
@@ -81,13 +75,24 @@ export function enlargeSlotContext(): Context<EnlargeSlot | null> {
   return slotContext;
 }
 
+type BigPhoneComponent = ComponentType<BigPhoneProps>;
+
 /**
- * The big phone's width. Two classes, so Tailwind finds both as literal text.
- * Below `sm` 7rem of the height is kept for Close above the phone; from `sm`
- * Close sits beside it and the phone takes all but the padding.
+ * The big phone's code, fetched in the browser only.
+ *
+ * `typeof window` is a build-time constant in Next: "undefined" when the server
+ * compiles this client component for server-side rendering. Webpack drops the
+ * dead branch without following its import, so the Worker never carries the
+ * big phone; it is only ever drawn after a click, which the server never sees.
+ * In the browser this is one lazy chunk, fetched once and shared by every tile
+ * (the same idiom as three.js in components/marketing/CarStage.tsx, PR #531).
+ * Keep the import inside this branch (tests/content-iphone.test.ts).
  */
-export const BIG_PHONE_WIDTH =
-  "w-[min(calc(100vw-2rem),calc((100dvh-7rem)/2.11))] sm:w-[min(calc(100vw-10rem),calc((100dvh-3rem)/2.11))]";
+export function loadBigPhone(): Promise<BigPhoneComponent> {
+  return typeof window === "undefined"
+    ? Promise.reject(new Error("the big phone draws in the browser only"))
+    : import("@/components/founders/PhoneEnlargeOverlay").then((m) => m.BigPhone);
+}
 
 const isElement = (x: unknown): x is HTMLElement =>
   typeof HTMLElement !== "undefined" && x instanceof HTMLElement;
@@ -110,109 +115,69 @@ export function PhoneEnlarge({
   className?: string;
 }) {
   const Slot = enlargeSlotContext();
-  const [start, setStart] = useState<EnlargeStart | null>(null);
+  const [open, setOpen] = useState<{ start: EnlargeStart; opener: HTMLElement | null } | null>(null);
+  const [BigPhone, setBigPhone] = useState<BigPhoneComponent | null>(null);
+  const [failed, setFailed] = useState(false);
   const inlineRef = useRef<HTMLDivElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const closeRef = useRef<HTMLButtonElement | null>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
-  const open = start !== null;
 
-  const enlarge = useCallback((asked: EnlargeStart, opener?: HTMLElement | null) => {
-    // A video playing in place carries on in the big phone from the same
-    // second, and stops in place so two never play at once.
-    const playing = inlineRef.current?.querySelector("video") ?? null;
-    const next: EnlargeStart = playing
-      ? { play: asked.play || !playing.paused, at: playing.currentTime || 0 }
-      : asked;
-    if (playing && !playing.paused) playing.pause();
-    const active = typeof document === "undefined" ? null : document.activeElement;
-    openerRef.current = opener ?? (isElement(active) ? active : null);
-    setStart(next);
-  }, []);
-  const close = useCallback(() => setStart(null), []);
+  // Fetch the big phone's code: when the pointer or keyboard reaches the tile
+  // (`pressed` false) and again on the press; the module system fetches it
+  // once. A press whose fetch fails is dropped, not kept waiting: otherwise
+  // the pointer passing over the tile later, with the network back, would
+  // open a big phone nobody asked for. The tile says what happened instead.
+  const fetchBigPhone = useCallback(
+    (pressed: boolean) => {
+      if (BigPhone) return;
+      loadBigPhone().then(
+        (C) => {
+          setBigPhone(() => C);
+          setFailed(false);
+        },
+        (e: unknown) => {
+          console.warn("[content:big-phone] could not load", e);
+          if (!pressed) return;
+          setOpen(null);
+          setFailed(true);
+        },
+      );
+    },
+    [BigPhone],
+  );
+  const prefetch = useCallback(() => fetchBigPhone(false), [fetchBigPhone]);
+
+  const enlarge = useCallback(
+    (asked: EnlargeStart, opener?: HTMLElement | null) => {
+      // A video playing in place carries on in the big phone from the same
+      // second, and stops in place so two never play at once.
+      const playing = inlineRef.current?.querySelector("video") ?? null;
+      const start: EnlargeStart = playing
+        ? { play: asked.play || !playing.paused, at: playing.currentTime || 0 }
+        : asked;
+      if (playing && !playing.paused) playing.pause();
+      const active = typeof document === "undefined" ? null : document.activeElement;
+      setFailed(false);
+      setOpen({ start, opener: opener ?? (isElement(active) ? active : null) });
+      fetchBigPhone(true);
+    },
+    [fetchBigPhone],
+  );
+  const close = useCallback(() => setOpen(null), []);
 
   const tileSlot = useMemo<EnlargeSlot>(() => ({ place: "tile", enlarge }), [enlarge]);
-  const bigSlot = useMemo<EnlargeSlot | null>(() => (start ? { place: "big", start } : null), [start]);
-
-  useEffect(() => {
-    if (!open) return;
-    closeRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-        return;
-      }
-      // aria-modal: Tab stays inside the dialog (focus-trap.ts).
-      const panel = panelRef.current;
-      if (e.key !== "Tab" || !panel) return;
-      const active = isElement(document.activeElement) ? document.activeElement : null;
-      const move = trapTab(
-        Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)),
-        active,
-        e.shiftKey,
-        !!active && panel.contains(active),
-      );
-      if (move.prevent) e.preventDefault();
-      move.focus?.focus();
-    };
-    window.addEventListener("keydown", onKey);
-    const body = document.body.style;
-    const overflow = body.overflow;
-    body.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      body.overflow = overflow;
-      // Back to the button that opened it, if it is still on the page.
-      const back = openerRef.current;
-      openerRef.current = null;
-      if (back && back.isConnected) back.focus();
-    };
-  }, [open, close]);
-
-  const overlay =
-    bigSlot && typeof document !== "undefined"
-      ? createPortal(
-          <div
-            ref={panelRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label={`${title}, enlarged`}
-            data-phone-enlarged=""
-            // A click on the dark area around the phone closes it; a click on
-            // the phone itself is the phone's.
-            onClick={(e) => {
-              if (e.target === e.currentTarget) close();
-            }}
-            className="fixed inset-0 z-[100] flex items-center justify-center overscroll-contain bg-black/85 p-4 backdrop-blur-sm motion-safe:animate-fade-in sm:p-6"
-          >
-            <button
-              ref={closeRef}
-              type="button"
-              onClick={close}
-              aria-label="Close"
-              className="absolute right-[max(0.75rem,env(safe-area-inset-right))] top-[max(0.75rem,env(safe-area-inset-top))] flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/80"
-            >
-              <X aria-hidden className="h-5 w-5" />
-            </button>
-            <div className={`${BIG_PHONE_WIDTH} motion-safe:animate-slide-up`}>
-              <Slot.Provider value={bigSlot}>
-                <PhoneFrame {...frame} label={title}>
-                  {media}
-                </PhoneFrame>
-              </Slot.Provider>
-            </div>
-          </div>,
-          document.body,
-        )
-      : null;
 
   return (
     <Slot.Provider value={tileSlot}>
-      <div ref={inlineRef} className={className}>
+      <div ref={inlineRef} className={className} onPointerEnter={prefetch} onFocus={prefetch}>
         {children}
+        {failed ? (
+          <p role="status" className="mt-2 text-[11px] leading-4 text-status-warm">
+            Couldn&apos;t open the big phone. Reload the page and try again.
+          </p>
+        ) : null}
       </div>
-      {overlay}
+      {open && BigPhone ? (
+        <BigPhone title={title} frame={frame} media={media} start={open.start} opener={open.opener} onClose={close} />
+      ) : null}
     </Slot.Provider>
   );
 }

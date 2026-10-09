@@ -177,13 +177,15 @@ check("no grid tile renders a <video> on arrival; any tile <video> is preload=\"
     assert.match(drawn.tiles[name], /aria-label="Play Asset title"/, `${name}: the video waits behind a play button`);
   }
   // Every other <video> a tile file can render is preload="none" in source. A
-  // grid tile reaches only these files (PhoneEnlarge: the big phone a tile
-  // opens, which draws the tile's own media and no <video> of its own).
+  // grid tile reaches only these files (PhoneEnlarge and PhoneEnlargeOverlay:
+  // the big phone a tile opens, which draws the tile's own media and no <video>
+  // of its own).
   for (const file of [
     "components/founders/marketing-shared.tsx",
     "components/founders/CarouselFrame.tsx",
     "components/founders/PhoneFrame.tsx",
     "components/founders/PhoneEnlarge.tsx",
+    "components/founders/PhoneEnlargeOverlay.tsx",
   ]) {
     const src = code(file);
     const elements = src.match(/<video\b[\s\S]*?\/?>/g) ?? [];
@@ -254,6 +256,7 @@ check("the asset page's player is open from the start, shows its first frame, an
     "components/founders/marketing-shared.tsx",
     "app/founders/marketing/library/page.tsx",
     "components/founders/PhoneEnlarge.tsx",
+    "components/founders/PhoneEnlargeOverlay.tsx",
   ]) {
     assert.ok(!/initialOpen/.test(code(file)), `${file}: a Library tile stays a cover until play`);
   }

@@ -9,12 +9,14 @@
  *
  * DRIVEN, FRAME BY FRAME. There is no DOM in this toolchain, so driver() stands
  * in for the reconciler (as in library-phone-preview.render.ts, plus the hooks
- * PhoneEnlarge uses): render() is a frame, effects() is the commit after it -
- * cleanups first, as React runs them - and what render() returns is drawn by
- * real React (renderToStaticMarkup), the big phone's portal included. A small
- * fake DOM (FakeElement, window listeners, document.body) records what the
- * components ask of it: focus(), pause(), play(), the keydown listener, the
- * body's overflow.
+ * these components use): render() is a frame, effects() is the commit after it
+ * - cleanups first, as React runs them - unmount() runs every cleanup, and what
+ * render() returns is drawn by real React (renderToStaticMarkup), the big
+ * phone's portal included. Two components are driven: PhoneEnlarge, the shell
+ * every tile carries (open or closed, the slot, the hand-over, fetching the big
+ * phone), and BigPhone, the dialog it fetches and draws. A small fake DOM
+ * (FakeElement, window listeners, document.body) records what they ask of it:
+ * focus(), pause(), play(), the keydown listener, the body's overflow.
  */
 import { dirname } from "node:path";
 import type { ReactElement, ReactNode } from "react";
@@ -94,6 +96,11 @@ function driver<P>(component: (props: P) => unknown, contexts: Map<unknown, unkn
         cleanups[at] = typeof c === "function" ? (c as () => void) : undefined;
       }
     },
+    /** The component leaves the page: every cleanup runs. */
+    unmount() {
+      for (const c of cleanups) c?.();
+      cleanups.length = 0;
+    },
   };
 }
 
@@ -122,24 +129,18 @@ function must(node: unknown, what: string, match: (el: El) => boolean): El {
   return hit;
 }
 
-/** The big phone's portal in a PhoneEnlarge frame, or null when it is closed. */
-function portalOf(node: unknown): { children: unknown; containerInfo: unknown } | null {
-  if (Array.isArray(node)) {
-    for (const child of node) {
-      const hit = portalOf(child);
-      if (hit) return hit;
-    }
-    return null;
-  }
-  if (!node || typeof node !== "object") return null;
-  if ((node as { $$typeof?: symbol }).$$typeof === Symbol.for("react.portal")) {
+/** The portal a BigPhone frame returns. */
+function portalOf(node: unknown): { children: unknown; containerInfo: unknown } {
+  if (node && typeof node === "object" && (node as { $$typeof?: symbol }).$$typeof === Symbol.for("react.portal")) {
     return node as { children: unknown; containerInfo: unknown };
   }
-  if (!("props" in node)) return null;
-  return portalOf((node as El).props.children);
+  throw new Error("render: the big phone did not draw into a portal");
 }
 
-// -- a small DOM ------------------------------------------------------------
+/** Let settled promises (the big phone's fetch) deliver their callbacks. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+// -- a small DOM -------------------------------------------------------------
 const listeners = new Map<string, Array<(e: unknown) => void>>();
 const fakeDocument: { activeElement: unknown; body: unknown } = { activeElement: null, body: null };
 
@@ -206,12 +207,17 @@ async function main() {
   });
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { AssetTile } = await import("../components/founders/marketing-shared");
-  const { PhoneEnlarge, EnlargeButton, enlargeSlotContext, BIG_PHONE_WIDTH } = await import("../components/founders/PhoneEnlarge");
+  const { PhoneEnlarge, EnlargeButton, enlargeSlotContext, loadBigPhone } = await import("../components/founders/PhoneEnlarge");
+  const { BigPhone, BIG_PHONE_WIDTH } = await import("../components/founders/PhoneEnlargeOverlay");
   const { TileVideo } = await import("../components/founders/TileVideo");
+  const { CarouselFrame } = await import("../components/founders/CarouselFrame");
   const draw = (node: unknown) => renderToStaticMarkup(node as El);
   const Slot = enlargeSlotContext();
+  type BigProps = Parameters<typeof BigPhone>[0];
+  type TileSlot = { place: string; enlarge: (s: { play: boolean; at: number }, opener?: unknown) => void };
 
-  // -- 1. the tiles, both presentations, every kind --------------------------
+  // -- 1. the tiles, both presentations, every kind ---------------------------
+  // Drawn before the fake DOM exists, as the server draws them.
   const base = {
     id: "a1",
     title: "Asset title",
@@ -245,23 +251,21 @@ async function main() {
   }
 
   // The fake DOM goes in only now: react-dom and the components are loaded,
-  // so nothing above saw it.
+  // so nothing above saw it. With `window` defined, loadBigPhone fetches the
+  // big phone as the browser does.
   const body = new FakeElement("body");
   fakeDocument.body = body;
-  Object.assign(globalThis, {
-    HTMLElement: FakeElement,
-    document: fakeDocument,
-    window: {
-      addEventListener(type: string, fn: (e: unknown) => void) {
-        listeners.set(type, [...(listeners.get(type) ?? []), fn]);
-      },
-      removeEventListener(type: string, fn: (e: unknown) => void) {
-        listeners.set(type, (listeners.get(type) ?? []).filter((f) => f !== fn));
-      },
+  const fakeWindow = {
+    addEventListener(type: string, fn: (e: unknown) => void) {
+      listeners.set(type, [...(listeners.get(type) ?? []), fn]);
     },
-  });
+    removeEventListener(type: string, fn: (e: unknown) => void) {
+      listeners.set(type, (listeners.get(type) ?? []).filter((f) => f !== fn));
+    },
+  };
+  Object.assign(globalThis, { HTMLElement: FakeElement, document: fakeDocument, window: fakeWindow });
 
-  // -- 2. Enlarge, by keyboard: open, trap, Esc, focus back ------------------
+  // -- 2. Enlarge, by keyboard: open, trap, Esc, focus back -------------------
   const reel = React.createElement(TileVideo, {
     src: "https://media.test/reel.mp4", posterUrl: null, width: 1080, height: 1920, title: "Asset title", variant: "phone",
   });
@@ -274,13 +278,9 @@ async function main() {
   };
   const pe = driver(PhoneEnlarge);
   let frame = pe.render(enlargeProps);
-  pe.effects();
   const closedMarkup = draw(frame);
-  const closedPortal = portalOf(frame) !== null;
-  const tileSlot = must(frame, "the tile slot's provider", (el) => el.type === Slot).props.value as {
-    place: string;
-    enlarge: (s: { play: boolean; at: number }, opener?: unknown) => void;
-  };
+  const closedHasBigPhone = find(frame, (el) => el.type === BigPhone) !== null;
+  const tileSlot = must(frame, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot;
 
   // The viewer tabs to Enlarge and presses Enter, which a <button> turns into
   // a click: EnlargeButton's own handler, driven in that slot.
@@ -289,10 +289,16 @@ async function main() {
   const button = driver(EnlargeButton, new Map([[Slot, tileSlot]]));
   const buttonEl = must(button.render({ title: "Asset title" }), "the Enlarge button", (el) => el.type === "button");
   (buttonEl.props.onClick as (e: unknown) => void)({ currentTarget: trigger });
-
+  await loadBigPhone();
+  await flush();
   frame = pe.render(enlargeProps);
-  const portal = portalOf(frame);
-  if (!portal) throw new Error("render: Enlarge did not open the big phone");
+  const bigEl = must(frame, "the big phone", (el) => el.type === BigPhone);
+  const bigProps = bigEl.props as unknown as BigProps;
+  const handed = { title: bigProps.title, start: bigProps.start, opener: (bigProps.opener as unknown as FakeElement | null)?.name ?? null };
+
+  // The big phone, driven: its first frame, then the commit.
+  const bp = driver(BigPhone);
+  const portal = portalOf(bp.render(bigProps));
   const openMarkup = draw(portal.children);
   const bigSlot = must(portal.children, "the big phone's provider", (el) => el.type === Slot).props.value;
   // What React would attach to the refs on commit.
@@ -304,7 +310,7 @@ async function main() {
   panel.focusables = [close, play];
   (dialogEl.props.ref as { current: unknown }).current = panel;
   (closeEl.props.ref as { current: unknown }).current = close;
-  pe.effects();
+  bp.effects();
   const afterOpen = {
     focused: (fakeDocument.activeElement as FakeElement | null)?.name ?? null,
     bodyOverflow: (body.style.overflow as string | undefined) ?? "",
@@ -321,11 +327,12 @@ async function main() {
   fakeDocument.activeElement = new FakeElement("page-behind");
   const strayTab = key("Tab");
   const strayLanded = (fakeDocument.activeElement as FakeElement).name;
-  // Esc closes it.
+  // Esc asks the shell to close; the shell stops drawing the big phone, which
+  // leaves the page.
   const esc = key("Escape");
   frame = pe.render(enlargeProps);
-  const openAfterEsc = portalOf(frame) !== null;
-  pe.effects();
+  const openAfterEsc = find(frame, (el) => el.type === BigPhone) !== null;
+  if (!openAfterEsc) bp.unmount();
   const afterClose = {
     triggerCalls: [...trigger.calls],
     focused: (fakeDocument.activeElement as FakeElement | null)?.name ?? null,
@@ -333,80 +340,108 @@ async function main() {
     keydownListeners: (listeners.get("keydown") ?? []).length,
   };
 
-  // -- 3. a click outside the phone closes it; a click on it does not --------
-  tileSlot.enlarge({ play: false, at: 0 }, trigger);
-  frame = pe.render(enlargeProps);
-  pe.effects();
-  const dialog2 = must(portalOf(frame)!.children, "the dialog", (el) => el.props.role === "dialog");
+  // -- 3. a click outside the phone or on Close closes it; on the phone, not --
+  const closes: string[] = [];
+  const bp2 = driver(BigPhone);
+  const portal2 = portalOf(bp2.render({ ...bigProps, onClose: () => closes.push("close") }));
+  const dialog2 = must(portal2.children, "the dialog", (el) => el.props.role === "dialog");
   const onBackdrop = dialog2.props.onClick as (e: unknown) => void;
-  const phoneNode = { name: "phone" };
-  onBackdrop({ target: phoneNode, currentTarget: panel });
-  frame = pe.render(enlargeProps);
-  const openAfterPhoneClick = portalOf(frame) !== null;
+  onBackdrop({ target: { name: "phone" }, currentTarget: panel });
+  const closesAfterPhoneClick = closes.length;
   onBackdrop({ target: panel, currentTarget: panel });
-  frame = pe.render(enlargeProps);
-  const openAfterBackdropClick = portalOf(frame) !== null;
-  pe.effects();
-  // Close, the button.
-  tileSlot.enlarge({ play: false, at: 0 }, trigger);
-  frame = pe.render(enlargeProps);
-  pe.effects();
-  const closeButton = must(portalOf(frame)!.children, "Close", (el) => el.type === "button" && el.props["aria-label"] === "Close");
-  (closeButton.props.onClick as () => void)();
-  frame = pe.render(enlargeProps);
-  const openAfterCloseButton = portalOf(frame) !== null;
-  pe.effects();
+  const closesAfterBackdropClick = closes.length;
+  (must(portal2.children, "Close", (el) => el.type === "button" && el.props["aria-label"] === "Close").props.onClick as () => void)();
+  const closesAfterCloseButton = closes.length;
 
-  // -- 3b. a carousel and a single image open big too ------------------------
-  // The tile's own media element, as AssetTile hands it over: Enlarge opens the
-  // big phone with the deck at its real 4:5 shape (one slide loaded, the rest
-  // on demand) and the 1:1 card letterboxed.
-  const { CarouselFrame } = await import("../components/founders/CarouselFrame");
-  const openBig = (media: ReactNode, shapeOver: Partial<typeof shape>) => {
-    const d = driver(PhoneEnlarge);
-    const props = { ...enlargeProps, frame: { ...shape, ...shapeOver }, media };
-    const first = d.render(props);
-    (must(first, "the tile slot's provider", (el) => el.type === Slot).props.value as typeof tileSlot).enlarge({ play: false, at: 0 }, trigger);
-    const open = portalOf(d.render(props));
-    if (!open) throw new Error("render: Enlarge did not open the big phone");
-    return draw(open.children);
-  };
-  const carouselBig = openBig(
+  // -- 3b. a carousel and a single image open big too -------------------------
+  // The tile's own media element, as AssetTile hands it over: the deck at its
+  // real 4:5 shape (one slide loaded, the rest on demand), the 1:1 card
+  // letterboxed.
+  const bigWith = (media: ReactNode, shapeOver: Partial<typeof shape>) =>
+    draw(portalOf(driver(BigPhone).render({ ...bigProps, frame: { ...shape, ...shapeOver }, media })).children);
+  const carouselBig = bigWith(
     React.createElement(CarouselFrame, {
       slides: ["https://media.test/slide_1.png", "https://media.test/slide_2.png", "https://media.test/slide_3.png"],
       title: "Asset title", width: 1080, height: 1350, className: "h-full w-full",
     }),
     { mediaW: 1080, mediaH: 1350, aspect: "4:5" },
   );
-  const imageBig = openBig(
+  const imageBig = bigWith(
     React.createElement("img", { src: "https://media.test/card.png", alt: "", loading: "lazy", decoding: "async", width: 1080, height: 1080, className: "h-full w-full object-contain" }),
     { mediaW: 1080, mediaH: 1080, aspect: "1:1" },
   );
 
-  // -- 4. a video playing in place carries on in the big phone ---------------
+  // -- 4. a video playing in place carries on in the big phone ----------------
+  const openShell = async (inline: unknown) => {
+    const d = driver(PhoneEnlarge);
+    let f = d.render(enlargeProps);
+    (must(f, "the in-place wrapper", (el) => el.type === "div").props.ref as { current: unknown }).current = inline;
+    (must(f, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot).enlarge({ play: false, at: 0 }, trigger);
+    await flush();
+    f = d.render(enlargeProps);
+    return { d, f };
+  };
   const inlineCalls: string[] = [];
   const playingInPlace = fakeMedia("inline-video", inlineCalls, true, 12.5);
-  const handover = driver(PhoneEnlarge);
-  let h = handover.render(enlargeProps);
-  const inlineDiv = must(h, "the in-place wrapper", (el) => el.type === "div");
-  (inlineDiv.props.ref as { current: unknown }).current = { querySelector: (sel: string) => (sel === "video" ? playingInPlace : null) };
-  const handoverSlot = must(h, "the tile slot's provider", (el) => el.type === Slot).props.value as typeof tileSlot;
-  handoverSlot.enlarge({ play: false, at: 0 }, trigger);
-  h = handover.render(enlargeProps);
-  const handoverStart = (must(portalOf(h)!.children, "the big phone's provider", (el) => el.type === Slot).props.value as { start: unknown }).start;
+  const handover = await openShell({ querySelector: (sel: string) => (sel === "video" ? playingInPlace : null) });
+  const handoverStart = (must(handover.f, "the big phone", (el) => el.type === BigPhone).props as unknown as BigProps).start;
   // ...and one paused part-way opens at that second, not playing.
   const pausedCalls: string[] = [];
   const pausedInPlace = fakeMedia("paused-video", pausedCalls, false, 9);
-  const handover2 = driver(PhoneEnlarge);
-  let h2 = handover2.render(enlargeProps);
-  (must(h2, "the in-place wrapper", (el) => el.type === "div").props.ref as { current: unknown }).current = {
-    querySelector: (sel: string) => (sel === "video" ? pausedInPlace : null),
-  };
-  (must(h2, "the tile slot's provider", (el) => el.type === Slot).props.value as typeof tileSlot).enlarge({ play: false, at: 0 }, trigger);
-  h2 = handover2.render(enlargeProps);
-  const pausedStart = (must(portalOf(h2)!.children, "the big phone's provider", (el) => el.type === Slot).props.value as { start: unknown }).start;
+  const paused = await openShell({ querySelector: (sel: string) => (sel === "video" ? pausedInPlace : null) });
+  const pausedStart = (must(paused.f, "the big phone", (el) => el.type === BigPhone).props as unknown as BigProps).start;
 
-  // -- 5. TileVideo in each slot ---------------------------------------------
+  // -- 4b. fetched when the viewer reaches for the tile; a failed fetch says so -
+  const reach = driver(PhoneEnlarge);
+  let r = reach.render(enlargeProps);
+  const wrapper = must(r, "the in-place wrapper", (el) => el.type === "div");
+  const prefetchHandlers = { pointer: typeof wrapper.props.onPointerEnter === "function", focus: typeof wrapper.props.onFocus === "function" };
+  (wrapper.props.onPointerEnter as () => void)();
+  await flush();
+  r = reach.render(enlargeProps);
+  (must(r, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot).enlarge({ play: false, at: 0 }, trigger);
+  // No wait this time: the code arrived with the pointer.
+  r = reach.render(enlargeProps);
+  const openOnPressAfterReach = find(r, (el) => el.type === BigPhone) !== null;
+
+  delete (globalThis as { window?: unknown }).window; // the fetch fails
+  const warnings: unknown[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args[0]);
+  };
+  const saysFailed = (node: unknown) => find(node, (el) => el.type === "p" && el.props.role === "status") !== null;
+  const tileSlotOf = (node: unknown) => must(node, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot;
+  const wrapperOf = (node: unknown) => must(node, "the in-place wrapper", (el) => el.type === "div");
+  const broken = driver(PhoneEnlarge);
+  let b = broken.render(enlargeProps);
+  // Only reaching for the tile, offline: nothing was asked, so nothing is said.
+  (wrapperOf(b).props.onPointerEnter as () => void)();
+  await flush();
+  b = broken.render(enlargeProps);
+  const prefetchFailureSaid = saysFailed(b);
+  // The press, offline.
+  tileSlotOf(b).enlarge({ play: false, at: 0 }, trigger);
+  await flush();
+  b = broken.render(enlargeProps);
+  console.warn = warn;
+  const failedMarkup = draw(b);
+  const failedHasBigPhone = find(b, (el) => el.type === BigPhone) !== null;
+  // The network comes back and the pointer passes over the tile again: the
+  // code arrives, and the press that failed is not replayed.
+  Object.assign(globalThis, { window: fakeWindow });
+  (wrapperOf(b).props.onPointerEnter as () => void)();
+  await flush();
+  b = broken.render(enlargeProps);
+  const openedLaterByPointer = find(b, (el) => el.type === BigPhone) !== null;
+  const failureSaidAfterFetch = saysFailed(b);
+  // Pressed again, it opens at once.
+  tileSlotOf(b).enlarge({ play: false, at: 0 }, trigger);
+  b = broken.render(enlargeProps);
+  const retryOpens = find(b, (el) => el.type === BigPhone) !== null;
+  const retrySaysFailed = saysFailed(b);
+
+  // -- 5. TileVideo in each slot ----------------------------------------------
   const tileProps = { src: "https://media.test/reel.mp4", posterUrl: null, width: 1080, height: 1920, title: "Asset title", variant: "phone" as const };
   // In a tile: pressing the cover opens the big phone, playing; nothing mounts here.
   const asked: Array<{ start: unknown; opener: string | null }> = [];
@@ -465,7 +500,8 @@ async function main() {
     tiles,
     enlarge: {
       closedMarkup,
-      closedPortal,
+      closedHasBigPhone,
+      handed,
       openMarkup,
       bigSlot,
       afterOpen,
@@ -474,12 +510,24 @@ async function main() {
       strayTab: { prevented: strayTab.prevented, landed: strayLanded },
       esc: { prevented: esc.prevented, openAfter: openAfterEsc },
       afterClose,
-      openAfterPhoneClick,
-      openAfterBackdropClick,
-      openAfterCloseButton,
+      closesAfterPhoneClick,
+      closesAfterBackdropClick,
+      closesAfterCloseButton,
       bigPhoneWidth: BIG_PHONE_WIDTH,
       carouselBig,
       imageBig,
+    },
+    fetch: {
+      prefetchHandlers,
+      openOnPressAfterReach,
+      prefetchFailureSaid,
+      failedMarkup,
+      failedHasBigPhone,
+      warned: warnings.map(String),
+      openedLaterByPointer,
+      failureSaidAfterFetch,
+      retryOpens,
+      retrySaysFailed,
     },
     handover: {
       start: handoverStart,

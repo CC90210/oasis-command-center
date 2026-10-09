@@ -16,12 +16,12 @@
  * WHAT IS PINNED
  *  1. Every Library tile, both views, every kind, opens the big phone: an
  *     Enlarge button named for the asset, and a video's play press too - and
- *     still no <video> in any tile (tests/content-iphone.render.ts draws them).
- *  2. The big phone is a modal dialog, drawn and DRIVEN: Close takes focus,
+ *     still no <video> in any tile (tests/content-iphone.render.ts draws them). *  2. The big phone is a modal dialog, drawn and DRIVEN: Close takes focus,
  *     Tab and Shift+Tab stay inside, Esc / Close / a click outside close it,
  *     focus goes back to the button that opened it, the page behind is held
  *     still, motion only without reduced motion, and its size fits 1280x800
- *     and 390x844.
+ *     and 390x844. Its code is fetched in the browser only; a press whose
+ *     fetch fails says so and is dropped, never replayed later.
  *  3. Nothing loads until play: opened by Enlarge, a video is a cover; opened
  *     by a play press, it mounts preload="none" and plays once; a video
  *     playing in place carries on from the same second and stops in place.
@@ -121,6 +121,7 @@ const CONTENT_FILES = [
     "AssetActions.tsx",
     "AssetPublishPanel.tsx",
     "PhoneEnlarge.tsx",
+    "PhoneEnlargeOverlay.tsx",
     "PhoneFrame.tsx",
     "TileVideo.tsx",
     "CarouselFrame.tsx",
@@ -135,7 +136,8 @@ type Drawn = {
   tiles: Record<string, string>;
   enlarge: {
     closedMarkup: string;
-    closedPortal: boolean;
+    closedHasBigPhone: boolean;
+    handed: { title: string; start: unknown; opener: string | null };
     openMarkup: string;
     bigSlot: unknown;
     afterOpen: { focused: string | null; bodyOverflow: string; keydownListeners: number; container: boolean };
@@ -144,12 +146,24 @@ type Drawn = {
     strayTab: { prevented: boolean; landed: string };
     esc: { prevented: boolean; openAfter: boolean };
     afterClose: { triggerCalls: string[]; focused: string | null; bodyOverflow: string; keydownListeners: number };
-    openAfterPhoneClick: boolean;
-    openAfterBackdropClick: boolean;
-    openAfterCloseButton: boolean;
+    closesAfterPhoneClick: number;
+    closesAfterBackdropClick: number;
+    closesAfterCloseButton: number;
     bigPhoneWidth: string;
     carouselBig: string;
     imageBig: string;
+  };
+  fetch: {
+    prefetchHandlers: { pointer: boolean; focus: boolean };
+    openOnPressAfterReach: boolean;
+    prefetchFailureSaid: boolean;
+    failedMarkup: string;
+    failedHasBigPhone: boolean;
+    warned: string[];
+    openedLaterByPointer: boolean;
+    failureSaidAfterFetch: boolean;
+    retryOpens: boolean;
+    retrySaysFailed: boolean;
   };
   handover: { start: unknown; inlineCalls: string[]; pausedStart: unknown; pausedCalls: string[] };
   player: {
@@ -295,8 +309,13 @@ async function main() {
   // -- 2. the big phone ------------------------------------------------------
   await check("Enlarge opens a modal big phone: a named dialog in a portal on <body>, Close, the asset in its phone frame, motion only without reduced motion", () => {
     const e = d.enlarge;
-    assert.equal(e.closedPortal, false, "closed: no big phone in the page");
+    assert.equal(e.closedHasBigPhone, false, "closed: no big phone in the page");
     assert.match(e.closedMarkup, /aria-label="Enlarge Asset title"/, "closed: the control is there");
+    assert.deepEqual(
+      e.handed,
+      { title: "Asset title", start: { play: false, at: 0 }, opener: "enlarge-button" },
+      "the shell hands the big phone the asset, how to start, and the button to give focus back to",
+    );
     const html = e.openMarkup;
     const dialog = tags(html, "div").find((t) => attr(t, "role") === "dialog");
     assert.ok(dialog, "a dialog");
@@ -350,9 +369,49 @@ async function main() {
   });
 
   await check("a click outside the phone or on Close closes it; a click on the phone does not", () => {
-    assert.equal(d.enlarge.openAfterPhoneClick, true, "a click on the phone is the phone's");
-    assert.equal(d.enlarge.openAfterBackdropClick, false, "a click on the dark area closes it");
-    assert.equal(d.enlarge.openAfterCloseButton, false, "Close closes it");
+    assert.equal(d.enlarge.closesAfterPhoneClick, 0, "a click on the phone is the phone's");
+    assert.equal(d.enlarge.closesAfterBackdropClick, 1, "a click on the dark area closes it");
+    assert.equal(d.enlarge.closesAfterCloseButton, 2, "Close closes it");
+  });
+
+  // The big phone only exists after a click, so its code is the browser's
+  // alone. Compiled for server rendering, it was copied into every Content
+  // route and put the first version of this change 129 KiB over main, past
+  // the Worker's upload budget (CI, 2026-10-02).
+  await check("the big phone's code never reaches the server: fetched in the browser only, when the viewer reaches for a tile", () => {
+    const shell = code("components/founders/PhoneEnlarge.tsx");
+    assert.match(
+      shell,
+      /return typeof window === "undefined"\s*\?\s*Promise\.reject\(new Error\("[^"]*"\)\)\s*:\s*import\("@\/components\/founders\/PhoneEnlargeOverlay"\)/,
+      "the only import of the big phone sits in the branch the server compile drops",
+    );
+    assert.equal((shell.match(/PhoneEnlargeOverlay"\)/g) ?? []).length, 1, "and nowhere else in the shell");
+    const runtimeImports = [...shell.matchAll(/^import\s+(?!type\b)[^;]*?from\s+"([^"]+)";/gm)].map((m) => m[1]);
+    assert.deepEqual(runtimeImports, ["react", "lucide-react"], `the shell carries nothing else to the server: ${runtimeImports.join(", ")}`);
+    // A type-only import is erased; any other import would pull the big phone
+    // back into whatever imports that file.
+    const runtimeOverlayImport = /^\s*import\s+(?!type\b)[^;]*?from\s+"@\/components\/founders\/PhoneEnlargeOverlay"/m;
+    assert.ok(runtimeOverlayImport.test('import { BigPhone } from "@/components/founders/PhoneEnlargeOverlay";'), "the detector is real");
+    for (const f of CONTENT_FILES.filter((x) => !x.endsWith("PhoneEnlargeOverlay.tsx"))) {
+      assert.doesNotMatch(code(f), runtimeOverlayImport, `${f} imports the big phone directly`);
+    }
+    assert.deepEqual(d.fetch.prefetchHandlers, { pointer: true, focus: true }, "fetched when the pointer or keyboard reaches the tile");
+    assert.equal(d.fetch.openOnPressAfterReach, true, "so the press opens it at once");
+  });
+
+  await check("if the big phone cannot be fetched, the tile says so instead of doing nothing", () => {
+    assert.equal(d.fetch.prefetchFailureSaid, false, "reaching for a tile asks for nothing, so its failure says nothing");
+    assert.equal(d.fetch.failedHasBigPhone, false);
+    assert.match(d.fetch.failedMarkup, /role="status"/);
+    assert.match(textOfHtml(d.fetch.failedMarkup), /Couldn't open the big phone\. Reload the page and try again\./);
+    assert.ok(d.fetch.warned.some((w) => /\[content:big-phone\] could not load/.test(w)), `logged: ${d.fetch.warned.join(" | ")}`);
+  });
+
+  await check("a press whose fetch failed is dropped: the code arriving later opens nothing until the next press", () => {
+    assert.equal(d.fetch.openedLaterByPointer, false, "the pointer passing over the tile again opened a big phone nobody asked for");
+    assert.equal(d.fetch.failureSaidAfterFetch, false, "the code is here now, so the failure line goes");
+    assert.equal(d.fetch.retryOpens, true, "the next press opens it at once");
+    assert.equal(d.fetch.retrySaysFailed, false);
   });
 
   await check("the big phone fits the screen: the full height from sm up, the width (with room for Close) on a phone", () => {
@@ -428,7 +487,10 @@ async function main() {
     assert.match(page, /<PhoneEnlarge title=\{asset\.title\} frame=\{phoneShape\} media=\{phoneScreen\}/);
     assert.match(page, /<EnlargeButton title=\{asset\.title\} \/>/);
     const enlarge = code("components/founders/PhoneEnlarge.tsx");
-    assert.doesNotMatch(enlarge, /<video\b|preload=|initialOpen/, "the big phone draws the caller's media and nothing else");
+    const overlay = code("components/founders/PhoneEnlargeOverlay.tsx");
+    for (const src of [enlarge, overlay]) {
+      assert.doesNotMatch(src, /<video\b|preload=|initialOpen/, "the big phone draws the caller's media and nothing else");
+    }
     assert.match(enlarge, /if \(!slotContext\) slotContext = createContext/, "the context is made on first use, not at import (react-server has no createContext)");
   });
 
