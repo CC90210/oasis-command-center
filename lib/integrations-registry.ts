@@ -540,7 +540,9 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     service: "google_ai",
     label: "Google Gemini",
     category: "ai",
-    description: "Gemini 2.5 Pro / Flash via AI Studio",
+    // No version numbers: Google stopped offering Gemini 2.5 to new accounts
+    // on 2026-09-18, and the models offered live in lib/ai/model-registry.ts.
+    description: "Direct Gemini API: Flash / Flash-Lite / Pro, key from AI Studio",
     connection_kind: "api_key",
     signup_url: "https://aistudio.google.com/",
     api_key_url: "https://aistudio.google.com/apikey",

@@ -1037,12 +1037,14 @@ async function main() {
     // What the dialog itself sends and shows, driven in the render helper (it
     // used to be read off the dialog's source text).
     const dialogSent = JSON.parse(html.plainConnect ?? "{}") as Record<string, unknown>;
-    // The dialog's default model is the registry's (lib/ai/model-registry.ts).
+    // The dialog's default model is the registry's (lib/ai/model-registry.ts):
+    // on Anthropic, Claude Sonnet 4.6 until a 5.x model has run through this app.
+    assert.equal(registry.defaultModelFor("anthropic"), "claude-sonnet-4-6");
     assert.deepEqual(
       dialogSent.calls,
       [
-        { url: "/api/agent-config/test-connection", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-5-5" } },
-        { url: "/api/agent-config/bulk-provider", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-5-5", scope: "tenant" } },
+        { url: "/api/agent-config/test-connection", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-4-6" } },
+        { url: "/api/agent-config/bulk-provider", body: { provider: "anthropic", api_key: "sk-ant-plain-key-P", model: "claude-sonnet-4-6", scope: "tenant" } },
       ],
       "the dialog does not test the pasted key once, on its model, before it saves it",
     );
@@ -1921,6 +1923,7 @@ async function main() {
       header: true, // "Cloud: 1 provider connected"
       disconnectedBeforeAnswer: false,
       newerAnswerSaysConnected: true, // a stale "disconnected" never covers a live key
+      afterDiscardedRender: true, // a render React threw away never takes a click's change with it
     });
   });
   await check("Settings says what each saved model is doing, from the same registry the calls use", () => {
@@ -1984,6 +1987,7 @@ async function main() {
     lost: u(24, "owner@lost.test"),
     prove: u(25, "owner@prove.test"),
     proveRep: u(26, "rep@prove.test"),
+    goneRep: u(28, "rep@gone.test"),
   } as const;
   const KEY_GONE = "AIza-gone-workspace-key-0600";
   const KEY_MOVE_ANT = "sk-ant-move-team-key-0601";
@@ -1999,6 +2003,8 @@ async function main() {
       ...workspace(LOSTCO, "lost-co", "Lost Co"),
       ...workspace(PROVECO, "prove-co", "Prove Co"),
       profile("p-gone", MORE.gone, GONECO, "owner", 1, ["sdr"]),
+      // A sales rep of the same workspace: not an owner or admin, so not one who can pick another model.
+      profile("p-gone-rep", MORE.goneRep, GONECO, "closer", 0, ["sdr"]),
       // R5-M3's two admins: their teammate lists differ (agents_enabled is per person).
       profile("p-move", MORE.move, MOVECO, "owner", 1, ["sdr", "customer-support"]),
       { ...profile("p-move-admin", MORE.moveAdmin, MOVECO, "admin", 0, ["sdr"]) },
@@ -2048,7 +2054,7 @@ async function main() {
       "Google no longer offers Gemini 2.5 Pro to new accounts; your departments now use Gemini 3.8 Flash.",
     );
   });
-  await check("a model the provider says was not found is named in the channel, with what to pick", async () => {
+  await check("a model the provider says was not found is named to whoever can pick another (an owner or admin), and to nobody else", async () => {
     await db.execute({ sql: "UPDATE agent_model_config SET model = 'gemini-9-nope' WHERE tenant_id = ? AND agent_key = ?", args: [GONECO, account.WORKSPACE_AI_AGENT_KEY] });
     try {
       await login(MORE.gone);
@@ -2063,6 +2069,21 @@ async function main() {
       );
       assert.deepEqual(err?.data.model, { label: "gemini-9-nope", vendor: "Google", suggestion: "Gemini 3.8 Flash" });
       assert.doesNotMatch(JSON.stringify(err?.data), /NOT_FOUND|v1beta/, "the provider's own words reached the channel");
+      // A sales rep of the same workspace cannot change the model: the plain
+      // sentence, and no model id anywhere in the event (PR #555 review: the
+      // route keeps the model id from anyone it is not for).
+      await login(MORE.goneRep);
+      sent = [];
+      const repEvents = parseSse(await (await chatTurn({ agent_slug: "sdr", department: "sales" })).text());
+      const repErr = repEvents.find((e) => e.event === "error");
+      assert.equal(sent.length, 1, "the rep's turn never reached the provider");
+      assert.equal(repErr?.data.code, "provider_404", JSON.stringify(repEvents));
+      assert.equal(
+        repErr?.data.message,
+        "The AI model this channel uses was not found: the provider has retired it or does not offer it to this AI account. Pick another model in AI settings. An owner or admin can fix this in Settings.",
+      );
+      assert.equal(repErr?.data.model, undefined, "the model was named to a rep");
+      assert.doesNotMatch(JSON.stringify(repEvents), /gemini-9-nope/, "the model id reached a rep");
     } finally {
       await db.execute({ sql: "UPDATE agent_model_config SET model = 'gemini-2.5-pro' WHERE tenant_id = ? AND agent_key = ?", args: [GONECO, account.WORKSPACE_AI_AGENT_KEY] });
     }
@@ -2109,6 +2130,18 @@ async function main() {
     assert.equal(connectGone.status, 400);
     assert.equal(connectGone.body.message, "Google no longer offers Gemini 2.5 Flash to new accounts. Pick Gemini 3.5 Flash-Lite or another listed model.");
     assert.equal(sent.length, 0);
+    // And a model whose tool calls do not work through this app (OpenAI's GPT-6
+    // on Chat Completions), by a hand-built request: it would pass a key test
+    // and then fail every tool-using chat (PR #555 review).
+    const beforeGpt6 = await keysOn(GONECO);
+    const connectGpt6 = await connect({ provider: "openai", api_key: "sk-proj-connect-0622", model: "gpt-6.1-sol" });
+    assert.equal(connectGpt6.status, 400, JSON.stringify(connectGpt6.body));
+    assert.equal(connectGpt6.body.error, "model_not_offered");
+    const rowGpt6 = await jsonOf(await agentConfig.POST(req("/api/agent-config", "POST", { agent_key: "sdr", provider: "openai", model: "gpt-6-luna", api_key: "sk-proj-row-0623" })));
+    assert.equal(rowGpt6.status, 400, JSON.stringify(rowGpt6.body));
+    assert.equal(rowGpt6.body.error, "model_not_offered");
+    assert.equal(sent.length, 0, "a key was tested on a model that cannot be saved");
+    assert.deepEqual(await keysOn(GONECO), beforeGpt6, "a refused save wrote a row");
     // The per-agent picker lists the saved value as itself, first, then the offered models.
     const { rowModelOptions } = await import("../components/settings/AgentConfigEditor");
     const options = rowModelOptions("google", "gemini-2.5-pro");
@@ -2179,6 +2212,55 @@ async function main() {
         "customer-support:anthropic:sk-ant-legacy2-new-0616",
         "sdr:anthropic:sk-ant-legacy2-new-0616",
       ],
+    );
+  });
+  await check("a connect whose account changed after it was read moves nothing: not a teammate still on the old key, not the legacy row", async () => {
+    // The race (PR #555 review; #535 review R5-L2): the one-time model update
+    // (scripts/update-saved-models.ts --apply) moves the account, a teammate
+    // and the legacy row off a gone model, KEEPING their keys, after a connect
+    // read the account and before its one step runs. The connect's read is
+    // stale, so none of it may land. The teammate still holds the account's
+    // previous key, so only the account guard stops the team move from putting
+    // it on the new key while the account stays on the old one.
+    const GUARDCO = "d8d8d8d8-0000-4000-8000-0000000000d8";
+    const owner = u(29, "owner@guard.test");
+    const teamCipher = encryptField("AIza-guard-team-0630");
+    const legacyCipher = encryptField("AIza-guard-legacy-0631");
+    const row = (agentKey: string, cipher: string) => ({
+      sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, ?, 'google', 'gemini-2.5-pro', ?, 1, ?)",
+      args: [GUARDCO, agentKey, cipher, stamp],
+    });
+    await db.batch(
+      [
+        { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [owner.id, owner.email] },
+        ...workspace(GUARDCO, "guard-co", "Guard Co"),
+        profile("p-guard", owner, GUARDCO, "owner", 1, ["sdr"]),
+        row(account.WORKSPACE_AI_AGENT_KEY, teamCipher),
+        row("customer-support", teamCipher),
+        row("bravo", legacyCipher),
+      ],
+      "write",
+    );
+    await login(owner);
+    const res = await interleaved(
+      () => connect({ provider: "anthropic", api_key: "sk-ant-guard-new-0632" }),
+      connectStep(GUARDCO),
+      async () => {
+        await db.execute({
+          sql: "UPDATE agent_model_config SET model = 'gemini-3.8-flash', updated_at = ? WHERE tenant_id = ? AND user_id IS NULL AND provider = 'google' AND model = 'gemini-2.5-pro'",
+          args: [new Date().toISOString(), GUARDCO],
+        });
+      },
+    );
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.deepEqual(
+      (await rows(GUARDCO)).map((r) => `${r.agent_key}:${r.provider}:${r.model}:${r.key}`).sort(),
+      [
+        `${account.WORKSPACE_AI_AGENT_KEY}:google:gemini-3.8-flash:AIza-guard-team-0630`,
+        "bravo:google:gemini-3.8-flash:AIza-guard-legacy-0631",
+        "customer-support:google:gemini-3.8-flash:AIza-guard-team-0630",
+      ],
+      "a statement of the stale connect landed",
     );
   });
 

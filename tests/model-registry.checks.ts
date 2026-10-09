@@ -136,6 +136,31 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
     }
   });
 
+  await check("a new Anthropic or OpenRouter connection starts on Claude Sonnet 4.6, never on a 5.x Claude model this app has not run (PR #555 review)", () => {
+    assert.deepEqual(Object.fromEntries(REGISTRY_PROVIDERS.map((p) => [p, reg.defaultModelFor(p)])), {
+      anthropic: "claude-sonnet-4-6",
+      openai: "gpt-5.6-terra",
+      google: "gemini-3.8-flash",
+      openrouter: "anthropic/claude-sonnet-4.6",
+    });
+    // The key test with no model named runs on the default: it answers one token without thinking first.
+    assert.equal(MODEL_REGISTRY.anthropic.probeModel, "claude-sonnet-4-6");
+    // The 5.x models stay on offer for an owner who picks one, but none is the default.
+    for (const [p, id] of [
+      ["anthropic", "claude-sonnet-5-5"],
+      ["anthropic", "claude-opus-5-5"],
+      ["anthropic", "claude-fable-5-1"],
+      ["anthropic", "claude-haiku-5-5"],
+      ["openrouter", "anthropic/claude-sonnet-5.5"],
+      ["openrouter", "anthropic/claude-opus-5.5"],
+      ["openrouter", "anthropic/claude-fable-5.1"],
+      ["openrouter", "anthropic/claude-haiku-5.5"],
+    ] as const) {
+      assert.equal(reg.modelInfo(p, id)?.offered, true, `${p}/${id} is no longer offered`);
+      assert.notEqual(reg.defaultModelFor(p), id, `${p}/${id} is the default`);
+    }
+  });
+
   await check("every model list and default reads the registry: the pickers, the save check, /model, the probe, the pairing defaults", () => {
     for (const p of REGISTRY_PROVIDERS) {
       const entry = PROVIDER_REGISTRY.find((e) => e.value === p)!;
@@ -154,13 +179,16 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
   });
 
   await check("no shipped source names a model the registry does not know, or one it knows is gone (except where listed, with the reason)", () => {
-    // lib/operator-credentials.ts could not be opened by the session that
-    // wrote this PR (the harness keeps files named like credentials closed):
-    // its four platform defaults are swapped at call time by streamChat and
-    // the tool loops, and the four-line change is in the PR for Bravo.
+    // lib/operator-credentials.ts cannot be opened by an agent session (a
+    // file-protection hook keeps files named like credentials closed): its
+    // four platform defaults are swapped at call time by streamChat and the
+    // tool loops, and the four-line change is in the PR for Bravo. This
+    // allowance fails the check once it is no longer needed, so the change
+    // and the deletion of this line land together.
     const allowed: Record<string, string[]> = {
       "lib/operator-credentials.ts": ["anthropic/claude-sonnet-4", "gemini-2.5-pro"],
     };
+    const usedAllowances = new Set<string>();
     const MODEL_LITERAL =
       /["'`]((?:anthropic|openai|google|meta-llama)\/[a-z0-9][a-z0-9.:_-]*|claude-[a-z0-9][a-z0-9.-]*|gpt-[0-9][a-z0-9.-]*|gemini-[0-9][a-z0-9.-]*)["'`]/g;
     const problems: string[] = [];
@@ -173,12 +201,17 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
         const known = REGISTRY_PROVIDERS.find((p) => reg.modelInfo(p, id));
         const verdict = known ? reg.modelVerdict(known, id, NOW).kind : "unknown";
         if (verdict === "usable") continue;
-        if ((allowed[rel] ?? []).includes(id)) continue;
+        if ((allowed[rel] ?? []).includes(id)) {
+          usedAllowances.add(`${rel}: ${id}`);
+          continue;
+        }
         problems.push(`${rel}: "${id}" is ${verdict === "unknown" ? "not in the registry" : "gone"}`);
       }
     }
     assert.ok(seen >= 5, `only ${seen} model literals found: the scan is not reaching the sources`);
     assert.deepEqual(problems, []);
+    const stale = Object.entries(allowed).flatMap(([rel, ids]) => ids.map((id) => `${rel}: ${id}`)).filter((a) => !usedAllowances.has(a));
+    assert.deepEqual(stale, [], "an allowance above is no longer needed: delete it");
   });
 
   await check("the price rows (bravo__192 + bravo__204) are exactly the registry's prices, and every model the app offers or tests on has one", () => {
@@ -269,7 +302,9 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
       "OpenRouter stops offering Gemini 2.5 Pro on 2026-10-20. Pick a newer model, or your departments will move to Gemini 3.8 Flash then.",
     );
     assert.equal(note("google", "gemini-3.8-flash"), null, "a current model needs no note");
-    assert.equal(note("anthropic", "claude-sonnet-4-6"), "Claude Sonnet 4.6 is an older model that still works. Claude Sonnet 5.5 is its current replacement.");
+    // The Anthropic default (offered) needs none; an older model the pickers no longer offer gets one.
+    assert.equal(note("anthropic", "claude-sonnet-4-6"), null, "the default model got a note");
+    assert.equal(note("anthropic", "claude-opus-4-7"), "Claude Opus 4.7 is an older model that still works. Claude Opus 5.5 is its current replacement.");
     assert.match(String(note("openrouter", "anthropic/claude-sonnet-4")), /^anthropic\/claude-sonnet-4 is not on our list of OpenRouter models, so we can't say whether OpenRouter still offers it\./);
     assert.match(String(note("openai", "gpt-6.1-sol")), /tool calls need OpenAI's newer Responses API/);
     assert.equal(reg.modelNote("anthropic", "claude-mythos-5-1", { audience: "agent", now: NOW })?.sentence, "Anthropic offers Claude Mythos 5.1 only to verified accounts; this agent now uses Claude Fable 5.1.");
@@ -285,6 +320,21 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
     assert.equal(reg.saveCheck("openrouter", "google/gemini-2.5-pro", NOW).ok, false, "a model ending in 12 days was saveable");
     assert.deepEqual(reg.saveCheck("anthropic", "claude-sonnet-4-6", NOW), { ok: true, known: true });
     assert.deepEqual(reg.saveCheck("openrouter", "some-vendor/new-model", NOW), { ok: true, known: false });
+    // Nor a model whose tool calls do not work through this app (PR #555 review):
+    // it answers a key test, so this check is what keeps a direct request from saving it.
+    assert.deepEqual(reg.saveCheck("openai", "gpt-6.1-sol", NOW), {
+      ok: false,
+      message: "GPT-6.1 Sol answers chats, but its tool calls need OpenAI's newer Responses API, which this app does not use yet. Pick GPT-5.6 Terra or another listed model.",
+    });
+    assert.deepEqual(reg.saveCheck("openrouter", "openai/gpt-6-luna", NOW), {
+      ok: false,
+      message: "GPT-6 Luna answers chats, but its tool calls through OpenRouter are not verified yet, so this app does not offer it. Pick Claude Sonnet 4.6 or another listed model.",
+    });
+    for (const p of REGISTRY_PROVIDERS) {
+      for (const m of MODEL_REGISTRY[p].models) {
+        if (!m.tools && m.status !== "retired") assert.equal(reg.saveCheck(p, m.id, NOW).ok, false, `${p}/${m.id} has no tool calls here but can be saved`);
+      }
+    }
   });
 
   await check("a provider's 'not found' names the model and says retired or not offered to this account; billing and a bad key stay their own", () => {
@@ -308,7 +358,7 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
     const unknownModel = outcome.failureCopy("provider_404", { canManageAi: false, model: reg.modelFactsForCopy("openrouter", "anthropic/claude-sonnet-4") });
     assert.equal(
       unknownModel.sentence,
-      "The AI model anthropic/claude-sonnet-4 was not found: OpenRouter has retired it or does not offer it to this AI account. Pick another model in AI settings, such as Claude Sonnet 5.5. An owner or admin can fix this in Settings.",
+      "The AI model anthropic/claude-sonnet-4 was not found: OpenRouter has retired it or does not offer it to this AI account. Pick another model in AI settings, such as Claude Sonnet 4.6. An owner or admin can fix this in Settings.",
     );
     assert.equal(unknownModel.fix, null);
     // With no model known, the sentence still says why and what to do.
@@ -392,29 +442,57 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
     assert.ok(reverted.includes("r-retired anthropic claude-haiku-5-5 cipher-unchanged 2026-10-09T01:00:00.000Z"), "the undo overwrote a later change");
 
     // The script itself, end to end on the same file: a dry run changes
-    // nothing, --apply moves and writes its undo log, --revert puts it back.
+    // nothing, --apply moves exactly the plan the dry run showed and writes
+    // its undo log, --revert puts it back.
     await db.execute("UPDATE agent_model_config SET model = 'gemini-2.5-pro', updated_at = '2026-08-01T00:00:00.000Z' WHERE id = 'r-g-pro'");
+    // --apply judges the registry at the real time (it refuses --now). The one
+    // seeded row whose fate depends on the date (GPT-5.3 Codex enters the
+    // 14-day horizon on 2027-03-18) is dropped, so this part gives the same
+    // answer on any day CI runs it.
+    await db.execute("DELETE FROM agent_model_config WHERE id = 'r-codex'");
     const fresh = await snapshot();
     const nodeOptions = (process.env.NODE_OPTIONS || "").split(/\s+/).filter((t) => t && !/^(--conditions|-C)(=|$)/.test(t) && t !== "react-server").join(" ");
-    const run = (...args: string[]) => {
+    const runRaw = (...args: string[]) => {
       const env: NodeJS.ProcessEnv = { ...process.env, TURSO_DB_PATH: file, NODE_OPTIONS: nodeOptions };
       delete env.TURSO_DATABASE_URL;
       delete env.TURSO_DB_URL;
-      const r = spawnSync(process.execPath, ["--conditions=react-server", "--import", "tsx", "scripts/update-saved-models.ts", "--json", "--now", "2026-10-08T12:00:00.000Z", ...args], {
+      return spawnSync(process.execPath, ["--conditions=react-server", "--import", "tsx", "scripts/update-saved-models.ts", "--json", ...args], {
         encoding: "utf8",
         env,
         timeout: 120_000,
       });
+    };
+    const run = (...args: string[]) => {
+      const r = runRaw(...args);
       assert.equal(r.status, 0, `the script exited ${r.status}:\n${r.stderr}`);
       return JSON.parse(r.stdout.trim().split("\n").at(-1)!) as Record<string, unknown>;
     };
+    // A rehearsal at a named instant still works for a dry run.
+    const rehearsal = run("--now", "2026-10-08T12:00:00.000Z");
+    assert.equal(rehearsal.mode, "dry_run");
     const dry = run();
     assert.equal(dry.mode, "dry_run");
     assert.deepEqual((dry.moves as Array<{ id: string }>).map((m) => m.id).sort(), ["r-g-pro", "r-or-pro"]);
+    assert.match(String(dry.planId), /^[0-9a-f]{16}$/);
     assert.deepEqual(await snapshot(), fresh, "the dry run changed a row");
     const logFile = join(mkdtempSync(join(tmpdir(), "saved-model-moves-log-")), "undo.json");
-    const applied = run("--apply", "--log", logFile);
+    // What was reviewed is what moves (PR #555 review): --apply without the
+    // dry run's plan id, on a pretend date, or with a plan id that no longer
+    // matches the rows, moves nothing.
+    const refusals = [
+      { args: ["--apply", "--log", logFile], says: /--apply needs --expect/ },
+      { args: ["--apply", "--now", "2027-06-01T00:00:00.000Z", "--expect", String(dry.planId), "--log", logFile], says: /--now is for a dry run only/ },
+      { args: ["--apply", "--expect", "0000000000000000", "--log", logFile], says: /changed since the dry run/ },
+    ];
+    for (const r of refusals) {
+      const refused = runRaw(...r.args);
+      assert.notEqual(refused.status, 0, `${r.args.join(" ")} was not refused`);
+      assert.match(refused.stderr, r.says);
+      assert.deepEqual(await snapshot(), fresh, `${r.args.join(" ")} changed a row`);
+    }
+    const applied = run("--apply", "--expect", String(dry.planId), "--log", logFile);
     assert.equal(applied.mode, "apply");
+    assert.equal(applied.planId, dry.planId);
     assert.ok((await snapshot()).includes("r-g-pro google gemini-3.8-flash cipher-unchanged " + String(applied.appliedAt)));
     const undo = JSON.parse(readFileSync(logFile, "utf8")) as { entries: Array<{ id: string; applied: boolean }> };
     assert.deepEqual(undo.entries.filter((e) => e.applied).map((e) => e.id).sort(), ["r-g-pro", "r-or-pro"]);

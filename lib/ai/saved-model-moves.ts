@@ -137,6 +137,31 @@ export function planMoves(rows: SavedRow[], now: Date): MovePlan {
   };
 }
 
+/** 32-bit FNV-1a of `text` from `seed`, as 8 hex digits. */
+function fnv1a(text: string, seed: number): string {
+  let h = seed >>> 0;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/**
+ * The plan's fingerprint: which rows it moves, and from what to what (not
+ * why, which can change with the date while the move stays the same). The dry
+ * run prints it; --apply moves nothing unless the plan it makes then has the
+ * same one, so what moves is exactly what was reviewed (PR #555 review). A
+ * fingerprint, not a secret.
+ */
+export function planId(plan: MovePlan): string {
+  const text = plan.moves
+    .map((m) => [m.id, m.tenantId, m.provider, m.from, m.to].join("|"))
+    .sort()
+    .join("\n");
+  return fnv1a(text, 0x811c9dc5) + fnv1a(text, 0x050c5d1f);
+}
+
 /**
  * Move each planned row with ONE guarded statement: it changes the row only
  * while it still holds the model the plan read (and only that workspace's
@@ -178,7 +203,7 @@ export async function revertMoves(db: Client, log: MoveLog): Promise<Array<{ id:
 /** The plan, as the script prints it, grouped by workspace. */
 export function describePlan(plan: MovePlan, heading: string): string[] {
   const lines = [
-    `${heading}: ${plan.moves.length} saved model${plan.moves.length === 1 ? "" : "s"} to move (registry judged at ${plan.judgedAt}, horizon ${plan.horizonDays} days)`,
+    `${heading}: ${plan.moves.length} saved model${plan.moves.length === 1 ? "" : "s"} to move (registry judged at ${plan.judgedAt}, horizon ${plan.horizonDays} days, plan ${planId(plan)})`,
   ];
   const byTenant = new Map<string, ModelMove[]>();
   for (const m of plan.moves) byTenant.set(m.tenantId, [...(byTenant.get(m.tenantId) ?? []), m]);

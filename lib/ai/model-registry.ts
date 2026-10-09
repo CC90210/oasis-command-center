@@ -27,7 +27,8 @@
  *   - scripts/update-saved-models.ts: moves saved rows whose model is gone or
  *     ending within REGISTRY_HORIZON_DAYS;
  *   - database/turso/bravo__204_model_prices_current.sql: the price rows,
- *     pinned equal to `prices` here by tests/ai-model-registry.test.ts.
+ *     pinned equal to `prices` here by tests/model-registry.checks.ts (run by
+ *     tests/ai-usage-ledger.test.ts).
  *
  * SOURCES. Every id, price, status and date below was read on
  * REGISTRY_VERIFIED_ON from the provider's own pages or API (the research file
@@ -55,6 +56,18 @@
  * Completions with reasoning_effort "none", which this app does not send), so
  * they are listed but not offered. OpenRouter's GPT-6 routes are not offered
  * either: how OpenRouter carries their tool calls is not verified yet.
+ *
+ * THE DEFAULT (the balanced pick, what a new connection starts on). On
+ * Anthropic and on OpenRouter it stays Claude Sonnet 4.6, the default this app
+ * has shipped since 2026-05. Claude Sonnet 5.5, Opus 5.5 and Fable 5.1 always
+ * think before they answer: thinking cannot be turned off, it counts against
+ * the reply's token limit, and the text they write between tool calls comes
+ * back inside thinking blocks this app does not show or pass back yet. No 5.x
+ * Claude model (Haiku 5.5 included) has been called through this app, so they
+ * are offered but are not the default until a real key test and a tool-using
+ * turn pass on them (PR #555 review). A gone model's replacement may still be
+ * a 5.x model: a gone model fails every call, and its own vendor's successor
+ * answers.
  *
  * PURE: no runtime imports (one type import), safe in client components and
  * bare-node tests. ASCII only (tests/worker-source-one-byte.test.ts).
@@ -174,6 +187,11 @@ function retired(id: string, label: string, endedOn: string, replacement: string
   return model({ id, label, status: "retired", endsOn: endedOn, replacement, tools: false, streaming: false, source, note });
 }
 
+/** Why a 5.x Claude model is offered but is not the default (see THE DEFAULT above). */
+const ALWAYS_THINKS =
+  "Always thinks before it answers, and has not been called through this app yet, so it is offered but is not the default.";
+const NOT_CALLED_YET = "Has not been called through this app yet, so it is offered but is not the default.";
+
 /**
  * Anthropic, Messages API. 5-minute cache writes cost 1.25x input. Claude
  * Haiku 5.5 is priced by prompt length (above 100K tokens: $0.50 / $2.50).
@@ -184,25 +202,26 @@ const ANTHROPIC: ProviderModels = {
   provider: "anthropic",
   vendor: "Anthropic",
   surface: "Anthropic's Messages API",
-  probeModel: "claude-haiku-5-5",
-  probeNote: "Anthropic's fastest current model; a one-token test costs a fraction of a cent.",
+  probeModel: "claude-sonnet-4-6",
+  probeNote:
+    "The default model: it answers a one-token test without thinking first (Sonnet 5.5, Opus 5.5 and Fable 5.1 always think), and the test costs a fraction of a cent.",
   models: [
     model({
-      id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", status: "current", offered: true, tier: "balanced",
-      prices: [price(NEW, 2.0, 10.0, 0.1, 2.5)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`,
+      id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", status: "current", offered: true,
+      prices: [price(NEW, 2.0, 10.0, 0.1, 2.5)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`, note: ALWAYS_THINKS,
     }),
     model({
       id: "claude-haiku-5-5", label: "Claude Haiku 5.5", status: "current", offered: true, tier: "fast",
       prices: [price(NEW, 0.1, 0.5, 0.01, 0.125), price(NEW, 0.5, 2.5, 0.05, 0.625, 100_000)],
-      source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`,
+      source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`, note: NOT_CALLED_YET,
     }),
     model({
       id: "claude-opus-5-5", label: "Claude Opus 5.5", status: "current", offered: true,
-      prices: [price(NEW, 4.0, 20.0, 0.2, 5.0)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`,
+      prices: [price(NEW, 4.0, 20.0, 0.2, 5.0)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`, note: ALWAYS_THINKS,
     }),
     model({
       id: "claude-fable-5-1", label: "Claude Fable 5.1", status: "current", offered: true, tier: "deep",
-      prices: [price(NEW, 10.0, 50.0, 0.25, 12.5)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`,
+      prices: [price(NEW, 10.0, 50.0, 0.25, 12.5)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`, note: ALWAYS_THINKS,
     }),
     model({
       id: "claude-mythos-5-1", label: "Claude Mythos 5.1", status: "access_limited", limitedTo: "verified", replacement: "claude-fable-5-1",
@@ -218,8 +237,9 @@ const ANTHROPIC: ProviderModels = {
     }),
     model({ id: "claude-opus-4-6", label: "Claude Opus 4.6", status: "legacy", replacement: "claude-opus-5-5", source: ANTHROPIC_MODELS_URL }),
     model({
-      id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", status: "legacy", replacement: "claude-sonnet-5-5",
+      id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", status: "legacy", offered: true, tier: "balanced", replacement: "claude-sonnet-5-5",
       prices: [price(SEEDED, 3.0, 15.0, 0.3, 3.75)], source: `${ANTHROPIC_MODELS_URL} ; ${ANTHROPIC_PRICING_URL}`,
+      note: "The default: this app's Anthropic default since 2026-05 (it thinks only when asked to). Anthropic retires it no sooner than 2027-02-17.",
     }),
     model({ id: "claude-opus-4-5-20251101", label: "Claude Opus 4.5", status: "legacy", replacement: "claude-opus-5-5", source: ANTHROPIC_MODELS_URL }),
     model({ id: "claude-opus-4-5", label: "Claude Opus 4.5", status: "legacy", replacement: "claude-opus-5-5", source: ANTHROPIC_MODELS_URL, note: "An alias of claude-opus-4-5-20251101." }),
@@ -402,20 +422,25 @@ const OPENROUTER: ProviderModels = {
   note: "OpenAI's GPT-6 models are not offered through OpenRouter yet: how OpenRouter carries their tool calls is not verified.",
   models: [
     model({
-      id: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5", status: "current", offered: true, tier: "balanced",
-      prices: [price(NEW, 2.0, 10.0, 0.1, null)], source: OPENROUTER_CATALOG_URL,
+      id: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6", status: "legacy", offered: true, tier: "balanced",
+      replacement: "anthropic/claude-sonnet-5.5", prices: [price(NEW, 3.0, 15.0, 0.3, null)], source: OPENROUTER_CATALOG_URL,
+      note: "The default: this app's OpenRouter default since 2026-05 (see THE DEFAULT above).",
+    }),
+    model({
+      id: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5", status: "current", offered: true,
+      prices: [price(NEW, 2.0, 10.0, 0.1, null)], source: OPENROUTER_CATALOG_URL, note: ALWAYS_THINKS,
     }),
     model({
       id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5", status: "current", offered: true, tier: "fast",
-      prices: [price(NEW, 0.1, 0.5, 0.01, null)], source: OPENROUTER_CATALOG_URL,
+      prices: [price(NEW, 0.1, 0.5, 0.01, null)], source: OPENROUTER_CATALOG_URL, note: NOT_CALLED_YET,
     }),
     model({
       id: "anthropic/claude-opus-5.5", label: "Claude Opus 5.5", status: "current", offered: true, tier: "deep",
-      prices: [price(NEW, 4.0, 20.0, 0.2, null)], source: OPENROUTER_CATALOG_URL,
+      prices: [price(NEW, 4.0, 20.0, 0.2, null)], source: OPENROUTER_CATALOG_URL, note: ALWAYS_THINKS,
     }),
     model({
       id: "anthropic/claude-fable-5.1", label: "Claude Fable 5.1", status: "current", offered: true,
-      prices: [price(NEW, 10.0, 50.0, 0.25, null)], source: OPENROUTER_CATALOG_URL,
+      prices: [price(NEW, 10.0, 50.0, 0.25, null)], source: OPENROUTER_CATALOG_URL, note: ALWAYS_THINKS,
     }),
     model({
       id: "google/gemini-3.8-flash", label: "Gemini 3.8 Flash", status: "current", offered: true,
@@ -445,11 +470,11 @@ const OPENROUTER: ProviderModels = {
     model({ id: "openai/gpt-6-luna", label: "GPT-6 Luna", status: "current", tools: false, source: OPENROUTER_CATALOG_URL, note: GPT6_NOT_OFFERED }),
     model({ id: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol", status: "current", tools: false, source: OPENROUTER_CATALOG_URL, note: GPT6_NOT_OFFERED }),
     model({ id: "openai/gpt-6-astra", label: "GPT-6 Astra", status: "current", tools: false, source: OPENROUTER_CATALOG_URL, note: GPT6_NOT_OFFERED }),
-    model({ id: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6", status: "legacy", replacement: "anthropic/claude-sonnet-5.5", source: OPENROUTER_CATALOG_URL }),
     model({ id: "anthropic/claude-opus-4.7", label: "Claude Opus 4.7", status: "legacy", replacement: "anthropic/claude-opus-5.5", source: OPENROUTER_CATALOG_URL }),
     model({
+      // The live catalog read again on 2026-10-08 evening (PR #555 review): $0.22 / $0.50, cache read $0.11.
       id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", status: "legacy", replacement: "meta-llama/llama-4-maverick",
-      prices: [price(NEW, 0.1, 0.32, null, null)], source: OPENROUTER_CATALOG_URL,
+      prices: [price(NEW, 0.22, 0.5, 0.11, null)], source: OPENROUTER_CATALOG_URL,
     }),
     model({
       id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", status: "deprecated", endsOn: "2026-10-20",
@@ -543,7 +568,7 @@ export function modelVerdict(provider: string, id: string, now: Date = new Date(
 /**
  * The first usable model down a replacement chain, on the same provider, or
  * null when the chain ends nowhere usable (a cycle, or an id this file does
- * not know). tests/ai-model-registry.test.ts proves every chain ends.
+ * not know). tests/model-registry.checks.ts proves every chain ends.
  */
 export function usableReplacement(provider: string, id: string, now: Date = new Date(), horizonDays = 0): RegistryModel | null {
   let current = modelInfo(provider, id);
@@ -646,17 +671,37 @@ export function endsWithin(provider: string, id: string, days: number, now: Date
 
 /**
  * Whether a save may store this model. A model that is gone, or ends within
- * REGISTRY_HORIZON_DAYS, may not: the sentence says why and what to pick. An id
- * this file does not know may be saved where the caller allows that (it is
- * shown as itself, with a note); `known` says whether it was known.
+ * REGISTRY_HORIZON_DAYS, may not: the sentence says why and what to pick. Nor
+ * may a model whose tool calls do not work through this app (OpenAI's GPT-6 on
+ * Chat Completions): it answers a key test, so nothing else would stop a
+ * direct request from saving it, and every tool-using chat on it would then
+ * fail (PR #555 review). The callers let a row keep a model it ALREADY holds
+ * through an edit that does not change it. An id this file does not know may
+ * be saved where the caller allows that (it is shown as itself, with a note);
+ * `known` says whether it was known.
  */
 export function saveCheck(provider: string, id: string, now: Date = new Date()): { ok: true; known: boolean } | { ok: false; message: string } {
   const ending = endsWithin(provider, id, REGISTRY_HORIZON_DAYS, now);
-  if (!ending) return { ok: true, known: modelInfo(provider, id) !== null };
+  if (!ending) {
+    const known = modelInfo(provider, id);
+    if (known && !known.tools && isRegistryProvider(provider)) {
+      const fallback = modelInfo(provider, defaultModelFor(provider));
+      const pick = fallback ? ` Pick ${fallback.label} or another listed model.` : " Pick another listed model.";
+      return { ok: false, message: `${limitedSentence(provider, known)}${pick}` };
+    }
+    return { ok: true, known: known !== null };
+  }
   const vendor = isRegistryProvider(provider) ? MODEL_REGISTRY[provider].vendor : "The provider";
   const next = usableReplacement(provider, ending.model.id, now);
   const pick = next ? ` Pick ${next.label} or another listed model.` : " Pick another listed model.";
   return { ok: false, message: `${goneClause(vendor, ending.model, ending.reason)}.${pick}` };
+}
+
+/** Why a listed model whose tool calls do not work through this app is not offered, as one sentence. */
+function limitedSentence(provider: RegistryProvider, m: RegistryModel): string {
+  return provider === "openrouter"
+    ? `${m.label} answers chats, but its tool calls through OpenRouter are not verified yet, so this app does not offer it.`
+    : `${m.label} answers chats, but its tool calls need ${MODEL_REGISTRY[provider].vendor}'s newer Responses API, which this app does not use yet.`;
 }
 
 /** "<Vendor> no longer offers <Model> to new accounts", without the full stop. */
@@ -725,15 +770,7 @@ export function modelNote(provider: string, id: string, opts: { audience: NoteAu
     return { kind: "ending", sentence: `${goneClause(vendor, v.model, "ending")}${tail}` };
   }
   if (v.model.offered) return null;
-  if (!v.model.tools) {
-    return {
-      kind: "limited",
-      sentence:
-        provider === "openrouter"
-          ? `${v.model.label} answers chats, but its tool calls through OpenRouter are not verified yet, so this app does not offer it.`
-          : `${v.model.label} answers chats, but its tool calls need ${vendor}'s newer Responses API, which this app does not use yet.`,
-    };
-  }
+  if (!v.model.tools) return { kind: "limited", sentence: limitedSentence(provider, v.model) };
   if (v.model.status === "current" || v.model.status === "preview") return null;
   if (v.model.status === "deprecated" && v.endsOn) {
     return { kind: "older", sentence: `${goneClause(vendor, v.model, "ending")}.${next ? ` ${next.label} is its replacement.` : ""}` };

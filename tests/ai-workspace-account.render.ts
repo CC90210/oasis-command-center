@@ -20,7 +20,7 @@ function stub(request: string, exports: Record<string, unknown>) {
 }
 
 type El = ReactElement<Record<string, unknown>>;
-type Frames<P> = ((props: P) => El) & { unmount: () => void };
+type Frames<P> = ((props: P) => El) & { unmount: () => void; discard: (props: P) => void };
 
 /**
  * A component called as a plain function, frame after frame, with its hook
@@ -28,7 +28,9 @@ type Frames<P> = ((props: P) => El) & { unmount: () => void };
  * knows useState, useRef and useLayoutEffect (run, with its dependencies
  * honoured, as soon as the frame is drawn, which is when React runs it: at
  * commit), so any other new hook fails loudly here. `unmount` runs the
- * effects' cleanups, as React does when the component goes away.
+ * effects' cleanups, as React does when the component goes away. `discard`
+ * draws a frame React then throws away (a concurrent render that never
+ * commits): its effects never run.
  */
 function framesOf<P>(component: (props: P) => unknown): Frames<P> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
@@ -66,17 +68,19 @@ function framesOf<P>(component: (props: P) => unknown): Frames<P> {
       });
     },
   };
-  const frames = (props: P) => {
+  const draw = (props: P): El => {
     cursor = 0;
     pending.length = 0;
     const previous = internals.H;
     internals.H = dispatcher;
-    let frame: El;
     try {
-      frame = component(props) as El;
+      return component(props) as El;
     } finally {
       internals.H = previous;
     }
+  };
+  const frames = (props: P) => {
+    const frame = draw(props);
     for (const run of pending.splice(0)) run();
     return frame;
   };
@@ -84,6 +88,10 @@ function framesOf<P>(component: (props: P) => unknown): Frames<P> {
     unmount: () => {
       for (const cleanup of cleanups.values()) cleanup();
       cleanups.clear();
+    },
+    discard: (props: P) => {
+      draw(props);
+      pending.length = 0;
     },
   });
 }
@@ -299,6 +307,18 @@ async function main() {
   overlay.disconnectedBeforeAnswer = connectedOn(d2(a0), "anthropic");
   const a1 = { ...base, connectedServices: new Set(["anthropic"]), personalServices: new Set<string>() };
   overlay.newerAnswerSaysConnected = connectedOn(d2(a1), "anthropic");
+  // A render React throws away (concurrent rendering) between the frame the
+  // owner clicked on and the click: the click is still tied to the answer the
+  // screen SHOWS, so the card flips. Writing the "latest answer" during render
+  // tied it to the thrown-away props, and the change vanished (PR #555 review).
+  const t3 = framesOf(ProviderAccountsCard) as unknown as Frames<Record<string, unknown>>;
+  const shown = { ...base, connectedServices: new Set<string>(), personalServices: new Set<string>() };
+  const openT3 = find(card(t3(shown), "anthropic"), "Anthropic's Connect button", (el) => el.type === "button" && typeof el.props.onClick === "function");
+  (openT3.props.onClick as () => void)();
+  const dialogT3 = find(t3(shown), "the connect dialog", (el) => typeof el.props.onConnected === "function");
+  t3.discard({ ...base, connectedServices: new Set(["openai_codex"]), personalServices: new Set<string>() });
+  (dialogT3.props.onConnected as (prov: string, scope: string) => void)("anthropic", "tenant");
+  overlay.afterDiscardedRender = connectedOn(t3(shown), "anthropic");
   out.overlay = JSON.stringify(overlay);
   // Closing the dialog draws the cards again from the server: a save whose
   // answer never came may have landed after all.

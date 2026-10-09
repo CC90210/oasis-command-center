@@ -112,7 +112,6 @@ export function ProviderAccountsCard({
   const keysKnown = initialServices !== null;
   const [changedHere, setChangedHere] = useState<Overlay>(() => ({ on: initialServices, changes: NO_CHANGES }));
   const latestServices = useRef(initialServices);
-  latestServices.current = initialServices;
   const services = laidOver(initialServices, changedHere);
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
   // The viewer's own keys (department chats never use them), with this page's
@@ -120,8 +119,15 @@ export function ProviderAccountsCard({
   // the next one.
   const [personalHere, setPersonalHere] = useState<Overlay>(() => ({ on: personalServices, changes: NO_CHANGES }));
   const latestPersonal = useRef(personalServices);
-  latestPersonal.current = personalServices;
   const personal = laidOver(personalServices, personalHere);
+  // The answers a click's change is made on: the ones the screen COMMITTED,
+  // written after the commit and never during render, so a render React
+  // throws away cannot leave a click tied to an answer nobody saw (the
+  // dialog's `drawn` ref does the same).
+  useLayoutEffect(() => {
+    latestServices.current = initialServices;
+    latestPersonal.current = personalServices;
+  });
   const change = (scope: "tenant" | "user", svc: string, now: boolean | null) => {
     const latest = scope === "user" ? latestPersonal.current : latestServices.current;
     const apply = (prev: Overlay): Overlay => {

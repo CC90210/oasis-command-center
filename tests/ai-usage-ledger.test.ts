@@ -953,10 +953,11 @@ async function main() {
     const bad = await probe.probeProvider("anthropic", "k", { meter: meter({ surface: "probe" }) });
     assert.equal(bad.ok, false);
     const r = await newRows(mark);
-    // The probe model is the registry's (Claude Haiku 5.5, bravo__204).
+    // The probe model is the registry's (Claude Sonnet 4.6, the default, bravo__192):
+    // it answers a one-token test without thinking first (PR #555 review).
     assert.deepEqual(r.map((x) => [x.surface, x.model, x.outcome, x.error_code, Number(x.cost_micro_usd)]), [
-      ["probe", "claude-haiku-5-5", "ok", null, 2], // 12 x $0.10 + 1 x $0.50 = 1.7, rounded
-      ["probe", "claude-haiku-5-5", "error", "http_401", 0],
+      ["probe", "claude-sonnet-4-6", "ok", null, 51], // 12 x $3 + 1 x $15
+      ["probe", "claude-sonnet-4-6", "error", "http_401", 0],
     ]);
     // An OpenAI probe with a cached prefix: prompt_tokens includes it, so the uncached input is 30.
     const cachedMark = await total();

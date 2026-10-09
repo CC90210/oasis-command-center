@@ -14,15 +14,22 @@
  * provider that is not itself ending soon (lib/ai/saved-model-moves.ts). The
  * key, the provider and everything else on the row stay as they are.
  *
- *   node --conditions=react-server --import tsx scripts/update-saved-models.ts                (dry run: what would change)
- *   node --conditions=react-server --import tsx scripts/update-saved-models.ts --apply        (Bravo only: move them)
- *   node --conditions=react-server --import tsx scripts/update-saved-models.ts --revert FILE  (exact undo of an --apply)
+ *   node --conditions=react-server --import tsx scripts/update-saved-models.ts                          (dry run: what would change, and its plan id)
+ *   node --conditions=react-server --import tsx scripts/update-saved-models.ts --apply --expect PLAN    (Bravo only: move exactly that plan)
+ *   node --conditions=react-server --import tsx scripts/update-saved-models.ts --revert FILE            (exact undo of an --apply)
  * Against the live database, through the BEA wrapper that hands it the two Turso keys:
- *   python scripts/integrations/occ_turso_run.py scripts/update-saved-models.ts [--apply | --revert FILE]
+ *   python scripts/integrations/occ_turso_run.py scripts/update-saved-models.ts [--apply --expect PLAN | --revert FILE]
  *
  * Options: --log FILE (where --apply writes its undo log; default: the OS temp
- * folder), --json (machine-readable output), --now ISO (judge the registry at
- * that instant: a rehearsal, or a test).
+ * folder), --json (machine-readable output), --now ISO (a dry run judged at
+ * that instant: a rehearsal; refused with --apply, which judges the registry
+ * now).
+ *
+ * WHAT IS REVIEWED IS WHAT MOVES (PR #555 review). The dry run prints a plan
+ * id (lib/ai/saved-model-moves.ts planId: which rows, from what, to what).
+ * --apply plans again and moves nothing unless that plan has the id passed in
+ * --expect: a row that entered the horizon, or changed, since the dry run is
+ * never moved unseen. Run the dry run again and review the new plan instead.
  *
  * SAFE TO RE-RUN. Each move is ONE guarded UPDATE: it changes the row only
  * while it still holds the old model (a row someone changed since it was read
@@ -35,7 +42,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadEnvConfig } from "@next/env";
-import { applyMoves, describePlan, planMoves, readSavedRows, revertMoves, type MoveLog } from "../lib/ai/saved-model-moves";
+import { applyMoves, describePlan, planId, planMoves, readSavedRows, revertMoves, type MoveLog } from "../lib/ai/saved-model-moves";
 
 // The hybrid data client falls back to the retired Supabase path unless this
 // is exactly turso_cloud. Pin it BEFORE any data module is imported.
@@ -56,6 +63,12 @@ function judgeTime(): Date {
 }
 
 async function main() {
+  const apply = process.argv.includes("--apply");
+  const expect = arg("--expect");
+  // Refused before anything is read: a move happens only on the real date, and
+  // only for the plan a dry run showed.
+  if (apply && arg("--now")) throw new Error("--now is for a dry run only: --apply judges the registry now. Nothing was changed.");
+  if (apply && !expect) throw new Error("--apply needs --expect <plan id> from the dry run you reviewed. Nothing was changed.");
   const { getTursoClient, tursoConfigured } = await import("../lib/turso");
   if (!tursoConfigured()) throw new Error("turso_not_configured: refusing to run without the Turso data client");
   const db = getTursoClient();
@@ -73,13 +86,23 @@ async function main() {
   }
 
   const plan = planMoves(await readSavedRows(db), judgeTime());
-  if (!process.argv.includes("--apply")) {
-    if (json) console.log(JSON.stringify({ mode: "dry_run", ...plan }));
+  const id = planId(plan);
+  if (!apply) {
+    if (json) console.log(JSON.stringify({ mode: "dry_run", planId: id, ...plan }));
     else {
       for (const line of describePlan(plan, "DRY RUN")) console.log(line);
-      console.log(plan.moves.length ? "Nothing was changed. Run again with --apply to move them." : "Nothing to move.");
+      console.log(
+        plan.moves.length
+          ? `Nothing was changed. To move exactly these: node --conditions=react-server --import tsx scripts/update-saved-models.ts --apply --expect ${id}`
+          : "Nothing to move.",
+      );
     }
     return;
+  }
+  if (id !== expect) {
+    throw new Error(
+      `The rows to move changed since the dry run (it showed plan ${expect}; now it is ${id}). Nothing was changed. Run the dry run again and review it.`,
+    );
   }
 
   const log = await applyMoves(db, plan);
@@ -91,7 +114,7 @@ async function main() {
     console.error(`could not write the undo log to ${logFile}: ${err instanceof Error ? err.message : String(err)}`);
     console.log(JSON.stringify(log));
   }
-  if (json) console.log(JSON.stringify({ mode: "apply", logFile, ...log, stuck: plan.stuck, unknown: plan.unknown }));
+  if (json) console.log(JSON.stringify({ mode: "apply", planId: id, logFile, ...log, stuck: plan.stuck, unknown: plan.unknown }));
   else {
     for (const line of describePlan(plan, "APPLY")) console.log(line);
     for (const e of log.entries) console.log(`${e.applied ? "moved" : "left alone (changed since it was read)"}: ${e.id}`);

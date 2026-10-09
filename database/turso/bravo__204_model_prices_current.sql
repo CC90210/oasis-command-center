@@ -12,13 +12,21 @@
 --
 -- WHAT. ADDITIVE ONLY: INSERT OR IGNORE of new (provider, model,
 -- effective_from, input_tokens_above) rows. No row bravo__192 wrote is
--- touched, and re-running this file never rewrites a price. The code works
--- before and after it runs: before, these models record cost NULL, as today.
+-- touched, and re-running this file never rewrites a price (a wrong row is
+-- corrected by a NEW dated row, never by re-running this one).
+--
+-- ORDER: APPLY THIS BEFORE, OR WITH, THE CODE THAT OFFERS THESE MODELS. Safe
+-- to run first: nothing reads these rows until a call names one of the models.
+-- Without them, a call on one of these models records cost NULL in a
+-- workspace with no monthly AI budget (as today), but a workspace WITH a
+-- budget is refused that call (ai_budget_unpriced_model), because its worst
+-- case cannot be reserved (PR #555 review).
 --
 -- SOURCES. Every number was read on 2026-10-08 from the page in its
 -- source_url (the research behind lib/ai/model-registry.ts quotes each one);
--- tests/ai-model-registry.test.ts pins every row equal to the registry's
--- `prices`, and checks that every model the pickers offer has one.
+-- tests/model-registry.checks.ts (run by tests/ai-usage-ledger.test.ts) pins
+-- every row equal to the registry's `prices`, and checks that every model the
+-- pickers offer has one.
 --   Anthropic  https://platform.claude.com/docs/en/about-claude/pricing
 --              (global routing; cache_write is the 5-minute write, 1.25x input;
 --              Claude Haiku 5.5 costs more for prompts above 100K tokens)
@@ -95,6 +103,8 @@ INSERT OR IGNORE INTO model_prices
   (provider, model, effective_from, input_tokens_above, input_micro_usd_per_mtok, output_micro_usd_per_mtok,
    cache_read_micro_usd_per_mtok, cache_write_micro_usd_per_mtok, source_url, source_fetched_on)
 VALUES
+  ('openrouter', 'anthropic/claude-sonnet-4.6',       '2026-10-08T00:00:00.000Z', 0,  3000000, 15000000, 300000, NULL,
+   'https://openrouter.ai/api/v1/models', '2026-10-08'),
   ('openrouter', 'anthropic/claude-sonnet-5.5',       '2026-10-08T00:00:00.000Z', 0,  2000000, 10000000, 100000, NULL,
    'https://openrouter.ai/api/v1/models', '2026-10-08'),
   ('openrouter', 'anthropic/claude-haiku-5.5',        '2026-10-08T00:00:00.000Z', 0,   100000,   500000,  10000, NULL,
@@ -115,5 +125,5 @@ VALUES
    'https://openrouter.ai/api/v1/models', '2026-10-08'),
   ('openrouter', 'meta-llama/llama-4-maverick',       '2026-10-08T00:00:00.000Z', 0,   187500,   652500,  50000, NULL,
    'https://openrouter.ai/api/v1/models', '2026-10-08'),
-  ('openrouter', 'meta-llama/llama-3.3-70b-instruct', '2026-10-08T00:00:00.000Z', 0,   100000,   320000,   NULL, NULL,
+  ('openrouter', 'meta-llama/llama-3.3-70b-instruct', '2026-10-08T00:00:00.000Z', 0,   220000,   500000, 110000, NULL,
    'https://openrouter.ai/api/v1/models', '2026-10-08');
