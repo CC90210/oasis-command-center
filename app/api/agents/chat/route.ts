@@ -56,6 +56,8 @@
  * Response: text/event-stream SSE
  *   event: agent       data: { display_name, agent_slug | department, model? }
  *                      (model only for the verified operator)
+ *                      (+ tools: { on, labels, note } on a department turn, lib/os/desk/turn.ts)
+ *   event: tool        data: { phase, label, ok }   (a department lookup, by its plain label)
  *   event: delta       data: { text }
  *   event: usage       data: { input_tokens, output_tokens }
  *   event: done        data: {}
@@ -81,6 +83,8 @@ import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
+import { groundDepartmentTurn } from "@/lib/os/desk/turn";
+import { resolveOsViewer } from "@/components/os/department/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -257,6 +261,19 @@ export async function POST(req: NextRequest) {
   }
   const t = prepared.turn;
   const turn = { ...ctx, tenantId, agentSlug: t.agentSlug, channelKey: t.channelKey };
+  // A department turn knows its business (lib/os/desk/turn.ts): the page's
+  // numbers, Needs you and connections in its prompt, and its palette of
+  // lookups where the provider can call tools. The viewer is the session's,
+  // and must be this same workspace, or the turn carries no workspace data.
+  const desk = t.department
+    ? await groundDepartmentTurn({
+        turn: t,
+        viewer: await resolveOsViewer(),
+        chatMode: body.chat_mode,
+        maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
+        plainStream: (dt, messages, maxTokens) => streamAgentTurn({ ...t, system: dt.system }, messages, maxTokens),
+      })
+    : null;
 
   const encoder = new TextEncoder();
 
@@ -271,6 +288,7 @@ export async function POST(req: NextRequest) {
         display_name: t.displayName,
         ...(t.department ? { department: t.department.key } : { agent_slug: t.agentSlug }),
         ...(t.revealModel ? { model: t.model } : {}),
+        ...(desk ? { tools: desk.tools } : {}),
       });
 
       // One code per failed turn. The client gets the code and one plain
@@ -295,13 +313,19 @@ export async function POST(req: NextRequest) {
         send("error", { code, message: failureCopy(code, { canManageAi: false, model }).sentence, ...(model ? { model } : {}) });
       };
       try {
-        for await (const ev of streamAgentTurn(t, incoming, DEPARTMENT_REPLY_MAX_TOKENS)) {
+        for await (const ev of desk ? desk.stream(incoming) : streamAgentTurn(t, incoming, DEPARTMENT_REPLY_MAX_TOKENS)) {
           if (ev.type === "delta") {
             send("delta", { text: ev.text });
           } else if (ev.type === "done") {
-            send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+            // A tool turn with a step that reported no usage has no known total.
+            if (!("usageKnown" in ev) || ev.usageKnown !== false) {
+              send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+            }
           } else if (ev.type === "error") {
             fail(classifyStreamError(ev.message), ev.message);
+          } else if (ev.type === "tool") {
+            // A lookup's plain label only (lib/os/desk/catalog.ts), never its input or result.
+            send("tool", { phase: ev.phase, label: ev.label, ok: ev.ok });
           }
         }
       } catch (err) {

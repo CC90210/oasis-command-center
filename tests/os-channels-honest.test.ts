@@ -165,7 +165,12 @@ const anthropicCredit = () => new Response(ANTHROPIC_CREDIT, { status: 400, head
 function anthropicOk(text: string) {
   const frames = [
     ["message_start", { message: { usage: { input_tokens: 12 } } }],
-    ["content_block_delta", { delta: { type: "text_delta", text } }],
+    // Anthropic opens every block before its deltas, with its index: a
+    // department turn reads the stream through the tool loop, which keys
+    // blocks by index (lib/os/desk/turn.ts).
+    ["content_block_start", { index: 0, content_block: { type: "text", text: "" } }],
+    ["content_block_delta", { index: 0, delta: { type: "text_delta", text } }],
+    ["content_block_stop", { index: 0 }],
     ["message_delta", { usage: { output_tokens: 3 } }],
     ["message_stop", {}],
   ]
