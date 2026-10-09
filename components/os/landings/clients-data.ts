@@ -14,7 +14,9 @@
  *   projects, tickets  lib/delivery/access.ts: a founder standing in OASIS.
  *                      A client workspace's delivery rows are OASIS's work FOR
  *                      that workspace — OASIS is their vendor, not their
- *                      customer — so they are not this list's rows.
+ *                      customer — so they are not this list's rows. Those
+ *                      naming a retired business are read, then dropped by
+ *                      the model (clients-model.ts buildClientRows).
  *
  * Every source reports ok / not_allowed / error separately, so the page can say
  * "you can't see this" and "this failed" in different words, and neither is a 0.

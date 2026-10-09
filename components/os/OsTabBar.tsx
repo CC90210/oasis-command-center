@@ -105,6 +105,8 @@ export function OsTabBar({
   onSelect?: (key: string, href: string) => void;
 }) {
   const query = useSearchParams();
+  // get() reads the first of a repeated param, the value the server renders
+  // (clients-records-data.ts firstParam).
   const current = param !== undefined ? tabFromParam(query.get(param), tabs) : (active ?? tabFromParam(null, tabs));
   const [clicked, setClicked] = useState<OsTabClick | null>(null);
   // The page moved on from where the click was made: that click is answered.

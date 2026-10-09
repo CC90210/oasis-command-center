@@ -126,6 +126,18 @@ function findAll(node: unknown, type: unknown, out: Array<{ props: Record<string
 
 type Tab = { key: string; label: string; href: string; count?: number };
 
+/**
+ * The "use client" modules the Clients pages' server files import or re-export
+ * directly (read 2026-10-08; all three were boundaries on main before the tabs
+ * work). Each is listed in every route's manifest of the Worker; a new one
+ * fails the check that computes this set.
+ */
+const CLIENTS_BOUNDARIES: string[] = [
+  "components/delivery/TicketForms.tsx",
+  "components/os/landings/client-conversations.tsx",
+  "components/os/landings/clients-actions.tsx",
+];
+
 async function main() {
   console.log("clients-tabs:");
   const bar = await import("../components/os/OsTabBar");
@@ -214,6 +226,19 @@ async function main() {
     for (const v of ["usage", "money", "tickets", "health", "", null, "x"]) {
       assert.equal(bar.tabFromParam(v, clientTabs), records.resolveClientTab(v, clientTabs), String(v));
     }
+  });
+  await check("a repeated param is its first value on the server, the value the browser's tab bar reads (?tab=a&tab=b)", () => {
+    const clientTabs = records.clientTabsFor({ tenantId: CLIENT_A, oasis: false });
+    assert.equal(records.firstParam(["tickets", "money"]), "tickets");
+    assert.equal(records.firstParam("tickets"), "tickets");
+    assert.equal(records.firstParam([]), undefined);
+    assert.equal(records.firstParam(undefined), undefined);
+    for (const query of ["tab=tickets&tab=health", "tab=health&tab=tickets", "tab=money&tab=tickets", "tab=x&tab=tickets"]) {
+      const sp = new URLSearchParams(query);
+      // Next hands the page every value (getAll); the browser's bar reads the first (get).
+      assert.equal(records.resolveClientTab(sp.getAll("tab"), clientTabs), bar.tabFromParam(sp.get("tab"), clientTabs), query);
+    }
+    assert.equal(records.resolveClientTab(["tickets", "health"], clientTabs), "tickets");
   });
 
   // -- 2 and 3. The pages, against a real database ------------------------------
@@ -314,15 +339,47 @@ async function main() {
     }));
     await db.batch(bulk, "write");
     try {
-      const { tree, props } = await listView({ lifecycle: "active" });
+      // lib/perf/server-timing.ts logs each statement's SQL text (never its
+      // values) when PERF_DB_VERBOSE=1: which reads this render made.
+      const sql: string[] = [];
+      const realLog = console.log;
+      process.env.PERF_DB_VERBOSE = "1";
+      console.log = (...a: unknown[]) => {
+        const line = a.map(String).join(" ");
+        if (line.startsWith("[perf.db] ")) sql.push((JSON.parse(line.slice("[perf.db] ".length)) as { sql: string }).sql);
+      };
+      let view: Awaited<ReturnType<typeof listView>>;
+      try {
+        view = await listView({ lifecycle: "active" });
+      } finally {
+        console.log = realLog;
+        delete process.env.PERF_DB_VERBOSE;
+      }
+      const { tree, props } = view;
       assert.equal(props.fromServer, true, "a cut list cannot be filtered from the rows at hand");
       assert.deepEqual([...new Set(props.lifecycles)], ["active"], "the server read the Active records");
       assert.equal(props.lifecycles.length, 2);
       assert.ok(props.tabs.every((t) => t.count === undefined), "no count from a cut list: it would be a floor");
       assert.equal(findAll(tree, KpiTile).length, 0, "no KPI row from a cut list");
+      // The health signals are read for the 2 rows shown, never for the 500 the
+      // page drops (the desk's breach count, as its SQL text starts).
+      const signalReads = sql.filter((s) => /^SELECT customer_id, COUNT\(\*\) AS n FROM support_tickets/.test(s));
+      assert.ok(signalReads.length > 0, `control: the desk signals were read, in ${sql.length} statements`);
+      const marks = signalReads.map((s) => (/customer_id IN \(([^)]*)\)/.exec(s)?.[1].match(/\?/g) ?? []).length);
+      assert.deepEqual(marks, [2], `signals were read for more rows than the page shows: ${JSON.stringify(marks)}`);
     } finally {
       await db.execute("DELETE FROM customers WHERE id LIKE 'bulk-tabs-%'");
     }
+  });
+  await check("/clients and a record given a repeated param read its first value, as the tab bars do; a repeated search no longer breaks the page", async () => {
+    // Next hands a repeated param to the page as an array; `.trim()` on it threw.
+    const { props } = await listView({ lifecycle: ["active", "paused"], q: ["Active", "Zed"] } as never);
+    assert.deepEqual(countsOf(props.tabs), { "": 2, prospect: 0, onboarding: 0, active: 2, paused: 0, churned: 0 }, "the search is its first value");
+    assert.equal(props.tabs.find((t) => t.key === "active")?.href, "/clients?lifecycle=active&q=Active");
+    const body = textOf(
+      await ClientRecordPage({ params: Promise.resolve({ id: alma.id }), searchParams: Promise.resolve({ tab: ["tickets", "money"] }) as never }),
+    ).join("\n");
+    assert.match(body, /No tickets from this client/, "?tab=tickets&tab=money opens Tickets, the tab the bar underlines");
   });
 
   const record = async (id: string, tab?: string) => {
@@ -453,6 +510,50 @@ async function main() {
       /export \{ ClearClientFilters, ClientRecordTabs, ClientStatusField, ClientsByStatus \} from "@\/components\/os\/landings\/clients-status";/,
     );
   });
+  await check("the Clients pages' server code imports exactly the client boundaries it has had: a new one fails here (each new boundary module costs ~147 KiB of Worker upload)", () => {
+    // The check above names two files; this one computes the whole set. Every
+    // server file of the Clients pages (app/clients and the clients-/client-
+    // modules beside the landings), every runtime import or re-export it
+    // makes, resolved to a file: the "use client" ones are the boundaries this
+    // code adds to every route's manifest. A module that is new here goes
+    // through clients-actions.tsx (the Clients pages' one boundary), or, if it
+    // is already a boundary elsewhere in the app (no new cost), is added below
+    // on purpose.
+    const isClient = (rel: string) => /^\s*["']use client["'];/.test(code(rel));
+    const resolveSpec = (from: string, spec: string): string | null => {
+      const base = spec.startsWith("@/") ? join(root, spec.slice(2)) : spec.startsWith(".") ? join(root, dirname(from), spec) : null;
+      if (!base) return null; // a package: not this app's code
+      for (const ext of ["", ".ts", ".tsx", "/index.ts", "/index.tsx"]) {
+        const p = base + ext;
+        if (existsSync(p) && statSync(p).isFile()) return relative(root, p).split(sep).join("/");
+      }
+      throw new Error(`${from}: cannot resolve ${spec}`);
+    };
+    /** Runtime imports and re-exports: `import type`, `export type` and all-type braces are erased, so they are not boundaries. */
+    const runtimeSpecs = (src: string): string[] => {
+      const out: string[] = [];
+      for (const m of src.matchAll(/(?:^|\n)[ \t]*(?:import|export)\s+(type\s+)?([^;]*?)\s*from\s*["']([^"']+)["']/g)) {
+        if (m[1]) continue;
+        const braces = /^\{([^}]*)\}$/.exec(m[2].trim());
+        if (braces && braces[1].split(",").map((s) => s.trim()).filter(Boolean).every((s) => /^type\s/.test(s))) continue;
+        out.push(m[3]);
+      }
+      return out;
+    };
+    const serverFiles = [
+      ...walk(join(root, "app", "clients")),
+      ...walk(join(root, "components", "os", "landings")).filter((f) => /\/clients?-[^/]+$/.test(f)),
+    ].filter((f) => !isClient(f));
+    assert.ok(serverFiles.includes("app/clients/page.tsx") && serverFiles.includes("components/os/landings/clients-records-data.ts"), "control: the pages' server files are read");
+    const boundaries = new Map<string, string[]>();
+    for (const f of serverFiles) {
+      for (const spec of runtimeSpecs(stripped(f))) {
+        const target = resolveSpec(f, spec);
+        if (target && isClient(target)) boundaries.set(target, [...(boundaries.get(target) ?? []), f]);
+      }
+    }
+    assert.deepEqual([...boundaries.keys()].sort(), CLIENTS_BOUNDARIES, `the boundaries and who imports them: ${JSON.stringify(Object.fromEntries(boundaries))}`);
+  });
   await check("both Clients pages have a loading boundary that paints at once", () => {
     for (const [f, variant] of [["app/clients/loading.tsx", "page"], ["app/clients/[id]/loading.tsx", "section"]] as const) {
       assert.ok(existsSync(join(root, f)), `${f} is missing`);
@@ -509,6 +610,23 @@ async function main() {
     assert.deepEqual(current(html("listAfterClick")), ["/clients?lifecycle=churned"]);
     assert.match(html("listAfterClick"), /Bravo Past/);
     assert.doesNotMatch(html("listAfterClick"), /Alpha Active|Charlie Prospect|Delta Active/);
+
+    // Mounted (its state kept from render to render): the click's own render
+    // already shows Past, while the address bar still says Active.
+    assert.equal(r.mountedSlots, 2, "the mount kept the list's view and the bar's click: the simulation engaged");
+    assert.deepEqual(current(html("mountedStart")), ["/clients?lifecycle=active"]);
+    assert.match(html("mountedStart"), /Alpha Active[\s\S]*Delta Active/);
+    assert.deepEqual(r.mountedClick, { cancelled: true, href: "/clients?lifecycle=churned" });
+    assert.deepEqual(r.mountedHistory, ["/clients?lifecycle=churned"], "the click writes the address bar");
+    assert.deepEqual(r.mountedRouter, [], "and asks the server nothing");
+    assert.deepEqual(current(html("mountedBeforeUrl")), ["/clients?lifecycle=churned"], "the click's own render underlines Past");
+    assert.match(html("mountedBeforeUrl"), /Bravo Past/, "the click's own render shows Past's rows");
+    assert.doesNotMatch(html("mountedBeforeUrl"), /Alpha Active|Delta Active/, "the click's own render still shows the tab it left");
+    assert.match(html("mountedUrlLanded"), /Bravo Past/, "nothing moves when the address bar catches up");
+    assert.doesNotMatch(html("mountedUrlLanded"), /Alpha Active|Delta Active/);
+    assert.deepEqual(current(html("mountedBack")), ["/clients?lifecycle=active"], "Back is followed");
+    assert.match(html("mountedBack"), /Alpha Active[\s\S]*Delta Active/);
+    assert.doesNotMatch(html("mountedBack"), /Bravo Past/);
 
     // A list cut at its page size: the server's rows, and the tabs navigate (warmed on hover).
     assert.match(html("server"), /Charlie Prospect/);

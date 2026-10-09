@@ -316,9 +316,22 @@ async function main() {
     assert.match(t, /the client's reply goes to support@oasisai\.work/);
     assert.doesNotMatch(t, /mailto:/, "the record writes from the app, not a mailto link");
   });
+  // A tab click renders the PAGE alone; a first load runs page and layout side
+  // by side. Each must refuse on its own: rendered together, the layout's own
+  // 404 would hide a page that leaked.
+  const pageAlone = (id: string, tab?: string) =>
+    ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+  const layoutAlone = (id: string) => ClientRecordLayout({ params: Promise.resolve({ id }), children: null as never });
+  const EVERY_TAB = [undefined, "conversations", "tickets", "projects", "money", "usage", "activity", "health", "files"] as const;
+  await check("control: OASIS's founder gets X's page alone on every tab, and its layout alone", async () => {
+    for (const tab of EVERY_TAB) await assert.doesNotReject(pageAlone(X.id, tab), `page ${tab ?? "overview"}`);
+    assert.match(await page(layoutAlone(X.id)), /Breeze Test Co/);
+  });
   await login(USERS.clientA);
-  await check("another workspace's client record is a 404, before anything of it is read", async () => {
-    assert.equal(await is404(record(X.id, "conversations")), true);
+  await check("another workspace's client record is a 404 from the page alone on every tab and from the layout alone, before anything of it is read", async () => {
+    for (const tab of EVERY_TAB) assert.equal(await is404(pageAlone(X.id, tab)), true, `page ${tab ?? "overview"}`);
+    assert.equal(await is404(layoutAlone(X.id)), true, "layout");
+    assert.equal(await is404(record(X.id, "conversations")), true, "and together");
   });
 
   // ── The composer ───────────────────────────────────────────────────────────
@@ -1398,6 +1411,11 @@ async function main() {
       // The list's retired-business guard reads client_tenant_id; without the
       // column no record can name a workspace, and the list still reads.
       assert.ok((await store.listCustomers(db, OASIS, {})).rows.some((r) => r.display_name === "Quiet Co"), "the list reads without bravo__195");
+      // So do the pickers, the matchers and the desk's validator, through the same guard.
+      assert.ok((await store.listCustomerOptions(db, OASIS)).some((o) => o.value === Y.id), "the Client picker reads without bravo__195");
+      assert.equal(await store.matchCustomerByEmail(db, OASIS, "y@other.test"), Y.id, "the intake match reads without bravo__195");
+      assert.equal(await store.isCustomerEmail(db, OASIS, "y@other.test"), true);
+      assert.equal(await deliveryStore.deskCustomerExists(db, OASIS, Y.id), true);
       const list = await page(ClientsPage({ searchParams: Promise.resolve({}) }));
       assert.doesNotMatch(list, /Couldn.t load your client records/);
       assert.match(list, /Quiet Co/);
@@ -1411,6 +1429,29 @@ async function main() {
     } finally {
       await db.execute("ALTER TABLE customers RENAME COLUMN client_tenant_id_unapplied TO client_tenant_id");
     }
+  });
+
+  // A record linked to a retired business's workspace is not a client
+  // anywhere (lib/os/customers/retired.ts): no list shows it, Include archived
+  // included, and opening it is a 404, so no tab ever reads the retired
+  // workspace (Usage included). The same record linked to a live client's
+  // workspace is the control.
+  await check("a record linked to a retired business's workspace: the page alone on every tab and the layout alone are a 404, and no list shows it", async () => {
+    await login(USERS.cc);
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    const made = await store.createCustomer(db, OASIS, { ...base, display_name: "Retired Link Co", primary_email: "ops@retired-link.test" }, USERS.cc.id, T0);
+    assert.ok(made.ok, JSON.stringify(made));
+    const R = made.customer;
+    await db.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [SUNBIZ, R.id] });
+    for (const tab of EVERY_TAB) assert.equal(await is404(pageAlone(R.id, tab)), true, `page ${tab ?? "overview"}`);
+    assert.equal(await is404(layoutAlone(R.id)), true, "layout");
+    for (const sp of [{}, { archived: "1" }]) {
+      assert.doesNotMatch(await page(ClientsPage({ searchParams: Promise.resolve(sp) })), /Retired Link Co/, `the list ${JSON.stringify(sp)} shows it`);
+    }
+    // Control: linked to a live client's workspace, the same record opens on Usage and is listed.
+    await db.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [CLIENT_B, R.id] });
+    assert.match(await page(record(R.id, "usage")), /Retired Link Co/);
+    assert.match(await page(ClientsPage({ searchParams: Promise.resolve({}) })), /Retired Link Co/);
   });
 
   finish("clients-hub");

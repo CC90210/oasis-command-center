@@ -24,10 +24,11 @@
  * total: it renders as "N+" (shownCount), never as the number alone. Which
  * counts a capped list turns into floors is decided here, in `floors`.
  *
- * A deal about a retired business (its data.client_tenant_id is a retired
- * tenant, lib/os/customers/retired.ts) is never a client here, whatever its
- * stage: SunBiz was retired on 2026-09-28 and must not come back through a
- * "Convert to client" button.
+ * A deal, project or ticket about a retired business (its client_tenant_id is
+ * a retired tenant, lib/os/customers/retired.ts) is never a client here,
+ * whatever its stage: SunBiz was retired on 2026-09-28 and must not come back
+ * through a "Convert to client" button, a project row or a ticket count. Such a
+ * ticket is not "unlinked" either: it names a business, just not a client.
  */
 import { isRetiredClientRef } from "@/lib/os/customers/retired";
 
@@ -214,7 +215,13 @@ export function buildClientRows(input: {
     byName.set(norm(name), acc);
   }
 
+  // A retired business's projects, so a ticket on one is dropped with it.
+  const retiredProjects = new Set<string>();
   for (const p of input.projects ?? []) {
+    if (isRetiredClientRef(p)) {
+      retiredProjects.add(p.id);
+      continue;
+    }
     const typedName = p.client_tenant_name || p.client_name;
     let acc: Acc | undefined =
       (p.lead_id ? byLead.get(p.lead_id) : undefined) ??
@@ -245,6 +252,7 @@ export function buildClientRows(input: {
 
   let unlinked = 0;
   for (const t of input.tickets ?? []) {
+    if (isRetiredClientRef(t) || (t.project_id !== null && retiredProjects.has(t.project_id))) continue;
     const acc: Acc | undefined =
       (t.project_id ? byProject.get(t.project_id) : undefined) ??
       (t.client_tenant_id ? byTenant.get(t.client_tenant_id) : undefined) ??

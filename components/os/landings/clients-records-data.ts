@@ -20,7 +20,8 @@
  *   Money          lib/os/customers/money.ts: OASIS's books, OASIS's own
  *                  records only, for the founders who may open Money.
  *   Usage          lib/os/customers/usage.ts: the client's own workspace,
- *                  once the operator has linked it.
+ *                  once the operator has linked it. Never a retired
+ *                  business's: a record linked to one is a 404 (clientOrNull).
  *   Activity       lib/os/customers/activity.ts: ledger facts and the source
  *                  deal's interactions (labelled inferred).
  *   Health         lib/os/customers/health.ts, computed on read; its badge is
@@ -47,6 +48,8 @@ import {
   type CustomerListRow,
   type LeadFile,
 } from "@/lib/os/customers/store";
+import { isRetiredClientRef } from "@/lib/os/customers/retired";
+import type { CustomerLifecycle } from "@/lib/os/customers/rules";
 import { lastTouchFor, loadClientActivity, type ActivityEntry } from "@/lib/os/customers/activity";
 import { clientAddresses, loadClientConversation, type ClientAddresses, type ClientConversation } from "@/lib/os/customers/conversations";
 import { loadClientMoney, type ClientMoney } from "@/lib/os/customers/money";
@@ -121,15 +124,28 @@ export type ListedClient = CustomerListRow & {
 /**
  * The workspace's clients, with desk counts only for a viewer who may read the
  * desk, each with its last touch and its health.
+ *
+ * `cut` says the read stopped at its page size (500). A cut list cannot be
+ * filtered by status in the browser, so with `statusWhenCut` the status is
+ * read here instead, and the signals (last touch, desk, money) are read for
+ * the rows that will be shown only, never for 500 rows the page drops.
  */
 export async function loadCustomerRecords(
   viewer: ClientsViewer,
   filters: CustomerFilters,
   now: Date = new Date(),
-): Promise<Loaded<{ rows: ListedClient[]; truncated: boolean; money: MoneyAccess }>> {
+  opts: { statusWhenCut?: CustomerLifecycle | null } = {},
+): Promise<Loaded<{ rows: ListedClient[]; truncated: boolean; cut: boolean; money: MoneyAccess }>> {
   if (!viewer.canRead) return { state: "not_allowed" };
-  const listed = await attempt("customers", () => listCustomers(dbOrThrow(), viewer.tenantId, filters, { withDelivery: viewer.desk !== null }));
+  const read = (f: CustomerFilters) =>
+    attempt("customers", () => listCustomers(dbOrThrow(), viewer.tenantId, f, { withDelivery: viewer.desk !== null }));
+  let listed = await read(filters);
   if (listed.state !== "ok") return listed;
+  const cut = listed.value.truncated;
+  if (cut && opts.statusWhenCut) {
+    listed = await read({ ...filters, lifecycle: opts.statusWhenCut });
+    if (listed.state !== "ok") return listed;
+  }
   const db = dbOrThrow();
   const { rows, truncated } = listed.value;
   const money = await moneyAccessFor(viewer);
@@ -142,6 +158,7 @@ export async function loadCustomerRecords(
     state: "ok",
     value: {
       truncated,
+      cut,
       money,
       rows: rows.map((r) => {
         const lastTouch = touch.state === "ok" ? touch.value.get(r.id) ?? null : undefined;
@@ -244,12 +261,25 @@ export function clientTabsFor(viewer: Pick<ClientsViewer, "tenantId" | "oasis">)
 }
 
 /**
- * The tab a ?tab= value opens: one of `tabs`, else Overview, the first (a
- * ?tab=money link in a client workspace included). The tab bar applies the
- * same rule in the browser (components/os/OsTabBar.tsx tabFromParam). PURE.
+ * A search param as ONE value. Next hands the page a repeated param
+ * (?tab=a&tab=b) as an array, while the browser's URLSearchParams.get reads
+ * the first; the server takes the first too, so the page and the tab bar never
+ * disagree, and a repeated text filter is a string, never an array. PURE.
  */
-export function resolveClientTab(param: string | null | undefined, tabs: ReadonlyArray<{ key: ClientTab }>): ClientTab {
-  return tabs.find((t) => t.key === param)?.key ?? "overview";
+export function firstParam(value: string | readonly string[] | null | undefined): string | undefined {
+  const v = Array.isArray(value) ? value[0] : value;
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * The tab a ?tab= value opens: one of `tabs`, else Overview, the first (a
+ * ?tab=money link in a client workspace included). A repeated ?tab= is its
+ * first value. The tab bar applies the same rule in the browser
+ * (components/os/OsTabBar.tsx tabFromParam). PURE.
+ */
+export function resolveClientTab(param: string | readonly string[] | null | undefined, tabs: ReadonlyArray<{ key: ClientTab }>): ClientTab {
+  const value = firstParam(param);
+  return tabs.find((t) => t.key === value)?.key ?? "overview";
 }
 
 /** A read that only the workspace's desk team (owners and admins) may make; anyone else gets not_allowed. */
@@ -294,6 +324,17 @@ async function healthOf(
   };
 }
 
+/**
+ * The record a page opens, or null when it is not a client of THIS workspace:
+ * another workspace's record (the store matches tenant_id AND id), and one
+ * linked to a retired business's workspace (lib/os/customers/retired.ts), so
+ * no tab ever reads a retired workspace. The header and the open tab each read
+ * it, because a tab switch renders the tab alone.
+ */
+function clientOrNull(customer: Customer | null): Customer | null {
+  return customer && !isRetiredClientRef(customer) ? customer : null;
+}
+
 /** What the record's header shows on every tab: the record, the projects its New ticket form links, its health. */
 export type ClientHeaderData = {
   customer: Customer;
@@ -305,7 +346,7 @@ export type ClientHeaderData = {
  * The record's header (app/clients/[id]/layout.tsx), read once per record
  * rather than once per tab: a layout is not rendered again when only ?tab=
  * changes, so a tab switch reads only the tab below it (loadClientRecord).
- * Null when the id is not a client of THIS workspace.
+ * Null when the id is not a client of THIS workspace (clientOrNull).
  */
 export async function loadClientHeader(
   viewer: ClientsViewer,
@@ -314,7 +355,7 @@ export async function loadClientHeader(
 ): Promise<Loaded<ClientHeaderData | null>> {
   if (!viewer.canRead) return { state: "not_allowed" };
   const now = opts.now ?? new Date();
-  const head = await attempt("record", async () => getCustomer(dbOrThrow(), viewer.tenantId, id));
+  const head = await attempt("record", async () => clientOrNull(await getCustomer(dbOrThrow(), viewer.tenantId, id)));
   if (head.state !== "ok") return head;
   const customer = head.value;
   if (!customer) return { state: "ok", value: null };
@@ -360,11 +401,11 @@ export type ClientRecordData = {
 };
 
 /**
- * One client of THIS workspace, or null when the id is not one (another
- * workspace's client included: the store matches tenant_id AND id). Only what
- * the open tab shows is read: the header (name, badge, the New ticket form's
- * projects) is app/clients/[id]/layout.tsx's (loadClientHeader), which a tab
- * switch does not render again.
+ * One client of THIS workspace, or null when the id is not one (clientOrNull:
+ * another workspace's client, or a record linked to a retired business). Only
+ * what the open tab shows is read: the header (name, badge, the New ticket
+ * form's projects) is app/clients/[id]/layout.tsx's (loadClientHeader), which
+ * a tab switch does not render again.
  */
 export async function loadClientRecord(
   viewer: ClientsViewer,
@@ -374,10 +415,7 @@ export async function loadClientRecord(
 ): Promise<Loaded<ClientRecordData | null>> {
   if (!viewer.canRead) return { state: "not_allowed" };
   const now = opts.now ?? new Date();
-  const head = await attempt("record", async () => {
-    const db = dbOrThrow();
-    return getCustomer(db, viewer.tenantId, id);
-  });
+  const head = await attempt("record", async () => clientOrNull(await getCustomer(dbOrThrow(), viewer.tenantId, id)));
   if (head.state !== "ok") return head;
   const customer = head.value;
   if (!customer) return { state: "ok", value: null };

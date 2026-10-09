@@ -150,6 +150,46 @@ async function main() {
   // What the list shows once the address bar holds what the click wrote.
   out.listAfterClick = render(list(), new URL(historyCalls[0] ?? "/clients", "http://x").search.slice(1));
 
+  // -- A mounted list: a click's rows show BEFORE the address bar moves -------
+  // There is no DOM here, so the list is kept mounted the way React keeps a
+  // component: its useState slots, by call order, carried from one render to
+  // the next. Render on Active; click Past; render again with the address bar
+  // NOT yet written (Next applies the click's replaceState a moment after the
+  // click's own render); then with it written; then Back to Active from
+  // outside. A list that read only the address bar would still show Active
+  // rows in the click's own render.
+  // The module object every component's `useState` is read from (loaded above).
+  const reactCjs = require.cache[require.resolve("react")]!.exports as { useState: unknown };
+  const realUseState = reactCjs.useState;
+  const slots: unknown[] = [];
+  let slot = 0;
+  reactCjs.useState = (init: unknown) => {
+    const i = slot++;
+    if (!(i in slots)) slots[i] = typeof init === "function" ? (init as () => unknown)() : init;
+    const set = (next: unknown) => {
+      slots[i] = typeof next === "function" ? (next as (prev: unknown) => unknown)(slots[i]) : next;
+    };
+    return [slots[i], set];
+  };
+  const mounted = (url: string) => {
+    slot = 0;
+    return render(list(), url);
+  };
+  try {
+    out.mountedStart = mounted("lifecycle=active");
+    historyCalls.length = 0;
+    routerCalls.length = 0;
+    out.mountedClick = click("/clients?lifecycle=churned");
+    out.mountedHistory = [...historyCalls];
+    out.mountedRouter = [...routerCalls];
+    out.mountedBeforeUrl = mounted("lifecycle=active");
+    out.mountedUrlLanded = mounted("lifecycle=churned");
+    out.mountedBack = mounted("lifecycle=active");
+    out.mountedSlots = slots.length;
+  } finally {
+    reactCjs.useState = realUseState;
+  }
+
   // A list cut at its page size: the rows are the server's, for the URL's status, and the tabs navigate.
   historyCalls.length = 0;
   const serverTabs = tabs.map((t) => ({ key: t.key, label: t.label, href: t.href }));

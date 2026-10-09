@@ -57,6 +57,7 @@ import {
   type ClientRow,
 } from "@/components/os/landings/clients-model";
 import {
+  firstParam,
   loadConvertedLeads,
   loadCustomerRecords,
   loadWorkspaceDirectory,
@@ -84,7 +85,8 @@ import { timeAgo } from "@/lib/fmt";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Clients" };
 
-type Search = { lifecycle?: string; q?: string; owner?: string; archived?: string };
+type Param = string | string[];
+type Search = { lifecycle?: Param; q?: Param; owner?: Param; archived?: Param };
 
 const rowsOf = <T,>(s: SourceState<T>): T[] | null => (s.state === "ok" ? s.rows : null);
 
@@ -93,7 +95,10 @@ const rowsOf = <T,>(s: SourceState<T>): T[] | null => (s.state === "ok" ? s.rows
 // ClientsPage() call (the landing tests) working at runtime.
 export default async function ClientsPage(props: { searchParams?: Promise<Search> }) {
   const viewer = await requireOsRoute("/clients");
-  const sp = ((await props?.searchParams) ?? {}) as Search;
+  const raw = ((await props?.searchParams) ?? {}) as Search;
+  // A repeated param (?lifecycle=active&lifecycle=paused) is its first value,
+  // the one the browser's tabs read (firstParam).
+  const sp = { lifecycle: firstParam(raw.lifecycle), q: firstParam(raw.q), owner: firstParam(raw.owner), archived: firstParam(raw.archived) };
   const cv = clientsViewerFromSurface(viewer.surface)!;
   const status = isOneOf(CUSTOMER_LIFECYCLES, sp.lifecycle) ? sp.lifecycle : null;
   // The form's filters narrow the read. The status does not: the tabs filter
@@ -104,15 +109,15 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     owner: sp.owner?.trim() || null,
     includeArchived: sp.archived === "1",
   };
-  const [everyStatus, sources, directory] = await Promise.all([
-    loadCustomerRecords(cv, filters),
+  const [records, sources, directory] = await Promise.all([
+    // A list cut at its page size cannot be filtered from the rows at hand:
+    // there the server reads the status in the address bar instead.
+    loadCustomerRecords(cv, filters, undefined, { statusWhenCut: status }),
     loadClientSources(viewer),
     loadWorkspaceDirectory(cv.tenantId),
   ]);
-  // A list cut at its page size cannot be filtered from the rows at hand: the
-  // tabs navigate there, and the server reads the status in the address bar.
-  const statusFromServer = everyStatus.state === "ok" && everyStatus.value.truncated;
-  const records = statusFromServer && status ? await loadCustomerRecords(cv, { ...filters, lifecycle: status }) : everyStatus;
+  // And its tabs navigate.
+  const statusFromServer = records.state === "ok" && records.value.cut;
   const canOpen = (href: string) => mayOpenOsHref(viewer.navInput, href);
   const owners = ownerOptions(directory);
 
@@ -133,7 +138,8 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
   const rows = records.state === "ok" ? records.value.rows : [];
   const formFiltered = Boolean(filters.q || filters.owner || filters.includeArchived);
   // The KPI row counts every status, whichever tab is open, so it stays put.
-  const allRows = everyStatus.state === "ok" ? everyStatus.value.rows : [];
+  // A cut list draws no KPI row and no counts: it holds one status's rows.
+  const allRows = records.state === "ok" && !statusFromServer ? records.value.rows : [];
   const byLifecycle = (l: string) => allRows.filter((r) => r.lifecycle === l).length;
   const sumOrNull = (pick: (r: ListedClient) => number | null) =>
     allRows.some((r) => pick(r) === null) ? null : allRows.reduce((n, r) => n + (pick(r) ?? 0), 0);

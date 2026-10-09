@@ -669,6 +669,32 @@ async function main() {
     assert.ok(intake.isSupportFormSubmission({ anonymous_init: { tenant_slug: "oasis-ai-cc", form_slug: "support" } }));
     assert.equal(intake.isSupportFormSubmission({ anonymous_init: { tenant_slug: "client-a", form_slug: "support" } }), false);
   });
+  await check("OASIS's desk never matches a requester to a retired business's workspace; a live client's workspace still matches", async () => {
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    await db.batch(
+      [
+        { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'submissions', 'SunBiz')", args: [SUNBIZ] },
+        {
+          sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role) VALUES
+                  ('p-sb-rep', 'u-sb-rep', 'rep@sunbiz.test', ?, 'owner'),
+                  ('p-sb-both', 'u-sb-both', 'both@either.test', ?, 'member'),
+                  ('p-a-both', 'u-a-both', 'both@either.test', ?, 'member')`,
+          args: [SUNBIZ, SUNBIZ, CLIENT_A],
+        },
+      ],
+      "write",
+    );
+    try {
+      const none = { client_tenant_id: null, project_id: null, client_match: "none" };
+      assert.deepEqual(await delivery.matchClientByEmail(db, "rep@sunbiz.test", null), none, "a SunBiz user's ticket names SunBiz's workspace");
+      // In SunBiz and in client A: client A is the one client workspace among them.
+      assert.deepEqual(await delivery.matchClientByEmail(db, "both@either.test", null), { client_tenant_id: CLIENT_A, project_id: null, client_match: "email_tenant" });
+      assert.deepEqual(await delivery.matchClientByEmail(db, "owner@client-a.test", null), { client_tenant_id: CLIENT_A, project_id: null, client_match: "email_tenant" }, "control");
+    } finally {
+      await db.execute("DELETE FROM user_profiles WHERE id IN ('p-sb-rep', 'p-sb-both', 'p-a-both')");
+      await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
+    }
+  });
   await check("SLA cron: a workspace desk's breach is flagged (its Breaching view) but alerted through no lane; OASIS's alerts", async () => {
     const sent: string[] = [];
     const fake = {
@@ -750,8 +776,24 @@ async function main() {
       await db.execute("DELETE FROM support_tickets WHERE id LIKE 'bulk-%'");
     }
   });
-  await check("/clients/[id]: another workspace's client is a 404, before anything of it is read", async () => {
+  // A tab click renders the PAGE alone (the layout is not rendered again), and
+  // a first load runs page and layout side by side: each must refuse on its
+  // own. Rendered together, the layout's own 404 would hide a page that leaked.
+  const pageAlone = (id: string, tab?: string) =>
+    ClientRecordPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(tab ? { tab } : {}) });
+  const layoutAlone = (id: string) => ClientRecordLayout({ params: Promise.resolve({ id }), children: null as never });
+  const RECORD_TABS = [undefined, "conversations", "tickets", "activity", "files"] as const;
+  await check("/clients/[id]: control: A's owner gets the page alone on every tab, and the layout alone", async () => {
+    for (const tab of RECORD_TABS) await assert.doesNotReject(pageAlone(harbourId, tab), `page ${tab ?? "overview"}`);
+    assert.match(await page(layoutAlone(harbourId)), /Harbour Dental/);
+  });
+  await check("/clients/[id]: another workspace's client is a 404 from the page alone on every tab, and from the layout alone", async () => {
     await login(USERS.clientB);
+    for (const id of [acme.id, harbourId]) {
+      for (const tab of RECORD_TABS) assert.equal(await is404(pageAlone(id, tab)), true, `page ${tab ?? "overview"} of ${id}`);
+      assert.equal(await is404(layoutAlone(id)), true, `layout of ${id}`);
+    }
+    // And together, as before.
     assert.equal(await is404(record(acme.id)), true);
     assert.equal(await is404(record(harbourId, "tickets")), true);
   });

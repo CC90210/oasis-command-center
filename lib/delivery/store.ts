@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
+import { isRetiredClientRef, notRetiredTenantSql, readNotRetired } from "@/lib/os/customers/retired";
 import {
   CLIENT_VISIBLE_MATCHES,
   commentScope,
@@ -615,18 +616,21 @@ export type ClientTenant = { id: string; name: string; slug: string | null };
 
 /**
  * Client workspaces an OASIS project/ticket may belong to: every tenant except
- * OASIS itself. OASIS's desk only — no other desk links rows to a workspace.
+ * OASIS itself and a retired business (lib/os/customers/retired.ts). OASIS's
+ * desk only — no other desk links rows to a workspace.
  */
 export async function listClientTenants(db: Client): Promise<ClientTenant[]> {
+  const live = notRetiredTenantSql("id");
   const rs = await db.execute({
-    sql: "SELECT id, name, slug FROM tenants WHERE id <> ? ORDER BY name, id LIMIT 500",
-    args: [DELIVERY_TENANT_ID],
+    sql: `SELECT id, name, slug FROM tenants WHERE id <> ? AND ${live.sql} ORDER BY name, id LIMIT 500`,
+    args: [DELIVERY_TENANT_ID, ...live.args],
   });
   return rows(rs).map((r) => ({ id: String(r.id), name: String(r.name ?? r.slug ?? r.id), slug: s(r.slug) }));
 }
 
+/** May a project or ticket name this workspace as its client? Not OASIS itself, not a retired business, and it must exist. */
 export async function clientTenantExists(db: Client, tenantId: string): Promise<boolean> {
-  if (tenantId === DELIVERY_TENANT_ID) return false;
+  if (tenantId === DELIVERY_TENANT_ID || isRetiredClientRef({ client_tenant_id: tenantId })) return false;
   const rs = await db.execute({ sql: "SELECT 1 AS ok FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
   return rs.rows.length > 0;
 }
@@ -640,12 +644,18 @@ export async function deskLeadExists(db: Client, tenantId: string, leadId: strin
   return rs.rows.length > 0;
 }
 
-/** Is `customerId` a client record of THIS desk's workspace? (Needs migration bravo__188.) */
+/**
+ * Is `customerId` a client record of THIS desk's workspace that a ticket or
+ * project may name? Not one linked to a retired business's workspace
+ * (lib/os/customers/retired.ts). (Needs migration bravo__188.)
+ */
 export async function deskCustomerExists(db: Client, tenantId: string, customerId: string): Promise<boolean> {
-  const rs = await db.execute({
-    sql: "SELECT 1 AS ok FROM customers WHERE tenant_id = ? AND id = ? LIMIT 1",
-    args: [requireTenant(tenantId), customerId],
-  });
+  const rs = await readNotRetired("client_tenant_id", (guard) =>
+    db.execute({
+      sql: `SELECT 1 AS ok FROM customers WHERE tenant_id = ? AND id = ? AND ${guard.sql} LIMIT 1`,
+      args: [requireTenant(tenantId), customerId, ...guard.args],
+    }),
+  );
   return rs.rows.length > 0;
 }
 
@@ -1854,7 +1864,9 @@ export type ClientMatch = {
  *      project (and its client workspace). With several projects, the free-text
  *      project hint picks one when it matches exactly one title.
  *   2. Otherwise, their email belongs to portal users of exactly ONE client
- *      workspace -> that workspace, no project.
+ *      workspace -> that workspace, no project. A retired business's
+ *      workspace is not a client (lib/os/customers/retired.ts), so its users
+ *      are not counted.
  *   3. Otherwise nothing. Ambiguity is never guessed through.
  *
  * The public form's email is UNVERIFIED. client_match records that the link was
@@ -1899,12 +1911,13 @@ export async function matchClientByEmail(
     args: [email, DELIVERY_TENANT_ID],
   });
   if (teammate.rows.length > 0) return { client_tenant_id: null, project_id: null, client_match: "none" };
+  const live = notRetiredTenantSql("tenant_id");
   const tenants = rows(
     await db.execute({
       sql: `SELECT DISTINCT tenant_id FROM user_profiles
-            WHERE lower(email) = ? AND tenant_id IS NOT NULL AND tenant_id <> ?
+            WHERE lower(email) = ? AND tenant_id IS NOT NULL AND tenant_id <> ? AND ${live.sql}
             LIMIT 3`,
-      args: [email, DELIVERY_TENANT_ID],
+      args: [email, DELIVERY_TENANT_ID, ...live.args],
     }),
   );
   if (tenants.length === 1) {

@@ -67,14 +67,15 @@ export default async function ClientRecordPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ tab?: string }>;
+  searchParams?: Promise<{ tab?: string | string[] }>;
 }) {
   const viewer = await requireOsRoute("/clients");
   const { id } = await params;
   const sp = (await searchParams) ?? {};
   const cv = clientsViewerFromSurface(viewer.surface)!;
   // Only a tab this workspace offers; anything else (?tab=money in a client
-  // workspace included) opens Overview, as the tab bar shows it.
+  // workspace included) opens Overview, as the tab bar shows it. A repeated
+  // ?tab= is its first value, the one the bar reads.
   const tab = resolveClientTab(sp.tab, clientTabsFor(cv));
   const [record, directory] = await Promise.all([
     loadClientRecord(cv, id, tab, { isOperator: viewer.navInput.isOperator }),
