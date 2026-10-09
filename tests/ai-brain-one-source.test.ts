@@ -95,11 +95,18 @@ function play(...responses: Array<Response | ((s: Sent) => Response | Promise<Re
   sent = [];
   script = responses.map((r) => (typeof r === "function" ? r : () => r));
 }
+/** A Gemini chunk (candidates / usageMetadata / promptFeedback): Google frames its SSE with CRLF, so the stub does too. */
+const isGeminiChunk = (d: unknown) => !!d && typeof d === "object" && ("candidates" in d || "usageMetadata" in d || "promptFeedback" in d);
 const sse = (frames: Array<[string | null, unknown]>) =>
-  new Response(frames.map(([e, d]) => `${e ? `event: ${e}\n` : ""}data: ${typeof d === "string" ? d : JSON.stringify(d)}\n\n`).join(""), {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
+  new Response(
+    frames
+      .map(([e, d]) => {
+        const nl = isGeminiChunk(d) ? "\r\n" : "\n";
+        return `${e ? `event: ${e}${nl}` : ""}data: ${typeof d === "string" ? d : JSON.stringify(d)}${nl}${nl}`;
+      })
+      .join(""),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
 /** One Gemini stream chunk. */
 const gem = (parts: Array<Record<string, unknown>> | null, extra: Record<string, unknown> = {}) => ({
   ...(parts ? { candidates: [{ content: { role: "model", parts }, ...(extra.finishReason ? { finishReason: extra.finishReason } : {}) }] } : {}),
