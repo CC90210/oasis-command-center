@@ -51,7 +51,7 @@ const fail = (status: number, error: string, message: string) => NextResponse.js
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** The model to switch to: asked, else saved with the key, else the provider's first offered one. */
-export function switchModel(provider: Provider, asked: string, savedWithKey: string | null): string {
+function switchModel(provider: Provider, asked: string, savedWithKey: string | null): string {
   if (asked) return asked;
   if (savedWithKey && saveCheck(provider, savedWithKey).ok && modelInfo(provider, savedWithKey)) return savedWithKey;
   return isRegistryProvider(provider) ? defaultModelFor(provider) : savedWithKey || "";
