@@ -189,7 +189,7 @@ async function main() {
   const { renderDepartmentState } = await import("../lib/os/desk/state-render");
   const { deskToolset } = await import("../lib/os/desk/tools");
   const { groundDepartmentTurn } = await import("../lib/os/desk/turn");
-  const { streamGeminiWithTools } = await import("../lib/os/desk/gemini-loop");
+  const { streamGeminiWithTools, hasInputs } = await import("../lib/os/desk/gemini-loop");
   const runner = await import("../lib/cloud-tool-runner");
 
   console.log("The DEPARTMENT STATE block");
@@ -381,6 +381,13 @@ async function main() {
     assert.equal(sent.length, 3);
     const decl = ((sent[0].body.tools as Array<{ functionDeclarations: Array<{ name: string }> }>)[0].functionDeclarations).map((d) => d.name);
     assert.deepEqual(decl, catalog.deskPalette("sales").map((t) => t.name));
+    // Gemini 400s on an OBJECT schema with no properties: a tool with no
+    // input is declared without `parameters`, every other tool keeps them.
+    for (const d of (sent[0].body.tools as Array<{ functionDeclarations: Array<{ parameters?: { properties?: object } }> }>)[0].functionDeclarations) {
+      if (d.parameters) assert.ok(Object.keys(d.parameters.properties ?? {}).length > 0, "no empty OBJECT schema reaches Gemini");
+    }
+    assert.equal(hasInputs({ type: "object", properties: {} }), false);
+    assert.equal(hasInputs({ type: "object", properties: { q: { type: "string" } } }), true);
     const contents2 = sent[1].body.contents as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
     assert.deepEqual(contents2[1], { role: "model", parts: [{ functionCall: { name: "leads_search", args: { query: "Harbor" } }, thoughtSignature: "sig-123" }] });
     const resp = contents2[2].parts[0].functionResponse as { name: string; response: { leads: Array<{ name: string }> } };

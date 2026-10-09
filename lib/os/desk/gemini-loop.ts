@@ -53,6 +53,11 @@ function functionResponseOf(content: string): Record<string, unknown> {
   }
 }
 
+export function hasInputs(schema: unknown): boolean {
+  const props = (schema as { properties?: unknown } | null)?.properties;
+  return !!props && typeof props === "object" && Object.keys(props).length > 0;
+}
+
 export async function* streamGeminiWithTools(req: GeminiToolLoopRequest): AsyncGenerator<StreamYield> {
   const { model, meter } = resolveCall("google", req.model, req.meter);
   const thinks = geminiTakesThinkingLevel(model);
@@ -60,7 +65,9 @@ export async function* streamGeminiWithTools(req: GeminiToolLoopRequest): AsyncG
   const contents: Content[] = req.messages
     .filter((m) => m.content && m.content.length > 0)
     .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
-  const declarations = req.toolset.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.input_schema }));
+  // Gemini answers 400 to an OBJECT schema with no properties, so a tool
+  // that takes no input is declared without `parameters`.
+  const declarations = req.toolset.tools.map((t) => ({ name: t.name, description: t.description, ...(hasInputs(t.input_schema) ? { parameters: t.input_schema } : {}) }));
   const allowed = new Set(req.toolset.tools.map((t) => t.name));
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
 

@@ -148,13 +148,15 @@ export async function deskApprovals(
     throw new Error("approvals_could_not_be_read");
   }
   const like = `${DESK_KEY_PREFIX}:${me.replace(/[\\%_]/g, (c) => `\\${c}`)}:%`;
-  const rs = await getTursoClient().execute({
-    sql: `SELECT id, title, department_key, status, created_at FROM approvals
-          WHERE tenant_id = ? AND idempotency_key LIKE ? ESCAPE '\\' AND status IN ('pending', 'sent_back')
-          ${department ? "AND department_key = ?" : ""}
-          ORDER BY created_at DESC LIMIT ?`,
-    args: [viewer.surface.tenantId, like, ...(department ? [department] : []), limit],
-  });
+  const where = `WHERE tenant_id = ? AND idempotency_key LIKE ? ESCAPE '\\' AND status IN ('pending', 'sent_back')
+          ${department ? "AND department_key = ?" : ""}`;
+  const whereArgs = [viewer.surface.tenantId, like, ...(department ? [department] : [])];
+  const db = getTursoClient();
+  // The total comes from a count: the list is capped, the number is not.
+  const [rs, cnt] = await Promise.all([
+    db.execute({ sql: `SELECT id, title, department_key, status, created_at FROM approvals ${where} ORDER BY created_at DESC LIMIT ?`, args: [...whereArgs, limit] }),
+    db.execute({ sql: `SELECT COUNT(*) AS n FROM approvals ${where}`, args: whereArgs }),
+  ]);
   const items = rs.rows.map((r) => ({
     id: String(r.id),
     title: String(r.title ?? ""),
@@ -162,5 +164,5 @@ export async function deskApprovals(
     status: String(r.status ?? ""),
     created_at: String(r.created_at ?? ""),
   }));
-  return { total: items.length, own: true, items };
+  return { total: Math.max(Number(cnt.rows[0]?.n ?? 0), items.length), own: true, items };
 }
