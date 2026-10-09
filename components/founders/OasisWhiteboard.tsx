@@ -1,389 +1,269 @@
 "use client";
 
 /**
- * Oasis Whiteboard — the flagship Content Tools surface.
+ * Oasis Whiteboard: the sketching board on Content > Content Tools, made for
+ * sharing a tab on a Google Meet call from a computer or a phone.
  *
- * Ported 2026-10-06 from the standalone tool at
- * Business-Empire-Agent/oasis-whiteboard/index.html. The drawing engine is
- * carried over unchanged: quadratic midpoint smoothing between samples,
- * devicePixelRatio-scaled backing store (retina), destination-out eraser,
- * dot-grid board. What changed is the chassis: vanilla DOM listeners became
- * React state + a single mount effect, and window-sized canvas became a
- * container-sized canvas driven by a ResizeObserver so the board fits the
- * dashboard instead of the viewport.
+ * Ported 2026-10-06 from Business-Empire-Agent/oasis-whiteboard/index.html
+ * (same pens, palette, smoothing and eraser). Since the 2026-10-08 review:
+ * - the drawing is a list of strokes (whiteboard-model.ts), so resizing the
+ *   window, rotating a phone or moving to another screen draws it again
+ *   instead of cutting it off;
+ * - Clear happens at once and Undo brings it back; nothing waits on a timer;
+ * - every control is at least 44 x 44 px at every width, the colour and
+ *   eraser buttons say which one is on (aria-pressed), and the toolbar sits
+ *   above the board so it never covers the drawing on a phone;
+ * - the board lives in this tab only, and the page says so: Download keeps a
+ *   picture.
  *
- * The mutable stroke state lives in a ref, not React state: mousemove fires
- * far faster than a render cycle and the handlers must never read a stale
- * closure. React state only mirrors what the toolbar RENDERS (active color,
- * brush size, eraser on/off, hint visibility).
+ * whiteboard-surface.ts owns the canvas (input, size, keys, download); this
+ * file is the toolbar and the frame. tests/oasis-whiteboard.test.ts covers all
+ * three files.
  */
 
 import { useEffect, useRef, useState } from "react";
+import { MAX_SIZE, MIN_SIZE, PALETTE } from "@/components/founders/whiteboard-model";
+import {
+  INITIAL_STATE,
+  mountWhiteboard,
+  type WhiteboardHandle,
+  type WhiteboardState,
+} from "@/components/founders/whiteboard-surface";
 
-const PALETTE = [
-  { color: "#38bdf8", name: "Sky" },
-  { color: "#d946ef", name: "Magenta" },
-  { color: "#ec4899", name: "Pink" },
-  { color: "#22c55e", name: "Green" },
-  { color: "#f59e0b", name: "Amber" },
-  { color: "#f8fafc", name: "White" },
-];
-
-/** Matches `bg-bg-deep` so the exported PNG is the board the operator saw. */
-const BOARD_BG = "#0a0c10";
-
-type StrokeState = {
-  isDrawing: boolean;
-  isErasing: boolean;
-  color: string;
-  size: number;
-  lastX: number;
-  lastY: number;
-  midX: number;
-  midY: number;
+export type ToolbarActions = {
+  setColor: (hex: string) => void;
+  setSize: (size: number) => void;
+  toggleEraser: () => void;
+  undo: () => void;
+  redo: () => void;
+  clear: () => void;
+  download: () => void;
 };
 
-export function OasisWhiteboard() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const strokeRef = useRef<StrokeState>({
-    isDrawing: false,
-    isErasing: false,
-    color: PALETTE[0].color,
-    size: 4,
-    lastX: 0,
-    lastY: 0,
-    midX: 0,
-    midY: 0,
-  });
+/** Every control's touch target: at least 44 x 44 CSS px, at every width. */
+export const TAP_TARGET = "min-h-11 min-w-11";
+const FOCUS =
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70";
+const TOOL_BUTTON = `${TAP_TARGET} ${FOCUS} inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-white/10 bg-white/5 px-3 text-[0.85rem] font-medium text-fg transition-all duration-200 hover:-translate-y-0.5 hover:bg-white/10 hover:shadow-[0_6px_16px_rgba(0,0,0,0.3)] active:translate-y-0 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40`;
+const TOOL_ON = "border-sky-400/50 bg-sky-400/[0.18] text-sky-400";
+const ICON = {
+  width: 15,
+  height: 15,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+};
 
-  const [color, setColorState] = useState(PALETTE[0].color);
-  const [size, setSizeState] = useState(4);
-  const [erasing, setErasingState] = useState(false);
-  const [hintVisible, setHintVisible] = useState(true);
-
-  // Toolbar buttons render outside the mount effect below, so the effect
-  // stashes its actions here for them to call. Defaults are inert until the
-  // effect runs on mount.
-  const actionsRef = useRef<{
-    toggleEraser: () => void;
-    clear: () => void;
-    save: () => void;
-  }>({ toggleEraser: () => {}, clear: () => {}, save: () => {} });
-
-  useEffect(() => {
-    const container = containerRef.current;
-    const canvas = canvasRef.current;
-    if (!container || !canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const stroke = strokeRef.current;
-    let clearTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function resizeCanvas() {
-      if (!canvas || !ctx || !container) return;
-      // Preserve the current drawing across the resize: copy it out at device
-      // pixels, resize (which wipes the backing store), then paint it back.
-      const temp = document.createElement("canvas");
-      const tctx = temp.getContext("2d");
-      temp.width = canvas.width;
-      temp.height = canvas.height;
-      if (tctx && canvas.width > 0) tctx.drawImage(canvas, 0, 0);
-
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(container.clientWidth * dpr);
-      canvas.height = Math.round(container.clientHeight * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-
-      if (tctx && temp.width > 0) ctx.drawImage(temp, 0, 0, temp.width / dpr, temp.height / dpr);
-    }
-
-    resizeCanvas();
-    const observer = new ResizeObserver(resizeCanvas);
-    observer.observe(container);
-
-    function getXY(e: MouseEvent | TouchEvent): [number, number] {
-      const rect = canvas!.getBoundingClientRect();
-      const point =
-        "touches" in e
-          ? (e.touches[0] ?? e.changedTouches[0])
-          : e;
-      return [point.clientX - rect.left, point.clientY - rect.top];
-    }
-
-    function applyBrush() {
-      if (!ctx) return;
-      if (stroke.isErasing) {
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.lineWidth = stroke.size * 2.5;
-        ctx.strokeStyle = "rgba(0,0,0,1)";
-        ctx.shadowBlur = 0;
-      } else {
-        ctx.globalCompositeOperation = "source-over";
-        ctx.lineWidth = stroke.size;
-        ctx.strokeStyle = stroke.color;
-        ctx.shadowBlur = 4;
-        ctx.shadowColor = stroke.color;
-      }
-    }
-
-    function startDrawing(e: MouseEvent | TouchEvent) {
-      e.preventDefault();
-      stroke.isDrawing = true;
-      setHintVisible(false);
-      [stroke.lastX, stroke.lastY] = getXY(e);
-      stroke.midX = stroke.lastX;
-      stroke.midY = stroke.lastY;
-      applyBrush();
-      if (!ctx) return;
-      ctx.beginPath();
-      ctx.arc(
-        stroke.lastX,
-        stroke.lastY,
-        (stroke.isErasing ? ctx.lineWidth : stroke.size) / 2,
-        0,
-        Math.PI * 2,
-      );
-      ctx.fillStyle = stroke.isErasing ? "rgba(0,0,0,1)" : stroke.color;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(stroke.lastX, stroke.lastY);
-    }
-
-    function draw(e: MouseEvent | TouchEvent) {
-      if (!stroke.isDrawing || !ctx) return;
-      e.preventDefault();
-      const [x, y] = getXY(e);
-      const newMidX = (stroke.lastX + x) / 2;
-      const newMidY = (stroke.lastY + y) / 2;
-      applyBrush();
-      ctx.beginPath();
-      ctx.moveTo(stroke.midX, stroke.midY);
-      ctx.quadraticCurveTo(stroke.lastX, stroke.lastY, newMidX, newMidY);
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-      stroke.lastX = x;
-      stroke.lastY = y;
-      stroke.midX = newMidX;
-      stroke.midY = newMidY;
-    }
-
-    function stopDrawing() {
-      stroke.isDrawing = false;
-      ctx?.beginPath();
-    }
-
-    function toggleEraser() {
-      stroke.isErasing = !stroke.isErasing;
-      setErasingState(stroke.isErasing);
-    }
-
-    function onKeyDown(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      const tag = (target?.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || target?.isContentEditable) return;
-      if (e.key === "e" || e.key === "E") toggleEraser();
-    }
-
-    canvas.addEventListener("mousedown", startDrawing);
-    canvas.addEventListener("mousemove", draw);
-    window.addEventListener("mouseup", stopDrawing);
-    canvas.addEventListener("touchstart", startDrawing, { passive: false });
-    canvas.addEventListener("touchmove", draw, { passive: false });
-    window.addEventListener("touchend", stopDrawing);
-    window.addEventListener("keydown", onKeyDown);
-
-    // Exposed to the toolbar buttons below through the stable refs — the
-    // buttons live outside this effect, so the effect stashes the actions.
-    actionsRef.current = {
-      toggleEraser,
-      clear: () => {
-        if (!canvas || !ctx) return;
-        canvas.style.transition = "opacity 0.3s ease";
-        canvas.style.opacity = "0";
-        clearTimer = setTimeout(() => {
-          ctx.save();
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.restore();
-          canvas.style.opacity = "1";
-          clearTimer = setTimeout(() => {
-            canvas.style.transition = "";
-            clearTimer = null;
-          }, 300);
-        }, 300);
-      },
-      save: () => {
-        if (!canvas) return;
-        const out = document.createElement("canvas");
-        out.width = canvas.width;
-        out.height = canvas.height;
-        const octx = out.getContext("2d");
-        if (!octx) return;
-        octx.fillStyle = BOARD_BG;
-        octx.fillRect(0, 0, out.width, out.height);
-        octx.drawImage(canvas, 0, 0);
-        const link = document.createElement("a");
-        link.download = `Oasis-Whiteboard-${new Date().toISOString().slice(0, 10)}.png`;
-        link.href = out.toDataURL("image/png");
-        link.click();
-      },
-    };
-
-    return () => {
-      observer.disconnect();
-      canvas.removeEventListener("mousedown", startDrawing);
-      canvas.removeEventListener("mousemove", draw);
-      window.removeEventListener("mouseup", stopDrawing);
-      canvas.removeEventListener("touchstart", startDrawing);
-      canvas.removeEventListener("touchmove", draw);
-      window.removeEventListener("touchend", stopDrawing);
-      window.removeEventListener("keydown", onKeyDown);
-      if (clearTimer) clearTimeout(clearTimer);
-    };
-  }, []);
-
-  function selectColor(hex: string) {
-    strokeRef.current.color = hex;
-    strokeRef.current.isErasing = false;
-    setColorState(hex);
-    setErasingState(false);
-  }
-
-  const toolButton =
-    "flex items-center gap-1.5 whitespace-nowrap rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[0.85rem] font-medium text-fg transition-all duration-200 hover:-translate-y-0.5 hover:bg-white/10 hover:shadow-[0_6px_16px_rgba(0,0,0,0.3)] active:translate-y-0 active:scale-[0.97]";
-  const eraserActive =
-    "border-sky-400/50 bg-sky-400/[0.18] text-sky-400 shadow-[0_0_16px_rgba(56,189,248,0.25)]";
-
+export function WhiteboardToolbar({ ui, actions }: { ui: WhiteboardState; actions: ToolbarActions }) {
+  const customOn = !ui.erasing && !PALETTE.some((s) => s.color === ui.color);
   return (
     <div
-      ref={containerRef}
-      className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-2xl border border-bg-border bg-bg-deep"
+      role="group"
+      aria-label="Whiteboard tools"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-bg-border bg-bg-panel px-2 py-1 shadow-elev"
     >
-      <canvas
-        ref={canvasRef}
-        className={`absolute inset-0 block h-full w-full touch-none ${
-          erasing ? "cursor-cell" : "cursor-crosshair"
-        }`}
-      />
+      <div className="hidden select-none items-center gap-2 whitespace-nowrap px-2 text-[1.05rem] font-bold text-fg md:flex">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M2 12h4l3-9 5 18 3-9h5" />
+        </svg>
+        Oasis Whiteboard
+      </div>
 
-      {/* Floating toolbar — glass pill, wraps into a rounded card on narrow
-          screens (the original's 820px breakpoint, expressed responsively). */}
-      <div className="absolute left-1/2 top-4 z-10 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-3xl border border-white/10 bg-bg-panel/70 px-4 py-2.5 shadow-elev backdrop-blur-xl backdrop-saturate-150 animate-slide-up md:flex-nowrap md:gap-5 md:rounded-[999px] md:px-6 md:py-3">
-        <div className="flex select-none items-center gap-2 whitespace-nowrap text-[1.05rem] font-bold text-fg">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M2 12h4l3-9 5 18 3-9h5" />
-          </svg>
-          <span className="hidden md:inline">Oasis Whiteboard</span>
-        </div>
-
-        <div className="hidden h-6 w-px bg-white/10 md:block" aria-hidden />
-
-        <div className="flex items-center gap-2">
-          <span className="text-[0.75rem] font-medium uppercase tracking-[0.06em] text-fg-muted">
-            Color
-          </span>
+      <div className="flex flex-wrap items-center">
+        <span className="mr-1 hidden text-[0.75rem] font-medium uppercase tracking-[0.06em] text-fg-muted md:inline">
+          Color
+        </span>
+        <label title="Any color" className={`${TAP_TARGET} relative flex cursor-pointer items-center justify-center rounded-full has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-accent/70`}>
+          <span
+            aria-hidden
+            style={{ background: ui.color }}
+            className={`h-[30px] w-[30px] rounded-full ${customOn ? "ring-2 ring-fg ring-offset-2 ring-offset-bg-panel" : "ring-2 ring-white/10"}`}
+          />
           <input
             type="color"
-            value={color}
-            title="Custom color"
-            onChange={(e) => selectColor(e.target.value)}
-            className="h-[30px] w-[30px] cursor-pointer appearance-none overflow-hidden rounded-full border-none bg-none p-0 shadow-[0_0_0_2px_rgba(255,255,255,0.09)] transition-all duration-200 hover:scale-[1.12] hover:shadow-[0_0_0_2px_#38bdf8] [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:p-0"
+            aria-label="Pick any color"
+            value={ui.color}
+            onChange={(e) => actions.setColor(e.target.value)}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
           />
-        </div>
-
-        <div className="flex items-center gap-[7px]">
-          {PALETTE.map((s) => (
+        </label>
+        {PALETTE.map((s) => {
+          const on = !ui.erasing && ui.color === s.color;
+          return (
             <button
               key={s.color}
               type="button"
               title={s.name}
               aria-label={`Draw in ${s.name}`}
-              onClick={() => selectColor(s.color)}
-              style={{ background: s.color }}
-              className={`h-[22px] w-[22px] rounded-full border-2 p-0 transition-transform duration-200 hover:scale-125 ${
-                !erasing && color === s.color
-                  ? "scale-[1.12] border-white shadow-[0_0_10px_rgba(255,255,255,0.3)]"
-                  : "border-transparent"
-              }`}
-            />
-          ))}
-        </div>
-
-        <div className="hidden h-6 w-px bg-white/10 md:block" aria-hidden />
-
-        <div className="flex items-center gap-2">
-          <span className="text-[0.75rem] font-medium uppercase tracking-[0.06em] text-fg-muted">
-            Size
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={50}
-            value={size}
-            title="Brush size"
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              strokeRef.current.size = n;
-              setSizeState(n);
-            }}
-            className="w-[70px] cursor-pointer appearance-none bg-transparent md:w-[100px] [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:cursor-pointer [&::-webkit-slider-runnable-track]:rounded-sm [&::-webkit-slider-runnable-track]:bg-white/[0.12] [&::-webkit-slider-thumb]:-mt-1.5 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-sky-400 [&::-webkit-slider-thumb]:shadow-[0_0_12px_rgba(56,189,248,0.6)] [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:duration-200 [&::-webkit-slider-thumb]:hover:scale-125"
-          />
-        </div>
-
-        <div className="hidden h-6 w-px bg-white/10 md:block" aria-hidden />
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            title="Eraser (E)"
-            onClick={() => actionsRef.current.toggleEraser()}
-            className={`${toolButton} ${erasing ? eraserActive : ""}`}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" />
-              <path d="M22 21H7" />
-              <path d="m5 11 9 9" />
-            </svg>
-            Eraser
-          </button>
-          <button
-            type="button"
-            title="Clear board"
-            onClick={() => actionsRef.current.clear()}
-            className={toolButton}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M3 6h18" />
-              <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-              <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-            </svg>
-            Clear
-          </button>
-          <button
-            type="button"
-            title="Download PNG"
-            onClick={() => actionsRef.current.save()}
-            className={toolButton}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            Save
-          </button>
-        </div>
+              aria-pressed={on}
+              onClick={() => actions.setColor(s.color)}
+              className={`${TAP_TARGET} ${FOCUS} group flex items-center justify-center rounded-full`}
+            >
+              <span
+                aria-hidden
+                style={{ background: s.color }}
+                className={`h-[22px] w-[22px] rounded-full border-2 transition-transform duration-200 group-hover:scale-125 ${
+                  on ? "scale-[1.12] border-white ring-2 ring-fg ring-offset-2 ring-offset-bg-panel" : "border-transparent"
+                }`}
+              />
+            </button>
+          );
+        })}
       </div>
 
+      <label className="flex items-center gap-2">
+        <span className="hidden text-[0.75rem] font-medium uppercase tracking-[0.06em] text-fg-muted md:inline">
+          Size
+        </span>
+        <input
+          type="range"
+          aria-label="Brush size"
+          min={MIN_SIZE}
+          max={MAX_SIZE}
+          value={ui.size}
+          onChange={(e) => actions.setSize(Number(e.target.value))}
+          className={`${FOCUS} h-11 w-28 cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-sm [&::-webkit-slider-runnable-track]:bg-white/[0.12] [&::-webkit-slider-thumb]:-mt-5 [&::-webkit-slider-thumb]:box-border [&::-webkit-slider-thumb]:h-11 [&::-webkit-slider-thumb]:w-11 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-[13px] [&::-webkit-slider-thumb]:border-solid [&::-webkit-slider-thumb]:border-transparent [&::-webkit-slider-thumb]:bg-sky-400 [&::-webkit-slider-thumb]:bg-clip-padding [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-sm [&::-moz-range-track]:bg-white/[0.12] [&::-moz-range-thumb]:box-border [&::-moz-range-thumb]:h-11 [&::-moz-range-thumb]:w-11 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-[13px] [&::-moz-range-thumb]:border-solid [&::-moz-range-thumb]:border-transparent [&::-moz-range-thumb]:bg-sky-400 [&::-moz-range-thumb]:bg-clip-padding`}
+        />
+      </label>
+
+      <div className="flex flex-wrap items-center gap-1">
+        <button
+          type="button"
+          title="Eraser (E)"
+          aria-label="Eraser"
+          aria-pressed={ui.erasing}
+          onClick={actions.toggleEraser}
+          className={`${TOOL_BUTTON} ${ui.erasing ? TOOL_ON : ""}`}
+        >
+          <svg {...ICON}>
+            <path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" />
+            <path d="M22 21H7" />
+            <path d="m5 11 9 9" />
+          </svg>
+          <span className="hidden sm:inline">Eraser</span>
+        </button>
+        <button type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!ui.canUndo} onClick={actions.undo} className={TOOL_BUTTON}>
+          <svg {...ICON}>
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+          </svg>
+          <span className="hidden sm:inline">Undo</span>
+        </button>
+        <button type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!ui.canRedo} onClick={actions.redo} className={TOOL_BUTTON}>
+          <svg {...ICON}>
+            <path d="m15 14 5-5-5-5" />
+            <path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" />
+          </svg>
+          <span className="hidden sm:inline">Redo</span>
+        </button>
+        <button type="button" title="Clear the board (Undo brings it back)" aria-label="Clear" disabled={ui.empty} onClick={actions.clear} className={TOOL_BUTTON}>
+          <svg {...ICON}>
+            <path d="M3 6h18" />
+            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+          </svg>
+          <span className="hidden sm:inline">Clear</span>
+        </button>
+        <button type="button" title="Download the board as a picture (PNG)" aria-label="Download" disabled={ui.empty} onClick={actions.download} className={TOOL_BUTTON}>
+          <svg {...ICON}>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span className="hidden sm:inline">Download</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** What the line at the foot of the board says: what just happened, or how to start. */
+export function boardHint(ui: WhiteboardState): { text: string | null; visible: boolean } {
+  if (ui.notice === "cleared") return { text: "Board cleared. Undo brings it back.", visible: true };
+  if (ui.notice === "download_failed") {
+    return { text: "Couldn't make the picture. Try again, or take a screenshot.", visible: true };
+  }
+  return { text: null, visible: !ui.started };
+}
+
+export function OasisWhiteboard() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const handleRef = useRef<WhiteboardHandle | null>(null);
+  const [ui, setUi] = useState<WhiteboardState>(INITIAL_STATE);
+  const [unsupported, setUnsupported] = useState(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const handle = mountWhiteboard(
+      canvas,
+      container,
+      { win: window, doc: document, ResizeObserver: window.ResizeObserver, now: () => new Date() },
+      setUi,
+    );
+    if (!handle) {
+      setUnsupported(true);
+      return;
+    }
+    handleRef.current = handle;
+    return () => {
+      handle.dispose();
+      handleRef.current = null;
+    };
+  }, []);
+
+  const actions: ToolbarActions = {
+    setColor: (hex) => handleRef.current?.setColor(hex),
+    setSize: (size) => handleRef.current?.setSize(size),
+    toggleEraser: () => handleRef.current?.toggleEraser(),
+    undo: () => handleRef.current?.undo(),
+    redo: () => handleRef.current?.redo(),
+    clear: () => handleRef.current?.clear(),
+    download: () => handleRef.current?.download(),
+  };
+  const hint = boardHint(ui);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <WhiteboardToolbar ui={ui} actions={actions} />
       <div
-        className={`pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-white/10 bg-bg-panel/70 px-[18px] py-2 text-[0.78rem] text-fg-muted backdrop-blur-md transition-opacity duration-500 ${
-          hintVisible ? "opacity-75" : "opacity-0"
-        }`}
+        ref={containerRef}
+        className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-2xl border border-bg-border bg-bg-deep"
       >
-        Drag to sketch &nbsp;•&nbsp; E = eraser &nbsp;•&nbsp; Works great for Google Meet screenshares
+        <canvas
+          ref={canvasRef}
+          role="img"
+          aria-label="Whiteboard. Draw with a mouse, a finger or a pen."
+          className={`absolute inset-0 block h-full w-full touch-none select-none ${
+            ui.erasing ? "cursor-cell" : "cursor-crosshair"
+          }`}
+        />
+        {unsupported ? (
+          <p className="absolute inset-x-4 top-1/2 -translate-y-1/2 text-center text-sm text-fg-muted">
+            This browser can&apos;t draw here. Open the page in Chrome, Safari or Edge.
+          </p>
+        ) : null}
+        <p
+          aria-live="polite"
+          className={`pointer-events-none absolute bottom-6 left-1/2 max-w-[90%] -translate-x-1/2 rounded-full border border-white/10 bg-bg-panel/70 px-[18px] py-2 text-center text-[0.78rem] text-fg-muted backdrop-blur-md transition-opacity duration-500 ${
+            hint.visible ? "opacity-75" : "opacity-0"
+          }`}
+        >
+          {hint.text ?? (
+            <>
+              <span className="md:hidden">Draw with your finger or a pen.</span>
+              <span className="hidden md:inline">
+                Drag to sketch &bull; E for the eraser &bull; Ctrl+Z to undo &bull; Share this tab on Google Meet
+              </span>
+            </>
+          )}
+        </p>
       </div>
     </div>
   );

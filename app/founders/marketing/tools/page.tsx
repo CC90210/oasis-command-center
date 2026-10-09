@@ -7,10 +7,13 @@
  *
  * This page took the Training tab's slot on 2026-10-06. The flagship tool is
  * the Oasis Whiteboard, ported from the standalone build in
- * Business-Empire-Agent/oasis-whiteboard — the sketching surface for
+ * Business-Empire-Agent/oasis-whiteboard: the sketching surface for
  * screenshares and quick visuals. The Training page was not deleted:
  * /founders/marketing/train still resolves by direct URL, the Overview's
  * Training card still links to it, and lib/os/match.ts keeps its crumb.
+ *
+ * The board is kept in the browser tab only (nothing is uploaded or stored),
+ * and the subtitle says so, so nobody expects to find it again later.
  */
 
 import { notFound } from "next/navigation";
@@ -28,7 +31,7 @@ export default async function ContentToolsPage() {
   return (
     <PageFrame
       title="Content Tools"
-      subtitle="Sketch an idea, save it as a PNG, hand it to the marketing agent."
+      subtitle="Sketch ideas live on a Google Meet call, from a computer or a phone. The board is not saved when you leave this page: Download keeps a picture of it."
     >
       <OasisWhiteboard />
     </PageFrame>
