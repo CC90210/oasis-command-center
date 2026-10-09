@@ -1585,7 +1585,10 @@ async function main() {
     assert.deepEqual(await keysOn(RACE), [`customer-support/team:${KEY_RACE_OWN}`]);
     assert.deepEqual(await teamRow(RACE, "customer-support"), { provider: "openrouter", key: KEY_RACE_OWN, prompt: FRENCH, enabled: 1 });
     assert.deepEqual(await spending(RACE, "race-co", USERS.race), nothingAnswers);
-    assert.equal(await perAgentChat(USERS.race, "customer-support"), `answers with ${KEY_RACE_OWN}`);
+    // Its own key is KEPT, and spends nothing: since 2026-10-09 a per-agent
+    // chat answers on the workspace AI account only (lib/chat-auth.ts), and
+    // with no account nothing answers.
+    assert.deepEqual(await perAgentChat(USERS.race, "customer-support"), { status: 412, code: "agent_not_configured" });
   });
   await check("a connect in another tab lands before a disconnect's one step: the disconnect changes nothing, says so, and the new key answers everywhere", async () => {
     await login(USERS.race);
@@ -2184,7 +2187,9 @@ async function main() {
     assert.ok(!after.some((r) => r.key === KEY_MOVE_ANT), "the replaced Anthropic key is still stored on a teammate");
     // The teammate's per-agent chat answers on the team's account now, not a key no card shows.
     assert.equal(await perAgentChat(MORE.move, "customer-support"), `answers with ${KEY_MOVE_OR}`);
-    assert.equal(await perAgentChat(MORE.move, "outreach"), `answers with ${KEY_MOVE_OWN}`);
+    // The teammate's own key stays stored, and no longer spends: its chat
+    // answers on the team's account like every other (2026-10-09, one source).
+    assert.equal(await perAgentChat(MORE.move, "outreach"), `answers with ${KEY_MOVE_OR}`);
   });
   await check("R5-M3 on a workspace with only the legacy row: teammates on the legacy row's key move with it", async () => {
     const LEGACY2 = "d7d7d7d7-0000-4000-8000-0000000000d7";

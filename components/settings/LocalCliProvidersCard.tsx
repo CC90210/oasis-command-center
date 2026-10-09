@@ -36,6 +36,8 @@ import {
   writeCliRuntime,
   type CliRuntime,
 } from "@/lib/cli-runtime";
+// What this card chooses, and what it never does (the department brain).
+import { LOCAL_CLI_PICKER_SCOPE, LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
 
 type CliInfo = {
   installed: boolean;
@@ -275,8 +277,8 @@ export function LocalCliProvidersCard({
 
   return (
     <Card
-      title="Local AI CLIs"
-      subtitle="See the CLIs reported by your paired machine and choose which one powers local-bridge chat. Setup commands run directly only when this dashboard is opened on that machine; hosted Settings fails closed and shows the exact local command instead."
+      title="Coding harness: AI tools on your computer"
+      subtitle={LOCAL_CLI_SCOPE}
       action={
         <button
           type="button"
@@ -381,9 +383,9 @@ export function LocalCliProvidersCard({
 
       {state.kind === "ok" && (
         <>
-          {/* Active CLI picker — surfaces the same selection the chat
-              header dropdown shows. Operator picks here once and every
-              chat session uses that subscription until they change it.
+          {/* The Coding harness's CLI picker: the same selection the Coding
+              harness header dropdown shows (lib/cli-runtime.ts). It answers
+              that chat on this computer only, never a department.
               Disabled options (not installed / not auth'd) still render
               as radios so the operator sees the full set + can click
               Install on the card below. */}
@@ -391,15 +393,13 @@ export function LocalCliProvidersCard({
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <div className="text-xs font-bold uppercase tracking-wider text-fg">
-                  Active CLI
+                  Coding harness on this computer uses
                 </div>
                 <div className="text-[11px] text-fg-muted mt-0.5 leading-snug">
-                  Which local CLI powers the chat when you talk to an agent in
-                  local-bridge mode. This also drives the dropdown in the chat
-                  header.
+                  {LOCAL_CLI_PICKER_SCOPE}
                 </div>
               </div>
-              <div role="radiogroup" aria-label="Active CLI" className="flex flex-wrap gap-1.5">
+              <div role="radiogroup" aria-label="Coding harness on this computer uses" className="flex flex-wrap gap-1.5">
                 {CARDS.map((card) => {
                   const info = state.data[card.key];
                   const ready = info.installed && info.authenticated;
@@ -412,7 +412,7 @@ export function LocalCliProvidersCard({
                       aria-checked={selected}
                       onClick={() => chooseCli(card.key)}
                       disabled={!ready}
-                      title={ready ? `Use ${card.label} for chat` : `${card.label} isn't ready yet`}
+                      title={ready ? `Use ${card.label} for the Coding harness on this computer` : `${card.label} isn't ready yet`}
                       className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-md border transition-colors ${
                         selected
                           ? "border-accent bg-accent/15 text-accent"

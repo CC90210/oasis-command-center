@@ -207,7 +207,7 @@ export async function loadReadinessReport(args: {
             (personalOnly ? " Your personal key is saved, but department chats don't use it." : ""),
         cta: haveAny
           ? undefined
-          : req.cta || { href: "/settings#agents", label: "Add AI key" },
+          : req.cta || { href: "/settings#providers", label: "Add AI key" },
       });
       continue;
     }

@@ -48,7 +48,6 @@ import { OpenSectionOnHash } from "@/components/settings/OpenSectionOnHash";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
-import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
 import { TelegramConnectCard } from "@/components/settings/TelegramConnectCard";
 import { SafeBoundary } from "@/components/SafeBoundary";
@@ -60,8 +59,6 @@ import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
 import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
-import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
-import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifestRead } from "@/lib/manifest/loader";
 import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
@@ -74,6 +71,8 @@ import { loadWorkspaceRoster } from "@/components/os/aiteam/roster";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
+import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
 
 type ViewerSettingsAccess = {
   persona: Persona;
@@ -171,7 +170,6 @@ export async function SettingsContent({
   // tenants whose manifest lookup failed.
   const effectiveAgentKeys = manifestAgentKeys;
   const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
-  const enabledChatAgentKeys = chatAgentKeys().filter((k) => enabledAgents.includes(k));
   const teamProfile = profile as
     | (typeof profile & { is_owner?: boolean; team_role?: string; admin_access?: boolean | null })
     | null;
@@ -200,7 +198,6 @@ export async function SettingsContent({
   // (W4a review R1).
   const onRoster = (slug: string) => teammateFor(slug, teammateScope) !== null;
   const rosterAgentKeys = manifestAgentKeys.filter(onRoster);
-  const rosterChatAgentKeys = enabledChatAgentKeys.filter(onRoster);
 
   // Every authenticated persona owns their profile, password and personal
   // connections. Non-admins stop here: no credential vault, AI/provider
@@ -237,7 +234,10 @@ export async function SettingsContent({
   // connectedAiSet: the workspace's AI account, the key every department chat
   // uses. personalAiSet: keys the viewer saved for their own chats only, shown
   // apart because department chats don't use them (lib/ai/workspace-account.ts).
-  const [connectedAiSet, personalAiSet, bridgeOnline, roster] = await Promise.all([
+  // aiBrain: what powers the departments (lib/ai/department-brain.ts), the
+  // provider and model AI brain shows and switches and every department header
+  // names. undefined when the read failed: nothing is claimed.
+  const [connectedAiSet, personalAiSet, bridgeOnline, roster, aiBrain] = await Promise.all([
     needsAiKeys
       ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
@@ -250,6 +250,13 @@ export async function SettingsContent({
     needsRoster && profile?.tenant_id
       ? safe("settings.roster", loadWorkspaceRoster({ tenantId: profile.tenant_id, scope: teammateScope }), null)
       : Promise.resolve(null),
+    needsAiKeys && profile?.tenant_id
+      ? safe<DepartmentBrain | null | undefined>(
+          "settings.ai_brain",
+          readWorkspaceAiAccount(profile.tenant_id).then((a) => (hasUsableKey(a) ? departmentBrain(a) : null)),
+          undefined,
+        )
+      : Promise.resolve<DepartmentBrain | null | undefined>(null),
   ]);
   // The Workspace agents card cannot state the roster when the workspace's
   // manifest read failed (the in-code seed answered in its place, which for a
@@ -426,8 +433,8 @@ export async function SettingsContent({
               title="AI setup"
               subtitle={
                 canManageTenant
-                  ? "Connect one AI account here — every agent uses it by default. OpenRouter is the easiest (one key powers every model). Anthropic, OpenAI, and Google are the per-vendor alternatives."
-                  : "These are the team's AI accounts. Your admin connects them once — your chats route through whichever account they pick."
+                  ? "The one place that decides what powers your departments: connect one AI account, then pick its model. Every department chat and Slack mention uses it. OpenRouter is the easiest (one key, many models); Anthropic, OpenAI and Google are the per-vendor alternatives."
+                  : "The team's AI account and model. An owner or admin connects it and picks the model; every department chat uses it."
               }
             >
               <SafeBoundary label="AI provider accounts">
@@ -437,67 +444,32 @@ export async function SettingsContent({
                   bridgeOnline={bridgeOnline}
                   canManageTeam={canManageTenant}
                   canInstallBridge={isOperator}
+                  brain={aiBrain}
                 />
               </SafeBoundary>
             </SettingsSection>
           )}
 
+          {/* The paired computer's AI command-line tools. They answer only the
+              operator's own Coding chat (/agent, components/ChatWidget.tsx) when
+              it runs on that computer; no department ever uses them, so the card
+              says so and never reads as a second place choosing the department
+              brain (CC, 2026-10-09). */}
           {show("ai") && isOperator && (
             <SafeBoundary label="Local CLI providers">
               <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} />
             </SafeBoundary>
           )}
 
-          {show("ai") && (
-            <SettingsSection
-              id="agents"
-              defaultOpen={focused}
-              title="Override an agent's provider"
-              subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
-              action={
-                <Tag tone={bridgeOnline ? "engaged" : "neutral"}>
-                  {bridgeOnline === null
-                    ? "Tool access: couldn't check the bridge"
-                    : bridgeOnline
-                      ? "Tool access: bridge online"
-                      : "Tool access: cloud only"}
-                </Tag>
-              }
-            >
-              {canManageTenant ? (
-                <SafeBoundary label="Override an agent's provider">
-                  <AgentConfigEditor
-                    agentKeys={rosterChatAgentKeys}
-                    agentLabels={teammateNames}
-                    bridgeOnline={bridgeOnline}
-                    canInstallBridge={isOperator}
-                    globallyConnectedServices={connectedAiSet ? Array.from(connectedAiSet) : null}
-                    agentPalettes={Object.fromEntries(
-                      (manifest?.agents || []).map((a) => [
-                        a.slug.toLowerCase(),
-                        a.tool_palette,
-                      ])
-                    )}
-                    manifestSlug={manifestSlug}
-                    toolCatalog={TOOL_DEFINITIONS.map((t) => ({
-                      name: t.name,
-                      description: t.description,
-                      defer: !!t.defer,
-                    }))}
-                  />
-                </SafeBoundary>
-              ) : (
-                <EmptyState message="Team-wide AI setup is managed by an owner or admin. Ask them to connect a provider, or set one per agent in the override table below." />
-              )}
-            </SettingsSection>
-          )}
-
-          {/* "Just-for-me overrides" removed 2026-08-17. It let an individual
-              point their own chats at a different AI account — a team feature on
-              a single-operator workspace, where it only ever added a second
-              place for the provider to be configured and a second place for it
-              to be wrong. Provider selection lives in AI Setup and, per agent,
-              in the override table above. */}
+          {/* "Override an agent's provider" removed 2026-10-09 (CC: "redundant
+              and not needed"). It was a second place choosing an AI provider
+              and key per teammate, while every department chat answers on the
+              ONE workspace AI account above (lib/ai/department-brain.ts), so
+              the table could say one thing while the departments did another.
+              Its rows no longer route anything: the operator's own chat reads
+              the workspace account for its provider and key too
+              (lib/chat-auth.ts). "Just-for-me overrides" went the same way on
+              2026-08-17. */}
 
           {/* Workspace agents: the AI Team's own roster (one list, W4a), with
               owner toggles and a link to the AI Team page. Every teammate is

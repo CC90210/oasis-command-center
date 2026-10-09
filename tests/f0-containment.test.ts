@@ -692,9 +692,11 @@ async function main() {
     assert.ok(!hasInstallLink(clientStrip) && !/Install\s+the\s+bridge/i.test(clientStripText) && clientStripText.includes("cloud mode"));
     assert.ok(hasInstallLink(BridgeToolAccess({ bridgeOnline: false, canInstallBridge: true })));
     assert.ok(!hasInstallLink(BridgeToolAccess({ bridgeOnline: true, canInstallBridge: true })), "no install link once the bridge is online");
-    // Both cards get the verdict from SettingsContent's verified operator check.
+    // The card gets the verdict from SettingsContent's verified operator check
+    // (AgentConfigEditor's per-agent override section was removed 2026-10-09).
     const settings = readFileSync(join(ROOT, "components", "settings", "SettingsContent.tsx"), "utf8");
-    assert.equal(settings.match(/canInstallBridge=\{isOperator\}/g)?.length, 2, "ProviderAccountsCard and AgentConfigEditor both get isOperator");
+    assert.equal(settings.match(/canInstallBridge=\{isOperator\}/g)?.length, 1, "ProviderAccountsCard gets isOperator");
+    assert.doesNotMatch(settings, /<AgentConfigEditor\b/, "the removed per-agent override editor is mounted again");
     assert.match(settings, /show\("ai"\) && isOperator && \(\s*<SafeBoundary label="Local CLI providers">\s*<LocalCliProvidersCard/, "the CLI card (which links the install) stays operator-only");
   });
   await check("/sequences: the offline banner offers Install bridge to the operator only", () => {
