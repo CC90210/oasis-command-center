@@ -26,6 +26,11 @@ export type CheckRule =
   | { kind: "must_be_above"; floor: number }
   /** Anything above zero is a failure. For invariants that must never occur. */
   | { kind: "must_be_zero" }
+  /** Anything above zero is DEGRADED (a warning), never failing. For a
+   *  condition worth saying out loud that is not an outage: the service is
+   *  answering, just not the way it was configured to. must_be_zero would page
+   *  it as a failure, and must_reach would need an inverted quantity to say it. */
+  | { kind: "warn_above_zero" }
   /** Absolute CEILING. Above it is a failure. The mirror of must_be_above, for
    *  observations where bigger is worse: hours of silence, age of the oldest
    *  overdue row, minutes since the last heartbeat. Without it those have to be
@@ -79,6 +84,12 @@ export function evaluate(
     return observed === 0
       ? { id, verdict: "ok", observed, baseline: 0, reason: "none observed" }
       : { id, verdict: "failing", observed, baseline: 0, reason: `${observed} occurrence(s) of a condition that must never happen` };
+  }
+
+  if (rule.kind === "warn_above_zero") {
+    return observed === 0
+      ? { id, verdict: "ok", observed, baseline: 0, reason: "none observed" }
+      : { id, verdict: "degraded", observed, baseline: 0, reason: `${observed} occurrence(s) of a condition worth a warning` };
   }
 
   if (rule.kind === "must_be_above") {

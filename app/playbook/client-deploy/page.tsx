@@ -14,6 +14,7 @@ import {
 import { PROMPTS_LIBRARY } from "@/lib/prompts-library";
 import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
 import { openAskDepartments } from "@/lib/playbook/ask-access";
+import { setupHref } from "@/lib/setup-links";
 
 export const dynamic = "force-dynamic";
 
@@ -169,7 +170,7 @@ const PHASES: Phase[] = [
         detail:
           "Open /integrations on the client's dashboard. For each api_key tile (Stripe, OpenRouter, Anthropic, Late, Firecrawl, ElevenLabs, etc.), ask if they have a key. If yes, paste via the modal. If no, decide together whether to grab one now or skip. The wire-integrations prompt drives the same walk from chat, reading lib/integrations-registry.ts so nothing gets skipped.",
         promptId: "client-wire-integrations",
-        cta: { label: "Open /integrations", href: "/integrations" },
+        cta: { label: "Open Connections", href: setupHref("connections") },
       },
       {
         title: "Discover what's already running",

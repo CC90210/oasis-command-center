@@ -10,7 +10,10 @@
  *
  * No hooks, so tests render it under react-server.
  */
-export const AI_SETTINGS_HREF = "/settings/ai";
+import { setupHref } from "@/lib/setup-links";
+
+/** Settings > AI brain > AI setup, where the key is saved (lib/setup-links.ts). */
+export const AI_SETTINGS_HREF = setupHref("ai_account");
 
 export function AiNotSetUpNotice({ feature, canConfigureAi }: { feature: string; canConfigureAi: boolean }) {
   return (

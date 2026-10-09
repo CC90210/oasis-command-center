@@ -136,10 +136,11 @@ export function departmentProfile(key: DepartmentKey): DepartmentProfile {
 // ── Channel binding ───────────────────────────────────────────────────────
 
 /**
- * The replies in a department channel are text only: /api/agents/chat streams
- * a model response and runs no tools, so nothing can be sent from here. The
- * greeting says so, because an owner deciding whether to type a customer's
- * name into it deserves to know.
+ * Nothing is sent from a department channel: its tools only look things up in
+ * the workspace, and its one write, an email draft, waits for a person's
+ * approval in Needs you (lib/os/desk/catalog.ts). The greeting says so,
+ * because an owner deciding whether to type a customer's name into it
+ * deserves to know.
  */
 const DRAFTS_ONLY = "Replies are drafts. Nothing is sent from this channel.";
 

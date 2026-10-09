@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   CLI_INVENTORY_SERVICE,
-  normalizeCliSnapshot,
+  normalizeCliMachines,
 } from "@/lib/bridge-cli-status";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getActiveProfile } from "@/lib/queries";
@@ -44,7 +44,21 @@ export async function GET() {
     metadata?: unknown;
     last_ping_at?: string | null;
   } | null;
-  const normalized = normalizeCliSnapshot(row?.metadata, row?.last_ping_at);
+  // One entry per paired computer (lib/bridge-cli-status.ts). A computer whose
+  // pairing was revoked disappears here; if the pairings cannot be read the
+  // filter is skipped (logged) rather than hiding every computer.
+  const pairings = await db
+    .from("bridge_pairings")
+    .select("id, label")
+    .eq("tenant_id", tenantId)
+    .is("revoked_at", null);
+  let active: Map<string, string | null> | null = null;
+  if (pairings.error) {
+    console.error("[bridge.cli_status.pairings]", pairings.error.message);
+  } else {
+    active = new Map(((pairings.data || []) as Array<{ id: string; label: string | null }>).map((p) => [p.id, p.label]));
+  }
+  const normalized = normalizeCliMachines(row?.metadata, row?.last_ping_at, active);
   return NextResponse.json(normalized, {
     headers: { "cache-control": "no-store" },
   });

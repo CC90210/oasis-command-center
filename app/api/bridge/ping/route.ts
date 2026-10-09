@@ -44,7 +44,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
-import { CLI_INVENTORY_SERVICE } from "@/lib/bridge-cli-status";
+import { CLI_INVENTORY_SERVICE, buildCliMachinePatch, type CliMachinePatch } from "@/lib/bridge-cli-status";
 import {
   BRIDGE_REPORT_KEY,
   BRIDGE_REPORT_VALUE,
@@ -88,7 +88,7 @@ export async function POST(req: NextRequest) {
   const db = getServiceSupabase();
   const pairing = await db
     .from("bridge_pairings")
-    .select("id, tenant_id, user_id, revoked_at")
+    .select("id, tenant_id, user_id, revoked_at, label")
     .eq("bridge_token_hash", tokenHash)
     .maybeSingle();
   if (pairing.error || !pairing.data) return bad(401, "unknown bridge token");
@@ -171,6 +171,21 @@ export async function POST(req: NextRequest) {
       // OASIS keeps on its server (lib/integrations/presence-heartbeat.ts).
       metadata: { ...reported, [BRIDGE_REPORT_KEY]: BRIDGE_REPORT_VALUE },
     };
+    // The CLI inventory is per computer: this pairing writes ONLY its own entry
+    // (recordCliMachine), so two paired computers never replace each other.
+    if (service === CLI_INVENTORY_SERVICE) {
+      const patch = buildCliMachinePatch(
+        pairing.data.id as string,
+        (pairing.data as { label?: string | null }).label,
+        reported,
+        payload.last_ping_at as string,
+      );
+      // No providers object (or an unusable pairing id) writes nothing and is
+      // reported as a failed persist, never as a success.
+      if (patch && (await recordCliMachine(payload, patch))) recorded += 1;
+      else cliInventoryPersistFailed = true;
+      continue;
+    }
     // Any key-name report, whatever status it carries, takes the guarded write:
     // an older bridge's "unconfigured" scan must not erase a real result either.
     if (isPresenceOnlyHeartbeat(payload.metadata)) {
@@ -249,5 +264,51 @@ async function recordPresence(payload: Record<string, unknown>): Promise<boolean
   } catch (error) {
     console.error("[bridge.ping.presence]", { service: payload.service, error: error instanceof Error ? error.message : String(error) });
     return null;
+  }
+}
+
+/**
+ * One computer's CLI inventory, merged into the shared local_ai_clis row in ONE
+ * statement: json_set touches only metadata.machines.<this pairing>, so a
+ * heartbeat landing between another computer's read and write cannot erase it
+ * (a read-modify-write here would). The top-level providers/checked_at of a row
+ * written before per-computer reports are removed so nothing reads them as a
+ * computer. True: written. False: the write failed (logged).
+ */
+async function recordCliMachine(payload: Record<string, unknown>, patch: CliMachinePatch): Promise<boolean> {
+  const reported = (payload.metadata ?? {}) as Record<string, unknown>;
+  const { providers: _providers, checked_at: _checkedAt, ...rest } = reported;
+  const fresh = { ...rest, machines: { [patch.id]: patch.entry } };
+  try {
+    await getTursoClient().execute({
+      sql: `INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at, last_error, metadata, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (profile_id, service) DO UPDATE SET
+              tenant_id = excluded.tenant_id, status = excluded.status, last_ping_at = excluded.last_ping_at,
+              last_error = excluded.last_error, updated_at = excluded.updated_at,
+              metadata = json_remove(
+                json_set(
+                  CASE WHEN json_valid(integrations_health.metadata) AND json_type(integrations_health.metadata) = 'object'
+                       THEN integrations_health.metadata ELSE '{}' END,
+                  ?, json(?), '$._reported_by', ?),
+                '$.providers', '$.checked_at')`,
+      args: [
+        payload.tenant_id as string,
+        payload.profile_id as string,
+        payload.service as string,
+        payload.status as string,
+        payload.last_ping_at as string,
+        (payload.last_error as string | null) ?? null,
+        JSON.stringify(fresh),
+        payload.last_ping_at as string,
+        patch.path,
+        JSON.stringify(patch.entry),
+        BRIDGE_REPORT_VALUE,
+      ],
+    });
+    return true;
+  } catch (error) {
+    console.error("[bridge.ping.cli_machine]", { error: error instanceof Error ? error.message : String(error) });
+    return false;
   }
 }

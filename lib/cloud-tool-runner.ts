@@ -2508,6 +2508,20 @@ export type ToolLoopRequest = {
    * loop that reaches the cap on iteration 3 stops there with the budget code.
    */
   meter: ModelCallMeter;
+  /**
+   * A caller-owned tool set (lib/os/desk: a department's palette). When set it
+   * REPLACES the TOOL_DEFINITIONS palette and every filter above: the loop
+   * offers exactly `tools` and dispatches every call through `execute`, never
+   * executeTool, so a department turn can only run its own palette. Its tools
+   * never pause for the bridge.
+   */
+  toolset?: InjectedToolset;
+};
+
+/** See ToolLoopRequest.toolset. `execute` enforces its own palette and tenant. */
+export type InjectedToolset = {
+  tools: ReadonlyArray<{ name: string; description: string; input_schema: Record<string, unknown> }>;
+  execute: (name: string, input: Record<string, unknown>) => Promise<ToolResultBlock>;
 };
 
 export async function* streamAnthropicWithTools(
@@ -2544,6 +2558,7 @@ export async function* streamAnthropicWithTools(
     startUnreportedCalls: 0,
     ctx,
     meter: req.meter,
+    toolset: req.toolset,
   });
 }
 
@@ -2638,14 +2653,17 @@ export async function* streamOpenAICompatibleWithTools(
     .map((m) => ({ role: m.role, content: m.content }) as OpenAICompatibleMessage);
   const mode = normalizeMode(req.chatMode);
   const system = composePlanSystemPrompt(req.system, mode);
-  const activeTools = resolveActiveTools({
-    tenantId: ctx.tenantId,
-    toolPalette: req.toolPalette,
-    chatMode: mode,
-    // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
-    // Keep this path cloud-safe instead of advertising tools it cannot resume.
-    forceExcludeDeferred: true,
-  });
+  const activeTools: ReadonlyArray<{ name: string; description: string; input_schema: Record<string, unknown> }> =
+    req.toolset
+      ? req.toolset.tools
+      : resolveActiveTools({
+          tenantId: ctx.tenantId,
+          toolPalette: req.toolPalette,
+          chatMode: mode,
+          // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
+          // Keep this path cloud-safe instead of advertising tools it cannot resume.
+          forceExcludeDeferred: true,
+        });
   // The turn's tokens: the SUM of every step's own report. Each step is its
   // own provider request (its own ai_usage_events row), and each reports only
   // its own usage, so keeping the last report under-counted every tool turn.
@@ -2815,7 +2833,7 @@ export async function* streamOpenAICompatibleWithTools(
         continue;
       }
       yield { type: "tool_use", name: tu.name, input: tu.input };
-      const result = await executeTool(tu.name, tu.input, ctx);
+      const result = req.toolset ? await req.toolset.execute(tu.name, tu.input) : await executeTool(tu.name, tu.input, ctx);
       yield {
         type: "tool_result",
         name: tu.name,
@@ -2917,6 +2935,8 @@ type IterationLoopArgs = {
   ctx: ToolContext;
   /** Meters each iteration's model call (ToolLoopRequest.meter). */
   meter: ModelCallMeter;
+  /** ToolLoopRequest.toolset: replaces the palette and the dispatcher. */
+  toolset?: InjectedToolset;
 };
 
 /**
@@ -3012,13 +3032,16 @@ async function* runIterationLoop(
   //      system prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY),
   //      applied where `system` is composed by streamAnthropicWithTools
   //      before this loop runs.
-  const activeTools: ToolDef[] = resolveActiveTools({
-    tenantId: ctx.tenantId,
-    excludeDeferredTools: args.excludeDeferredTools,
-    bridgeAdvertisedTools: args.bridgeAdvertisedTools,
-    toolPalette: args.toolPalette,
-    chatMode: args.chatMode,
-  });
+  //   A caller's toolset (ToolLoopRequest.toolset) replaces all of the above.
+  const activeTools: ReadonlyArray<Pick<ToolDef, "name" | "description" | "input_schema" | "defer">> = args.toolset
+    ? args.toolset.tools
+    : resolveActiveTools({
+        tenantId: ctx.tenantId,
+        excludeDeferredTools: args.excludeDeferredTools,
+        bridgeAdvertisedTools: args.bridgeAdvertisedTools,
+        toolPalette: args.toolPalette,
+        chatMode: args.chatMode,
+      });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;
   // Iterations whose call finished with no complete usage report: their
@@ -3266,10 +3289,13 @@ async function* runIterationLoop(
     // remaining tool calls to the resume; the model will re-emit them.
     // In practice the model issues one tool_use per turn unless we ask
     // for parallel-tools, which we don't.)
-    const deferred = dispatchableToolUses.find((tu) => {
-      const def = TOOL_DEFINITIONS.find((d) => d.name === tu.name);
-      return def?.defer === true;
-    });
+    // A caller's toolset never pauses for the bridge.
+    const deferred = args.toolset
+      ? undefined
+      : dispatchableToolUses.find((tu) => {
+          const def = TOOL_DEFINITIONS.find((d) => d.name === tu.name);
+          return def?.defer === true;
+        });
     if (deferred) {
       yield {
         type: "tool_use_pending",
@@ -3314,7 +3340,7 @@ async function* runIterationLoop(
     const resultBlocks: ContentBlock[] = [...blockedResultBlocks];
     for (const tu of dispatchableToolUses) {
       yield { type: "tool_use", name: tu.name, input: tu.input };
-      const result = await executeTool(tu.name, tu.input, ctx);
+      const result = args.toolset ? await args.toolset.execute(tu.name, tu.input) : await executeTool(tu.name, tu.input, ctx);
       yield {
         type: "tool_result",
         name: tu.name,

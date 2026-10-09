@@ -18,6 +18,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { setupHref } from "@/lib/setup-links";
 import type { DepartmentKey } from "@/lib/os/types";
 import { departmentChannelFor, type DepartmentScope } from "@/components/os/department/config";
 
@@ -26,7 +27,7 @@ export const INSTALL_PROVIDERS: readonly string[] = ["slack"];
 
 /** Where an install lands the browser back. */
 export function installReturnPath(provider: string): string {
-  return provider === "slack" ? "/settings/chat-apps" : "/settings/connections";
+  return provider === "slack" ? setupHref("chat_apps") : setupHref("connections");
 }
 
 export const DEPARTMENT_KEYS: readonly DepartmentKey[] = OS_DEPARTMENTS.map((d) => d.key);

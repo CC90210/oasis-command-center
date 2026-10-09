@@ -20,6 +20,7 @@ import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Check, KeyRound, Loader2, X, ExternalLink } from "lucide-react";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import { setupHref } from "@/lib/setup-links";
 
 type Props = {
   open: boolean;
@@ -157,7 +158,7 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
               Open Settings → Devices, or run <code className="text-accent">oasis bridge status</code> followed by <code className="text-accent">oasis bridge restart</code> on the paired machine. Return here when the bridge reports online; secret entry stays disabled until then.
             </div>
             <a
-              href="/settings/devices"
+              href={setupHref("bridge_devices")}
               className="mt-2 inline-flex text-xs font-semibold text-accent hover:text-accent-bright"
             >
               Open Devices

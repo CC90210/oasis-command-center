@@ -20,7 +20,8 @@ import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { aiServicesWithKey } from "@/lib/queries";
 import { readPersonalAiServices } from "@/lib/ai/workspace-account";
 import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
-import { connectorHref } from "@/lib/os/connectors";
+import { connectorBySlug } from "@/lib/os/connectors";
+import { setupHref, type SetupNeed } from "@/lib/setup-links";
 import { ONLINE_MS, isOnline } from "@/lib/devices/presence";
 import type { ManifestRequiredService } from "@/lib/manifest/schema";
 
@@ -39,6 +40,16 @@ export type ReadinessReport = {
 };
 
 const PERSONAL_OAUTH_SERVICES = ["gmail_oauth"];
+
+/**
+ * Where a missing workspace credential is added: that app's own Connections
+ * card when the catalog has it (a manifest names a service by its slug), else
+ * the hub. A hub link for "Add key" left the owner to find the card themselves.
+ */
+function credentialSetupHref(service: string): string {
+  const need: SetupNeed = connectorBySlug(service) ? `connector:${service}` : "connections";
+  return setupHref(need);
+}
 
 /**
  * Default required_services list for tenants whose manifest doesn't
@@ -112,7 +123,7 @@ export async function loadReadinessReport(args: {
           : "Not connected — outbound mail will fall back to the shared address.",
         cta: hasGmail
           ? undefined
-          : { href: connectorHref("google-workspace"), label: "Connect Gmail" },
+          : { href: setupHref("connector:google-workspace"), label: "Connect Gmail" },
       });
     }
   }
@@ -207,7 +218,7 @@ export async function loadReadinessReport(args: {
             (personalOnly ? " Your personal key is saved, but department chats don't use it." : ""),
         cta: haveAny
           ? undefined
-          : req.cta || { href: "/settings#providers", label: "Add AI key" },
+          : req.cta || { href: setupHref("ai_account"), label: "Add AI key" },
       });
       continue;
     }
@@ -221,7 +232,7 @@ export async function loadReadinessReport(args: {
       detail: present ? "Key on file." : req.detail || "Not yet wired.",
       cta: present
         ? undefined
-        : req.cta || { href: "/settings/connections", label: "Add key" },
+        : req.cta || { href: credentialSetupHref(req.service), label: "Add key" },
     });
   }
 
@@ -291,7 +302,7 @@ export async function loadReadinessReport(args: {
           : "No bridge paired — automations (drips, daily plan, renewals) cannot fire.",
     cta:
       live.length === 0
-        ? { href: "/settings/devices/install", label: "Install bridge" }
+        ? { href: setupHref("bridge_install"), label: "Install bridge" }
         : undefined,
   });
 
@@ -357,6 +368,6 @@ async function checkTeamGmail(
     label: "Team Gmail",
     status: "warn",
     detail: `${unconnected.length} of ${employees.length} employee(s) not connected: ${unconnected.map((u) => u.email).join(", ")}`,
-    cta: { href: "/team", label: "Open team" },
+    cta: { href: setupHref("team"), label: "Open team" },
   };
 }

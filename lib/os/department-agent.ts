@@ -48,10 +48,33 @@ import {
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
-import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
-import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
+import {
+  billingForBridge,
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  modelCallMeter,
+  recordModelCall,
+  utf8Length,
+  type AuthKind,
+  type BillingMode,
+  type CallEnd,
+  type ModelCallMeter,
+} from "@/lib/ai/usage";
+import { meterWithFallbackReason, resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
+import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import {
+  bridgeEngineLine,
+  engineFallbackReason,
+  harnessEngineLine,
+  spendFor,
+  type AgentEngineChoice,
+  type EngineSpend,
+} from "@/lib/ai/agent-engine";
+import { harnessForDepartment } from "@/lib/admin/harness-targets";
+import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
+import { streamBridgeTurn, type BridgeCaller, type BridgeEngine, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -81,7 +104,46 @@ export type AgentTurnRequest = {
    * is no: such an account is treated as no usable account.
    */
   localModelAllowed?: boolean;
+  /**
+   * The paired computer, reachable for this person: the caller's resolver runs
+   * the coding harness's own bridge gate (lib/bridge-proxy.ts
+   * authorizeBridgeRequest) for this workspace, only when an engine there is
+   * chosen. Absent, or answering null (a Slack mention, a person the gate
+   * refuses, no bridge set up): an engine on the paired computer cannot answer, and the
+   * workspace's API account answers instead, saying so (TurnEngine.fellBackFrom).
+   *
+   * null is the gate saying NO by design (a teammate who may not use the
+   * computer): the API account answering is the rule, not a fault. A
+   * BridgeUnavailable is a person who may use it and cannot (no bridge set up,
+   * the gate threw): that alone is a fallback worth reporting.
+   */
+  bridge?: (() => Promise<BridgeCaller | BridgeUnavailable | null>) | null;
 };
+
+/**
+ * What a turn runs on (lib/ai/agent-engine.ts): the API account (or the
+ * platform key), or an AI app / local model on the paired computer. `runsOn`
+ * is the plain words every reply footer shows; `spend` says whose credits or
+ * plan it uses. `fellBackFrom` names the engine that was chosen but could not
+ * be reached for a person entitled to it, when the API account answered in its
+ * place: a fault, recorded in the ledger (engine_unreachable) and said as
+ * "could not be reached". `notUsedFor` names the engine when the API account
+ * answers BY DESIGN (a Slack mention, a teammate the gate does not admit, a
+ * workspace or chat with no harness yet): not a fault, said as "isn't used for
+ * this chat", and nothing is recorded as a fallback.
+ */
+export type TurnEngine =
+  | { kind: "api"; runsOn: string; spend: EngineSpend; fellBackFrom: string | null; notUsedFor: string | null }
+  | (BridgeEngine & {
+      runsOn: string;
+      spend: EngineSpend;
+      caller: BridgeCaller;
+      tenantSlug: string;
+      fellBackFrom: null;
+      notUsedFor: null;
+      /** The department's agent harness the app runs in (lib/admin/harness-targets.ts). */
+      harness: { agent: string; department: string; label: string };
+    });
 
 export type PreparedTurn = {
   tenantId: string;
@@ -105,6 +167,8 @@ export type PreparedTurn = {
   revealModel: boolean;
   /** Carried to lib/providers.ts, which calls a local model server only with it. */
   localModelAllowed: boolean;
+  /** What the turn runs on; kind "api" is a hosted provider call (streamChat). */
+  engine: TurnEngine;
 };
 
 export type PrepareRefusal = {
@@ -153,6 +217,7 @@ export function interpolate(template: string, vars: Record<string, string>): str
  */
 export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareResult> {
   const { tenantId, tenantSlug } = req;
+  const startedAt = Date.now();
   const agentSlug = (req.agentSlug || "").trim().toLowerCase();
   const dept = req.department;
 
@@ -171,12 +236,16 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // binds to that department (config.ts departmentChannelFor), so a department
   // label is never pinned on another agent, and a lead switched off answers
   // nothing.
+  // OASIS's own workspace: its department turns may run in the department's
+  // agent harness on the paired computer (lib/admin/harness-targets.ts).
+  let oasisWorkspace = false;
   if (dept) {
     // getTenant answers null when the tenants read fails. That is not "not
     // OASIS": judging the binding on it would refuse OASIS's own departments.
     const tenant = await getTenant(tenantId);
     if (!tenant?.slug) return { ok: false, status: 503, error: "workspace_unavailable" };
-    const lead = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug), manifest });
+    oasisWorkspace = isOasisSurfaceTenant(tenant.slug);
+    const lead = departmentChannelFor(dept.key, { oasis: oasisWorkspace, manifest });
     if (lead.kind !== "agent" || lead.agentSlug !== agentSlug) {
       return { ok: false, status: 400, error: "department_agent_mismatch" };
     }
@@ -194,12 +263,14 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // owner connected for the whole team, whatever teammates the workspace has.
   // A teammate's personal key never answers a shared channel.
   let cfg: WorkspaceAiAccount | null;
+  let chosen: AgentEngineChoice;
   try {
-    cfg = await readWorkspaceAiAccount(tenantId);
+    [cfg, chosen] = await Promise.all([readWorkspaceAiAccount(tenantId), readAgentEngine(tenantId)]);
   } catch (err) {
     // A failed read is not "no key": answering 412 would send the owner to
     // connect an account that is already connected.
     console.error("[department-agent.config]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    await recordRefusedTurn(req, startedAt, "config_unavailable", { provider: "none", model: "none", ...billingForKey("none", "tenant") });
     return { ok: false, status: 503, error: "config_unavailable" };
   }
 
@@ -211,28 +282,73 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // verdict; for anyone else (and for every Slack mention) it is no usable
   // account, so no request to its address is ever made (Codex review, PR #535).
   const localModelAllowed = req.localModelAllowed === true;
-  // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
-  // AI account's, as Settings > AI brain shows and switches them. A manifest
-  // binding's model_override used to win here, a second place choosing a
-  // department's model that no screen showed (no stored manifest carried one
-  // on 2026-10-09); it no longer chooses anything.
-  if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+  // WHAT POWERS YOUR AGENTS (lib/ai/agent-engine.ts): an AI app or local model
+  // on the paired computer answers when the caller can reach it for this
+  // person; then no key, no API credits and no budget are involved. Otherwise
+  // the API account below answers, and the reply says what was chosen instead.
+  const bridgeEngine: BridgeEngine | null = chosen.kind === "api" ? null : chosen;
+  // The harness path is OASIS's department channels only, until client
+  // harness packs exist: anyone else on a CLI engine is answered by the API
+  // account (in-app desk agent), and the turn says so.
+  const target = dept && oasisWorkspace ? harnessForDepartment(dept.key) : null;
+  const harness = target && dept ? { agent: target.agent, department: dept.label, label: target.departments } : null;
+  // Asked only when an engine on the paired computer is chosen; a gate that
+  // throws is "can't be reached", never a crash of the turn.
+  const resolved: BridgeCaller | BridgeUnavailable | null =
+    bridgeEngine && harness && req.bridge ? await req.bridge().catch((): BridgeUnavailable => ({ unavailable: "gate_error" })) : null;
+  const caller = resolved && "target" in resolved ? resolved : null;
+  const viaBridge = bridgeEngine && harness && caller ? { engine: bridgeEngine, caller, harness } : null;
+  // WHY the chosen engine is not answering decides what is said and recorded.
+  // Only a person the gate admits, for whom the computer cannot be used, is a
+  // FALLBACK (a fault). Everyone else is answered by the API account by design.
+  const engineLine = bridgeEngine ? bridgeEngineLine(bridgeEngine) : null;
+  const unreachable = Boolean(bridgeEngine && !viaBridge && resolved && "unavailable" in resolved);
+  const fellBackFrom = unreachable ? engineLine : null;
+  const notUsedFor = bridgeEngine && !viaBridge && !unreachable ? engineLine : null;
+  if (viaBridge) {
+    // Named for the logs and the operator's model detail; no key is sent.
+    provider = hasUsableKey(cfg) ? cfg.provider : "anthropic";
+    model = bridgeEngineLine(viaBridge.engine);
+  } else if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+    // ONE SOURCE (CC, 2026-10-09): the provider AND the model are the workspace
+    // AI account's, as Settings > AI brain shows and switches them. A manifest
+    // binding's model_override used to win here, a second place choosing a
+    // department's model that no screen showed (no stored manifest carried one
+    // on 2026-10-09); it no longer chooses anything.
     provider = cfg.provider;
     model = cfg.model;
     try {
       apiKey = decryptField(cfg.encryptedApiKey);
     } catch {
+      await recordRefusedTurn(req, startedAt, "key_unreadable", { provider, model, ...billingForKey(provider, "tenant") });
       return { ok: false, status: 500, error: "key_unreadable", recordAs: "key_unreadable", agentSlug: agent.slug, channelKey };
     }
   } else {
     const fallback = req.platformFallback;
     if (!fallback) {
-      // Not recorded: no key was tried, so this says nothing about the key.
+      // Not recorded as the channel's last turn: no key was tried, so this says
+      // nothing about the key. It IS a department turn that got no answer, so
+      // the ledger gets its row: with an app chosen, its computer down and no
+      // account behind it, this refusal is the whole outage.
+      await recordRefusedTurn(
+        req,
+        startedAt,
+        "agent_not_configured",
+        bridgeEngine
+          ? { provider: "bridge", model: bridgeLedgerModel(bridgeEngine), ...billingForBridge(bridgeEngine) }
+          : { provider: "none", model: "none", ...billingForKey("none", "tenant") },
+      );
       return {
         ok: false,
         status: 412,
         error: "agent_not_configured",
-        extra: { hint: "Connect an AI account in Settings > AI brain before chatting here." },
+        extra: {
+          hint: fellBackFrom
+            ? `Your agents run on ${fellBackFrom}, which can't be reached for this chat, and no AI account is connected to answer instead.`
+            : notUsedFor
+              ? `Your agents run on ${notUsedFor}, which isn't used for this chat, and no AI account is connected to answer instead.`
+              : "Connect an AI account in Settings > AI brain before chatting here.",
+        },
       };
     }
     provider = fallback.provider;
@@ -244,9 +360,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // The month's AI budget (lib/ai/usage.ts): a workspace already at its cap is
   // refused before a model is called, and it is recorded as the channel's last
   // turn, because it is a verdict every channel shares.
-  const billing = billingForKey(provider, keySource);
+  // A turn on the paired computer spends no API credits, so no budget applies.
+  const billing = viaBridge ? billingForBridge(viaBridge.engine) : billingForKey(provider, keySource);
   try {
-    const exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
+    const exhausted = viaBridge ? null : await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
     if (exhausted) {
       return { ok: false, status: 402, error: exhausted, recordAs: exhausted, agentSlug: agent.slug, channelKey };
     }
@@ -281,19 +398,43 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // replacement on the same provider and key, and the meter records why
   // (lib/ai/model-registry.ts). Resolved here, not only where the request is
   // built, so the turn names the model it really sends.
-  const picked = resolveCall(
-    provider,
-    model,
-    modelCallMeter({
-      tenantId,
-      surface: "agents.chat",
-      ...billing,
-      departmentKey: dept?.key ?? null,
-      teammateId: agent.slug,
-      userId: req.userId,
-      jobId: req.jobId ?? null,
-    }),
-  );
+  const meter = modelCallMeter({
+    tenantId,
+    surface: "agents.chat",
+    ...billing,
+    departmentKey: dept?.key ?? null,
+    teammateId: agent.slug,
+    userId: req.userId,
+    jobId: req.jobId ?? null,
+  });
+  // A turn on the paired computer sends no hosted model, so there is nothing to
+  // resolve; its one row is written by streamAgentTurn (meteredBridgeTurn). A
+  // turn that fell back from the chosen engine records that on every call it
+  // opens, INSIDE the model-swap wrapper so both reasons survive. Only a real
+  // fallback: an API turn that is the rule (Slack, a teammate the gate does not
+  // admit, a chat with no harness) records none, or the health check would page
+  // on turns that are working as designed.
+  const apiMeter = bridgeEngine && fellBackFrom ? meterWithFallbackReason(meter, engineFallbackReason(bridgeEngine)) : meter;
+  const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, apiMeter);
+  const brain = keySource === "tenant" && hasUsableKey(cfg) ? departmentBrain({ provider, model: picked.model }) : null;
+  const engine: TurnEngine = viaBridge
+    ? {
+        ...viaBridge.engine,
+        runsOn: harnessEngineLine(viaBridge.engine, viaBridge.harness.label),
+        spend: spendFor(viaBridge.engine),
+        caller: viaBridge.caller,
+        tenantSlug,
+        fellBackFrom: null,
+        notUsedFor: null,
+        harness: viaBridge.harness,
+      }
+    : {
+        kind: "api",
+        runsOn: keySource === "platform" ? "the OASIS platform key" : brain ? `${brainLine(brain)} (API)` : `${provider} (API)`,
+        spend: keySource === "platform" ? "platform" : "api_credits",
+        fellBackFrom,
+        notUsedFor,
+      };
 
   return {
     ok: true,
@@ -312,8 +453,126 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       meter: picked.meter,
       revealModel: req.revealModel,
       localModelAllowed,
+      engine,
     },
   };
+}
+
+/**
+ * One zero-cost ledger row for a department turn that was refused BEFORE any
+ * model was asked (no AI account, an unreadable key or settings). Without it
+ * these outages leave nothing for lib/health/department-chat-checks.ts to read:
+ * "app chosen, computer down, no account" would be a dead department with a
+ * quiet monitor. Department turns only; the month's budget refusal (402) is a
+ * policy verdict the channel already surfaces and is not recorded here.
+ */
+async function recordRefusedTurn(
+  req: AgentTurnRequest,
+  startedAt: number,
+  code: "agent_not_configured" | "key_unreadable" | "config_unavailable",
+  what: { provider: string; model: string; authKind: AuthKind; billingMode: BillingMode },
+): Promise<void> {
+  if (!req.department) return;
+  await recordModelCall({
+    tenantId: req.tenantId,
+    surface: "agents.chat",
+    authKind: what.authKind,
+    billingMode: what.billingMode,
+    departmentKey: req.department.key,
+    teammateId: req.agentSlug,
+    userId: req.userId,
+    jobId: req.jobId ?? null,
+    occurredAt: new Date(),
+    provider: what.provider,
+    model: what.model,
+    costMicroUsd: 0,
+    costSource: "none",
+    latencyMs: Date.now() - startedAt,
+    outcome: "error",
+    errorCode: code,
+  });
+}
+
+/** What the ledger calls the engine: the app's id ("claude", "codex", "gemini") or the local model's name. */
+function bridgeLedgerModel(engine: BridgeEngine): string {
+  return engine.kind === "cli" ? engine.cli : engine.model;
+}
+
+/** The ledger's error_code for a bridge stream error: the same words the channel shows (outcome.ts), empty replies as the providers record them. */
+function bridgeErrorCode(message: string): string {
+  const empty = /^empty_reply:(thinking|blocked|empty)$/.exec(message);
+  return empty ? `empty_reply_${empty[1]}` : classifyStreamError(message);
+}
+
+/**
+ * One ledger row for one department turn on the paired computer, whatever its
+ * end. Passes every event through unchanged.
+ *
+ *   - provider "bridge", model the app or local model; billing subscription or
+ *     local (billingForBridge), so nothing is priced or reserved against the
+ *     budget; cost is a known 0 (nothing billed to an API account).
+ *   - text arrived and the stream finished: ok. The bridge often reports no
+ *     token counts, so output_tokens falls back to a characters/4 estimate: an
+ *     ok row never carries 0 for a reply that had words, and the health check's
+ *     "ok with 0 output" rule stays a real alarm.
+ *   - an error event: that failure's code (bridge_unreachable, cli_failed, ...).
+ *   - a stream that ends with no text, or no end at all: a FAILURE
+ *     (empty_reply_*), never ok.
+ *   - the consumer stopping early: cancelled.
+ * Latency runs from the first pull, the start of the turn.
+ */
+export async function* meteredBridgeTurn(
+  meter: ModelCallMeter,
+  engine: BridgeEngine,
+  inner: AsyncGenerator<StreamEvent>,
+  size: { maxOutputTokens: number; promptBytes: number },
+): AsyncGenerator<StreamEvent> {
+  const call = await meter.begin({
+    provider: "bridge",
+    model: bridgeLedgerModel(engine),
+    maxOutputTokens: size.maxOutputTokens,
+    promptBytes: size.promptBytes,
+  });
+  let chars = 0;
+  let reportedIn = 0;
+  let reportedOut = 0;
+  let end: CallEnd | null = null;
+  const empty: CallEnd = {
+    outcome: "error",
+    errorCode: "empty_reply_empty",
+    usage: { inputTokens: null, outputTokens: 0, cacheReadTokens: null, cacheWriteTokens: null },
+    notBilled: true,
+  };
+  try {
+    for await (const ev of inner) {
+      if (ev.type === "delta") chars += ev.text.length;
+      else if (ev.type === "done") {
+        reportedIn = ev.inputTokens;
+        reportedOut = ev.outputTokens;
+      } else if (ev.type === "error") {
+        end = { outcome: "error", errorCode: bridgeErrorCode(ev.message), usage: null, notBilled: true };
+      }
+      yield ev;
+    }
+    end ??=
+      chars > 0
+        ? {
+            outcome: "ok",
+            usage: {
+              inputTokens: reportedIn > 0 ? reportedIn : null,
+              outputTokens: reportedOut > 0 ? reportedOut : Math.ceil(chars / 4),
+              cacheReadTokens: null,
+              cacheWriteTokens: null,
+            },
+            notBilled: true,
+          }
+        : empty;
+  } catch (err) {
+    end = { outcome: "error", errorCode: "stream_failed", usage: null, notBilled: true };
+    throw err;
+  } finally {
+    await call.finish(end ?? { outcome: "cancelled", usage: null, notBilled: true });
+  }
 }
 
 /** The provider stream for a prepared turn (the web route relays it as SSE). */
@@ -322,6 +581,27 @@ export function streamAgentTurn(
   messages: readonly ChatMessage[],
   maxTokens = DEPARTMENT_REPLY_MAX_TOKENS,
 ): AsyncGenerator<StreamEvent> {
+  // The paired computer (lib/ai/bridge-turn.ts): the same SSE shape, no key.
+  // No hosted model is called, but the turn still leaves its one ledger row,
+  // or a broken CLI turn would be invisible to the department-chat health check.
+  if (turn.engine.kind !== "api") {
+    const engine: BridgeEngine = turn.engine.kind === "cli" ? { kind: "cli", cli: turn.engine.cli } : { kind: "local", model: turn.engine.model };
+    return meteredBridgeTurn(
+      turn.meter,
+      engine,
+      streamBridgeTurn({
+        caller: turn.engine.caller,
+        engine,
+        agentSlug: turn.agentSlug,
+        tenantSlug: turn.engine.tenantSlug,
+        system: turn.system,
+        messages,
+        maxTokens,
+        harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
+      }),
+      { maxOutputTokens: maxTokens, promptBytes: utf8Length(JSON.stringify({ system: turn.system, messages })) },
+    );
+  }
   const isOllama = turn.provider === "ollama";
   return streamChat({
     provider: turn.provider,

@@ -5,8 +5,25 @@ import Link from "next/link";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
 import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
-import { AI_SETTINGS_HREF, failureCopy, isTurnFailureCode, type FailureModel } from "@/lib/os/channel/outcome";
+import { failureCopy, isTurnFailureCode, type FailureModel } from "@/lib/os/channel/outcome";
 import { announceTurn } from "@/components/os/department/turn-event";
+import { deskToolsNote } from "@/lib/os/desk/catalog";
+import { ENGINE_SETTINGS_HREF, isEngineSpend, spendTag, type EngineLabel } from "@/lib/ai/agent-engine";
+import { CHAT_LIST_CLASS, CHAT_VIA_CLASS, chatBubbleClass, chatRowClass } from "./chat-layout";
+
+/** The "via" footer of an answer, from the route's `agent` event: what ran it and whose credits it spent. */
+export function viaLine(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as { runs_on?: unknown; spend?: unknown; model?: unknown; fell_back_from?: unknown; engine_not_used?: unknown };
+  const what = typeof p.runs_on === "string" && p.runs_on.trim() ? p.runs_on.trim() : typeof p.model === "string" && p.model ? p.model : null;
+  if (!what) return null;
+  const parts = [what];
+  if (isEngineSpend(p.spend)) parts.push(spendTag(p.spend));
+  if (typeof p.fell_back_from === "string" && p.fell_back_from) parts.push(`${p.fell_back_from} could not be reached`);
+  // The API account answers by design here: say so, never "could not be reached".
+  else if (typeof p.engine_not_used === "string" && p.engine_not_used) parts.push(`${p.engine_not_used} is not used for this chat`);
+  return parts.join(" - ");
+}
 
 /** The `model` of a route error event (app/api/agents/chat), when it is well formed. */
 function asFailureModel(raw: unknown): FailureModel | null {
@@ -50,10 +67,11 @@ type Props = {
   initialFailure?: string | null;
   /**
    * What answers in this channel, in Settings > AI brain's own words
-   * ("Google Gemini, Gemini 3.8 Flash", lib/ai/department-brain.ts), with a
-   * link to change it there. Set by a department channel for owners and admins.
+   * ("Google Gemini, Gemini 3.8 Flash", or "Claude Code on your paired
+   * computer", lib/ai/agent-engine.ts) and whose credits it spends, linking to
+   * that choice. Set by a department channel for owners and admins.
    */
-  poweredBy?: string | null;
+  poweredBy?: EngineLabel | null;
 };
 
 // sessionStorage key for plan mode. Per-tab so a tenant-preview reload
@@ -105,6 +123,10 @@ export function AgentChat({
   const [failure, setFailure] = useState<string | null>(initialFailure);
   // The model a "not found" was about, as the route named it (its error event).
   const [failureModel, setFailureModel] = useState<FailureModel | null>(null);
+  // A department turn's lookups (app/api/agents/chat `tool` events) and, when
+  // lookups are off for this AI account, why (the `agent` event's `tools`).
+  const [toolsNote, setToolsNote] = useState<string | null>(null);
+  const [lookups, setLookups] = useState<string[]>([]);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
@@ -126,6 +148,7 @@ export function AgentChat({
       if (!trimmed || streaming) return;
       setFailure(null);
       setFailureModel(null);
+      setLookups([]);
 
       // Slash commands — intercepted client-side, never hit the server.
       // Scoped to the commands this chat offers (chatCommands): anything
@@ -293,18 +316,20 @@ export function AgentChat({
               continue;
             }
             if (eventName === "agent" && payload && typeof payload === "object") {
+              setToolsNote(deskToolsNote((payload as { tools?: unknown }).tools));
               const model = (payload as { model?: string }).model || null;
               setModelLabel(model);
-              // Stamp the assistant placeholder with the runtime so the
-              // pill renders under the message once streaming completes.
-              // The server emits this `agent` event BEFORE any delta,
-              // so the placeholder is already on screen at this point.
-              if (model) {
+              // Stamp the assistant placeholder with what ran it (and whose
+              // credits it spent) so the line renders under the message once
+              // streaming completes. The server emits this `agent` event
+              // BEFORE any delta, so the placeholder is already on screen.
+              const via = viaLine(payload);
+              if (via) {
                 setTurns((prev) => {
                   const next = [...prev];
                   const last = next[next.length - 1];
                   if (last && last.role === "assistant") {
-                    next[next.length - 1] = { ...last, runtime: model };
+                    next[next.length - 1] = { ...last, runtime: via };
                   }
                   return next;
                 });
@@ -330,6 +355,11 @@ export function AgentChat({
               streamFailure = (payload as { code?: string }).code || "provider_error";
               setFailureModel(asFailureModel((payload as { model?: unknown }).model));
               setFailure(streamFailure);
+            } else if (eventName === "tool" && payload && typeof payload === "object") {
+              const label = (payload as { label?: unknown; phase?: unknown }).label;
+              if ((payload as { phase?: unknown }).phase === "start" && typeof label === "string" && label) {
+                setLookups((prev) => (prev.includes(label) ? prev : [...prev, label]));
+              }
             }
           }
         }
@@ -384,7 +414,7 @@ export function AgentChat({
   // mobile, the original fixed floor on desktop.
   return (
     <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[calc(100dvh-14rem)] md:min-h-[640px]">
-      <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between">
+      <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-accent/30 bg-accent/10 text-accent">
             <Sparkles className="h-4 w-4" />
@@ -419,28 +449,54 @@ export function AgentChat({
             </button>
           )}
           {poweredBy ? (
-            // The one source: the AI account AI brain shows and switches.
+            // The one source: what powers your agents, as AI brain shows and
+            // switches it. A click opens that choice (Settings > AI brain).
             <Link
-              href={AI_SETTINGS_HREF}
+              href={ENGINE_SETTINGS_HREF}
               prefetch={false}
-              title="Change it in Settings > AI brain"
-              className="text-[11px] text-fg-dim hover:text-fg underline-offset-2 hover:underline"
+              data-testid="channel-engine"
+              title={`${poweredBy.note ? `${poweredBy.note} ` : ""}Change what powers your agents in Settings > AI brain.`}
+              className="min-w-0 max-w-[16rem] sm:max-w-[22rem] truncate text-right text-[11px] leading-tight text-fg-dim hover:text-fg underline-offset-2 hover:underline"
             >
-              {poweredBy}
+              {poweredBy.line}
+              <span className="block text-[10px] text-fg-dim/80">
+                {poweredBy.note ? "Fallback in use" : spendTag(poweredBy.spend)}
+              </span>
             </Link>
           ) : (
-            modelLabel && (
-              <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">
+            modelLabel &&
+            // The engine choice is an owner's or admin's (Settings > AI brain
+            // answers anyone else with a 404), so a member sees the label only.
+            (canManageAi ? (
+              <Link
+                href={ENGINE_SETTINGS_HREF}
+                prefetch={false}
+                title="Change what powers your agents in Settings > AI brain"
+                className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono hover:text-fg"
+              >
                 {modelLabel}
-              </span>
-            )
+              </Link>
+            ) : (
+              <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">{modelLabel}</span>
+            ))
           )}
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
+      {toolsNote && (
+        <div className="border-b border-bg-border px-5 py-2 text-[11px] text-fg-dim">{toolsNote}</div>
+      )}
+
+      {poweredBy?.note && (
+        <p className="border-b border-hairline px-5 py-2 text-[11px] leading-snug text-status-warm">{poweredBy.note}</p>
+      )}
+
+      {/* Layout: components/agents/chat-layout.ts (bubbles sized to their
+          text, yours right and the department's left, the "via" line under
+          its bubble). */}
+      <div ref={scrollRef} className={CHAT_LIST_CLASS}>
         {turns.length === 0 && (
-          <div className="rounded-xl border border-bg-border bg-bg-elev/40 px-4 py-3 text-sm text-fg-muted leading-relaxed">
+          <div className="rounded-xl border border-hairline bg-bg-panel px-4 py-3 text-sm text-fg-muted leading-[1.65]">
             {greeting || `Start chatting with ${agentName}. Press Enter to send.`}
           </div>
         )}
@@ -450,11 +506,8 @@ export function AgentChat({
           // without confusing them for assistant output.
           if (t.role === "system") {
             return (
-              <div
-                key={i}
-                className="text-xs leading-relaxed whitespace-pre-wrap break-words text-fg-dim font-mono px-3 py-2 rounded-lg border border-bg-border/50 bg-bg-deep/40"
-              >
-                {t.content}
+              <div key={i} className={chatRowClass("system")}>
+                <div className={chatBubbleClass("system")}>{t.content}</div>
               </div>
             );
           }
@@ -465,27 +518,21 @@ export function AgentChat({
             t.content.trim().length > 0 &&
             !(streaming && isLastAssistant);
           return (
-            <div key={i} className="contents">
-              <div
-                className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                  t.role === "user"
-                    ? "ml-8 rounded-xl bg-accent-soft border border-accent-muted/30 px-4 py-2.5 text-fg"
-                    : "mr-8 rounded-xl bg-bg-elev/70 border border-bg-border px-4 py-2.5 text-fg-muted"
-                }`}
-              >
+            <div key={i} className={chatRowClass(t.role)}>
+              <div className={chatBubbleClass(t.role)}>
                 {t.content || (streaming && i === turns.length - 1 ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-accent inline" />
                 ) : null)}
               </div>
-              {showRuntime && (
-                <div className="text-[10px] text-fg-dim font-mono ml-2 mr-8 -mt-2">
-                  via {t.runtime}
-                </div>
-              )}
+              {showRuntime && <div className={CHAT_VIA_CLASS}>via {t.runtime}</div>}
             </div>
           );
         })}
       </div>
+
+      {lookups.length > 0 && (
+        <div className="mx-5 mb-2 text-[11px] text-fg-dim">Looked up: {lookups.join(", ")}</div>
+      )}
 
       {failureText && (
         <div

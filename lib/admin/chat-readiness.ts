@@ -29,6 +29,21 @@ export function bridgeProbeTimeoutMs(proxyMode: boolean): number {
 }
 
 /**
+ * How long the harness waits for its agent settings (/api/agent-config). The
+ * read had no limit, so a request that never answered left "loading agent
+ * config..." on screen for good (CC, 2026-10-09).
+ */
+export const CONFIG_READ_TIMEOUT_MS = 15_000;
+
+/** The plain reason that read failed: a timeout is said as one, never left spinning. */
+export function agentConfigReadFailure(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  return name === "TimeoutError" || name === "AbortError"
+    ? `Couldn't read your agent settings: the server didn't answer within ${CONFIG_READ_TIMEOUT_MS / 1000} seconds. Refresh to try again.`
+    : "Couldn't read your agent settings: the request didn't reach the server. Check your connection, then refresh.";
+}
+
+/**
  * Is a chat turn possible right now, from a real check? The desktop bridge
  * answered, or there is an actual key: this agent's own saved key, or, for
  * the operator, a platform key /api/usage confirmed exists. Being the

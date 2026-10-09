@@ -12,7 +12,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { bridgeProbeTimeoutMs, chatReadiness, harnessOwnsUrlParams } from "@/lib/admin/chat-readiness";
+import {
+  CONFIG_READ_TIMEOUT_MS,
+  agentConfigReadFailure,
+  bridgeProbeTimeoutMs,
+  chatReadiness,
+  harnessOwnsUrlParams,
+} from "@/lib/admin/chat-readiness";
 import { PendingHarnessActions, pendingFromFrame, type PendingHarnessAction } from "@/components/admin/PendingHarnessActions";
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
@@ -49,15 +55,12 @@ import {
   CLI_RUNTIME_STORAGE_KEY,
   type CliRuntime,
 } from "@/lib/cli-runtime";
+import { setupHref } from "@/lib/setup-links";
+import { ENGINE_SETTINGS_HREF, agentsEngineLine, harnessRouteFor, parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
 import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
-import {
-  deriveDropdownState,
-  DROPDOWN_SUFFIX,
-  isDropdownEnabled,
-} from "@/lib/bridge-dropdown-state";
 import type { BridgeHealthResponse } from "@/lib/bridge-health-types";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { parseInput, renderHelp, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
@@ -184,69 +187,9 @@ function computeExpectedRuntime(args: {
 // mode to survive. Distinct from CHAT_MODE_STORAGE_KEY (localStorage, per
 // origin) because plan mode is a within-conversation state, not a long-lived
 // operator preference.
-const PLAN_MODE_STORAGE_KEY = "oasis.chat.planMode.v1";
-const isCliRuntime = (s: unknown): s is CliRuntime =>
+const PLAN_MODE_STORAGE_KEY = "oasis.chat.planMode.v1";const isCliRuntime = (s: unknown): s is CliRuntime =>
   s === "claude" || s === "codex" || s === "gemini";
 
-/** Single-source-of-truth label suffix for the three CLI options in
- *  the advanced picker. Keeps the three nearly-identical <option>
- *  blocks in the dropdown tight + makes adding a fourth CLI a one-line
- *  change instead of a 12-line ternary copy.
- *
- *  - bridgeOnline=true: just the runtime name, no suffix
- *  - bridgeOnline=null (probe in flight): "(checking…)"
- *  - bridgeOnline=false + serverBridgeOnline=true: heartbeating but
- *    this browser can't reach it — usually CORS, different machine,
- *    or a Firefox/Safari HTTPS→HTTP localhost block
- *  - bridgeOnline=false + serverBridgeOnline=false: daemon actually down
- */
-// deriveDropdownState / DROPDOWN_SUFFIX / isDropdownEnabled live in
-// lib/bridge-dropdown-state.ts so they can be unit-tested and reused.
-// See that file for the full state-machine contract.
-function renderCliOption(args: {
-  value: string;
-  displayName: string;
-  onlineTooltip: string;
-  offlineTooltip: string;
-  bridgeOnline: boolean | null;
-  serverBridgeOnline?: boolean;
-  bridgeProbeReason?: string | null;
-  bridgeProbeDetail?: string | null;
-}) {
-  const {
-    value,
-    displayName,
-    onlineTooltip,
-    offlineTooltip,
-    bridgeOnline,
-    serverBridgeOnline,
-    bridgeProbeReason,
-    bridgeProbeDetail,
-  } = args;
-  const state = deriveDropdownState(bridgeOnline, serverBridgeOnline);
-  const enabled = isDropdownEnabled(state);
-  const suffix = DROPDOWN_SUFFIX[state];
-  // Tooltip surfaces the structured probe reason when available, otherwise
-  // falls back to the caller-supplied generic copy. The reason names the
-  // exact failure mode (bridge_not_configured / vps_unauthorized / etc.)
-  // and `detail` holds the operator-actionable next step.
-  let title = onlineTooltip;
-  if (state === "degraded") {
-    title = bridgeProbeReason && bridgeProbeDetail
-      ? `${bridgeProbeReason}: ${bridgeProbeDetail}`
-      : "Daemon online · proxy degraded. Hover the bridge status icon for diagnostic detail.";
-  } else if (state === "offline") {
-    title = bridgeProbeDetail
-      ? `${bridgeProbeReason || "offline"}: ${bridgeProbeDetail}`
-      : offlineTooltip;
-  }
-  return (
-    <option key={value} value={value} disabled={!enabled} title={title}>
-      {displayName}
-      {suffix}
-    </option>
-  );
-}
 const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   claude: "Claude Code",
   codex: "Codex CLI",
@@ -833,17 +776,6 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
     }
   }
-  function setCliRuntime(next: CliRuntime) {
-    setCliRuntimeState(next);
-    setSessionId(null);
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, next);
-      } catch {
-        // localStorage quota / privacy mode - fine, runtime is in-memory.
-      }
-    }
-  }
   const [usage, setUsage] = useState<{ usage: number; limit: number | null } | null>(null);
   // Cloud-tool results — only fire on the cloud /api/chat path. Each
   // entry is one execution of a <cloud-tool> marker the agent emitted
@@ -984,8 +916,12 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     return `${mm}:${ss}`;
   }, [streamStartedAt, elapsedTick]);
 
+  // A request that never answers used to leave "loading agent config..." on
+  // screen for good (CC, 2026-10-09): the fetch had no time limit, so the
+  // spinner waited on it forever. It now gives up after 15 s and says why.
+  const [configsError, setConfigsError] = useState<string | null>(null);
   useEffect(() => {
-    fetch("/api/agent-config")
+    fetch("/api/agent-config", { signal: AbortSignal.timeout(CONFIG_READ_TIMEOUT_MS) })
       .then(async (r) => {
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j.ok) {
@@ -994,12 +930,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           // renders — just with whatever configs were last hydrated (none on
           // first mount) — so the operator can retry the page.
           console.error("[chat_widget.agent_config]", j?.error || `status ${r.status}`);
+          setConfigsError(`Couldn't read your agent settings (the server answered ${r.status}). Refresh to try again.`);
           return;
         }
         setConfigs(j.configs as AgentConfig[]);
       })
       .catch((err) => {
         console.error("[chat_widget.agent_config]", err);
+        setConfigsError(agentConfigReadFailure(err));
       })
       .finally(() => setConfigsLoaded(true));
   }, []);
@@ -1145,14 +1083,52 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }, []);
 
+  // ONE ENGINE (CC, 2026-10-09: the coding harness and the departments "should
+  // share the same connection ... on the same functionality"). The harness
+  // runs on what powers your agents (lib/ai/agent-engine.ts harnessRouteFor):
+  // there is no second picker that can disagree with Settings > AI brain. Until
+  // the setting is read, the last route this browser used stands; a read that
+  // fails says so in the header instead of guessing.
+  const [agentsEngine, setAgentsEngine] = useState<AgentEngineChoice | null>(null);
+  const [engineNote, setEngineNote] = useState<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      const stored = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
-      if (isCliRuntime(stored)) setCliRuntimeState(stored);
+      const raw = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
+      if (isCliRuntime(raw)) setCliRuntimeState(raw);
     } catch {
       // Privacy mode / disabled storage - leave default "claude".
     }
+    let alive = true;
+    void fetch("/api/ai/engine", { cache: "no-store", signal: AbortSignal.timeout(15_000) })
+      .then(async (r) => {
+        const body = (await r.json().catch(() => null)) as { ok?: boolean; engine?: unknown; message?: string } | null;
+        if (!alive) return;
+        const engine = r.ok && body?.ok ? parseEngineChoice(body.engine) : null;
+        if (!engine) {
+          setEngineNote(body?.message || "Couldn't read what powers your agents, so the coding harness kept its last route.");
+          return;
+        }
+        const route = harnessRouteFor(engine);
+        setAgentsEngine(engine);
+        setEngineNote(route.note);
+        setChatModeState(route.mode);
+        setCliRuntimeState(route.runtime);
+        setSessionId(null);
+        // Remembered only so the next load starts on the same route before the setting is read.
+        try {
+          window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, route.runtime);
+        } catch {
+          // localStorage quota / privacy mode: the setting is read again next load.
+        }
+      })
+      .catch((err) => {
+        console.error("[chat_widget.engine]", err);
+        if (alive) setEngineNote("Couldn't read what powers your agents (no answer in 15 seconds), so the coding harness kept its last route.");
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Probe the local bridge on mount + every 30s. When the operator runs
@@ -2883,25 +2859,35 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             {targetLabels?.[agent] ? `Runs in ${targetLabels[agent].split(" · ").pop()} on your computer` : getAgentInfo(agent).tagline}
           </div>
           <div className="text-xs text-fg-dim font-mono truncate">
-            <span title={accessTitle} className={bridgeReady ? "text-accent" : undefined}>
+            {/* The model label opens what powers your agents (Settings > AI brain). */}
+            <Link
+              href={ENGINE_SETTINGS_HREF}
+              prefetch={false}
+              title={`${accessTitle} Click to change what powers your agents.`}
+              data-testid="harness-engine"
+              className={`hover:underline underline-offset-2 ${bridgeReady ? "text-accent" : ""}`}
+            >
               {bridgeReady && (
                 <Cpu className="w-3 h-3 inline-block mr-1 -mt-0.5" />
               )}
               {activeStatus}
-            </span>
+              {agentsEngine && ` - Agents: ${agentsEngineLine(agentsEngine)}`}
+            </Link>
           </div>
         </div>
         {/* Mobile-only compact status — one short pill so the operator
             still sees whether they're routed through the bridge or a
             cloud key. */}
         <div className="md:hidden flex-1 min-w-0">
-          <span
+          <Link
+            href={ENGINE_SETTINGS_HREF}
+            prefetch={false}
             title={accessTitle}
             className={`text-[10px] font-mono truncate block ${bridgeReady ? "text-accent" : "text-fg-dim"}`}
           >
             {bridgeReady && <Cpu className="w-3 h-3 inline-block mr-1 -mt-0.5" />}
             {activeStatus}
-          </span>
+          </Link>
         </div>
         {/*
           Chat-mode picker — Phase 3 of giggly-reef (2026-05-15). Four real
@@ -2922,82 +2908,21 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           framing 2026-05-15: "if one of them just works correctly,"
           the CLI-vs-API distinction is irrelevant to end users.
         */}
+        {/* ONE ENGINE (CC, 2026-10-09): the route picker that used to sit here
+            chose the coding harness's app on its own, so the harness could say
+            Codex while Settings said Gemini. The harness now runs on what powers
+            your agents (lib/ai/agent-engine.ts harnessRouteFor), and this pill
+            names it and opens that one setting. */}
         {advancedPicker && (
-          <select
-            /* Single 4-option route picker. CC's feedback 2026-06-06: the
-               old 4 options (Best path / On my computer / Cloud chat only /
-               Cloud + my files) didn't match his mental model and the
-               secondary CLI-runtime dropdown was confusing in addition.
-               One picker, four routes, the only ones that exist:
-                 - Codex CLI         (cli + codex runtime)
-                 - Gemini CLI        (cli + gemini runtime)
-                 - Claude Code CLI   (cli + claude runtime)
-                 - API (cloud)       (cloud_only — uses operator's API key)
-               CLI options grey out when the bridge is offline; API lights
-               up as the only usable choice. */
-            value={chatMode === "cli" ? `cli:${cliRuntime}` : "api"}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === "cli:codex") {
-                setChatMode("cli");
-                setCliRuntime("codex");
-              } else if (v === "cli:gemini") {
-                setChatMode("cli");
-                setCliRuntime("gemini");
-              } else if (v === "cli:claude") {
-                setChatMode("cli");
-                setCliRuntime("claude");
-              } else if (v === "api") {
-                setChatMode("cloud_only");
-              }
-            }}
-            /* Hidden on mobile — route choice is a desktop concern; phones
-               default to whatever the bridge last used. */
-            className="hidden md:block bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted focus:outline-none focus:border-accent transition-colors cursor-pointer"
-            aria-label="Chat route"
-            title={accessTitle}
+          <Link
+            href={ENGINE_SETTINGS_HREF}
+            prefetch={false}
+            data-testid="harness-engine-pill"
+            className="hidden md:inline-flex items-center gap-1 bg-bg-elev border border-bg-border rounded-lg px-2 py-2 text-[11px] text-fg-muted hover:text-fg hover:border-accent transition-colors"
+            title={`${engineNote ? `${engineNote} ` : ""}Change what powers your agents and the coding harness in Settings > AI brain.`}
           >
-            {/* Three near-identical CLI options — extracted via renderCliOption
-                below. The label distinguishes three states (online / online
-                but unreachable from this browser / daemon offline) and the
-                tooltip explains each. */}
-            {renderCliOption({
-              value: "cli:codex",
-              displayName: "Codex CLI",
-              onlineTooltip: "OpenAI Codex on your machine. Best for backend, deep debugging, code review.",
-              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Codex.",
-              bridgeOnline,
-              serverBridgeOnline,
-              bridgeProbeReason,
-              bridgeProbeDetail,
-            })}
-            {renderCliOption({
-              value: "cli:gemini",
-              displayName: "Gemini CLI",
-              onlineTooltip: "Google Gemini on your machine. Cheaper for high-volume reasoning.",
-              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Gemini.",
-              bridgeOnline,
-              serverBridgeOnline,
-              bridgeProbeReason,
-              bridgeProbeDetail,
-            })}
-            {renderCliOption({
-              value: "cli:claude",
-              displayName: "Claude Code CLI",
-              onlineTooltip: "Anthropic Claude on your machine. Best for architecture, conversation, writing.",
-              offlineTooltip: "Bridge offline — start the daemon on the machine that runs Claude Code.",
-              bridgeOnline,
-              serverBridgeOnline,
-              bridgeProbeReason,
-              bridgeProbeDetail,
-            })}
-            <option
-              value="api"
-              title="Uses your saved API key. No local files. Always available — fallback when the CLIs aren't reachable."
-            >
-              API (cloud){bridgeOnline === true ? "" : " — recommended now"}
-            </option>
-          </select>
+            {agentsEngine ? `Runs on: ${agentsEngineLine(agentsEngine)}` : engineNote ? "Engine: couldn't check" : "Engine: checking..."}
+          </Link>
         )}
         {planMode === "plan" && (
           // Plan-mode header badge. Redundant with the new Plan/Execute
@@ -3077,7 +3002,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           </button>
         )}
         <Link
-          href="/settings#providers"
+          href={setupHref("ai_account")}
           className="text-fg-dim hover:text-accent transition-colors p-1"
           title="Configure agent in Settings"
         >
@@ -3107,6 +3032,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             agent={agent}
             agentDisplayName={(k) => targetLabels?.[k] ?? agentDisplayName(k)}
             configsLoaded={configsLoaded}
+            configsError={configsError}
             readyVia={bridgeReady ? "bridge" : readyViaPlatformKey ? "platform_key" : "own_key"}
             currentProvider={cfg?.provider ?? null}
             onSuggestion={applySuggestion}
@@ -3312,7 +3238,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="font-bold">Your saved AI key needs a refresh.</div>
                   <div className="text-xs text-fg-muted font-sans">
                     The encryption envelope on your stored provider key has changed since you last saved it, so it can no longer be decrypted. Open{" "}
-                    <Link href="/settings#providers" className="text-accent underline">
+                    <Link href={setupHref("ai_account")} className="text-accent underline">
                       Settings → AI setup
                     </Link>{" "}
                     and click <strong>Replace key</strong> on the affected provider — paste the same value, save, and you&apos;re back. Takes 30 seconds.
@@ -3363,7 +3289,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 <>
                   <div className="font-bold">Provider had a hiccup.</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    The chat retried 3 times and the upstream LLM is still unhappy. Usually clears in a minute. Try again, or switch model in <Link href="/settings#providers" className="text-accent underline">Settings</Link>.
+                    The chat retried 3 times and the upstream LLM is still unhappy. Usually clears in a minute. Try again, or switch model in <Link href={setupHref("ai_account")} className="text-accent underline">Settings</Link>.
                   </div>
                 </>
               ) : (
@@ -3381,7 +3307,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "agent_not_configured" && (
                 <div className="text-xs text-fg-muted font-sans">
                   No provider key on file. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI provider accounts
                   </Link>{" "}
                   and click Connect — it applies to every agent in one shot.
@@ -3390,7 +3316,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "no_api_key" && (
                 <div className="text-xs text-fg-muted font-sans">
                   This agent&apos;s provider row exists but has no key. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI provider accounts
                   </Link>{" "}
                   and Connect (or Replace key) for the matching provider.
@@ -3399,7 +3325,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "agent_disabled" && (
                 <div className="text-xs text-fg-muted font-sans">
                   This agent is switched off for this workspace. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI brain
                   </Link>{" "}
                   to check your workspace agents.
@@ -3692,10 +3618,13 @@ function EmptyTranscript({
   agent,
   agentDisplayName,
   configsLoaded,
+  configsError = null,
   readyVia,
   currentProvider,
   onSuggestion,
 }: {
+  /** Why the agent settings could not be read (a timeout or a refusal), said instead of spinning. */
+  configsError?: string | null;
   ready: boolean;
   agent: string;
   /** Lookup that returns the operator's per-user nickname for an agent
@@ -3713,6 +3642,13 @@ function EmptyTranscript({
     return (
       <div className="flex items-center gap-2 text-fg-dim text-sm">
         <Loader2 className="w-4 h-4 animate-spin" /> loading agent config…
+      </div>
+    );
+  }
+  if (configsError) {
+    return (
+      <div role="alert" className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-4 text-sm text-status-warm">
+        {configsError}
       </div>
     );
   }
@@ -3743,7 +3679,7 @@ function EmptyTranscript({
               Get OpenRouter key
             </a>
           )}
-          <Link href="/settings#providers" className="btn-secondary text-xs">
+          <Link href={setupHref("ai_account")} className="btn-secondary text-xs">
             Open Settings
           </Link>
         </div>

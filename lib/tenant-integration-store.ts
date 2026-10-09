@@ -1,6 +1,6 @@
 /**
  * lib/tenant-integration-store.ts — server-side per-tenant integration
- * key store (Twilio, TextTorrent, SMTP, n8n, Stripe, etc.).
+ * key store (Twilio, TextTorrent, SMTP, Stripe, etc.).
  *
  * Reads/writes `tenant_integration_credentials` (migration 058) using
  * the canonical AES-256-GCM encryption helper at lib/field-encryption.
@@ -118,10 +118,6 @@ export const ENV_FALLBACKS: Readonly<Record<string, Readonly<Record<string, stri
     user: "SMTP_USER",
     password: "SMTP_PASSWORD",
     from_address: "SMTP_FROM_ADDRESS",
-  },
-  n8n: {
-    outbound_url: "N8N_OUTBOUND_URL",
-    outbound_secret: "N8N_OUTBOUND_SECRET",
   },
   stripe: {
     secret_key: "STRIPE_SECRET_KEY",

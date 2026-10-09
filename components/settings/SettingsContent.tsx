@@ -57,6 +57,9 @@ import { HARNESS_REPO } from "@/lib/install-scripts";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
+import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
+import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
 import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
@@ -237,7 +240,7 @@ export async function SettingsContent({
   // aiBrain: what powers the departments (lib/ai/department-brain.ts), the
   // provider and model AI brain shows and switches and every department header
   // names. undefined when the read failed: nothing is claimed.
-  const [connectedAiSet, personalAiSet, bridgeOnline, roster, aiBrain] = await Promise.all([
+  const [connectedAiSet, personalAiSet, bridgeOnline, roster, aiBrain, agentEngine] = await Promise.all([
     needsAiKeys
       ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
@@ -257,6 +260,11 @@ export async function SettingsContent({
           undefined,
         )
       : Promise.resolve<DepartmentBrain | null | undefined>(null),
+    // What powers your agents (lib/ai/agent-engine.ts): the AI account card
+    // says "Your departments use ..." only when the account IS the choice.
+    needsAiKeys && profile?.tenant_id
+      ? safe<AgentEngineChoice | null>("settings.agent_engine", readAgentEngine(profile.tenant_id), null)
+      : Promise.resolve<AgentEngineChoice | null>(null),
   ]);
   // The Workspace agents card cannot state the roster when the workspace's
   // manifest read failed (the in-code seed answered in its place, which for a
@@ -426,6 +434,24 @@ export async function SettingsContent({
           )}
 
           {/* ── AI brain ────────────────────────────────────────────── */}
+          {/* id="engine": what powers your agents, ONE choice for every
+              department, Slack mention and the coding harness (lib/ai/
+              agent-engine.ts). Every "what powers this" label in a chat links
+              here (lib/ai/agent-engine.ts ENGINE_SETTINGS_HREF), and
+              OpenSectionOnHash opens it. */}
+          {show("ai") && (
+            <SettingsSection
+              id="engine"
+              defaultOpen
+              title="What powers your agents"
+              subtitle="One choice for every department, Slack mention and the coding harness: an AI account (API key), an app on your paired computer (Claude Code, Codex, Gemini CLI), or a local model there."
+            >
+              <SafeBoundary label="What powers your agents">
+                <AgentEnginePanel />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
           {show("ai") && (
             <SettingsSection
               id="providers"
@@ -433,8 +459,8 @@ export async function SettingsContent({
               title="AI setup"
               subtitle={
                 canManageTenant
-                  ? "The one place that decides what powers your departments: connect one AI account, then pick its model. Every department chat and Slack mention uses it. OpenRouter is the easiest (one key, many models); Anthropic, OpenAI and Google are the per-vendor alternatives."
-                  : "The team's AI account and model. An owner or admin connects it and picks the model; every department chat uses it."
+                  ? "Your AI accounts: connect a key, then pick its model. Your agents use it when What powers your agents is an AI account, and as the fallback when the paired computer can't be reached. OpenRouter is the easiest (one key, many models); Anthropic, OpenAI and Google are the per-vendor alternatives."
+                  : "The team's AI account and model. An owner or admin connects it and picks the model."
               }
             >
               <SafeBoundary label="AI provider accounts">
@@ -445,6 +471,7 @@ export async function SettingsContent({
                   canManageTeam={canManageTenant}
                   canInstallBridge={isOperator}
                   brain={aiBrain}
+                  accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
                 />
               </SafeBoundary>
             </SettingsSection>

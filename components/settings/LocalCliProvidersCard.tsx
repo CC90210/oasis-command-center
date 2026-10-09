@@ -18,7 +18,8 @@
  *   3. Component mounts → GET /api/bridge/cli-status, which returns
  *      {claude, codex, gemini: {installed, authenticated,
  *      version, install_hint_url}}
- *   4. Each card renders one of: Ready / Needs auth / Not installed.
+ *   4. Each card renders lib/bridge-cli-status.ts's state: Ready / Needs
+ *      sign-in / Sign-in not confirmed (a check did not finish) / Not detected.
  *
  * Reachability and heartbeat are separate signals. A fresh tenant heartbeat
  * renders "online, inventory unavailable" if this browser's probe fails;
@@ -31,19 +32,29 @@ import { Loader2, CheckCircle2, AlertCircle, Terminal, RefreshCw } from "lucide-
 import { Card, Tag } from "@/components/Card";
 import { bridgeClientUrl, isProxyModeRuntime } from "@/lib/bridge-client-routing";
 import { deriveDropdownState } from "@/lib/bridge-dropdown-state";
+// What this card shows. It chooses nothing: what powers your agents AND the
+// coding harness is the one setting above (What powers your agents).
+import { LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
+// Operator-only card (mounted under show("ai") && isOperator), so the
+// operator links are taken from the registry without a viewer check.
+import { setupHref } from "@/lib/setup-links";
 import {
-  readCliRuntime,
-  writeCliRuntime,
-  type CliRuntime,
-} from "@/lib/cli-runtime";
-// What this card chooses, and what it never does (the department brain).
-import { LOCAL_CLI_PICKER_SCOPE, LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
+  AGENTS_RUN_ON_UNKNOWN_NOTE,
+  CLI_SIGN_IN,
+  CLI_STATE_LABEL,
+  cliStatusState,
+  machinesOfBody,
+  type CliMachineSnapshot,
+  type CliState,
+} from "@/lib/bridge-cli-status";
 
 type CliInfo = {
   installed: boolean;
   authenticated: boolean;
   version: string | null;
   install_hint_url: string;
+  /** Whether the computer's checks finished (lib/bridge-cli-status.ts). */
+  checked?: boolean;
 };
 
 type CliStatusResponse = {
@@ -56,7 +67,7 @@ type ProbeState =
   | { kind: "loading" }
   | { kind: "bridge_unreachable" }
   | { kind: "error"; message: string }
-  | { kind: "ok"; data: CliStatusResponse };
+  | { kind: "ok"; machines: CliMachineSnapshot[]; agentsRunOn: string | null };
 
 const CARDS: Array<{
   key: keyof CliStatusResponse;
@@ -97,12 +108,16 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
     const body = (await r.json()) as {
       ok?: boolean;
       data?: CliStatusResponse;
+      machines?: CliMachineSnapshot[];
+      agents_run_on?: string | null;
       reason?: string;
     };
-    if (!body.ok || !body.data) {
+    // One entry per paired computer; a body from before that has one `data`.
+    const machines = body.ok ? machinesOfBody(body) : [];
+    if (machines.length === 0) {
       return { kind: "bridge_unreachable" };
     }
-    return { kind: "ok", data: body.data };
+    return { kind: "ok", machines, agentsRunOn: body.agents_run_on ?? null };
   } catch (err) {
     // AbortError fires when the 10s timeout in the caller elapses. The
     // previous return `{ kind: "loading" }` left the spinner forever
@@ -119,14 +134,17 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
   }
 }
 
+/** The computer's report in lib/bridge-cli-status.ts's words: a check that did not finish is never "Needs sign-in". */
+function cliState(info: CliInfo): CliState {
+  return cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true });
+}
+
 function statusFor(info: CliInfo): { label: string; tone: "engaged" | "warm" | "neutral"; icon: React.ReactNode } {
-  if (info.installed && info.authenticated) {
-    return { label: "Ready", tone: "engaged", icon: <CheckCircle2 className="w-3.5 h-3.5" /> };
-  }
-  if (info.installed && !info.authenticated) {
-    return { label: "Needs auth", tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
-  }
-  return { label: "Not installed", tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
+  const s = cliState(info);
+  if (s === "ready") return { label: CLI_STATE_LABEL[s], tone: "engaged", icon: <CheckCircle2 className="w-3.5 h-3.5" /> };
+  if (s === "needs_sign_in") return { label: CLI_STATE_LABEL[s], tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
+  if (s === "unknown") return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <AlertCircle className="w-3.5 h-3.5" /> };
+  return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
 }
 
 type Busy =
@@ -134,10 +152,32 @@ type Busy =
   | { kind: "installing"; provider: keyof CliStatusResponse }
   | { kind: "authing"; provider: keyof CliStatusResponse };
 
-// Key, type and accessors all come from lib/cli-runtime, which the chat header
-// also imports. This file used to declare its own copy of the literal plus its
-// own reader, synchronised with ChatWidget by a comment — a contract enforced
-// by a comment is not enforced.
+/**
+ * Connect / Reconnect: asks the paired computer's bridge to start the app's own
+ * sign-in there (app/api/bridge/cli-auth), which opens the vendor's page in
+ * that computer's browser. Never a sign-in inside OASIS. No React, so a test
+ * drives it.
+ */
+export async function startCliSignIn(
+  provider: "claude" | "codex" | "gemini",
+  fetchImpl: (url: string, init: RequestInit) => Promise<Response> = (u, i) => fetch(u, i),
+): Promise<{ ok: boolean; text: string }> {
+  const command = CLI_SIGN_IN[provider].command;
+  try {
+    const r = await fetchImpl("/api/bridge/cli-auth", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = (await r.json().catch(() => ({}))) as { ok?: boolean; message?: string; output?: string };
+    const message = typeof body.message === "string" && body.message ? body.message : `On your paired computer, run: ${command}`;
+    const output = typeof body.output === "string" && body.output.trim() ? `\n\n${body.output.trim()}` : "";
+    return { ok: r.ok && body.ok === true, text: message + output };
+  } catch {
+    return { ok: false, text: `The Command Center didn't answer. On your paired computer, run: ${command}` };
+  }
+}
 
 export function LocalCliProvidersCard({
   serverBridgeOnline,
@@ -150,11 +190,7 @@ export function LocalCliProvidersCard({
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
   const [localActionsAvailable, setLocalActionsAvailable] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  // Persistent CLI selection — same key the ChatWidget reads. Selecting
-  // a CLI here flips the chat header dropdown on next render too.
-  const [activeCli, setActiveCli] = useState<CliRuntime>("claude");
   useEffect(() => {
-    setActiveCli(readCliRuntime());
     // A hosted dashboard can read the outbound, pairing-authenticated
     // heartbeat, but it cannot prove that a tenant bridge proxy points back
     // to the same paired machine. Only allow install/auth mutations when the
@@ -162,13 +198,6 @@ export function LocalCliProvidersCard({
     // targets this browser's machine.
     setLocalActionsAvailable(!isProxyModeRuntime());
   }, []);
-
-  function chooseCli(next: CliRuntime) {
-    setActiveCli(next);
-    // Storage failures are swallowed inside writeCliRuntime: the in-memory
-    // state already updated, so the click registers even where storage is off.
-    writeCliRuntime(next);
-  }
 
   async function refresh() {
     setState({ kind: "loading" });
@@ -229,45 +258,53 @@ export function LocalCliProvidersCard({
   async function handleSignIn(provider: keyof CliStatusResponse) {
     setBusy({ kind: "authing", provider });
     setActionMessage(null);
-    const res = await runBridgeTool("cli_auth_start", provider);
+    // Through the server, hosted or not: the bridge it reaches is this
+    // workspace's own paired computer (app/api/bridge/cli-auth).
+    const res = await startCliSignIn(provider);
     setActionMessage({ kind: res.ok ? "ok" : "err", text: res.text });
     setBusy({ kind: "idle" });
-    // Claude Code has no auth subcommand — the bridge returns guidance
-    // text only and there's no OAuth flow to poll for. Polling cli_status
-    // every 3s for 2 minutes would just burn cycles waiting for an event
-    // that requires the operator to manually run `claude /login` first.
-    // Skip the polling loop entirely; operator clicks Refresh when done.
-    if (!res.ok || provider === "claude") return;
+    if (!res.ok) return;
 
-    // Codex + Gemini: OAuth round-trip is operator-driven (they click
-    // "Sign in" in their browser tab). Poll cli_status every 3s, in-
-    // flight guarded so a slow probe doesn't stack with the next tick.
+    // The sign-in finishes in that computer's browser. The bridge re-checks
+    // its apps on its next heartbeat (about a minute), so poll the report
+    // every 5 s for 3 minutes, one probe at a time. The sign-in request does
+    // not name a computer, so "ready" is only claimed for a computer that was
+    // NOT ready when it started: another computer already signed in proves
+    // nothing about this one.
+    const readyBefore = new Set(
+      state.kind === "ok"
+        ? state.machines.filter((m) => m.data[provider]?.installed && m.data[provider]?.authenticated).map((m) => m.id ?? m.label ?? "")
+        : [],
+    );
     const startMs = Date.now();
     let probeInFlight = false;
     const poll = async () => {
-      if (Date.now() - startMs > 120_000) return;
+      if (Date.now() - startMs > 180_000) return;
       if (probeInFlight) {
-        setTimeout(() => void poll(), 3_000);
+        setTimeout(() => void poll(), 5_000);
         return;
       }
       probeInFlight = true;
       try {
         const next = await probeCliStatus(new AbortController().signal);
         setState(next);
-        if (
-          next.kind === "ok" &&
-          next.data[provider]?.installed &&
-          next.data[provider]?.authenticated
-        ) {
-          setActionMessage({ kind: "ok", text: `${provider} is ready.` });
+        const ready =
+          next.kind === "ok"
+            ? next.machines.find(
+                (m) => m.data[provider]?.installed && m.data[provider]?.authenticated && !readyBefore.has(m.id ?? m.label ?? ""),
+              )
+            : undefined;
+        if (next.kind === "ok" && ready) {
+          const where = next.machines.length > 1 && ready.label ? ` on ${ready.label}` : "";
+          setActionMessage({ kind: "ok", text: `${CLI_SIGN_IN[provider].label} is signed in and ready${where}.` });
           return;
         }
       } finally {
         probeInFlight = false;
       }
-      setTimeout(() => void poll(), 3_000);
+      setTimeout(() => void poll(), 5_000);
     };
-    setTimeout(() => void poll(), 3_000);
+    setTimeout(() => void poll(), 5_000);
   }
 
   useEffect(() => {
@@ -277,7 +314,7 @@ export function LocalCliProvidersCard({
 
   return (
     <Card
-      title="Coding harness: AI tools on your paired computer"
+      title="AI apps on your paired computer"
       subtitle={LOCAL_CLI_SCOPE}
       action={
         <button
@@ -319,7 +356,7 @@ export function LocalCliProvidersCard({
               The paired bridge is online, matching the sidebar, but its latest CLI inventory has not reached this workspace yet. Refresh after the next heartbeat; installed status is unknown—not offline.
             </p>
             <Link
-              href="/settings#devices"
+              href={setupHref("bridge_devices")}
               className="mt-2 inline-flex text-xs font-bold text-accent hover:text-accent-bright"
             >
               View paired devices →
@@ -345,7 +382,7 @@ export function LocalCliProvidersCard({
                 click, not a set of directions. */}
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Link
-                href="/settings/devices/install"
+                href={setupHref("bridge_install")}
                 className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5"
               >
                 <Terminal className="w-3 h-3" />
@@ -383,63 +420,39 @@ export function LocalCliProvidersCard({
 
       {state.kind === "ok" && (
         <>
-          {/* The Coding harness's CLI picker: the same selection the Coding
-              harness header dropdown shows (lib/cli-runtime.ts). It answers
-              that chat on this computer only, never a department.
-              Disabled options (not installed / not auth'd) still render
-              as radios so the operator sees the full set + can click
-              Install on the card below. */}
-          <div className="mb-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-wider text-fg">
-                  Coding harness on the paired computer uses
-                </div>
-                <div className="text-[11px] text-fg-muted mt-0.5 leading-snug">
-                  {LOCAL_CLI_PICKER_SCOPE}
-                </div>
-              </div>
-              <div role="radiogroup" aria-label="Coding harness on the paired computer uses" className="flex flex-wrap gap-1.5">
-                {CARDS.map((card) => {
-                  const info = state.data[card.key];
-                  const ready = info.installed && info.authenticated;
-                  const selected = activeCli === card.key;
-                  return (
-                    <button
-                      key={card.key}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      onClick={() => chooseCli(card.key)}
-                      disabled={!ready}
-                      title={ready ? `Use ${card.label} for the Coding harness on the paired computer` : `${card.label} isn't ready yet`}
-                      className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-md border transition-colors ${
-                        selected
-                          ? "border-accent bg-accent/15 text-accent"
-                          : ready
-                            ? "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg hover:border-accent/40"
-                            : "border-bg-border bg-bg-deep/30 text-fg-faint opacity-60 cursor-not-allowed"
-                      }`}
-                    >
-                      {card.label}
-                      {selected && <span className="ml-1.5">✓</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+          {/* No picker here (CC, 2026-10-09: "they should be on the same
+              functionality"): which app answers your agents AND the coding
+              harness is the one setting above, What powers your agents. These
+              cards are the paired computer's report, with each app's
+              Connect / Reconnect. */}
+        {state.machines.length > 1 && (
+          <p className="mb-3 text-[11px] text-fg-muted leading-relaxed" data-testid="cli-agents-run-on">
+            {state.agentsRunOn
+              ? `Your agents run on ${state.machines.find((m) => m.id === state.agentsRunOn)?.label ?? "the marked computer"}.`
+              : `${AGENTS_RUN_ON_UNKNOWN_NOTE} Each computer is shown with its own status.`}
+          </p>
+        )}
+        {state.machines.map((machine) => (
+        <div key={machine.id ?? "this-computer"} className="mb-4 last:mb-0" data-cli-machine={machine.id ?? "unlabeled"}>
+        {machine.label && (
+          <div className="mb-2 flex items-center gap-2 text-xs font-bold text-fg">
+            <span>{machine.label}</span>
+            {state.agentsRunOn !== null && state.agentsRunOn === machine.id && <Tag tone="engaged">Your agents run here</Tag>}
           </div>
+        )}
         <div className="grid sm:grid-cols-3 gap-3">
           {CARDS.map((card) => {
-            const info = state.data[card.key];
+            const info = machine.data[card.key];
             const s = statusFor(info);
+            const cs = cliState(info);
             return (
               <div
                 key={card.key}
+                data-cli-state={cs}
                 className={`rounded-lg border p-3 space-y-2 ${
-                  info.installed && info.authenticated
+                  cs === "ready"
                     ? "border-status-engaged/30 bg-status-engaged/5"
-                    : info.installed
+                    : cs === "needs_sign_in"
                       ? "border-status-warm/30 bg-status-warm/5"
                       : "border-bg-border bg-bg-elev/30"
                 }`}
@@ -459,10 +472,56 @@ export function LocalCliProvidersCard({
                     {info.version}
                   </div>
                 )}
+                {cs === "unknown" && (
+                  <p className="text-[11px] text-fg-muted leading-relaxed">
+                    It is installed, but the computer&apos;s sign-in check did not finish, so it isn&apos;t
+                    confirmed. If it answers in a terminal there, it will answer here: choose it above and use Test.
+                  </p>
+                )}
+                {/* Connect / Reconnect (CC, 2026-10-09): starts the app's own
+                    sign-in on the paired computer, which opens the vendor's
+                    page there. Every not-ready card has it, with the exact
+                    command for when it can't be started remotely. */}
+                {cs !== "ready" && (
+                  <div className="space-y-1.5" data-testid={`cli-connect-${card.key}`}>
+                    <button
+                      type="button"
+                      disabled={busy.kind !== "idle"}
+                      onClick={() => void handleSignIn(card.key)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+                    >
+                      {busy.kind === "authing" && busy.provider === card.key ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Starting sign-in...
+                        </>
+                      ) : (
+                        <>{cs === "needs_sign_in" ? "Connect" : "Reconnect"}</>
+                      )}
+                    </button>
+                    <p className="text-[11px] text-fg-muted leading-relaxed">
+                      Opens {CLI_SIGN_IN[card.key].label}&apos;s own sign-in in the browser on your paired computer. Or run there:{" "}
+                      <code className="text-fg-dim">{CLI_SIGN_IN[card.key].command}</code>
+                    </p>
+                  </div>
+                )}
+                {cs === "ready" && (
+                  <button
+                    type="button"
+                    disabled={busy.kind !== "idle"}
+                    onClick={() => void handleSignIn(card.key)}
+                    className="text-[11px] text-fg-dim underline underline-offset-2 hover:text-fg disabled:opacity-50"
+                    title={`Sign in to ${CLI_SIGN_IN[card.key].label} again on your paired computer`}
+                  >
+                    Reconnect
+                  </button>
+                )}
                 {!info.installed && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-fg-muted leading-relaxed">
-                      {localActionsAvailable ? "Click Install to run " : "Run "}
+                      The computer did not report it. If it is installed there, its check may have timed out: Connect above, or
+                      choose it in What powers your agents and use Test.{" "}
+                      {localActionsAvailable ? "If it isn't installed, click Install to run " : "If it isn't installed, run "}
                       <code className="text-fg-dim">{card.install_command}</code>
                       {localActionsAvailable ? " on this machine." : " on the paired machine, then click Refresh."}
                     </p>
@@ -485,36 +544,12 @@ export function LocalCliProvidersCard({
                     )}
                   </div>
                 )}
-                {info.installed && !info.authenticated && (
-                  <div className="space-y-1.5">
-                    <p className="text-[11px] text-status-warm leading-relaxed">
-                      {localActionsAvailable
-                        ? "Installed. Click Sign in — your browser opens for the OAuth flow."
-                        : `Installed. Sign in from a terminal on the paired machine, then click Refresh.`}
-                    </p>
-                    {localActionsAvailable && (
-                      <button
-                        type="button"
-                        disabled={busy.kind !== "idle"}
-                        onClick={() => void handleSignIn(card.key)}
-                        className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-status-warm/20 text-status-warm border border-status-warm/40 hover:bg-status-warm/30 disabled:opacity-50"
-                      >
-                        {busy.kind === "authing" && busy.provider === card.key ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            Waiting for sign-in…
-                          </>
-                        ) : (
-                          <>Sign in</>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
+        </div>
+        ))}
         </>
       )}
     </Card>

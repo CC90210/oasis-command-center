@@ -723,6 +723,7 @@ async function main() {
     // Files that may name the route. Each says why.
     const ALLOWED = new Map([
       ["components/settings/BridgeInstallLink.tsx", "the gate itself"],
+      ["lib/setup-links.ts", "the setup-link registry: the one place the href is written, under the operator audience, so setupLink() never hands it to anyone else"],
       ["components/settings/SettingsContent.tsx", "inside the Settings › Devices section, which is show(\"devices\") && isOperator (os-connectors test)"],
       ["components/settings/LocalCliProvidersCard.tsx", "mounted only under show(\"ai\") && isOperator (asserted above)"],
       ["lib/setup-readiness.ts", "readiness data with no caller in app/ or components/"],

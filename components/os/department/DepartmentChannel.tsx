@@ -84,7 +84,13 @@ export function DepartmentChannel({ label, state }: { label: string; state: Chan
         canManageAi={state.canManageAi}
         initialFailure={state.lastTurn.kind === "failed" ? state.lastTurn.code : null}
         // Owners and admins: the people who choose it in Settings > AI brain.
-        poweredBy={state.canManageAi && state.brain ? brainLine(state.brain) : null}
+        // What powers the channel (the API account, or an AI app on the paired
+        // computer), and whose credits it spends; it links to that choice.
+        poweredBy={
+          state.canManageAi
+            ? state.engine ?? (state.brain ? { line: brainLine(state.brain), spend: "api_credits", note: null } : null)
+            : null
+        }
       />
     </section>
   );

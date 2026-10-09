@@ -20,8 +20,11 @@
  * A code the copy table does not know prints a generic sentence, never the raw
  * provider text.
  *
- * PURE: no imports, safe in client code and in bare-node tests.
+ * PURE: its one import (lib/setup-links.ts) is pure too, so it stays safe in
+ * client code and in bare-node tests.
  */
+
+import { setupHref } from "@/lib/setup-links";
 
 export const TURN_FAILURE_CODES = [
   // Workspace configuration — no provider was asked.
@@ -47,6 +50,10 @@ export const TURN_FAILURE_CODES = [
   // The workspace's monthly AI budget (lib/ai/usage.ts): no provider was asked.
   "ai_budget_exhausted", //    the month's cap is used (HTTP 402)
   "ai_budget_unpriced_model", // a cap is set and the model has no verified price (HTTP 402)
+  // The engine is an AI app or local model on the paired computer
+  // (lib/ai/agent-engine.ts, lib/ai/bridge-turn.ts).
+  "bridge_unreachable", //     the paired computer could not be reached
+  "cli_failed", //             it was reached, and the app there could not answer
 ] as const;
 
 export type TurnFailureCode = (typeof TURN_FAILURE_CODES)[number];
@@ -77,6 +84,9 @@ const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
   // One budget per workspace per month, shared by every channel.
   "ai_budget_exhausted",
   "ai_budget_unpriced_model",
+  // One engine per workspace: every channel runs on the same paired computer.
+  "bridge_unreachable",
+  "cli_failed",
 ]);
 
 export function isAccountScoped(code: TurnFailureCode): boolean {
@@ -144,6 +154,9 @@ export function classifyStreamError(message: string): TurnFailureCode {
   if (msg === "empty_reply:thinking") return "reply_empty_thinking";
   if (msg === "empty_reply:blocked") return "reply_blocked";
   if (msg === "empty_reply:empty") return "reply_empty";
+  // lib/ai/bridge-turn.ts: the paired computer, or the AI app on it.
+  if (msg.startsWith("bridge_unreachable:")) return "bridge_unreachable";
+  if (msg.startsWith("cli_error:")) return "cli_failed";
   const busy = /^(?:provider|local_model)_temporarily_unavailable:(?:[a-z]+_)?(\d{3})\b/.exec(msg);
   if (busy) return classifyProviderStatus(Number(busy[1]), "");
   const refused = /^(?:openrouter|anthropic|openai|google|ollama)_(\d{3}):([\s\S]*)$/.exec(msg);
@@ -186,10 +199,12 @@ export type FailureCopy = {
   fix: FailureFix | null;
 };
 
-/** Settings › AI brain: the one page that holds the workspace's AI account. */
-export const AI_SETTINGS_HREF = "/settings/ai";
+/** Settings › AI brain › AI setup: where the workspace's AI account (key and model) is saved. */
+export const AI_SETTINGS_HREF = setupHref("ai_account");
 
 const OPEN_AI_SETTINGS: FailureFix = { href: AI_SETTINGS_HREF, label: "Open AI settings" };
+/** Settings › AI brain › What powers your agents: the engine choice (API account or paired computer). */
+const OPEN_ENGINE_SETTINGS: FailureFix = { href: setupHref("ai_engine"), label: "Choose what powers your agents" };
 const OWNER_CAN_FIX = " An owner or admin can fix this in Settings.";
 
 const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: FailureFix | null }> = {
@@ -286,6 +301,18 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
       "This workspace has a monthly AI budget, and the AI model it uses has no verified price, so it can't run under that budget. The owner can pick another model.",
     short: "the AI model has no verified price",
     fix: OPEN_AI_SETTINGS,
+  },
+  bridge_unreachable: {
+    sentence:
+      "Your agents run on an AI app on your paired computer, and that computer could not be reached. Start the bridge on it, or choose an AI account in AI settings.",
+    short: "the paired computer could not be reached",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_failed: {
+    sentence:
+      "The AI app on your paired computer could not answer. Check that it is installed and signed in on that computer, or choose another engine in AI settings.",
+    short: "the AI app on the paired computer could not answer",
+    fix: OPEN_ENGINE_SETTINGS,
   },
 };
 

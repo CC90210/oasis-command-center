@@ -71,6 +71,13 @@ type Props = {
    * the read failed (nothing is claimed).
    */
   brain?: DepartmentBrain | null;
+  /**
+   * Whether the AI account IS what powers your agents (lib/ai/agent-engine.ts
+   * kind "api", the default). false: an app or local model on the paired
+   * computer is the choice, and the account is its fallback; the panel says so
+   * instead of "Your departments use ...".
+   */
+  accountIsTheEngine?: boolean;
 };
 
 // Providers that get a card on this surface. Ollama is intentionally hidden
@@ -104,6 +111,7 @@ export function ProviderAccountsCard({
   canManageTeam,
   canInstallBridge,
   brain,
+  accountIsTheEngine = true,
 }: Props) {
   const router = useRouter();
   // What the cards draw is the server's latest answer (the prop, which every
@@ -243,6 +251,7 @@ export function ProviderAccountsCard({
           brain={brain}
           canManageTeam={canManageTeam}
           onSwitched={() => router.refresh()}
+          accountIsTheEngine={accountIsTheEngine}
         />
       )}
 
@@ -309,7 +318,9 @@ export function ProviderAccountsCard({
               </div>
               {connected && (
                 <p className="text-[11px] text-fg-muted leading-relaxed mb-3">
-                  Every department chat and Slack mention uses this key.
+                  {accountIsTheEngine
+                    ? "Every department chat and Slack mention uses this key."
+                    : "Slack mentions, and your departments whenever the paired computer can't be reached, use this key."}
                 </p>
               )}
               {personalOnly && (
@@ -1005,10 +1016,13 @@ export function DepartmentBrainPanel({
   brain,
   canManageTeam,
   onSwitched,
+  accountIsTheEngine = true,
 }: {
   brain: DepartmentBrain;
   canManageTeam: boolean;
   onSwitched: () => void;
+  /** false: an app on the paired computer powers your agents; this account is its fallback. */
+  accountIsTheEngine?: boolean;
 }) {
   const saved = brain.savedModel ?? brain.model;
   const [model, setModel] = useState(saved);
@@ -1033,7 +1047,16 @@ export function DepartmentBrainPanel({
   return (
     <div className="rounded-lg border border-status-engaged/30 bg-status-engaged/5 p-4 space-y-2" data-testid="department-brain">
       <div className="text-sm text-fg">
-        Your departments use <span className="font-bold">{brainLine(brain)}</span>.
+        {accountIsTheEngine ? (
+          <>
+            Your departments use <span className="font-bold">{brainLine(brain)}</span>.
+          </>
+        ) : (
+          <>
+            Your AI account is <span className="font-bold">{brainLine(brain)}</span>. It answers only when your paired
+            computer can&apos;t be reached (What powers your agents, above).
+          </>
+        )}
       </div>
       {note && <p className="text-[11px] text-status-warm leading-relaxed">{note.sentence}</p>}
       {canManageTeam && choices.length > 0 && (
@@ -1075,7 +1098,7 @@ export function DepartmentBrainPanel({
       )}
       <p className="text-[11px] text-fg-dim leading-relaxed">
         {canManageTeam
-          ? "Before a switch, we test the new model with one short department answer and change nothing if it fails. To use another provider, connect its key on its card below: your departments move to it once its test passes."
+          ? "Before a switch, we test the new model with one short department answer and change nothing if it fails. To use another provider, pick it in What powers your agents above (a saved key switches at once), or connect its key on its card below."
           : "An owner or admin changes the model or provider here."}
       </p>
     </div>
