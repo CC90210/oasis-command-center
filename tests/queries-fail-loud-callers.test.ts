@@ -571,9 +571,13 @@ async function main() {
     assert.match(plain(html.cliOnline), /Your computer is checking in/);
     assert.doesNotMatch(plain(html.cliOnline), /only renders when you load this page on the bridge machine/, "the old false claim is gone");
     const cliReport = plain(html.cliReport);
-    assert.match(cliReport, /Claude Code Signed in/);
-    assert.match(cliReport, /Codex Installed, not signed in/);
-    assert.match(cliReport, /Gemini Not installed/);
+    // The words of lib/bridge-cli-status.ts (CC, 2026-10-09): a finished
+    // sign-in check that said no is "Needs sign-in"; a CLI the computer did not
+    // report is "Not detected" (its check may have timed out), never a flat
+    // "Not installed".
+    assert.match(cliReport, /Claude Code Ready/);
+    assert.match(cliReport, /Codex Needs sign-in/);
+    assert.match(cliReport, /Gemini Not detected/);
     assert.match(plain(html.cliNetworkError), /Couldn't check your computer's AI tools/);
     assert.match(plain(html.cliSignedOut), /You're signed out/);
   });

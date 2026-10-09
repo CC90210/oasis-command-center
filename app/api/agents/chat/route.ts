@@ -54,8 +54,11 @@
  * agent, and the code (never message content, never a key).
  *
  * Response: text/event-stream SSE
- *   event: agent       data: { display_name, agent_slug | department, model? }
- *                      (model only for the verified operator)
+ *   event: agent       data: { display_name, agent_slug | department, model?,
+ *                              runs_on?, spend?, fell_back_from? }
+ *                      (model only for the verified operator; runs_on/spend,
+ *                      what answered and on whose credits, for owners, admins
+ *                      and the operator: lib/ai/agent-engine.ts)
  *   event: delta       data: { text }
  *   event: usage       data: { input_tokens, output_tokens }
  *   event: done        data: {}
@@ -80,6 +83,7 @@ import type { AiBudgetCode } from "@/lib/ai/usage";
 import { modelFactsForCopy } from "@/lib/ai/model-registry";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { prepareAgentTurn, streamAgentTurn } from "@/lib/os/department-agent";
+import { bridgeCallerForSession } from "@/lib/ai/bridge-turn";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 
 export const runtime = "nodejs";
@@ -240,6 +244,9 @@ export async function POST(req: NextRequest) {
     localModelAllowed: isOperator,
     userId: user.id,
     chatMode: body.chat_mode,
+    // What powers your agents may be an AI app on the paired computer: reached
+    // by the coding harness's own gate, asked only when that is the choice.
+    bridge: () => bridgeCallerForSession(tenantId),
   });
   if (!prepared.ok) {
     // A refusal that is a verdict on the workspace's AI account (an unreadable
@@ -271,6 +278,12 @@ export async function POST(req: NextRequest) {
         display_name: t.displayName,
         ...(t.department ? { department: t.department.key } : { agent_slug: t.agentSlug }),
         ...(t.revealModel ? { model: t.model } : {}),
+        // What answered and whose credits or plan it used, in plain words
+        // (lib/ai/agent-engine.ts), for owners, admins and the operator: the
+        // people who choose it in Settings > AI brain.
+        ...(t.revealModel || canManageAi
+          ? { runs_on: t.engine.runsOn, spend: t.engine.spend, ...(t.engine.fellBackFrom ? { fell_back_from: t.engine.fellBackFrom } : {}) }
+          : {}),
       });
 
       // One code per failed turn. The client gets the code and one plain

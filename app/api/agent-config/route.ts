@@ -79,7 +79,9 @@ export async function GET(req: NextRequest) {
     }
   }
   // The workspace's AI account row is not a teammate: no list may show it.
-  const configs = (data || []).filter((row) => row.agent_key !== WORKSPACE_AI_AGENT_KEY).map((row) => ({
+  // Nor are the engine choice and the saved provider keys (lib/ai/
+  // agent-engine-store.ts): every "__" row is the workspace's, never an agent's.
+  const configs = (data || []).filter((row) => row.agent_key !== WORKSPACE_AI_AGENT_KEY && !String(row.agent_key).startsWith("__")).map((row) => ({
     agent_key: row.agent_key,
     provider: row.provider,
     model: row.model,

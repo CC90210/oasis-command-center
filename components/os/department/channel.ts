@@ -31,7 +31,11 @@ import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAccountChangedAt, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
-import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { brainLine, departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import { bridgeEngineLine, harnessEngineLine, spendFor, type AgentEngineChoice, type EngineLabel, type EngineSpend } from "@/lib/ai/agent-engine";
+import { harnessForDepartment } from "@/lib/admin/harness-targets";
+import { bridgeCallerForSession } from "@/lib/ai/bridge-turn";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -61,6 +65,12 @@ export type ChannelState =
        * verified operator's fallback) answers instead of an account.
        */
       brain?: DepartmentBrain | null;
+      /**
+       * What powers this channel (lib/ai/agent-engine.ts): the API account, or
+       * an AI app / local model on the paired computer, and whose credits or
+       * plan it spends. Owners and admins only; null for anyone else.
+       */
+      engine?: ChannelEngine | null;
     }
   | {
       kind: "not_connected";
@@ -114,30 +124,91 @@ export async function workspaceChatSlug(tenantId: string): Promise<string | null
  * A failed read is `unknown`, never "none": the route answers it with 503
  * config_unavailable, not 412, and the header must agree with the route.
  */
+type EngineRead = { chosen: AgentEngineChoice; reachable: boolean } | null;
+
 async function providerReady(
   tenantId: string,
   authUserId: string | null,
   email: string | null,
-): Promise<{ readiness: ProviderReadiness; brain: DepartmentBrain | null; accountChangedAt: string | null }> {
+  oasis: boolean,
+): Promise<{
+  readiness: ProviderReadiness;
+  brain: DepartmentBrain | null;
+  accountChangedAt: string | null;
+  engine: ChannelEngine | null;
+  engineRead: EngineRead;
+}> {
   let changedAt: string | null = null;
+  let chosen: AgentEngineChoice;
+  let brain: DepartmentBrain | null = null;
   try {
     // When the account last changed never fails the read (null = unknown).
-    const [account, at] = await Promise.all([readWorkspaceAiAccount(tenantId), readWorkspaceAccountChangedAt(tenantId)]);
+    const [account, at, engine] = await Promise.all([
+      readWorkspaceAiAccount(tenantId),
+      readWorkspaceAccountChangedAt(tenantId),
+      readAgentEngine(tenantId),
+    ]);
     changedAt = at;
+    chosen = engine;
     if (
       hasUsableKey(account) &&
       (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
     ) {
-      return { readiness: "ready", brain: departmentBrain(account), accountChangedAt: changedAt };
+      brain = departmentBrain(account);
     }
   } catch (err) {
     console.error("[os.channel.provider]", err);
-    return { readiness: "unknown", brain: null, accountChangedAt: null };
+    return { readiness: "unknown", brain: null, accountChangedAt: null, engine: null, engineRead: null };
   }
+  // An AI app or local model on the paired computer answers when this person
+  // can reach it (the route asks the same gate, lib/ai/bridge-turn.ts), and
+  // only in OASIS's own workspace (the department harnesses are OASIS's);
+  // else the API account answers in its place, and the header says so.
+  const onComputer = chosen.kind === "api" || !oasis ? null : chosen;
+  const reachable = onComputer ? (await bridgeCallerForSession(tenantId)) !== null : false;
+  const engineRead: EngineRead = { chosen, reachable };
+  const engine = channelEngine(chosen, reachable, brain);
+  if (reachable || brain) return { readiness: "ready", brain, accountChangedAt: changedAt, engine, engineRead };
   const readiness: ProviderReadiness =
     operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email)) ? "ready" : "none";
-  return { readiness, brain: null, accountChangedAt: changedAt };
+  return {
+    readiness,
+    brain: null,
+    accountChangedAt: changedAt,
+    engine: readiness === "ready" ? channelEngine(chosen, false, null) : engine,
+    engineRead,
+  };
 }
+
+/**
+ * What a channel header says powers it (owners and admins only), in the same
+ * words a reply's footer uses (lib/ai/agent-engine.ts): the line, whose credits
+ * or plan it spends, and, when the chosen engine on the paired computer cannot
+ * be reached, that the API account answers instead. PURE.
+ */
+export function channelEngine(
+  chosen: AgentEngineChoice,
+  reachable: boolean,
+  brain: DepartmentBrain | null,
+  /** The department's agent harness (lib/admin/harness-targets.ts), when the channel has one. */
+  harnessLabel: string | null = null,
+): ChannelEngine {
+  if (chosen.kind !== "api" && reachable) {
+    return { line: harnessLabel ? harnessEngineLine(chosen, harnessLabel) : bridgeEngineLine(chosen), spend: spendFor(chosen), note: null };
+  }
+  const apiLine = brain ? brainLine(brain) : "the OASIS platform key";
+  const spend: EngineSpend = brain ? "api_credits" : "platform";
+  if (chosen.kind !== "api") {
+    return {
+      line: apiLine,
+      spend,
+      note: `${bridgeEngineLine(chosen)} is chosen, but the computer can't be reached right now, so ${brain ? "your AI account" : "the platform key"} answers.`,
+    };
+  }
+  return { line: apiLine, spend, note: null };
+}
+
+export type ChannelEngine = EngineLabel;
 
 /**
  * The two workspace-wide halves of "can a channel answer": a slug the chat
@@ -151,12 +222,22 @@ export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
   provider: ProviderReadiness;
   brain: DepartmentBrain | null;
   accountChangedAt: string | null;
+  engine: ChannelEngine | null;
+  /** The choice and whether the paired computer answers this person (null: not read). */
+  engineRead: EngineRead;
 }> {
   const [slug, ready] = await Promise.all([
     workspaceChatSlug(viewer.surface.tenantId),
-    providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email),
+    providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email, viewer.oasis),
   ]);
-  return { slug, provider: ready.readiness, brain: ready.brain, accountChangedAt: ready.accountChangedAt };
+  return {
+    slug,
+    provider: ready.readiness,
+    brain: ready.brain,
+    accountChangedAt: ready.accountChangedAt,
+    engine: ready.engine,
+    engineRead: ready.engineRead,
+  };
 }
 
 /**
@@ -197,7 +278,7 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
   }
   const owner = viewer.surface.persona === "founder";
   const tenantId = viewer.surface.tenantId;
-  const [{ slug, provider, brain, accountChangedAt }, agent, turns] = await Promise.all([
+  const [{ slug, provider, brain, accountChangedAt, engine: workspaceEngine, engineRead }, agent, turns] = await Promise.all([
     workspaceChatReadiness(viewer),
     getAgentBySlug(binding.agentSlug, tenantId),
     readWorkspaceTurns(tenantId),
@@ -239,5 +320,21 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
     lastTurn: lastTurnFrom(turns, dept.key, accountChangedAt),
     canManageAi: owner,
     brain: owner ? brain : null,
+    // Which engine and which agent harness answers this department (OASIS:
+    // the department's harness on the paired computer, lib/admin/harness-targets.ts).
+    engine: owner ? engineForChannel(dept.key, viewer.oasis, engineRead, brain, workspaceEngine) : null,
   };
+}
+
+/** A channel's header line: the workspace's engine, with this department's harness named when it runs in one. */
+function engineForChannel(
+  departmentKey: DepartmentKey,
+  oasis: boolean,
+  read: EngineRead,
+  brain: DepartmentBrain | null,
+  fallback: ChannelEngine | null,
+): ChannelEngine | null {
+  const target = oasis ? harnessForDepartment(departmentKey) : null;
+  if (!read || !target || !read.reachable) return fallback;
+  return channelEngine(read.chosen, true, brain, target.departments);
 }
