@@ -28,6 +28,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { dbBool } from "@/lib/db-bool";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,8 +100,9 @@ export async function POST(
     userId: user.id,
     tenantId,
     leadId,
-    isOwner: profileData?.is_owner === true,
-    adminAccess: profileData?.admin_access === true,
+    // dbBool (lib/db-bool.ts): `=== true` refused the stored 1 for both flags.
+    isOwner: dbBool(profileData?.is_owner),
+    adminAccess: dbBool(profileData?.admin_access),
     accessMode: "owned_oasis_sales",
   });
   if (!access.ok) {

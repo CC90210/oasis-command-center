@@ -15,49 +15,39 @@
  *
  * The tenant slug is read from the tenant row (not the manifest) since
  * tenant.slug is the authoritative URL segment everywhere else.
+ *
+ * WHO (MKT-02, 2026-10-02): only canEditForms may mint (formsSession,
+ * lib/forms/access.ts), for the session's own workspace. Its workspace used
+ * to come from a user_profiles lookup that answered "unauthorized" for anyone
+ * with a seat in two workspaces. The lead must be one of this workspace's
+ * too: a link signed for a lead the workspace does not have files every
+ * answer under a lead nobody can open.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { signFormLink } from "@/lib/form-links";
 import { publicFormOrigin } from "@/lib/forms/public-origin";
+import { formsSession } from "@/lib/forms/access";
+import { getTenant } from "@/lib/queries";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_TTL_DAYS = 60;
 
-async function resolveTenant(): Promise<
-  | { tenant_id: string; tenant_slug: string }
-  | null
-> {
-  const user = await getSessionUser();
-  if (!user) return null;
-  const db = getServiceSupabase();
-  const { data } = await db
-    .from("user_profiles")
-    .select("tenant_id, tenant:tenants!inner(slug)")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  if (!data) return null;
-  const row = data as { tenant_id: string | null; tenant: { slug: string } | { slug: string }[] | null };
-  if (!row.tenant_id) return null;
-  // PostgREST returns the joined table as either an object or an array
-  // depending on the relationship cardinality declared in the select.
-  // Normalize either way so the slug is reliable.
-  const t = Array.isArray(row.tenant) ? row.tenant[0] : row.tenant;
-  if (!t?.slug) return null;
-  return { tenant_id: row.tenant_id, tenant_slug: t.slug };
-}
-
 export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const tenant = await resolveTenant();
-  if (!tenant) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const auth = await formsSession({ edit: true });
+  if (!auth.ok) return auth.response;
+  const tenantRow = await getTenant(auth.session.tenantId);
+  const tenantSlug = tenantRow?.slug;
+  if (!tenantSlug) {
+    return NextResponse.json({ ok: false, error: "workspace_unresolved" }, { status: 503 });
   }
+  const tenant = { tenant_id: auth.session.tenantId, tenant_slug: tenantSlug };
   const { id: formId } = await ctx.params;
 
   let body: { lead_id?: unknown };
@@ -92,6 +82,19 @@ export async function POST(
   const form = formRow.data as { id: string; slug: string; enabled: boolean };
   if (!form.enabled) {
     return NextResponse.json({ ok: false, error: "form_disabled" }, { status: 400 });
+  }
+  const leadRow = await db
+    .from("tenant_records")
+    .select("id")
+    .eq("id", leadId)
+    .eq("tenant_id", tenant.tenant_id)
+    .maybeSingle();
+  if (leadRow.error) {
+    console.error("[forms.mint-link.lead]", { tenantId: tenant.tenant_id, leadId }, leadRow.error.message);
+    return NextResponse.json({ ok: false, error: "lead_lookup_failed" }, { status: 500 });
+  }
+  if (!leadRow.data) {
+    return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
 
   const token = signFormLink({

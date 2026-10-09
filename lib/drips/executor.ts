@@ -623,8 +623,9 @@ async function markCancelled(db: Db, row: ClaimedRow, reason: string): Promise<S
  *     skip-advance this step so the lead still gets later steps.
  *   - safety_check_failed        → the lender-name lookup couldn't run (transient
  *     DB error). RESCHEDULE (no attempt burn) so the channel recovers when the DB
- *     does, and raise a deduped alert so a persistent stall is never silent. */
-async function handleGuardBlock(
+ *     does, and raise a deduped alert so a persistent stall is never silent.
+ * Exported for tests (tests/workspace-alerts.test.ts). */
+export async function handleGuardBlock(
   db: Db,
   row: ClaimedRow,
   steps: DripStep[],
@@ -632,27 +633,34 @@ async function handleGuardBlock(
   where: string,
 ): Promise<StepOutcome> {
   if (guard.reason === "lender_name" || guard.reason === "positioning") {
+    // Both guards page once per open card: a batch claims up to 12 rows of the
+    // same sequence, and paging per row was up to 12 pages a tick. Whose chat
+    // is paged is the workspace's (lib/notify/alert-route.ts), never a lane
+    // named here.
     await writeAgentAlert({
       tenantId: row.tenant_id,
       alertType: "drip_blast_safety_block",
-      lane: "sunbiz-ops",
       severity: "warn",
       title: `Drip copy blocked by compliance: ${row.sequence_name}`,
       body: `${where} step ${row.step_index}: ${guard.message} Fix the sequence template; leads are skipping this step until you do.`,
       subjectType: "drip_sequence",
       subjectId: row.sequence_id,
       payload: { step_index: row.step_index, reason: guard.reason, where },
+      telegramOncePerOpen: true,
     }).catch(() => {});
     return skipStep(db, row, steps, `blast_safety_skipped(${where}): ${guard.message}`);
   }
   // safety_check_failed — fail-closed, but recoverable, never a permanent drop.
+  // One card per workspace: the lookup is shared by every sequence.
   await writeAgentAlert({
     tenantId: row.tenant_id,
     alertType: "drip_safety_lookup_failed",
-    lane: "sunbiz-ops",
     severity: "warn",
     title: "Drip compliance check can't run — sends rescheduling",
     body: "The lender-name safety lookup is failing; drip sends are rescheduling (fail-closed, not dropped) until it recovers.",
+    subjectType: "tenant",
+    subjectId: row.tenant_id,
+    telegramOncePerOpen: true,
   }).catch(() => {});
   const retryAt = new Date(Date.now() + 15 * 60_000).toISOString();
   return markRescheduled(db, row, retryAt, `blast_safety_check_failed(${where}) - retrying`);
@@ -1320,8 +1328,7 @@ async function processSmsStep(
       await writeAgentAlert({
         tenantId: row.tenant_id,
         alertType: "sms_carrier_route_dead",
-        lane: "sunbiz-ops",
-        severity: "urgent",
+              severity: "urgent",
         title: "SMS halted — the carrier is refusing our sends",
         body:
           `${breaker.reason}. Drip SMS is paused and every affected step reschedules +2h ` +
@@ -1380,8 +1387,7 @@ async function processSmsStep(
         await writeAgentAlert({
           tenantId: row.tenant_id,
           alertType: "tt_credits_exhausted",
-          lane: "sunbiz-ops",
-          severity: "urgent",
+                  severity: "urgent",
           title: "TextTorrent credits exhausted — SMS drips parked",
           body: "Drip SMS sends are failing with 'not enough credits'. Every affected row reschedules +6h (no retry burn, no auto-dead) until credits are topped up.",
           telegramOncePerOpen: true, // one page per outage, not one per row
@@ -1516,8 +1522,7 @@ async function processEmailStep(
           await writeAgentAlert({
             tenantId: row.tenant_id,
             alertType: "optout_stamp_unrepairable",
-            lane: "sunbiz-ops",
-            severity: "warn",
+                      severity: "warn",
             // Scoped to the LEAD. writeAgentAlert dedupes on
             // (tenant, type, subject), so a null subject merges every failing
             // lead into one open alert: the body is overwritten by whichever
@@ -1619,8 +1624,7 @@ async function processEmailStep(
           await writeAgentAlert({
             tenantId: row.tenant_id,
             alertType: "drip_missing_app_link",
-            lane: "sunbiz-ops",
-            severity: attempts >= CAP ? "urgent" : "warn",
+                      severity: attempts >= CAP ? "urgent" : "warn",
             title: `Drip email ${attempts >= CAP ? "skipped" : "held"}: no application link (${row.sequence_name})`,
             body: `Lead ${row.lead_id} has no application link and one couldn't be minted (no enabled intake form or HMAC key). ${attempts >= CAP ? "Skipped this email after retries so the sequence keeps moving." : "Holding this email so no generic link reaches the merchant."}`,
             subjectType: "drip_sequence",

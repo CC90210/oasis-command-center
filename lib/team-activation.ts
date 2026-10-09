@@ -28,6 +28,7 @@ import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
+import { dbBool } from "@/lib/db-bool";
 import { canonicalizeTenantMembers, isTrueAdminRole, type MemberRow, type SessionContext } from "@/lib/team";
 import { releaseLeads } from "@/lib/web-leads/claim-ops";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
@@ -353,7 +354,7 @@ export async function deactivateMember(args: {
   const person = await loadPerson(args.tenantId, target);
   // Checked across every row of the person: a duplicate row can be the owner's,
   // or carry the actor's own login, and deactivating it would lock them out.
-  if (person.rows.some((row) => row.is_owner)) throw new ActivationError("cannot_deactivate_owner", 409);
+  if (person.rows.some((row) => dbBool(row.is_owner))) throw new ActivationError("cannot_deactivate_owner", 409);
   if (
     person.rows.some((row) => row.id === args.actor.profileId) ||
     person.authUserIds.includes(args.actor.authUserId)

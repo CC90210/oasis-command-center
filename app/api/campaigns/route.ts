@@ -15,6 +15,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveTenantId, resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { dbBool } from "@/lib/db-bool";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
@@ -152,12 +153,13 @@ async function callerIsAdmin(authUserId: string): Promise<boolean> {
     const op = r.data as
       | { is_owner: boolean | null; team_role: string | null; admin_access: boolean | null }
       | null;
+    // Both flags through dbBool (lib/db-bool.ts): `=== true` refused the stored 1.
     return (
       !!op &&
-      (op.is_owner === true ||
+      (dbBool(op.is_owner) ||
         op.team_role === "owner" ||
         op.team_role === "admin" ||
-        op.admin_access === true)
+        dbBool(op.admin_access))
     );
   } catch {
     return false;

@@ -41,6 +41,8 @@ import { agentChannelKey, departmentChannelKey, failureCopy } from "@/lib/os/cha
 import type { WebState } from "./TeammateRow";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
+import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
+import { connectionProblem, connectionSetUp } from "@/lib/os/connectors";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -105,6 +107,13 @@ export type AiTeam = {
   custom: Read<CustomTeammate[]>;
   /** The builder (/agents/new, an OS page), for owners/admins of a workspace the builder accepts. */
   builderHref: string | null;
+  /**
+   * The workspace's chat apps as their Connections cards see them, for every
+   * row: the Slack card's words when its connection is a problem (so no row
+   * names channels on a broken connection), and whether a Telegram team bot
+   * is set up (the only case a row may mention Telegram).
+   */
+  channels: { slackProblem: string | null; telegramSetUp: boolean };
 };
 
 /** A department lead on the workspace roster (Settings and the AI Team list the same ones). */
@@ -241,6 +250,14 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     readWorkspaceTurns(tenantId),
     loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
   ]);
+  // The Slack and Telegram cards' own statuses (Settings > Connections), read
+  // after the roster so the page keeps its database reads bounded: the Slack
+  // card only where Slack is installed (the only case a row names channels),
+  // the Telegram card always (a row names Telegram only when it is set up).
+  const [slackCard, telegramCard] = await Promise.all([
+    slackPresence.kind === "connected" ? loadWorkspaceConnectorStatus(tenantId, "slack") : Promise.resolve(null),
+    loadWorkspaceConnectorStatus(tenantId, "telegram"),
+  ]);
   // Key readiness, the same answer the channel gets: no slug or no key is Not
   // connected; an AI settings read that failed is unknown, not "not connected".
   const web: "ready" | "not_connected" | "unknown" = !readiness.slug
@@ -333,5 +350,6 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     // The builder page itself refuses anyone below owner/admin
     // (app/agents/new), and needs a slug it recognises.
     builderHref: owner && readiness.slug ? "/agents/new" : null,
+    channels: { slackProblem: connectionProblem(slackCard), telegramSetUp: connectionSetUp(telegramCard) },
   };
 }

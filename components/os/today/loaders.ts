@@ -32,8 +32,9 @@ import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
 import { momentumMetrics, priorityInbound } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { operatorCalendarStatus, systemCalendarConfig } from "@/lib/integrations/google-calendar";
-import { getUserIntegrationBundleForStatus } from "@/lib/user-integration-store";
+import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
+import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
+import { personalGoogleStatus } from "@/lib/os/connectors";
 import { loadEmpireRoutines, loadTenantRoutines } from "@/components/os/department/routines";
 import { empireReadFor, mergeRoutineReads, routineHealth, type EmpireLane, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
@@ -66,6 +67,8 @@ import {
   type HotReply,
   type Read,
   type SalesSnapshot,
+  type WorkspaceAlertCard,
+  type WorkspaceAlerts,
 } from "@/components/os/today/model";
 
 /**
@@ -313,6 +316,50 @@ export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionA
   );
 }
 
+/** How many open alert cards Needs you lists; past it the count is a floor. */
+export const WORKSPACE_ALERTS_SHOWN = 10;
+
+/**
+ * The workspace's open alert cards (agent_alerts, lib/notify/agent-alert.ts),
+ * newest first: its own rows only, by tenant id. A workspace whose Telegram
+ * is not connected learns about an alert here and nowhere else. A failed read
+ * is "Couldn't check alerts", never "no alerts".
+ */
+export function loadWorkspaceAlerts(tenantId: string): Promise<Read<WorkspaceAlerts>> {
+  return read("alerts", async () => {
+    // One more than is shown, so "more are open" is known rather than guessed.
+    const res = await getServiceSupabase()
+      .from("agent_alerts")
+      .select("id, title, body, severity, payload, created_at")
+      .eq("tenant_id", tenantId)
+      .is("resolved_at", null)
+      .order("created_at", { ascending: false })
+      .limit(WORKSPACE_ALERTS_SHOWN + 1);
+    if (res.error) throw new Error(`alerts read failed: ${res.error.message}`);
+    const rows = (res.data || []) as Array<Record<string, unknown>>;
+    const cards = rows.slice(0, WORKSPACE_ALERTS_SHOWN).map((row): WorkspaceAlertCard => {
+      let payload = row.payload;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          payload = null;
+        }
+      }
+      const telegram = payload && typeof payload === "object" ? (payload as Record<string, unknown>).telegram : null;
+      return {
+        id: String(row.id),
+        title: String(row.title ?? ""),
+        body: typeof row.body === "string" && row.body.trim() ? row.body : null,
+        severity: String(row.severity ?? "info"),
+        createdAtMs: Number.isFinite(Date.parse(String(row.created_at ?? ""))) ? Date.parse(String(row.created_at)) : null,
+        telegram: typeof telegram === "string" ? telegram : null,
+      };
+    });
+    return { cards, truncated: rows.length > WORKSPACE_ALERTS_SHOWN };
+  });
+}
+
 /**
  * The calendars behind today's schedule (model.ts CalendarStatus). The
  * personal login is read through the FAIL-LOUD status reader: the send-path
@@ -322,10 +369,14 @@ export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionA
  */
 export function loadCalendarStatus(tenantId: string, userId: string, oasisWorkspace: boolean): Promise<Read<CalendarStatus>> {
   return read("calendar", async () => {
-    const status = await operatorCalendarStatus(tenantId, userId, { getBundle: getUserIntegrationBundleForStatus });
+    // Your own Google account through the one reader and resolver Settings and
+    // the Connections card use (lib/integrations/personal-google.ts), so a
+    // wrong account reads "Wrong Google account" here too, never "Connected".
+    const fact = await readPersonalGoogleFact(tenantId, userId);
+    const status = personalGoogleStatus(fact);
     const system = oasisWorkspace ? systemCalendarConfig() : null;
     return {
-      personal: { connected: status.connected, address: status.address ?? null },
+      personal: { connected: status.state === "ready", label: status.label, address: fact.address },
       workspace: oasisWorkspace ? { configured: system !== null, address: system?.organizerEmail || null } : null,
     };
   });

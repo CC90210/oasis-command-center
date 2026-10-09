@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { inviteTokenFromPath, safeInternalPath } from "../lib/turso-auth-admin";
+import { loginFailureMessage } from "../lib/login-error";
 
 assert.equal(safeInternalPath("/invite/token-123?from=login"), "/invite/token-123?from=login");
 for (const unsafe of [
@@ -74,3 +75,23 @@ assert(
 );
 
 console.log("Auth OAuth-continuation tests passed");
+
+// The password form blames the password ONLY when the server said the
+// credentials were wrong (401). An outage, a missing backend or a malformed
+// request is not "Invalid email or password" (Adon 2026-10-08: a 5xx read as
+// a wrong password hides an outage and sends people to reset a good password).
+{
+
+  const INVALID = "Invalid email or password.";
+  assert.equal(loginFailureMessage(401), INVALID);
+  assert.match(loginFailureMessage(429), /too many attempts/i);
+  for (const status of [400, 404, 500, 502, 503, 504, 0]) {
+    assert.notEqual(loginFailureMessage(status), INVALID, `${status} must not blame the password`);
+  }
+  assert.match(loginFailureMessage(503), /unavailable/i);
+  for (const status of [401, 429, 400, 500, 503]) {
+    assert(!loginFailureMessage(status).includes("—"), "no em dashes in customer-facing copy");
+  }
+  assert(login.includes("loginFailureMessage(r.status)"), "the form uses the tested mapping");
+  assert(!login.includes(': "Invalid email or password."'), "no inline fallback that blames the password");
+}

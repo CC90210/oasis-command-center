@@ -173,6 +173,184 @@ function isInlineFile(v: unknown): v is InlineFile {
 }
 
 
+/** A step may carry at most this many inline files (checked with its fields). */
+const MAX_FILES_PER_STEP = 10;
+
+/**
+ * One submitted step's fields against its payload: the authoritative copy of
+ * the client validator. Address completeness first (a filled-in address must
+ * be a real one, even an optional one), then every visible required field
+ * (text trimmed, files present), then the per-step file count. The 4xx for the
+ * first thing that fails, or null.
+ *
+ * Asked twice for an anonymous first step (PR #544 review, 2026-10-08): once
+ * by refuseInvalidAnonymousFirstStep BEFORE initAnonymousLead creates a lead
+ * or merges into a returning merchant's, and again in handleSubmit like every
+ * step. One function both times, so the two answers can never disagree.
+ */
+function refuseInvalidStep(input: {
+  formSlug: string;
+  step: FormStep;
+  payload: Record<string, unknown>;
+  /** buildAnswerContext's server-built answers: show_if is judged on these. */
+  answers: Record<string, unknown>;
+  inlineFileNames: ReadonlySet<string>;
+  inlineFileCount: number;
+}): NextResponse | null {
+  const { payload } = input;
+  for (const field of input.step.fields) {
+    // Hidden-by-condition fields are not required (mirrors the renderer + the
+    // client validator). Evaluated against the server-built answers, never client-trusted.
+    if (!isFieldVisible(field, input.answers)) continue;
+
+    // ADDRESS COMPLETENESS — the fail-closed boundary, and the reason this
+    // whole change exists. Ezra, 2026-08-13, relayed by Adon: "to include the
+    // address, it doesn't make them have to put in the city, state, and ZIP
+    // Code. Some people literally just put their street name and I'm like,
+    // 'Where the fuck do you live bro?'" Measured on production at the time:
+    // 514 of 1,051 business addresses had no ZIP at all.
+    //
+    // Checked BEFORE the `required` guard on purpose — an OPTIONAL address
+    // (the partner's) may be left blank, but if it is filled in it must still
+    // be a real address. The client validator mirrors this; this is the
+    // authoritative copy, because the client can be bypassed.
+    if (field.type === "address") {
+      const rawAddr = payload[field.name];
+      const provided = typeof rawAddr === "string" ? rawAddr.trim() : "";
+      if (provided) {
+        const gate = isAcceptableCaptureAddress(
+          provided,
+          // The business address holds its state in a separate dropdown, which
+          // may have been answered on an earlier step.
+          field.name === "business_address"
+            ? payload.business_state ?? input.answers.business_state
+            : undefined,
+        );
+        if (!gate.ok) {
+          // Log the SHAPE of the failure, never the address itself — this is
+          // merchant PII and the log is not a PII sink.
+          console.warn("[forms/submit] incomplete address rejected", {
+            form: input.formSlug,
+            field: field.name,
+          });
+          return NextResponse.json(
+            { ok: false, error: "incomplete_address", field: field.name, message: gate.message },
+            { status: 400 },
+          );
+        }
+      }
+    }
+
+    if (!field.required) continue;
+    const v = payload[field.name];
+    if (field.type === "file_upload") {
+      // Either an inline file in THIS request OR a previously-uploaded
+      // storage_path reference would satisfy the field.
+      const hasInline = input.inlineFileNames.has(field.name);
+      const hasStoragePath =
+        v && typeof v === "object" && typeof (v as { storage_path?: unknown }).storage_path === "string";
+      if (!hasInline && !hasStoragePath) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_file", field: field.name },
+          { status: 400 },
+        );
+      }
+    } else if (field.type === "file_upload_multi") {
+      // Satisfied by a non-empty array of uploaded descriptors (the client
+      // uploaded each to a signed URL and reports {storage_path,...}). The
+      // descriptors are re-validated + registered below.
+      const ok =
+        Array.isArray(v) &&
+        v.length > 0 &&
+        v.some(
+          (d) =>
+            d && typeof d === "object" && typeof (d as { storage_path?: unknown }).storage_path === "string",
+        );
+      if (!ok) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_file", field: field.name },
+          { status: 400 },
+        );
+      }
+    } else {
+      const present =
+        (typeof v === "string" && v.trim().length > 0) ||
+        (typeof v === "number" && !Number.isNaN(v)) ||
+        (Array.isArray(v) && v.length > 0) ||
+        (typeof v === "boolean");
+      if (!present) {
+        return NextResponse.json(
+          { ok: false, error: "missing_required_field", field: field.name },
+          { status: 400 },
+        );
+      }
+    }
+  }
+  if (input.inlineFileCount > MAX_FILES_PER_STEP) {
+    return NextResponse.json(
+      { ok: false, error: "too_many_files", max: MAX_FILES_PER_STEP },
+      { status: 400 },
+    );
+  }
+  return null;
+}
+
+/**
+ * An anonymous first step, judged BEFORE initAnonymousLead creates a lead or
+ * merges into a returning merchant's (PR #544 review, 2026-10-08).
+ *
+ * The lead write used to come first. A whitespace-only phone in a required
+ * field created a lead, or wrote into an existing one matched by email or
+ * phone, and only then did the step validator answer 400
+ * missing_required_field, with no submission and no notification to show for
+ * the write. Now every answer that judges the step (no such form, a broken
+ * definition, no first step, an incomplete address, a missing required field
+ * or file, too many files) is given before any lead is touched.
+ *
+ * initialize_only is not judged here: it mints the token an upload-first form
+ * needs before its file can be chosen, and records no step.
+ */
+async function refuseInvalidAnonymousFirstStep(input: {
+  tenantSlug: string;
+  formSlug: string;
+  payload: unknown;
+}): Promise<NextResponse | null> {
+  const resolved = await resolvePublicForm(getServiceSupabase(), input.tenantSlug, input.formSlug);
+  // The same answer initAnonymousLead gives for a form it cannot find.
+  if (!resolved.ok) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  let steps: FormStep[];
+  try {
+    steps = parseFormSteps(resolved.form.steps);
+  } catch (err) {
+    if (err instanceof FormDefinitionError) {
+      return NextResponse.json(
+        { ok: false, error: "form_definition_corrupt", path: err.path, reason: err.reason },
+        { status: 500 },
+      );
+    }
+    throw err;
+  }
+  if (steps.length === 0) {
+    return NextResponse.json(
+      { ok: false, error: "step_index_out_of_range", max: -1 },
+      { status: 400 },
+    );
+  }
+  const payload =
+    input.payload && typeof input.payload === "object" ? (input.payload as Record<string, unknown>) : {};
+  const inlineFieldNames = Object.entries(payload)
+    .filter(([, value]) => isInlineFile(value))
+    .map(([fieldName]) => fieldName);
+  return refuseInvalidStep({
+    formSlug: resolved.form.slug,
+    step: steps[0],
+    payload,
+    answers: buildAnswerContext(steps, [], 0, payload),
+    inlineFileNames: new Set(inlineFieldNames),
+    inlineFileCount: inlineFieldNames.length,
+  });
+}
+
 export async function POST(req: NextRequest) {
   // MERCHANT-FACING BOUNDARY. An uncaught throw here does not become a Next
   // error page — Vercel answers 500 with an EMPTY body, res.json() in the form
@@ -296,6 +474,12 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         { ok: false, error: "rate_limited", retry_in_sec: initLimit.resetIn },
         { status: 429 },
       );
+    }
+    // Judge the first step BEFORE any lead is created or merged
+    // (refuseInvalidAnonymousFirstStep): a rejected submission never writes one.
+    if (body.initialize_only !== true) {
+      const invalid = await refuseInvalidAnonymousFirstStep({ tenantSlug, formSlug, payload: body.payload });
+      if (invalid) return invalid;
     }
     const anonResult = await initAnonymousLead({
       tenantSlug,
@@ -465,94 +649,15 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
 
   const currentStep = steps[stepIndex];
   const inlineFileNames = new Set(inlineFiles.map((f) => f.fieldName));
-  for (const field of currentStep.fields) {
-    // Hidden-by-condition fields are not required (mirrors the renderer + the
-    // client validator). Evaluated against mergedAnswers, never client-trusted.
-    if (!isFieldVisible(field, mergedAnswers)) continue;
-
-    // ADDRESS COMPLETENESS — the fail-closed boundary, and the reason this
-    // whole change exists. Ezra, 2026-08-13, relayed by Adon: "to include the
-    // address, it doesn't make them have to put in the city, state, and ZIP
-    // Code. Some people literally just put their street name and I'm like,
-    // 'Where the fuck do you live bro?'" Measured on production at the time:
-    // 514 of 1,051 business addresses had no ZIP at all.
-    //
-    // Checked BEFORE the `required` guard on purpose — an OPTIONAL address
-    // (the partner's) may be left blank, but if it is filled in it must still
-    // be a real address. The client validator mirrors this; this is the
-    // authoritative copy, because the client can be bypassed.
-    if (field.type === "address") {
-      const rawAddr = payload[field.name];
-      const provided = typeof rawAddr === "string" ? rawAddr.trim() : "";
-      if (provided) {
-        const gate = isAcceptableCaptureAddress(
-          provided,
-          // The business address holds its state in a separate dropdown, which
-          // may have been answered on an earlier step.
-          field.name === "business_address"
-            ? payload.business_state ?? mergedAnswers.business_state
-            : undefined,
-        );
-        if (!gate.ok) {
-          // Log the SHAPE of the failure, never the address itself — this is
-          // merchant PII and the log is not a PII sink.
-          console.warn("[forms/submit] incomplete address rejected", {
-            form: form.slug,
-            field: field.name,
-          });
-          return NextResponse.json(
-            { ok: false, error: "incomplete_address", field: field.name, message: gate.message },
-            { status: 400 },
-          );
-        }
-      }
-    }
-
-    if (!field.required) continue;
-    const v = payload[field.name];
-    if (field.type === "file_upload") {
-      // Either an inline file in THIS request OR a previously-uploaded
-      // storage_path reference would satisfy the field.
-      const hasInline = inlineFileNames.has(field.name);
-      const hasStoragePath =
-        v && typeof v === "object" && typeof (v as { storage_path?: unknown }).storage_path === "string";
-      if (!hasInline && !hasStoragePath) {
-        return NextResponse.json(
-          { ok: false, error: "missing_required_file", field: field.name },
-          { status: 400 },
-        );
-      }
-    } else if (field.type === "file_upload_multi") {
-      // Satisfied by a non-empty array of uploaded descriptors (the client
-      // uploaded each to a signed URL and reports {storage_path,...}). The
-      // descriptors are re-validated + registered below.
-      const ok =
-        Array.isArray(v) &&
-        v.length > 0 &&
-        v.some(
-          (d) =>
-            d && typeof d === "object" && typeof (d as { storage_path?: unknown }).storage_path === "string",
-        );
-      if (!ok) {
-        return NextResponse.json(
-          { ok: false, error: "missing_required_file", field: field.name },
-          { status: 400 },
-        );
-      }
-    } else {
-      const present =
-        (typeof v === "string" && v.trim().length > 0) ||
-        (typeof v === "number" && !Number.isNaN(v)) ||
-        (Array.isArray(v) && v.length > 0) ||
-        (typeof v === "boolean");
-      if (!present) {
-        return NextResponse.json(
-          { ok: false, error: "missing_required_field", field: field.name },
-          { status: 400 },
-        );
-      }
-    }
-  }
+  const invalid = refuseInvalidStep({
+    formSlug: form.slug,
+    step: currentStep,
+    payload,
+    answers: mergedAnswers,
+    inlineFileNames,
+    inlineFileCount: inlineFiles.length,
+  });
+  if (invalid) return invalid;
 
   // Insert the submission row. service-role write — RLS doesn't see this
   // path; HMAC token + tenant_id match is the auth boundary.
@@ -590,14 +695,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   const currentStepFields = new Map(steps[stepIndex].fields.map((f) => [f.name, f]));
   const PER_FILE_DECODED_CAP_BYTES = 15 * 1024 * 1024;
   const PER_REQUEST_DECODED_CAP_BYTES = 60 * 1024 * 1024;
-  const MAX_FILES_PER_STEP = 10;
   let totalDecodedBytes = 0;
-  if (inlineFiles.length > MAX_FILES_PER_STEP) {
-    return NextResponse.json(
-      { ok: false, error: "too_many_files", max: MAX_FILES_PER_STEP },
-      { status: 400 },
-    );
-  }
   for (const { fieldName, file } of inlineFiles) {
     const fieldDef = currentStepFields.get(fieldName);
     if (!fieldDef || fieldDef.type !== "file_upload") {

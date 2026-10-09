@@ -6,6 +6,13 @@
  * Server component above passes initialRows; this client component
  * handles the create flow (POST /api/forms with a starter stub then
  * redirect to the editor) and per-row toggle/delete.
+ *
+ * canEdit comes from the page (formsEditRefusal, lib/forms/access.ts), the
+ * same rule the API enforces. Without it the list draws no New form, no on/off
+ * switch, no Edit and no Delete: only the forms, their links and their
+ * responses. Each row's Responses count opens /forms/[id]/responses.
+ * readOnlyNote replaces the default "who may change forms" sentence when the
+ * page has a different reason (a retired workspace, where nobody may).
  */
 
 import { useEffect, useState } from "react";
@@ -35,6 +42,9 @@ export function FormsListClient({
   tenantSlug,
   tenantName,
   profileSlug,
+  canEdit,
+  readOnlyNote,
+  responseCounts,
 }: {
   initialRows: FormRow[];
   tenantLogoUrl: string | null;
@@ -43,6 +53,12 @@ export function FormsListClient({
   tenantName: string | null;
   /** Resolved PROFILE slug ("sun" for SunBiz) — picks the starter template. */
   profileSlug: string | null;
+  /** May this viewer create, switch off, edit or delete forms? */
+  canEdit: boolean;
+  /** Why not, when the reason is not the viewer's role (a retired workspace). */
+  readOnlyNote?: string;
+  /** Responses per form id; null where the count could not be read. */
+  responseCounts: Record<string, number | null>;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -83,14 +99,20 @@ export function FormsListClient({
           slug,
         }),
       });
-      const data = (await res.json()) as { ok: boolean; form?: { id: string }; error?: string };
+      const data = (await res.json()) as { ok: boolean; form?: { id: string }; error?: string; message?: string };
       if (!data.ok || !data.form) {
-        setError(data.error || `http_${res.status}`);
+        // The server's own sentence when it sends one (a refused editor reads
+        // who may change forms), the error code otherwise.
+        setError(
+          data.error === "slug_taken"
+            ? "Slug collision — try New form again (we'll mint a new one)."
+            : data.message || `Couldn't create form: ${data.error || `http_${res.status}`}`,
+        );
         return;
       }
       router.push(`/forms/${data.form.id}/edit`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "network_error");
+      setError(`Couldn't create form: ${err instanceof Error ? err.message : "network_error"}`);
     } finally {
       setCreating(false);
     }
@@ -123,7 +145,7 @@ export function FormsListClient({
   async function copyPublicUrl(formId: string, formSlug: string) {
     const url = publicFormUrl(formSlug);
     if (!url) {
-      setError("tenant_slug_missing");
+      setError("Couldn't create form: tenant_slug_missing");
       return;
     }
     try {
@@ -144,8 +166,8 @@ export function FormsListClient({
     if (!confirm(`Delete form "${name}"? This can't be undone.`)) return;
     const res = await fetch(`/api/forms/${id}`, { method: "DELETE" });
     if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error || `delete failed (${res.status})`);
+      const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      setError(data.message || `Couldn't delete form: ${data.error || `delete failed (${res.status})`}`);
       return;
     }
     setRows((prev) => prev.filter((r) => r.id !== id));
@@ -158,15 +180,21 @@ export function FormsListClient({
         <div className="text-xs text-fg-muted">
           {rows.length} form{rows.length === 1 ? "" : "s"}
         </div>
-        <button
-          type="button"
-          onClick={createForm}
-          disabled={creating}
-          className="inline-flex items-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2 text-sm font-bold hover:bg-accent-bright disabled:opacity-50"
-        >
-          {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          New form
-        </button>
+        {canEdit ? (
+          <button
+            type="button"
+            onClick={createForm}
+            disabled={creating}
+            className="inline-flex items-center gap-2 rounded-lg bg-accent text-bg-deep px-4 py-2 text-sm font-bold hover:bg-accent-bright disabled:opacity-50"
+          >
+            {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            New form
+          </button>
+        ) : (
+          <div className="text-xs text-fg-muted">
+            {readOnlyNote ?? <>Only owners and admins can create or change forms. You can read every form&apos;s responses.</>}
+          </div>
+        )}
       </div>
 
       {savedFlash && (
@@ -178,18 +206,18 @@ export function FormsListClient({
 
       {error && (
         <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-400">
-          {error === "slug_taken"
-            ? "Slug collision — try New form again (we'll mint a new one)."
-            : `Couldn't create form: ${error}`}
+          {error}
         </div>
       )}
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted">
           <div className="text-sm">No forms yet.</div>
-          <div className="text-xs mt-1 text-fg-dim">
-            Click <span className="text-fg">New form</span> to start designing one.
-          </div>
+          {canEdit && (
+            <div className="text-xs mt-1 text-fg-dim">
+              Click <span className="text-fg">New form</span> to start designing one.
+            </div>
+          )}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-bg-border">
@@ -199,6 +227,7 @@ export function FormsListClient({
                 <th className="px-4 py-2 font-bold">Name</th>
                 <th className="px-4 py-2 font-bold">Slug</th>
                 <th className="px-4 py-2 font-bold">Status</th>
+                <th className="px-4 py-2 font-bold">Responses</th>
                 <th className="px-4 py-2 font-bold text-right">Actions</th>
               </tr>
             </thead>
@@ -215,30 +244,49 @@ export function FormsListClient({
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-fg-muted">{r.slug}</td>
                   <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      onClick={() => toggle(r.id, r.enabled)}
-                      className={`inline-flex items-center gap-1.5 text-xs ${
-                        r.enabled ? "text-status-engaged" : "text-fg-dim"
-                      }`}
+                    {canEdit ? (
+                      <button
+                        type="button"
+                        onClick={() => toggle(r.id, r.enabled)}
+                        className={`inline-flex items-center gap-1.5 text-xs ${
+                          r.enabled ? "text-status-engaged" : "text-fg-dim"
+                        }`}
+                      >
+                        {r.enabled ? (
+                          <ToggleRight className="w-4 h-4" />
+                        ) : (
+                          <ToggleLeft className="w-4 h-4" />
+                        )}
+                        {r.enabled ? "Live" : "Disabled"}
+                      </button>
+                    ) : (
+                      <span className={`text-xs ${r.enabled ? "text-status-engaged" : "text-fg-dim"}`}>
+                        {r.enabled ? "Live" : "Disabled"}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <Link
+                      href={`/forms/${r.id}/responses`}
+                      className="text-xs text-accent hover:text-accent-bright"
+                      title="Read every answer people sent on this form"
                     >
-                      {r.enabled ? (
-                        <ToggleRight className="w-4 h-4" />
-                      ) : (
-                        <ToggleLeft className="w-4 h-4" />
-                      )}
-                      {r.enabled ? "Live" : "Disabled"}
-                    </button>
+                      {typeof responseCounts[r.id] === "number"
+                        ? `${responseCounts[r.id]} response${responseCounts[r.id] === 1 ? "" : "s"}`
+                        : "Responses (couldn't count)"}
+                    </Link>
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-2">
-                      <Link
-                        href={`/forms/${r.id}/edit`}
-                        className="inline-flex items-center gap-1 text-accent hover:text-accent-bright text-xs"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                        Edit
-                      </Link>
+                      {canEdit && (
+                        <Link
+                          href={`/forms/${r.id}/edit`}
+                          className="inline-flex items-center gap-1 text-accent hover:text-accent-bright text-xs"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          Edit
+                        </Link>
+                      )}
                       <button
                         type="button"
                         onClick={() => copyPublicUrl(r.id, r.slug)}
@@ -249,7 +297,7 @@ export function FormsListClient({
                             ? "Couldn't resolve your tenant — refresh and try again."
                             : !r.enabled
                               ? "Enable the form first — disabled forms refuse public submissions."
-                              : "Copy the public form URL. Anyone with this link can fill the form; a fresh lead is created on submit. For a link tied to one lead, see Personalized links below."
+                              : "Copy the public form URL. Anyone with this link can fill the form; a fresh lead is created on submit."
                         }
                       >
                         {copiedId === r.id ? (
@@ -264,14 +312,16 @@ export function FormsListClient({
                           </>
                         )}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => destroy(r.id, r.name)}
-                        className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300 text-xs"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        Delete
-                      </button>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={() => destroy(r.id, r.name)}
+                          className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300 text-xs"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Delete
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -293,19 +343,6 @@ export function FormsListClient({
           phone / business name (if those fields are in the form) seed the
           lead row automatically. Use this for landing pages, social bios, ad
           destinations — anywhere you want one URL that works for everyone.
-        </div>
-        <div>
-          <div className="font-bold text-fg mb-1 flex items-center gap-1.5">
-            <ExternalLink className="w-3 h-3 text-accent" />
-            Personalized links
-          </div>
-          For outreach to one prospect, a tracked link tied to their lead is created through{" "}
-          <code className="text-accent bg-bg-deep px-1 rounded">POST /api/forms/{`<id>`}/mint-link</code>
-          {" "}with a <code className="text-accent">lead_id</code>. Opening
-          the link transitions the existing lead to{" "}
-          <span className="font-mono text-fg">viewed_application</span>;
-          submitting transitions per the form&apos;s{" "}
-          <span className="font-mono text-fg">step_outcomes</span> map.
         </div>
       </div>
     </div>

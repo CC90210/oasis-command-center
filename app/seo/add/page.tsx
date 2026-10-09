@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireOperator } from "@/lib/role-surfaces-session";
+import { requireSeoOwner } from "@/lib/seo/occ";
 import { SERVICE_ACCOUNT_EMAIL } from "@/lib/seo/types";
 import { PageFrame } from "@/components/os/PageFrame";
 import { AddSiteForm } from "@/components/seo/AddSiteForm";
@@ -7,8 +7,8 @@ import { AddSiteForm } from "@/components/seo/AddSiteForm";
 export const dynamic = "force-dynamic";
 
 export default async function SeoAddPage() {
-  // GATE: requireOperator() as the FIRST statement. The data is never fetched for anyone else.
-  await requireOperator();
+  // GATE: requireSeoOwner() as the FIRST statement (CC and Adon only). The data is never fetched for anyone else.
+  await requireSeoOwner();
   return (
     <PageFrame
       title="Add a site"

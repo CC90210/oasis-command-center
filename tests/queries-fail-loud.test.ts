@@ -115,7 +115,7 @@ async function main() {
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, publisher_agent TEXT, source_agent TEXT,
       correlation_id TEXT, severity TEXT, payload TEXT, published_at TEXT);
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, provider TEXT,
-      encrypted_api_key TEXT, enabled INTEGER, user_id TEXT);
+      encrypted_api_key TEXT, enabled INTEGER, user_id TEXT, agent_key TEXT, model TEXT);
   `);
   await db.batch(
     [
@@ -130,9 +130,11 @@ async function main() {
       { sql: "INSERT INTO agent_state_snapshot VALUES ('bravo', 7, ?, 't1', 'healthy')", args: [now] },
       { sql: "INSERT INTO agent_events VALUES ('e1', 'dashboard_action', 'bravo', 'bravo', ?, 'info', '{}', ?)", args: [A, now] },
       { sql: "INSERT INTO agent_events VALUES ('e2', 'dashboard_action', 'bravo', 'bravo', ?, 'info', '{}', ?)", args: [B, now] },
-      { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL)", args: [A] },
-      { sql: "INSERT INTO agent_model_config VALUES ('m2', ?, 'openrouter', 'enc', 1, 'someone-else')", args: [A] },
-      { sql: "INSERT INTO agent_model_config VALUES ('m3', ?, 'openai', 'enc', 1, NULL)", args: [B] },
+      // A's workspace AI account (lib/ai/workspace-account.ts), a teammate's
+      // personal key in A, and B's account.
+      { sql: "INSERT INTO agent_model_config VALUES ('m1', ?, 'anthropic', 'enc', 1, NULL, '__workspace__', 'claude-sonnet-4-6')", args: [A] },
+      { sql: "INSERT INTO agent_model_config VALUES ('m2', ?, 'openrouter', 'enc', 1, 'someone-else', 'bravo', 'openai/gpt-5.4')", args: [A] },
+      { sql: "INSERT INTO agent_model_config VALUES ('m3', ?, 'openai', 'enc', 1, NULL, '__workspace__', 'gpt-5.4')", args: [B] },
     ],
     "write",
   );

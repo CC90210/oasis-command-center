@@ -12,6 +12,7 @@ import {
 } from "@/lib/team";
 import { invitableRoleOptionsForActor } from "@/lib/role-surfaces";
 import { teamRoleLabel } from "@/lib/team-roles";
+import { dbBool } from "@/lib/db-bool";
 import { computeSeatWarning } from "@/lib/seat-warning";
 import {
   TeamInviteActions,
@@ -99,9 +100,10 @@ export default async function TeamPage() {
             {members.map((m) => {
               // libSQL hands these INTEGER flags back as 0/1 (and some rows as
               // strings). `{m.is_owner && ...}` rendered the 0 itself, so every
-              // non-owner read "Riley0". Compare the number, never the truthiness.
-              const isOwner = Number(m.is_owner) === 1;
-              const adminGranted = Number(m.admin_access) === 1;
+              // non-owner read "Riley0". Read them with dbBool (lib/db-bool.ts),
+              // never the truthiness.
+              const isOwner = dbBool(m.is_owner);
+              const adminGranted = dbBool(m.admin_access);
               return (
                 <li
                   key={m.id}

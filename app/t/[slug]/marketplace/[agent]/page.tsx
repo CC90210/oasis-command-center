@@ -5,10 +5,13 @@ import { Card, PageHeader, Tag } from "@/components/Card";
 import { AgentSubscriptionPanel } from "@/components/marketplace/AgentSubscriptionPanel";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
+import { libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { getManifestRow } from "@/lib/manifest/persistence";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireOwnedTenantSlug } from "@/lib/tenant-access";
+import { dbBool } from "@/lib/db-bool";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -39,7 +42,9 @@ export default async function MarketplaceDetailPage({
   const tenantId = profile?.tenant_id || null;
 
   const agentDef = await getAgentBySlug(agent, tenantId);
-  if (!agentDef) notFound();
+  // An OASIS house agent is in the library for OASIS's founders only
+  // (lib/os/agent-names.ts); anyone else gets the 404 a missing agent gets.
+  if (!agentDef || !libraryOffersAgent(agentDef.slug, await viewerReadsInternalAgentNames())) notFound();
 
   const manifest = await getManifest(normalised);
   const row = await getManifestRow(normalised).catch(() => null);
@@ -47,12 +52,14 @@ export default async function MarketplaceDetailPage({
 
   const binding = manifest.agents.find((a) => a.slug === agentDef.slug);
   // Editing an agent is a full-admin capability — honors the admin_access grant.
+  // Both flags through dbBool (lib/db-bool.ts): truthiness read "0" as an owner,
+  // `=== true` refused the stored grant (1).
   const isAdmin =
     !!profile &&
-    (profile.is_owner ||
+    (dbBool(profile.is_owner) ||
       profile.team_role === "admin" ||
       profile.team_role === "owner" ||
-      profile.admin_access === true);
+      dbBool(profile.admin_access));
 
   return (
     <div className="space-y-6 animate-fade-in">

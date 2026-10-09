@@ -805,7 +805,7 @@ async function main() {
       createElement(ScheduleGlance, {
         meetings: null,
         partial: false,
-        calendar: { ok: true, value: { personal: { connected: false, address: null }, workspace: { configured: true, address: "bookings@oasis.test" } } },
+        calendar: { ok: true, value: { personal: { connected: false, label: "Not connected", address: null }, workspace: { configured: true, address: "bookings@oasis.test" } } },
         connectHref: "/settings",
       }),
     );
@@ -817,7 +817,7 @@ async function main() {
       createElement(ScheduleGlance, {
         meetings: null,
         partial: false,
-        calendar: { ok: true, value: { personal: { connected: false, address: null }, workspace: { configured: false, address: null } } },
+        calendar: { ok: true, value: { personal: { connected: false, label: "Not connected", address: null }, workspace: { configured: false, address: null } } },
         connectHref: "/settings",
       }),
     );
@@ -1038,15 +1038,23 @@ async function main() {
     assert.deepEqual(await loaders.loadCalendarStatus(TENANT_A, "user-a", true), { ok: false });
   });
   await check("calendar I/O: the workspace calendar is OASIS's alone; the personal login is read per viewer", async () => {
+    // Your own Google account is read through lib/integrations/personal-google.ts,
+    // which also reads your work email (a wrong account is "Wrong Google
+    // account", never "Connected"): the profile table exists for this check only.
     await raw.executeMultiple(`
       CREATE TABLE user_integration_credentials (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, service TEXT, field_key TEXT, encrypted_value TEXT);
+      CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT);
     `);
-    assert.deepEqual(await loaders.loadCalendarStatus(TENANT_A, "user-a", true), {
-      ok: true,
-      value: { personal: { connected: false, address: null }, workspace: { configured: true, address: "bookings@oasis.test" } },
-    });
-    const client = await loaders.loadCalendarStatus(TENANT_B, "user-b", false);
-    assert.deepEqual(client.ok && client.value.workspace, null, "a client workspace never sees OASIS's calendar identity");
+    try {
+      assert.deepEqual(await loaders.loadCalendarStatus(TENANT_A, "user-a", true), {
+        ok: true,
+        value: { personal: { connected: false, label: "Not connected", address: null }, workspace: { configured: true, address: "bookings@oasis.test" } },
+      });
+      const client = await loaders.loadCalendarStatus(TENANT_B, "user-b", false);
+      assert.deepEqual(client.ok && client.value.workspace, null, "a client workspace never sees OASIS's calendar identity");
+    } finally {
+      await raw.execute("DROP TABLE user_profiles");
+    }
   });
 
   // The department tabs read the same rows the same way as Today's cards.
@@ -1168,15 +1176,18 @@ async function main() {
     const none = await numbersMod.loadDepartmentNumbers(deptOf("operations"), osViewer(TENANT_C, false), await loadTenantRoutines(TENANT_C));
     assert.deepEqual([tile(none.tiles, "Routines on")?.status, tile(none.tiles, "Failed in 24h")?.status], ["no_data", "no_data"], "no routine set up is not '0 failed'");
   });
+  // A's shared Google mailbox passed its Test a minute ago (2026-10-08: a
+  // card is proven by its own Test, never by a heartbeat).
+  const gwsPassedRows = async (tenant: string) => {
+    const { encryptField } = await import("../lib/field-encryption");
+    return ["app_password", "from_address"].map((field) => ({
+      sql: "INSERT INTO tenant_integration_credentials (id, tenant_id, service, field_key, encrypted_value, last_tested_at, last_test_ok) VALUES (?, ?, 'gws', ?, ?, ?, 1)",
+      args: [`gws-${tenant}-${field}`, tenant, field, encryptField(field === "from_address" ? "team@a.test" : "abcdabcdabcdabcd"), at(60_000)],
+    }));
+  };
   await check("Operations tab I/O (W2a): the connection tile counts the hub's own statuses, never 'not measured'", async () => {
-    // A's Google Workspace heartbeat passed a minute ago; Stripe refused A's key.
-    await raw.batch(
-      [
-        { sql: "INSERT INTO integrations_health (tenant_id, service, status, last_ping_at) VALUES (?, 'gws', 'healthy', ?)", args: [TENANT_A, at(60_000)] },
-        connectionRow("st-a", TENANT_A, "stripe", "expired", "down"),
-      ],
-      "write",
-    );
+    // A's Google mailbox passed its Test a minute ago; Stripe refused A's key.
+    await raw.batch([...(await gwsPassedRows(TENANT_A)), connectionRow("st-a", TENANT_A, "stripe", "expired", "down")], "write");
     try {
       const connTile = (tiles: Parameters<typeof tile>[0]) =>
         tile(tiles, "Connections needing attention") as { status: string; value: unknown; hint?: string; emptyText?: string } | undefined;
@@ -1186,7 +1197,7 @@ async function main() {
       assert.deepEqual([b?.status, b?.emptyText], ["no_data", "No apps connected yet"], "nothing set up is words, never 0");
       assert.doesNotMatch(JSON.stringify([a, b]), /not measured/i);
     } finally {
-      await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
+      await raw.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ?", args: [TENANT_A] });
       await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
     }
   });
@@ -1194,13 +1205,7 @@ async function main() {
   // it counted the viewer's own Google link, so two people in one workspace
   // could read two different workspace numbers.
   await check("Operations tab I/O (W2A-R5): an owner gets the link to fix a non-zero count; the count is the workspace's, whoever looks", async () => {
-    await raw.batch(
-      [
-        { sql: "INSERT INTO integrations_health (tenant_id, service, status, last_ping_at) VALUES (?, 'gws', 'healthy', ?)", args: [TENANT_A, at(60_000)] },
-        connectionRow("st-a", TENANT_A, "stripe", "expired", "down"),
-      ],
-      "write",
-    );
+    await raw.batch([...(await gwsPassedRows(TENANT_A)), connectionRow("st-a", TENANT_A, "stripe", "expired", "down")], "write");
     // The personal-link read needs the table's real columns; B's owner links their own Google.
     await raw.executeMultiple(`
       ALTER TABLE user_integration_credentials ADD COLUMN last_tested_at TEXT;
@@ -1225,11 +1230,12 @@ async function main() {
       const { KpiTile } = await import("../components/os/KpiTile");
       assert.match(render(createElement(KpiTile, owner as never)), /Connections needing attention 1 Of 2 apps set up Open Connections/);
       // B's owner has their own Google linked; B has set up nothing. The hub
-      // card says "Your account linked", but the workspace has no app set up.
+      // card reports that account beside the workspace's state, which stays
+      // "No shared mailbox": the workspace has no app set up.
       const b = await connTile(osViewer(TENANT_B, false), TENANT_B);
       assert.deepEqual([b?.status, b?.emptyText, b?.action], ["no_data", "No apps connected yet", undefined], "a personal link is not the workspace's app");
     } finally {
-      await raw.execute({ sql: "DELETE FROM integrations_health WHERE tenant_id = ?", args: [TENANT_A] });
+      await raw.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ?", args: [TENANT_A] });
       await raw.execute("DELETE FROM tenant_connections WHERE id = 'st-a'");
       await raw.execute("DELETE FROM user_integration_credentials WHERE id = 'g-b'");
     }
