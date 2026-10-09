@@ -25,7 +25,8 @@ import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { PROVIDER_LABEL, PROVIDER_MODELS, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { canManageTeam, getSessionContext } from "@/lib/team";
-import { LOCAL_MODEL_REFUSAL, WORKSPACE_AI_AGENT_KEY, mayUseLocalModel } from "@/lib/ai/workspace-account";
+import { LOCAL_MODEL_REFUSAL, WORKSPACE_AI_AGENT_KEY, mayUseLocalModel, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
+import { saveCheck } from "@/lib/ai/model-registry";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -64,6 +65,19 @@ export async function GET(req: NextRequest) {
   }
   const { data, error } = await q;
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  // The workspace's AI account (never its key): its provider and the model
+  // its department chats are saved on, so Settings can say what that model is
+  // doing (lib/ai/model-registry.ts modelNote). A read that fails says
+  // nothing (null), never a model the account is not on.
+  let account: { provider: string; model: string; connected: boolean } | null = null;
+  if (scope === "tenant") {
+    try {
+      const a = await readWorkspaceAiAccount(tenantId);
+      account = a ? { provider: a.provider, model: a.model, connected: a.enabled && !!a.encryptedApiKey } : null;
+    } catch (err) {
+      console.error("[agent-config.account]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   // The workspace's AI account row is not a teammate: no list may show it.
   const configs = (data || []).filter((row) => row.agent_key !== WORKSPACE_AI_AGENT_KEY).map((row) => ({
     agent_key: row.agent_key,
@@ -80,7 +94,7 @@ export async function GET(req: NextRequest) {
     display_name_override:
       scope === "user" ? ((row.display_name_override as string | null) || null) : null,
   }));
-  return NextResponse.json({ ok: true, scope, configs });
+  return NextResponse.json({ ok: true, scope, configs, ...(scope === "tenant" ? { account } : {}) });
 }
 
 export async function POST(req: NextRequest) {
@@ -154,7 +168,7 @@ export async function POST(req: NextRequest) {
   // Upsert
   let existingQ = service
     .from("agent_model_config")
-    .select("id, encrypted_api_key, provider")
+    .select("id, encrypted_api_key, provider, model")
     .eq("tenant_id", tenantId)
     .eq("agent_key", agentKey);
   existingQ = effectiveUserId
@@ -187,6 +201,19 @@ export async function POST(req: NextRequest) {
       },
       { status: 409 },
     );
+  }
+  // A model the registry knows is gone, or ends within its horizon, is never
+  // saved (lib/ai/model-registry.ts): Settings lists a saved value as itself,
+  // so a save can never put a model back that no longer answers. A row that
+  // is ALREADY on such a model keeps it through an edit that does not change
+  // it (a new key, the on/off switch, the prompt): nothing is put back, its
+  // calls already send the replacement, and Settings says so next to it. A
+  // model the registry does not know (any of OpenRouter's catalog, a local
+  // tag) is saved as before, and Settings says nobody here vouches for it.
+  const unchangedModel = existingProvider === provider && existing?.model === model;
+  const modelCheck = unchangedModel ? null : saveCheck(provider, model);
+  if (modelCheck && !modelCheck.ok) {
+    return NextResponse.json({ ok: false, error: "model_not_offered", message: modelCheck.message }, { status: 400 });
   }
 
   const payload: Record<string, unknown> = {

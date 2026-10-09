@@ -143,6 +143,8 @@ export async function getDeskForm(db: Client, tenantId: string, tenantSlug: stri
     )[0];
   } catch (err) {
     if (!isMissingRegistry(err)) throw err;
+    // The screens say only that the form isn't available; the cause is here, every time.
+    console.error("[delivery.desks.form] support_desks is missing (migration bravo__188 not applied): the support form cannot be shown or turned on");
     return { state: "unavailable" };
   }
   // A registration whose form is gone (deleted through the Forms page before

@@ -274,12 +274,24 @@ export function stampHoldsKey(stamp: AccountStamp, key: { provider: string; mode
 /**
  * The team-wide connect, in one step: the teammate rows it stamps (a new row
  * is switched on; an existing one keeps its prompt, name and on/off switch and
- * takes the new provider, model and key), the legacy `bravo` workspace row
- * when the workspace has one and it is not a target (the old team key moves
- * with the team; that row is only ever updated, never created), then the
- * account row (switched on). `committed` is false when the account changed
- * after `stamp` was read: then nothing was written. Throws when the batch
- * fails, and then nothing was written either.
+ * takes the new provider, model and key), every OTHER workspace teammate row
+ * that still holds the account's previous key (see THE KEY MOVES WITH THE
+ * TEAM), the legacy `bravo` workspace row when the workspace has one and it is
+ * not a target (the old team key moves with the team; that row is only ever
+ * updated, never created), then the account row (switched on). `committed` is
+ * false when the account changed after `stamp` was read: then nothing was
+ * written. Throws when the batch fails, and then nothing was written either.
+ *
+ * THE KEY MOVES WITH THE TEAM (PR #535 review, R5-M3). A connect stamps only
+ * the teammates the caller names (by default their own enabled list, which is
+ * per person). A teammate an earlier connect stamped with the account's key,
+ * and this one did not name, used to keep that key on its old provider: it
+ * still answered per-agent chats, while that provider's card read Not
+ * connected and offered no Disconnect. Every workspace teammate row whose key
+ * IS the account's previous key (the same ciphertext: one connect writes one
+ * ciphertext to every row it stamps) now moves with the account. A teammate
+ * the owner gave its OWN key (a per-agent override, a different ciphertext) is
+ * left as it is. `movedWithTeam` names the rows that moved.
  */
 export async function connectWorkspaceAccountInOneStep(input: {
   tenantId: string;
@@ -288,7 +300,7 @@ export async function connectWorkspaceAccountInOneStep(input: {
   model: string;
   encryptedApiKey: string;
   agentKeys: string[];
-}): Promise<{ committed: boolean; legacyRowMoved: boolean }> {
+}): Promise<{ committed: boolean; legacyRowMoved: boolean; movedWithTeam: string[] }> {
   const { tenantId, stamp, provider, model, encryptedApiKey } = input;
   const at = new Date().toISOString();
   const guard = stillAsRead(tenantId, stamp);
@@ -300,6 +312,27 @@ export async function connectWorkspaceAccountInOneStep(input: {
       " DO UPDATE SET provider = excluded.provider, model = excluded.model, encrypted_api_key = excluded.encrypted_api_key, updated_at = excluded.updated_at",
     args: [tenantId, agentKey, provider, model, encryptedApiKey, at, ...guard.args],
   }));
+  // The account's previous key: the account row's (as the stamp read it), or,
+  // for a workspace with no account row yet, the legacy row's (read by this
+  // statement itself, before the legacy row's own move below rewrites it).
+  const previousKey: { sql: string; args: InValue[] } | null = stamp.present
+    ? stamp.encryptedApiKey
+      ? { sql: "?", args: [stamp.encryptedApiKey] }
+      : null
+    : {
+        sql: "(SELECT l.encrypted_api_key FROM agent_model_config l WHERE l.tenant_id = ? AND l.agent_key = ? AND l.user_id IS NULL)",
+        args: [tenantId, LEGACY_WORKSPACE_AI_AGENT_KEY],
+      };
+  const moveTeamIndex = previousKey ? stmts.length : -1;
+  if (previousKey) {
+    stmts.push({
+      sql:
+        "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = ?, updated_at = ?" +
+        " WHERE tenant_id = ? AND user_id IS NULL AND agent_key <> ? AND agent_key <> ?" +
+        ` AND encrypted_api_key = ${previousKey.sql} AND ${guard.sql} RETURNING agent_key`,
+      args: [provider, model, encryptedApiKey, at, tenantId, WORKSPACE_AI_AGENT_KEY, LEGACY_WORKSPACE_AI_AGENT_KEY, ...previousKey.args, ...guard.args],
+    });
+  }
   const moveLegacyRow = !input.agentKeys.includes(LEGACY_WORKSPACE_AI_AGENT_KEY);
   if (moveLegacyRow) {
     stmts.push({
@@ -328,6 +361,7 @@ export async function connectWorkspaceAccountInOneStep(input: {
   return {
     committed: results[results.length - 1].rowsAffected === 1,
     legacyRowMoved: moveLegacyRow && results[results.length - 2].rowsAffected === 1,
+    movedWithTeam: moveTeamIndex < 0 ? [] : results[moveTeamIndex].rows.map((r) => String(r.agent_key)),
   };
 }
 

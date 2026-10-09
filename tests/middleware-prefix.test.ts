@@ -161,6 +161,25 @@ for (const notPublic of ["/api/ledger", "/api/ledger/events", "/api/ledger/inges
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only the ingest path is public`);
 }
 
+// Skills Training machine check-in (JARVIS plan 2, Task 7). The PC holds a
+// per-computer key, not a session cookie, and authenticates INSIDE
+// lib/skills/machine-auth.ts; left off the allowlist every real check-in
+// would 401 here before that key check ever runs. Only the check-in
+// sub-path is public — the admin surfaces Adon's session uses
+// (computers, overview, and the change-authoring POST /api/skills/changes)
+// must stay session-gated.
+for (const checkin of [
+  "/api/skills/checkin/poll",
+  "/api/skills/checkin/skills",
+  "/api/skills/checkin/changes",
+  "/api/skills/checkin/report",
+]) {
+  assert.equal(isPublic(checkin), true, `${checkin} is key-gated inside its route and MUST bypass session middleware`);
+}
+for (const notPublic of ["/api/skills/changes", "/api/skills/overview", "/api/skills/computers", "/api/skills/checkin", "/api/skills/checkin-admin"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only /api/skills/checkin/* is public`);
+}
+
 // The support@ reader (BEA, on CC's PC) posts to four routes under
 // /api/internal/support/, each HMAC-gated inside (lib/delivery/support-ingest-auth.ts).
 // A 401 from middleware would read to the reader as a bad signature and stop

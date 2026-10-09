@@ -5,7 +5,19 @@ import Link from "next/link";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
 import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
-import { failureCopy } from "@/lib/os/channel/outcome";
+import { failureCopy, type FailureModel } from "@/lib/os/channel/outcome";
+
+/** The `model` of a route error event (app/api/agents/chat), when it is well formed. */
+function asFailureModel(raw: unknown): FailureModel | null {
+  if (!raw || typeof raw !== "object") return null;
+  const m = raw as Record<string, unknown>;
+  if (typeof m.label !== "string" || !m.label.trim()) return null;
+  return {
+    label: m.label,
+    vendor: typeof m.vendor === "string" ? m.vendor : null,
+    suggestion: typeof m.suggestion === "string" ? m.suggestion : null,
+  };
+}
 
 type ChatTurn = {
   role: "user" | "assistant" | "system";
@@ -83,6 +95,8 @@ export function AgentChat({
   // A failure is a CODE (lib/os/channel/outcome.ts), rendered as one plain
   // sentence with a fix link. Raw provider text never reaches the screen.
   const [failure, setFailure] = useState<string | null>(initialFailure);
+  // The model a "not found" was about, as the route named it (its error event).
+  const [failureModel, setFailureModel] = useState<FailureModel | null>(null);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
@@ -103,6 +117,7 @@ export function AgentChat({
       const trimmed = text.trim();
       if (!trimmed || streaming) return;
       setFailure(null);
+      setFailureModel(null);
 
       // Slash commands — intercepted client-side, never hit the server.
       // Scoped to the commands this chat offers (chatCommands): anything
@@ -302,6 +317,7 @@ export function AgentChat({
               }
             } else if (eventName === "error" && payload && typeof payload === "object") {
               streamFailure = (payload as { code?: string }).code || "provider_error";
+              setFailureModel(asFailureModel((payload as { model?: unknown }).model));
               setFailure(streamFailure);
             }
           }
@@ -344,7 +360,7 @@ export function AgentChat({
     }
   };
 
-  const failureText = failure ? failureCopy(failure, { canManageAi }) : null;
+  const failureText = failure ? failureCopy(failure, { canManageAi, model: failureModel }) : null;
 
   // Min-height: on phones a hardcoded 640px is taller than a lot of
   // viewports (iPhone SE = 667px). Use a viewport-relative floor on

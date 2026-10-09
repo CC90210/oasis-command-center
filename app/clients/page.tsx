@@ -12,6 +12,15 @@
  * record's updated_at. Current clients come first; clients whose engagement
  * ended are listed under PAST CLIENTS below them.
  *
+ * THE STATUS TABS (All, Prospect, Onboarding, Active, Paused, Past) filter in
+ * the browser (components/os/landings/clients-status.tsx). The search, owner
+ * and archived filters narrow the read; the status does not: every status is
+ * read once and each record's row is rendered here, so a tab click shows its
+ * rows at once instead of waiting on a server render (CC, 2026-10-02: "they're
+ * not clickable"). Only a list cut at its page size reads the status on the
+ * server, and there the tabs navigate. The KPI row and the sections stay
+ * mounted under a status, so nothing jumps.
+ *
  * IMPORT STRIPE CUSTOMERS (OASIS, founders who may open Money) turns the
  * Stripe customers in OASIS's books into records, after the privacy question.
  *
@@ -20,7 +29,10 @@
  * clients-model.ts): deals won in Pipeline, delivery projects and open support
  * tickets. Those are still shown, honestly labelled, until each is converted:
  * a won deal that already has a record links to it; the rest offer "Convert to
- * client" (owners and admins). Nothing here is typed in or sampled.
+ * client" (owners and admins). Nothing here is typed in or sampled. A deal
+ * about a retired business is never listed (lib/os/customers/retired.ts), and
+ * the section is drawn only when it has something to show, so a blank start
+ * is a clean empty state.
  *
  * GATE, first statement: requireOsRoute("/clients") — the rail's own rule
  * (capabilities.canSeeClientIdentities). Each source then applies its own rule
@@ -45,6 +57,7 @@ import {
   type ClientRow,
 } from "@/components/os/landings/clients-model";
 import {
+  firstParam,
   loadConvertedLeads,
   loadCustomerRecords,
   loadWorkspaceDirectory,
@@ -53,11 +66,15 @@ import {
   type ListedClient,
 } from "@/components/os/landings/clients-records-data";
 import {
+  ClearClientFilters,
+  ClientStatusField,
+  ClientsByStatus,
   ConvertToClientButton,
   EndDealEngagementButton,
   ImportStripeButton,
   NewClientButton,
 } from "@/components/os/landings/clients-actions";
+import type { OsTab } from "@/components/os/OsTabBar";
 import { ClientHealthBadge } from "@/components/os/landings/client-health-badge";
 import { clientsViewerFromSurface } from "@/lib/os/customers/session";
 import { CUSTOMER_LIFECYCLES, CUSTOMER_LIFECYCLE_LABELS, isOneOf } from "@/lib/os/customers/rules";
@@ -68,7 +85,8 @@ import { timeAgo } from "@/lib/fmt";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Clients" };
 
-type Search = { lifecycle?: string; q?: string; owner?: string; archived?: string };
+type Param = string | string[];
+type Search = { lifecycle?: Param; q?: Param; owner?: Param; archived?: Param };
 
 const rowsOf = <T,>(s: SourceState<T>): T[] | null => (s.state === "ok" ? s.rows : null);
 
@@ -77,19 +95,29 @@ const rowsOf = <T,>(s: SourceState<T>): T[] | null => (s.state === "ok" ? s.rows
 // ClientsPage() call (the landing tests) working at runtime.
 export default async function ClientsPage(props: { searchParams?: Promise<Search> }) {
   const viewer = await requireOsRoute("/clients");
-  const sp = ((await props?.searchParams) ?? {}) as Search;
+  const raw = ((await props?.searchParams) ?? {}) as Search;
+  // A repeated param (?lifecycle=active&lifecycle=paused) is its first value,
+  // the one the browser's tabs read (firstParam).
+  const sp = { lifecycle: firstParam(raw.lifecycle), q: firstParam(raw.q), owner: firstParam(raw.owner), archived: firstParam(raw.archived) };
   const cv = clientsViewerFromSurface(viewer.surface)!;
+  const status = isOneOf(CUSTOMER_LIFECYCLES, sp.lifecycle) ? sp.lifecycle : null;
+  // The form's filters narrow the read. The status does not: the tabs filter
+  // the rows of every status in the browser.
   const filters = {
-    lifecycle: isOneOf(CUSTOMER_LIFECYCLES, sp.lifecycle) ? sp.lifecycle : null,
+    lifecycle: null,
     q: sp.q?.trim() || null,
     owner: sp.owner?.trim() || null,
     includeArchived: sp.archived === "1",
   };
   const [records, sources, directory] = await Promise.all([
-    loadCustomerRecords(cv, filters),
+    // A list cut at its page size cannot be filtered from the rows at hand:
+    // there the server reads the status in the address bar instead.
+    loadCustomerRecords(cv, filters, undefined, { statusWhenCut: status }),
     loadClientSources(viewer),
     loadWorkspaceDirectory(cv.tenantId),
   ]);
+  // And its tabs navigate.
+  const statusFromServer = records.state === "ok" && records.value.cut;
   const canOpen = (href: string) => mayOpenOsHref(viewer.navInput, href);
   const owners = ownerOptions(directory);
 
@@ -108,17 +136,27 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
 
   // ── the records ──────────────────────────────────────────────────────────
   const rows = records.state === "ok" ? records.value.rows : [];
-  const filtered = Boolean(filters.lifecycle || filters.q || filters.owner || filters.includeArchived);
-  const byLifecycle = (l: string) => rows.filter((r) => r.lifecycle === l).length;
+  const formFiltered = Boolean(filters.q || filters.owner || filters.includeArchived);
+  // The KPI row counts every status, whichever tab is open, so it stays put.
+  // A cut list draws no KPI row and no counts: it holds one status's rows.
+  const allRows = records.state === "ok" && !statusFromServer ? records.value.rows : [];
+  const byLifecycle = (l: string) => allRows.filter((r) => r.lifecycle === l).length;
   const sumOrNull = (pick: (r: ListedClient) => number | null) =>
-    rows.some((r) => pick(r) === null) ? null : rows.reduce((n, r) => n + (pick(r) ?? 0), 0);
-  // Past clients (the engagement ended) sit under their own heading unless a
-  // status filter already chose what to show.
-  const splitPast = !filters.lifecycle;
-  const currentRows = splitPast ? rows.filter((r) => r.lifecycle !== "churned") : rows;
-  const pastRows = splitPast ? rows.filter((r) => r.lifecycle === "churned") : [];
-  const atRisk = rows.filter((r) => r.health.level === "at_risk").length;
-  const healthUnknown = rows.some((r) => r.lifecycle !== "churned" && r.health.level === "unknown");
+    allRows.some((r) => pick(r) === null) ? null : allRows.reduce((n, r) => n + (pick(r) ?? 0), 0);
+  const atRisk = allRows.filter((r) => r.health.level === "at_risk").length;
+  const healthUnknown = allRows.some((r) => r.lifecycle !== "churned" && r.health.level === "unknown");
+  // Each tab's link keeps the form's filters; a plain click never follows it
+  // unless the list is cut (statusFromServer). Each tab says how many clients
+  // it holds, counted from the rows read, so only when every row was read.
+  const tabs: OsTab[] = [{ key: "", label: "All" }, ...CUSTOMER_LIFECYCLES.map((l) => ({ key: l, label: CUSTOMER_LIFECYCLE_LABELS[l] }))].map((t) => {
+    const params = new URLSearchParams();
+    if (t.key) params.set("lifecycle", t.key);
+    if (filters.q) params.set("q", filters.q);
+    if (filters.owner) params.set("owner", filters.owner);
+    if (filters.includeArchived) params.set("archived", "1");
+    const count = statusFromServer ? undefined : t.key ? byLifecycle(t.key) : allRows.length;
+    return { ...t, href: `/clients${params.size ? `?${params.toString()}` : ""}`, ...(count === undefined ? {} : { count }) };
+  });
 
   // ── the pipeline-derived clients (OASIS) ─────────────────────────────────
   const derivedApplies = sources.wonDeals.state !== "not_applicable";
@@ -126,7 +164,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
   // (lib/os/count.ts; #469).
   const projectsCapped = sources.projects.state === "ok" && sources.projects.truncated;
   const ticketsCapped = sources.tickets.state === "ok" && sources.tickets.truncated;
-  const built = derivedApplies && !filtered && sources.wonDeals.state !== "not_allowed"
+  const built = derivedApplies && !formFiltered && sources.wonDeals.state !== "not_allowed"
     ? buildClientRows({
         leads: rowsOf(sources.wonDeals) ?? [],
         projects: rowsOf(sources.projects),
@@ -162,14 +200,26 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
     converted?.state === "error" ? "which deals are already client records" : null,
   ].filter(Boolean);
   const deliveryHidden = sources.projects.state === "not_allowed";
+  // A blank start is a clean empty state: the section is drawn only when it has
+  // something to show (a deal, a past deal, unlinked tickets), a failure to
+  // report, or the reason this role sees none of it.
+  const derivedShown =
+    derivedApplies &&
+    !formFiltered &&
+    (sources.wonDeals.state === "not_allowed" ||
+      derivedFailed.length > 0 ||
+      derivedRows.length > 0 ||
+      pastDerivedRows.length > 0 ||
+      (built?.unlinkedTickets ?? 0) > 0);
 
   return (
     <PageFrame title="Clients" subtitle="The customers your business serves." actions={actions}>
       <div className="space-y-6">
         {records.state === "not_set_up" && (
+          // The reason (the client records table is missing) is in the log
+          // (clients-records-data.ts attempt), not on the screen (CS-16).
           <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
-            Client records are not set up in this database yet (migration bravo__188). Until they are, the clients below
-            are assembled from Pipeline, projects and tickets.
+            Client records aren&rsquo;t available right now. The error has been logged.
           </p>
         )}
         {records.state === "error" && (
@@ -180,7 +230,7 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
 
         {records.state === "ok" && (
           <>
-            {!filtered && !records.value.truncated && (
+            {!formFiltered && !statusFromServer && (
               <section className={`grid grid-cols-2 gap-3 ${cv.desk ? "md:grid-cols-5" : "md:grid-cols-2"}`}>
                 <KpiTile label="Active" value={byLifecycle("active")} status="live" />
                 <KpiTile label="Onboarding" value={byLifecycle("onboarding")} status="live" />
@@ -206,90 +256,60 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
               </p>
             )}
 
-            <nav aria-label="Client status" className="flex flex-wrap gap-1 border-b border-hairline">
-              {[{ key: "", label: "All" }, ...CUSTOMER_LIFECYCLES.map((l) => ({ key: l, label: CUSTOMER_LIFECYCLE_LABELS[l] }))].map((t) => {
-                const active = (filters.lifecycle ?? "") === t.key;
-                const params = new URLSearchParams();
-                if (t.key) params.set("lifecycle", t.key);
-                if (filters.q) params.set("q", filters.q);
-                if (filters.owner) params.set("owner", filters.owner);
-                if (filters.includeArchived) params.set("archived", "1");
-                return (
-                  <Link
-                    key={t.key || "all"}
-                    href={`/clients${params.size ? `?${params.toString()}` : ""}`}
-                    prefetch={false}
-                    aria-current={active ? "page" : undefined}
-                    className={`-mb-px border-b-2 px-3 py-2 text-[13px] ${active ? "border-fg font-medium text-fg" : "border-transparent text-fg-muted hover:text-fg"}`}
-                  >
-                    {t.label}
-                  </Link>
-                );
-              })}
-            </nav>
-
-            <form method="get" className="flex flex-wrap items-end gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
-              {filters.lifecycle && <input type="hidden" name="lifecycle" value={filters.lifecycle} />}
-              <label className="min-w-[12rem] flex-1">
-                <span className="label">Search</span>
-                <input name="q" className="input" defaultValue={filters.q ?? ""} placeholder="Name, company, email or phone" />
-              </label>
-              <label className="w-48">
-                <span className="label">Owner</span>
-                <select name="owner" className="select" defaultValue={filters.owner ?? ""}>
-                  <option value="">Anyone</option>
-                  <option value="unassigned">No owner</option>
-                  {owners.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex items-center gap-2 pb-2 text-[13px] text-fg-muted">
-                <input type="checkbox" name="archived" value="1" defaultChecked={filters.includeArchived} />
-                Include archived
-              </label>
-              <button type="submit" className="btn-secondary">Apply</button>
-              {filtered && <Link href="/clients" prefetch={false} className="pb-2 text-sm text-fg-muted hover:text-fg">Clear</Link>}
-            </form>
-
-            {rows.length === 0 ? (
-              <Card>
-                <div className="py-6">
-                  <p className="text-sm font-medium text-fg">{filtered ? "No clients match these filters." : "No client records yet."}</p>
-                  {!filtered && (
-                    <p className="mt-1 max-w-prose text-[13px] leading-5 text-fg-muted">
-                      {cv.canWrite ? "Add a client you already serve with New client, or" : "A client record is made when an owner adds one or"}{" "}
-                      convert a deal once it is won in Pipeline. Each client then carries its tickets, projects, files and
-                      activity in one place.
-                    </p>
-                  )}
-                </div>
-              </Card>
-            ) : (
-              <>
-                {currentRows.length > 0 ? (
-                  <CustomersTable rows={currentRows} directory={directory} deskKnown={cv.desk !== null} />
-                ) : (
-                  <Card>
-                    <p className="py-4 text-[13px] text-fg-muted">No current clients. Every client record here is a past engagement.</p>
-                  </Card>
-                )}
-                {pastRows.length > 0 && (
-                  <section className="space-y-3">
-                    <div>
-                      <h2 className="text-sm font-semibold text-fg">Past clients</h2>
-                      <p className="mt-0.5 text-[13px] text-fg-muted">Engagements that ended. Their history stays on each record.</p>
-                    </div>
-                    <CustomersTable rows={pastRows} directory={directory} deskKnown={cv.desk !== null} />
-                  </section>
-                )}
-              </>
-            )}
+            <ClientsByStatus
+              tabs={tabs}
+              fromServer={statusFromServer}
+              lifecycles={rows.map((r) => r.lifecycle)}
+              rows={rows.map((r) => (
+                <CustomerRow key={r.id} r={r} directory={directory} deskKnown={cv.desk !== null} />
+              ))}
+              head={<CustomersHead />}
+              formFiltered={formFiltered}
+              filterForm={
+                <form method="get" className="flex flex-wrap items-end gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
+                  <ClientStatusField />
+                  <label className="min-w-[12rem] flex-1">
+                    <span className="label">Search</span>
+                    <input name="q" className="input" defaultValue={filters.q ?? ""} placeholder="Name, company, email or phone" />
+                  </label>
+                  <label className="w-48">
+                    <span className="label">Owner</span>
+                    <select name="owner" className="select" defaultValue={filters.owner ?? ""}>
+                      <option value="">Anyone</option>
+                      <option value="unassigned">No owner</option>
+                      {owners.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 pb-2 text-[13px] text-fg-muted">
+                    <input type="checkbox" name="archived" value="1" defaultChecked={filters.includeArchived} />
+                    Include archived
+                  </label>
+                  <button type="submit" className="btn-secondary">Apply</button>
+                  <ClearClientFilters formFiltered={formFiltered} />
+                </form>
+              }
+              empty={
+                <Card>
+                  <div className="py-6">
+                    <p className="text-sm font-medium text-fg">{formFiltered ? "No clients match these filters." : "No client records yet."}</p>
+                    {!formFiltered && (
+                      <p className="mt-1 max-w-prose text-[13px] leading-5 text-fg-muted">
+                        {cv.canWrite ? "Add a client you already serve with New client, or" : "A client record is made when an owner adds one or"}{" "}
+                        convert a deal once it is won in Pipeline. Each client then carries its tickets, projects, files and
+                        activity in one place.
+                      </p>
+                    )}
+                  </div>
+                </Card>
+              }
+            />
             {records.value.truncated && <p className="text-xs text-fg-dim">Showing the first 500 clients. Narrow the filters to see the rest.</p>}
           </>
         )}
 
-        {derivedApplies && !filtered && (
+        {derivedShown && (
           <section className="space-y-3">
             <div>
               <h2 className="text-sm font-semibold text-fg">Not yet client records</h2>
@@ -410,74 +430,68 @@ function LastTouch({ at }: { at: string | null | undefined }) {
   return <span title={at}>{timeAgo(at)}</span>;
 }
 
-/** The workspace's client records. */
-function CustomersTable({
-  rows,
+/** The client records' header row; ClientsByStatus draws the table around it. */
+function CustomersHead() {
+  return (
+    <thead>
+      <tr className="border-b border-hairline">
+        <th className={th}>Name</th>
+        <th className={th}>Health</th>
+        <th className={th}>Status</th>
+        <th className={th}>Owner</th>
+        <th className={`${th} text-right`}>Open tickets</th>
+        <th className={`${th} text-right`}>Active projects</th>
+        <th className={`${th} text-right`}>Last touch</th>
+      </tr>
+    </thead>
+  );
+}
+
+/** One client record's row, rendered here and shown under whichever status tab is open. */
+function CustomerRow({
+  r,
   directory,
   deskKnown,
 }: {
-  rows: readonly ListedClient[];
+  r: ListedClient;
   directory: Parameters<typeof ownerName>[1];
   deskKnown: boolean;
 }) {
+  const sub = [r.company_name && r.company_name !== r.display_name ? r.company_name : null, r.primary_email]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <Card noPadding>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[840px] text-sm">
-          <thead>
-            <tr className="border-b border-hairline">
-              <th className={th}>Name</th>
-              <th className={th}>Health</th>
-              <th className={th}>Status</th>
-              <th className={th}>Owner</th>
-              <th className={`${th} text-right`}>Open tickets</th>
-              <th className={`${th} text-right`}>Active projects</th>
-              <th className={`${th} text-right`}>Last touch</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-hairline">
-            {rows.map((r) => {
-              const sub = [r.company_name && r.company_name !== r.display_name ? r.company_name : null, r.primary_email]
-                .filter(Boolean)
-                .join(" · ");
-              return (
-                <tr key={r.id} className="transition-colors duration-150 hover:bg-active-hover">
-                  <td className={td}>
-                    <Link href={`/clients/${r.id}`} prefetch={false} className="font-medium text-fg hover:underline">
-                      {r.display_name}
-                    </Link>
-                    {r.archived_at && <span className="ml-2 text-xs text-fg-dim">Archived</span>}
-                    {sub && <div className="text-xs text-fg-dim">{sub}</div>}
-                    {r.tags.length > 0 && <div className="mt-0.5 text-xs text-fg-dim">{r.tags.join(" · ")}</div>}
-                  </td>
-                  <td className={td}>
-                    {/* Health reads the desk's signals, which are the owners' and admins' to read. */}
-                    {deskKnown ? (
-                      <ClientHealthBadge health={r.health} />
-                    ) : (
-                      <span className="text-fg-dim" title="Owners and admins only" aria-label="Owners and admins only">
-                        —
-                      </span>
-                    )}
-                  </td>
-                  <td className={`${td} text-fg-muted`}>{CUSTOMER_LIFECYCLE_LABELS[r.lifecycle]}</td>
-                  <td className={`${td} text-fg-muted`}>{ownerName(r.owner_user_id, directory) ?? (r.owner_user_id ? "—" : "No owner")}</td>
-                  <td className={`${td} text-right tabular-nums`}>
-                    <Count value={r.open_ticket_count} hidden={!deskKnown} />
-                  </td>
-                  <td className={`${td} text-right tabular-nums`}>
-                    <Count value={r.active_project_count} hidden={!deskKnown} />
-                  </td>
-                  <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`}>
-                    <LastTouch at={r.last_touch} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
+    <tr className="transition-colors duration-150 hover:bg-active-hover">
+      <td className={td}>
+        <Link href={`/clients/${r.id}`} prefetch={false} className="font-medium text-fg hover:underline">
+          {r.display_name}
+        </Link>
+        {r.archived_at && <span className="ml-2 text-xs text-fg-dim">Archived</span>}
+        {sub && <div className="text-xs text-fg-dim">{sub}</div>}
+        {r.tags.length > 0 && <div className="mt-0.5 text-xs text-fg-dim">{r.tags.join(" · ")}</div>}
+      </td>
+      <td className={td}>
+        {/* Health reads the desk's signals, which are the owners' and admins' to read. */}
+        {deskKnown ? (
+          <ClientHealthBadge health={r.health} />
+        ) : (
+          <span className="text-fg-dim" title="Owners and admins only" aria-label="Owners and admins only">
+            —
+          </span>
+        )}
+      </td>
+      <td className={`${td} text-fg-muted`}>{CUSTOMER_LIFECYCLE_LABELS[r.lifecycle]}</td>
+      <td className={`${td} text-fg-muted`}>{ownerName(r.owner_user_id, directory) ?? (r.owner_user_id ? "—" : "No owner")}</td>
+      <td className={`${td} text-right tabular-nums`}>
+        <Count value={r.open_ticket_count} hidden={!deskKnown} />
+      </td>
+      <td className={`${td} text-right tabular-nums`}>
+        <Count value={r.active_project_count} hidden={!deskKnown} />
+      </td>
+      <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`}>
+        <LastTouch at={r.last_touch} />
+      </td>
+    </tr>
   );
 }
 

@@ -20,7 +20,8 @@
  *   Money          lib/os/customers/money.ts: OASIS's books, OASIS's own
  *                  records only, for the founders who may open Money.
  *   Usage          lib/os/customers/usage.ts: the client's own workspace,
- *                  once the operator has linked it.
+ *                  once the operator has linked it. Never a retired
+ *                  business's: a record linked to one is a 404 (clientOrNull).
  *   Activity       lib/os/customers/activity.ts: ledger facts and the source
  *                  deal's interactions (labelled inferred).
  *   Health         lib/os/customers/health.ts, computed on read; its badge is
@@ -47,6 +48,8 @@ import {
   type CustomerListRow,
   type LeadFile,
 } from "@/lib/os/customers/store";
+import { isRetiredClientRef } from "@/lib/os/customers/retired";
+import type { CustomerLifecycle } from "@/lib/os/customers/rules";
 import { lastTouchFor, loadClientActivity, type ActivityEntry } from "@/lib/os/customers/activity";
 import { clientAddresses, loadClientConversation, type ClientAddresses, type ClientConversation } from "@/lib/os/customers/conversations";
 import { loadClientMoney, type ClientMoney } from "@/lib/os/customers/money";
@@ -64,7 +67,12 @@ async function attempt<T>(label: string, fn: () => Promise<T>): Promise<Loaded<T
   try {
     return { state: "ok", value: await fn() };
   } catch (err) {
-    if (isMissingCustomersSchema(err)) return { state: "not_set_up" };
+    if (isMissingCustomersSchema(err)) {
+      // The pages say only "Client records aren't available right now"; the
+      // reason is here, for whoever reads the log.
+      console.error(`[os.clients.${label}] client records are not set up: migration bravo__188 is not applied`, err);
+      return { state: "not_set_up" };
+    }
     console.error(`[os.clients.${label}]`, err);
     return { state: "error" };
   }
@@ -87,8 +95,17 @@ function dbOrThrow(): Client {
  */
 export type MoneyAccess = "read" | "not_tracked" | "not_allowed" | "error";
 
+/**
+ * Are this workspace's payments in the app at all? Only OASIS's own books are,
+ * so for every other workspace a client's money is "not_tracked": the record
+ * has no Money tab (clientTabsFor) and health leaves payments out. PURE.
+ */
+export function booksTracked(viewer: Pick<ClientsViewer, "tenantId">): boolean {
+  return viewer.tenantId === DELIVERY_TENANT_ID;
+}
+
 export async function moneyAccessFor(viewer: ClientsViewer): Promise<MoneyAccess> {
-  if (viewer.tenantId !== DELIVERY_TENANT_ID) return "not_tracked";
+  if (!booksTracked(viewer)) return "not_tracked";
   if (!viewer.desk) return "not_allowed";
   try {
     return (await resolveFinanceViewer()) ? "read" : "not_allowed";
@@ -107,15 +124,28 @@ export type ListedClient = CustomerListRow & {
 /**
  * The workspace's clients, with desk counts only for a viewer who may read the
  * desk, each with its last touch and its health.
+ *
+ * `cut` says the read stopped at its page size (500). A cut list cannot be
+ * filtered by status in the browser, so with `statusWhenCut` the status is
+ * read here instead, and the signals (last touch, desk, money) are read for
+ * the rows that will be shown only, never for 500 rows the page drops.
  */
 export async function loadCustomerRecords(
   viewer: ClientsViewer,
   filters: CustomerFilters,
   now: Date = new Date(),
-): Promise<Loaded<{ rows: ListedClient[]; truncated: boolean; money: MoneyAccess }>> {
+  opts: { statusWhenCut?: CustomerLifecycle | null } = {},
+): Promise<Loaded<{ rows: ListedClient[]; truncated: boolean; cut: boolean; money: MoneyAccess }>> {
   if (!viewer.canRead) return { state: "not_allowed" };
-  const listed = await attempt("customers", () => listCustomers(dbOrThrow(), viewer.tenantId, filters, { withDelivery: viewer.desk !== null }));
+  const read = (f: CustomerFilters) =>
+    attempt("customers", () => listCustomers(dbOrThrow(), viewer.tenantId, f, { withDelivery: viewer.desk !== null }));
+  let listed = await read(filters);
   if (listed.state !== "ok") return listed;
+  const cut = listed.value.truncated;
+  if (cut && opts.statusWhenCut) {
+    listed = await read({ ...filters, lifecycle: opts.statusWhenCut });
+    if (listed.state !== "ok") return listed;
+  }
   const db = dbOrThrow();
   const { rows, truncated } = listed.value;
   const money = await moneyAccessFor(viewer);
@@ -128,6 +158,7 @@ export async function loadCustomerRecords(
     state: "ok",
     value: {
       truncated,
+      cut,
       money,
       rows: rows.map((r) => {
         const lastTouch = touch.state === "ok" ? touch.value.get(r.id) ?? null : undefined;
@@ -214,6 +245,129 @@ export const CLIENT_TABS: ReadonlyArray<{ key: ClientTab; label: string }> = [
   { key: "files", label: "Files" },
 ];
 
+/**
+ * The tabs this viewer's record can ever show something on (CS-03). Money is
+ * OASIS's books: in any other workspace a client's money is not tracked
+ * (booksTracked), so the tab could only say so, and it is left out. Usage is
+ * how OASIS sees a client's own workspace, so it exists only in OASIS's
+ * workspace. Overview is always first: it is where an unknown ?tab= lands. PURE.
+ */
+export function clientTabsFor(viewer: Pick<ClientsViewer, "tenantId" | "oasis">): ReadonlyArray<{ key: ClientTab; label: string }> {
+  return CLIENT_TABS.filter((t) => {
+    if (t.key === "money") return booksTracked(viewer);
+    if (t.key === "usage") return viewer.oasis;
+    return true;
+  });
+}
+
+/**
+ * A search param as ONE value. Next hands the page a repeated param
+ * (?tab=a&tab=b) as an array, while the browser's URLSearchParams.get reads
+ * the first; the server takes the first too, so the page and the tab bar never
+ * disagree, and a repeated text filter is a string, never an array. PURE.
+ */
+export function firstParam(value: string | readonly string[] | null | undefined): string | undefined {
+  const v = Array.isArray(value) ? value[0] : value;
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * The tab a ?tab= value opens: one of `tabs`, else Overview, the first (a
+ * ?tab=money link in a client workspace included). A repeated ?tab= is its
+ * first value. The tab bar applies the same rule in the browser
+ * (components/os/OsTabBar.tsx tabFromParam). PURE.
+ */
+export function resolveClientTab(param: string | readonly string[] | null | undefined, tabs: ReadonlyArray<{ key: ClientTab }>): ClientTab {
+  const value = firstParam(param);
+  return tabs.find((t) => t.key === value)?.key ?? "overview";
+}
+
+/** A read that only the workspace's desk team (owners and admins) may make; anyone else gets not_allowed. */
+function deskOnlyFor(viewer: ClientsViewer) {
+  return <T,>(label: string, fn: (desk: NonNullable<ClientsViewer["desk"]>) => Promise<T>): Promise<Loaded<T>> => {
+    const desk = viewer.desk;
+    return desk ? attempt(label, () => fn(desk)) : Promise.resolve({ state: "not_allowed" });
+  };
+}
+
+/**
+ * One record's health and what it was read from: the last touch, the desk's
+ * signals and, for the founders who may open Money, its payments. The header's
+ * badge (loadClientHeader) and the Health tab (loadClientRecord) both read it
+ * here, so the two can never disagree.
+ */
+async function healthOf(
+  viewer: ClientsViewer,
+  db: Client,
+  customer: Customer,
+  now: Date,
+): Promise<{ health: Health; lastTouch: Loaded<string | null>; moneyAccess: MoneyAccess }> {
+  const deskOnly = deskOnlyFor(viewer);
+  const moneyAccess = await moneyAccessFor(viewer);
+  const [lastTouch, deskSignals, moneySignals] = await Promise.all([
+    deskOnly("last_touch", async () => (await lastTouchFor(db, viewer.tenantId, [customer])).get(customer.id) ?? null),
+    deskOnly("desk_signals", async () => (await deskSignalsFor(db, viewer.tenantId, [customer.id], now)).get(customer.id)!),
+    moneyAccess === "read" ? attempt("money_signals", () => moneySignalsFor(db, [customer], torontoDay(now))) : Promise.resolve(null),
+  ]);
+  return {
+    lastTouch,
+    moneyAccess,
+    health: health({
+      lifecycle: customer.lifecycle,
+      createdAt: customer.created_at,
+      now,
+      lastTouch: lastTouch.state === "ok" ? lastTouch.value : undefined,
+      slaBreaches30d: deskSignals.state === "ok" ? deskSignals.value.slaBreaches30d : null,
+      projectsPastDue: deskSignals.state === "ok" ? deskSignals.value.projectsPastDue : null,
+      money: moneyInput(moneyAccess, moneySignals, customer.id),
+    }),
+  };
+}
+
+/**
+ * The record a page opens, or null when it is not a client of THIS workspace:
+ * another workspace's record (the store matches tenant_id AND id), and one
+ * linked to a retired business's workspace (lib/os/customers/retired.ts), so
+ * no tab ever reads a retired workspace. The header and the open tab each read
+ * it, because a tab switch renders the tab alone.
+ */
+function clientOrNull(customer: Customer | null): Customer | null {
+  return customer && !isRetiredClientRef(customer) ? customer : null;
+}
+
+/** What the record's header shows on every tab: the record, the projects its New ticket form links, its health. */
+export type ClientHeaderData = {
+  customer: Customer;
+  projects: Loaded<{ rows: Project[]; truncated: boolean }>;
+  health: Health;
+};
+
+/**
+ * The record's header (app/clients/[id]/layout.tsx), read once per record
+ * rather than once per tab: a layout is not rendered again when only ?tab=
+ * changes, so a tab switch reads only the tab below it (loadClientRecord).
+ * Null when the id is not a client of THIS workspace (clientOrNull).
+ */
+export async function loadClientHeader(
+  viewer: ClientsViewer,
+  id: string,
+  opts: { now?: Date } = {},
+): Promise<Loaded<ClientHeaderData | null>> {
+  if (!viewer.canRead) return { state: "not_allowed" };
+  const now = opts.now ?? new Date();
+  const head = await attempt("record", async () => clientOrNull(await getCustomer(dbOrThrow(), viewer.tenantId, id)));
+  if (head.state !== "ok") return head;
+  const customer = head.value;
+  if (!customer) return { state: "ok", value: null };
+  const db = dbOrThrow();
+  const [projects, signals] = await Promise.all([
+    // The header's New ticket form links one of this client's projects.
+    deskOnlyFor(viewer)("projects", (desk) => listProjects(db, desk, { customer_id: customer.id, includeArchived: true })),
+    healthOf(viewer, db, customer, now),
+  ]);
+  return { state: "ok", value: { customer, projects, health: signals.health } };
+}
+
 /** Money: Loaded, or "not_tracked" in a workspace whose books are not in the app. */
 export type MoneyState = Loaded<ClientMoney | null> | { state: "not_tracked" };
 
@@ -240,14 +394,18 @@ export type ClientRecordData = {
   linkableWorkspaces: Loaded<Array<{ id: string; name: string; slug: string | null }>> | null;
   activity: Loaded<{ entries: ActivityEntry[]; truncated: boolean }>;
   lastTouch: Loaded<string | null>;
-  health: Health;
-  moneyAccess: MoneyAccess;
+  /** The Health tab's breakdown; null on every other tab (the header's badge is the layout's). */
+  health: Health | null;
+  /** Read for the tabs that use it (Money, Activity, Health); null on the others. */
+  moneyAccess: MoneyAccess | null;
 };
 
 /**
- * One client of THIS workspace, or null when the id is not one (another
- * workspace's client included — the store matches tenant_id AND id). Only the
- * tab being viewed is read beyond the header's counts and health.
+ * One client of THIS workspace, or null when the id is not one (clientOrNull:
+ * another workspace's client, or a record linked to a retired business). Only
+ * what the open tab shows is read: the header (name, badge, the New ticket
+ * form's projects) is app/clients/[id]/layout.tsx's (loadClientHeader), which
+ * a tab switch does not render again.
  */
 export async function loadClientRecord(
   viewer: ClientsViewer,
@@ -257,10 +415,7 @@ export async function loadClientRecord(
 ): Promise<Loaded<ClientRecordData | null>> {
   if (!viewer.canRead) return { state: "not_allowed" };
   const now = opts.now ?? new Date();
-  const head = await attempt("record", async () => {
-    const db = dbOrThrow();
-    return getCustomer(db, viewer.tenantId, id);
-  });
+  const head = await attempt("record", async () => clientOrNull(await getCustomer(dbOrThrow(), viewer.tenantId, id)));
   if (head.state !== "ok") return head;
   const customer = head.value;
   if (!customer) return { state: "ok", value: null };
@@ -269,28 +424,36 @@ export async function loadClientRecord(
   const deskOnly = <T,>(label: string, fn: () => Promise<T>): Promise<Loaded<T>> =>
     desk ? attempt(label, fn) : Promise.resolve({ state: "not_allowed" });
   const skip = <T,>(): Promise<Loaded<T>> => Promise.resolve({ state: "not_allowed" });
-  const oasisBooks = viewer.tenantId === DELIVERY_TENANT_ID;
-  const moneyAccess = await moneyAccessFor(viewer);
+  const on = (...tabs: ClientTab[]) => tabs.includes(tab);
+  const oasisBooks = booksTracked(viewer);
+  // Money and Activity need the finance gate; Health reads it with its signals.
+  const moneyAccess = on("money", "activity") ? await moneyAccessFor(viewer) : null;
+  // Overview shows the last touch; Health shows every signal behind the badge.
+  const readSignals = async (): Promise<{ lastTouch: Loaded<string | null>; health: Health | null; moneyAccess: MoneyAccess | null } | null> => {
+    if (on("health")) return healthOf(viewer, db, customer, now);
+    if (!on("overview")) return null;
+    const lastTouch = await deskOnly("last_touch", async () => (await lastTouchFor(db, viewer.tenantId, [customer])).get(customer.id) ?? null);
+    return { lastTouch, health: null, moneyAccess: null };
+  };
 
-  const wantTickets = tab === "overview" || tab === "tickets" || tab === "files";
-  const [contacts, tickets, projects, leadFiles, activity, lastTouch, deskSignals, moneySignals] = await Promise.all([
-    attempt("contacts", () => listContacts(db, viewer.tenantId, customer.id)),
-    wantTickets
+  const [contacts, tickets, projects, leadFiles, activity, signals] = await Promise.all([
+    on("overview", "conversations")
+      ? attempt("contacts", () => listContacts(db, viewer.tenantId, customer.id))
+      : skip<CustomerContact[]>(),
+    on("overview", "tickets", "files")
       ? deskOnly("tickets", () => listTickets(db, desk!, { customer_id: customer.id, status: "all" }))
       : skip<{ rows: Ticket[]; truncated: boolean }>(),
-    // Every tab: the header's New ticket form links one of this client's
-    // projects whichever tab is open (Codex, PR #473).
-    deskOnly("projects", () => listProjects(db, desk!, { customer_id: customer.id, includeArchived: true })),
-    tab === "files"
+    on("overview", "projects")
+      ? deskOnly("projects", () => listProjects(db, desk!, { customer_id: customer.id, includeArchived: true }))
+      : skip<{ rows: Project[]; truncated: boolean }>(),
+    on("files")
       ? deskOnly("files", async () => (customer.source_lead_id ? listLeadFiles(db, viewer.tenantId, customer.source_lead_id) : null))
       : skip<LeadFile[] | null>(),
-    tab === "activity"
+    on("activity")
       ? // Payments appear only for the founders who may open Money, the same gate as the Money tab.
         deskOnly("activity", () => loadClientActivity(db, viewer.tenantId, customer, { books: oasisBooks && moneyAccess === "read" }))
       : skip<{ entries: ActivityEntry[]; truncated: boolean }>(),
-    deskOnly("last_touch", async () => (await lastTouchFor(db, viewer.tenantId, [customer])).get(customer.id) ?? null),
-    deskOnly("desk_signals", async () => (await deskSignalsFor(db, viewer.tenantId, [customer.id], now)).get(customer.id)!),
-    moneyAccess === "read" ? attempt("money_signals", () => moneySignalsFor(db, [customer], torontoDay(now))) : Promise.resolve(null),
+    readSignals(),
   ]);
 
   const conversation: ClientRecordData["conversation"] =
@@ -347,16 +510,6 @@ export async function loadClientRecord(
     }
   }
 
-  const clientHealth = health({
-    lifecycle: customer.lifecycle,
-    createdAt: customer.created_at,
-    now,
-    lastTouch: lastTouch.state === "ok" ? lastTouch.value : undefined,
-    slaBreaches30d: deskSignals.state === "ok" ? deskSignals.value.slaBreaches30d : null,
-    projectsPastDue: deskSignals.state === "ok" ? deskSignals.value.projectsPastDue : null,
-    money: moneyInput(moneyAccess, moneySignals, customer.id),
-  });
-
   return {
     state: "ok",
     value: {
@@ -370,9 +523,9 @@ export async function loadClientRecord(
       usage,
       linkableWorkspaces,
       activity,
-      lastTouch,
-      health: clientHealth,
-      moneyAccess,
+      lastTouch: signals ? signals.lastTouch : { state: "not_allowed" },
+      health: signals ? signals.health : null,
+      moneyAccess: signals?.moneyAccess ?? moneyAccess,
     },
   };
 }
