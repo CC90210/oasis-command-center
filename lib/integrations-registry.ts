@@ -137,7 +137,10 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
     service: "gws",
     label: "Google Workspace",
     category: "comms",
-    description: "Gmail + Calendar + Drive + Docs + Meet (single App Password — google_tool.py)",
+    // What OASIS checks and uses (2026-10-08): the shared mailbox's Gmail
+    // sign-in. Nothing in OASIS uses Drive or Docs through it, and an App
+    // Password cannot reach those APIs, so the card claims neither (PR #558).
+    description: "Shared Gmail mailbox (App Password)",
     connection_kind: "api_key",
     signup_url: "https://workspace.google.com/signup",
     api_key_url: "https://myaccount.google.com/apppasswords",

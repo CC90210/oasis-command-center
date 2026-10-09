@@ -1,10 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
-import { getUserIntegrationBundle } from "@/lib/user-integration-store";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
-import { PERSONAL_GOOGLE_SERVICE, readPersonalGoogleFact } from "@/lib/integrations/personal-google";
+import { readPersonalGoogleForLiveCheck } from "@/lib/integrations/personal-google";
 import { personalGoogleState } from "@/lib/os/connectors";
 import {
   canManageTeam,
@@ -134,7 +133,7 @@ async function calendarReadiness(tenantId: string, userId: string | null) {
     // Connections card and Today say the same state for the same row. This
     // form used to read the row with its own rule. It adds one thing only: a
     // connection those screens call ready is spent against Google below.
-    const fact = await readPersonalGoogleFact(tenantId, userId);
+    const { fact, refreshToken } = await readPersonalGoogleForLiveCheck(tenantId, userId);
     const state = personalGoogleState(fact);
     // ═══ PRESENCE IS NOT VALIDITY ═══════════════════════════════════════════
     //
@@ -157,14 +156,10 @@ async function calendarReadiness(tenantId: string, userId: string | null) {
     //
     // Only spend a network call when the shared state is already "ready" -- a
     // host with no token, the wrong scope or the wrong account is not
-    // connected regardless of Google. The token is read only for that call; a
-    // token that could not be re-read is no verdict (the reader just saw it),
-    // so it keeps the shared state, as an unknown answer from Google does.
-    let workspaceConnected = false;
-    if (state === "ready") {
-      const token = (await getUserIntegrationBundle(tenantId, userId, PERSONAL_GOOGLE_SERVICE)).refresh_token;
-      workspaceConnected = token ? await tokenUsable(String(token)) : true;
-    }
+    // connected regardless of Google. The token comes from the same read as
+    // the state: a second read of the row, which could fail on its own and
+    // then count the host as ready, is gone (PR #558 review).
+    const workspaceConnected = state === "ready" && refreshToken ? await tokenUsable(refreshToken) : false;
     // ═══ THESE TWO FLAGS WERE ALWAYS FALSE ═════════════════════════════════
     //
     // They read `workspaceConnected && !calendarConnected` and

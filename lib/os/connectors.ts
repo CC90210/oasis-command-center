@@ -797,6 +797,12 @@ export type ServerCheckFact = {
   ok: boolean;
   /** The failed check's code, looked up in the card's failureStates. */
   code: string | null;
+  /**
+   * A Test of values OASIS's server no longer holds (a secret changed after
+   * it ran: server-checks.ts serverValuesFingerprint). It describes nothing in
+   * use, pass or failure: the card ignores it and says the details changed.
+   */
+  outdated?: boolean;
 };
 
 /** The viewer's own Telegram bot (user_integration_credentials telegram_bot): presence only. */
@@ -918,13 +924,13 @@ export function testFailureWords(service: string, code: string | null | undefine
   return null;
 }
 
-/** The newest real check of one app's server-set values, or null. */
+/** The newest real check of one app's server-set values that still describes them, or null. */
 function newestServerCheck(checks: readonly ServerCheckFact[], service: string): ServerCheckFact | null {
   let best: ServerCheckFact | null = null;
   let bestMs = -Infinity;
   for (const c of checks) {
     const ms = Date.parse(c.checked_at);
-    if (c.service !== service || !Number.isFinite(ms) || ms <= bestMs) continue;
+    if (c.service !== service || c.outdated || !Number.isFinite(ms) || ms <= bestMs) continue;
     best = c;
     bestMs = ms;
   }
@@ -1063,8 +1069,19 @@ function keyedStatus(
     };
   }
   // Every value is OASIS's own, set on its server (an OASIS workspace with
-  // nothing saved here), and no check of them is recorded yet.
+  // nothing saved here), and no check of them is recorded yet, or the last
+  // Test checked values the server has since changed (a rotated secret): that
+  // result, a pass or a failure, says nothing about the values in use.
   if (rows.filter((r) => r.has_value).every((r) => r.source === "environment")) {
+    const outdated = onServer ? (serverChecks ?? []).find((c) => c.service === source.service && c.via === "test" && c.outdated) : undefined;
+    if (outdated) {
+      const day = formatCheckDate(outdated.checked_at);
+      return {
+        kind: "configured",
+        label: "Set up on OASIS's server · changed since the last Test",
+        detail: `The ${appName} details set on OASIS's own server changed after the last Test (${day}), so its result no longer applies. Run Test to check the details in use.`,
+      };
+    }
     return {
       kind: "configured",
       label: "Set up on OASIS's server · not tested yet",

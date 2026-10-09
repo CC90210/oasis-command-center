@@ -29,7 +29,12 @@
  *     never replaces a REAL result on the same row: OASIS's own email sender
  *     writes its Gmail sign-in outcome to the "gws" row, and this minute-by-
  *     minute scan used to reset it to healthy and clear its error (PR #553
- *     review W5). The scan still creates a row, and refreshes its own.
+ *     review W5). The scan still creates a row, and refreshes its own. Any
+ *     key-name report takes that guarded write, whatever status it carries.
+ *   - Marks every row it writes as a computer's report (metadata._reported_by,
+ *     lib/integrations/presence-heartbeat.ts BRIDGE_REPORT_KEY), so no paired
+ *     computer can post a result that reads as OASIS's own email sender's
+ *     (PR #558 review).
  *
  * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded }
  */
@@ -40,7 +45,12 @@ import { getTursoClient } from "@/lib/turso";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { CLI_INVENTORY_SERVICE } from "@/lib/bridge-cli-status";
-import { PRESENCE_ONLY_VIA, isPresenceOnlyHeartbeat } from "@/lib/integrations/presence-heartbeat";
+import {
+  BRIDGE_REPORT_KEY,
+  BRIDGE_REPORT_VALUE,
+  PRESENCE_ONLY_VIA,
+  isPresenceOnlyHeartbeat,
+} from "@/lib/integrations/presence-heartbeat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -148,6 +158,7 @@ export async function POST(req: NextRequest) {
     if (!service) continue;
     const status = (report.status || "unconfigured") as
       | "healthy" | "degraded" | "down" | "unconfigured";
+    const reported = report.metadata && typeof report.metadata === "object" && !Array.isArray(report.metadata) ? report.metadata : {};
     const payload: Record<string, unknown> = {
       tenant_id: tenantId,
       profile_id: profileId,
@@ -155,9 +166,14 @@ export async function POST(req: NextRequest) {
       status,
       last_ping_at: new Date().toISOString(),
       last_error: report.last_error || null,
-      metadata: report.metadata || {},
+      // Every row a computer reports is marked as its report (set last, so a
+      // computer cannot send it away): it is never read as the check of a value
+      // OASIS keeps on its server (lib/integrations/presence-heartbeat.ts).
+      metadata: { ...reported, [BRIDGE_REPORT_KEY]: BRIDGE_REPORT_VALUE },
     };
-    if (status === "healthy" && isPresenceOnlyHeartbeat(payload.metadata)) {
+    // Any key-name report, whatever status it carries, takes the guarded write:
+    // an older bridge's "unconfigured" scan must not erase a real result either.
+    if (isPresenceOnlyHeartbeat(payload.metadata)) {
       const written = await recordPresence(payload);
       if (written === null) {
         if (service === CLI_INVENTORY_SERVICE) cliInventoryPersistFailed = true;

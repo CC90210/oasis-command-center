@@ -59,6 +59,7 @@ import {
   loadSales,
   loadTelegramCard,
   loadWorkspaceAlerts,
+  loadWorkspaceConnectionFacts,
   TODAY_READ_DEADLINE_MS,
   type OperatorDay,
 } from "@/components/os/today/loaders";
@@ -188,7 +189,10 @@ export async function loadNeedsYouReads(input: {
     TODAY_READ_DEADLINE_MS,
     "approvals",
   );
-  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId, day.nowMs) : Promise.resolve(null);
+  // The connection cards' facts, read once when both Needs you's connection
+  // rows and the alerts' Telegram note are drawn (an owner's Today).
+  const connectionFacts = plan.connections && plan.alerts ? loadWorkspaceConnectionFacts(tenantId) : undefined;
+  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId, day.nowMs, connectionFacts) : Promise.resolve(null);
   // The Empire scheduler's OASIS rows are OASIS's own routines; only the
   // platform operator standing in OASIS counts them (empireRoutinesFor).
   const routinesP = plan.routines
@@ -197,7 +201,7 @@ export async function loadNeedsYouReads(input: {
   // This workspace's own open alert cards, for its owners/admins, and its
   // Telegram card, which says whether the bot works now (model.ts alertTelegramNote).
   const alertsP = plan.alerts ? loadWorkspaceAlerts(tenantId) : Promise.resolve(null);
-  const telegramCardP = plan.alerts ? loadTelegramCard(tenantId, day.nowMs) : Promise.resolve(null);
+  const telegramCardP = plan.alerts ? loadTelegramCard(tenantId, day.nowMs, connectionFacts) : Promise.resolve(null);
 
   const [sales, delivery, inbound, cash, approvals, connections, routines, alerts, telegramCard] = await Promise.all([
     salesP,

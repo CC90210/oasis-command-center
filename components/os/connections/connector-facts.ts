@@ -1,7 +1,7 @@
 /**
  * The facts the Connections hub computes statuses from, read once per render.
  *
- * Three reads, each failing on its own: a failed read becomes `null`, which
+ * Four reads, each failing on its own: a failed read becomes `null`, which
  * lib/os/connectors.ts turns into "Status unavailable" for exactly the cards
  * that depend on it. None of them is ever turned into "not connected", and no
  * credential VALUE leaves this file — listTenantIntegrationStatus returns

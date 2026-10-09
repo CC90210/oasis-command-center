@@ -521,6 +521,25 @@ assert.equal(
   assert.equal(label(gws, withChecks(envGws, [check("gws", { via: "send", checked_at: iso(9 * DAY) })])), `configured | Set up · last send worked ${day(9 * DAY)}`);
   assert.equal(connectionsDot(connectionsHealth({ ...EMPTY, keyRows: tgKeys({ last_test_ok: true, last_tested_at: iso(8 * DAY) }) }, NOW)), null);
 
+  // A Test of values the server has since changed (PR #558 review) describes
+  // nothing in use: a pass is not Connected, a refusal is not red, and the card
+  // says the details changed. A newer real check of the values in use still counts.
+  const changed = `configured | Set up on OASIS's server · changed since the last Test`;
+  const outdatedPass = resolveConnectorStatus(telegram, withChecks(envTg, [check("telegram", { outdated: true })]), NOW);
+  assert.equal(`${outdatedPass.kind} | ${outdatedPass.label}`, changed);
+  assert.equal(
+    outdatedPass.detail,
+    `The Telegram details set on OASIS's own server changed after the last Test (${day(5 * MIN)}), so its result no longer applies. Run Test to check the details in use.`,
+  );
+  assert.equal(label(telegram, withChecks(envTg, [check("telegram", { ok: false, code: "telegram_http_401", outdated: true })])), changed);
+  assert.equal(label(twilio, withChecks(twilioKeys({ source: "environment" }), [check("twilio", { ok: false, code: "needs_number", outdated: true })])), changed);
+  assert.equal(
+    label(gws, withChecks(envGws, [check("gws", { ok: false, code: "smtp_auth_failed", checked_at: iso(MIN), outdated: true }), sent])),
+    "connected | Connected · last send worked 3m ago",
+    "the sender's send describes the mailbox in use; the outdated Test is ignored",
+  );
+  assert.equal(connectionsDot(connectionsHealth(withChecks([...envTg, ...envGws], [check("telegram", { outdated: true }), sent]), NOW)), null, "an outdated pass proves nothing");
+
   // The form's words for a failed Test are the card's words for the same code.
   assert.equal(testFailureWords("telegram", "telegram_http_401")?.label, "Bot token not accepted");
   assert.equal(testFailureWords("telegram", "network_error: getaddrinfo ENOTFOUND")?.label, TELEGRAM_TEST_STATES.network_error.label);
