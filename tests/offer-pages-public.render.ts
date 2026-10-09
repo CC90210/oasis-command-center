@@ -3,8 +3,8 @@
  *
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * where react-dom/server does not resolve, so the public page's client parts
- * (FormPublicClient, the video facade, the results viewer) cannot be drawn
- * there. The test spawns this with plain `node --import tsx` (the condition
+ * (FormPublicClient, the video facade, the results viewer) and the Offers list
+ * (FormsListClient) cannot be drawn there. The test spawns this with plain `node --import tsx` (the condition
  * removed from NODE_OPTIONS for the child, the way tests/workspace-alerts.test.ts
  * does), feeds it scenarios on stdin and reads the markup back as JSON.
  *
@@ -70,24 +70,34 @@ async function main() {
     return;
   }
 
-  // Scenarios from the test, on stdin: { name: { kind: "form" | "offer", props } }.
-  // The props are exactly what the real page handed each component.
+  // Scenarios from the test, on stdin: { name: { kind: "form" | "offer" | "list", props } }.
+  // The props are exactly what the real page handed each component ("list" is
+  // the Offers list, FormsListClient). Like Next's server render, there is no
+  // window here; a render that throws is reported per scenario, so the test
+  // names the one that broke.
   const { OfferPage } = await import("../components/offer-pages/OfferPage");
+  const { FormsListClient } = await import("../components/forms/FormsListClient");
   const input = await new Promise<string>((resolve) => {
     let buf = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (c) => (buf += c));
     process.stdin.on("end", () => resolve(buf));
   });
-  const scenarios = (input.trim() ? JSON.parse(input) : {}) as Record<string, { kind: "form" | "offer"; props: Record<string, unknown> }>;
+  const scenarios = (input.trim() ? JSON.parse(input) : {}) as Record<string, { kind: "form" | "offer" | "list"; props: Record<string, unknown> }>;
   const out: Record<string, unknown> = {
     fixtureForm: renderToStaticMarkup(React.createElement(FormPublicClient, formOnlyProps)),
   };
   for (const [name, s] of Object.entries(scenarios)) {
-    out[name] =
-      s.kind === "form"
-        ? renderToStaticMarkup(React.createElement(FormPublicClient, s.props as Parameters<typeof FormPublicClient>[0]))
-        : renderToStaticMarkup(React.createElement(OfferPage, s.props as Parameters<typeof OfferPage>[0]));
+    try {
+      out[name] =
+        s.kind === "form"
+          ? renderToStaticMarkup(React.createElement(FormPublicClient, s.props as Parameters<typeof FormPublicClient>[0]))
+          : s.kind === "list"
+            ? renderToStaticMarkup(React.createElement(FormsListClient, s.props as Parameters<typeof FormsListClient>[0]))
+            : renderToStaticMarkup(React.createElement(OfferPage, s.props as Parameters<typeof OfferPage>[0]));
+    } catch (e) {
+      out[name] = `RENDER FAILED: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
   process.stdout.write(JSON.stringify(out));
 }

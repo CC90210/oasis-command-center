@@ -6,8 +6,10 @@
  *
  *   sticky header   mark, pinned sections, Book
  *   hero            eyebrow, headline, subheadline, the VSL (a facade), Book
- *   body sections   only those holding real content, in the owner's order
- *   #book           the form, always last
+ *   body sections   only those holding real content, in the owner's order;
+ *                   results, bonuses and the guarantee end with the Book button
+ *   #book           the form, always last, on ONE card (the form draws no card
+ *                   of its own inside it: FormPublicClient chrome="embedded")
  *   footer          the workspace's name (and OASIS's legal links on OASIS's own)
  *   phones          a Book bar pinned to the bottom after the hero
  *
@@ -22,6 +24,7 @@ import { offerFontVariables } from "@/app/fonts/offer-fonts";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { CTA_PRIMARY, CTA_INLINE } from "@/components/marketing/Cta";
 import type { PreparedOffer } from "@/lib/offer-pages/render";
+import type { BodyKey } from "@/lib/offer-pages/types";
 import { OfferNav } from "./OfferNav";
 import { OfferSection, OfferHead, OfferFacade } from "./sections";
 import { OfferBook, type EmbeddedFormProps } from "./OfferBook";
@@ -29,6 +32,9 @@ import { StickyBookBar } from "./StickyBookBar";
 
 /** Same switch as app/(marketing)/layout.tsx: reveals animate only once JS can undo them. */
 const JS_FLAG = `document.documentElement.classList.add('js')`;
+
+/** The sections a visitor decides on (proof, value, risk): each ends with the booking button. */
+const ASK_AGAIN_AFTER: ReadonlySet<BodyKey> = new Set<BodyKey>(["results", "bonuses", "guarantee"]);
 
 export function OfferPage({
   prepared,
@@ -133,7 +139,7 @@ export function OfferPage({
           </section>
 
           {page.sections.map((s) => (
-            <OfferSection key={s.key} s={s} prepared={prepared} />
+            <OfferSection key={s.key} s={s} prepared={prepared} cta={ASK_AGAIN_AFTER.has(s.key) ? ctaLabel : null} />
           ))}
 
           {/* -- Book: always last ---------------------------------------- */}

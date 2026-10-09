@@ -12,6 +12,10 @@
  *     re-checks that the video is in the PUBLISHED page of a live offer on an
  *     enabled form) and plays it in a native <video>. If the URL expires
  *     mid-watch, it asks again and resumes where the visitor was.
+ *   - in the owner's signed-in preview of the DRAFT (source.preview), the same
+ *     video and its captions come from the builder's own route,
+ *     /api/forms/<id>/offer/preview-video, which reads the draft and answers
+ *     only an owner or admin of the form's workspace.
  * No player library: a facade, a fetch and the browser's own player.
  */
 import { useEffect, useRef, useState } from "react";
@@ -20,7 +24,21 @@ import { ACCENT_FILL } from "./styles";
 
 export type FacadeSource =
   | { kind: "link"; embedSrc: string }
-  | { kind: "library"; formId: string; videoRef: string; captions: boolean };
+  | { kind: "library"; formId: string; videoRef: string; captions: boolean; preview?: true };
+
+/** Where a Library video is signed, and its captions read: the draft for the owner's preview, else the live page. */
+export function libraryEndpoints(s: Extract<FacadeSource, { kind: "library" }>): { sign: string; body: string; captions: string } {
+  const ref = encodeURIComponent(s.videoRef);
+  if (s.preview) {
+    const base = `/api/forms/${encodeURIComponent(s.formId)}/offer/preview-video`;
+    return { sign: base, body: JSON.stringify({ ref: s.videoRef }), captions: `${base}?ref=${ref}` };
+  }
+  return {
+    sign: "/api/offer-page/video",
+    body: JSON.stringify({ form_id: s.formId, ref: s.videoRef }),
+    captions: `/api/offer-page/captions?form_id=${encodeURIComponent(s.formId)}&ref=${ref}`,
+  };
+}
 
 const ALLOW = "autoplay; fullscreen; picture-in-picture; encrypted-media";
 
@@ -76,11 +94,12 @@ export function VideoFacade({
 
   async function signedUrl(): Promise<string | null> {
     if (source.kind !== "library") return null;
+    const at = libraryEndpoints(source);
     try {
-      const res = await fetch("/api/offer-page/video", {
+      const res = await fetch(at.sign, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ form_id: source.formId, ref: source.videoRef }),
+        body: at.body,
       });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; url?: string } | null;
       return res.ok && data?.ok && typeof data.url === "string" ? data.url : null;
@@ -165,7 +184,7 @@ export function VideoFacade({
           {source.captions ? (
             <track
               kind="captions"
-              src={`/api/offer-page/captions?form_id=${encodeURIComponent(source.formId)}&ref=${encodeURIComponent(source.videoRef)}`}
+              src={libraryEndpoints(source).captions}
               srcLang="en"
               label="English"
               default

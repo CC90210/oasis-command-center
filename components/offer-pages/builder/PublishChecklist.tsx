@@ -4,8 +4,9 @@
  * PublishChecklist - what stands between the draft and the public page, in
  * plain sentences (design 3.5), with Publish and Unpublish.
  *
- * Each flagged sentence (money, a number, a percentage, a multiplier, or
- * clients / results / guarantee / proven / revenue / booked) gets its own tick:
+ * Each flagged sentence (money, a number, a percentage, a multiplier, or a
+ * claim word such as results, guaranteed, refund or ROI; the full list is in
+ * lib/offer-pages/claims.ts) gets its own tick:
  * "true, and we can back it". Editing a sentence clears its tick. Publish is
  * refused by the server until nothing is left on the list; Unpublish always
  * works.

@@ -5,20 +5,23 @@
  *
  * WHAT IS PINNED: the route signs a ref only when it is in the PUBLISHED copy
  * of a LIVE offer page on an ENABLED form, and the asset is that form's own
- * workspace's, OASIS's own brand, not archived or rejected, with that media row
- * its video. Every other case is the same 404:
- *   - a ref only in the draft,
+ * workspace's, OASIS's own brand, a released cut (approved, scheduled or
+ * published), with that media row its video. Every other case is the same 404:
+ *   - a ref only in the draft (captions too, though that ref has captions),
  *   - another workspace's asset,
  *   - a client brand's asset in OASIS's own workspace (MKT-01),
- *   - an archived asset,
+ *   - an archived asset, a draft-status asset, one pulled back to review,
  *   - a page that is not live, a form that is switched off,
  *   - a media row of another asset or of the wrong kind,
  *   - a malformed ref or form id.
  * The signed URL is the video file's own, for two hours (plus the presign
  * window); the bucket is never signed wholesale. The route refuses a cross-site
  * caller (403), a missing Origin (403) and an oversized body (400).
+ * The owner's Preview (POST/GET /api/forms/[id]/offer/preview-video) plays a
+ * DRAFT ref and its captions, by the same asset rules, for half an hour.
  * The builder: a new Library ref to a client brand's asset is refused (400),
- * and the picker lists only OASIS's own approved or published videos.
+ * a new Library image that the page could not show is refused (400), and the
+ * picker lists only OASIS's own approved or published videos.
  * A link video's thumbnail (design 4.2) is copied only from the provider's own
  * image host over https, and a redirect is never followed (CodeRabbit on #557):
  * the copy lands in the PUBLIC prefix.
@@ -74,9 +77,21 @@ async function main() {
           { title: "draft status", video: lib("a-draft-status", "m-ds-v") },
         ],
       },
+      {
+        key: "results",
+        items: [
+          { kind: "video", label: "scheduled", video: lib("a-scheduled", "m-sch-v"), evidence: { permission: true, confirmed: OK } },
+          { kind: "video", label: "pulled back to review", video: lib("a-pulled", "m-pulled-v"), evidence: { permission: true, confirmed: OK } },
+        ],
+      },
     ],
   });
-  const draft = { ...published, sections: [...(published.sections as unknown[]), { key: "what_you_get", items: [{ title: "draft only", video: lib("a-good", "m-good-v") }] }] };
+  // The draft-only ref carries captions, so a captions route that read the
+  // draft would answer it (503 here, past every check) instead of 404.
+  const draft = {
+    ...published,
+    sections: [...(published.sections as unknown[]), { key: "what_you_get", items: [{ title: "draft only", video: lib("a-good", "m-good-v", { caption_media_id: "m-good-c" }) }] }],
+  };
   await db.batch(
     [
       asset("a-good", OASIS, "oasis-ai", "approved"),
@@ -91,6 +106,11 @@ async function main() {
       media("m-other-v", CLIENT_A, "a-other", "video"),
       asset("a-draft-status", OASIS, "oasis-ai", "draft"),
       media("m-ds-v", OASIS, "a-draft-status", "video"),
+      asset("a-scheduled", OASIS, "oasis-ai", "scheduled"),
+      media("m-sch-v", OASIS, "a-scheduled", "video"),
+      // Approved when it was attached, then pulled back to review (an unreleased cut).
+      asset("a-pulled", OASIS, "oasis-ai", "in_review"),
+      media("m-pulled-v", OASIS, "a-pulled", "video"),
       formRow(FORM, OASIS, "vsl", "VSL offer", CONTACT_STEPS),
       formRow(FORM_OFF, OASIS, "vsl-off", "VSL offer off", CONTACT_STEPS, {}, 0),
       formRow(FORM_DRAFT, OASIS, "vsl-draft", "VSL offer draft", CONTACT_STEPS),
@@ -135,6 +155,8 @@ async function main() {
       ["an archived asset", { form_id: FORM, ref: "work:1" }],
       ["another workspace's asset", { form_id: FORM, ref: "work:2" }],
       ["a media row of the wrong kind", { form_id: FORM, ref: "work:3" }],
+      ["a draft-status asset", { form_id: FORM, ref: "work:4" }],
+      ["an asset pulled back to review after it went live", { form_id: FORM, ref: "results:1" }],
       ["no such ref", { form_id: FORM, ref: "work:9" }],
       ["a page that is not live", { form_id: FORM_DRAFT, ref: "hero" }],
       ["a form that is switched off", { form_id: FORM_OFF, ref: "hero" }],
@@ -150,9 +172,9 @@ async function main() {
     assert.deepEqual(signCalls, [], "a refused ref was signed");
   });
 
-  await step("a draft-status asset is signed (the rule is not archived or rejected); the picker never offers it", async () => {
-    const r = await json(post({ form_id: FORM, ref: "work:4" }));
-    assert.equal(r.status, 200, "only archived and rejected are refused at play time");
+  await step("a scheduled asset still plays: approved, scheduled, published is the forward path", async () => {
+    const r = await json(post({ form_id: FORM, ref: "results:0" }));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
   });
 
   await step("cross-site and malformed callers are refused before anything is read", async () => {
@@ -178,7 +200,16 @@ async function main() {
     // object store (not configured in a test) stands between it and the file.
     assert.equal((await get(FORM, "hero")).status, 503);
     // A published ref with no caption on record is 404, not 503.
-    assert.equal((await get(FORM, "work:4")).status, 404);
+    assert.equal((await get(FORM, "results:0")).status, 404);
+  });
+
+  await step("captions: a file bigger than a caption file, by its size on record, is 404 before anything is downloaded", async () => {
+    const { captionsResponse, MAX_VTT_BYTES } = await import("../lib/offer-pages/captions");
+    const row = { id: "m-big", asset_id: "a-good", kind: "caption", storage_bucket: "marketing-media", storage_path: `${OASIS}/a-good/m-big.vtt`, mime: null, width: null, height: null };
+    const ctx = { where: "test", formId: FORM, ref: "hero", cacheControl: "no-store" };
+    assert.equal((await captionsResponse({ ...row, bytes: MAX_VTT_BYTES + 1 }, ctx)).status, 404, "an oversized caption was downloaded");
+    // Within the cap it goes on to the object store (not configured here: 503).
+    assert.equal((await captionsResponse({ ...row, bytes: 2048 }, ctx)).status, 503);
   });
 
   // -- the builder --------------------------------------------------------
@@ -187,6 +218,49 @@ async function main() {
   const libraryRoute = await import("../app/api/forms/[id]/offer/library-videos/route");
   const req = (method: string, url: string, body?: unknown) =>
     new NextRequest(`http://localhost${url}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+
+  await step("the owner's Preview plays the DRAFT's Library video and its captions, by the page's own asset rules", async () => {
+    const preview = await import("../app/api/forms/[id]/offer/preview-video/route");
+    const params = { params: Promise.resolve({ id: FORM }) };
+    const sign = (ref: unknown) => preview.POST(req("POST", `/api/forms/${FORM}/offer/preview-video`, { ref }), params);
+    const caps = (ref: string) => preview.GET(req("GET", `/api/forms/${FORM}/offer/preview-video?ref=${encodeURIComponent(ref)}`), params);
+    await login(USERS.cc);
+    signCalls.length = 0;
+    const r = await json(sign("what_you_get:0"));
+    assert.equal(r.status, 200, `a draft-only ref does not play in the owner's preview: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.url, `https://r2.test/marketing-media/${OASIS}/a-good/m-good-v.mp4?ttl=1800&sig=fake`);
+    assert.deepEqual(signCalls, [{ bucket: "marketing-media", path: `${OASIS}/a-good/m-good-v.mp4`, ttl: 1800 }], "exactly one object, for half an hour");
+    // Its captions come from the draft too: past every check, only the object store (not configured here) remains.
+    assert.equal((await caps("what_you_get:0")).status, 503);
+    signCalls.length = 0;
+    for (const [what, ref] of [
+      ["a client brand's asset", "work:0"],
+      ["an archived asset", "work:1"],
+      ["another workspace's asset", "work:2"],
+      ["a media row of the wrong kind", "work:3"],
+      ["a draft-status asset", "work:4"],
+      ["an asset pulled back to review", "results:1"],
+      ["no such ref", "work:9"],
+      ["a malformed ref", "hero;x"],
+    ] as const) {
+      assert.equal((await sign(ref)).status, 404, what);
+    }
+    assert.equal((await caps("results:0")).status, 404, "a ref with no captions on record");
+    assert.deepEqual(signCalls, [], "a refused ref was signed");
+    // The facade asks the preview route only in the owner's preview, and the public routes otherwise.
+    const { libraryEndpoints } = await import("../components/offer-pages/VideoFacade");
+    const base = { kind: "library" as const, formId: FORM, videoRef: "what_you_get:0", captions: true };
+    assert.deepEqual(libraryEndpoints({ ...base, preview: true }), {
+      sign: `/api/forms/${FORM}/offer/preview-video`,
+      body: JSON.stringify({ ref: "what_you_get:0" }),
+      captions: `/api/forms/${FORM}/offer/preview-video?ref=what_you_get%3A0`,
+    });
+    assert.deepEqual(libraryEndpoints(base), {
+      sign: "/api/offer-page/video",
+      body: JSON.stringify({ form_id: FORM, ref: "what_you_get:0" }),
+      captions: `/api/offer-page/captions?form_id=${FORM}&ref=what_you_get%3A0`,
+    });
+  });
 
   await step("the builder refuses a NEW Library ref to a client brand's or another workspace's asset (400), accepts its own", async () => {
     await login(USERS.cc);
@@ -216,6 +290,47 @@ async function main() {
     }
     const ok = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: withHero(lib("a-good", "m-good-v")), version }), params);
     assert.equal(ok.status, 200);
+  });
+
+  await step("the builder refuses a NEW Library image the page could not show (400, naming where), and takes a released one", async () => {
+    await login(USERS.cc);
+    const params = { params: Promise.resolve({ id: FORM }) };
+    await db.batch(
+      [
+        asset("a-img-draft", OASIS, "oasis-ai", "draft", "image"),
+        media("m-img-draft", OASIS, "a-img-draft", "image"),
+        asset("a-img-ok", OASIS, "oasis-ai", "approved", "image"),
+        media("m-img-ok", OASIS, "a-img-ok", "image"),
+      ],
+      "write",
+    );
+    const cur = await db.execute({ sql: "SELECT draft, draft_version FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
+    const base = JSON.parse(String(cur.rows[0].draft)) as { sections: Array<{ key: string; items: unknown[] }> };
+    const version = Number(cur.rows[0].draft_version);
+    const at = base.sections.findIndex((s) => s.key === "results");
+    assert.ok(at >= 0, "precondition: the draft has a results section");
+    const shotAt = base.sections[at].items.length;
+    const withShot = (assetId: string, mediaId: string) => ({
+      ...base,
+      sections: base.sections.map((s, i) =>
+        i === at
+          ? {
+              ...s,
+              items: [
+                ...s.items,
+                { kind: "screenshot", image: { asset_id: assetId, media_id: mediaId }, alt: "The inbox, before and after", evidence: { permission: true, confirmed: OK } },
+              ],
+            }
+          : s,
+      ),
+    });
+    const bad = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: withShot("a-img-draft", "m-img-draft"), version }), params);
+    assert.equal(bad.status, 400, "a draft-status image was attached");
+    const body = (await bad.json()) as { path: string; reason: string };
+    assert.equal(body.path, `$.sections[${at}].items[${shotAt}].image`);
+    assert.equal(body.reason, "not a Library image this workspace may show");
+    const good = await offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: withShot("a-img-ok", "m-img-ok"), version }), params);
+    assert.equal(good.status, 200, JSON.stringify(await good.json()));
   });
 
   await step("the picker lists only OASIS's own approved or published videos with a video file", async () => {

@@ -7,8 +7,9 @@
  *   - the form exists and is switched on,
  *   - its offer page is live,
  *   - `ref` is in the PUBLISHED copy (a ref only in the draft is refused),
- *   - the asset is in the form's own workspace, OASIS's own brand, not archived
- *     or rejected, and the media row is that asset's video.
+ *   - the asset is in the form's own workspace, OASIS's own brand, a released
+ *     cut (approved, scheduled or published: one pulled back to review stops
+ *     playing at once), and the media row is that asset's video.
  * Every other answer is the same 404. The bucket stays private: only the one
  * attached object is ever signed (lib/offer-pages/video.ts).
  *

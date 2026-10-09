@@ -72,6 +72,7 @@ async function main() {
   const unpublish = await import("../app/api/forms/[id]/offer/unpublish/route");
   const videoLink = await import("../app/api/forms/[id]/offer/video-link/route");
   const library = await import("../app/api/forms/[id]/offer/library-videos/route");
+  const previewVideo = await import("../app/api/forms/[id]/offer/preview-video/route");
   const req = (method: string, url: string, body?: unknown) =>
     new NextRequest(`http://localhost${url}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const p = (id: string) => ({ params: Promise.resolve({ id }) });
@@ -88,6 +89,8 @@ async function main() {
       ["unpublish", () => unpublish.POST(req("POST", `/api/forms/${id}/offer/unpublish`), p(id))],
       ["video-link", () => videoLink.POST(req("POST", `/api/forms/${id}/offer/video-link`, { url: "https://youtu.be/dQw4w9WgXcQ" }), p(id))],
       ["library-videos", () => library.GET(req("GET", `/api/forms/${id}/offer/library-videos`), p(id))],
+      ["preview-video (sign)", () => previewVideo.POST(req("POST", `/api/forms/${id}/offer/preview-video`, { ref: "hero" }), p(id))],
+      ["preview-video (captions)", () => previewVideo.GET(req("GET", `/api/forms/${id}/offer/preview-video?ref=hero`), p(id))],
     ] as const;
 
   console.log("offer-pages-access:");

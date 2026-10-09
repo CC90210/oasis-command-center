@@ -14,11 +14,17 @@
  *     go out as one save, of the last edit);
  *   - save() resolves only once its value (or a newer one) is saved;
  *   - idle() waits for the save in flight (Publish reads the version after it);
- *   - a save that throws does not jam the queue: the next one goes out.
+ *   - a save that throws does not jam the queue: the next one goes out;
+ *   - the builder is wired to it (components/offer-pages/builder/OfferBuilder.tsx,
+ *     read as source: a client component has no DOM to drive here): every
+ *     save goes through the queue, Publish waits for it before it reads the
+ *     version, and the accent's text box shows what is typed.
  *
  * Pure. Run: node --conditions=react-server --import tsx tests/offer-pages-save-queue.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { serialSaver } from "../lib/offer-pages/save-queue";
 
 type Server = {
@@ -159,6 +165,27 @@ async function main() {
     await assert.rejects(q.save("boom"), /connection dropped/);
     await q.save("after");
     assert.equal(calls, 2);
+  });
+
+  await t("the builder is wired to the queue: every save goes through it, Publish waits for it", async () => {
+    const src = readFileSync(join(__dirname, "..", "components", "offer-pages", "builder", "OfferBuilder.tsx"), "utf8");
+    assert.match(src, /const saver = useMemo\(\(\) => serialSaver\(saveOnce\), \[saveOnce\]\);/, "the builder no longer builds its saver on the queue");
+    assert.match(src, /const save = saver\.save;/, "the builder's save bypasses the queue (two saves in flight read as someone else's edit)");
+    assert.equal((src.match(/\bsaveOnce\(/g) || []).length, 0, "saveOnce is called directly, outside the queue");
+    const publish = src.slice(src.indexOf("async function publish()"), src.indexOf("async function unpublish()"));
+    const idleAt = publish.indexOf("await saver.idle();");
+    assert.ok(idleAt > 0, "Publish does not wait for the save in flight");
+    assert.ok(idleAt < publish.indexOf("/offer/publish"), "Publish reads the version before the save in flight lands");
+    // A refused save names the field in words (lib/offer-pages/field-labels.ts), never by its path.
+    assert.match(src, /fieldLabel\(data\.path, next\)/, "a refused save no longer names the field in words");
+    assert.doesNotMatch(src, /\$\{data\.path/, "a refused save prints the raw path");
+  });
+
+  await t("the accent's text box shows what is typed; the page takes only a whole colour", async () => {
+    const src = readFileSync(join(__dirname, "..", "components", "offer-pages", "builder", "OfferBuilder.tsx"), "utf8");
+    const box = src.slice(src.indexOf('placeholder="#00D4FF"') - 200, src.indexOf('placeholder="#00D4FF"') + 600);
+    assert.match(box, /value=\{accentText\}/, "the box is bound to the saved colour, so each typed character is thrown away");
+    assert.match(box, /if \(!v \|\| isHexColor\(v\)\) update\(/, "the page takes a colour that is not whole yet");
   });
 
   console.log(`offer-pages-save-queue: OK - ${groups} groups of checks`);

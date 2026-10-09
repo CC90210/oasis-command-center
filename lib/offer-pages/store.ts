@@ -145,30 +145,46 @@ export async function readOfferRow(db: Client, tenantId: string, formId: string)
   }
 }
 
+/** What /f/ needs to know about a form's offer page. */
+export type PublicOfferState = {
+  /** The form has an offer page row, live or not. */
+  hasRow: boolean;
+  /** Its PUBLISHED copy while it is live, otherwise null (today's form). */
+  live: OfferPageDoc | null;
+};
+
 /**
- * The page /f/ should draw for this form: its PUBLISHED copy while it is live,
- * otherwise null (today's form). Never throws: a broken page layer must cost a
- * visitor the landing page, never the form.
+ * The page /f/ should draw for this form, and whether the form is an offer at
+ * all, in one read. An offer's name is internal (New offer says so), so while
+ * no page is live its plain form is titled with the workspace's name, never
+ * the form's (app/f/[tenant_slug]/[form_slug]/page.tsx). Never throws: a
+ * broken page layer must cost a visitor the landing page, never the form.
  */
-export async function readLiveOfferDoc(db: Client, tenantId: string, formId: string): Promise<OfferPageDoc | null> {
-  try {
-    const rs = await db.execute({
-      sql: "SELECT published FROM form_offer_pages WHERE tenant_id = ? AND form_id = ? AND live = 1 AND published IS NOT NULL LIMIT 1",
-      args: [tenantId, formId],
-    });
-    const r = rowsOf(rs)[0];
-    if (!r) return null;
-    return parseOfferPageDoc(String(r.published));
-  } catch (err) {
-    if (isMissingOfferTable(err)) {
-      noteOfferTableMissing("live");
-      return null;
-    }
+export async function readPublicOfferState(db: Client, tenantId: string, formId: string): Promise<PublicOfferState> {
+  const unreadable = (err: unknown) =>
     console.error("[offer-pages] live page unreadable, rendering the form", {
       form_id: formId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+  let r: Record<string, unknown> | undefined;
+  try {
+    const rs = await db.execute({
+      sql: "SELECT live, published FROM form_offer_pages WHERE tenant_id = ? AND form_id = ? LIMIT 1",
+      args: [tenantId, formId],
+    });
+    r = rowsOf(rs)[0];
+  } catch (err) {
+    if (isMissingOfferTable(err)) noteOfferTableMissing("live");
+    else unreadable(err);
+    return { hasRow: false, live: null };
+  }
+  if (!r) return { hasRow: false, live: null };
+  if (Number(r.live ?? 0) !== 1 || r.published == null) return { hasRow: true, live: null };
+  try {
+    return { hasRow: true, live: parseOfferPageDoc(String(r.published)) };
+  } catch (err) {
+    unreadable(err);
+    return { hasRow: true, live: null };
   }
 }
 

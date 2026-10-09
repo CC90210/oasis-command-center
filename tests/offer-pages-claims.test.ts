@@ -5,15 +5,20 @@
  * WHAT IS PINNED:
  *   1. The linter flags money, numbers (digits and number words), percentages,
  *      multipliers ("3x") and the words clients, results, guarantee(d),
- *      proven, revenue, booked; a plain sentence passes.
+ *      proven, revenue, booked, refund, money back, risk-free, ROI, profit,
+ *      savings; a plain sentence passes.
  *   2. A tick is stored under the sentence's sha256: editing the sentence
  *      clears it. A tick can only be added for a sentence the draft flags.
  *   3. Confirmations are stamped by the server: a new one gets the saving
  *      owner and the time, whatever the browser sent; one already on record
- *      for the same content is kept; editing the confirmed content re-stamps it.
+ *      for the same content is kept, even when the browser echoes it as
+ *      "pending" again (saving twice never moves "confirmed at" forward, and a
+ *      live page saved with nothing changed stays Live); editing the confirmed
+ *      content re-stamps it.
  *   4. Publish answers 409 with a plain list of what blocks it, until every
- *      flagged sentence is ticked; then it publishes exactly the checked draft,
- *      without the brief. An edit after the tick blocks it again.
+ *      flagged sentence is ticked and the guarantee's terms are confirmed;
+ *      then it publishes exactly the checked draft, without the brief. An edit
+ *      after the tick blocks it again.
  *   5. Someone who may not edit forms gets 403 from every offer write, and the
  *      table is unchanged.
  *
@@ -50,6 +55,12 @@ async function main() {
       ["A proven system.", /proven/],
       ["More revenue, less admin.", /revenue/],
       ["Calls booked while you sleep.", /booked/],
+      ["Money back, no questions asked.", /money back/],
+      ["A full refund if it does not fit.", /refund/],
+      ["Start risk-free.", /risk-free/],
+      ["Strong ROI from week one.", /roi/],
+      ["Pure profit.", /profit/],
+      ["Real savings on admin.", /savings/],
     ];
     for (const [s, why] of flagged) {
       const reasons = claims.claimReasons(s);
@@ -121,6 +132,30 @@ async function main() {
     const edited = parseOfferPageDoc(minimalDoc({ sections: [{ key: "results", items: [result("It works brilliantly.", "u-cc")] }] }));
     const restamped = claims.stampConfirmations(edited, [prev], "u-adon", "2026-10-09T09:00:00.000Z");
     assert.equal((restamped.sections[0] as { items: Array<{ evidence: { confirmed: { by: string } } }> }).items[0].evidence.confirmed.by, "u-adon");
+  });
+
+  await step("saving the same confirmed content again keeps its first stamp, whatever the browser echoes", () => {
+    // What the builder holds after "Add the result", until it is reloaded.
+    const pending = { by: "pending", at: "2026-10-08T10:00:00.000Z" };
+    const local = parseOfferPageDoc(
+      minimalDoc({ sections: [{ key: "results", items: [{ kind: "quote", quote: "Great.", who: "Dana", evidence: { permission: true, confirmed: pending } }] }] }),
+    );
+    const conf = (d: unknown) => (d as { sections: Array<{ items: Array<{ evidence: { confirmed: unknown } }> }> }).sections[0].items[0].evidence.confirmed;
+    const first = claims.stampConfirmations(local, [], "user-a", "2026-10-08T10:00:01.000Z");
+    assert.deepEqual(conf(first), { by: "user-a", at: "2026-10-08T10:00:01.000Z" });
+    const later = claims.stampConfirmations(local, [first], "user-a", "2026-10-08T15:00:00.000Z");
+    assert.deepEqual(conf(later), conf(first), "a second save of the same content moved 'confirmed at' forward");
+    const otherOwner = claims.stampConfirmations(local, [first], "user-b", "2026-10-08T16:00:00.000Z");
+    assert.deepEqual(conf(otherOwner), conf(first), "another owner's save of the same content took the confirmation over");
+  });
+
+  await step("the guarantee blocks Publish while its terms have words and no owner's confirmation, and not once confirmed", () => {
+    const withGuarantee = (confirmed?: { by: string; at: string }) =>
+      parseOfferPageDoc(minimalDoc({ sections: [{ key: "guarantee", body: "Keep the build if we miss the date.", ...(confirmed ? { confirmed } : {}) }] }));
+    const open = claims.publishGate(withGuarantee(), [], { formEnabled: true, fallbackHeadline: "" });
+    assert.deepEqual(open.blockers, ["The guarantee needs an owner's confirmation of its terms."]);
+    const confirmed = claims.publishGate(withGuarantee(OK), [], { formEnabled: true, fallbackHeadline: "" });
+    assert.deepEqual(confirmed.blockers, [], "a confirmed guarantee still blocks Publish");
   });
 
   // -- 4 and 5. the routes -------------------------------------------------
@@ -225,6 +260,29 @@ async function main() {
     const row = await db.execute({ sql: "SELECT draft FROM form_offer_pages WHERE form_id = ?", args: [FORM] });
     const stored = JSON.parse(String(row.rows[0].draft)) as { sections: Array<{ items: Array<{ evidence: { confirmed: { by: string } } }> }> };
     assert.equal(stored.sections[0].items[0].evidence.confirmed.by, USERS.adon.id, "a browser cannot put CC's name on a claim Adon added");
+  });
+
+  await step("the builder saving the same page again (its 'pending' echo) keeps the stamp, and a live page stays Live", async () => {
+    await login(USERS.cc);
+    const pending = { by: "pending", at: "2026-10-08T10:00:00.000Z" };
+    const local = { ...draft, sections: [{ key: "results", items: [{ kind: "quote", quote: "Kept our weekends.", who: "Sam", evidence: { permission: true, confirmed: pending } }] }] };
+    const version = async () => Number((await db.execute({ sql: "SELECT draft_version FROM form_offer_pages WHERE form_id = ?", args: [FORM] })).rows[0].draft_version);
+    const stamp = async () =>
+      (JSON.parse(String((await db.execute({ sql: "SELECT draft FROM form_offer_pages WHERE form_id = ?", args: [FORM] })).rows[0].draft)) as {
+        sections: Array<{ items: Array<{ evidence: { confirmed: { by: string; at: string } } }> }>;
+      }).sections[0].items[0].evidence.confirmed;
+    const first = await json(offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: local, version: await version() }), params));
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const stamped = await stamp();
+    assert.equal(stamped.by, USERS.cc.id);
+    const pub = await json(publishRoute.POST(req("POST", `/api/forms/${FORM}/offer/publish`, { version: await version() }), params));
+    assert.equal(pub.status, 200, JSON.stringify(pub.body));
+    // The builder still holds "pending" until it is reloaded; its next autosave sends it again.
+    await new Promise((r) => setTimeout(r, 5));
+    const again = await json(offerRoute.PUT(req("PUT", `/api/forms/${FORM}/offer`, { draft: local, version: await version() }), params));
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.deepEqual(await stamp(), stamped, "the second save moved who confirmed it, or when");
+    assert.equal((again.body.offer as { status: string }).status, "live", "a save that changed nothing turned the live page into 'unpublished changes'");
   });
 
   done("offer-pages-claims");

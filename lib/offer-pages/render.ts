@@ -22,7 +22,11 @@ import { embedUrl, formatDuration } from "./providers";
 import { imageKey, ownThumbPath, resolveDocLibrary, signPageMedia, type ResolvedLibrary, type Signer } from "./video";
 
 export type FacadeMedia = {
-  source: { kind: "link"; embedSrc: string } | { kind: "library"; formId: string; videoRef: string; captions: boolean };
+  source:
+    | { kind: "link"; embedSrc: string }
+    // preview: the owner's signed-in preview of the DRAFT, signed by the
+    // builder's own route (it reads the draft); absent on the public page.
+    | { kind: "library"; formId: string; videoRef: string; captions: boolean; preview?: true };
   posterUrl: string | null;
   posterWidth: number | null;
   posterHeight: number | null;
@@ -56,6 +60,8 @@ export async function prepareOfferRender(input: {
   sign: Signer;
   /** Public URL of an object in the public tenant-assets prefix. */
   publicUrl: (path: string) => string | null;
+  /** The owner's preview of the draft (app/f/.../page.tsx canPreview). */
+  preview?: boolean;
 }): Promise<PreparedOffer> {
   const { doc, formId, tenantId } = input;
   let resolved: ResolvedLibrary = { videos: new Map(), images: new Map() };
@@ -95,7 +101,7 @@ export async function prepareOfferRender(input: {
       const r = resolved.videos.get(ref);
       if (!r) return;
       out[ref] = {
-        source: { kind: "library", formId, videoRef: ref, captions: !!r.caption },
+        source: { kind: "library", formId, videoRef: ref, captions: !!r.caption, ...(input.preview ? { preview: true as const } : {}) },
         posterUrl: signed.posters.get(ref) ?? null,
         posterWidth: r.poster?.width ?? null,
         posterHeight: r.poster?.height ?? null,

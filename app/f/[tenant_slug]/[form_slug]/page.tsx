@@ -25,6 +25,13 @@
  * ?offer_preview=1 shows the DRAFT, but only to a signed-in owner or admin of
  * the form's own workspace (the builder's Preview tab). Everyone else gets the
  * public page, and a preview never mounts a live form.
+ *
+ * AN OFFER'S NAME IS INTERNAL (the New offer dialog says so). A form with an
+ * offer page and no headline of its own is titled with the workspace's name on
+ * its plain form and in its tab, and a live page whose headline is missing
+ * falls back to the form's own headline, then the workspace's name: never the
+ * form's name. A form with its own headline, and every intake form, renders
+ * exactly as before.
  */
 
 import type { Metadata } from "next";
@@ -42,7 +49,8 @@ import {
 } from "@/lib/forms/types";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { publicMarkForTenant, faviconForTenant, publicIdentityForTenant } from "@/lib/tenant/public-identity";
-import { offerPagesDb, readLiveOfferDoc, readOfferRow } from "@/lib/offer-pages/store";
+import { offerPagesDb, readOfferRow, readPublicOfferState, type PublicOfferState } from "@/lib/offer-pages/store";
+import { fallbackHeadline } from "@/lib/offer-pages/operator";
 import { prepareOfferRender, type PreparedOffer } from "@/lib/offer-pages/render";
 import type { OfferPageDoc } from "@/lib/offer-pages/types";
 import { signMediaUrls } from "@/lib/founders/marketing-queries";
@@ -74,13 +82,18 @@ export async function generateMetadata({
   if (!lookup.ok) {
     return { title: "Form", robots: { index: false, follow: false } };
   }
+  const offer = await offerState(lookup.form.tenant_id, lookup.form.id);
   let title = lookup.form.name || "Application";
+  let headline = "";
   try {
-    const branding = parseFormBranding(lookup.form.branding);
-    if (branding.headline) title = branding.headline;
+    headline = parseFormBranding(lookup.form.branding).headline || "";
   } catch {
     // Fall through to form name on parse failure.
   }
+  if (headline) title = headline;
+  // An offer's name is internal: with no headline of its own, its tab says the
+  // workspace's name, never the form's.
+  else if (offer.hasRow) title = (await workspaceDisplayName(lookup.form.tenant_id)) || "Application";
   // The TAB belongs to the tenant too. app/layout.tsx sets one global icon —
   // OASIS AI's — so a SunBiz merchant uploading three months of bank statements
   // saw another company's mark in the browser tab on the most sensitive page in
@@ -92,9 +105,9 @@ export async function generateMetadata({
   });
   // A live offer page names the tab and the link preview from its own words.
   // noindex either way (D8): offer pages stay out of search results.
-  const offer = await liveOfferDoc(lookup.form.tenant_id, lookup.form.id);
-  const description = offer ? offer.seo.description || offer.hero.subheadline : undefined;
-  if (offer) title = offer.seo.title || offer.hero.headline || title;
+  const live = offer.live;
+  const description = live ? live.seo.description || live.hero.subheadline : undefined;
+  if (live) title = live.seo.title || live.hero.headline || title;
   return {
     title,
     ...(description ? { description } : {}),
@@ -103,10 +116,28 @@ export async function generateMetadata({
   };
 }
 
-/** The live offer page for a form, read once per request (metadata and page share it). */
-const liveOfferDoc = cache(async (tenantId: string, formId: string): Promise<OfferPageDoc | null> => {
+/** A form's offer page state, read once per request (metadata and page share it). */
+const offerState = cache(async (tenantId: string, formId: string): Promise<PublicOfferState> => {
   const db = offerPagesDb();
-  return db ? readLiveOfferDoc(db, tenantId, formId) : null;
+  return db ? readPublicOfferState(db, tenantId, formId) : { hasRow: false, live: null };
+});
+
+/**
+ * The workspace's public name: its brand's display name, else its own name;
+ * "" only when it has neither. What an offer falls back to where it would
+ * otherwise show the form's name, which is internal.
+ */
+const workspaceDisplayName = cache(async (tenantId: string): Promise<string> => {
+  const known = publicIdentityForTenant({ tenantId })?.displayName ?? "";
+  if (known) return known;
+  const db = offerPagesDb();
+  if (!db) return "";
+  try {
+    const t = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
+    return String((t.rows[0] as unknown as { name?: unknown } | undefined)?.name ?? "").trim();
+  } catch {
+    return "";
+  }
 });
 
 type RouteParams = {
@@ -246,7 +277,10 @@ export default async function AnonymousFormPage({
             ? null
             : {
                 formId: result.form.id,
-                formName: result.form.name,
+                // Not drawn inside the Book section, but a client component's
+                // props travel to the browser: the page's own headline, never
+                // the form's internal name.
+                formName: offer.prepared.page.hero.headline,
                 // One accent on the page: the form's buttons follow it.
                 branding: { ...result.form.branding, primary_color: offer.prepared.accent },
                 steps: result.form.steps,
@@ -270,7 +304,7 @@ export default async function AnonymousFormPage({
   return (
     <FormPublicClient
       formId={result.form.id}
-      formName={result.form.name}
+      formName={await plainFormName(result)}
       branding={result.form.branding}
       steps={result.form.steps}
       redirectUrl={result.form.redirect_url}
@@ -309,6 +343,18 @@ export default async function AnonymousFormPage({
 type OfferView = { doc: OfferPageDoc; prepared: PreparedOffer; workspaceName: string; preview: boolean };
 
 /**
+ * The name the plain form falls back to when it has no headline of its own
+ * (FormPublicClient: headline = branding.headline || formName). An offer's
+ * name is internal, so an offer's plain form gets the workspace's name. Every
+ * other form passes its own name, exactly as it always has.
+ */
+async function plainFormName(result: Extract<LoadResult, { ok: true }>): Promise<string> {
+  if (result.form.branding.headline) return result.form.name;
+  const { hasRow } = await offerState(result.form.tenant_id, result.form.id);
+  return hasRow ? await workspaceDisplayName(result.form.tenant_id) : result.form.name;
+}
+
+/**
  * May this session see this form's DRAFT? A signed-in owner or admin of the
  * form's own workspace, by the rule every forms write uses. Anyone else,
  * including a signed-in member of another workspace, is an ordinary visitor.
@@ -345,23 +391,25 @@ async function loadOfferView(
         preview = true;
       }
     }
-    if (!doc) doc = await liveOfferDoc(tenantId, formId);
+    if (!doc) doc = (await offerState(tenantId, formId)).live;
     if (!doc) return null;
+    const workspaceName = await workspaceDisplayName(tenantId);
     const prepared = await prepareOfferRender({
       db,
       tenantId,
       formId,
       doc,
-      fallbackHeadline: result.form.branding.headline || result.form.name,
+      // The form's own headline, read as the Publish gate reads it, then the
+      // workspace's name: never the form's name, which is internal. (The gate
+      // blocks a page with neither; this covers a headline removed later.)
+      fallbackHeadline: fallbackHeadline({ branding: result.form.branding }) || workspaceName,
       sign: signMediaUrls,
+      // The owner's preview signs its Library videos through the builder's own
+      // route, which reads the draft; the public route reads only what is live.
+      preview,
       // Read lazily: without an object store a link video simply has no poster.
       publicUrl: (path) => getServiceSupabase().storage.from("tenant-assets").getPublicUrl(path).data.publicUrl || null,
     });
-    let workspaceName = publicIdentityForTenant({ tenantId })?.displayName ?? "";
-    if (!workspaceName) {
-      const t = await db.execute({ sql: "SELECT name FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
-      workspaceName = String((t.rows[0] as unknown as { name?: unknown } | undefined)?.name ?? "").trim() || result.form.name;
-    }
     return { doc, prepared, workspaceName, preview };
   } catch (err) {
     console.error("[offer-pages] page layer failed; rendering the form", {

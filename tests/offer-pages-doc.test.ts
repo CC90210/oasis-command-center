@@ -17,12 +17,15 @@
  *     its rights tick are all refused;
  *   - the whole document is capped at 200 KB;
  *   - booking on the page (native) is refused until PR3, the canvas is dark
- *     only, the page is never indexable.
+ *     only, the page is never indexable;
+ *   - a refused field reaches the owner in the builder's words ("Bonus 2
+ *     title"), never as its path (lib/offer-pages/field-labels.ts).
  *
  * Pure: no database. Run: node --conditions=react-server --import tsx tests/offer-pages-doc.test.ts
  */
 import assert from "node:assert/strict";
 import { OfferPageError, accentPassesAA, contrastRatio, parseOfferPageDoc } from "../lib/offer-pages/types";
+import { fieldLabel } from "../lib/offer-pages/field-labels";
 
 const OK = { by: "u-1", at: "2026-10-08T12:00:00.000Z" };
 const YT = { source: "youtube", id: "dQw4w9WgXcQ", rights: OK, aspect: "16:9" };
@@ -226,6 +229,46 @@ t("the whole document is capped at 200 KB, as a stored string and as a body", ()
   (d as Record<string, unknown>).pad = "x".repeat(205 * 1024);
   assert.throws(() => parseOfferPageDoc(d), (e: unknown) => e instanceof OfferPageError && e.path === "$" && /200 KB/.test(e.reason));
   assert.throws(() => parseOfferPageDoc("not json"), (e: unknown) => e instanceof OfferPageError && /JSON/.test(e.reason));
+});
+
+t("a refused field is named in the builder's words, never by its path", () => {
+  const doc = parseOfferPageDoc(fullDoc());
+  const cases: Array<[string, string]> = [
+    ["$.hero.headline", "Headline"],
+    ["$.hero.video.rights", "Top video"],
+    ["hero", "Top video"],
+    ["work:1", "Our work item 2 video"],
+    ["$.sections[4].items[1].title", "Bonus 2 title"],
+    ["$.sections[6].items[0].a", "Question 1 answer"],
+    ["$.sections[3].items[0].evidence.confirmed", "Result 1 owner's confirmation"],
+    ["$.sections[3].items[2].image", "Result 3 image"],
+    ["$.sections[4].title", "Bonuses section title"],
+    ["$.nav.cta_label", "Header button label"],
+    ["$.seo.title", "Browser tab title"],
+    ["$.theme.accent", "Accent colour"],
+    ["$.book.title", "Book section title"],
+    ["$", "This page"],
+    ["", "This page"],
+  ];
+  for (const [path, words] of cases) assert.equal(fieldLabel(path, doc), words, path);
+  // Whatever the parser refuses, the owner never sees a "$" or a bracket.
+  const tooLong = "x".repeat(200);
+  for (const mutate of [
+    (d: Record<string, unknown>) => ((d.hero as Record<string, unknown>).headline = tooLong),
+    (d: Record<string, unknown>) => (items(d, "bonuses")[0].title = tooLong),
+    (d: Record<string, unknown>) => (items(d, "faq")[0].a = "<b>bold</b>"),
+    (d: Record<string, unknown>) => ((d.theme as Record<string, unknown>).accent = "#111111"),
+  ]) {
+    const d = fullDoc();
+    mutate(d);
+    try {
+      parseOfferPageDoc(d);
+      assert.fail("not refused");
+    } catch (e) {
+      assert.ok(e instanceof OfferPageError, String(e));
+      assert.doesNotMatch(fieldLabel(e.path, doc), /[$[\]]/, `${e.path} reached the owner as a path`);
+    }
+  }
 });
 
 console.log(`offer-pages-doc: OK - ${n} groups of checks`);

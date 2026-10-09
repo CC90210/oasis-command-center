@@ -6,9 +6,13 @@
  * ref resolves only when, for the FORM'S OWN workspace:
  *   - the asset exists in that workspace (every statement binds tenant_id),
  *   - it is OASIS's own brand (never a client brand's asset: MKT-01),
- *   - it is not archived or rejected, and is a video,
+ *   - it is a released cut: approved, scheduled or published (the forward
+ *     path, so an asset that moves on stays playable; one pulled back to
+ *     in_review or draft, or rejected or archived, stops playing at once, on
+ *     a live page too), and is a video,
  *   - the media row is that asset's, of the right kind (video / poster /
  *     caption).
+ * Library images (a result's screenshot) resolve by the same rule.
  * The page's HTML carries the poster only, signed through the existing
  * windowed presign. The video itself is signed on tap by
  * /api/offer-page/video, which resolves the ref again from the PUBLISHED copy.
@@ -34,6 +38,8 @@ export type MediaRow = {
   storage_bucket: string;
   storage_path: string;
   mime: string | null;
+  /** The object's size on record (null when the upload did not record it). */
+  bytes: number | null;
   width: number | null;
   height: number | null;
 };
@@ -56,7 +62,8 @@ export type ResolvedLibrary = { videos: Map<string, ResolvedVideo>; images: Map<
 /** signMediaUrls' shape (lib/founders/marketing-queries.ts): "bucket\npath" -> url. */
 export type Signer = (refs: Array<{ bucket: string; path: string }>, ttlSec: number) => Promise<Map<string, string>>;
 
-const BLOCKED_STATUSES = new Set(["archived", "rejected"]);
+/** Released cuts: the Library statuses a page may show (the header above). */
+const SHOWABLE_STATUSES = new Set(["approved", "scheduled", "published"]);
 const POSTER_KINDS = new Set(["poster", "thumb", "preview", "image"]);
 const IMAGE_KINDS = new Set(["image", "poster", "thumb", "preview"]);
 
@@ -91,7 +98,7 @@ function isMissingLibrary(err: unknown): boolean {
 
 /** Is this asset one the page may show at all? */
 function assetAllowed(a: AssetRow | undefined): a is AssetRow {
-  return !!a && a.brand_slug === FOUNDERS_OWN_BRAND && !BLOCKED_STATUSES.has(a.status);
+  return !!a && a.brand_slug === FOUNDERS_OWN_BRAND && SHOWABLE_STATUSES.has(a.status);
 }
 
 /**
@@ -119,7 +126,7 @@ export async function resolveLibrary(
         args: [tenantId, ...assetIds],
       }),
       db.execute({
-        sql: `SELECT id, asset_id, kind, storage_bucket, storage_path, mime, width, height FROM marketing_asset_media
+        sql: `SELECT id, asset_id, kind, storage_bucket, storage_path, mime, bytes, width, height FROM marketing_asset_media
               WHERE tenant_id = ? AND asset_id IN (${marks})`,
         args: [tenantId, ...assetIds],
       }),
@@ -148,6 +155,7 @@ export async function resolveLibrary(
           storage_bucket: String(r.storage_bucket ?? "marketing-media"),
           storage_path: String(r.storage_path ?? ""),
           mime: r.mime == null ? null : String(r.mime),
+          bytes: num(r.bytes),
           width: num(r.width),
           height: num(r.height),
         },
@@ -180,6 +188,25 @@ export async function resolveLibrary(
     const row = own(image.media_id, asset.id, IMAGE_KINDS);
     if (row) out.images.set(imageKey(image), row);
   }
+  return out;
+}
+
+/**
+ * Every Library image a document carries, with its path in the document: a
+ * result's screenshot and its proof, and the link-preview image. (The page
+ * draws only the screenshots today; the builder route checks them all.)
+ */
+export function imageRefs(doc: OfferPageDoc): Array<{ path: string; image: ImageRef }> {
+  const out: Array<{ path: string; image: ImageRef }> = [];
+  doc.sections.forEach((s, i) => {
+    if (s.key !== "results") return;
+    s.items.forEach((it, j) => {
+      const p = `$.sections[${i}].items[${j}]`;
+      if (it.kind === "screenshot") out.push({ path: `${p}.image`, image: it.image });
+      if (it.evidence.proof) out.push({ path: `${p}.evidence.proof`, image: it.evidence.proof });
+    });
+  });
+  if (doc.seo.og_image) out.push({ path: "$.seo.og_image", image: doc.seo.og_image });
   return out;
 }
 

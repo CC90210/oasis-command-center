@@ -890,8 +890,12 @@ export function FormPublicClient({
           </div>
   );
 
+  // The form's card. Inside an offer page the Book section's card is the one
+  // surface (components/offer-pages/OfferPage.tsx), so the embedded form draws
+  // no card of its own; on its own page it is exactly the card it always was.
+  const cardClass = chrome === "embedded" ? undefined : "rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg";
   const body = (
-        <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg">
+        <div className={cardClass}>
           {done ? (
             /*
              * TWO ENDINGS, and which one shows is load-bearing (Adon,

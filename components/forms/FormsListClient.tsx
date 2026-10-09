@@ -16,8 +16,10 @@
  * New offer (primary) opens the template picker: a template (structure only),
  * the offer's name (internal) and its link name (the slug, fixed once made).
  * It creates the form with the template's steps, then its draft page, and opens
- * the builder. Nothing is public until Publish; until then the link shows the
- * plain form. New intake form is today's starter.
+ * the builder. The page goes public at Publish; until then the link shows the
+ * plain form, titled with the workspace's name: an offer's name is internal,
+ * and the public route never shows it (app/f/[tenant_slug]/[form_slug]/page.tsx).
+ * New intake form is today's starter.
  *
  * canEdit comes from the page (formsEditRefusal, lib/forms/access.ts), the
  * same rule the API enforces. Without it the lists draw no New offer, no New
@@ -191,9 +193,9 @@ export function FormsListClient({
   // Per-row "Copy" feedback. Keyed by form id so the check icon only
   // appears on the row the operator just clicked.
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  function publicFormUrl(formSlug: string): string | null {
-    if (!tenantSlug) return null;
-    return `${window.location.origin}/f/${tenantSlug}/${formSlug}`;
+  /** The public path; absoluteUrl() adds the origin, in a click handler only. */
+  function publicFormPath(formSlug: string): string | null {
+    return tenantSlug ? `/f/${tenantSlug}/${formSlug}` : null;
   }
   async function copyText(key: string, text: string) {
     try {
@@ -210,12 +212,12 @@ export function FormsListClient({
     }
   }
   async function copyPublicUrl(formId: string, formSlug: string) {
-    const url = publicFormUrl(formSlug);
-    if (!url) {
+    const path = publicFormPath(formSlug);
+    if (!path) {
       setError("Couldn't build the link: refresh the page and try again.");
       return;
     }
-    await copyText(formId, url);
+    await copyText(formId, absoluteUrl(path));
   }
 
   async function destroy(id: string, name: string) {
@@ -300,7 +302,7 @@ export function FormsListClient({
       {copyButton(r)}
       {offer && tenantSlug && r.enabled ? (
         <ShareMenu
-          url={publicFormUrl(r.slug)}
+          path={publicFormPath(r.slug)}
           onCopy={(key, text) => copyText(key, text)}
           copiedKey={copiedId}
           formId={r.id}
@@ -499,21 +501,30 @@ export function FormsListClient({
   );
 }
 
+/**
+ * A public path as a full link for this browser. Call it from a click handler
+ * only: a client component is rendered on the server first, where there is no
+ * window, so reading the origin while rendering throws there.
+ */
+function absoluteUrl(path: string): string {
+  return `${window.location.origin}${path}`;
+}
+
 /** The Share menu: the plain link, a link for a rep, and links tagged by channel. */
 function ShareMenu({
-  url,
+  path,
   onCopy,
   copiedKey,
   formId,
 }: {
-  url: string | null;
+  path: string | null;
   onCopy: (key: string, text: string) => void;
   copiedKey: string | null;
   formId: string;
 }) {
   const [open, setOpen] = useState(false);
   const [rep, setRep] = useState("");
-  if (!url) return null;
+  if (!path) return null;
   const repCode = rep.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 40);
   return (
     <span className="relative inline-block">
@@ -536,7 +547,7 @@ function ShareMenu({
           </div>
           <ul className="space-y-1">
             <li>
-              <button type="button" onClick={() => onCopy(`${formId}:plain`, url)} className="w-full rounded px-2 py-1.5 text-left text-xs text-fg hover:bg-bg-hover">
+              <button type="button" onClick={() => onCopy(`${formId}:plain`, absoluteUrl(path))} className="w-full rounded px-2 py-1.5 text-left text-xs text-fg hover:bg-bg-hover">
                 {copiedKey === `${formId}:plain` ? "Copied" : "Plain link"}
               </button>
             </li>
@@ -544,7 +555,7 @@ function ShareMenu({
               <li key={p.label}>
                 <button
                   type="button"
-                  onClick={() => onCopy(`${formId}:${p.label}`, `${url}?${p.params}`)}
+                  onClick={() => onCopy(`${formId}:${p.label}`, `${absoluteUrl(path)}?${p.params}`)}
                   className="w-full rounded px-2 py-1.5 text-left text-xs text-fg hover:bg-bg-hover"
                 >
                   {copiedKey === `${formId}:${p.label}` ? "Copied" : `${p.label} link`}
@@ -565,7 +576,7 @@ function ShareMenu({
             <button
               type="button"
               disabled={!repCode}
-              onClick={() => onCopy(`${formId}:rep`, `${url}?rep=${encodeURIComponent(repCode)}`)}
+              onClick={() => onCopy(`${formId}:rep`, `${absoluteUrl(path)}?rep=${encodeURIComponent(repCode)}`)}
               className="mt-2 w-full rounded border border-bg-border px-2 py-1.5 text-xs text-fg hover:bg-bg-hover disabled:opacity-40"
             >
               {copiedKey === `${formId}:rep` ? "Copied" : "Copy rep link"}
@@ -631,7 +642,7 @@ function NewOfferPicker({
         setError(
           data.error === "slug_taken"
             ? "That link name is taken in this workspace. Pick another."
-            : data.message || `Couldn't create the offer (${data.error || res.status}).`,
+            : data.message || "Couldn't create the offer. Try again in a moment.",
         );
         return;
       }
@@ -642,12 +653,12 @@ function NewOfferPicker({
       });
       const made = (await page.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
       if (!made.ok) {
-        setError(made.message || `The form was made, but its page wasn't (${made.error || page.status}). Open it and choose Turn into an offer.`);
+        setError(made.message || "The form was made, but its page wasn't. Open the form from the list and choose Turn into an offer.");
         return;
       }
       onCreated(data.form.id);
-    } catch (err) {
-      setError(`Couldn't create the offer: ${err instanceof Error ? err.message : "network error"}`);
+    } catch {
+      setError("Couldn't create the offer: the connection dropped. Check it and try again.");
     } finally {
       setBusy(false);
     }
@@ -720,7 +731,10 @@ function NewOfferPicker({
             Create the offer
           </button>
         </div>
-        <p className="mt-3 text-[11px] text-fg-dim">Nothing is public until you press Publish. Until then the link shows the plain form.</p>
+        <p className="mt-3 text-[11px] text-fg-dim">
+          The page goes public when you press Publish. Until then its link shows only a plain form, titled with your
+          workspace&apos;s name, never this offer&apos;s name.
+        </p>
       </div>
     </div>
   );

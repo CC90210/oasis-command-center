@@ -18,6 +18,7 @@ import { BODY_KEYS, COPY_CAPS, accentPassesAA, isHexColor } from "@/lib/offer-pa
 import { NAV_LABELS, drawnSections } from "@/lib/offer-pages/visibility";
 import type { GateResult } from "@/lib/offer-pages/claims";
 import { serialSaver } from "@/lib/offer-pages/save-queue";
+import { fieldLabel } from "@/lib/offer-pages/field-labels";
 import { BookEditor, BriefEditor, HeroEditor, SectionCard, newSection, type ChipState } from "./SectionEditors";
 import { PublishChecklist } from "./PublishChecklist";
 import { VideoPicker } from "./VideoPicker";
@@ -86,6 +87,9 @@ export function OfferBuilder({
   const [publishErrors, setPublishErrors] = useState<string[]>([]);
   const [previewWidth, setPreviewWidth] = useState<"desktop" | "phone">("desktop");
   const [previewKey, setPreviewKey] = useState(0);
+  // The accent's text box holds what is typed, one character at a time; the
+  // page takes it only once it is a whole colour (or emptied).
+  const [accentText, setAccentText] = useState(initial.draft?.theme.accent ?? "");
   const versionRef = useRef(initial.version);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
@@ -108,7 +112,9 @@ export function OfferBuilder({
         setSaving("error");
         setSaveError(
           data.message ||
-            (data.error === "invalid_page" ? `Not saved: ${data.reason ?? "check the highlighted field"} (${data.path ?? ""}).` : "Not saved. Try again."),
+            (data.error === "invalid_page"
+              ? `Not saved. ${fieldLabel(data.path, next)}: ${data.reason ?? "needs a change"}.`
+              : "Not saved. Try again in a moment."),
         );
         return;
       }
@@ -211,6 +217,8 @@ export function OfferBuilder({
 
   const accent = doc.theme.accent ?? "";
   const accentOk = !accent || accentPassesAA(accent);
+  const accentTyped = accentText.trim();
+  const accentPartial = accentTyped !== "" && !isHexColor(accentTyped);
   const script = doc.hero.vsl_script?.text ?? "";
   const words = wordCount(script);
 
@@ -388,21 +396,31 @@ export function OfferBuilder({
               <input
                 type="color"
                 value={isHexColor(accent) ? accent : "#00D4FF"}
-                onChange={(e) => update({ ...doc, theme: { ...doc.theme, accent: e.target.value.toUpperCase() } })}
+                onChange={(e) => {
+                  const picked = e.target.value.toUpperCase();
+                  setAccentText(picked);
+                  update({ ...doc, theme: { ...doc.theme, accent: picked } });
+                }}
                 className="h-9 w-12 rounded border border-bg-border bg-transparent"
                 aria-label="Pick the accent colour"
               />
               <input
                 className="input w-32 font-mono"
-                value={accent}
+                value={accentText}
                 placeholder="#00D4FF"
+                aria-label="The accent colour as a code"
                 onChange={(e) => {
+                  setAccentText(e.target.value);
                   const v = e.target.value.trim();
                   if (!v || isHexColor(v)) update({ ...doc, theme: { ...doc.theme, accent: v ? v.toUpperCase() : undefined } });
                 }}
               />
-              <span className={`text-[12px] ${accentOk ? "text-fg-dim" : "text-rose-400"}`}>
-                {accentOk ? "Readable on the page." : "Too dark to read on the page. Pick a lighter colour."}
+              <span className={`text-[12px] ${accentPartial ? "text-status-warm" : accentOk ? "text-fg-dim" : "text-rose-400"}`}>
+                {accentPartial
+                  ? "Type the whole colour, like #E8C547."
+                  : accentOk
+                    ? "Readable on the page."
+                    : "Too dark to read on the page. Pick a lighter colour."}
               </span>
             </div>
           </label>

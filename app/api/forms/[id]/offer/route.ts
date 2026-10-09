@@ -33,7 +33,7 @@ import {
   type VideoRef,
 } from "@/lib/offer-pages/types";
 import { videoRefs } from "@/lib/offer-pages/providers";
-import { resolveLibrary } from "@/lib/offer-pages/video";
+import { imageKey, imageRefs, resolveLibrary } from "@/lib/offer-pages/video";
 import { emptyDocForTemplate } from "@/lib/offer-pages/templates";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
 import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
@@ -161,8 +161,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   );
   if (fresh.length) {
     const resolved = await resolveLibrary(db, tenantId, fresh);
-    // The picker's rule: approved or published (the play-time rule, "not
-    // archived or rejected", is wider so an asset that moves on stays playable).
+    // The picker's rule: approved or published (the play-time rule adds
+    // scheduled, the step after approved, so an asset that moves on stays
+    // playable; lib/offer-pages/video.ts).
     const bad = fresh.find((v) => {
       const hit = resolved.videos.get(v.ref);
       return !hit || !["approved", "published"].includes(hit.asset.status);
@@ -170,6 +171,22 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (bad) {
       return NextResponse.json(
         { ok: false, error: "invalid_page", path: bad.ref, reason: "not a Library video this workspace may show" },
+        { status: 400 },
+      );
+    }
+  }
+  // The same for a Library IMAGE newly in the page (a result's screenshot or
+  // proof, the link-preview image): it must resolve as the page would draw it,
+  // this workspace's own, OASIS's own brand, a released cut. The builder
+  // attaches none yet; this holds a hand-made body to the rule.
+  const knownImages = new Set([row.draft, row.published].flatMap((d) => (d ? imageRefs(d) : [])).map(({ image }) => imageKey(image)));
+  const freshImages = imageRefs(parsed).filter(({ image }) => !knownImages.has(imageKey(image)));
+  if (freshImages.length) {
+    const resolved = await resolveLibrary(db, tenantId, [], freshImages.map(({ image }) => image));
+    const bad = freshImages.find(({ image }) => !resolved.images.has(imageKey(image)));
+    if (bad) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_page", path: bad.path, reason: "not a Library image this workspace may show" },
         { status: 400 },
       );
     }

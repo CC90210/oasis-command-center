@@ -17,8 +17,15 @@
  *
  * THE LINTER flags a sentence that carries money, a number (digits or a number
  * word), a percentage, a multiplier ("3x"), or the words clients, results,
- * guarantee(d), proven, revenue or booked. It over-flags on purpose: an extra
- * tick costs a click, a missed claim costs the business.
+ * guarantee(d), proven, revenue, booked, refund, money back, risk-free, ROI,
+ * profit or savings. It over-flags on purpose: an extra tick costs a click, a
+ * missed claim costs the business.
+ *
+ * WHAT IT DOES NOT READ: the form's own copy that the Book section draws (step
+ * titles, field labels, the thank-you message, including the default "A
+ * specialist will reach out within one business day."). That copy belongs to
+ * the form and is edited in the form editor; docs/OFFER_PAGES.md lists it as a
+ * known limit for the owner to decide on.
  *
  * Server side only (node:crypto). Unpublish never runs the gate.
  */
@@ -100,8 +107,14 @@ function confirmables(doc: OfferPageDoc): Confirmable[] {
 }
 
 /**
- * The document as it will be stored: every confirmation that is not already on
- * record FOR THE SAME CONTENT is re-stamped with the saving owner and the time.
+ * The document as it will be stored. Who confirmed a thing, and when, is the
+ * server's record, never the browser's say-so:
+ *   - a confirmation on record for the same content is kept as it is;
+ *   - one the browser echoes for content already on record (the builder's
+ *     "pending" tick, a stale copy, a forged name) is put back to the record,
+ *     so saving the same page again never moves "confirmed at" forward;
+ *   - anything else (new content, or confirmed content that was edited) is
+ *     stamped with the saving owner and the time.
  * A browser can therefore never put another person's name on a claim, and
  * editing what was confirmed (the quote, the amount, the video, the terms)
  * makes the person who saved the edit the one vouching for it.
@@ -113,17 +126,24 @@ export function stampConfirmations(
   now: string,
 ): OfferPageDoc {
   const doc = JSON.parse(JSON.stringify(next)) as OfferPageDoc;
-  const known = new Set<string>();
+  const exact = new Set<string>();
+  const onRecord = new Map<string, Confirmation>();
   for (const p of previous) {
     if (!p) continue;
     for (const c of confirmables(p)) {
       const conf = c.get();
-      if (conf) known.add(`${c.kind}|${stable(c.thing)}|${conf.by}|${conf.at}`);
+      if (!conf) continue;
+      const content = `${c.kind}|${stable(c.thing)}`;
+      exact.add(`${content}|${conf.by}|${conf.at}`);
+      if (!onRecord.has(content)) onRecord.set(content, { by: conf.by, at: conf.at });
     }
   }
   for (const c of confirmables(doc)) {
     const conf = c.get();
-    if (!conf || !known.has(`${c.kind}|${stable(c.thing)}|${conf.by}|${conf.at}`)) c.set({ by: actor, at: now });
+    const content = `${c.kind}|${stable(c.thing)}`;
+    if (conf && exact.has(`${content}|${conf.by}|${conf.at}`)) continue;
+    const recorded = conf ? onRecord.get(content) : undefined;
+    c.set(recorded ? { ...recorded } : { by: actor, at: now });
   }
   return doc;
 }
@@ -151,7 +171,8 @@ const MULTIPLIER_RE = /\b[0-9]+(?:\.[0-9]+)?\s?x\b/i;
 const DIGIT_RE = /[0-9]/;
 const NUMBER_WORD_RE =
   /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundreds?|thousands?|millions?|billions?|double[ds]?|triple[ds]?|half)\b/i;
-const WORD_RE = /\b(clients?|results?|guarantee[ds]?|proven|revenue|booked)\b/i;
+const WORD_RE =
+  /\b(clients?|results?|guarantee[ds]?|proven|revenue|booked|refunds?|refunded|money[ -]back|risk[ -]free|roi|profits?|profitable|savings?)\b/i;
 
 /** Why a sentence is a claim, or [] when it is not one. */
 export function claimReasons(sentence: string): string[] {

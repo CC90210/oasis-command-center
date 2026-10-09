@@ -11,19 +11,17 @@
  * The browser requests this only after a tap, when the <video> and its <track>
  * exist. No same-origin gate here: a <track> load sends no Origin header and a
  * privacy setting may strip Referer, and captions of a PUBLISHED page are not
- * secret. The rate cap and the published-only rule still hold.
+ * secret. The rate cap and the published-only rule still hold, and the file's
+ * size is checked before it is read (lib/offer-pages/captions.ts).
  */
 import { NextResponse } from "next/server";
 import { offerPagesDb } from "@/lib/offer-pages/store";
 import { resolvePublishedVideo } from "@/lib/offer-pages/video";
 import { NOT_FOUND, limited, validIds } from "@/lib/offer-pages/public-http";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { captionsResponse } from "@/lib/offer-pages/captions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** WebVTT files are small; anything larger is not a caption file. */
-const MAX_VTT_BYTES = 512 * 1024;
 
 export async function GET(req: Request) {
   if (limited(req, "captions")) return NextResponse.json({ ok: false, error: "rate_limited" }, { status: 429 });
@@ -40,30 +38,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
   }
   if (!hit.ok || !hit.resolved.caption) return NOT_FOUND();
-
-  const { storage_bucket: bucket, storage_path: path } = hit.resolved.caption;
-  let got: { data: Blob | null; error: unknown };
-  try {
-    got = await getServiceSupabase().storage.from(bucket).download(path);
-  } catch (err) {
-    // No object store configured (or it threw): an honest 503, never a crash.
-    console.error("[offer-pages.captions] object store unavailable", { form_id: ids.formId, error: err instanceof Error ? err.message : String(err) });
-    return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
-  }
-  if (got.error || !got.data) {
-    console.error("[offer-pages.captions] download failed", { form_id: ids.formId, ref: ids.ref });
-    return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
-  }
-  const bytes = new Uint8Array(await got.data.arrayBuffer());
-  if (bytes.byteLength > MAX_VTT_BYTES) return NOT_FOUND();
-  const text = new TextDecoder("utf-8").decode(bytes);
-  if (!text.startsWith("WEBVTT") && !text.startsWith("\uFEFFWEBVTT")) return NOT_FOUND();
-  return new NextResponse(text, {
-    status: 200,
-    headers: {
-      "content-type": "text/vtt; charset=utf-8",
-      "cache-control": "private, max-age=600",
-      "x-content-type-options": "nosniff",
-    },
+  return captionsResponse(hit.resolved.caption, {
+    where: "offer-pages.captions",
+    formId: ids.formId,
+    ref: ids.ref,
+    cacheControl: "private, max-age=600",
   });
 }

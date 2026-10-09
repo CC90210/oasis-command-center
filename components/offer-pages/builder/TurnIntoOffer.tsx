@@ -33,7 +33,7 @@ export function TurnIntoOffer({ formId }: { formId: string }) {
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
       if (!data.ok) {
-        setError(data.message || `Couldn't make the page (${data.error || res.status}).`);
+        setError(data.message || "Couldn't make the page. Try again in a moment.");
         return;
       }
       router.refresh();

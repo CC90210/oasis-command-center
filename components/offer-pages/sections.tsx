@@ -11,7 +11,7 @@ import type { ReactNode } from "react";
 import { ArrowRight } from "lucide-react";
 import { Section, Eyebrow } from "@/components/marketing/Section";
 import { Reveal } from "@/components/marketing/Reveal";
-import { CTA_INLINE } from "@/components/marketing/Cta";
+import { CTA_INLINE, CTA_PRIMARY } from "@/components/marketing/Cta";
 import type { DrawnSection } from "@/lib/offer-pages/visibility";
 import { formatMoney } from "@/lib/offer-pages/visibility";
 import { BODY_ANCHORS } from "@/lib/offer-pages/types";
@@ -220,8 +220,12 @@ function Faq({ s }: { s: Extract<DrawnSection, { key: "faq" }> }) {
   );
 }
 
-/** One drawn section, with its anchor. */
-export function OfferSection({ s, prepared }: { s: DrawnSection; prepared: PreparedOffer }): ReactNode {
+/**
+ * One drawn section, with its anchor. `cta` (the page's button label) ends it
+ * with the booking button, so a long page asks again after its proof, its
+ * value and its guarantee instead of only in the header.
+ */
+export function OfferSection({ s, prepared, cta = null }: { s: DrawnSection; prepared: PreparedOffer; cta?: string | null }): ReactNode {
   const id = BODY_ANCHORS[s.key];
   let inner: ReactNode;
   switch (s.key) {
@@ -250,6 +254,14 @@ export function OfferSection({ s, prepared }: { s: DrawnSection; prepared: Prepa
   return (
     <Section id={id} className="m-edge">
       {inner}
+      {cta ? (
+        <div className="mt-12 flex">
+          <a href="#book" className={CTA_PRIMARY} data-section={s.key}>
+            {cta}
+            <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          </a>
+        </div>
+      ) : null}
     </Section>
   );
 }

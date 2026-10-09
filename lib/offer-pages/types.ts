@@ -21,7 +21,7 @@
  *     result needs evidence, the client's permission and a confirmation; a
  *     money value needs a confirmation; every attached video needs the rights
  *     confirmation. Confirmations are re-stamped by the server with the saving
- *     owner's id and the time (store.ts stampConfirmations), so a browser can
+ *     owner's id and the time (claims.ts stampConfirmations), so a browser can
  *     never claim someone else said it.
  *   - Templates and this parser carry structure only. Nothing here invents copy.
  *

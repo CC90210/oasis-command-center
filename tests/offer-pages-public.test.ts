@@ -21,7 +21,20 @@
  *   5. noindex stays; a live page names the tab from its own words.
  *   6. ?offer_preview=1 shows the DRAFT only to a signed-in owner of the
  *      form's own workspace, never mounts a live form there, and is the public
- *      page for anyone else.
+ *      page for anyone else; its Library videos are marked for the builder's
+ *      own preview route, never the public one.
+ *   7. AN OFFER'S NAME IS INTERNAL: a form made with New offer (no headline of
+ *      its own) shows its plain form and its tab under the workspace's name,
+ *      and a live page with no headline anywhere falls back to the workspace's
+ *      name; the form's name appears nowhere on either.
+ *   8. A link video's thumbnail stored under ANOTHER workspace's prefix is
+ *      never drawn (render-time ownThumbPath).
+ *   9. The page asks again: results, bonuses and the guarantee each end with
+ *      the Book button, and the Book section is one card (the embedded form
+ *      draws no card of its own).
+ *  10. The Offers list (FormsListClient) renders on the server with an enabled
+ *      offer row and a workspace link: a client component is server-rendered
+ *      first, where there is no window.
  *
  * The markup comes from tests/offer-pages-public.render.ts, run as a child
  * process without the react-server condition (react-dom/server does not load
@@ -29,7 +42,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-public.test.ts
  */
-import { OASIS, ROOT, USERS, done, formRow, login, offerRow, setupOfferDatabase, step, stubPath, stubSigner, CONTACT_STEPS } from "./_offer-pages-harness";
+import { CLIENT_A, OASIS, ROOT, USERS, done, formRow, login, offerRow, setupOfferDatabase, step, stubPath, stubSigner, CONTACT_STEPS } from "./_offer-pages-harness";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -46,7 +59,11 @@ const FIXTURE_HTML = readFileSync(join(ROOT, "tests", "fixtures", "offer-pages",
 const OK = { by: "u-1", at: "2026-10-08T12:00:00.000Z" };
 const FORM_VSL = "f0f1c000-0000-4000-8000-000000000001";
 const FORM_LIB = "f0f1c000-0000-4000-8000-000000000002";
+const FORM_NEW = "f0f1c000-0000-4000-8000-000000000003";
+const FORM_FOREIGN_THUMB = "f0f1c000-0000-4000-8000-000000000004";
 const YT = "dQw4w9WgXcQ";
+/** What New offer stores as the form's name: internal, by the dialog's own words. */
+const INTERNAL_NAME = "Q4 Meta test - cold list, do not share";
 
 function liveDoc(headline: string) {
   return {
@@ -131,9 +148,29 @@ async function main() {
       { sql: "INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_path, width, height) VALUES ('m-1-v', ?, 'a-1', 'video', ?, 1920, 1080)", args: [OASIS, `${OASIS}/a-1/m-1-v.mp4`] },
       { sql: "INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_path, width, height) VALUES ('m-1-p', ?, 'a-1', 'poster', ?, 1280, 720)", args: [OASIS, `${OASIS}/a-1/m-1-p.jpg`] },
       { sql: "INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_path) VALUES ('m-1-c', ?, 'a-1', 'caption', ?)", args: [OASIS, `${OASIS}/a-1/m-1-c.vtt`] },
+      // A form made with New offer: the starter's headline removed, its name internal.
+      formRow(FORM_NEW, OASIS, "q4-meta-test", INTERNAL_NAME, CONTACT_STEPS),
+      offerRow({ formId: FORM_NEW, tenantId: OASIS, draft: { ...liveDoc("Not live yet"), hero: {} } }),
+      // A live page whose link video points at a thumbnail in ANOTHER workspace's prefix.
+      formRow(FORM_FOREIGN_THUMB, OASIS, "foreign-thumb", "Foreign thumbnail", CONTACT_STEPS, { headline: "Plain" }),
+      offerRow({
+        formId: FORM_FOREIGN_THUMB,
+        tenantId: OASIS,
+        draft: {},
+        published: {
+          ...liveDoc("Someone else's thumbnail"),
+          hero: {
+            headline: "Someone else's thumbnail",
+            video: { source: "youtube", id: YT, rights: OK, aspect: "16:9", thumb_path: `${CLIENT_A}/offer-pages/youtube-${YT}.jpg` },
+          },
+        },
+        live: 1,
+      }),
     ],
     "write",
   );
+  const { publicIdentityForTenant } = await import("../lib/tenant/public-identity");
+  const WORKSPACE = publicIdentityForTenant({ tenantId: OASIS })?.displayName ?? "";
 
   // A page layer that throws (here prepareOfferRender, on request) must still
   // hand the visitor today's form, never a 500. Installed before the page loads.
@@ -158,7 +195,7 @@ async function main() {
   const plain = (props: Record<string, unknown>) => JSON.parse(JSON.stringify(props)) as Record<string, unknown>;
 
   console.log("offer-pages-public:");
-  const scenarios: Record<string, { kind: "form" | "offer"; props: Record<string, unknown> }> = {};
+  const scenarios: Record<string, { kind: "form" | "offer" | "list"; props: Record<string, unknown> }> = {};
 
   await step("no offer row: the page returns today's FormPublicClient with today's props", async () => {
     const el = await run("ai-audit");
@@ -256,6 +293,76 @@ async function main() {
     await login(null);
   });
 
+  await step("the owner's preview marks its Library videos for the builder's preview route; the public page never does", async () => {
+    await login(USERS.cc);
+    await db.execute({ sql: "UPDATE form_offer_pages SET draft = published WHERE form_id = ?", args: [FORM_LIB] });
+    const owner = await run("lib", { offer_preview: "1" });
+    const ownerHero = (owner.props.prepared as { media: Record<string, { source: Record<string, unknown> }> }).media.hero.source;
+    assert.equal(ownerHero.preview, true, "the owner's preview would ask the public route, which signs only what is published");
+    await login(null);
+    const visitor = await run("lib", { offer_preview: "1" });
+    const visitorHero = (visitor.props.prepared as { media: Record<string, { source: Record<string, unknown> }> }).media.hero.source;
+    assert.equal("preview" in visitorHero, false, "a visitor's page is marked as a preview");
+  });
+
+  await step("an offer's internal name never reaches the public: its plain form and its tab carry the workspace's name", async () => {
+    assert.ok(WORKSPACE && WORKSPACE !== INTERNAL_NAME, `precondition: the workspace has a public name (${WORKSPACE})`);
+    const el = await run("q4-meta-test");
+    assert.equal(el.type, FormPublicClient, "a draft nobody published changed the page from the plain form");
+    assert.equal(el.props.formName, WORKSPACE, "the plain form's heading falls back to the offer's internal name");
+    assert.doesNotMatch(JSON.stringify(el.props), /do not share/, "the internal name is in the plain form's props");
+    scenarios.newOfferPlain = { kind: "form", props: plain(el.props) };
+    const meta = await page.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "q4-meta-test" }) });
+    assert.equal(meta.title, WORKSPACE, "the browser tab shows the offer's internal name");
+  });
+
+  await step("a live page with no headline anywhere falls back to the workspace's name; the form's name is nowhere in it", async () => {
+    // Published while the form had a headline, which was cleared later in the form editor.
+    await db.execute({
+      sql: "UPDATE form_offer_pages SET published = ?, published_version = 1, live = 1 WHERE form_id = ?",
+      args: [JSON.stringify({ ...liveDoc("x"), hero: {}, seo: { indexable: false } }), FORM_NEW],
+    });
+    try {
+      const el = await run("q4-meta-test");
+      assert.equal(el.type, OfferPage);
+      assert.equal((el.props.prepared as { page: { hero: { headline: string } } }).page.hero.headline, WORKSPACE);
+      assert.doesNotMatch(JSON.stringify(el.props), /do not share/, "the internal name reached the live page or its form's props");
+      const meta = await page.generateMetadata({ params: Promise.resolve({ tenant_slug: "oasis-ai-cc", form_slug: "q4-meta-test" }) });
+      assert.equal(meta.title, WORKSPACE);
+    } finally {
+      await db.execute({ sql: "UPDATE form_offer_pages SET published = NULL, published_version = 0, live = 0 WHERE form_id = ?", args: [FORM_NEW] });
+    }
+  });
+
+  await step("a link video's thumbnail stored under another workspace's prefix is never drawn", async () => {
+    const el = await run("foreign-thumb");
+    assert.equal(el.type, OfferPage);
+    const hero = (el.props.prepared as { media: Record<string, { posterUrl: string | null }> }).media.hero;
+    assert.ok(hero, "the video itself is still drawn (a facade with a plain play button)");
+    assert.equal(hero.posterUrl, null, "another workspace's stored thumbnail was drawn");
+    // The markup (what reaches the visitor) is checked below.
+    scenarios.foreignThumb = { kind: "offer", props: plain(el.props) };
+  });
+
+  // The Offers list: rendered on the server first, like any client component.
+  scenarios.offersList = {
+    kind: "list",
+    props: {
+      initialRows: [
+        { id: FORM_VSL, slug: "vsl", name: "VSL offer", description: null, enabled: true, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" },
+        { id: "f-intake", slug: "intake", name: "Intake", description: null, enabled: true, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z" },
+      ],
+      tenantLogoUrl: null,
+      tenantSlug: "oasis-ai-cc",
+      tenantName: "OASIS AI",
+      profileSlug: "oasis",
+      canEdit: true,
+      responseCounts: { [FORM_VSL]: 4, "f-intake": 1 },
+      offers: { [FORM_VSL]: { status: "live", publishedVersion: 2 } },
+      recentLeads: { [FORM_VSL]: 3 },
+    },
+  };
+
   // -- the markup ----------------------------------------------------------
   // CI runs every suite with NODE_OPTIONS=--conditions=react-server, which the
   // child would inherit, and react-dom/server refuses to load under it.
@@ -346,6 +453,40 @@ async function main() {
     assert.ok(h.includes("Preview of your unpublished page"));
     assert.ok(h.includes("A preview never sends anything"));
     assert.doesNotMatch(h, /<input\b/i, "a preview drew form inputs");
+  });
+
+  await step("another workspace's thumbnail is nowhere in the page a visitor gets", () => {
+    const h = html.foreignThumb;
+    assert.ok(h.includes('aria-label="Play video: Someone else&#x27;s thumbnail"'), "the hero video's facade is missing");
+    assert.ok(!h.includes(CLIENT_A), "another workspace's object path is in the page");
+  });
+
+  await step("an offer's plain form is headed with the workspace's name, and carries the offer's name nowhere", () => {
+    const h = html.newOfferPlain;
+    assert.ok(h.includes(`>${WORKSPACE}</h1>`), "the plain form's heading is not the workspace's name");
+    assert.doesNotMatch(h, /do not share/, "the offer's internal name is on the public page");
+  });
+
+  await step("the page asks again after results, bonuses and the guarantee; the Book section is one card", () => {
+    const h = html.live;
+    for (const key of ["results", "bonuses", "guarantee"]) {
+      assert.equal((h.match(new RegExp(`href="#book"[^>]*data-section="${key}"`, "g")) || []).length, 1, `${key} does not end with the Book button`);
+    }
+    for (const key of ["what_you_get", "obstacles", "work", "faq"]) {
+      assert.ok(!h.includes(`data-section="${key}"`), `${key} ends with a Book button`);
+    }
+    const book = h.slice(h.indexOf('id="book"'));
+    assert.ok(book.includes("Your details"), "the form is not in the Book section");
+    assert.ok(!book.includes("rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg"), "the embedded form draws its own card inside the Book card");
+  });
+
+  await step("the Offers list renders on the server with an enabled offer row and its links (no window there)", () => {
+    const h = String(html.offersList);
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes("Live, version 2"), "the offer row's page status is missing");
+    assert.ok(h.includes(">3</td>"), "the offer row's new leads are missing");
+    assert.ok(h.includes("Share</button>"), "the enabled offer row has no Share menu");
+    assert.ok(h.includes(">Intake<"), "the intake form's row is missing");
   });
 
   done("offer-pages-public");
