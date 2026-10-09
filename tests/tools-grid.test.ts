@@ -123,7 +123,7 @@ async function main() {
 
   const full: ToolCatalog = {
     installed: true,
-    tools: [card("score_hook"), card("repurpose_post"), card("learn_from_link"), card("video_download", "ready", { label: "CC's PC", lastSeenMinutes: 3 })],
+    tools: [card("score_hook"), card("repurpose_post"), card("learn_from_link"), card("video_download", "ready", { label: "CC's PC", lastSeenAt: "2026-10-09T01:00:00.000Z" })],
   };
   const noAi: ToolCatalog = { installed: true, tools: [card("score_hook"), card("repurpose_post", "needs_ai_account"), card("learn_from_link", "needs_ai_account")] };
   const unreadable: ToolCatalog = { installed: true, tools: [card("score_hook"), card("repurpose_post", "ai_account_unreadable"), card("learn_from_link", "ai_account_unreadable")] };

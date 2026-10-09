@@ -429,7 +429,9 @@ async function main() {
     const live = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
     assert.deepEqual(keys(live), ["score_hook:ready", "repurpose_post:ready", "learn_from_link:ready", "video_download:ready"]);
     const dl = live.installed ? live.tools.find((t) => t.key === "video_download") : undefined;
-    assert.deepEqual(dl?.runner, { label: "CC's PC", lastSeenMinutes: 4 });
+    // The catalog hands the grid the check-in time itself; the grid counts the minutes on the viewer's clock.
+    assert.equal(dl?.runner?.label, "CC's PC");
+    assert.equal(Math.round((now.getTime() - Date.parse(dl?.runner?.lastSeenAt ?? "")) / 60_000), 4, "the runner's check-in time, 4 minutes ago");
     // Eleven minutes: not live, no card.
     await seedRunner(db, later(now, -minutes(11)));
     const stale = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
