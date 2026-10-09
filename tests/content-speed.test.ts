@@ -30,8 +30,9 @@
  *      boundary; the Training card reads only the training material and opens
  *      the Training tab, and a failed or thrown read of it stays in that card;
  *      one request reads the Library's summary once (React cache(), under
- *      React's own server renderer); there is no Requests card (D16: nothing
- *      files or reads a request); no persona or vendor name on any branch of
+ *      React's own server renderer); there is no Requests card and the summary
+ *      reads no request count (D16: nothing files or reads a request), only the
+ *      asset pages and the review count; no persona or vendor name on any branch of
  *      the copy (work queued for the agent, nothing awaiting a verdict, a
  *      failed read).
  *
@@ -554,41 +555,33 @@ async function main() {
     assert.doesNotMatch(queue.text, /Couldn't load your queue/);
   });
 
-  await check("the summary's three counts run together after the asset read, not one after another", async () => {
+  // D16 took the Requests card away, and with it every screen that showed a
+  // request count; the summary went on reading two of them on every Overview,
+  // and a failure on that table marked the whole summary degraded, which hides
+  // the pipeline and says "Couldn't load your queue" (review of #542, F5).
+  await check("the summary reads the asset pages and the review count, and no table the Overview does not show", async () => {
     const { getMarketingSummary } = await import("../lib/founders/marketing-queries");
-    let requestAsked!: () => void;
-    const requestSeen = new Promise<void>((r) => (requestAsked = r));
+    const read: string[] = [];
     const fake = {
       from(table: string) {
-        let head = false;
+        read.push(table);
         const api: Record<string, unknown> = {
-          select(_c: string, o?: { head?: boolean }) { head = Boolean(o?.head); return api; },
-          eq: () => api, is: () => api, in: () => api, order: () => api, range: () => api,
+          select: () => api, eq: () => api, is: () => api, in: () => api, order: () => api, range: () => api,
           then(done: (v: unknown) => void) {
             if (table === "marketing_asset") return done({ error: null, data: [{ id: "a1", track: "organic", status: "draft" }] });
-            if (table === "marketing_request") { requestAsked(); return done({ error: null, count: 0 }); }
-            // The review count answers only once a request count has been asked
-            // for: run one after the other, the summary would never resolve.
-            if (table === "marketing_review") { void requestSeen.then(() => done({ error: null, count: 1 })); return; }
-            return done(head ? { error: null, count: 0 } : { error: null, data: [] });
+            if (table === "marketing_review") return done({ error: null, count: 1 });
+            // Every other table is broken: reading one would degrade the summary.
+            return done({ error: { code: "57014", message: "canceling statement due to statement timeout" }, data: null, count: null });
           },
         };
         return api;
       },
     } as unknown as Parameters<typeof getMarketingSummary>[1];
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const summary = await Promise.race([
-        getMarketingSummary("t", fake),
-        new Promise<never>((_, fail) => {
-          timer = setTimeout(() => fail(new Error("the request count waited for the review count")), 2000);
-        }),
-      ]);
-      assert.equal(summary.open_reviews, 1);
-      assert.equal(summary.degraded, false);
-    } finally {
-      clearTimeout(timer);
-    }
+    const summary = await getMarketingSummary("t", fake);
+    assert.deepEqual([...new Set(read)].sort(), ["marketing_asset", "marketing_review"], `read: ${read.join(", ")}`);
+    assert.equal(summary.open_reviews, 1);
+    assert.equal(summary.degraded, false, "a table no screen shows cannot mark the Library's numbers degraded");
+    assert.ok(!("open_requests" in summary), "no request count, since nothing shows one");
   });
 
   // D16 (approved 2026-10-01): the Requests card counted a queue nothing can

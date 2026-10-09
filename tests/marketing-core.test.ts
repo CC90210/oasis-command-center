@@ -530,12 +530,6 @@ async function brandBoundaryChecks() {
       { asset_id: CLIENT, acted_on_at: null as string | null },      // a client's — not ours
       { asset_id: OWN[1], acted_on_at: "2026-08-01" as string | null }, // already acted on
     ],
-    requests: [
-      { asset_id: OWN[0] as string | null, status: "open" },
-      { asset_id: CLIENT as string | null, status: "open" },   // a client's — not ours
-      { asset_id: null as string | null, status: "claimed" },  // unbound: typed into OUR portal
-      { asset_id: OWN[1] as string | null, status: "done" },   // closed
-    ],
   };
 
   const makeTable = (table: string) => {
@@ -564,14 +558,6 @@ async function brandBoundaryChecks() {
               r.acted_on_at === null &&
               (!has("in:asset_id") || (val("in:asset_id") as string[]).includes(r.asset_id)),
           );
-        } else if (table === "marketing_request") {
-          rows = fixtures.requests.filter(
-            (r) =>
-              ["open", "claimed"].includes(r.status) &&
-              (!has("is:asset_id") || r.asset_id === null) &&
-              (!has("in:asset_id") ||
-                (r.asset_id !== null && (val("in:asset_id") as string[]).includes(r.asset_id))),
-          );
         }
         const range = call.filters.find(([f]) => f === "range")?.[1] as [number, number] | undefined;
         if (range) rows = rows.slice(range[0], range[1] + 1);
@@ -591,11 +577,14 @@ async function brandBoundaryChecks() {
     "an open review on a CLIENT asset must not appear in the founders count — " +
       "this is the assertion the source-text checks could not make",
   );
+  // No request count (D16): the Requests card is gone and nothing else shows
+  // one, so the summary does not read the table at all (review of #542, F5).
   assert.equal(
-    summary.open_requests,
-    2,
-    "own-asset request + unbound request; a client-asset request is excluded",
+    calls.some((c) => c.table === "marketing_request"),
+    false,
+    "the summary reads no request count: nothing on any screen shows one",
   );
+  assert.ok(!("open_requests" in summary), "and returns none");
 
   // The scoping must reach the DB, not be applied in JS after an unscoped read.
   const reviewCall = calls.find((c) => c.table === "marketing_review");
@@ -738,7 +727,7 @@ async function brandBoundaryChecks() {
   // The empty set is a real answer, and an empty `.in()` list is the trap: the
   // guard has to skip the query, not send `.in(asset_id, [])` and hope.
   const emptyDb = {
-    from(table: string) {
+    from() {
       const api: Record<string, unknown> = {
         select: () => api,
         eq: () => api,
@@ -747,7 +736,7 @@ async function brandBoundaryChecks() {
         order: () => api,
         range: () => api,
         then: (resolve: (v: unknown) => void) =>
-          resolve({ error: null, data: [], count: table === "marketing_request" ? 7 : 99 }),
+          resolve({ error: null, data: [], count: 99 }),
       };
       return api;
     },
@@ -756,12 +745,6 @@ async function brandBoundaryChecks() {
   const empty = await getMarketingSummary("tenant-empty", emptyDb);
   assert.equal(empty.total, 0);
   assert.equal(empty.open_reviews, 0, "no own assets means no own reviews, not every review");
-  assert.equal(
-    empty.open_requests,
-    7,
-    "with no own assets only UNBOUND requests remain ours (7 from the stub), " +
-      "not the tenant-wide total",
-  );
 }
 
 // ── failure paths: a broken query must never render as an empty dashboard ─────
@@ -843,14 +826,14 @@ async function degradedChecks() {
     "the assets that DID load are still reported — degrading is not blanking the screen",
   );
 
-  // Same for the request count. The corpus read left the summary (2026-10-01):
-  // a broken training-material read now degrades only getCorpusStats, which
-  // the Training tab and card render as "Couldn't read the training material"
-  // (tests/content-speed.test.ts), and no longer blanks the Library's numbers.
-  for (const table of ["marketing_request"]) {
-    const r = await getMarketingSummary("t", dbFailing({ table, onCall: 1, err: BROKEN }));
-    assert.equal(r.degraded, true, `a failed ${table} read must degrade the summary`);
-  }
+  // NOT for tables no screen shows. The request count left with the Requests
+  // card (D16; review of #542, F5): a broken request table had marked the
+  // summary degraded, hiding the pipeline over a number nothing draws. The
+  // corpus read left the summary on 2026-10-01: a broken training-material
+  // read degrades only getCorpusStats, which the Training tab and card render
+  // as "Couldn't read the training material" (tests/content-speed.test.ts).
+  const requestsBroken = await getMarketingSummary("t", dbFailing({ table: "marketing_request", onCall: 1, err: BROKEN }));
+  assert.equal(requestsBroken.degraded, false, "a broken request table is not the Library's failure");
   const corpusBroken = await getMarketingSummary("t", dbFailing({ table: "marketing_corpus", onCall: 1, err: BROKEN }));
   assert.equal(corpusBroken.degraded, false, "a broken corpus read is not the Library's failure");
   const statsBroken = await getCorpusStats("t", dbFailing({ table: "marketing_corpus", onCall: 1, err: BROKEN }) as unknown as Parameters<typeof getCorpusStats>[1]);
