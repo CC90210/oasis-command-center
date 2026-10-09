@@ -27,11 +27,13 @@
  *                       Team row (the same resolver, wired as pinned below),
  *                       System health's card (rendered).
  *   Your own Telegram   Notifications (rendered) and the bot's setup card (its
- *                       API, which the card prints verbatim).
+ *                       API, and the card drawn from it once loaded), unlinked
+ *                       and with a linked chat.
  *   Google mailbox      Connections and the department chips (one resolver);
  *                       the drawer's key form has no verdict of its own.
- *   Your own Google     the Settings panel (its API), the Connections card's
- *                       line, Today's calendar line (loader + rendered).
+ *   Your own Google     the Settings panel (its API, and the panel drawn from
+ *                       it once loaded), the Connections card's line, Today's
+ *                       calendar line (loader + rendered).
  *   Slack               the Connections card, the department Slack line and the
  *                       AI Team row (rendered).
  *   OASIS's server      a Test of the Telegram bot OASIS sets on its server,
@@ -112,6 +114,10 @@ function renderClient(cases: unknown[]): Record<string, string> {
   return (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
 }
 const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+/** The first status line in drawn markup (components/os/connections/StatusLine: its label span). */
+const statusLabelIn = (html: string) => text(/<span class="truncate">([\s\S]*?)<\/span>/.exec(html)?.[1] ?? "(no status line)");
+/** The one-line notice under a Connections action (components/os/connections/Notice). */
+const noticeIn = (html: string) => text(/<p role="status"[^>]*>([\s\S]*?)<\/p>/.exec(html)?.[1] ?? "(no notice)");
 
 /** Every string a server page's tree renders as text. */
 function textOf(node: unknown): string {
@@ -176,7 +182,7 @@ async function main() {
   const connectors = await import("../lib/os/connectors");
   const { loadConnectorFacts, loadConnectorStatuses, loadWorkspaceConnectorStatus } = await import("../components/os/connections/connector-facts");
   const store = await import("../lib/tenant-integration-store");
-  const { setUserIntegrationBundle } = await import("../lib/user-integration-store");
+  const { setUserIntegrationBundle, setUserIntegrationValue } = await import("../lib/user-integration-store");
   const { heartbeatVerdict } = await import("../lib/integrations/presence-heartbeat");
   const { loadCalendarStatus } = await import("../components/os/today/loaders");
   const { loadSlackPresence, slackHomeFor } = await import("../lib/slack/status");
@@ -308,16 +314,32 @@ async function main() {
   });
 
   // -- 2. Telegram: your own bot ------------------------------------------------------
-  await check("your own Telegram bot: Notifications and the bot's setup card (its API) say the same, and nothing promises alerts", async () => {
+  await check("your own Telegram bot: Notifications, the bot's setup card (its API) and the card as drawn say the same; a linked chat is 'Linked', and nothing promises alerts", async () => {
+    // The setup card as a person sees it once it has loaded, from the route's own JSON.
+    const drawnCard = (api: Json) =>
+      statusLabelIn(renderClient([{ id: "card", kind: "telegram_card", responses: { "/api/integrations/personal/telegram": api } }]).card);
     await login(USERS.clientA);
     const [, yours] = await notifications();
     const api = await routeJson(personalTelegramRoute.GET());
     agree("Your own Telegram bot (Client A owner)", [
-      ["Settings > Notifications (your own bot)", kl(yours)],
-      ["Setup card (GET personal/telegram status)", kl(api.status as Status)],
+      ["Settings > Notifications (your own bot)", yours.label],
+      ["Setup card (GET personal/telegram status)", (api.status as Status).label],
+      ["Setup card (drawn)", drawnCard(api)],
     ]);
     assert.equal(yours.label, "Bot saved · chat not linked yet");
+    // She links her chat: "Linked", never "Connected" (nothing sends to a personal bot yet).
+    assert.ok((await setUserIntegrationValue(CLIENT_A, USERS.clientA.id, "telegram_bot", "chat_id", "424242")).ok);
+    const [, linked] = await notifications();
+    const linkedApi = await routeJson(personalTelegramRoute.GET());
+    agree("Your own Telegram bot, chat linked (Client A owner)", [
+      ["Settings > Notifications (your own bot)", linked.label],
+      ["Setup card (GET personal/telegram status)", (linkedApi.status as Status).label],
+      ["Setup card (drawn)", drawnCard(linkedApi)],
+    ]);
+    assert.equal(linked.label, "Linked · @alice_alerts_bot");
     await login(USERS.cc);
+    const ccApi = await routeJson(personalTelegramRoute.GET());
+    assert.equal(drawnCard(ccApi), "Not set up", "CC has no personal bot, and the card says so");
     const [workspace, ccYours] = await notifications();
     // CC's example, exactly: his workspace bot is set up, his own bot is not,
     // and the page says which is which instead of "Telegram is not set up".
@@ -365,10 +387,13 @@ async function main() {
           kind: "schedule",
           props: { blocks: null, meetings: null, partial: false, calendar: today, connectHref: connectors.connectorHref("google-workspace") },
         },
+        // The panel as a person sees it once it has loaded, from the route's own JSON.
+        { id: "panel", kind: "personal_google_panel", responses: { "/api/integrations/personal/status": api } },
       ]);
       const todayLine = today.value.personal.connected ? "Connected" : today.value.personal.label;
       agree(`Your own Google account (${tenant === OASIS ? "CC" : "Client A owner"})`, [
         ["Settings panel (GET personal/status)", panel],
+        ["Settings panel (drawn)", statusLabelIn(markup.panel)],
         ["Settings > Connections, Google card", cardLine],
         ["Today, calendar line (loader)", todayLine],
         ["Today, calendar line (rendered)", /Google Calendar · (Connected|Wrong Google account|Reconnect once|Not connected)/.exec(text(markup.today))?.[1] ?? "(none)"],
@@ -671,6 +696,55 @@ async function main() {
       const copy = [s.description, ...s.fields.map((f) => `${f.label} ${f.hint ?? ""}`)].join(" ");
       assert.doesNotMatch(copy, /GMAIL_|TELEGRAM_|<digits>|SMTP|stays off until/, s.service);
     }
+  });
+
+  // -- 9. A save or a removal that stops part way says what changed (F6) ---------------------
+  await check("an app's key form says which keys a save or a removal changed when a request fails part way, never 'Nothing else changed'; a failed read says try again once", async () => {
+    const failed = { status: 500, body: { ok: false, error: "upsert_failed" } };
+    const storedRow = (field_key: string) => ({ service: "telegram", field_key, has_value: true, last_tested_at: null, last_test_ok: null, last_test_error: null, source: "stored" });
+    // Each field is its own request: the first is saved, the second refused, the third never sent.
+    const markup = renderClient([
+      {
+        id: "save",
+        kind: "keys_form",
+        service: "twilio",
+        appName: "Twilio",
+        replies: {
+          "GET /api/integrations/keys": [{ status: 200, body: { ok: true, rows: [] } }],
+          "POST /api/integrations/keys": [{ status: 200, body: { ok: true, id: "k1" } }, failed],
+        },
+        steps: [
+          // Not SID-shaped: the form checks nothing itself, and a real-looking SID trips secret scanning.
+          { type: "type", field: "account_sid", value: "AC-status-integrity-test" },
+          { type: "type", field: "auth_token", value: "status-integrity-twilio-token" },
+          { type: "type", field: "from_number", value: "+14165551212" },
+          { type: "submit" },
+        ],
+      },
+      {
+        id: "remove",
+        kind: "keys_form",
+        service: "telegram",
+        appName: "Telegram",
+        replies: {
+          "GET /api/integrations/keys": [{ status: 200, body: { ok: true, rows: [storedRow("bot_token"), storedRow("chat_id")] } }],
+          "DELETE /api/integrations/keys": [{ status: 200, body: { ok: true } }, failed],
+        },
+        steps: [{ type: "click", button: "Remove" }, { type: "click", button: "Remove" }],
+      },
+      { id: "read_failed", kind: "keys_form", service: "telegram", appName: "Telegram", replies: { "GET /api/integrations/keys": [failed] }, steps: [] },
+    ]);
+    assert.equal(
+      noticeIn(markup.save),
+      "Account SID was saved. Auth Token was not saved: OASIS could not finish that just now. Try again in a minute. From Number was not saved either.",
+    );
+    assert.equal(
+      noticeIn(markup.remove),
+      "Bot Token was removed. Destination Chat ID was not removed: OASIS could not finish that just now. Try again in a minute.",
+    );
+    for (const html of Object.values(markup)) assert.doesNotMatch(text(html), /Nothing else changed/i);
+    assert.match(text(markup.read_failed), /The saved keys could not be read, so nothing here is shown as set or missing\. Refresh the page in a minute to try again\./);
+    assert.equal((text(markup.read_failed).match(/try again/gi) ?? []).length, 1, "one instruction, not two stacked");
   });
 
   finish("status-integrity");
