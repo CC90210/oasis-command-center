@@ -48,12 +48,27 @@ import {
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
-import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
-import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
+import {
+  billingForBridge,
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  modelCallMeter,
+  utf8Length,
+  type CallEnd,
+  type ModelCallMeter,
+} from "@/lib/ai/usage";
+import { meterWithFallbackReason, resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
-import { bridgeEngineLine, harnessEngineLine, spendFor, type AgentEngineChoice, type EngineSpend } from "@/lib/ai/agent-engine";
+import {
+  bridgeEngineLine,
+  engineFallbackReason,
+  harnessEngineLine,
+  spendFor,
+  type AgentEngineChoice,
+  type EngineSpend,
+} from "@/lib/ai/agent-engine";
 import { harnessForDepartment } from "@/lib/admin/harness-targets";
 import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
 import { streamBridgeTurn, type BridgeCaller, type BridgeEngine } from "@/lib/ai/bridge-turn";
@@ -308,7 +323,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // refused before a model is called, and it is recorded as the channel's last
   // turn, because it is a verdict every channel shares.
   // A turn on the paired computer spends no API credits, so no budget applies.
-  const billing = billingForKey(provider, keySource);
+  const billing = viaBridge ? billingForBridge(viaBridge.engine) : billingForKey(provider, keySource);
   try {
     const exhausted = viaBridge ? null : await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
     if (exhausted) {
@@ -354,8 +369,12 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     userId: req.userId,
     jobId: req.jobId ?? null,
   });
-  // A turn on the paired computer sends no hosted model: nothing to resolve or meter.
-  const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, meter);
+  // A turn on the paired computer sends no hosted model, so there is nothing to
+  // resolve; its one row is written by streamAgentTurn (meteredBridgeTurn). A
+  // turn that fell back from the chosen engine records that on every call it
+  // opens, INSIDE the model-swap wrapper so both reasons survive.
+  const apiMeter = bridgeEngine && fellBackFrom ? meterWithFallbackReason(meter, engineFallbackReason(bridgeEngine)) : meter;
+  const picked = viaBridge ? { model, swap: null, meter } : resolveCall(provider, model, apiMeter);
   const brain = keySource === "tenant" && hasUsableKey(cfg) ? departmentBrain({ provider, model: picked.model }) : null;
   const engine: TurnEngine = viaBridge
     ? {
@@ -396,6 +415,88 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   };
 }
 
+/** What the ledger calls the engine: the app's id ("claude", "codex", "gemini") or the local model's name. */
+function bridgeLedgerModel(engine: BridgeEngine): string {
+  return engine.kind === "cli" ? engine.cli : engine.model;
+}
+
+/** The ledger's error_code for a bridge stream error: the same words the channel shows (outcome.ts), empty replies as the providers record them. */
+function bridgeErrorCode(message: string): string {
+  const empty = /^empty_reply:(thinking|blocked|empty)$/.exec(message);
+  return empty ? `empty_reply_${empty[1]}` : classifyStreamError(message);
+}
+
+/**
+ * One ledger row for one department turn on the paired computer, whatever its
+ * end. Passes every event through unchanged.
+ *
+ *   - provider "bridge", model the app or local model; billing subscription or
+ *     local (billingForBridge), so nothing is priced or reserved against the
+ *     budget; cost is a known 0 (nothing billed to an API account).
+ *   - text arrived and the stream finished: ok. The bridge often reports no
+ *     token counts, so output_tokens falls back to a characters/4 estimate: an
+ *     ok row never carries 0 for a reply that had words, and the health check's
+ *     "ok with 0 output" rule stays a real alarm.
+ *   - an error event: that failure's code (bridge_unreachable, cli_failed, ...).
+ *   - a stream that ends with no text, or no end at all: a FAILURE
+ *     (empty_reply_*), never ok.
+ *   - the consumer stopping early: cancelled.
+ * Latency runs from the first pull, the start of the turn.
+ */
+export async function* meteredBridgeTurn(
+  meter: ModelCallMeter,
+  engine: BridgeEngine,
+  inner: AsyncGenerator<StreamEvent>,
+  size: { maxOutputTokens: number; promptBytes: number },
+): AsyncGenerator<StreamEvent> {
+  const call = await meter.begin({
+    provider: "bridge",
+    model: bridgeLedgerModel(engine),
+    maxOutputTokens: size.maxOutputTokens,
+    promptBytes: size.promptBytes,
+  });
+  let chars = 0;
+  let reportedIn = 0;
+  let reportedOut = 0;
+  let end: CallEnd | null = null;
+  const empty: CallEnd = {
+    outcome: "error",
+    errorCode: "empty_reply_empty",
+    usage: { inputTokens: null, outputTokens: 0, cacheReadTokens: null, cacheWriteTokens: null },
+    notBilled: true,
+  };
+  try {
+    for await (const ev of inner) {
+      if (ev.type === "delta") chars += ev.text.length;
+      else if (ev.type === "done") {
+        reportedIn = ev.inputTokens;
+        reportedOut = ev.outputTokens;
+      } else if (ev.type === "error") {
+        end = { outcome: "error", errorCode: bridgeErrorCode(ev.message), usage: null, notBilled: true };
+      }
+      yield ev;
+    }
+    end ??=
+      chars > 0
+        ? {
+            outcome: "ok",
+            usage: {
+              inputTokens: reportedIn > 0 ? reportedIn : null,
+              outputTokens: reportedOut > 0 ? reportedOut : Math.ceil(chars / 4),
+              cacheReadTokens: null,
+              cacheWriteTokens: null,
+            },
+            notBilled: true,
+          }
+        : empty;
+  } catch (err) {
+    end = { outcome: "error", errorCode: "stream_failed", usage: null, notBilled: true };
+    throw err;
+  } finally {
+    await call.finish(end ?? { outcome: "cancelled", usage: null, notBilled: true });
+  }
+}
+
 /** The provider stream for a prepared turn (the web route relays it as SSE). */
 export function streamAgentTurn(
   turn: PreparedTurn,
@@ -403,17 +504,25 @@ export function streamAgentTurn(
   maxTokens = DEPARTMENT_REPLY_MAX_TOKENS,
 ): AsyncGenerator<StreamEvent> {
   // The paired computer (lib/ai/bridge-turn.ts): the same SSE shape, no key.
+  // No hosted model is called, but the turn still leaves its one ledger row,
+  // or a broken CLI turn would be invisible to the department-chat health check.
   if (turn.engine.kind !== "api") {
-    return streamBridgeTurn({
-      caller: turn.engine.caller,
-      engine: turn.engine.kind === "cli" ? { kind: "cli", cli: turn.engine.cli } : { kind: "local", model: turn.engine.model },
-      agentSlug: turn.agentSlug,
-      tenantSlug: turn.engine.tenantSlug,
-      system: turn.system,
-      messages,
-      maxTokens,
-      harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
-    });
+    const engine: BridgeEngine = turn.engine.kind === "cli" ? { kind: "cli", cli: turn.engine.cli } : { kind: "local", model: turn.engine.model };
+    return meteredBridgeTurn(
+      turn.meter,
+      engine,
+      streamBridgeTurn({
+        caller: turn.engine.caller,
+        engine,
+        agentSlug: turn.agentSlug,
+        tenantSlug: turn.engine.tenantSlug,
+        system: turn.system,
+        messages,
+        maxTokens,
+        harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
+      }),
+      { maxOutputTokens: maxTokens, promptBytes: utf8Length(JSON.stringify({ system: turn.system, messages })) },
+    );
   }
   const isOllama = turn.provider === "ollama";
   return streamChat({

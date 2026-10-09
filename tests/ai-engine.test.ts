@@ -531,6 +531,166 @@ async function main() {
     await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
+  // -- The ledger sees the engine (CC, 2026-10-09: the product catches its own errors) --
+  // lib/health/department-chat-checks.ts reads ai_usage_events. A turn that fell
+  // back from the chosen engine, and a turn that ran on the paired computer,
+  // used to leave nothing to read.
+  const usageRows = async () =>
+    (await db.execute("SELECT * FROM ai_usage_events ORDER BY occurred_at, id")).rows.map((r) => ({ ...r }) as Record<string, unknown>);
+  const drainTurn = async (turn: Parameters<typeof streamAgentTurn>[0]) => {
+    const out = [];
+    for await (const ev of streamAgentTurn(turn, [{ role: "user", content: "How is the pipeline?" }])) out.push(ev);
+    return out;
+  };
+  const bridgeTurnFor = async () => {
+    const prepared = await oasisTurn("sales", "sdr", async () => ccCaller);
+    assert.ok(prepared.ok && prepared.turn.engine.kind !== "api", JSON.stringify(prepared));
+    if (!prepared.ok) throw new Error("not prepared");
+    return prepared.turn;
+  };
+
+  await check("a turn that fell back from the chosen engine records engine_unreachable:<app> on its API call", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const prepared = await oasisTurn("sales", "sdr", async () => null);
+    assert.ok(prepared.ok && prepared.turn.engine.kind === "api" && prepared.turn.engine.fellBackFrom !== null);
+    if (!prepared.ok) return;
+    answer = (s) => (s.url.includes("anthropic.com") ? anthropicOk("Answered by the API account.") : new Response("x", { status: 599 }));
+    await drainTurn(prepared.turn);
+    const rows = await usageRows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].fallback_reason, "engine_unreachable:codex");
+    assert.equal(rows[0].billing_mode, "byo_key", "the API account answered and is billed as before");
+    assert.equal(rows[0].outcome, "ok");
+    // A Slack mention (no resolver) falls back the same way; a local engine says "local".
+    await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
+    const slack = await oasisTurn("sales", "sdr", null);
+    assert.ok(slack.ok);
+    if (!slack.ok) return;
+    await db.execute("DELETE FROM ai_usage_events");
+    await drainTurn(slack.turn);
+    assert.equal((await usageRows())[0].fallback_reason, "engine_unreachable:local");
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("a turn answered by its chosen engine records no fallback; a model swap and an engine fallback are BOTH kept, joined with +", async () => {
+    const { meterWithFallbackReason, resolveCall } = await import("../lib/ai/model-registry");
+    const { engineFallbackReason } = engineLib;
+    const seen: Array<string | null | undefined> = [];
+    const spy = {
+      context: {} as never,
+      totals: () => ({ calls: 0, costMicroUsd: 0, unknownCostCalls: 0 }),
+      begin: async (call: { fallbackReason?: string | null }) => {
+        seen.push(call.fallbackReason);
+        return { finish: async () => undefined };
+      },
+    };
+    const begin = { provider: "anthropic", model: "m", maxOutputTokens: 1, promptBytes: 1 };
+    const engineOnly = meterWithFallbackReason(spy, engineFallbackReason({ kind: "cli", cli: "claude" }));
+    await engineOnly.begin(begin);
+    const retired = resolveCall("anthropic", "claude-3-5-sonnet-20241022", engineOnly);
+    assert.ok(retired.swap, "the saved model is gone, so it is swapped");
+    await retired.meter.begin(begin);
+    const swapOnly = resolveCall("anthropic", "claude-3-5-sonnet-20241022", spy);
+    await swapOnly.meter.begin(begin);
+    assert.equal(seen[0], "engine_unreachable:claude");
+    assert.equal(seen[1], `${retired.swap!.fallbackReason}+engine_unreachable:claude`);
+    assert.equal(seen[2], swapOnly.swap!.fallbackReason, "without an engine fallback the swap reason is unchanged");
+    assert.equal(engineFallbackReason({ kind: "local", model: "llama3.3" }), "engine_unreachable:local");
+    assert.equal(meterWithFallbackReason(spy, null), spy, "no reason, no wrapper");
+    // An engine that answered writes nothing of the kind (next test reads the row).
+  });
+
+  await check("a department turn on the paired computer writes exactly ONE row: provider bridge, the app named, cost 0, no reservation", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const turn = await bridgeTurnFor();
+    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
+    const events = await drainTurn(turn);
+    assert.deepEqual(events, [{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }], "the turn's events are unchanged");
+    const rows = await usageRows();
+    assert.equal(rows.length, 1, "one row per bridge turn");
+    const r = rows[0];
+    assert.deepEqual(
+      [r.provider, r.model, r.surface, r.auth_kind, r.billing_mode, r.department_key, r.outcome, r.error_code, r.fallback_reason],
+      ["bridge", "codex", "agents.chat", "subscription", "subscription", "sales", "ok", null, null],
+    );
+    assert.equal(r.cost_micro_usd, 0);
+    assert.equal(r.cost_source, "none");
+    assert.equal(r.reserved_micro_usd, null, "nothing reserved");
+    assert.equal(r.expires_at, null);
+    assert.equal(Number(r.output_tokens), 5, "the bridge reported none: characters / 4, rounded up, so a reply with words is never 0");
+    assert.ok(r.latency_ms !== null && Number(r.latency_ms) >= 0, "latency runs from the start of the turn");
+  });
+
+  await check("the bridge's own token counts are recorded when it reports them; a local model is named and billed local", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
+    const turn = await bridgeTurnFor();
+    answer = () => sse([["delta", { text: "local hi" }], ["done", { input_tokens: 31, output_tokens: 9 }]]);
+    await drainTurn(turn);
+    const [r] = await usageRows();
+    assert.deepEqual([r.provider, r.model, r.auth_kind, r.billing_mode, r.outcome], ["bridge", "llama3.3", "local", "local", "ok"]);
+    assert.deepEqual([Number(r.input_tokens), Number(r.output_tokens)], [31, 9]);
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+  });
+
+  await check("a bridge turn that fails writes a failure row with the channel's code; an EMPTY reply is a failure, never ok", async () => {
+    const turn = await bridgeTurnFor();
+    const run = async (respond: () => Response) => {
+      await db.execute("DELETE FROM ai_usage_events");
+      answer = respond;
+      await drainTurn(turn);
+      const rows = await usageRows();
+      assert.equal(rows.length, 1);
+      return rows[0];
+    };
+    const down = await run(() => {
+      throw new TypeError("fetch failed");
+    });
+    assert.deepEqual([down.outcome, down.error_code, down.cost_micro_usd], ["error", "bridge_unreachable", 0]);
+    const cli = await run(() => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]));
+    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_failed"]);
+    const http = await run(() => new Response("no", { status: 503 }));
+    assert.deepEqual([http.outcome, http.error_code], ["error", "bridge_unreachable"]);
+    const empty = await run(() => sse([["done", { input_tokens: 5, output_tokens: 0 }]]));
+    assert.deepEqual([empty.outcome, empty.error_code, Number(empty.output_tokens)], ["error", "empty_reply_empty", 0]);
+    const blank = await run(() => sse([["delta", { text: "   " }], ["done", {}]]));
+    assert.equal(blank.outcome, "error", "whitespace is not an answer");
+  });
+
+  await check("a bridge turn reserves no budget: a workspace at its cap still answers on its paired computer, and no reservation is left", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const month = new Date().toISOString().slice(0, 7);
+    await db.execute({
+      sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
+            VALUES (?, ?, 1, 0, 1, ?, ?)`,
+      args: [OASIS, month, stamp, stamp],
+    });
+    try {
+      const turn = await bridgeTurnFor();
+      answer = () => bridgeOk("Still answering.");
+      const events = await drainTurn(turn);
+      assert.equal(events[0].type, "delta");
+      const rows = await usageRows();
+      assert.deepEqual(rows.map((r) => [r.outcome, r.reserved_micro_usd]), [["ok", null]]);
+      assert.equal(rows.filter((r) => r.outcome === "pending").length, 0);
+      const budget = (await db.execute({ sql: "SELECT reserved_micro_usd FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] })).rows[0];
+      assert.equal(Number(budget.reserved_micro_usd), 0, "the cap's reserved total did not move");
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
+    }
+  });
+
+  await check("a consumer that stops reading leaves a cancelled row, not an ok one", async () => {
+    await db.execute("DELETE FROM ai_usage_events");
+    const turn = await bridgeTurnFor();
+    answer = () => bridgeOk("A long answer the reader walks away from.");
+    for await (const ev of streamAgentTurn(turn, [{ role: "user", content: "hi" }])) {
+      if (ev.type === "delta") break;
+    }
+    const [r] = await usageRows();
+    assert.equal(r.outcome, "cancelled");
+  });
+
   await check("one rule for who runs which app: a member is pinned to Claude Code with its tools switched off; the proxy route uses the same rule", () => {
     const member = policy.bridgeCliPolicy("closer", "codex");
     assert.equal(member.cliProvider, "claude");

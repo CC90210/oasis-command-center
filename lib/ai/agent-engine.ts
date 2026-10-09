@@ -121,6 +121,17 @@ export function harnessRouteFor(choice: AgentEngineChoice): { mode: "cli" | "clo
   return { mode: "cloud_only", runtime: "claude", note: null };
 }
 
+/**
+ * The code a turn leaves in ai_usage_events.fallback_reason when the chosen
+ * engine could not answer and the API account did: `engine_unreachable:claude`
+ * (or codex, gemini, local). A code, never prose; lib/health/department-chat-
+ * checks.ts reads it back into words, so keep the two in step.
+ */
+export const ENGINE_FALLBACK_PREFIX = "engine_unreachable:";
+export function engineFallbackReason(choice: Exclude<AgentEngineChoice, { kind: "api" }>): string {
+  return `${ENGINE_FALLBACK_PREFIX}${choice.kind === "cli" ? choice.cli : "local"}`;
+}
+
 /** "Agents: ..." in the coding harness header: the choice in a few words. */
 export function agentsEngineLine(choice: AgentEngineChoice): string {
   return choice.kind === "api" ? "your AI account (API credits)" : bridgeEngineLine(choice);

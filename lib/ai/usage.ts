@@ -912,6 +912,18 @@ export function billingForKey(provider: string, keySource: "tenant" | "platform"
   return { authKind: "api_key", billingMode: keySource === "platform" ? "platform" : "byo_key" };
 }
 
+/**
+ * A department turn on the paired computer (lib/ai/bridge-turn.ts): an AI app
+ * on its own sign-in is a flat plan, a local model is the tenant's own machine.
+ * Neither is metered, so neither is priced, reserved against the budget or
+ * capped (isMetered), yet the row is still written.
+ */
+export function billingForBridge(engine: { kind: "cli" | "local" }): { authKind: AuthKind; billingMode: BillingMode } {
+  return engine.kind === "cli"
+    ? { authKind: "subscription", billingMode: "subscription" }
+    : { authKind: "local", billingMode: "local" };
+}
+
 // ---------------------------------------------------------------------------
 // Read: the future AI brain settings page
 // ---------------------------------------------------------------------------

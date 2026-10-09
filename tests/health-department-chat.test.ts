@@ -144,6 +144,8 @@ async function main() {
   } = await import("../lib/health/department-chat-checks");
   const { allChecks, OASIS_GLOBAL_CHECKS, ESTATE_WIDE_CHECKS, runHealthChecks } = await import("../lib/health/runner");
   const { evaluate } = await import("../lib/health/checks-core");
+  const { meteredBridgeTurn } = await import("../lib/os/department-agent");
+  const { modelCallMeter, billingForBridge } = await import("../lib/ai/usage");
 
   const supa = getServiceSupabase();
   const outcomes = DEPARTMENT_CHAT_CHECKS.find((c) => c.id === "department_chat_outcomes")!;
@@ -427,6 +429,94 @@ async function main() {
     const healed = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 40 * MIN, sendTelegramImpl: send as never });
     assert.deepEqual(healed.recovered, ["department_chat_outcomes"]);
     assert.match(pages[pages.length - 1].text, /RECOVERED/);
+  });
+
+  // ── the engine fallback, in words ────────────────────────────────────────
+  await check("engine_unreachable:<app> reads as 'your PC's <app> couldn't be reached', alone or joined with a model swap", () => {
+    assert.match(plainFallback("engine_unreachable:claude"), /^your PC's Claude Code couldn't be reached, so the API account answered \(engine_unreachable:claude\)$/);
+    assert.match(plainFallback("engine_unreachable:codex"), /your PC's Codex couldn't be reached/);
+    assert.match(plainFallback("engine_unreachable:gemini"), /your PC's Gemini CLI couldn't be reached/);
+    assert.match(plainFallback("engine_unreachable:local"), /your PC's local model couldn't be reached/);
+    const both = plainFallback("model_retired:claude-3-5-sonnet-20241022+engine_unreachable:claude");
+    assert.match(both, /the chosen model claude-3-5-sonnet-20241022 is retired/);
+    assert.match(both, / and your PC's Claude Code couldn't be reached/);
+    assert.match(plainFallback("engine_unreachable:vim"), /no wording for \(engine_unreachable:vim\)/, "an unknown app is shown, not guessed");
+  });
+
+  await check("turns that fell back from the chosen engine warn, naming the engine; the chat itself is answering so outcomes stays quiet", async () => {
+    await reset();
+    await seed(
+      { dept: "sales", minsAgo: 5, fallback: "engine_unreachable:claude" },
+      { dept: "marketing", minsAgo: 15, fallback: "engine_unreachable:claude" },
+      { dept: "finance", minsAgo: 25 },
+    );
+    const r = await run(fallback);
+    assert.equal(r.verdict, "degraded");
+    assert.match(r.reason, /2 of 3 department chat turns in the last 6 h were answered by a fallback/);
+    assert.match(r.reason, /your PC's Claude Code couldn't be reached, so the API account answered/);
+    assert.equal((await run(outcomes)).verdict, "ok");
+  });
+
+  // ── turns on the paired computer reach the check through the real meter ──
+  const nowRun = (c: typeof outcomes) => runCheck(supa, OASIS, c, Date.now() + MIN);
+  type Ev = { type: "delta"; text: string } | { type: "done"; inputTokens: number; outputTokens: number } | { type: "error"; message: string };
+  /** One real bridge turn through meteredBridgeTurn and the real meter, writing the real row. */
+  async function bridgeTurn(events: Ev[], engine: { kind: "cli"; cli: "claude" } | { kind: "local"; model: string } = { kind: "cli", cli: "claude" }) {
+    const meter = modelCallMeter({ tenantId: OASIS, surface: "agents.chat", ...billingForBridge(engine), departmentKey: "sales", teammateId: "sdr" });
+    async function* inner() {
+      for (const ev of events) yield ev;
+    }
+    const seen: Ev[] = [];
+    for await (const ev of meteredBridgeTurn(meter, engine, inner(), { maxOutputTokens: 100, promptBytes: 50 })) seen.push(ev as Ev);
+    assert.deepEqual(seen, events, "the events pass through unchanged");
+  }
+
+  await check("a healthy turn on the paired computer is one row, and department_chat_outcomes reads it as ok", async () => {
+    await reset();
+    await bridgeTurn([{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }]);
+    const rows = (await db.execute("SELECT provider, model, outcome, output_tokens, cost_micro_usd, reserved_micro_usd FROM ai_usage_events")).rows;
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0].provider, rows[0].model, rows[0].outcome, rows[0].cost_micro_usd, rows[0].reserved_micro_usd], ["bridge", "claude", "ok", 0, null]);
+    assert.ok(Number(rows[0].output_tokens) > 0, "a reply with words never records 0 output");
+    const r = await nowRun(outcomes);
+    assert.equal(r.verdict, "ok", r.reason);
+    assert.match(r.reason, /1 department chat turn\(s\)/);
+  });
+
+  await check("a bridge turn that failed (computer unreachable / the app errored) makes department_chat_outcomes ALERT, in words", async () => {
+    await reset();
+    await bridgeTurn([{ type: "error", message: "bridge_unreachable:TypeError" }]);
+    let r = await nowRun(outcomes);
+    assert.equal(r.verdict, "failing");
+    assert.match(r.reason, /Sales: failing now, the paired computer could not be reached \(bridge_unreachable\)/);
+    await reset();
+    await bridgeTurn([{ type: "error", message: "cli_error:cli_not_found" }]);
+    r = await nowRun(outcomes);
+    assert.equal(r.verdict, "failing");
+    assert.match(r.reason, /the AI app on the paired computer could not answer \(cli_failed\)/);
+  });
+
+  await check("an EMPTY reply from the CLI alerts, whether it arrives as an error event or as a stream that simply ends", async () => {
+    await reset();
+    await bridgeTurn([{ type: "error", message: "empty_reply:empty" }]);
+    let r = await nowRun(outcomes);
+    assert.equal(r.verdict, "failing");
+    assert.match(r.reason, /the model sent back an empty reply \(empty_reply_empty\)/);
+    await reset();
+    await bridgeTurn([]); // the stream ended with nothing at all
+    r = await nowRun(outcomes);
+    assert.equal(r.verdict, "failing", "a stream with no events graded ok");
+    await reset();
+    await bridgeTurn([{ type: "done", inputTokens: 4, outputTokens: 0 }]); // finished, no text
+    assert.equal((await nowRun(outcomes)).verdict, "failing", "a finished stream with no text graded ok");
+  });
+
+  await check("a local model turn on the paired computer is named and graded the same way", async () => {
+    await reset();
+    await bridgeTurn([{ type: "error", message: "empty_reply:empty" }], { kind: "local", model: "llama3.3" });
+    const row = (await db.execute("SELECT provider, model, billing_mode FROM ai_usage_events")).rows[0];
+    assert.deepEqual([row.provider, row.model, row.billing_mode], ["bridge", "llama3.3", "local"]);
+    assert.equal((await nowRun(outcomes)).verdict, "failing");
   });
 
   // ── pure grading and wording ─────────────────────────────────────────────

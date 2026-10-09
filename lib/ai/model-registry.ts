@@ -645,6 +645,23 @@ export function meterWithSwap(meter: ModelCallMeter, swap: ModelSwap | null): Mo
 }
 
 /**
+ * A meter that adds `reason` to the fallback_reason of every call it opens,
+ * joined with "+" after any reason already there. It sits INSIDE meterWithSwap
+ * (wrap the raw meter first, resolveCall second), so a turn that fell back from
+ * its engine AND had its saved model swapped records both:
+ * `model_retired:<id>+engine_unreachable:claude`.
+ */
+export function meterWithFallbackReason(meter: ModelCallMeter, reason: string | null): ModelCallMeter {
+  if (!reason) return meter;
+  return {
+    context: meter.context,
+    totals: () => meter.totals(),
+    begin: (call: BeginCall): Promise<ModelCall> =>
+      meter.begin({ ...call, fallbackReason: [call.fallbackReason, reason].filter(Boolean).join("+") }),
+  };
+}
+
+/**
  * Resolve a call's model and meter together: the request sends the returned
  * model, and the returned meter records why it is not the saved one. Calling
  * it again on its own result changes nothing, so a turn resolved early (the

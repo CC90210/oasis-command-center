@@ -48,7 +48,7 @@
  */
 
 import "server-only";
-import { ENGINE_SETTINGS_HREF } from "@/lib/ai/agent-engine";
+import { CLI_ENGINE_LABEL, ENGINE_FALLBACK_PREFIX, ENGINE_SETTINGS_HREF, isCliEngine } from "@/lib/ai/agent-engine";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getTursoClient } from "@/lib/turso";
 import { isRetiredTenant } from "@/lib/tenant/retired";
@@ -142,8 +142,21 @@ const FALLBACK_WHY: Record<string, string> = {
   expired: "expired",
 };
 
-/** A fallback_reason ("model_retired:<id>") in words. Unknown shapes are shown, not hidden. */
+/**
+ * A fallback_reason in words. One turn can carry two reasons joined with "+"
+ * (lib/ai/model-registry.ts meterWithFallbackReason): the saved model was gone
+ * AND the chosen engine was unreachable. Unknown shapes are shown, not hidden.
+ */
 export function plainFallback(reason: string): string {
+  return reason.split("+").map(plainFallbackOne).join(" and ");
+}
+
+function plainFallbackOne(reason: string): string {
+  if (reason.startsWith(ENGINE_FALLBACK_PREFIX)) {
+    const which = reason.slice(ENGINE_FALLBACK_PREFIX.length);
+    const app = isCliEngine(which) ? CLI_ENGINE_LABEL[which] : which === "local" ? "local model" : null;
+    if (app) return `your PC's ${app} couldn't be reached, so the API account answered (${reason})`;
+  }
   const m = /^model_([a-z_]+):(.+)$/.exec(reason);
   if (m) return `the chosen model ${m[2]} is ${FALLBACK_WHY[m[1]] ?? m[1].replace(/_/g, " ")} (${reason})`;
   return `a fallback this monitor has no wording for (${reason})`;
