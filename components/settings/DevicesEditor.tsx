@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Plus, Copy, Clock, Download } from "lucide-react";
 import { InstallBridgeModal } from "./InstallBridgeModal";
+import { machineState } from "@/lib/devices/presence";
 
 type Device = {
   id: string;
@@ -28,8 +29,6 @@ type PairCode = {
   expires_at: string;
   ttl_minutes: number;
 };
-
-const FRESH_MS = 5 * 60 * 1000;
 
 function PairCodeBlock({
   code,
@@ -296,7 +295,9 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
       )}
       <ul className="divide-y divide-bg-border">
         {active.map((d) => {
-          const fresh = d.last_seen_at && Date.now() - new Date(d.last_seen_at).getTime() < FRESH_MS;
+          // The one online rule (lib/devices/presence.ts): idle is not online.
+          const state = machineState(d.last_seen_at, Date.now());
+          const fresh = state === "online";
           return (
             <li key={d.id} className="py-3 flex items-center justify-between gap-3">
               <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -305,7 +306,7 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm text-fg truncate" title={d.label}>{d.label}</span>
                     <span className={`text-[10px] uppercase tracking-wider font-bold ${fresh ? "text-accent" : "text-fg-dim"}`}>
-                      {fresh ? "online" : "offline"}
+                      {state}
                     </span>
                   </div>
                   <div className="text-[10px] text-fg-dim font-mono mt-0.5 truncate" title={d.machine_fingerprint || undefined}>

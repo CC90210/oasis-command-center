@@ -21,6 +21,7 @@ import type { DripCheck } from "./drip-checks";
 import { isProductionRuntime } from "./runtime-environment";
 import { FLEET_REPORTER_SERVICE, describeStatusReporter } from "@/lib/automations/worker-status";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { isOnline } from "@/lib/devices/presence";
 
 const OK = 0;
 const FAILING = 1;
@@ -28,7 +29,6 @@ const SILENT = 2;
 
 /** Generous on purpose: one missed 60s tick must not page anyone. */
 export const REPORTER_ALERT_AFTER_MS = 10 * 60_000;
-const BRIDGE_ONLINE_MS = 120_000;
 
 export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
   id: "fleet.worker_status_reporter",
@@ -54,8 +54,8 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
     ]);
     // A failed read is check_broken (null), never a quiet OK.
     if (pairing.error || reporter.error) return null;
-    const lastSeen = pairing.data?.[0]?.last_seen_at ? Date.parse(pairing.data[0].last_seen_at) : NaN;
-    const bridgeOnline = Number.isFinite(lastSeen) && endMs - lastSeen < BRIDGE_ONLINE_MS;
+    // The one online rule every screen uses (lib/devices/presence.ts).
+    const bridgeOnline = isOnline(pairing.data?.[0]?.last_seen_at ?? null, endMs);
     const row = reporter.data?.[0] as
       | { status: string; metadata: Record<string, unknown> | null; last_ping_at: string | null }
       | undefined;

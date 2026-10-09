@@ -94,7 +94,11 @@ export default async function DepartmentPage({
   // Routines feed both the panel and the Operations / Chief of Staff numbers:
   // read once, shared, while the channel check runs beside them.
   const routinesRead = loadTenantRoutines(tenantId);
-  const [channel, routines, numbers, approvals, slackPresence, connectorFacts] = await Promise.all([
+  // The app chips' facts are read only for those who manage connections, on a
+  // department with chips; everyone else's Slack line still needs the Slack
+  // card, read in this same batch rather than after it (PR #553 review F5).
+  const chipFacts = canManageConnections && profile.connections.length > 0;
+  const [channel, routines, numbers, approvals, slackPresence, connectorFacts, slackCardAlone] = await Promise.all([
     resolveChannelState(dept, viewer),
     routinesRead,
     routinesRead.then((r) => loadDepartmentNumbers(dept, viewer, r)),
@@ -112,9 +116,10 @@ export default async function DepartmentPage({
     // Where this department lives in Slack (lib/slack/status.ts).
     loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
     // Each app's status, from the facts Settings > Connections reads.
-    canManageConnections && profile.connections.length > 0
-      ? loadConnectorFacts({ tenantId, userId: viewer.surface.userId })
-      : Promise.resolve(null),
+    chipFacts ? loadConnectorFacts({ tenantId, userId: viewer.surface.userId }) : Promise.resolve(null),
+    // The Slack card alone, where the facts above are not read and this tab
+    // may name Slack channels (a department with a teammate).
+    binding.kind === "agent" && !chipFacts ? loadWorkspaceConnectorStatus(tenantId, "slack") : Promise.resolve(null),
   ]);
   const nowMs = Date.now();
   const apps = profile.connections.map((app) => {
@@ -125,18 +130,14 @@ export default async function DepartmentPage({
       status: connectorFacts && def ? resolveConnectorStatus(def, connectorFacts, nowMs) : null,
     };
   });
-  // The Slack card's own status, read only where this tab's Slack line would
+  // The Slack card's own status, used only where this tab's Slack line would
   // say the department answers there (Slack is installed): a failing
   // connection answers nobody, and the line then says the card's words
   // (connectionProblem). The facts above serve when they were read.
   const slackDef = connectorBySlug("slack");
   const slackProblem =
     binding.kind === "agent" && slackPresence.kind === "connected" && slackDef
-      ? connectionProblem(
-          connectorFacts
-            ? resolveConnectorStatus(slackDef, connectorFacts, nowMs)
-            : await loadWorkspaceConnectorStatus(tenantId, "slack", nowMs),
-        )
+      ? connectionProblem(connectorFacts ? resolveConnectorStatus(slackDef, connectorFacts, nowMs) : slackCardAlone)
       : null;
 
   const deptRoutines = routines.ok

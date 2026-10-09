@@ -57,7 +57,9 @@ import {
   loadHotReplies,
   loadRoutineHealth,
   loadSales,
+  loadTelegramCard,
   loadWorkspaceAlerts,
+  loadWorkspaceConnectionFacts,
   TODAY_READ_DEADLINE_MS,
   type OperatorDay,
 } from "@/components/os/today/loaders";
@@ -141,6 +143,8 @@ export type NeedsYouReads = {
   connections: Read<ConnectionAttention[]> | null;
   routines: Read<RoutineHealth> | null;
   alerts: Read<WorkspaceAlerts> | null;
+  /** The workspace's Telegram card, read beside the alerts for their Telegram note. */
+  telegramCard: Read<{ kind: string; label: string }> | null;
 };
 
 export async function loadNeedsYouReads(input: {
@@ -185,16 +189,21 @@ export async function loadNeedsYouReads(input: {
     TODAY_READ_DEADLINE_MS,
     "approvals",
   );
-  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId) : Promise.resolve(null);
+  // The connection cards' facts, read once when both Needs you's connection
+  // rows and the alerts' Telegram note are drawn (an owner's Today).
+  const connectionFacts = plan.connections && plan.alerts ? loadWorkspaceConnectionFacts(tenantId) : undefined;
+  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId, day.nowMs, connectionFacts) : Promise.resolve(null);
   // The Empire scheduler's OASIS rows are OASIS's own routines; only the
   // platform operator standing in OASIS counts them (empireRoutinesFor).
   const routinesP = plan.routines
     ? empireRoutinesFor(viewer, input.isPlatformOperator).then((empire) => loadRoutineHealth(tenantId, empire, day.nowMs))
     : Promise.resolve(null);
-  // This workspace's own open alert cards, for its owners/admins.
+  // This workspace's own open alert cards, for its owners/admins, and its
+  // Telegram card, which says whether the bot works now (model.ts alertTelegramNote).
   const alertsP = plan.alerts ? loadWorkspaceAlerts(tenantId) : Promise.resolve(null);
+  const telegramCardP = plan.alerts ? loadTelegramCard(tenantId, day.nowMs, connectionFacts) : Promise.resolve(null);
 
-  const [sales, delivery, inbound, cash, approvals, connections, routines, alerts] = await Promise.all([
+  const [sales, delivery, inbound, cash, approvals, connections, routines, alerts, telegramCard] = await Promise.all([
     salesP,
     deliveryP,
     inboundP,
@@ -203,8 +212,9 @@ export async function loadNeedsYouReads(input: {
     connectionsP,
     routinesP,
     alertsP,
+    telegramCardP,
   ]);
-  return { sales, delivery, inbound, cash, approvals, connections, routines, alerts };
+  return { sales, delivery, inbound, cash, approvals, connections, routines, alerts, telegramCard };
 }
 
 /** The one Needs-you list, from the reads above. */

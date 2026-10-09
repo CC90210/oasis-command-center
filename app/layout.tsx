@@ -297,9 +297,9 @@ export default async function RootLayout({
     // paint (P1 instant-load, 2026-09-01): they are cosmetic chrome, and
     // the bridge check is internally sequential (two round trips), so
     // they were the long pole of this block on every full page load. The
-    // "online means last_seen_at within 5 minutes" definition still lives
-    // solely in the shared bridge helper (lib/queries.ts), now called by
-    // the status route instead of here.
+    // online rule lives in lib/devices/presence.ts (read by the shared
+    // bridge helper, lib/queries.ts), now called by the status route
+    // instead of here.
     //
     // The operator verdict is the one platformOperatorP computed above (the
     // verified check: alias AND an OASIS owner/admin profile by auth id). It
@@ -336,7 +336,8 @@ export default async function RootLayout({
   // (showConnections below): one summary of the statuses Settings > Connections
   // shows (lib/os/connectors.ts connectionsHealth), started here so it runs
   // beside the manifest read instead of after it. Null is no dot: nothing set
-  // up, an unverified app or a failed read is never drawn green.
+  // up, an unverified app or a failed read is never drawn green. A count of
+  // workspace cards needs no read of the viewer's own Google (personal: false).
   const surfaceForConnections = viewerSurface?.ok ? viewerSurface : null;
   const connectionsStatusP: Promise<ConnectionsStatus | null> =
     !isFullBleed && !demoMode && !pathOverrideSlug && navPersona === "founder" && surfaceForConnections
@@ -345,7 +346,7 @@ export default async function RootLayout({
           safe(
             "layout.connections_status",
             withDeadline(
-              loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId }).then(
+              loadConnectorFacts({ tenantId: surfaceForConnections.tenantId, userId: surfaceForConnections.userId, personal: false }).then(
                 (facts) => connectionsDot(connectionsHealth(facts, Date.now())),
               ),
               RAIL_CONNECTIONS_DEADLINE_MS,

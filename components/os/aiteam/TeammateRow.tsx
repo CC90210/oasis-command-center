@@ -12,12 +12,14 @@
  * @mention" when none is, "not connected", or "app not set up" where OASIS's
  * Slack app is not on this deployment. Custom teammates do not answer in Slack,
  * so their rows say nothing about it. When the Slack card itself says the
- * connection needs attention or could not be checked, the row says the card's
- * words instead of the channels (lib/os/connectors.ts connectionProblem): a
- * mapped channel on an expired connection answers nobody. Telegram carries
- * alerts only today: no teammate answers there, and the row says that only
- * where the workspace has a Telegram team bot set up (the Telegram card's own
- * status), never as a fixed line.
+ * connection needs attention, the row says the card's words instead of the
+ * channels (lib/os/connectors.ts connectionProblem): a mapped channel on an
+ * expired connection answers nobody; a card that could not be checked says
+ * "couldn't check", never that Slack is broken. Telegram carries alerts only
+ * today: no teammate answers there, and the row names it only where the
+ * workspace has a Telegram team bot set up (the Telegram card's own status),
+ * never as a fixed line, and in the card's words when the card says the bot
+ * needs attention (a rejected token sends no alert).
  *
  * ON / OFF (W4a, S2-06). An owner or admin gets a real switch on every
  * teammate that has one (the page passes a TeammateToggle as `control`: POST
@@ -35,6 +37,7 @@ import Link from "next/link";
 import { Check } from "lucide-react";
 import type { TeammateHome } from "./roster";
 import type { SlackHome } from "@/lib/slack/status";
+import type { ConnectionProblem } from "@/lib/os/connectors";
 
 /**
  * ready          answering (a key on file, and no failed last turn)
@@ -94,14 +97,17 @@ export function Homes({
   slack,
   slackProblem,
   telegramSetUp,
+  telegramProblem,
 }: {
   web: WebState;
   webReason?: string | null;
   slack?: SlackHome;
-  /** The Slack card's own words when its connection is a problem (connectionProblem); null when it is fine. */
-  slackProblem?: string | null;
+  /** The Slack card's problem, or that it could not be checked (connectionProblem); null when it is fine. */
+  slackProblem?: ConnectionProblem | null;
   /** The workspace has a Telegram team bot set up (connectionSetUp of the Telegram card). */
   telegramSetUp?: boolean;
+  /** The Telegram card's problem (connectionProblem); null when it is fine. */
+  telegramProblem?: ConnectionProblem | null;
 }) {
   const slackAnswers = !!slack && (slack.kind === "channels" || slack.kind === "mention_only");
   return (
@@ -115,12 +121,19 @@ export function Homes({
         {webLabel(web, webReason)}
       </li>
       {slack &&
-        (slackAnswers && slackProblem ? (
-          <li className="text-status-warm">Slack · {slackProblem}</li>
+        (slackAnswers && slackProblem?.kind === "attention" ? (
+          <li className="text-status-warm">Slack · {slackProblem.label}</li>
+        ) : slackAnswers && slackProblem ? (
+          <li className="text-fg-dim">{slackLabel({ kind: "unknown" })}</li>
         ) : (
           <li className={slackAnswers ? "text-fg-muted" : "text-fg-dim"}>{slackLabel(slack)}</li>
         ))}
-      {telegramSetUp && <li className="text-fg-dim">Telegram · alerts only</li>}
+      {telegramSetUp &&
+        (telegramProblem?.kind === "attention" ? (
+          <li className="text-status-warm">Telegram · {telegramProblem.label}</li>
+        ) : (
+          <li className="text-fg-dim">Telegram · alerts only</li>
+        ))}
     </ul>
   );
 }
@@ -135,6 +148,7 @@ export function TeammateRow({
   slack,
   slackProblem,
   telegramSetUp,
+  telegramProblem,
   href,
   badge,
   control,
@@ -149,10 +163,12 @@ export function TeammateRow({
   webReason?: string | null;
   /** Where it lives in Slack; absent for teammates that do not answer there. */
   slack?: SlackHome;
-  /** The Slack card's words when its connection is a problem; null when it is fine. */
-  slackProblem?: string | null;
+  /** The Slack card's problem, or that it could not be checked; null when it is fine. */
+  slackProblem?: ConnectionProblem | null;
   /** The workspace has a Telegram team bot set up. */
   telegramSetUp?: boolean;
+  /** The Telegram card's problem; null when it is fine. */
+  telegramProblem?: ConnectionProblem | null;
   /** Where the name links: the teammate's channel or chat. */
   href?: string | null;
   /** A short state word on the right, e.g. "On" / "Off", for a viewer with no switch. */
@@ -189,7 +205,14 @@ export function TeammateRow({
             ))}
           </div>
         )}
-        <Homes web={web} webReason={webReason} slack={slack} slackProblem={slackProblem} telegramSetUp={telegramSetUp} />
+        <Homes
+          web={web}
+          webReason={webReason}
+          slack={slack}
+          slackProblem={slackProblem}
+          telegramSetUp={telegramSetUp}
+          telegramProblem={telegramProblem}
+        />
       </div>
       {control
         ? control

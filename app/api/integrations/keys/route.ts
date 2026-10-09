@@ -8,6 +8,15 @@
  *
  * Auth: session-cookie → tenant. Only `owner` / `admin` team roles
  * can mutate; everyone in the tenant can read presence.
+ *
+ * A save or a removal changes which values the app uses, so the workspace's
+ * last Test of the values set on OASIS's server no longer describes them and
+ * is cleared (lib/integrations/server-checks.ts): the card then says "not
+ * tested yet" instead of carrying a pass that tested other values. The clear
+ * runs FIRST, and a clear that fails stops the request before anything is
+ * saved or removed: the other order could change the value, fail to clear, and
+ * answer ok while the card applied the old pass to the new value (PR #558
+ * review). A save that fails after the clear only costs the old result.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -19,6 +28,7 @@ import {
   listTenantIntegrationStatus,
   tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
+import { clearIntegrationCheck } from "@/lib/integrations/server-checks";
 import {
   findTenantManuallyEditableIntegrationSchema,
   validateIntegrationValue,
@@ -90,6 +100,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  if (!(await clearIntegrationCheck(sess.tenantId, service))) {
+    return NextResponse.json({ ok: false, error: "check_clear_failed" }, { status: 500 });
+  }
   const result = await setTenantIntegrationValue({
     tenantId: sess.tenantId,
     service,
@@ -135,6 +148,9 @@ export async function DELETE(req: NextRequest) {
   }
   if (!schema.fields.some((field) => field.key === fieldKey)) {
     return NextResponse.json({ ok: false, error: "unknown_field" }, { status: 400 });
+  }
+  if (!(await clearIntegrationCheck(sess.tenantId, service))) {
+    return NextResponse.json({ ok: false, error: "check_clear_failed" }, { status: 500 });
   }
   const result = await deleteTenantIntegrationValue({
     tenantId: sess.tenantId,

@@ -51,6 +51,7 @@ import {
 import { loadOutcomeChecks, type OutcomeCheckData } from "@/lib/health/outcome-panel-data";
 import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { machineState, type MachineState } from "@/lib/devices/presence";
 
 export type AdminDb = ReturnType<typeof getServiceSupabase>;
 
@@ -58,9 +59,6 @@ export const ATTENTION_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const COLD_LEAD_MS = 14 * 24 * 60 * 60 * 1000;
 /** Display cap for the lists. Counts are always COUNT(*), never a list length. */
 export const ATTENTION_LIST_LIMIT = 50;
-/** The /operations thresholds against the bridge's 60 s heartbeat. */
-export const BRIDGE_ONLINE_MS = 90_000;
-export const BRIDGE_IDLE_MS = 5 * 60_000;
 
 /** A JSON column as an object, or null. A string that is not JSON is logged, not guessed at. */
 export function metadataObject(raw: unknown): Record<string, unknown> | null {
@@ -79,16 +77,8 @@ export function metadataObject(raw: unknown): Record<string, unknown> | null {
 
 // ── Paired computers ──────────────────────────────────────────────────────
 
-export type MachineState = "online" | "idle" | "offline";
-
-export function machineState(lastSeenAt: string | null, now: number): MachineState {
-  const t = lastSeenAt ? Date.parse(lastSeenAt) : NaN;
-  if (!Number.isFinite(t)) return "offline";
-  const age = now - t;
-  if (age < BRIDGE_ONLINE_MS) return "online";
-  if (age < BRIDGE_IDLE_MS) return "idle";
-  return "offline";
-}
+// The one online rule every screen uses (lib/devices/presence.ts).
+export { machineState, type MachineState };
 
 export type PairedMachine = { label: string; lastSeenAt: string | null; state: MachineState };
 

@@ -42,7 +42,7 @@ import type { WebState } from "./TeammateRow";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
 import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
-import { connectionProblem, connectionSetUp } from "@/lib/os/connectors";
+import { connectionProblem, connectionSetUp, type ConnectionProblem } from "@/lib/os/connectors";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -109,11 +109,12 @@ export type AiTeam = {
   builderHref: string | null;
   /**
    * The workspace's chat apps as their Connections cards see them, for every
-   * row: the Slack card's words when its connection is a problem (so no row
-   * names channels on a broken connection), and whether a Telegram team bot
-   * is set up (the only case a row may mention Telegram).
+   * row: the Slack card's problem, or that it could not be checked (so no row
+   * names channels on a broken connection), whether a Telegram team bot is set
+   * up (the only case a row may mention Telegram), and the Telegram card's
+   * problem (a rejected bot token sends no alert).
    */
-  channels: { slackProblem: string | null; telegramSetUp: boolean };
+  channels: { slackProblem: ConnectionProblem | null; telegramSetUp: boolean; telegramProblem: ConnectionProblem | null };
 };
 
 /** A department lead on the workspace roster (Settings and the AI Team list the same ones). */
@@ -243,21 +244,21 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     .map((t) => ({ teammate: t, depts: open.filter((d) => t.departments.includes(d.key)) }))
     .filter((l) => l.depts.length > 0);
 
-  const [readiness, agents, custom, turns, slackPresence] = await Promise.all([
+  // The Slack and Telegram cards' own statuses (Settings > Connections) are read
+  // in the same batch as the roster, not after it (PR #553 review F5): neither
+  // depends on it. The Slack card is used only where Slack is installed (the
+  // only case a row names channels); the Telegram card always (a row names
+  // Telegram only when it is set up).
+  const [readiness, agents, custom, turns, slackPresence, slackCardRead, telegramCard] = await Promise.all([
     workspaceChatReadiness(viewer),
     Promise.all(shown.map((l) => getAgentBySlug(l.teammate.slug, tenantId))),
     loadCustomTeammates(tenantId, teammates),
     readWorkspaceTurns(tenantId),
     loadSlackPresence(tursoConfigured() ? getTursoClient() : null, tenantId),
-  ]);
-  // The Slack and Telegram cards' own statuses (Settings > Connections), read
-  // after the roster so the page keeps its database reads bounded: the Slack
-  // card only where Slack is installed (the only case a row names channels),
-  // the Telegram card always (a row names Telegram only when it is set up).
-  const [slackCard, telegramCard] = await Promise.all([
-    slackPresence.kind === "connected" ? loadWorkspaceConnectorStatus(tenantId, "slack") : Promise.resolve(null),
+    loadWorkspaceConnectorStatus(tenantId, "slack"),
     loadWorkspaceConnectorStatus(tenantId, "telegram"),
   ]);
+  const slackCard = slackPresence.kind === "connected" ? slackCardRead : null;
   // Key readiness, the same answer the channel gets: no slug or no key is Not
   // connected; an AI settings read that failed is unknown, not "not connected".
   const web: "ready" | "not_connected" | "unknown" = !readiness.slug
@@ -350,6 +351,10 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     // The builder page itself refuses anyone below owner/admin
     // (app/agents/new), and needs a slug it recognises.
     builderHref: owner && readiness.slug ? "/agents/new" : null,
-    channels: { slackProblem: connectionProblem(slackCard), telegramSetUp: connectionSetUp(telegramCard) },
+    channels: {
+      slackProblem: connectionProblem(slackCard),
+      telegramSetUp: connectionSetUp(telegramCard),
+      telegramProblem: connectionProblem(telegramCard),
+    },
   };
 }
