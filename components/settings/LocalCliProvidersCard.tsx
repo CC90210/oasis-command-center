@@ -264,7 +264,15 @@ export function LocalCliProvidersCard({
 
     // The sign-in finishes in that computer's browser. The bridge re-checks
     // its apps on its next heartbeat (about a minute), so poll the report
-    // every 5 s for 3 minutes, one probe at a time.
+    // every 5 s for 3 minutes, one probe at a time. The sign-in request does
+    // not name a computer, so "ready" is only claimed for a computer that was
+    // NOT ready when it started: another computer already signed in proves
+    // nothing about this one.
+    const readyBefore = new Set(
+      state.kind === "ok"
+        ? state.machines.filter((m) => m.data[provider]?.installed && m.data[provider]?.authenticated).map((m) => m.id ?? m.label ?? "")
+        : [],
+    );
     const startMs = Date.now();
     let probeInFlight = false;
     const poll = async () => {
@@ -277,7 +285,12 @@ export function LocalCliProvidersCard({
       try {
         const next = await probeCliStatus(new AbortController().signal);
         setState(next);
-        const ready = next.kind === "ok" ? next.machines.find((m) => m.data[provider]?.installed && m.data[provider]?.authenticated) : undefined;
+        const ready =
+          next.kind === "ok"
+            ? next.machines.find(
+                (m) => m.data[provider]?.installed && m.data[provider]?.authenticated && !readyBefore.has(m.id ?? m.label ?? ""),
+              )
+            : undefined;
         if (next.kind === "ok" && ready) {
           const where = next.machines.length > 1 && ready.label ? ` on ${ready.label}` : "";
           setActionMessage({ kind: "ok", text: `${CLI_SIGN_IN[provider].label} is signed in and ready${where}.` });

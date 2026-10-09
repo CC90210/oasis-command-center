@@ -54,7 +54,7 @@ export function describeCliPanel(
   title: string;
   detail: string;
   /** One group per paired computer (label null = an old-shape report that names none). */
-  machines: Array<{ label: string | null; rows: CliPanelRows }> | null;
+  machines: Array<{ id: string | null; label: string | null; rows: CliPanelRows }> | null;
 } {
   if (result.kind === "network_error") {
     return { tone: "neutral", title: "Couldn't check your computer's AI tools", detail: "The Command Center didn't answer just now. This is not saying anything is down. It retries every 30 seconds.", machines: null };
@@ -74,6 +74,7 @@ export function describeCliPanel(
           ? `Each computer's own report from the last 5 minutes. ${AGENTS_RUN_ON_UNKNOWN_NOTE}`
           : "As your computer's bridge reported them in the last 5 minutes.",
         machines: machines.map((m) => ({
+          id: m.id,
           label: m.label,
           rows: (["claude", "codex", "gemini"] as const).map((name) => ({ name, info: m.data[name] })),
         })),
@@ -154,7 +155,7 @@ export function BridgeCliPanel({
       <div className="space-y-3">
         <p className="text-xs text-fg-muted">{view.detail}</p>
         {view.machines.map((m, i) => (
-          <div key={m.label ?? `computer-${i}`} className="space-y-2" data-cli-machine={m.label ?? "unlabeled"}>
+          <div key={m.id ?? m.label ?? `computer-${i}`} className="space-y-2" data-cli-machine={m.label ?? "unlabeled"}>
             {m.label && <div className="text-xs font-bold text-fg">{m.label}</div>}
             {m.rows.map((r) => (
               <CliRow key={r.name} name={r.name} info={r.info} />
