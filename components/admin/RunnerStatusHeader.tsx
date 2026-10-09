@@ -29,8 +29,9 @@ import { cliStatusState } from "@/lib/bridge-cli-status";
 const POLL_MS = 20_000;
 const WARM_STATUS_ROUTE = "/api/bridge/warm-status";
 
+type CliTools = Record<string, { installed: boolean; authenticated: boolean; checked?: boolean }>;
 type CliBody =
-  | { ok: true; data: Record<string, { installed: boolean; authenticated: boolean; checked?: boolean }> }
+  | { ok: true; machines?: Array<{ label: string | null; data: CliTools }>; data?: CliTools }
   | { ok: false; reason: string };
 
 export type RunnerSnapshot = {
@@ -82,17 +83,28 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
     if (status === 401) tools = "You're signed out.";
     else if (body.ok) {
       // lib/bridge-cli-status.ts's words: a check that did not finish is "not confirmed", never "not signed in".
-      const named = (want: string) =>
-        Object.entries(body.data)
-          .filter(([, v]) => cliStatusState({ installed: v.installed, authenticated: v.authenticated, checked: v.checked === true }) === want)
-          .map(([k]) => CLI_LABEL[k] ?? k);
-      const signedIn = named("ready");
-      const notSigned = named("needs_sign_in");
-      const unconfirmed = named("unknown");
+      // One line per paired computer, so two computers never read as one (CC, 2026-10-09).
+      const line = (data: CliTools) => {
+        const named = (want: string) =>
+          Object.entries(data)
+            .filter(([, v]) => cliStatusState({ installed: v.installed, authenticated: v.authenticated, checked: v.checked === true }) === want)
+            .map(([k]) => CLI_LABEL[k] ?? k);
+        const signedIn = named("ready");
+        const notSigned = named("needs_sign_in");
+        const unconfirmed = named("unknown");
+        return (
+          (signedIn.length ? `Signed in: ${signedIn.join(", ")}` : "No AI tool is signed in") +
+          (notSigned.length ? `. Needs sign-in: ${notSigned.join(", ")}` : "") +
+          (unconfirmed.length ? `. Sign-in not confirmed: ${unconfirmed.join(", ")}` : "")
+        );
+      };
+      const machines = body.machines ?? (body.data ? [{ label: null, data: body.data }] : []);
       tools =
-        (signedIn.length ? `Signed in: ${signedIn.join(", ")}` : "No AI tool is signed in") +
-        (notSigned.length ? `. Needs sign-in: ${notSigned.join(", ")}` : "") +
-        (unconfirmed.length ? `. Sign-in not confirmed: ${unconfirmed.join(", ")}` : "");
+        machines.length === 0
+          ? "Couldn't read your computer's AI tool report."
+          : machines.length === 1
+            ? line(machines[0].data)
+            : machines.map((m) => `${m.label ?? "A computer"}: ${line(m.data)}`).join(" | ");
     } else if (body.reason === "missing") tools = "Your computer hasn't reported its AI tools yet.";
     else if (body.reason === "stale") tools = "The last report of your AI tools is more than 5 minutes old.";
     else tools = "Couldn't read your computer's AI tool report.";

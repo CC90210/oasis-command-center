@@ -26,15 +26,17 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
 import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
-import { CLI_STATE_LABEL, cliStatusState } from "@/lib/bridge-cli-status";
+import { AGENTS_RUN_ON_UNKNOWN_NOTE, CLI_STATE_LABEL, cliStatusState, machinesOfBody, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
 
 const POLL_MS = 30_000;
 export const CLI_STATUS_ROUTE = "/api/bridge/cli-status";
 
 type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string; checked?: boolean };
 type CliSnapshotBody =
-  | { ok: true; data: Record<"claude" | "codex" | "gemini", CliInfo> }
+  | { ok: true; machines?: CliMachineSnapshot[]; data?: Record<"claude" | "codex" | "gemini", CliInfo> }
   | { ok: false; reason: string };
+
+type CliPanelRows = Array<{ name: string; info: CliInfo }>;
 
 /** What one poll found. */
 export type CliFetchResult =
@@ -47,21 +49,38 @@ export type CliPanelState = { loading: boolean; result: CliFetchResult | null };
 export function describeCliPanel(
   serverBridgeOnline: boolean | null,
   result: CliFetchResult,
-): { tone: "ok" | "warn" | "neutral"; title: string; detail: string; rows: Array<{ name: string; info: CliInfo }> | null } {
+): {
+  tone: "ok" | "warn" | "neutral";
+  title: string;
+  detail: string;
+  /** One group per paired computer (label null = an old-shape report that names none). */
+  machines: Array<{ id: string | null; label: string | null; rows: CliPanelRows }> | null;
+} {
   if (result.kind === "network_error") {
-    return { tone: "neutral", title: "Couldn't check your computer's AI tools", detail: "The Command Center didn't answer just now. This is not saying anything is down. It retries every 30 seconds.", rows: null };
+    return { tone: "neutral", title: "Couldn't check your computer's AI tools", detail: "The Command Center didn't answer just now. This is not saying anything is down. It retries every 30 seconds.", machines: null };
   }
   const { status, body } = result;
   if (status === 401) {
-    return { tone: "neutral", title: "You're signed out", detail: "Sign in again to see your computer's AI tools.", rows: null };
+    return { tone: "neutral", title: "You're signed out", detail: "Sign in again to see your computer's AI tools.", machines: null };
   }
   if (body.ok) {
-    return {
-      tone: "ok",
-      title: "Your computer's AI tools",
-      detail: "As your computer's bridge reported them in the last 5 minutes.",
-      rows: (["claude", "codex", "gemini"] as const).map((name) => ({ name, info: body.data[name] })),
-    };
+    const machines = machinesOfBody(body);
+    if (machines.length > 0) {
+      const many = machines.length > 1;
+      return {
+        tone: "ok",
+        title: many ? "Your computers' AI tools" : "Your computer's AI tools",
+        detail: many
+          ? `Each computer's own report from the last 5 minutes. ${AGENTS_RUN_ON_UNKNOWN_NOTE}`
+          : "As your computer's bridge reported them in the last 5 minutes.",
+        machines: machines.map((m) => ({
+          id: m.id,
+          label: m.label,
+          rows: (["claude", "codex", "gemini"] as const).map((name) => ({ name, info: m.data[name] })),
+        })),
+      };
+    }
+    return { tone: "warn", title: "Your computer sent a report this page can't read", detail: "Updating the bridge on that computer fixes this.", machines: null };
   }
   const heartbeat =
     serverBridgeOnline === true
@@ -75,19 +94,19 @@ export function describeCliPanel(
         tone: serverBridgeOnline === false ? "warn" : "neutral",
         title: "No report of your AI tools yet",
         detail: `${heartbeat}, but its bridge hasn't sent a list of its AI tools. An older bridge doesn't send one.`,
-        rows: null,
+        machines: null,
       };
     case "stale":
       return {
         tone: serverBridgeOnline === false ? "warn" : "neutral",
         title: "The last report of your AI tools is out of date",
         detail: `${heartbeat}. The last list it sent is more than 5 minutes old, so it isn't shown.`,
-        rows: null,
+        machines: null,
       };
     case "invalid_inventory":
-      return { tone: "warn", title: "Your computer sent a report this page can't read", detail: `${heartbeat}. Updating the bridge on that computer fixes this.`, rows: null };
+      return { tone: "warn", title: "Your computer sent a report this page can't read", detail: `${heartbeat}. Updating the bridge on that computer fixes this.`, machines: null };
     default:
-      return { tone: "neutral", title: "Couldn't check your computer's AI tools", detail: "The report couldn't be read just now. This is not saying anything is down.", rows: null };
+      return { tone: "neutral", title: "Couldn't check your computer's AI tools", detail: "The report couldn't be read just now. This is not saying anything is down.", machines: null };
   }
 }
 
@@ -131,12 +150,17 @@ export function BridgeCliPanel({
   }
 
   const view = describeCliPanel(serverBridgeOnline, state.result);
-  if (view.rows) {
+  if (view.machines) {
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
         <p className="text-xs text-fg-muted">{view.detail}</p>
-        {view.rows.map((r) => (
-          <CliRow key={r.name} name={r.name} info={r.info} />
+        {view.machines.map((m, i) => (
+          <div key={m.id ?? m.label ?? `computer-${i}`} className="space-y-2" data-cli-machine={m.label ?? "unlabeled"}>
+            {m.label && <div className="text-xs font-bold text-fg">{m.label}</div>}
+            {m.rows.map((r) => (
+              <CliRow key={r.name} name={r.name} info={r.info} />
+            ))}
+          </div>
         ))}
       </div>
     );
