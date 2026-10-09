@@ -566,9 +566,13 @@ export function modelVerdict(provider: string, id: string, now: Date = new Date(
 }
 
 /**
- * The first usable model down a replacement chain, on the same provider, or
- * null when the chain ends nowhere usable (a cycle, or an id this file does
- * not know). tests/model-registry.checks.ts proves every chain ends.
+ * The first usable model down a replacement chain, on the same provider, that
+ * takes tool calls through this app's request, or null when the chain ends
+ * nowhere usable (a cycle, or an id this file does not know). A model with no
+ * tool calls here (OpenAI's GPT-6 on Chat Completions) is passed over: a swap
+ * to it would fail every tool-using turn, and a "pick X instead" naming it
+ * would name a model Settings refuses (CodeRabbit on #555).
+ * tests/model-registry.checks.ts proves every chain ends.
  */
 export function usableReplacement(provider: string, id: string, now: Date = new Date(), horizonDays = 0): RegistryModel | null {
   let current = modelInfo(provider, id);
@@ -578,7 +582,7 @@ export function usableReplacement(provider: string, id: string, now: Date = new 
     const next = modelInfo(provider, current.replacement);
     if (!next) return null;
     const lasting = horizonDays > 0 ? endsWithin(provider, next.id, horizonDays, now) === null : modelVerdict(provider, next.id, now).kind === "usable";
-    if (lasting) return next;
+    if (lasting && next.tools) return next;
     current = next;
   }
   return null;

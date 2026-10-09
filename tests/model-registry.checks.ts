@@ -274,6 +274,24 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
     }
   });
 
+  await check("no swap and no 'pick X instead' ever lands on a model whose tool calls do not work here (CodeRabbit on #555)", () => {
+    // GPT-5.6 Terra's own successor is GPT-6.1 Sol, whose tool calls need OpenAI's Responses API.
+    assert.equal(reg.modelInfo("openai", "gpt-5.6-terra")?.replacement, "gpt-6.1-sol");
+    assert.equal(reg.usableReplacement("openai", "gpt-5.6-terra", NOW), null);
+    assert.equal(reg.modelFactsForCopy("openai", "gpt-5.6-terra").suggestion, null, "a 'not found' on the default suggested a model Settings refuses");
+    assert.equal(reg.modelFactsForCopy("openrouter", "openai/gpt-5.4").suggestion, "Claude Sonnet 4.6");
+    for (const p of REGISTRY_PROVIDERS) {
+      for (const m of MODEL_REGISTRY[p].models) {
+        for (const day of ["2026-10-08", "2027-01-01", "2028-01-01"]) {
+          const next = reg.usableReplacement(p, m.id, DAY(day));
+          if (next) assert.ok(next.tools, `${p}/${m.id} -> ${next.id} on ${day}, which has no tool calls here`);
+          const sent = reg.resolveModelForCall(p, m.id, DAY(day));
+          if (sent.swap) assert.ok(reg.modelInfo(p, sent.model)?.tools, `${p}/${m.id} is sent as ${sent.model} on ${day}, which has no tool calls here`);
+        }
+      }
+    }
+  });
+
   await check("a swapped call's meter records why, on every call it opens; resolving again changes nothing", async () => {
     const begun: Array<Record<string, unknown>> = [];
     const meter = {
