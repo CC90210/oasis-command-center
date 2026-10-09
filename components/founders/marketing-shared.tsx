@@ -254,6 +254,12 @@ function TileMedia({
  * PhoneFrame the way it lands on Instagram or TikTok; `"grid"` is the plain
  * card. Both use the same media switch and the same verdict controls.
  *
+ * A VIDEO IS A PHONE IN BOTH VIEWS. CC, 2026-10-01: "make all of these videos
+ * that are currently displayed as rectangular shapes into iPhone shapes".
+ * The grid's card drew a video as a rectangle at the file's own shape, so in
+ * the grid a video takes the phone tile too; pictures, decks and text keep the
+ * plain card there.
+ *
  * Both open the asset in the big phone (PhoneEnlarge): tapping a video plays it
  * there, and Enlarge opens any asset there without playing it. The big phone
  * always draws the phone's media, so in the grid view it is handed its own.
@@ -306,7 +312,7 @@ export function AssetTile({
   const duration = fmtDuration(durationS);
   const platforms = parsePlatforms(platformsRaw);
   const slides = slideUrls ?? [];
-  const phone = presentation === "phone";
+  const phone = presentation === "phone" || format === "video";
   const hasVisual = isRenderableCarousel(assetType, slides) || Boolean(posterUrl) || Boolean(playbackUrl && format === "video");
   const mediaProps = { format, assetType, slides, playbackUrl, posterUrl, mediaW, mediaH, title, hook };
   const media = <TileMedia {...mediaProps} phone={phone} />;

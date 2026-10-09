@@ -16,7 +16,9 @@
  * WHAT IS PINNED
  *  1. Every Library tile, both views, every kind, opens the big phone: an
  *     Enlarge button named for the asset, and a video's play press too - and
- *     still no <video> in any tile (tests/content-iphone.render.ts draws them). *  2. The big phone is a modal dialog, drawn and DRIVEN: Close takes focus,
+ *     still no <video> in any tile (tests/content-iphone.render.ts draws them).
+ *     A video is a phone in both views, never the file's rectangle.
+ *  2. The big phone is a modal dialog, drawn and DRIVEN: Close takes focus,
  *     Tab and Shift+Tab stay inside, Esc / Close / a click outside close it,
  *     focus goes back to the button that opened it, the page behind is held
  *     still, motion only without reduced motion, and its size fits 1280x800
@@ -301,9 +303,19 @@ async function main() {
       assert.equal(attr(play[0], "aria-haspopup"), "dialog", `${name}: pressing play opens the big phone`);
     }
     assert.match(d.tiles["carousel:phone"], /aria-roledescription="carousel"/, "the carousel still pages in place");
-    // The phone view's control is a labelled button; the plain grid's sits on the card's corner.
-    assert.match(d.tiles["videoPoster:phone"], /<button[^>]*aria-label="Enlarge Asset title"[^>]*>.*?Enlarge<\/button>/);
-    assert.match(d.tiles["videoPoster:grid"], /<button[^>]*class="absolute bottom-2 left-2[^"]*"[^>]*aria-label="Enlarge Asset title"|<button[^>]*aria-label="Enlarge Asset title"[^>]*class="absolute bottom-2 left-2/);
+    // A phone tile's control is a labelled button: every tile in the phone
+    // view, and a video in the grid (a video is a phone in both views). The
+    // plain card's sits on its corner.
+    const labelled = /<button[^>]*aria-label="Enlarge Asset title"[^>]*><svg\b[\s\S]*?<\/svg>Enlarge<\/button>/;
+    const corner = /<button[^>]*class="absolute bottom-2 left-2[^"]*"[^>]*aria-label="Enlarge Asset title"|<button[^>]*aria-label="Enlarge Asset title"[^>]*class="absolute bottom-2 left-2/;
+    for (const name of ["videoPoster:phone", "videoBare:phone", "image:phone", "videoPoster:grid", "videoBare:grid"]) {
+      assert.match(d.tiles[name], labelled, `${name}: the phone tile's Enlarge`);
+      assert.ok(d.tiles[name].includes("data-phone-frame"), `${name}: in a phone`);
+    }
+    for (const name of ["image:grid", "carousel:grid", "copy:grid"]) {
+      assert.match(d.tiles[name], corner, `${name}: the plain card's corner Enlarge`);
+      assert.ok(!d.tiles[name].includes("data-phone-frame"), `${name}: the plain card`);
+    }
   });
 
   // -- 2. the big phone ------------------------------------------------------

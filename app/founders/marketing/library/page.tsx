@@ -424,7 +424,8 @@ export default async function MarketingLibraryPage({
             {pageCount > 1 && ` · showing ${firstShown}-${lastShown}`}
           </div>
           {/* Phone frames are the default (CC: "the preferred iPhone view");
-              Grid is the plain card grid. The page you are on is kept. */}
+              Grid is the plain card grid, where a video is still a phone
+              (AssetTile). The page you are on is kept. */}
           <div className="flex items-center gap-1" role="group" aria-label="Library layout">
             <ViewLink href={filterHref({ view: "phone", page: currentPage })} active={view === "phone"} label="Phone">
               <Smartphone className="h-3.5 w-3.5" />

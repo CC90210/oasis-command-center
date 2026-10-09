@@ -173,6 +173,8 @@ async function main() {
   const KINDS: Record<string, Record<string, unknown>> = {
     videoPoster: { format: "video", assetType: "video", aspect: "9:16", playbackUrl: "https://media.test/reel.mp4", posterUrl: "https://media.test/poster.jpg", mediaW: 1080, mediaH: 1920 },
     videoBare: { format: "video", assetType: "video", aspect: "9:16", playbackUrl: "https://media.test/reel.mp4", posterUrl: null, mediaW: 1080, mediaH: 1920 },
+    // A video whose render is not on file yet: no URL to play.
+    videoNoRender: { format: "video", assetType: "video", aspect: "9:16", playbackUrl: null, posterUrl: null, mediaW: null, mediaH: null },
     carousel: {
       format: "image", assetType: "carousel", aspect: "4:5", mediaW: 1080, mediaH: 1350,
       posterUrl: "https://media.test/slide_1.png",
