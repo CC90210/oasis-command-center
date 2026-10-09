@@ -441,13 +441,20 @@ async function main() {
   await tick();
   b = broken.render(enlargeProps);
   const prefetchFailureSaid = saysFailed(b);
-  // The press, offline.
+  // The press, offline, with a video playing in place (the asset page's player).
+  const failedInlineCalls: string[] = [];
+  const failingInPlace = fakeMedia("failing-inline", failedInlineCalls, true, 4);
+  (wrapperOf(b).props.ref as { current: unknown }).current = {
+    querySelector: (sel: string) => (sel === "video" ? failingInPlace : null),
+  };
   tileSlotOf(b).enlarge({ play: false, at: 0 }, trigger);
   await broken.nextSet("the failed press");
   b = broken.render(enlargeProps);
   console.warn = warn;
   const failedMarkup = draw(b);
   const failedHasBigPhone = find(b, (el) => el.type === BigPhone) !== null;
+  // Nothing in place was touched: the video the viewer was watching still plays.
+  const failedPressInline = { calls: [...failedInlineCalls], paused: failingInPlace.paused };
   // The network comes back and the pointer passes over the tile again: the
   // code arrives, and the press that failed is not replayed.
   Object.assign(globalThis, { window: fakeWindow });
@@ -456,11 +463,16 @@ async function main() {
   b = broken.render(enlargeProps);
   const openedLaterByPointer = find(b, (el) => el.type === BigPhone) !== null;
   const failureSaidAfterFetch = saysFailed(b);
-  // Pressed again, it opens at once.
+  // Pressed again, it opens at once, and only now the video in place hands over.
   tileSlotOf(b).enlarge({ play: false, at: 0 }, trigger);
   b = broken.render(enlargeProps);
   const retryOpens = find(b, (el) => el.type === BigPhone) !== null;
   const retrySaysFailed = saysFailed(b);
+  const retryBig = find(b, (el) => el.type === BigPhone);
+  const retryHandover = {
+    calls: [...failedInlineCalls],
+    start: retryBig ? (retryBig.props as unknown as BigProps).start : null,
+  };
 
   // -- 5. TileVideo in each slot ----------------------------------------------
   const tileProps = { src: "https://media.test/reel.mp4", posterUrl: null, width: 1080, height: 1920, title: "Asset title", variant: "phone" as const };
@@ -544,11 +556,13 @@ async function main() {
       prefetchFailureSaid,
       failedMarkup,
       failedHasBigPhone,
+      failedPressInline,
       warned: warnings.map(String),
       openedLaterByPointer,
       failureSaidAfterFetch,
       retryOpens,
       retrySaysFailed,
+      retryHandover,
     },
     handover: {
       start: handoverStart,

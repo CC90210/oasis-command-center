@@ -99,9 +99,6 @@ export default async function AssetDetailPage({
   if (!founder) notFound();
   const { id } = await params;
   const sp = await searchParams;
-  // The phone preview is the default view of an asset; ?frame=original shows
-  // the media alone at its own shape, as this page always has.
-  const original = sp.frame === "original";
   const guides = sp.guides === "1";
   // The Library view this asset was opened from (tab, filters, view, page),
   // validated to the Library's own path; anything else is its front page.
@@ -119,6 +116,19 @@ export default async function AssetDetailPage({
     media.find((m) => m.kind === "thumb") ||
     media.find((m) => m.kind === "preview");
   const image = media.find((m) => m.kind === "image");
+
+  // The phone preview is the default view of an asset; ?frame=original shows
+  // the media alone at its own shape - except a video's.
+  //
+  // A VIDEO IS ALWAYS A PHONE. CC, 2026-10-01: "make all of these videos that
+  // are currently displayed as rectangular shapes into iPhone shapes". The
+  // Original view drew a video as a rectangle at the file's shape, with the
+  // browser's player, whose full-screen button made it a big rectangle rather
+  // than the big iPhone. So a video has no Original view: the pill is not
+  // offered and ?frame=original shows the phone. Pictures, decks and text keep
+  // it, as they keep the plain card in the Library's grid.
+  const isVideo = asset.format === "video" || Boolean(video);
+  const original = sp.frame === "original" && !isVideo;
 
   // Slides in the order `media_urls` recorded at migration time — never
   // re-derived from the media rows, whose row order means nothing. A carousel
@@ -163,12 +173,12 @@ export default async function AssetDetailPage({
   const frame = mediaFrame(w, h, asset.aspect);
   const vertical = isPortrait(w, h);
 
-  // ONE media decision for both views, so the phone and the original can never
-  // show different things. In the phone the video plays the way a Reel does
-  // (TileVideo, no control bar over the caption); the Original view keeps the
-  // browser's player for scrubbing. initialOpen: this page IS the opened asset,
-  // so the player is there from the start with its first frame - not a cover,
-  // which for most videos (no poster on file) was a black "No cover image".
+  // ONE media element for both views, so the phone and the original can never
+  // show different things. A video plays the way a Reel does (TileVideo, no
+  // control bar over the caption), and only ever in a phone (isVideo above).
+  // initialOpen: this page IS the opened asset, so the player is there from
+  // the start with its first frame - not a cover, which for most videos (no
+  // poster on file) was a black "No cover image".
   const carousel = isRenderableCarousel(asset.asset_type, slideUrls);
   const phoneMediaEl = carousel ? (
     <CarouselFrame slides={slideUrls} title={asset.title} width={w} height={h} className="h-full w-full" />
@@ -178,19 +188,6 @@ export default async function AssetDetailPage({
     // eslint-disable-next-line @next/next/no-img-element -- signed R2 URL, not a static asset
     <img src={imageUrl} alt={asset.title} decoding="async" width={w ?? undefined} height={h ?? undefined} className="h-full w-full object-contain" />
   ) : null;
-  const mediaEl =
-    original && videoUrl && !carousel ? (
-      <video
-        src={videoUrl}
-        poster={posterUrl || undefined}
-        controls
-        playsInline
-        preload="metadata"
-        className="h-full w-full bg-black object-contain"
-      />
-    ) : (
-      phoneMediaEl
-    );
   // What the phone's screen shows, in place and in the big phone: the media,
   // or the asset's own copy when it has none.
   const phoneScreen = phoneMediaEl ?? (
@@ -279,7 +276,7 @@ export default async function AssetDetailPage({
                 className={`relative flex items-center justify-center overflow-hidden rounded-xl bg-bg-deep ${frame.className}`}
                 style={frame.style}
               >
-                {mediaEl ?? (
+                {phoneMediaEl ?? (
                   <div className="p-8 text-center text-sm text-fg-dim">
                     No playable media is attached to this asset.
                   </div>
@@ -296,11 +293,16 @@ export default async function AssetDetailPage({
             </PhoneFrame>
           )}
           <div className="flex flex-wrap items-center justify-center gap-1.5" aria-label="Preview options">
-            <PreviewLink href={detailHref({ original: false })} active={!original} label="Phone" />
-            <PreviewLink href={detailHref({ original: true })} active={original} label="Original" />
+            {/* A video has one view, the phone, so it is offered no choice of view. */}
+            {!isVideo && (
+              <>
+                <PreviewLink href={detailHref({ original: false })} active={!original} label="Phone" />
+                <PreviewLink href={detailHref({ original: true })} active={original} label="Original" />
+              </>
+            )}
             {!original && (
               <>
-                <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />
+                {!isVideo && <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />}
                 <PreviewLink href={detailHref({ chrome: "instagram" })} active={chrome === "instagram"} label="Instagram" />
                 <PreviewLink href={detailHref({ chrome: "tiktok" })} active={chrome === "tiktok"} label="TikTok" />
                 <span className="mx-1 h-4 w-px bg-bg-border" aria-hidden />

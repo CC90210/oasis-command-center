@@ -26,7 +26,8 @@
  *     fetch fails says so and is dropped, never replayed later.
  *  3. Nothing loads until play: opened by Enlarge, a video is a cover; opened
  *     by a play press, it mounts preload="none" and plays once; a video
- *     playing in place carries on from the same second and stops in place.
+ *     playing in place carries on from the same second and stops in place -
+ *     only once the big phone opens, so a failed press leaves it playing.
  *  4. Performance lists every connected channel: a quiet one with how long
  *     ago it last posted, one with none on record, an unknown said as
  *     unknown, and LinkedIn measured in impressions.
@@ -35,7 +36,9 @@
  *     Requests are gone; no duplicate "Back to Content".
  *  6. The asset page, rendered against a local database through the real
  *     founder gate: "Made by" is the role, the copy card names no agent, and
- *     the preview sits in PhoneEnlarge with an Enlarge control.
+ *     the preview sits in PhoneEnlarge with an Enlarge control. A video asset
+ *     plays in the phone, in place and in the big phone, and has no Original
+ *     view: never the file's rectangle, not even at ?frame=original.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -161,11 +164,13 @@ type Drawn = {
     prefetchFailureSaid: boolean;
     failedMarkup: string;
     failedHasBigPhone: boolean;
+    failedPressInline: { calls: string[]; paused: boolean };
     warned: string[];
     openedLaterByPointer: boolean;
     failureSaidAfterFetch: boolean;
     retryOpens: boolean;
     retrySaysFailed: boolean;
+    retryHandover: { calls: string[]; start: unknown };
   };
   handover: { start: unknown; inlineCalls: string[]; pausedStart: unknown; pausedCalls: string[] };
   player: {
@@ -247,8 +252,16 @@ stubFile("components/founders/PhoneEnlarge.tsx", {
   EnlargeButton: (p: { title: string }) => ReactNS.createElement("enlarge-button", { "data-title": p.title }),
   enlargeSlotContext: () => null,
 });
+// The player carries what the page hands it, so a video asset's wiring can be read.
+stubFile("components/founders/TileVideo.tsx", {
+  TileVideo: (p: { src: string; variant?: string; initialOpen?: boolean }) =>
+    ReactNS.createElement("stub-tilevideo", {
+      "data-src": p.src,
+      "data-variant": p.variant ?? "native",
+      "data-initial-open": String(Boolean(p.initialOpen)),
+    }),
+});
 for (const [file, name] of [
-  ["components/founders/TileVideo.tsx", "TileVideo"],
   ["components/founders/CarouselFrame.tsx", "CarouselFrame"],
   ["components/founders/AssetActions.tsx", "AssetActions"],
   ["components/founders/AssetPublishPanel.tsx", "AssetPublishPanel"],
@@ -423,6 +436,18 @@ async function main() {
     assert.equal(d.fetch.failureSaidAfterFetch, false, "the code is here now, so the failure line goes");
     assert.equal(d.fetch.retryOpens, true, "the next press opens it at once");
     assert.equal(d.fetch.retrySaysFailed, false);
+  });
+
+  // Review of #542 (F4): the video playing in place was paused before the big
+  // phone's code was known to load, so a failed press stopped the video the
+  // viewer was watching and opened nothing.
+  await check("a failed press leaves the video playing in place; it hands over only when the big phone opens", () => {
+    assert.deepEqual(d.fetch.failedPressInline, { calls: [], paused: false }, "the failed press paused the video in place");
+    assert.deepEqual(
+      d.fetch.retryHandover,
+      { calls: ["pause"], start: { play: true, at: 4 } },
+      "the next press, online: paused in place, carried on in the big phone from the same second",
+    );
   });
 
   await check("the big phone fits the screen: the full height from sm up, the width (with room for Close) on a phone", () => {
@@ -674,6 +699,20 @@ async function main() {
   });
 
   // -- 6. the asset page, rendered -------------------------------------------
+  /** One asset's page, drawn to host elements, with what it handed PhoneEnlarge. */
+  const renderAsset = async (id: string, sp: Record<string, string>) => {
+    const { default: AssetPage } = await import("../app/founders/marketing/asset/[id]/page");
+    enlargeCalls.length = 0;
+    const tree = await resolve(await AssetPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve(sp) }));
+    return { tree, text: textOf(tree), calls: [...enlargeCalls] };
+  };
+  /** The links in the preview's options row, by label. */
+  const previewOptions = (tree: unknown) => {
+    const row = hosts(tree).find((h) => h.props["aria-label"] === "Preview options");
+    assert.ok(row, "the preview's options row");
+    return hosts(row!.props.children).filter((h) => h.type === "a").map((h) => textOf(h).trim());
+  };
+
   await check("the asset page, through the real gate: 'Made by: Marketing agent', no agent name, and the preview in PhoneEnlarge", async () => {
     const raw = createClient({ url: `file:${dbFile}` });
     await raw.executeMultiple(`
@@ -712,12 +751,7 @@ async function main() {
     );
     const { signSession } = await import("../lib/turso-auth");
     sessionCookie = signSession({ sub: CC.id, email: CC.email, exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
-    const { default: AssetPage } = await import("../app/founders/marketing/asset/[id]/page");
-    const render = async (sp: Record<string, string>) => {
-      enlargeCalls.length = 0;
-      const tree = await resolve(await AssetPage({ params: Promise.resolve({ id: "m1" }), searchParams: Promise.resolve(sp) }));
-      return { tree, text: textOf(tree), calls: [...enlargeCalls] };
-    };
+    const render = (sp: Record<string, string>) => renderAsset("m1", sp);
 
     const phone = await render({});
     assert.match(phone.text, /Made by\s+Marketing agent/, "the role, from maven-codex");
@@ -742,12 +776,87 @@ async function main() {
     assert.ok(hosts(wrapper!.props.children).some((h) => h.props["data-phone-frame"] === ""), "around the small phone");
 
     // Original view and Safe zones: the big phone keeps the phone's shape and guides.
+    // A text post (not a video) keeps its choice of view.
+    assert.deepEqual(previewOptions(phone.tree), ["Phone", "Original", "Instagram", "TikTok", "Safe zones"]);
     const original = await render({ frame: "original" });
     assert.equal(original.calls.length, 1, "Enlarge in the Original view too");
+    assert.match(original.text, /No playable media is attached to this asset\./, "the Original view is the plain card");
+    assert.ok(!hosts(original.tree).some((h) => h.props["data-phone-frame"] === ""), "with no phone in place");
     const guides = await render({ guides: "1", chrome: "instagram" });
     const g = guides.calls[0] as { frame: Record<string, unknown> };
     assert.deepEqual([g.frame.guides, g.frame.chrome], [true, "instagram"], "safe zones and the chosen app carry into the big phone");
     raw.close();
+  });
+
+  // Review of #542: no test drew a VIDEO through the asset page, the surface
+  // CC named, so its video branch could break with every test green (F1); and
+  // its Original view drew a video as the file's rectangle with the browser's
+  // player (F2). CC: "make all of these videos that are currently displayed as
+  // rectangular shapes into iPhone shapes".
+  await check("a video asset's page: it plays in the phone and in the big phone, and is never a rectangle, not even at ?frame=original", async () => {
+    // Fake R2 keys: lib/r2-storage.ts signs a URL locally (node:crypto, no
+    // request), so the page draws its real video branch.
+    const R2 = { R2_ACCOUNT_ID: "r2-test-account", R2_ACCESS_KEY_ID: "r2-test-key", R2_SECRET_ACCESS_KEY: "r2-test-secret", R2_BUCKET: "r2-test-bucket" };
+    Object.assign(process.env, R2);
+    const raw = createClient({ url: `file:${dbFile}` });
+    try {
+      await raw.batch(
+        [
+          {
+            sql: `INSERT INTO marketing_asset (id, tenant_id, title, hook, brand_slug, brand_name, track, channel, status, format,
+                    aspect, asset_type, author_agent, created_at)
+                  VALUES ('v1', ?, 'Launch reel', 'Watch it land', 'oasis-ai', 'OASIS AI', 'organic', 'organic-instagram',
+                    'in_review', 'video', '9:16', 'video', 'maven', '2026-10-01T00:00:00Z')`,
+            args: [OASIS],
+          },
+          {
+            sql: `INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_bucket, storage_path, mime, bytes, width, height)
+                  VALUES ('v1-video', ?, 'v1', 'video', 'marketing-media', 'reels/launch.mp4', 'video/mp4', 1000, 1080, 1920)`,
+            args: [OASIS],
+          },
+        ],
+        "write",
+      );
+      const SIGNED = /^https:\/\/r2-test-account\.r2\.cloudflarestorage\.com\/r2-test-bucket\/marketing-media\/reels\/launch\.mp4\?X-Amz-/;
+      const players = (tree: unknown) => hosts(tree).filter((h) => h.type === "stub-tilevideo");
+      const bareVideos = (tree: unknown) => hosts(tree).filter((h) => h.type === "video");
+      const phones = (tree: unknown) => hosts(tree).filter((h) => h.props["data-phone-frame"] === "");
+
+      const page = await renderAsset("v1", {});
+      const inPlace = players(page.tree);
+      assert.equal(inPlace.length, 1, "the page draws the asset's video, once");
+      assert.match(String(inPlace[0].props["data-src"]), SIGNED, "its own video, signed");
+      assert.equal(inPlace[0].props["data-variant"], "phone", "played the way a Reel is, with no control bar over the caption");
+      assert.equal(inPlace[0].props["data-initial-open"], "true", "open from the start, on its first frame");
+      assert.equal(phones(page.tree).length, 1, "a phone in place");
+      assert.equal(players(phones(page.tree)[0].props.children).length, 1, "and the video plays inside it");
+      assert.equal(bareVideos(page.tree).length, 0, "no bare <video>: no rectangle");
+
+      assert.equal(page.calls.length, 1, "one big phone");
+      const handed = page.calls[0] as { frame: Record<string, unknown>; media: unknown };
+      const big = players(await resolve(handed.media));
+      assert.deepEqual(
+        big.map((h) => [h.props["data-src"], h.props["data-variant"]]),
+        [[inPlace[0].props["data-src"], "phone"]],
+        "the big phone plays the same video, in the same phone player",
+      );
+      assert.deepEqual(
+        { w: handed.frame.mediaW, h: handed.frame.mediaH, caption: handed.frame.caption },
+        { w: 1080, h: 1920, caption: "Watch it land" },
+        "at the video's own shape, with its caption",
+      );
+      assert.deepEqual(previewOptions(page.tree), ["Instagram", "TikTok", "Safe zones"], "no Phone / Original choice for a video");
+      assert.ok(hosts(page.tree).some((h) => h.type === "enlarge-button"), "Enlarge");
+
+      const original = await renderAsset("v1", { frame: "original" });
+      assert.equal(bareVideos(original.tree).length, 0, "?frame=original: still no rectangle");
+      assert.equal(phones(original.tree).length, 1, "the video stays in its phone");
+      assert.equal(players(original.tree).length, 1);
+      assert.equal(original.calls.length, 1, "with its big phone");
+    } finally {
+      raw.close();
+      for (const k of Object.keys(R2)) delete process.env[k];
+    }
   });
 
   console.log(`\ncontent-iphone: ${passed} passed, ${failed} failed`);

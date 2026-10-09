@@ -14,8 +14,9 @@
  * <video> element mounts only when the viewer presses play, with
  * preload="none"; the play() call that follows is what loads it.
  *
- * Two players once open. `native` (the plain grid, the asset page's Original
- * view) keeps the browser's controls. `phone` (inside a PhoneFrame) plays the
+ * Two players once open. `native` keeps the browser's controls; nothing in
+ * Content draws it now that a video is a phone everywhere (the plain grid's
+ * card was the last). `phone` (inside a PhoneFrame) plays the
  * way a Reel does: no control bar over the caption, tap to pause or play, a
  * mute toggle and a thin progress line - so the app's overlay is judged as the
  * audience will see it rather than under a desktop scrubber. The tap target is

@@ -119,12 +119,29 @@ export function PhoneEnlarge({
   const [BigPhone, setBigPhone] = useState<BigPhoneComponent | null>(null);
   const [failed, setFailed] = useState(false);
   const inlineRef = useRef<HTMLDivElement | null>(null);
+  // A press waiting for the big phone's code: how it asked to start, and the
+  // button to give focus back to.
+  const pendingRef = useRef<{ asked: EnlargeStart; opener: HTMLElement | null } | null>(null);
+
+  // Opens the big phone, its code being here. A video playing in place
+  // carries on in the big phone from the same second, and stops in place so
+  // two never play at once - only now, so a press whose fetch fails leaves
+  // the video playing where it was.
+  const openBig = useCallback((asked: EnlargeStart, opener: HTMLElement | null) => {
+    const playing = inlineRef.current?.querySelector("video") ?? null;
+    const start: EnlargeStart = playing
+      ? { play: asked.play || !playing.paused, at: playing.currentTime || 0 }
+      : asked;
+    if (playing && !playing.paused) playing.pause();
+    setOpen({ start, opener });
+  }, []);
 
   // Fetch the big phone's code: when the pointer or keyboard reaches the tile
   // (`pressed` false) and again on the press; the module system fetches it
-  // once. A press whose fetch fails is dropped, not kept waiting: otherwise
-  // the pointer passing over the tile later, with the network back, would
-  // open a big phone nobody asked for. The tile says what happened instead.
+  // once, and whichever fetch lands first opens a waiting press. A press whose
+  // own fetch fails is dropped, not kept waiting: otherwise the pointer passing
+  // over the tile later, with the network back, would open a big phone nobody
+  // asked for. The tile says what happened instead.
   const fetchBigPhone = useCallback(
     (pressed: boolean) => {
       if (BigPhone) return;
@@ -132,34 +149,35 @@ export function PhoneEnlarge({
         (C) => {
           setBigPhone(() => C);
           setFailed(false);
+          const press = pendingRef.current;
+          pendingRef.current = null;
+          if (press) openBig(press.asked, press.opener);
         },
         (e: unknown) => {
           console.warn("[content:big-phone] could not load", e);
           if (!pressed) return;
-          setOpen(null);
+          pendingRef.current = null;
           setFailed(true);
         },
       );
     },
-    [BigPhone],
+    [BigPhone, openBig],
   );
   const prefetch = useCallback(() => fetchBigPhone(false), [fetchBigPhone]);
 
   const enlarge = useCallback(
     (asked: EnlargeStart, opener?: HTMLElement | null) => {
-      // A video playing in place carries on in the big phone from the same
-      // second, and stops in place so two never play at once.
-      const playing = inlineRef.current?.querySelector("video") ?? null;
-      const start: EnlargeStart = playing
-        ? { play: asked.play || !playing.paused, at: playing.currentTime || 0 }
-        : asked;
-      if (playing && !playing.paused) playing.pause();
       const active = typeof document === "undefined" ? null : document.activeElement;
+      const returnTo = opener ?? (isElement(active) ? active : null);
       setFailed(false);
-      setOpen({ start, opener: opener ?? (isElement(active) ? active : null) });
+      if (BigPhone) {
+        openBig(asked, returnTo);
+        return;
+      }
+      pendingRef.current = { asked, opener: returnTo };
       fetchBigPhone(true);
     },
-    [fetchBigPhone],
+    [BigPhone, fetchBigPhone, openBig],
   );
   const close = useCallback(() => setOpen(null), []);
 
