@@ -40,9 +40,11 @@
  * outnumber it; the alert says whether each department is answering again.
  *
  * RUNNING. These are not in OASIS_GLOBAL_CHECKS: that list runs under one
- * tenant, and a client workspace's broken chat must page against ITS tenant
- * (own health_alert_state ladder, own health_check_runs). The cron route runs
- * DEPARTMENT_CHAT_CHECKS once per tenant returned by departmentChatTenantIds.
+ * tenant, and each workspace must be graded on its own turns (own
+ * health_alert_state ladder, own health_check_runs). The cron route runs
+ * DEPARTMENT_CHAT_CHECKS once per tenant returned by departmentChatTenantIds,
+ * and pages only the workspaces whose alerts belong in OASIS's operator chat
+ * (see the route); the rest are recorded, not paged.
  */
 
 import "server-only";
@@ -346,8 +348,8 @@ export const DEPARTMENT_CHAT_CHECKS: DripCheck[] = [
   {
     id: "department_chat_outcomes",
     severity: "critical",
-    // CC's lane: a broken department chat is a platform fault for the operator
-    // to fix, whichever workspace it is in. Adon's lane is SunBiz ops.
+    // CC's lane (OASIS's own workspace; the route does not page the others).
+    // Adon's lane is SunBiz ops, which is retired.
     lane: "operator",
     rule: { kind: "must_be_zero" },
     observe: async (db, tenantId, endMs) => (await outcomesObservation(db, tenantId, endMs)).observed,

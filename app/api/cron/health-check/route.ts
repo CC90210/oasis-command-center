@@ -29,6 +29,7 @@ import {
   type RunSummary,
 } from "@/lib/health/runner";
 import { departmentChatTenantIds } from "@/lib/health/department-chat-checks";
+import { alertAudienceFor } from "@/lib/notify/alert-route";
 import { worstVerdict } from "@/lib/health/checks-core";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
@@ -38,9 +39,17 @@ export const maxDuration = 60;
 
 /**
  * Department chat, once per workspace that had a department turn in the last 6
- * h (OASIS always). Per tenant, not under OASIS: a client's broken chat pages
- * against that client's own alert ladder and history. Needs the ai_usage_events
+ * h (OASIS always). Per tenant, not under OASIS: each workspace is graded on its
+ * own turns, with its own alert ladder and history. Needs the ai_usage_events
  * ledger only, so it adds nothing to the calendar probe's wall-clock budget.
+ *
+ * WHO IS PAGED. An alert's audience is a property of the workspace
+ * (lib/notify/alert-route.ts), and these checks name CC's operator chat. So
+ * only a workspace that resolves to OASIS's operator chat pages; any other is
+ * graded and recorded (health_check_runs) with notify off. A client whose own
+ * AI key ran dry is that client's to fix, not a page to CC, and paging a
+ * client's bot needs the workspace-alert path, which the lane-based runner
+ * does not have yet.
  */
 async function runDepartmentChat(notify: boolean): Promise<Array<{ tenantId: string; summary: RunSummary }>> {
   const { tenantIds, error } = await departmentChatTenantIds();
@@ -51,7 +60,10 @@ async function runDepartmentChat(notify: boolean): Promise<Array<{ tenantId: str
   return Promise.all(
     tenantIds.map(async (tenantId) => ({
       tenantId,
-      summary: await runHealthChecks(tenantId, { notify, checks: DEPARTMENT_CHAT_CHECKS }),
+      summary: await runHealthChecks(tenantId, {
+        notify: notify && alertAudienceFor(tenantId) === "oasis_operator",
+        checks: DEPARTMENT_CHAT_CHECKS,
+      }),
     })),
   );
 }

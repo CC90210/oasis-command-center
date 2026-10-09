@@ -166,6 +166,8 @@ async function main() {
     const route = readFileSync(join(ROOT, "app/api/cron/health-check/route.ts"), "utf8");
     assert.match(route, /checks:\s*DEPARTMENT_CHAT_CHECKS/);
     assert.match(route, /departmentChatTenantIds\(\)/);
+    // Another workspace's chat is graded and recorded, never paged into OASIS's operator chat.
+    assert.match(route, /notify:\s*notify && alertAudienceFor\(tenantId\) === "oasis_operator"/);
   });
 
   await check("warn_above_zero: 0 is ok, a count is DEGRADED (never failing), an unreadable value is check_broken", () => {
