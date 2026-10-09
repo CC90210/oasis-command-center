@@ -18,7 +18,8 @@
  *   3. Component mounts → GET /api/bridge/cli-status, which returns
  *      {claude, codex, gemini: {installed, authenticated,
  *      version, install_hint_url}}
- *   4. Each card renders one of: Ready / Needs auth / Not installed.
+ *   4. Each card renders lib/bridge-cli-status.ts's state: Ready / Needs
+ *      sign-in / Sign-in not confirmed (a check did not finish) / Not detected.
  *
  * Reachability and heartbeat are separate signals. A fresh tenant heartbeat
  * renders "online, inventory unavailable" if this browser's probe fails;
@@ -34,16 +35,21 @@ import { deriveDropdownState } from "@/lib/bridge-dropdown-state";
 import {
   readCliRuntime,
   writeCliRuntime,
+  writeHarnessOverride,
+  readHarnessOverride,
   type CliRuntime,
 } from "@/lib/cli-runtime";
 // What this card chooses, and what it never does (the department brain).
 import { LOCAL_CLI_PICKER_SCOPE, LOCAL_CLI_SCOPE } from "@/components/settings/local-cli-scope";
+import { CLI_STATE_LABEL, cliStatusState, type CliState } from "@/lib/bridge-cli-status";
 
 type CliInfo = {
   installed: boolean;
   authenticated: boolean;
   version: string | null;
   install_hint_url: string;
+  /** Whether the computer's checks finished (lib/bridge-cli-status.ts). */
+  checked?: boolean;
 };
 
 type CliStatusResponse = {
@@ -119,14 +125,17 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
   }
 }
 
+/** The computer's report in lib/bridge-cli-status.ts's words: a check that did not finish is never "Needs sign-in". */
+function cliState(info: CliInfo): CliState {
+  return cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true });
+}
+
 function statusFor(info: CliInfo): { label: string; tone: "engaged" | "warm" | "neutral"; icon: React.ReactNode } {
-  if (info.installed && info.authenticated) {
-    return { label: "Ready", tone: "engaged", icon: <CheckCircle2 className="w-3.5 h-3.5" /> };
-  }
-  if (info.installed && !info.authenticated) {
-    return { label: "Needs auth", tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
-  }
-  return { label: "Not installed", tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
+  const s = cliState(info);
+  if (s === "ready") return { label: CLI_STATE_LABEL[s], tone: "engaged", icon: <CheckCircle2 className="w-3.5 h-3.5" /> };
+  if (s === "needs_sign_in") return { label: CLI_STATE_LABEL[s], tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
+  if (s === "unknown") return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <AlertCircle className="w-3.5 h-3.5" /> };
+  return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
 }
 
 type Busy =
@@ -154,7 +163,7 @@ export function LocalCliProvidersCard({
   // a CLI here flips the chat header dropdown on next render too.
   const [activeCli, setActiveCli] = useState<CliRuntime>("claude");
   useEffect(() => {
-    setActiveCli(readCliRuntime());
+    setActiveCli(readHarnessOverride() ?? readCliRuntime());
     // A hosted dashboard can read the outbound, pairing-authenticated
     // heartbeat, but it cannot prove that a tenant bridge proxy points back
     // to the same paired machine. Only allow install/auth mutations when the
@@ -168,6 +177,9 @@ export function LocalCliProvidersCard({
     // Storage failures are swallowed inside writeCliRuntime: the in-memory
     // state already updated, so the click registers even where storage is off.
     writeCliRuntime(next);
+    // A pick for the coding harness alone (lib/cli-runtime.ts ONE ENGINE, ONE
+    // EXCEPTION): it wins over your agents' app in this browser.
+    writeHarnessOverride(next);
   }
 
   async function refresh() {
@@ -386,9 +398,10 @@ export function LocalCliProvidersCard({
           {/* The Coding harness's CLI picker: the same selection the Coding
               harness header dropdown shows (lib/cli-runtime.ts). It answers
               that chat on this computer only, never a department.
-              Disabled options (not installed / not auth'd) still render
-              as radios so the operator sees the full set + can click
-              Install on the card below. */}
+              Every option can be chosen (CC, 2026-10-09: "it doesn't allow me
+              to switch to Claude Code or Codex"): the computer's report can
+              be wrong when a check times out, so it is a hint, never a lock.
+              A real turn says plainly if the app cannot answer. */}
           <div className="mb-3 rounded-lg border border-bg-border bg-bg-elev/30 p-3">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
@@ -402,7 +415,7 @@ export function LocalCliProvidersCard({
               <div role="radiogroup" aria-label="Coding harness on the paired computer uses" className="flex flex-wrap gap-1.5">
                 {CARDS.map((card) => {
                   const info = state.data[card.key];
-                  const ready = info.installed && info.authenticated;
+                  const ready = cliState(info) === "ready";
                   const selected = activeCli === card.key;
                   return (
                     <button
@@ -411,14 +424,15 @@ export function LocalCliProvidersCard({
                       role="radio"
                       aria-checked={selected}
                       onClick={() => chooseCli(card.key)}
-                      disabled={!ready}
-                      title={ready ? `Use ${card.label} for the Coding harness on the paired computer` : `${card.label} isn't ready yet`}
+                      title={
+                        ready
+                          ? `Use ${card.label} for the coding harness on the paired computer`
+                          : `Use ${card.label} for the coding harness. The computer reported it as: ${statusFor(info).label}.`
+                      }
                       className={`text-[11px] font-semibold px-2.5 py-1.5 rounded-md border transition-colors ${
                         selected
                           ? "border-accent bg-accent/15 text-accent"
-                          : ready
-                            ? "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg hover:border-accent/40"
-                            : "border-bg-border bg-bg-deep/30 text-fg-faint opacity-60 cursor-not-allowed"
+                          : "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg hover:border-accent/40"
                       }`}
                     >
                       {card.label}
@@ -433,13 +447,15 @@ export function LocalCliProvidersCard({
           {CARDS.map((card) => {
             const info = state.data[card.key];
             const s = statusFor(info);
+            const cs = cliState(info);
             return (
               <div
                 key={card.key}
+                data-cli-state={cs}
                 className={`rounded-lg border p-3 space-y-2 ${
-                  info.installed && info.authenticated
+                  cs === "ready"
                     ? "border-status-engaged/30 bg-status-engaged/5"
-                    : info.installed
+                    : cs === "needs_sign_in"
                       ? "border-status-warm/30 bg-status-warm/5"
                       : "border-bg-border bg-bg-elev/30"
                 }`}
@@ -459,10 +475,17 @@ export function LocalCliProvidersCard({
                     {info.version}
                   </div>
                 )}
+                {cs === "unknown" && (
+                  <p className="text-[11px] text-fg-muted leading-relaxed">
+                    It is installed, but the computer&apos;s sign-in check did not finish, so it isn&apos;t
+                    confirmed. If it answers in a terminal there, it will answer here: choose it and use Test.
+                  </p>
+                )}
                 {!info.installed && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-fg-muted leading-relaxed">
-                      {localActionsAvailable ? "Click Install to run " : "Run "}
+                      The computer did not report it. If it is installed there, its check may have timed out: choose it and use Test.{" "}
+                      {localActionsAvailable ? "Otherwise click Install to run " : "Otherwise run "}
                       <code className="text-fg-dim">{card.install_command}</code>
                       {localActionsAvailable ? " on this machine." : " on the paired machine, then click Refresh."}
                     </p>
@@ -485,7 +508,7 @@ export function LocalCliProvidersCard({
                     )}
                   </div>
                 )}
-                {info.installed && !info.authenticated && (
+                {cs === "needs_sign_in" && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-status-warm leading-relaxed">
                       {localActionsAvailable

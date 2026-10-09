@@ -47,8 +47,12 @@ import { getAgentInfo } from "@/lib/agents";
 import { useAgentDisplayNames } from "@/lib/use-agent-display-names";
 import {
   CLI_RUNTIME_STORAGE_KEY,
+  harnessRuntime,
+  readHarnessOverride,
+  writeHarnessOverride,
   type CliRuntime,
 } from "@/lib/cli-runtime";
+import { ENGINE_SETTINGS_HREF, agentsEngineLine, parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
 import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
@@ -836,6 +840,8 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   function setCliRuntime(next: CliRuntime) {
     setCliRuntimeState(next);
     setSessionId(null);
+    // The header picker chooses for the coding harness alone (lib/cli-runtime.ts).
+    writeHarnessOverride(next);
     if (typeof window !== "undefined") {
       try {
         window.localStorage.setItem(CLI_RUNTIME_STORAGE_KEY, next);
@@ -1145,14 +1151,34 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     }
   }, []);
 
+  // What powers your agents (lib/ai/agent-engine.ts): the coding harness shows
+  // it and follows its app, unless a pick was made for the harness alone.
+  const [agentsEngine, setAgentsEngine] = useState<AgentEngineChoice | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
+    let stored: CliRuntime = "claude";
     try {
-      const stored = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
-      if (isCliRuntime(stored)) setCliRuntimeState(stored);
+      const raw = window.localStorage.getItem(CLI_RUNTIME_STORAGE_KEY);
+      if (isCliRuntime(raw)) stored = raw;
     } catch {
       // Privacy mode / disabled storage - leave default "claude".
     }
+    setCliRuntimeState(harnessRuntime(null, stored, readHarnessOverride()).runtime);
+    let alive = true;
+    void fetch("/api/ai/engine", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body: { ok?: boolean; engine?: unknown } | null) => {
+        if (!alive || !body?.ok) return;
+        const engine = parseEngineChoice(body.engine);
+        setAgentsEngine(engine);
+        setCliRuntimeState(harnessRuntime(engine?.kind === "cli" ? engine.cli : null, stored, readHarnessOverride()).runtime);
+      })
+      .catch(() => {
+        // Not known: the header simply does not name your agents' engine.
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Probe the local bridge on mount + every 30s. When the operator runs
@@ -2883,25 +2909,35 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             {targetLabels?.[agent] ? `Runs in ${targetLabels[agent].split(" · ").pop()} on your computer` : getAgentInfo(agent).tagline}
           </div>
           <div className="text-xs text-fg-dim font-mono truncate">
-            <span title={accessTitle} className={bridgeReady ? "text-accent" : undefined}>
+            {/* The model label opens what powers your agents (Settings > AI brain). */}
+            <Link
+              href={ENGINE_SETTINGS_HREF}
+              prefetch={false}
+              title={`${accessTitle} Click to change what powers your agents.`}
+              data-testid="harness-engine"
+              className={`hover:underline underline-offset-2 ${bridgeReady ? "text-accent" : ""}`}
+            >
               {bridgeReady && (
                 <Cpu className="w-3 h-3 inline-block mr-1 -mt-0.5" />
               )}
               {activeStatus}
-            </span>
+              {agentsEngine && ` - Agents: ${agentsEngineLine(agentsEngine)}`}
+            </Link>
           </div>
         </div>
         {/* Mobile-only compact status — one short pill so the operator
             still sees whether they're routed through the bridge or a
             cloud key. */}
         <div className="md:hidden flex-1 min-w-0">
-          <span
+          <Link
+            href={ENGINE_SETTINGS_HREF}
+            prefetch={false}
             title={accessTitle}
             className={`text-[10px] font-mono truncate block ${bridgeReady ? "text-accent" : "text-fg-dim"}`}
           >
             {bridgeReady && <Cpu className="w-3 h-3 inline-block mr-1 -mt-0.5" />}
             {activeStatus}
-          </span>
+          </Link>
         </div>
         {/*
           Chat-mode picker — Phase 3 of giggly-reef (2026-05-15). Four real

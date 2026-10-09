@@ -1,19 +1,23 @@
 /**
- * What Settings > AI brain's local CLI card chooses, in the words it shows (CC,
- * 2026-10-09: "it says I have Codex CLI selected, but then ... it says I'm
- * using Gemini"). The CLI picked there answers ONLY the operator's Coding
- * harness (/agent, components/ChatWidget.tsx) when that chat runs on the
- * paired computer: its "On this computer" mode, or Auto while the computer is
- * online, sends `cli_provider` to the bridge. No department ever uses it:
- * department chats answer on the workspace AI account set in AI setup
- * (lib/ai/department-brain.ts), so the card says that, and never reads as a
- * second place choosing the department brain.
+ * What Settings > AI brain's paired-computer card shows and chooses, in the
+ * words it shows.
+ *
+ * 2026-10-09 (CC: "the Coding Harness and then all of the department agents ...
+ * should have the same background workings"). What powers your agents is ONE
+ * choice, "What powers your agents" (components/settings/AgentEnginePanel.tsx,
+ * lib/ai/agent-engine.ts): an AI account, an AI app on the paired computer, or
+ * a local model there. This card is that computer's status (which apps it
+ * reported and whether each is signed in) and ONE extra choice that only the
+ * coding harness needs: the coding harness edits files, so it always runs on
+ * an app on the computer, even when your agents answer on an AI account. It
+ * follows your agents' app when they run on one; a pick here changes the
+ * coding harness alone, in this browser, and says so.
  *
  * PURE: no imports (components/settings/LocalCliProvidersCard.tsx shows them).
  */
 
 export const LOCAL_CLI_SCOPE =
-  "The AI command-line tools on your paired computer. They answer only the Coding harness (Admin > Coding harness) when it runs on that computer. Your departments do not use them: what powers your departments is the AI account and model in AI setup above. Setup commands run directly only when this dashboard is opened on that computer; elsewhere the card shows the exact command to run there.";
+  "The AI apps on your paired computer, as it last reported them. What powers your agents is chosen above, in What powers your agents. Setup commands run directly only when this dashboard is opened on that computer; elsewhere the card shows the exact command to run there.";
 
 export const LOCAL_CLI_PICKER_SCOPE =
-  "Which tool answers the Coding harness when it runs on the paired computer (it also sets the Coding harness's own picker). It never changes what your departments use.";
+  "The coding harness edits files, so it always runs on an app on the paired computer. It uses your agents' app when they run on one; pick another here to change the coding harness alone (in this browser). It never changes what your agents use.";

@@ -23,7 +23,7 @@
 
 import { NextRequest } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
-import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
+import { bridgeCliPolicy, type BridgeCliProvider } from "@/lib/bridge-cli-policy";
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
@@ -138,17 +138,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ---- Compute role-derived disallowed tools (server-side) -----------------
-  const disallowedTools = bridgeDisallowedToolsForRole(auth.teamRole);
-
-  // Confine non-privileged roles to Claude Code — the ONLY runtime whose
-  // --disallowed-tools spawn flag enforces the no-shell wall. Codex/Gemini
-  // have no equivalent spawn-time tool boundary, so a member who selected them
-  // could bypass the gate entirely (Codex audit P1). Force claude for anyone
-  // who isn't owner/admin; owner/admin already get the full toolset, so their
-  // runtime choice is unrestricted. The server value wins in the forward body.
-  const isPrivileged = auth.teamRole === "owner" || auth.teamRole === "admin";
-  const effectiveCliProvider = isPrivileged ? cliProvider : "claude";
+  // ---- Role-derived runtime + disallowed tools (server-side) ----------------
+  // Non-privileged roles run on Claude Code, the ONLY runtime whose
+  // --disallowed-tools spawn flag enforces the no-shell wall (Codex audit P1);
+  // owner/admin keep their choice and every tool. One rule shared with the
+  // department turns on a CLI engine (lib/bridge-cli-policy.ts). The server
+  // value wins in the forward body.
+  const { cliProvider: effectiveCliProvider, disallowedTools } = bridgeCliPolicy(
+    auth.teamRole,
+    cliProvider as BridgeCliProvider,
+  );
 
   // ---- HOP 3: forward to the VPS bridge ------------------------------------
   // Server fields WIN in the spread — any tenant_id/team_role/user_id/

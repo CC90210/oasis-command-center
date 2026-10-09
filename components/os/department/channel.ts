@@ -31,7 +31,10 @@ import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAccountChangedAt, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
-import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { brainLine, departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
+import { readAgentEngine } from "@/lib/ai/agent-engine-store";
+import { bridgeEngineLine, spendFor, type AgentEngineChoice, type EngineLabel, type EngineSpend } from "@/lib/ai/agent-engine";
+import { bridgeCallerForSession } from "@/lib/ai/bridge-turn";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -61,6 +64,12 @@ export type ChannelState =
        * verified operator's fallback) answers instead of an account.
        */
       brain?: DepartmentBrain | null;
+      /**
+       * What powers this channel (lib/ai/agent-engine.ts): the API account, or
+       * an AI app / local model on the paired computer, and whose credits or
+       * plan it spends. Owners and admins only; null for anyone else.
+       */
+      engine?: ChannelEngine | null;
     }
   | {
       kind: "not_connected";
@@ -118,26 +127,64 @@ async function providerReady(
   tenantId: string,
   authUserId: string | null,
   email: string | null,
-): Promise<{ readiness: ProviderReadiness; brain: DepartmentBrain | null; accountChangedAt: string | null }> {
+): Promise<{ readiness: ProviderReadiness; brain: DepartmentBrain | null; accountChangedAt: string | null; engine: ChannelEngine | null }> {
   let changedAt: string | null = null;
+  let chosen: AgentEngineChoice;
+  let brain: DepartmentBrain | null = null;
   try {
     // When the account last changed never fails the read (null = unknown).
-    const [account, at] = await Promise.all([readWorkspaceAiAccount(tenantId), readWorkspaceAccountChangedAt(tenantId)]);
+    const [account, at, engine] = await Promise.all([
+      readWorkspaceAiAccount(tenantId),
+      readWorkspaceAccountChangedAt(tenantId),
+      readAgentEngine(tenantId),
+    ]);
     changedAt = at;
+    chosen = engine;
     if (
       hasUsableKey(account) &&
       (account.provider !== LOCAL_MODEL_PROVIDER || (await isPlatformOperatorForAuthUser(authUserId, email)))
     ) {
-      return { readiness: "ready", brain: departmentBrain(account), accountChangedAt: changedAt };
+      brain = departmentBrain(account);
     }
   } catch (err) {
     console.error("[os.channel.provider]", err);
-    return { readiness: "unknown", brain: null, accountChangedAt: null };
+    return { readiness: "unknown", brain: null, accountChangedAt: null, engine: null };
   }
+  // An AI app or local model on the paired computer answers when this person
+  // can reach it (the route asks the same gate, lib/ai/bridge-turn.ts); else
+  // the API account answers in its place, and the header says so.
+  const onComputer = chosen.kind === "api" ? null : chosen;
+  const reachable = onComputer ? (await bridgeCallerForSession(tenantId)) !== null : false;
+  const engine = channelEngine(chosen, reachable, brain);
+  if (reachable || brain) return { readiness: "ready", brain, accountChangedAt: changedAt, engine };
   const readiness: ProviderReadiness =
     operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email)) ? "ready" : "none";
-  return { readiness, brain: null, accountChangedAt: changedAt };
+  return { readiness, brain: null, accountChangedAt: changedAt, engine: readiness === "ready" ? channelEngine(chosen, false, null) : engine };
 }
+
+/**
+ * What a channel header says powers it (owners and admins only), in the same
+ * words a reply's footer uses (lib/ai/agent-engine.ts): the line, whose credits
+ * or plan it spends, and, when the chosen engine on the paired computer cannot
+ * be reached, that the API account answers instead. PURE.
+ */
+export function channelEngine(chosen: AgentEngineChoice, reachable: boolean, brain: DepartmentBrain | null): ChannelEngine {
+  if (chosen.kind !== "api" && reachable) {
+    return { line: bridgeEngineLine(chosen), spend: spendFor(chosen), note: null };
+  }
+  const apiLine = brain ? brainLine(brain) : "the OASIS platform key";
+  const spend: EngineSpend = brain ? "api_credits" : "platform";
+  if (chosen.kind !== "api") {
+    return {
+      line: apiLine,
+      spend,
+      note: `${bridgeEngineLine(chosen)} is chosen, but the computer can't be reached right now, so ${brain ? "your AI account" : "the platform key"} answers.`,
+    };
+  }
+  return { line: apiLine, spend, note: null };
+}
+
+export type ChannelEngine = EngineLabel;
 
 /**
  * The two workspace-wide halves of "can a channel answer": a slug the chat
@@ -151,12 +198,13 @@ export async function workspaceChatReadiness(viewer: OsViewer): Promise<{
   provider: ProviderReadiness;
   brain: DepartmentBrain | null;
   accountChangedAt: string | null;
+  engine: ChannelEngine | null;
 }> {
   const [slug, ready] = await Promise.all([
     workspaceChatSlug(viewer.surface.tenantId),
     providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email),
   ]);
-  return { slug, provider: ready.readiness, brain: ready.brain, accountChangedAt: ready.accountChangedAt };
+  return { slug, provider: ready.readiness, brain: ready.brain, accountChangedAt: ready.accountChangedAt, engine: ready.engine };
 }
 
 /**
@@ -197,7 +245,7 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
   }
   const owner = viewer.surface.persona === "founder";
   const tenantId = viewer.surface.tenantId;
-  const [{ slug, provider, brain, accountChangedAt }, agent, turns] = await Promise.all([
+  const [{ slug, provider, brain, accountChangedAt, engine }, agent, turns] = await Promise.all([
     workspaceChatReadiness(viewer),
     getAgentBySlug(binding.agentSlug, tenantId),
     readWorkspaceTurns(tenantId),
@@ -239,5 +287,6 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
     lastTurn: lastTurnFrom(turns, dept.key, accountChangedAt),
     canManageAi: owner,
     brain: owner ? brain : null,
+    engine: owner ? engine : null,
   };
 }

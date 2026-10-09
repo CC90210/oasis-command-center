@@ -356,10 +356,14 @@ async function main() {
     assert.match(agent, /provider = cfg\.provider;\s*model = cfg\.model;/);
     assert.doesNotMatch(agent, /binding\?\.model_override \|\|/, "a manifest model_override chooses a department model again");
     const channel = readFileSync(join(ROOT, "components/os/department/channel.ts"), "utf8");
-    assert.match(channel, /return \{ readiness: "ready", brain: departmentBrain\(account\), accountChangedAt: changedAt \};/);
+    // fix/ai-brain-engine: the header names what powers the channel (the
+    // account, or an app on the paired computer: lib/ai/agent-engine.ts),
+    // still from the account's brain when the account is what answers.
+    assert.match(channel, /brain = departmentBrain\(account\);/);
+    assert.match(channel, /if \(reachable \|\| brain\) return \{ readiness: "ready", brain, accountChangedAt: changedAt, engine \};/);
     assert.match(channel, /brain: owner \? brain : null,/);
     const deptChannel = readFileSync(join(ROOT, "components/os/department/DepartmentChannel.tsx"), "utf8");
-    assert.match(deptChannel, /poweredBy=\{state\.canManageAi && state\.brain \? brainLine\(state\.brain\) : null\}/);
+    assert.match(deptChannel, /state\.engine \?\? \(state\.brain \? \{ line: brainLine\(state\.brain\), spend: "api_credits", note: null \} : null\)/);
     const settings = readFileSync(join(ROOT, "components/settings/SettingsContent.tsx"), "utf8");
     assert.match(settings, /readWorkspaceAiAccount\(profile\.tenant_id\)\.then\(\(a\) => \(hasUsableKey\(a\) \? departmentBrain\(a\) : null\)\)/);
     assert.match(settings, /brain=\{aiBrain\}/);
@@ -526,10 +530,14 @@ async function main() {
 
   // -- 5. The local CLI card says exactly what it powers ------------------------
   console.log("5. local CLIs");
-  await check("the local CLI card says it answers only the Coding harness on that computer, never the departments", async () => {
+  await check("the paired-computer card points at the one engine choice, and its picker changes the coding harness alone", async () => {
+    // 2026-10-09 (PR fix/ai-brain-engine): departments CAN run on an app on the
+    // paired computer now, chosen in ONE place (What powers your agents). The
+    // card no longer says departments never use the apps; it says where the
+    // choice is, and that its own picker is the coding harness's alone.
     const cli = await import("../components/settings/local-cli-scope");
-    assert.match(cli.LOCAL_CLI_SCOPE, /They answer only the Coding harness \(Admin > Coding harness\) when it runs on that computer\. Your departments do not use them/);
-    assert.match(cli.LOCAL_CLI_PICKER_SCOPE, /It never changes what your departments use\./);
+    assert.match(cli.LOCAL_CLI_SCOPE, /What powers your agents is chosen above, in What powers your agents\./);
+    assert.match(cli.LOCAL_CLI_PICKER_SCOPE, /pick another here to change the coding harness alone \(in this browser\)\. It never changes what your agents use\./);
     // The bridge may run on another computer than this browser (hosted mode): "the paired computer".
     assert.doesNotMatch(cli.LOCAL_CLI_SCOPE + cli.LOCAL_CLI_PICKER_SCOPE, /this computer/);
     const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");

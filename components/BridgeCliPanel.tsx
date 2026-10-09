@@ -15,8 +15,8 @@
  * when older than five minutes (lib/bridge-cli-status.ts).
  *
  * States, each said plainly:
- *   - the report: one row per CLI (installed and signed in / installed, not
- *     signed in / not installed);
+ *   - the report: one row per CLI, in lib/bridge-cli-status.ts's words (Ready /
+ *     Needs sign-in / Sign-in not confirmed / Not detected);
  *   - no report yet, a stale report, or one the page can't read: said so, next
  *     to what the heartbeat says about the computer (online / offline / unknown);
  *   - the read failed or the session is gone: "Couldn't check" or "signed out",
@@ -26,11 +26,12 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
 import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
+import { CLI_STATE_LABEL, cliStatusState } from "@/lib/bridge-cli-status";
 
 const POLL_MS = 30_000;
 export const CLI_STATUS_ROUTE = "/api/bridge/cli-status";
 
-type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string };
+type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string; checked?: boolean };
 type CliSnapshotBody =
   | { ok: true; data: Record<"claude" | "codex" | "gemini", CliInfo> }
   | { ok: false; reason: string };
@@ -168,8 +169,11 @@ export function BridgeCliPanel({
 
 function CliRow({ name, info }: { name: string; info: CliInfo }) {
   const label = name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : "Gemini";
-  const state = !info.installed ? "Not installed" : info.authenticated ? "Signed in" : "Installed, not signed in";
-  const good = info.installed && info.authenticated;
+  // The words Settings > AI brain uses too (lib/bridge-cli-status.ts): a check
+  // that did not finish is "not confirmed", never "not signed in".
+  const cli = cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true });
+  const state = CLI_STATE_LABEL[cli];
+  const good = cli === "ready";
   return (
     <div
       className={`rounded-lg border px-3 py-2.5 flex items-start gap-3 ${
