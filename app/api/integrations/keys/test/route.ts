@@ -23,7 +23,7 @@ import {
   tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
 import { recordIntegrationCheck, serverSetFieldKeys } from "@/lib/integrations/server-checks";
-import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { findTenantManuallyEditableIntegrationSchema, hasHostBoundSecrets } from "@/lib/tenant-integration-schemas";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import { mayManageConnections } from "@/lib/connections/access";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
@@ -79,7 +79,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const bundle = await getTenantIntegrationBundle(sess.tenantId, service);
+  // An app that sends a secret to an address the owner typed (its mail server) is
+  // tested only with values saved TOGETHER here: never with a secret OASIS
+  // sets on its own server, which was never entered for that address.
+  const bundle = await getTenantIntegrationBundle(sess.tenantId, service, {
+    allowEnvFallback: !hasHostBoundSecrets(schema),
+  });
   let result: ProbeResult;
   try {
     result = await runProbe(service, bundle);
@@ -150,9 +155,9 @@ async function runProbe(
   bundle: Record<string, string>,
 ): Promise<ProbeResult> {
   // The apps an owner connects with a pasted key (Calendly, Cal.com, Fathom,
-  // Fireflies, Zernio, GoHighLevel, n8n, their own mail server): one read each
+  // Fireflies, Zernio, GoHighLevel, their own mail server): one read each
   // that changes nothing, against the vendor's documented endpoint
-  // (lib/integrations/key-probes.ts). n8n and SMTP connect only to a public
+  // (lib/integrations/key-probes.ts). SMTP connects only to a public
   // host name, so this route is never an internal-network probe.
   if (hasKeyProbe(service)) return runKeyProbe(service, bundle);
   switch (service) {

@@ -22,7 +22,6 @@ export type IntegrationFieldDef = {
     | "email"
     | "alphanum_uppercase"
     | "twilio_sid"
-    | "public_https_url"
     | "public_hostname"
     | "smtp_port"
     | "single_line_token";
@@ -32,6 +31,13 @@ export type IntegrationFieldDef = {
   optional?: boolean;
   /** Shown inside the empty input, never a real value. */
   placeholder?: string;
+  /**
+   * Where the saved secret(s) named here are SENT (a mail server's host and
+   * port). Changing this field clears those secrets in
+   * the same save, so a secret is never sent anywhere it was not entered for:
+   * it must be pasted again for the new address (app/api/integrations/keys).
+   */
+  bindsSecrets?: readonly string[];
 };
 
 export type IntegrationSchema = {
@@ -139,27 +145,12 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     description:
       "The mail server your business already sends from: your email host, Microsoft 365, SendGrid or Amazon SES. Test signs in to it with these details and sends nothing.",
     fields: [
-      { key: "host", label: "Server", sensitive: false, validation: "public_hostname", placeholder: "smtp.example.com", hint: "Your provider's SMTP server name, e.g. smtp.office365.com or smtp.sendgrid.net. A public name, not an IP address." },
-      { key: "port", label: "Port", sensitive: false, validation: "smtp_port", placeholder: "587", hint: "587 (most providers), 465, 2525 or 25." },
+      { key: "host", label: "Server", sensitive: false, validation: "public_hostname", bindsSecrets: ["password"], placeholder: "smtp.example.com", hint: "Your provider's SMTP server name, e.g. smtp.office365.com or smtp.sendgrid.net. A public name, not an IP address." },
+      { key: "port", label: "Port", sensitive: false, validation: "smtp_port", bindsSecrets: ["password"], placeholder: "587", hint: "587 (most providers), 465, 2525 or 25." },
       { key: "user", label: "Username", sensitive: false, hint: "Usually your full email address. SendGrid uses the word apikey." },
       { key: "password", label: "Password", sensitive: true, hint: "Your mailbox password, an app password, or the provider's SMTP key." },
       { key: "from_address", label: "Send from", sensitive: false, validation: "email", placeholder: "you@yourbusiness.com", hint: "The address your emails come from." },
     ],  },
-  // n8n public REST API: X-N8N-API-KEY header, base <instance>/api/v1.
-  // https://docs.n8n.io/api/authentication/ and
-  // https://docs.n8n.io/api/using-api-playground/ (read 2026-10-09). The API is
-  // not available on n8n Cloud's free trial.
-  {
-    service: "n8n",
-    label: "n8n",
-    description:
-      "Your own n8n, on n8n Cloud or your own server: its web address and an API key. Test lists one workflow with the key, which changes nothing.",
-    fields: [
-      { key: "base_url", label: "n8n address", sensitive: false, validation: "public_https_url", placeholder: "https://yourname.app.n8n.cloud", hint: "The address you open n8n at. It must start with https:// and be reachable from the internet." },
-      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In n8n: Settings > n8n API > Create an API key. Copy it when it is shown." },
-    ],
-    getKey: { href: "https://docs.n8n.io/api/authentication/", label: "n8n's guide to API keys" },
-  },
   {
     service: "stripe",
     label: "Stripe",
@@ -366,18 +357,6 @@ export function validateIntegrationValue(
       return isPublicHostname(value) ? null : "Use the server's public name (like smtp.example.com), not an IP address or an internal name.";
     case "smtp_port":
       return SMTP_PORTS.has(value.trim()) ? null : "Use one of the standard mail ports: 587, 465, 2525 or 25.";
-    case "public_https_url": {
-      let u: URL;
-      try {
-        u = new URL(value.trim());
-      } catch {
-        return "That is not a web address. It should look like https://yourname.app.n8n.cloud";
-      }
-      if (u.protocol !== "https:") return "The address must start with https://";
-      if (u.username || u.password) return "Leave any username or password out of the address.";
-      if (u.port && u.port !== "443") return "Use the address without a port number (https on port 443).";
-      return isPublicHostname(u.hostname) ? null : "Use the public address you open n8n at, not an IP address or an internal name.";
-    }
     default:
       return null;
   }
@@ -388,7 +367,7 @@ export const SMTP_PORTS: ReadonlySet<string> = new Set(["587", "465", "2525", "2
 
 /**
  * A host name OASIS may connect to for an owner's self-hosted app (their mail
- * server, their n8n): a DNS name with a letter top-level label. That refuses
+ * server): a DNS name with a letter top-level label. That refuses
  * every IP literal (an IPv4 address ends in a number, an IPv6 one has colons),
  * localhost and the internal suffixes, so a Test can never be aimed at an
  * address inside a network. A public name that resolves to a private address is
@@ -413,4 +392,24 @@ export function isOptionalIntegrationField(field: IntegrationFieldDef): boolean 
 
 export function requiredIntegrationFieldKeys(schema: IntegrationSchema): string[] {
   return schema.fields.filter((f) => !isOptionalIntegrationField(f)).map((f) => f.key);
+}
+
+/** True when the app sends a saved secret to an address the owner typed (its own mail server). */
+export function hasHostBoundSecrets(schema: IntegrationSchema): boolean {
+  return schema.fields.some((f) => (f.bindsSecrets?.length ?? 0) > 0);
+}
+
+/**
+ * The order to save several fields in one go: every field that clears a
+ * secret (an address) before the fields it clears, so a new address and a
+ * new key typed together both survive the save.
+ */
+export function orderForSave(schema: IntegrationSchema, keys: readonly string[]): string[] {
+  const binders = new Set(schema.fields.filter((f) => (f.bindsSecrets?.length ?? 0) > 0).map((f) => f.key));
+  const rank = (k: string) => (binders.has(k) ? 0 : 1);
+  const index = (k: string) => {
+    const i = schema.fields.findIndex((f) => f.key === k);
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  return [...keys].sort((a, b) => rank(a) - rank(b) || index(a) - index(b));
 }

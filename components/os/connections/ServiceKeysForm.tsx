@@ -27,7 +27,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { findTenantManuallyEditableIntegrationSchema, requiredIntegrationFieldKeys } from "@/lib/tenant-integration-schemas";
+import { findTenantManuallyEditableIntegrationSchema, orderForSave, requiredIntegrationFieldKeys } from "@/lib/tenant-integration-schemas";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 import { testResultNotice } from "@/components/os/connections/test-notice";
 import type { ConnectorStatus } from "@/lib/os/connectors";
@@ -168,8 +168,12 @@ export function ServiceKeysForm({
 
   const save = () =>
     run("save", async () => {
-      const entries = Object.entries(drafts).filter(([, v]) => v.trim());
+      // An address is saved before the key it guards: a new address clears
+      // the old key on the server, so a new key typed beside it must land after.
+      const typed = Object.fromEntries(Object.entries(drafts).filter(([, v]) => v.trim()));
+      const entries = orderForSave(schema, Object.keys(typed)).map((k) => [k, typed[k]] as const);
       const saved: string[] = [];
+      const cleared = new Set<string>();
       for (const [i, [field_key, value]] of entries.entries()) {
         const r = await send("POST", "/api/integrations/keys", { service, field_key, value });
         if (!r.ok) {
@@ -179,8 +183,21 @@ export function ServiceKeysForm({
           onChanged();
           return;
         }
+        for (const k of Array.isArray(r.data?.cleared) ? (r.data!.cleared as string[]) : []) cleared.add(k);
+        cleared.delete(field_key);
         saved.push(labelOf(field_key));
         setDrafts((d) => ({ ...d, [field_key]: "" }));
+      }
+      if (cleared.size > 0) {
+        // The address changed and its key or password was removed with it: say
+        // which to paste again (the server will not send the old one anywhere new).
+        setNotice({
+          tone: "err",
+          text: `Saved. The address changed, so the saved ${listed([...cleared].map(labelOf))} was removed: paste it again for the new address, then run Test.`,
+        });
+        await reload();
+        onChanged();
+        return;
       }
       setNotice({ tone: "ok", text: "Saved." });
       await reload();

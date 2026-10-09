@@ -1,7 +1,7 @@
 /**
  * connectors-by-key.test.ts - every app a client connects with a key from its
- * own account (Calendly, Cal.com, Fathom, Fireflies, Zernio, GoHighLevel, n8n,
- * its own mail server), end to end, plus Stripe's and Jev's key Test.
+ * own account (Calendly, Cal.com, Fathom, Fireflies, Zernio, GoHighLevel, its
+ * own mail server), end to end, plus Stripe's and Jev's key Test.
  *
  * WHY. CC, 2026-10-09: "You can't add API keys, which should be the easiest
  * thing ... when you click on that connection, you can attach the required
@@ -11,7 +11,8 @@
  *     vendor accepted it; or a vendor's refusal shown as a code nobody reads;
  *   - a saved key stored readable, or sent back to the browser in any answer;
  *   - one workspace's Test run with another workspace's key;
- *   - a Test aimed at an address inside a network (n8n, SMTP: owner-typed hosts);
+ *   - a Test aimed at an address inside a network (SMTP: an owner-typed host),
+ *     or a saved password sent to a mail server it was never entered for;
  *   - Jev's TypeSafe key refused in the browser by Stripe's key rule.
  *
  * Real routes, real signed session, real store and encryption on a local
@@ -101,15 +102,12 @@ const VENDOR_HOSTS = new Set([
   "api.fireflies.ai",
   "zernio.com",
   "services.leadconnectorhq.com",
-  "alpha.app.n8n.cloud",
-  "ghost.app.n8n.cloud",
   "api.stripe.com",
   "cloudflare-dns.com",
 ]);
 
 function credentialOf(host: string, headers: Headers): string {
   if (host === "api.fathom.ai") return headers.get("x-api-key") ?? "";
-  if (host.endsWith(".app.n8n.cloud")) return headers.get("x-n8n-api-key") ?? "";
   return (headers.get("authorization") ?? "").replace(/^Bearer /, "");
 }
 
@@ -119,10 +117,8 @@ function credentialOf(host: string, headers: Headers): string {
 // inside a network, partly or wholly, or change between lookups (rebinding).
 const PUBLIC_V4 = "93.184.216.34";
 const DNS: Record<string, { A?: string[]; AAAA?: string[]; nx?: boolean }> = {
-  "alpha.app.n8n.cloud": { A: [PUBLIC_V4] },
-  "ghost.app.n8n.cloud": { A: [PUBLIC_V4] },
-  "automations.alpha.test": { A: [PUBLIC_V4], AAAA: ["2606:2800:220:1::1"] },
-  "smtp.alpha.test": { A: [PUBLIC_V4] },
+  "smtp.alpha.test": { A: [PUBLIC_V4], AAAA: ["2606:2800:220:1::1"] },
+  "mail.attacker.test": { A: ["198.199.1.2"] },
   "evil.alpha.test": { A: ["10.0.0.5"] },
   "loop.alpha.test": { A: ["127.0.0.1"] },
   "meta.alpha.test": { A: ["169.254.169.254"] },
@@ -198,12 +194,6 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (id === "loc-missing") return json(404, { message: "Location not found" });
       return json(200, { location: { id, name: "Alpha Plumbing HQ", email: "owner@alpha.test" } });
     }
-    case "alpha.app.n8n.cloud":
-      assert.equal(url.pathname, "/api/v1/workflows");
-      assert.equal(url.searchParams.get("limit"), "1", "n8n is asked for one workflow, never more");
-      return json(200, { data: [{ id: "1", name: "Lead intake" }], nextCursor: null });
-    case "ghost.app.n8n.cloud":
-      return json(404, { message: "not found" });
   }
   throw new Error(`unhandled ${href}`);
 }) as typeof fetch;
@@ -235,7 +225,6 @@ const APPS: App[] = [
   { slug: "fireflies", service: "fireflies", good: { api_key: "ff-alpha-key-00000000000001" }, secretField: "api_key", passDetail: /Fireflies account: Alpha Plumbing/ },
   { slug: "zernio", service: "late", good: { api_key: "sk_alpha000000000000000000000001" }, secretField: "api_key", passDetail: /2 profiles/ },
   { slug: "gohighlevel", service: "gohighlevel", good: { private_token: "pit-alpha-0000000000000001", location_id: "loc-alpha-1" }, secretField: "private_token", passDetail: /sub-account: Alpha Plumbing HQ/ },
-  { slug: "n8n", service: "n8n", good: { base_url: "https://alpha.app.n8n.cloud", api_key: "n8n-alpha-key-00000000001" }, secretField: "api_key", passDetail: /n8n accepted the key/ },
 ];
 
 async function main() {
@@ -360,7 +349,7 @@ async function main() {
     }
     // Every schema cites the vendor doc it was built from.
     const src = read("lib/tenant-integration-schemas.ts");
-    for (const host of ["developer.calendly.com", "cal.com/docs", "developers.fathom.ai", "docs.fireflies.ai", "docs.zernio.com", "marketplace.gohighlevel.com/docs", "docs.n8n.io"]) {
+    for (const host of ["developer.calendly.com", "cal.com/docs", "developers.fathom.ai", "docs.fireflies.ai", "docs.zernio.com", "marketplace.gohighlevel.com/docs"]) {
       assert.ok(src.includes(host), `the schemas cite ${host}`);
     }
     // The form links to it and asks for what the schema requires, not every field.
@@ -392,12 +381,6 @@ async function main() {
     await login(USERS.ownerA);
     const refused: [string, string, string][] = [
       ["calendly", "access_token", "has a space in it"],
-      ["n8n", "base_url", "http://automations.alpha.test"],
-      ["n8n", "base_url", "https://10.0.0.5"],
-      ["n8n", "base_url", "https://127.0.0.1:5678"],
-      ["n8n", "base_url", "https://n8n.internal"],
-      ["n8n", "base_url", "https://localhost"],
-      ["n8n", "base_url", "https://user:pw@automations.alpha.test"],
       ["smtp", "host", "192.168.1.10"],
       ["smtp", "host", "mail.corp"],
       ["smtp", "host", "[::1]"],
@@ -413,9 +396,13 @@ async function main() {
       const f = schemas.findIntegrationSchema("smtp")!.fields.find((x) => x.key === field)!;
       assert.equal(schemas.validateIntegrationValue(f, value), null, `smtp.${field}=${value} is accepted`);
     }
-    const n8nUrl = schemas.findIntegrationSchema("n8n")!.fields.find((f) => f.key === "base_url")!;
-    assert.equal(schemas.validateIntegrationValue(n8nUrl, "https://yourname.app.n8n.cloud"), null);
-    assert.equal(schemas.validateIntegrationValue(n8nUrl, "https://n8n.example.com/"), null);
+    // n8n is gone (CC, 2026-10-09): no card, no schema, and its keys are refused.
+    assert.equal(connectors.connectorBySlug("n8n"), null);
+    assert.equal(schemas.findIntegrationSchema("n8n"), null);
+    assert.equal(probes.hasKeyProbe("n8n"), false);
+    for (const field_key of ["base_url", "api_key", "outbound_url", "outbound_secret"]) {
+      assert.equal((await save("n8n", field_key, "https://example.com/x")).status, 400, `n8n.${field_key} is not saved`);
+    }
   });
 
   // -- 3. Never back to the browser -------------------------------------------
@@ -486,7 +473,7 @@ async function main() {
     }
   });
 
-  await check("vendor-specific answers: Fireflies' auth_failed on a 200, its paid plan, GoHighLevel's unknown sub-account, n8n's wrong address", async () => {
+  await check("vendor-specific answers: Fireflies' auth_failed on a 200, its paid plan, GoHighLevel's unknown sub-account", async () => {
     await login(USERS.ownerA);
     await save("fireflies", "api_key", "ff-alpha-key-revoked-0001");
     let t = await runTest("fireflies");
@@ -503,12 +490,6 @@ async function main() {
     assert.equal(t.body.error, "not_found");
     assert.equal((await card(ALPHA, "gohighlevel")).label, "Not found");
     await saveAll("gohighlevel", APPS[5].good);
-
-    await save("n8n", "base_url", "https://ghost.app.n8n.cloud");
-    t = await runTest("n8n");
-    assert.equal(t.body.error, "not_found");
-    assert.match((await card(ALPHA, "n8n")).detail ?? "", /no n8n API at this address/);
-    await saveAll("n8n", APPS[6].good);
   });
 
   await check("a missing required value is said as missing and calls no vendor", async () => {
@@ -526,19 +507,21 @@ async function main() {
 
   // -- 6. Self-hosted addresses: never inside a network -------------------------
 
-  await check("n8n and SMTP Tests never connect to an internal address, even one saved before the rule", async () => {
+  await check("an SMTP Test never connects to an internal address, even one saved before the rule", async () => {
     await login(USERS.ownerA);
     // Planted straight into the store (the save route refuses these).
     const { setTenantIntegrationValue } = await import("../lib/tenant-integration-store");
-    const before = calls.length;
-    for (const host of ["https://169.254.169.254", "https://10.1.2.3", "https://localhost", "https://n8n.internal", "http://automations.alpha.test"]) {
-      await setTenantIntegrationValue({ tenantId: ALPHA, service: "n8n", fieldKey: "base_url", value: host });
-      const t = await runTest("n8n");
-      assert.equal(t.body.error, "blocked_host", `${host} is never called`);
+    const plant = async (values: Record<string, string>) => {
+      for (const [fieldKey, value] of Object.entries(values)) await setTenantIntegrationValue({ tenantId: ALPHA, service: "smtp", fieldKey, value });
+    };
+    const dnsBefore = dnsLookups;
+    for (const host of ["169.254.169.254", "10.1.2.3", "localhost", "mail.internal", "[::1]"]) {
+      await plant({ host, port: "587", user: "u@alpha.test", password: "planted-pw-0001", from_address: "u@alpha.test" });
+      const t = await runTest("smtp");
+      assert.equal(t.body.error, "blocked_host", `${host} is never connected to`);
     }
-    assert.equal(calls.length, before, "no request left OASIS for any of them");
-    assert.equal((await card(ALPHA, "n8n")).label, "Address not allowed");
-    await saveAll("n8n", APPS[6].good);
+    assert.equal(dnsLookups, dnsBefore, "refused by its spelling, before any lookup or connection");
+    assert.equal((await card(ALPHA, "smtp")).label, "Server name not allowed");
 
     let verified = 0;
     const smtpVerify = async () => {
@@ -607,13 +590,11 @@ async function main() {
   await check("a public-looking name that resolves (wholly or partly) inside a network is refused at save, and nothing is saved", async () => {
     await login(USERS.ownerA);
     for (const name of ["evil.alpha.test", "loop.alpha.test", "meta.alpha.test", "mixed.alpha.test", "mapped.alpha.test", "ula.alpha.test", "nowhere.alpha.test"]) {
-      const n8n = await save("n8n", "base_url", `https://${name}`);
-      assert.equal(n8n.status, 422, `n8n ${name}: ${n8n.text}`);
-      assert.match(String(n8n.body.error), name === "nowhere.alpha.test" ? /could not find that address/ : /points inside a private network/);
       const smtp = await save("smtp", "host", name);
       assert.equal(smtp.status, 422, `smtp ${name}: ${smtp.text}`);
+      assert.match(String(smtp.body.error), name === "nowhere.alpha.test" ? /could not find that address/ : /points inside a private network/);
     }
-    const rows = await db.execute({ sql: "SELECT field_key, encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service IN ('n8n','smtp') AND field_key IN ('base_url','host')", args: [ALPHA] });
+    const rows = await db.execute({ sql: "SELECT field_key, encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service = 'smtp' AND field_key = 'host'", args: [ALPHA] });
     for (const r of rows.rows) {
       const v = decryptField(String(r.encrypted_value));
       assert.ok(!/evil|loop|meta|mixed|mapped|ula|nowhere/.test(v), `${v} must not have been saved`);
@@ -622,16 +603,15 @@ async function main() {
 
   await check("every Test resolves again: a name that answered a public address at save and a private one now is refused, and nothing is sent", async () => {
     await login(USERS.ownerA);
-    const saved = await save("n8n", "base_url", "https://rebind.alpha.test");
+    const saved = await save("smtp", "host", "rebind.alpha.test");
     assert.equal(saved.status, 200, `the first answer was public: ${saved.text}`);
-    const before = calls.length;
-    const t = await runTest("n8n");
+    await saveAll("smtp", { port: "587", user: "u@alpha.test", password: "rebind-pw-0001", from_address: "u@alpha.test" });
+    const t = await runTest("smtp");
     assert.equal(t.body.error, "blocked_host", t.text);
-    assert.equal(calls.length, before, "no request was made to the re-pointed name");
-    await saveAll("n8n", APPS[6].good);
+    assert.equal((await card(ALPHA, "smtp")).label, "Server name not allowed");
   });
 
-  await check("a self-hosted address is reached at the ONE address that was checked (pinned), with the name kept for SNI, Host and the certificate; DNS is never asked again", async () => {
+  await check("a self-hosted mail server is reached at the ONE address that was checked (pinned), with the name kept for the TLS certificate; DNS is never asked again", async () => {
     let lookups = 0;
     // Rebinding: the first answer is public, every later answer is loopback.
     const resolve: import("../lib/integrations/host-safety").Resolver = async (_name, type) => {
@@ -639,67 +619,29 @@ async function main() {
       if (type === "AAAA") return [];
       return lookups <= 2 ? [PUBLIC_V4] : ["127.0.0.1"];
     };
-    const got: { ip: string; hostname: string; path: string; headers: Record<string, string> }[] = [];
-    const before = calls.length;
-    const r = await probes.runKeyProbe(
-      "n8n",
-      { base_url: "https://automations.alpha.test", api_key: "n8n-self-hosted-key-0001" },
-      {
-        runtime: "node",
-        resolve,
-        pinnedHttpsGet: async (i) => {
-          got.push({ ip: i.ip, hostname: i.hostname, path: i.path, headers: i.headers });
-          return { status: 200, body: JSON.stringify({ data: [] }) };
-        },
-      },
-    );
-    assert.equal(r.ok, true, JSON.stringify(r));
-    assert.equal(lookups, 2, "one A and one AAAA lookup per Test, none at connect time");
-    assert.deepEqual(got.map((g) => [g.ip, g.hostname, g.path]), [[PUBLIC_V4, "automations.alpha.test", "/api/v1/workflows?limit=1"]]);
-    assert.equal(got[0].headers["X-N8N-API-KEY"], "n8n-self-hosted-key-0001");
-    assert.equal(calls.length, before, "no fetch by name for a self-hosted address");
-    // The real pinned client connects to the address with the name as SNI and Host.
-    const src = read("lib/integrations/key-probes.ts");
-    assert.match(src, /https\.request\(\s*\{ host: ip, port: 443, servername: hostname, method: "GET", path, headers: \{ \.\.\.headers, Host: hostname \}/);
-    assert.match(src, /host: connectHost,[\s\S]{0,300}tls: \{ servername: host \}/, "SMTP connects to the checked address and verifies the saved name");
-    // One total deadline (the request's own `timeout` is only an idle limit),
-    // and an answer past 1 MB ends the request instead of being read on (CodeRabbit #563).
-    assert.match(src, /deadline = setTimeout\(\(\) => req\.destroy\(/);
-    assert.match(src, /if \(size > 1_000_000\) \{\s*req\.destroy\(/);
-
-    // SMTP: the sign-in goes to the checked address.
     const seen: { host: string; connectHost: string }[] = [];
     const s = await probes.runKeyProbe(
       "smtp",
       { host: "smtp.alpha.test", port: "587", user: "u@alpha.test", password: "pw-0001", from_address: "u@alpha.test" },
-      { runtime: "node", smtpVerify: async (i) => void seen.push({ host: i.host, connectHost: i.connectHost }) },
+      { runtime: "node", resolve, smtpVerify: async (i) => void seen.push({ host: i.host, connectHost: i.connectHost }) },
     );
-    assert.equal(s.ok, true);
-    assert.deepEqual(seen, [{ host: "smtp.alpha.test", connectHost: PUBLIC_V4 }]);
+    assert.equal(s.ok, true, JSON.stringify(s));
+    assert.equal(lookups, 2, "one A and one AAAA lookup per Test, none at connect time");
+    assert.deepEqual(seen, [{ host: "smtp.alpha.test", connectHost: PUBLIC_V4 }], "the sign-in goes to the checked address");
+    // The real client connects to the address and verifies the saved name.
+    assert.match(read("lib/integrations/key-probes.ts"), /host: connectHost,[\s\S]{0,300}tls: \{ servername: host \}/);
   });
 
-  await check("where a connection cannot be pinned (the Worker), a self-hosted address is refused and nothing is sent; a vendor's own host still tests by name", async () => {
-    let pinned = 0;
+  await check("where a connection cannot be pinned (the Worker), a self-hosted mail server is refused and nothing is sent; a big provider's own server still tests by name", async () => {
     let signedIn: string[] = [];
-    const before = calls.length;
-    const n8n = await probes.runKeyProbe(
-      "n8n",
-      { base_url: "https://automations.alpha.test", api_key: "n8n-self-hosted-key-0001" },
-      { runtime: "workers", pinnedHttpsGet: async () => ((pinned += 1), { status: 200, body: "{}" }) },
-    );
-    assert.equal(n8n.error, "cannot_pin");
     const smtp = await probes.runKeyProbe(
       "smtp",
       { host: "smtp.alpha.test", port: "587", user: "u", password: "p", from_address: "u@alpha.test" },
       { runtime: "workers", smtpVerify: async (i) => void signedIn.push(i.connectHost) },
     );
     assert.equal(smtp.error, "cannot_pin");
-    assert.equal(pinned + signedIn.length, 0, "nothing was connected to");
-    assert.equal(calls.length, before);
-    // n8n Cloud and a big provider's SMTP name: only the vendor controls their DNS.
-    const cloud = await probes.runKeyProbe("n8n", { base_url: "https://alpha.app.n8n.cloud", api_key: "n8n-alpha-key-00000000001" }, { runtime: "workers" });
-    assert.equal(cloud.ok, true, JSON.stringify(cloud));
-    signedIn = [];
+    assert.equal(signedIn.length, 0, "nothing was connected to");
+    // A big provider's SMTP name: only the provider controls its DNS.
     const o365 = await probes.runKeyProbe(
       "smtp",
       { host: "smtp.office365.com", port: "587", user: "u@alpha.test", password: "p", from_address: "u@alpha.test" },
@@ -707,19 +649,81 @@ async function main() {
     );
     assert.equal(o365.ok, true);
     assert.deepEqual(signedIn, ["smtp.office365.com"]);
-    // Even a vendor's host is resolved and refused if it pointed inside a network.
-    const cloudEvil = await probes.runKeyProbe("n8n", { base_url: "https://alpha.app.n8n.cloud", api_key: "k-00000000" }, {
-      runtime: "workers",
-      resolve: async (_n, t) => (t === "A" ? ["10.0.0.9"] : []),
-    });
-    assert.equal(cloudEvil.error, "blocked_host");
+    // Even a provider's name is resolved and refused if it pointed inside a network.
+    signedIn = [];
+    const o365Evil = await probes.runKeyProbe(
+      "smtp",
+      { host: "smtp.office365.com", port: "587", user: "u", password: "p", from_address: "u@alpha.test" },
+      { runtime: "workers", resolve: async (_n, t) => (t === "A" ? ["10.0.0.9"] : []), smtpVerify: async (i) => void signedIn.push(i.connectHost) },
+    );
+    assert.equal(o365Evil.error, "blocked_host");
+    assert.equal(signedIn.length, 0);
     // The card says it in words.
-    const words = (connectors.connectorBySlug("n8n")!.live!.source as { failureStates: Record<string, { label: string; kind: string }> }).failureStates.cannot_pin;
+    const words = (connectors.connectorBySlug("smtp")!.live!.source as { failureStates: Record<string, { label: string; kind: string }> }).failureStates.cannot_pin;
     assert.equal(words.kind, "configured");
     assert.match(words.label, /can't be tested from OASIS yet/);
-    assert.equal(hostSafety.connectPlan("n8n", "automations.alpha.test", "workers"), "refuse");
-    assert.equal(hostSafety.connectPlan("n8n", "automations.alpha.test", "node"), "pinned");
-    assert.equal(hostSafety.connectPlan("n8n", "x.app.n8n.cloud.evil.test", "workers"), "refuse", "a look-alike suffix is not n8n's");
+    assert.equal(hostSafety.connectPlan("smtp", "smtp.alpha.test", "workers"), "refuse");
+    assert.equal(hostSafety.connectPlan("smtp", "smtp.alpha.test", "node"), "pinned");
+    assert.equal(hostSafety.connectPlan("smtp", "smtp.office365.com.evil.test", "workers"), "refuse", "a look-alike name is not the provider's");
+  });
+
+  // -- 6b'. A changed mail server never gets the old password (Codex re-review) ------
+
+  await check("changing only the server or the port removes the saved password in the same save; the next Test has nothing to send and calls nobody", async () => {
+    await login(USERS.ownerA);
+    const PW = "the-real-password-0001";
+    const good = { host: "smtp.alpha.test", port: "587", user: "owner@alpha.test", password: PW, from_address: "owner@alpha.test" };
+    const pwRow = async () =>
+      (await db.execute({ sql: "SELECT encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service = 'smtp' AND field_key = 'password'", args: [ALPHA] })).rows[0];
+    for (const [field, value] of [["host", "mail.attacker.test"], ["port", "2525"]] as const) {
+      await saveAll("smtp", good);
+      assert.equal(decryptField(String((await pwRow())!.encrypted_value)), PW, "the password is saved with its server");
+      const changed = await save("smtp", field, value);
+      assert.equal(changed.status, 200, changed.text);
+      assert.deepEqual(changed.body.cleared, ["password"], `changing ${field} says the password was removed`);
+      assert.equal(await pwRow(), undefined, `changing ${field} removed the password row in the same save`);
+      const dnsBefore = dnsLookups;
+      const t = await runTest("smtp");
+      assert.equal(t.body.ok, false);
+      assert.match(String(t.body.error), /^missing_fields: password/, `${field}: the Test has nothing to send`);
+      assert.equal(dnsLookups, dnsBefore, `${field}: no lookup and no connection to the new address`);
+      assert.ok(!t.text.includes(PW));
+      assert.equal((await card(ALPHA, "smtp")).kind, "attention");
+    }
+    // Re-saving the SAME server keeps the password: only a change clears it.
+    await saveAll("smtp", good);
+    const same = await save("smtp", "host", "smtp.alpha.test");
+    assert.equal(same.body.cleared, undefined);
+    assert.equal(decryptField(String((await pwRow())!.encrypted_value)), PW);
+    // A new server and a new password saved together both stay (the form saves the server first).
+    const fresh = await save("smtp", "host", "mail.attacker.test");
+    assert.deepEqual(fresh.body.cleared, ["password"]);
+    assert.equal((await save("smtp", "password", "a-new-password-0002")).status, 200);
+    assert.equal(decryptField(String((await pwRow())!.encrypted_value)), "a-new-password-0002");
+    await saveAll("smtp", good);
+  });
+
+  await check("the form saves a server before its password, and the Test never borrows a password OASIS keeps on its own server", () => {
+    const smtp = schemas.findIntegrationSchema("smtp")!;
+    assert.deepEqual(schemas.orderForSave(smtp, ["password", "from_address", "user", "port", "host"]), ["host", "port", "user", "password", "from_address"]);
+    // Even where a schema lists the secret first, the address it guards is saved first.
+    const secretFirst = {
+      service: "x",
+      label: "X",
+      description: "",
+      fields: [
+        { key: "token", label: "Token", sensitive: true },
+        { key: "server", label: "Server", sensitive: false, bindsSecrets: ["token"] },
+      ],
+    };
+    assert.deepEqual(schemas.orderForSave(secretFirst, ["token", "server"]), ["server", "token"]);
+    assert.deepEqual(smtp.fields.filter((f) => f.bindsSecrets).map((f) => [f.key, f.bindsSecrets]), [["host", ["password"]], ["port", ["password"]]]);
+    assert.equal(schemas.hasHostBoundSecrets(smtp), true);
+    assert.equal(schemas.hasHostBoundSecrets(schemas.findIntegrationSchema("calendly")!), false);
+    const form = read("components/os/connections/ServiceKeysForm.tsx");
+    assert.match(form, /const entries = orderForSave\(schema, Object\.keys\(typed\)\)/);
+    assert.match(form, /was removed: paste it again for the new address/);
+    assert.match(read("app/api/integrations/keys/test/route.ts"), /getTenantIntegrationBundle\(sess\.tenantId, service, \{\s*allowEnvFallback: !hasHostBoundSecrets\(schema\),/);
   });
 
   // -- 6c. Who may run a Test (Codex review, 2026-10-09) ----------------------------
