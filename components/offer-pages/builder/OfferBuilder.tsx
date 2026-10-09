@@ -17,6 +17,7 @@ import type { BodyKey, BodySection, OfferPageDoc } from "@/lib/offer-pages/types
 import { BODY_KEYS, COPY_CAPS, accentPassesAA, isHexColor } from "@/lib/offer-pages/types";
 import { NAV_LABELS, drawnSections } from "@/lib/offer-pages/visibility";
 import type { GateResult } from "@/lib/offer-pages/claims";
+import { serialSaver } from "@/lib/offer-pages/save-queue";
 import { BookEditor, BriefEditor, HeroEditor, SectionCard, newSection, type ChipState } from "./SectionEditors";
 import { PublishChecklist } from "./PublishChecklist";
 import { VideoPicker } from "./VideoPicker";
@@ -90,7 +91,7 @@ export function OfferBuilder({
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
   const conflict = useRef(false);
 
-  const save = useCallback(async (next: OfferPageDoc) => {
+  const saveOnce = useCallback(async (next: OfferPageDoc) => {
     if (conflict.current) return;
     setSaving("saving");
     const ticks = pendingTicks.current;
@@ -120,6 +121,10 @@ export function OfferBuilder({
       setSaveError("Not saved: the connection dropped. Your changes are still here; they save on the next edit.");
     }
   }, [form.id]);
+  // One save at a time (lib/offer-pages/save-queue.ts): each sends the version
+  // the last one returned, so two in flight would read as someone else's edit.
+  const saver = useMemo(() => serialSaver(saveOnce), [saveOnce]);
+  const save = saver.save;
 
   const update = useCallback(
     (next: OfferPageDoc) => {
@@ -173,6 +178,8 @@ export function OfferBuilder({
       timer.current = null;
       if (doc) await save(doc);
     }
+    // A save already on its way moves the version on: publish the one it returns.
+    await saver.idle();
     try {
       const res = await fetch(`/api/forms/${form.id}/offer/publish`, {
         method: "POST",
