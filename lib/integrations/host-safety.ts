@@ -1,6 +1,6 @@
 /**
  * lib/integrations/host-safety.ts -- may OASIS connect to an address an owner
- * typed (their n8n, their mail server)? Answered from what the name RESOLVES
+ * typed (their own mail server)? Answered from what the name RESOLVES
  * to, not how it is spelled (Codex review, 2026-10-09: a public-looking name
  * can point, or re-point, at 127.0.0.1 or 10.x).
  *
@@ -20,8 +20,8 @@
  * name themselves), so on the Worker a self-hosted address is NOT connected
  * to at all: the Test answers "cannot_pin" and sends nothing.
  *
- * One exception, with its reason: a host inside a vendor's own domain (n8n
- * Cloud's *.app.n8n.cloud, the big mail providers' SMTP names). Only the
+ * One exception, with its reason: the big mail providers' own SMTP names.
+ * Only the
  * vendor controls those DNS answers, so an owner cannot point them inside a
  * network, and they are reached by name. They are still resolved and checked.
  */
@@ -167,9 +167,8 @@ const VENDOR_SMTP_HOSTS: ReadonlySet<string> = new Set([
 ]);
 
 /** True when only a vendor controls this name's DNS answers (reached by name). */
-export function isVendorControlledHost(kind: "n8n" | "smtp", host: string): boolean {
+export function isVendorControlledHost(kind: "smtp", host: string): boolean {
   const h = host.trim().toLowerCase().replace(/\.$/, "");
-  if (kind === "n8n") return /^[a-z0-9-]+\.app\.n8n\.cloud$/.test(h);
   return VENDOR_SMTP_HOSTS.has(h) || /^email-smtp\.[a-z0-9-]+\.amazonaws\.com$/.test(h);
 }
 
@@ -186,7 +185,7 @@ export function onWorkersRuntime(): boolean {
  *   refuse    neither is possible here (a self-hosted address on the Worker)
  */
 export function connectPlan(
-  kind: "n8n" | "smtp",
+  kind: "smtp",
   host: string,
   runtime: "workers" | "node" = onWorkersRuntime() ? "workers" : "node",
 ): "by_name" | "pinned" | "refuse" {

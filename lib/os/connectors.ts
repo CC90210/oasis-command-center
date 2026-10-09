@@ -54,7 +54,6 @@ export type ConnectorCategoryKey =
   | "messaging"
   | "ads_social"
   | "crm_import"
-  | "automation"
   | "ai_models";
 
 /** Catalog groups, in the order the hub renders them. */
@@ -65,7 +64,6 @@ export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: 
   { key: "messaging", label: "Messaging" },
   { key: "ads_social", label: "Ads & social" },
   { key: "crm_import", label: "CRM import" },
-  { key: "automation", label: "Automation" },
   { key: "ai_models", label: "AI models" },
 ];
 
@@ -269,7 +267,7 @@ export const TELEGRAM_TEST_STATES: Readonly<Record<string, TestState>> = {
  * The words for a FAILED Test of an app connected with a pasted key, keyed by
  * the shared codes every such Test answers with (lib/integrations/key-probes.ts).
  * `notFound` says what the Test could not find for this app (GoHighLevel's
- * sub-account, n8n's address); an app whose Test never answers it omits it.
+ * sub-account); an app whose Test never answers it omits it.
  */
 export function keyTestStates(
   appName: string,
@@ -318,7 +316,7 @@ export function keyTestStates(
 }
 
 /**
- * A self-hosted address (an owner's own n8n or mail server) that OASIS's
+ * A self-hosted mail server that OASIS's
  * servers cannot connect to safely: they cannot lock the connection to the
  * address they checked (lib/integrations/host-safety.ts), so nothing was sent.
  */
@@ -326,7 +324,7 @@ const SELF_HOSTED_CANNOT_PIN: TestState = {
   kind: "configured",
   label: "Set up · this address can't be tested from OASIS yet",
   detail:
-    "OASIS only tests a self-hosted address when it can lock the connection to the address it checked, and its servers can't do that yet, so nothing was sent. Addresses run by the provider itself (n8n Cloud, or a big mail provider's server name) test normally.",
+    "OASIS only tests a self-hosted address when it can lock the connection to the address it checked, and its servers can't do that yet, so nothing was sent. A big mail provider's own server name (Microsoft 365, Gmail, SendGrid and the like) tests normally.",
 };
 
 /** The workspace's own mail server: a sign-in refused, or an address OASIS never connects to. */
@@ -863,42 +861,6 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
         verifiable: true,
       },
       connect: { kind: "keys", label: "Connect GoHighLevel", service: "gohighlevel" },
-    },
-  },
-  {
-    slug: "n8n",
-    name: "n8n",
-    summary: "Your own workflow automations",
-    category: "automation",
-    departments: ["operations"],
-    brandColor: null,
-    icon: { kind: "monogram", letters: "Nn", reason: "Its Simple Icons logo is not in OASIS" },
-    reads: ["Whether your n8n accepts the key, when you run Test (Test lists one workflow and keeps nothing)"],
-    does: [
-      "Checks the key with your n8n when you press Test, and runs no workflow",
-      "Nothing in OASIS starts or reads your workflows from this key yet: that is not built",
-    ],
-    keywords: ["automation", "workflow", "zapier", "api key", "webhook"],
-    live: {
-      source: {
-        kind: "tenant_keys",
-        service: "n8n",
-        requireAll: ["base_url", "api_key"],
-        failureStates: {
-          ...keyTestStates("n8n", {
-            notFound:
-              "OASIS found no n8n API at this address. Check it is the address you open n8n at, and that the n8n API is on (it is off during n8n Cloud's free trial), then run Test.",
-          }),
-          blocked_host: {
-            kind: "attention",
-            label: "Address not allowed",
-            detail: "OASIS only connects to a public https:// address whose name points to the public internet, never an IP address, an internal name or a name that points inside a network. Use the address you open n8n at from the internet.",
-          },
-          cannot_pin: SELF_HOSTED_CANNOT_PIN,
-        },
-        verifiable: true,
-      },
-      connect: { kind: "keys", label: "Connect n8n", service: "n8n" },
     },
   },
 

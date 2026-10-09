@@ -162,12 +162,12 @@ assert.notEqual(glyphColor(connectorBySlug("cal-com")!), "#292929", "Cal.com's n
 // The live set is pinned. Making a connector live means pointing it at a store
 // that exists — this list changes in the same commit, on purpose.
 // 2026-10-09: the apps a client connects with a key from its own account
-// (Calendly, Cal.com, Fathom, Fireflies, Zernio, GoHighLevel, n8n, its own mail
+// (Calendly, Cal.com, Fathom, Fireflies, Zernio, GoHighLevel, its own mail
 // server) went live on the key store, each with a real Test
 // (tests/connectors-by-key.test.ts).
 const LIVE = [
   "stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev",
-  "calendly", "cal-com", "fathom", "fireflies", "zernio", "gohighlevel", "n8n", "smtp",
+  "calendly", "cal-com", "fathom", "fireflies", "zernio", "gohighlevel", "smtp",
 ].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),

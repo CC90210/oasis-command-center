@@ -1,12 +1,12 @@
 /**
  * lib/integrations/key-probes.ts -- the live Test for each app that connects
  * with a key the owner pastes in Settings > Connections (Calendly, Cal.com,
- * Fathom, Fireflies, Zernio, GoHighLevel, n8n, and the workspace's own mail
- * server over SMTP).
+ * Fathom, Fireflies, Zernio, GoHighLevel, and the workspace's own mail server
+ * over SMTP).
  *
  * ONE READ, NO SIDE EFFECT. Each Test makes the cheapest read the vendor
  * documents for "whose key is this" (or lists one item) and changes nothing in
- * the owner's account: no booking, no message, no workflow run, no email sent.
+ * the owner's account: no booking, no message, no post, no email sent.
  * The endpoint and header of each come from the vendor's current API docs,
  * cited beside its schema in lib/tenant-integration-schemas.ts.
  *
@@ -17,13 +17,13 @@
  *   missing_permission   the key works but may not read what the Test reads (403)
  *   plan_required        the vendor's plan for this account has no API access
  *   not_found            the account part named beside the key does not exist
- *                        (GoHighLevel's sub-account, n8n's address)
+ *                        (GoHighLevel's sub-account, a mail server's name)
  *   rate_limited         the vendor asked OASIS to slow down (429)
  *   provider_unreachable the vendor did not answer (network, timeout)
  *   provider_error       any other answer (a 5xx, an unexpected shape)
  *   blocked_host         the address points somewhere OASIS never connects to
  *                        (by its spelling, or by what its name RESOLVES to)
- *   cannot_pin           a self-hosted address this runtime cannot connect to
+ *   cannot_pin           a self-hosted mail server this runtime cannot connect to
  *                        safely (no way to pin it to the checked address):
  *                        nothing was sent (lib/integrations/host-safety.ts)
  *   smtp_auth_failed     the mail server refused the username and password
@@ -34,7 +34,7 @@
  * in a code or a detail: the detail names only what the vendor said the
  * account is called.
  *
- * Self-hosted addresses (n8n, SMTP) are re-checked here with the same rule the
+ * A self-hosted mail server's address is re-checked here with the same rule the
  * save used (isPublicHostname), so a value saved before that rule, or set some
  * other way, still cannot aim a Test at an internal address. Then their name is
  * resolved and every address checked, and the connection goes to the checked
@@ -47,7 +47,6 @@ import {
   findIntegrationSchema,
   isPublicHostname,
   requiredIntegrationFieldKeys,
-  validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
 import { checkPublicHost, connectPlan, dohResolver, type Resolver } from "@/lib/integrations/host-safety";
 
@@ -70,15 +69,6 @@ export type SmtpVerify = (input: {
   password: string;
 }) => Promise<void>;
 
-/** One HTTPS GET to a checked address, with the name as SNI, Host and the certificate's name. */
-export type PinnedHttpsGet = (input: {
-  ip: string;
-  hostname: string;
-  path: string;
-  headers: Record<string, string>;
-  timeoutMs: number;
-}) => Promise<{ status: number; body: string }>;
-
 export type KeyProbeDeps = {
   fetchImpl?: typeof fetch;
   smtpVerify?: SmtpVerify;
@@ -87,13 +77,12 @@ export type KeyProbeDeps = {
   resolve?: Resolver;
   /** Where this runs, which decides whether a connection can be pinned (default: detected). */
   runtime?: "workers" | "node";
-  pinnedHttpsGet?: PinnedHttpsGet;
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** The services this module tests. The Test route asks here first. */
-export const KEY_PROBE_SERVICES = ["calendly", "cal_com", "fathom", "fireflies", "late", "gohighlevel", "n8n", "smtp"] as const;
+export const KEY_PROBE_SERVICES = ["calendly", "cal_com", "fathom", "fireflies", "late", "gohighlevel", "smtp"] as const;
 
 export function hasKeyProbe(service: string): boolean {
   return (KEY_PROBE_SERVICES as readonly string[]).includes(service);
@@ -120,7 +109,7 @@ async function call(deps: KeyProbeDeps, url: string, init: RequestInit): Promise
     return { ok: true, res };
   } catch (err) {
     // The reason is the error's NAME only (TimeoutError, TypeError): a message
-    // can echo the address, and an n8n address is the owner's own.
+    // can echo the address.
     const name = err instanceof Error ? err.name : "error";
     console.error("[key-probe.network]", new URL(url).hostname, name);
     return { ok: false, result: { ok: false, error: `provider_unreachable: ${name}` } };
@@ -283,15 +272,6 @@ async function probeGoHighLevel(bundle: Record<string, string>, deps: KeyProbeDe
   return { ok: true, detail: name ? `GoHighLevel sub-account: ${name}` : "GoHighLevel accepted the token" };
 }
 
-/** The n8n instance's API root from the address the owner saved, or null when it is not one OASIS may call. */
-export function n8nApiRoot(raw: string): string | null {
-  const field = findIntegrationSchema("n8n")?.fields.find((f) => f.key === "base_url");
-  if (!field || validateIntegrationValue(field, raw) !== null) return null;
-  const u = new URL(raw.trim());
-  const path = u.pathname.replace(/\/+$/, "").replace(/\/api\/v1$/, "");
-  return `${u.origin}${path}/api/v1`;
-}
-
 /**
  * Resolve and check an owner-typed host, then decide how to reach it
  * (lib/integrations/host-safety.ts): a refusal result, or the address to use.
@@ -299,7 +279,7 @@ export function n8nApiRoot(raw: string): string | null {
  * cannot be swapped between the check and the connect.
  */
 async function reachableHost(
-  kind: "n8n" | "smtp",
+  kind: "smtp",
   host: string,
   deps: KeyProbeDeps,
 ): Promise<{ ok: true; connectTo: string; pinned: boolean } | { ok: false; result: KeyProbeResult }> {
@@ -311,90 +291,6 @@ async function reachableHost(
   const plan = connectPlan(kind, host, deps.runtime);
   if (plan === "refuse") return { ok: false, result: { ok: false, error: "cannot_pin" } };
   return plan === "by_name" ? { ok: true, connectTo: host, pinned: false } : { ok: true, connectTo: checked.addresses[0], pinned: true };
-}
-
-/** Node's https, to the checked address, with the name as SNI, Host and the certificate's name. */
-const defaultPinnedHttpsGet: PinnedHttpsGet = async ({ ip, hostname, path, headers, timeoutMs }) => {
-  const https = await import("node:https");
-  return await new Promise((resolve, reject) => {
-    // `timeout` below is only the socket's idle limit: a server sending a byte
-    // at a time would hold the Test open. One total deadline ends it, and an
-    // answer past 1 MB is cut off instead of read to the end (CodeRabbit #563).
-    const fail = (err: Error) => {
-      clearTimeout(deadline);
-      reject(err);
-    };
-    const req = https.request(
-      { host: ip, port: 443, servername: hostname, method: "GET", path, headers: { ...headers, Host: hostname }, timeout: timeoutMs },
-      (res) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on("data", (c: Buffer) => {
-          size += c.length;
-          if (size > 1_000_000) {
-            req.destroy(Object.assign(new Error("response too large"), { name: "ResponseTooLarge" }));
-            return;
-          }
-          chunks.push(c);
-        });
-        res.on("end", () => {
-          clearTimeout(deadline);
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
-        });
-        res.on("error", fail);
-      },
-    );
-    // Declared after the request it ends; the handlers above run only later.
-    const deadline = setTimeout(() => req.destroy(Object.assign(new Error("timeout"), { name: "TimeoutError" })), timeoutMs);
-    req.on("timeout", () => req.destroy(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
-    req.on("error", fail);
-    req.end();
-  });
-};
-
-/** n8n: GET <instance>/api/v1/workflows?limit=1 with X-N8N-API-KEY. Lists, never runs. */
-async function probeN8n(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
-  const root = n8nApiRoot(bundle.base_url);
-  if (!root) return { ok: false, error: "blocked_host" };
-  const url = new URL(`${root}/workflows?limit=1`);
-  const reach = await reachableHost("n8n", url.hostname, deps);
-  if (!reach.ok) return reach.result;
-  const headers = { "X-N8N-API-KEY": bundle.api_key.trim(), Accept: "application/json" };
-  let status: number;
-  let body: Record<string, unknown> | null;
-  if (reach.pinned) {
-    try {
-      const r = await (deps.pinnedHttpsGet ?? defaultPinnedHttpsGet)({
-        ip: reach.connectTo,
-        hostname: url.hostname,
-        path: `${url.pathname}${url.search}`,
-        headers,
-        timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      });
-      status = r.status;
-      try {
-        const parsed = JSON.parse(r.body) as unknown;
-        body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
-      } catch {
-        body = null;
-      }
-    } catch (err) {
-      const name = err instanceof Error ? err.name : "error";
-      console.error("[key-probe.network]", "n8n pinned", name);
-      return { ok: false, error: `provider_unreachable: ${name}` };
-    }
-  } else {
-    const r = await call(deps, url.toString(), { method: "GET", headers });
-    if (!r.ok) return r.result;
-    status = r.res.status;
-    body = status === 200 ? await jsonOf(r.res) : null;
-  }
-  // A redirect or a 404 is an address with no n8n API behind it (or the API is
-  // switched off, as on n8n Cloud's free trial): never followed anywhere else.
-  if (status === 404 || (status >= 300 && status < 400)) return { ok: false, error: "not_found" };
-  if (status !== 200) return { ok: false, error: httpFailureCode(status) };
-  if (!body || !Array.isArray(body.data)) return { ok: false, error: "not_found" };
-  return { ok: true, detail: "n8n accepted the key" };
 }
 
 const defaultSmtpVerify: SmtpVerify = async ({ host, connectHost, port, secure, user, password }) => {
@@ -456,7 +352,6 @@ const PROBES: Readonly<Record<(typeof KEY_PROBE_SERVICES)[number], (b: Record<st
   fireflies: probeFireflies,
   late: probeZernio,
   gohighlevel: probeGoHighLevel,
-  n8n: probeN8n,
   smtp: probeSmtp,
 };
 
