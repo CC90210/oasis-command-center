@@ -362,11 +362,13 @@ async function main() {
       assert.ok(props.tabs.every((t) => t.count === undefined), "no count from a cut list: it would be a floor");
       assert.equal(findAll(tree, KpiTile).length, 0, "no KPI row from a cut list");
       // The health signals are read for the 2 rows shown, never for the 500 the
-      // page drops (the desk's breach count, as its SQL text starts).
+      // page drops (the desk's breach count, as its SQL text starts). 500 ids
+      // are read in several statements, each listing more ids than the log's
+      // 140-character preview holds; 2 ids are one statement, listed whole.
       const signalReads = sql.filter((s) => /^SELECT customer_id, COUNT\(\*\) AS n FROM support_tickets/.test(s));
       assert.ok(signalReads.length > 0, `control: the desk signals were read, in ${sql.length} statements`);
-      const marks = signalReads.map((s) => (/customer_id IN \(([^)]*)\)/.exec(s)?.[1].match(/\?/g) ?? []).length);
-      assert.deepEqual(marks, [2], `signals were read for more rows than the page shows: ${JSON.stringify(marks)}`);
+      assert.equal(signalReads.length, 1, `the desk signals were read in ${signalReads.length} statements: the rows the page drops were read too`);
+      assert.match(signalReads[0], /customer_id IN \(\?, \?\) AND /, "the one read is for the 2 rows shown");
     } finally {
       await db.execute("DELETE FROM customers WHERE id LIKE 'bulk-tabs-%'");
     }
