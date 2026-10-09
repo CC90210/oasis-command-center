@@ -52,6 +52,7 @@ import { bad, checkBearerSecret, sha256, isUniqueViolationError, publicAppBaseUr
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
+import { defaultModelFor } from "@/lib/ai/model-registry";
 import {
   clientIp as _clientIp,
   isRateLimited as _isRateLimited,
@@ -63,11 +64,14 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const VALID_PROVIDERS = new Set(["anthropic", "openai", "google", "openrouter"]);
+// Each provider's default model is the registry's (lib/ai/model-registry.ts):
+// the Google default here was Gemini 2.5 Pro, which Google now serves only to
+// projects that used it before.
 const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
-  openrouter: "anthropic/claude-sonnet-4",
-  anthropic: "claude-sonnet-4-6",
-  openai: "gpt-5.4",
-  google: "gemini-2.5-pro",
+  openrouter: defaultModelFor("openrouter"),
+  anthropic: defaultModelFor("anthropic"),
+  openai: defaultModelFor("openai"),
+  google: defaultModelFor("google"),
 };
 
 // Pick the best provider when the wizard sent multiple keys — operators

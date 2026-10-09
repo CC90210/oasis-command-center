@@ -33,14 +33,18 @@ type El = ReactElement<Record<string, unknown>>;
  * useState slots kept between calls: what React does across a router.refresh()
  * that hands the same mounted card new props. renderToStaticMarkup draws a
  * single frame and there is no DOM in the test toolchain, so this stands in
- * for the reconciler for the card's OWN hooks only (it knows useState and
- * nothing else, so a new hook fails loudly here). What it returns is drawn by
- * real React.
+ * for the reconciler for the card's OWN hooks only (it knows useState,
+ * useRef and useLayoutEffect, which ProviderAccountsCard uses to lay its own
+ * changes over only the server answer they were made on, and nothing else, so
+ * a new hook fails loudly here). A layout effect runs, its dependencies
+ * honoured, as soon as the frame is drawn: React runs it at commit. What it
+ * returns is drawn by real React.
  */
 function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's useState reads
   const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
   const slots: unknown[] = [];
+  const pending: Array<() => void> = [];
   let cursor = 0;
   const dispatcher = {
     useState(initial: unknown) {
@@ -51,16 +55,33 @@ function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
       };
       return [slots[at], set];
     },
+    useRef(initial: unknown) {
+      const at = cursor++;
+      if (!(at in slots)) slots[at] = { current: initial };
+      return slots[at];
+    },
+    useLayoutEffect(effect: () => void | (() => void), deps?: unknown[]) {
+      const at = cursor++;
+      const before = slots[at] as { deps?: unknown[] } | undefined;
+      const changed =
+        !before || !deps || !before.deps || deps.length !== before.deps.length || deps.some((d, i) => !Object.is(d, before.deps![i]));
+      slots[at] = { deps };
+      if (changed) pending.push(() => void effect());
+    },
   };
   return (props: P) => {
     cursor = 0;
+    pending.length = 0;
     const previous = internals.H;
     internals.H = dispatcher;
+    let frame: El;
     try {
-      return component(props) as El;
+      frame = component(props) as El;
     } finally {
       internals.H = previous;
     }
+    for (const run of pending.splice(0)) run();
+    return frame;
   };
 }
 
