@@ -19,6 +19,9 @@
  * caller (403), a missing Origin (403) and an oversized body (400).
  * The builder: a new Library ref to a client brand's asset is refused (400),
  * and the picker lists only OASIS's own approved or published videos.
+ * A link video's thumbnail (design 4.2) is copied only from the provider's own
+ * image host over https, and a redirect is never followed (CodeRabbit on #557):
+ * the copy lands in the PUBLIC prefix.
  *
  * Stand-in: the R2 signer (records what it was asked to sign).
  *
@@ -223,6 +226,41 @@ async function main() {
     assert.deepEqual(body.videos.map((v) => v.asset_id), ["a-good"], "client brands, archived, draft and other workspaces' assets are not offered");
     assert.equal(body.videos[0].caption_media_id, "m-good-c");
     assert.match(String(body.videos[0].poster_url), /m-good-p\.jpg\?ttl=3600/);
+  });
+
+  // -- a link video's thumbnail, copied to our own PUBLIC prefix -------------
+  await step("a link video's thumbnail comes only from the provider's own image host, and a redirect is never followed", async () => {
+    const { copyThumbnail } = await import("../lib/offer-pages/video");
+    const ref = { source: "youtube" as const, id: "dQw4w9WgXcQ" };
+    const image = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    const uploads: string[] = [];
+    const upload = async (path: string) => {
+      uploads.push(path);
+      return true;
+    };
+    const asked: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+    // An allowed CDN URL that answers with a redirect to an internal address.
+    // A fetch left to follow it gets that address's bytes; told not to, it
+    // gets the 302 itself.
+    const redirecting = (async (input: unknown, init?: RequestInit) => {
+      asked.push({ url: String(input), redirect: init?.redirect });
+      if (init?.redirect === "manual") return new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/" } });
+      return new Response(image, { status: 200, headers: { "content-type": "image/jpeg" } });
+    }) as typeof fetch;
+    const hq = "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg";
+    assert.equal(await copyThumbnail({ thumbnailUrl: hq, tenantId: OASIS, ref, upload, fetchImpl: redirecting }), null);
+    assert.deepEqual(uploads, [], "a redirected thumbnail was saved to the public prefix");
+    assert.deepEqual(asked, [{ url: hq, redirect: "manual" }], "the thumbnail fetch follows redirects");
+    // An off-list host, plain http, or a lookalike host is never fetched at all.
+    asked.length = 0;
+    for (const url of ["https://evil.test/x.jpg", "http://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", "https://i.ytimg.com.evil.test/x.jpg"]) {
+      assert.equal(await copyThumbnail({ thumbnailUrl: url, tenantId: OASIS, ref, upload, fetchImpl: redirecting }), null, url);
+    }
+    assert.deepEqual(asked, [], "an off-list thumbnail URL was fetched");
+    // The provider's own image: copied under this workspace's offer-pages prefix.
+    const direct = (async () => new Response(image, { status: 200, headers: { "content-type": "image/jpeg" } })) as typeof fetch;
+    assert.equal(await copyThumbnail({ thumbnailUrl: hq, tenantId: OASIS, ref, upload, fetchImpl: direct }), `${OASIS}/offer-pages/youtube-dQw4w9WgXcQ.jpg`);
+    assert.deepEqual(uploads, [`${OASIS}/offer-pages/youtube-dQw4w9WgXcQ.jpg`]);
   });
 
   done("offer-pages-video-sign");

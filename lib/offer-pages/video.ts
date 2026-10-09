@@ -332,7 +332,10 @@ export async function copyThumbnail(input: {
   try {
     const u = new URL(input.thumbnailUrl);
     if (u.protocol !== "https:" || !THUMB_HOSTS.has(u.hostname)) return null;
-    const res = await (input.fetchImpl ?? fetch)(u.toString(), { signal: AbortSignal.timeout(5000) });
+    // Never follow a redirect: the host check above is the only one, and a
+    // provider URL that redirects could lead anywhere (an internal address,
+    // plain http) before the bytes land in the PUBLIC prefix. A 3xx is not ok.
+    const res = await (input.fetchImpl ?? fetch)(u.toString(), { signal: AbortSignal.timeout(5000), redirect: "manual" });
     if (!res.ok) return null;
     const type = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
     const ext = THUMB_TYPES[type];
