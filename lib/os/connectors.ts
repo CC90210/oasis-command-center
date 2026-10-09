@@ -138,7 +138,7 @@ export type ConnectorDef = {
   /** The brand's own colour (Simple Icons' hex), or null for a monogram. */
   brandColor: string | null;
   icon: ConnectorIcon;
-  /** Sub-products shown in the drawer (Google: Gmail, Calendar, Drive, Meet). */
+  /** Sub-products shown in the drawer: only ones OASIS uses (Google: Gmail, Calendar, Meet). */
   includes?: readonly { name: string; file: string; color: string }[];
   /** What OASIS reads from it — plain English, no scopes or jargon. */
   reads: readonly string[];
@@ -338,7 +338,11 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
   {
     slug: "google-workspace",
     name: "Google Workspace",
-    summary: "Gmail, Calendar, Drive and Meet",
+    // Only what is connected here (2026-10-08): the workspace's shared Gmail
+    // mailbox, which its status checks, and each person's own Google account
+    // (Gmail, and Calendar invites with Google Meet), reported beside it. No
+    // part of OASIS uses Google Drive, and no calendar is read for free time.
+    summary: "Shared Gmail mailbox, and your own Calendar",
     category: "calendar_email",
     departments: ["chief_of_staff", "sales", "client_success"],
     brandColor: "#4285F4",
@@ -346,12 +350,14 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     includes: [
       { name: "Gmail", file: "gmail.svg", color: "#EA4335" },
       { name: "Google Calendar", file: "googlecalendar.svg", color: "#4285F4" },
-      { name: "Google Drive", file: "googledrive.svg", color: "#4285F4" },
       { name: "Google Meet", file: "googlemeet.svg", color: "#00897B" },
     ],
-    reads: ["Calendar events on the account you connect, so booked calls land in open slots"],
-    does: ["Sends email from your own address", "Adds booked calls to your calendar"],
-    keywords: ["gmail", "calendar", "email", "drive", "meet", "google"],
+    reads: ["The address of the Google account you connect, so client invitations only come from your work email"],
+    does: [
+      "Sends the workspace's email from its shared Gmail address",
+      "Adds the calls you book to your own Google Calendar, with a Google Meet link, once you connect your account",
+    ],
+    keywords: ["gmail", "calendar", "email", "meet", "google"],
     live: {
       // Proven only by its own Test (a Gmail sign-in with the saved address and
       // App Password), never by a heartbeat from OASIS's computer.
@@ -493,12 +499,13 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
   {
     slug: "telegram",
     name: "Telegram",
-    summary: "Alerts and AI teammates in chat",
+    // Alerts only: Telegram teammates are not built (Settings > Chat apps says so).
+    summary: "Team alerts in a Telegram chat",
     category: "messaging",
     departments: ["chief_of_staff", "sales"],
     brandColor: "#26A5E4",
     icon: { kind: "svg", file: "telegram.svg" },
-    reads: ["Messages sent to your OASIS bot, so it can link your chat"],
+    reads: ["The bot's name and the chat it writes to, when you run Test"],
     does: ["Sends your team's alerts to Telegram"],
     keywords: ["chat", "alerts", "bot"],
     live: {
@@ -1255,12 +1262,19 @@ export function resolveConnectorStatus(
  * from lib/slack/status.ts, which only knows that a connection row exists,
  * whatever its state: an expired or failing connection still read "Answers
  * @mentions in #sales" while its card said "Key no longer accepted". When the
- * card's own status is a problem or could not be read, those lines say the
- * card's words instead (null: the card is fine, the line stands).
+ * card's own status is a problem or could not be read, those lines say so
+ * instead of the channels (null: the card is fine, the line stands):
+ *
+ *   attention  the card's problem, in its own words: the app answers nobody
+ *              until it is fixed
+ *   unknown    the card could not be checked: said as that, never as the app
+ *              being broken
  */
-export function connectionProblem(status: ConnectorStatus | null): string | null {
+export type ConnectionProblem = { kind: "attention" | "unknown"; label: string };
+
+export function connectionProblem(status: ConnectorStatus | null): ConnectionProblem | null {
   if (!status) return null;
-  return status.kind === "attention" || status.kind === "unknown" ? status.label : null;
+  return status.kind === "attention" || status.kind === "unknown" ? { kind: status.kind, label: status.label } : null;
 }
 
 /** The workspace has this app set up (whatever its last check said): a line may name it. */
@@ -1317,11 +1331,17 @@ export function personalGoogleStatus(fact: PersonalGoogleFact | null): Connector
         detail: `Connected as ${address}, but your invitations must come from ${fact?.workEmail?.trim() || "your work email"}. Reconnect with that account.`,
       };
     case "reconnect":
+      // One state, said by its cause: only a grant without Calendar is
+      // "without Calendar access" (the same predicate as before; only the words).
       return {
         state,
         kind: "attention",
         label: "Reconnect once",
-        detail: `Connected as ${address}, but without Calendar access. Reconnect once so OASIS can send Calendar invites with Google Meet.`,
+        detail: !fact?.calendarScope
+          ? `Connected as ${address}, but without Calendar access. Reconnect once so OASIS can send Calendar invites with Google Meet.`
+          : !fact.address?.trim()
+            ? "Connected, but Google did not say which address it is, so OASIS cannot match it to your work email. Reconnect once."
+            : `Connected as ${address}, but your profile has no work email for OASIS to match it to, so client invitations cannot use it yet. Reconnect once with your work account after an owner or admin adds your work email.`,
       };
     case "not_linked":
       return { state, kind: "not_connected", label: "Not connected", detail: "No Google account is connected for your login." };

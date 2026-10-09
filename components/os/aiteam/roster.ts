@@ -42,7 +42,7 @@ import type { WebState } from "./TeammateRow";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor, type SlackHome } from "@/lib/slack/status";
 import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
-import { connectionProblem, connectionSetUp } from "@/lib/os/connectors";
+import { connectionProblem, connectionSetUp, type ConnectionProblem } from "@/lib/os/connectors";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -109,11 +109,12 @@ export type AiTeam = {
   builderHref: string | null;
   /**
    * The workspace's chat apps as their Connections cards see them, for every
-   * row: the Slack card's words when its connection is a problem (so no row
-   * names channels on a broken connection), and whether a Telegram team bot
-   * is set up (the only case a row may mention Telegram).
+   * row: the Slack card's problem, or that it could not be checked (so no row
+   * names channels on a broken connection), whether a Telegram team bot is set
+   * up (the only case a row may mention Telegram), and the Telegram card's
+   * problem (a rejected bot token sends no alert).
    */
-  channels: { slackProblem: string | null; telegramSetUp: boolean };
+  channels: { slackProblem: ConnectionProblem | null; telegramSetUp: boolean; telegramProblem: ConnectionProblem | null };
 };
 
 /** A department lead on the workspace roster (Settings and the AI Team list the same ones). */
@@ -350,6 +351,10 @@ export async function loadAiTeam(viewer: OsViewer): Promise<AiTeam> {
     // The builder page itself refuses anyone below owner/admin
     // (app/agents/new), and needs a slug it recognises.
     builderHref: owner && readiness.slug ? "/agents/new" : null,
-    channels: { slackProblem: connectionProblem(slackCard), telegramSetUp: connectionSetUp(telegramCard) },
+    channels: {
+      slackProblem: connectionProblem(slackCard),
+      telegramSetUp: connectionSetUp(telegramCard),
+      telegramProblem: connectionProblem(telegramCard),
+    },
   };
 }

@@ -618,6 +618,111 @@ async function main() {
     assert.equal((await loadConnectorFacts({ tenantId: CLIENT_A, userId: USERS.clientA.id })).serverChecks?.length, 0);
   });
 
+  // -- 5d. Lines that name an app say no more than its card (PR #553 review F3, F4, F7) --
+  await check("a Slack card that could not be checked is 'could not check', never 'nothing is answered'; a rejected Telegram bot reads in the card's words on the AI Team row; a member is never told a team bot exists", async () => {
+    const channels: Json = { kind: "channels", names: ["sales"] };
+    const unknownSlack = connectors.connectionProblem({ kind: "unknown", label: "Status unavailable" });
+    const expiredSlack = connectors.connectionProblem({ kind: "attention", label: "Key no longer accepted" });
+    // Client B's own team bot, refused by Telegram on its last Test.
+    for (const [fieldKey, value] of [["bot_token", "333333333:client-b-team-bot-token-000000000"], ["chat_id", "-1009999"]] as const) {
+      assert.ok((await store.setTenantIntegrationValue({ tenantId: CLIENT_B, service: "telegram", fieldKey, value, createdBy: "test" })).ok);
+      await store.recordIntegrationTest({ tenantId: CLIENT_B, service: "telegram", fieldKey, ok: false, error: "telegram_http_401" });
+    }
+    const clientBTelegram = await loadWorkspaceConnectorStatus(CLIENT_B, "telegram");
+    assert.equal(kl(clientBTelegram), "attention | Bot token not accepted");
+    const markup = renderClient([
+      { id: "dept_unknown", kind: "slack_line", props: { slack: channels, problem: unknownSlack, canManage: true } },
+      { id: "dept_expired", kind: "slack_line", props: { slack: channels, problem: expiredSlack, canManage: true } },
+      { id: "row_unknown", kind: "homes", props: { web: "ready", slack: channels, slackProblem: unknownSlack } },
+      {
+        id: "row_telegram",
+        kind: "homes",
+        props: {
+          web: "ready",
+          telegramSetUp: connectors.connectionSetUp(clientBTelegram),
+          telegramProblem: connectors.connectionProblem(clientBTelegram),
+        },
+      },
+      { id: "row_telegram_fine", kind: "homes", props: { web: "ready", telegramSetUp: true, telegramProblem: null } },
+    ]);
+    assert.match(text(markup.dept_unknown), /^Slack Could not check Slack just now\./);
+    assert.doesNotMatch(text(markup.dept_unknown), /Nothing is answered|Status unavailable|#sales/);
+    assert.match(text(markup.dept_expired), /The Slack connection says: Key no longer accepted\. Nothing is answered in Slack until it is fixed\./);
+    assert.match(text(markup.row_unknown), /Slack · couldn.t check/);
+    assert.doesNotMatch(text(markup.row_unknown), /#sales|Status unavailable/);
+    agree("Telegram team bot, token rejected (Client B)", [
+      ["Settings > Connections", clientBTelegram?.label ?? "(none)"],
+      ["AI Team row", /Telegram · ([^·]+)$/.exec(text(markup.row_telegram))?.[1]?.trim() ?? "(none)"],
+    ]);
+    assert.doesNotMatch(text(markup.row_telegram), /alerts only/);
+    assert.match(text(markup.row_telegram_fine), /Telegram · alerts only/);
+
+    // Notifications, as a member with no say over the team bot: who sets it up, never that one exists.
+    await login(USERS.rep);
+    const words = textOf(await NotificationsPage());
+    assert.match(words, /An owner or admin sets up the team bot in Connections\./);
+    assert.doesNotMatch(words, /The team bot is set up/);
+  });
+
+  // -- 5e. The handoff form reads a host's Google through the one reader (U6) ------------------
+  await check("the handoff form's host list says what Settings says about each host's own Google, and adds only a live check of a ready one", async () => {
+    const membersRoute = await import("../app/api/team/members/route");
+    const hostList = async () => {
+      const res = await membersRoute.GET(new NextRequest("https://oasisai.work/api/team/members"));
+      assert.equal(res.status, 200);
+      return ((await res.json()) as { members: Json[] }).members;
+    };
+    // [ready, wrong account, reconnect for another reason]: Settings' reconnect
+    // flag also covers a wrong account, the handoff form names that apart.
+    const flags = (m: Json | undefined) => [
+      m?.calendar_connected,
+      m?.calendar_identity_mismatch,
+      m?.calendar_reconnect_required === true && m?.calendar_identity_mismatch !== true,
+    ];
+    const env = { GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET };
+    process.env.GOOGLE_OAUTH_CLIENT_ID = "status-integrity-client";
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = "status-integrity-client-secret";
+    try {
+      for (const [who, tenant] of [[USERS.clientA, CLIENT_A], [USERS.cc, OASIS]] as const) {
+        await login(who);
+        const api = await routeJson(personalStatusRoute.GET());
+        const gmail = (api.statuses as Json[]).find((s) => s.service === "gmail_oauth") as Json;
+        // Google cannot be reached here (fetch throws): no verdict, so the shared state stands.
+        const host = (await hostList()).find((m) => m.auth_user_id === who.id);
+        agree(`Your own Google account, handoff form (${tenant === OASIS ? "CC" : "Client A owner"})`, [
+          ["Settings panel (GET personal/status)", JSON.stringify(flags(gmail))],
+          ["Handoff host list (GET team/members)", JSON.stringify(flags(host))],
+        ]);
+        assert.equal(host?.connected_google_address, gmail.gmail_address ? String(gmail.gmail_address).toLowerCase() : null);
+      }
+      // A token Google refuses: the live check says reconnect once, while Settings
+      // (which does not call Google on every visit) still says what the saved grant shows.
+      await login(USERS.cc);
+      assert.ok((await setUserIntegrationBundle(OASIS, USERS.cc.id, "gmail_oauth", {
+        refresh_token: "cc-refresh-revoked", scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.send", gmail_address: USERS.cc.email,
+      })).ok);
+      const offline = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).startsWith("https://oauth2.googleapis.com/token")) return Response.json({ error: "invalid_grant" }, { status: 400 });
+        throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
+      }) as typeof fetch;
+      try {
+        const cc = (await hostList()).find((m) => m.auth_user_id === USERS.cc.id);
+        assert.deepEqual(flags(cc), [false, false, true]);
+      } finally {
+        globalThis.fetch = offline;
+      }
+      const settings = (((await routeJson(personalStatusRoute.GET())).statuses as Json[]).find((s) => s.service === "gmail_oauth") as Json).status as Json;
+      assert.equal(settings.label, "Connected");
+      assert.match(String(settings.detail), /does not re-check it on every visit/);
+    } finally {
+      for (const [k, v] of Object.entries(env)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   // -- 6. The workspace counts ------------------------------------------------------------
   await check("the rail's dot and the Operations tile count the same workspace, whoever is looking", async () => {
     const facts = await loadConnectorFacts({ tenantId: CLIENT_A, userId: USERS.clientA.id });
@@ -638,16 +743,21 @@ async function main() {
     assert.match(dept, /const slackProblem =\s*binding\.kind === "agent" && slackPresence\.kind === "connected" && slackDef\s*\?/);
     assert.match(dept, /slack: binding\.kind === "agent" \? slackHomeFor\(slackPresence, \[dept\.key\]\) : null,\s*slackProblem,/);
     const roster = read("components/os/aiteam/roster.ts");
-    assert.match(roster, /channels: \{ slackProblem: connectionProblem\(slackCard\), telegramSetUp: connectionSetUp\(telegramCard\) \}/);
+    assert.match(
+      roster,
+      /channels: \{\s*slackProblem: connectionProblem\(slackCard\),\s*telegramSetUp: connectionSetUp\(telegramCard\),\s*telegramProblem: connectionProblem\(telegramCard\),?\s*\}/,
+    );
     assert.match(roster, /slackPresence\.kind === "connected" \? loadWorkspaceConnectorStatus\(tenantId, "slack"\) : Promise\.resolve\(null\),\s*loadWorkspaceConnectorStatus\(tenantId, "telegram"\),/);
     // The light loader is the same resolver over the same reads as the hub.
     const facts = read("components/os/connections/connector-facts.ts");
     assert.match(facts, /export async function loadWorkspaceConnectorStatus[\s\S]*?return resolveConnectorStatus\(/);
     const row = read("components/os/aiteam/TeammateRow.tsx");
-    assert.match(row, /\{telegramSetUp && <li/, "the Telegram line follows the Telegram card");
-    assert.doesNotMatch(row, /^\s*<li className="text-fg-dim">Telegram · alerts only<\/li>/m, "never a fixed line");
+    assert.match(row, /\{telegramSetUp &&\s*\(telegramProblem\?\.kind === "attention" \?/, "the Telegram line follows the Telegram card");
+    assert.match(row, /\{telegramSetUp &&[\s\S]{0,300}Telegram · alerts only<\/li>/, "never a fixed line");
+    assert.equal((row.match(/Telegram · alerts only/g) ?? []).length, 1);
     const agents = read("app/agents/page.tsx");
     assert.equal((agents.match(/telegramSetUp=\{team\.channels\.telegramSetUp\}/g) ?? []).length, 2);
+    assert.equal((agents.match(/telegramProblem=\{team\.channels\.telegramProblem\}/g) ?? []).length, 2);
     assert.match(agents, /slackProblem=\{team\.channels\.slackProblem\}/);
     // The drawer's key form has no verdict of its own: the Status above it is the card's.
     const form = read("components/os/connections/ServiceKeysForm.tsx");

@@ -35,6 +35,7 @@ import {
   connectorMatches,
   glyphColor,
   contrastOnTile,
+  personalGoogleStatus,
   resolveConnectorStatus,
   testFailureWords,
   type ConnectionFact,
@@ -128,8 +129,25 @@ for (const slug of ["slack", "microsoft-teams", "twilio", "fathom"]) {
 }
 
 // No orphan logos: every SVG shipped under public/connectors is in the catalog.
+// One exception, named: no part of OASIS uses Google Drive, so its chip left the
+// Google card (2026-10-08, PR #553 review U4); the file is removed separately.
+const RETIRED_LOGOS = new Set(["googledrive.svg"]);
 const shipped = readdirSync(join(root, "public/connectors")).filter((f) => f.endsWith(".svg"));
-for (const f of shipped) assert.ok(referenced.has(f), `public/connectors/${f} is shipped but no connector uses it`);
+for (const f of shipped) assert.ok(referenced.has(f) || RETIRED_LOGOS.has(f), `public/connectors/${f} is shipped but no connector uses it`);
+assert.ok(
+  [...RETIRED_LOGOS].every((f) => !referenced.has(f)),
+  "a retired logo is back in the catalog: take it off the retired list",
+);
+// The Google card names only what OASIS connects and uses (U4): no Drive, and
+// no calendar read for free time.
+{
+  const google = connectorBySlug("google-workspace")!;
+  const copy = [google.summary, ...google.reads, ...google.does, ...(google.keywords ?? []), ...(google.includes ?? []).map((i) => i.name)].join(" ");
+  assert.doesNotMatch(copy, /drive/i);
+  assert.doesNotMatch(copy, /open slots|free time|busy/i);
+  // Telegram carries alerts only: its card never promises teammates (U5).
+  assert.doesNotMatch(connectorBySlug("telegram")!.summary, /teammate/i);
+}
 
 // Every glyph stays visible on the dark tile (WCAG 3:1 for graphics).
 for (const def of CONNECTOR_CATALOG) {
@@ -529,6 +547,19 @@ assert.equal(
 );
 // One service's check never lights up another.
 assert.notEqual(label(telegram, { ...EMPTY, keyRows: gwsKeys({ last_test_ok: true, last_tested_at: iso(MIN) }) }).split(" | ")[0], "connected");
+// "Reconnect once" says its cause (PR #553 review F8): only a grant without
+// Calendar is "without Calendar access"; the predicate is unchanged.
+{
+  const reconnect = (over: Partial<typeof ready>) => personalGoogleStatus({ ...ready, ...over });
+  const noCalendar = reconnect({ calendarScope: false });
+  const noAddress = reconnect({ address: null });
+  const noWorkEmail = reconnect({ workEmail: null });
+  for (const s of [noCalendar, noAddress, noWorkEmail]) assert.deepEqual([s.state, s.kind, s.label], ["reconnect", "attention", "Reconnect once"]);
+  assert.match(noCalendar.detail ?? "", /^Connected as me@workspace\.test, but without Calendar access\./);
+  assert.match(noAddress.detail ?? "", /^Connected, but Google did not say which address it is/);
+  assert.match(noWorkEmail.detail ?? "", /^Connected as me@workspace\.test, but your profile has no work email/);
+  for (const s of [noAddress, noWorkEmail]) assert.doesNotMatch(s.detail ?? "", /Calendar access/, "a grant with Calendar is never 'without Calendar access'");
+}
 
 // The UI cannot upgrade a status: no component under the hub or Settings
 // writes a "connected" kind of its own, the hub reads a missing status as
@@ -571,8 +602,11 @@ assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /Phase 2|Coming soo
 assert.match(read("app/settings/notifications/page.tsx"), /Choosing what notifies you is not built yet/);
 assert.doesNotMatch(read("app/settings/notifications/page.tsx"), /Phase 2|arrives with/);
 // The AI Team names Telegram only where the workspace has a team bot set up
-// (the Telegram card's own status), never as a fixed line on every row.
-assert.match(read("components/os/aiteam/TeammateRow.tsx"), /\{telegramSetUp && <li className="text-fg-dim">Telegram · alerts only<\/li>\}/);
+// (the Telegram card's own status), never as a fixed line on every row, and in
+// the card's own words when it needs attention (tests/status-integrity.test.ts
+// draws both).
+assert.match(read("components/os/aiteam/TeammateRow.tsx"), /\{telegramSetUp &&\s*\(telegramProblem\?\.kind === "attention" \?/);
+assert.match(read("components/os/aiteam/TeammateRow.tsx"), /<li className="text-fg-dim">Telegram · alerts only<\/li>/);
 assert.doesNotMatch(read("components/os/aiteam/TeammateRow.tsx"), /Phase 2/);
 // The connector drawer's coming-soon note is the state too, not a date:
 // "scheduled for the next release" promised a release nobody had scheduled.

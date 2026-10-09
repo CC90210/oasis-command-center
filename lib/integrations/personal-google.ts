@@ -3,8 +3,13 @@
  * connection (user_integration_credentials, service gmail_oauth), for every
  * screen that reports it: Settings (the "Your own Google account" panel, via
  * /api/integrations/personal/status), the Google card in Connections
- * (components/os/connections/connector-facts.ts) and Today's calendar line
- * (components/os/today/loaders.ts).
+ * (components/os/connections/connector-facts.ts), Today's calendar line
+ * (components/os/today/loaders.ts) and the handoff form's host list
+ * (app/api/team/members). The handoff form alone also spends the token against
+ * Google, and only for a connection this reader calls ready, because a booking
+ * is about to use it: a token revoked at Google reads "Reconnect once" there,
+ * while the other screens, which do not call Google on every visit, say what
+ * the saved grant shows (and say that they do not re-check it).
  *
  * They used to answer from three different rules, so the same account read
  * "Wrong Google account" in Settings, "Connected" on Today and "Your account

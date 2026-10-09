@@ -9,11 +9,12 @@
  *     it, see the connected workspace, and map each channel to a department
  *     and, optionally, a client. @mentions get a department's draft that waits
  *     for approval; mapped channels show on the client's Conversations tab.
- *   - Telegram: each person's own alert bot works now (TelegramConnectCard,
- *     rendered by SettingsContent's chat-apps section), and owners see the
- *     shared team-alerts bot's measured status. Two-way AI teammates in
- *     Telegram chats are not built, and the card says exactly that: a state,
- *     never a release promise, with a button that asks OASIS for it.
+ *   - Telegram: each person can link their own bot (TelegramConnectCard,
+ *     rendered by SettingsContent's chat-apps section), though nothing sends
+ *     to a personal bot yet, and owners see the shared team-alerts bot's
+ *     status (its Connections card's own). Two-way AI teammates in Telegram
+ *     chats are not built, and the card says exactly that: a state, never a
+ *     release promise, with a button that asks OASIS for it.
  *   - Discord, Microsoft Teams, WhatsApp: not built. Each opens the shared
  *     Connections drawer, which says why and files the request (no dead chip).
  *
