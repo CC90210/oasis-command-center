@@ -25,6 +25,7 @@ import {
 import { recordIntegrationCheck, serverSetFieldKeys } from "@/lib/integrations/server-checks";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { mayManageConnections } from "@/lib/connections/access";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { probeTwilioConnection } from "@/lib/twilio/connection";
 import { twilioWebhookUrls } from "@/lib/twilio/shared";
@@ -49,8 +50,18 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canAccessSharedTenantResource(sess))) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // A Test decrypts the workspace's saved credentials, calls the vendor with
+  // them, rewrites the shared Test result and answers with the account's
+  // identity (an SMTP host and username, a Calendly name). That is managing the
+  // connection, so it takes the same owner/admin rule as every
+  // /api/connections route (lib/connections/access.ts), checked before any
+  // credential is read. A member used to pass (canAccessSharedTenantResource is
+  // true for every member of a client workspace): Codex review, 2026-10-09.
+  if (!(await canAccessSharedTenantResource(sess)) || !mayManageConnections(sess)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only the workspace owner or an admin can test connections." },
+      { status: 403 },
+    );
   }
 
   let body: { service?: unknown };
