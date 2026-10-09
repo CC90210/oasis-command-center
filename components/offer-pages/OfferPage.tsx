@@ -82,20 +82,26 @@ export function OfferPage({
         <OfferNav nav={page.nav} name={workspaceName} logoUrl={logoUrl} ctaLabel={ctaLabel} />
 
         <main id="top">
-          {/* -- Hero ----------------------------------------------------- */}
+          {/* -- Hero -----------------------------------------------------
+              The marketing home hero's treatment: the solid ops-void canvas
+              with no backdrop, one hairline accent rule, and the type doing
+              the rest (display headline, muted lede, the accent button). The
+              rule is the eyebrow device (.m-eyebrow in marketing.css): with an
+              eyebrow it is the eyebrow's own rule; without one it is drawn
+              bare, so every hero opens on the same mark and never on two. */}
           <section className="m-edge relative overflow-hidden">
-            <div
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-0 [background:radial-gradient(55%_45%_at_80%_0%,color-mix(in_srgb,var(--accent,#00D4FF)_11%,transparent),transparent_72%)]"
-            />
-            <div className="relative mx-auto w-full max-w-6xl px-5 pb-16 pt-14 sm:px-8 sm:pb-24 sm:pt-20">
+            <div className="mx-auto w-full max-w-6xl px-5 pb-16 pt-14 sm:px-8 sm:pb-24 sm:pt-20">
               <div className={heroMedia ? "grid items-center gap-10 lg:grid-cols-[1.02fr_1fr] lg:gap-14" : "max-w-3xl"}>
                 {/* No Reveal in the hero: it is the first paint (LCP), so it never
                     waits for JavaScript to fade it in. Sections below the fold do. */}
                 <div>
-                  {hero.eyebrow ? <Eyebrow>{hero.eyebrow}</Eyebrow> : null}
+                  {hero.eyebrow ? (
+                    <Eyebrow>{hero.eyebrow}</Eyebrow>
+                  ) : (
+                    <span aria-hidden="true" className="block h-px w-8 bg-[linear-gradient(to_right,var(--accent,#00D4FF),transparent)]" />
+                  )}
                   <h1
-                    className={`${hero.eyebrow ? "mt-6" : ""} font-display text-[clamp(2.3rem,5.4vw,4rem)] font-bold leading-[1.03] tracking-[-0.025em] text-fg`}
+                    className="mt-6 font-display text-[clamp(2.3rem,5.4vw,4rem)] font-bold leading-[1.03] tracking-[-0.025em] text-fg"
                   >
                     {hero.headline}
                   </h1>
