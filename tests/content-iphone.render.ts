@@ -36,6 +36,7 @@ function driver<P>(component: (props: P) => unknown, contexts: Map<unknown, unkn
   const deps: Array<unknown[] | undefined> = [];
   const cleanups: Array<(() => void) | undefined> = [];
   let queued: Array<{ at: number; effect: () => unknown }> = [];
+  let waiting: Array<() => void> = [];
   let cursor = 0;
   const changed = (at: number, next?: unknown[]) => {
     const prev = deps[at];
@@ -47,6 +48,9 @@ function driver<P>(component: (props: P) => unknown, contexts: Map<unknown, unkn
       if (!(at in slots)) slots[at] = typeof initial === "function" ? (initial as () => unknown)() : initial;
       const set = (next: unknown) => {
         slots[at] = typeof next === "function" ? (next as (prev: unknown) => unknown)(slots[at]) : next;
+        const woken = waiting;
+        waiting = [];
+        for (const wake of woken) wake();
       };
       return [slots[at], set];
     },
@@ -101,6 +105,22 @@ function driver<P>(component: (props: P) => unknown, contexts: Map<unknown, unkn
       for (const c of cleanups) c?.();
       cleanups.length = 0;
     },
+    /**
+     * Resolves after the component next sets state from outside a frame (a
+     * fetch delivering), once the callback doing it has finished. Waiting on
+     * the component itself, not on a number of event-loop turns: how long a
+     * dynamic import takes depends on the Node version (one turn was enough on
+     * Node 24, not on CI's Node 22, 2026-10-09).
+     */
+    nextSet(what: string): Promise<void> {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`render: ${what} never set any state`)), 5000);
+        waiting.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    },
   };
 }
 
@@ -137,8 +157,8 @@ function portalOf(node: unknown): { children: unknown; containerInfo: unknown } 
   throw new Error("render: the big phone did not draw into a portal");
 }
 
-/** Let settled promises (the big phone's fetch) deliver their callbacks. */
-const flush = () => new Promise((r) => setTimeout(r, 0));
+/** One turn of the event loop. */
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 // -- a small DOM -------------------------------------------------------------
 const listeners = new Map<string, Array<(e: unknown) => void>>();
@@ -207,7 +227,7 @@ async function main() {
   });
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { AssetTile } = await import("../components/founders/marketing-shared");
-  const { PhoneEnlarge, EnlargeButton, enlargeSlotContext, loadBigPhone } = await import("../components/founders/PhoneEnlarge");
+  const { PhoneEnlarge, EnlargeButton, enlargeSlotContext } = await import("../components/founders/PhoneEnlarge");
   const { BigPhone, BIG_PHONE_WIDTH } = await import("../components/founders/PhoneEnlargeOverlay");
   const { TileVideo } = await import("../components/founders/TileVideo");
   const { CarouselFrame } = await import("../components/founders/CarouselFrame");
@@ -289,8 +309,7 @@ async function main() {
   const button = driver(EnlargeButton, new Map([[Slot, tileSlot]]));
   const buttonEl = must(button.render({ title: "Asset title" }), "the Enlarge button", (el) => el.type === "button");
   (buttonEl.props.onClick as (e: unknown) => void)({ currentTarget: trigger });
-  await loadBigPhone();
-  await flush();
+  await pe.nextSet("the press's fetch");
   frame = pe.render(enlargeProps);
   const bigEl = must(frame, "the big phone", (el) => el.type === BigPhone);
   const bigProps = bigEl.props as unknown as BigProps;
@@ -377,7 +396,7 @@ async function main() {
     let f = d.render(enlargeProps);
     (must(f, "the in-place wrapper", (el) => el.type === "div").props.ref as { current: unknown }).current = inline;
     (must(f, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot).enlarge({ play: false, at: 0 }, trigger);
-    await flush();
+    await d.nextSet("the press's fetch");
     f = d.render(enlargeProps);
     return { d, f };
   };
@@ -397,7 +416,7 @@ async function main() {
   const wrapper = must(r, "the in-place wrapper", (el) => el.type === "div");
   const prefetchHandlers = { pointer: typeof wrapper.props.onPointerEnter === "function", focus: typeof wrapper.props.onFocus === "function" };
   (wrapper.props.onPointerEnter as () => void)();
-  await flush();
+  await reach.nextSet("the prefetch");
   r = reach.render(enlargeProps);
   (must(r, "the tile slot's provider", (el) => el.type === Slot).props.value as TileSlot).enlarge({ play: false, at: 0 }, trigger);
   // No wait this time: the code arrived with the pointer.
@@ -416,13 +435,15 @@ async function main() {
   const broken = driver(PhoneEnlarge);
   let b = broken.render(enlargeProps);
   // Only reaching for the tile, offline: nothing was asked, so nothing is said.
+  // (Offline the fetch rejects at once, so one turn delivers it; a failed
+  // prefetch sets no state, so there is no state change to wait on.)
   (wrapperOf(b).props.onPointerEnter as () => void)();
-  await flush();
+  await tick();
   b = broken.render(enlargeProps);
   const prefetchFailureSaid = saysFailed(b);
   // The press, offline.
   tileSlotOf(b).enlarge({ play: false, at: 0 }, trigger);
-  await flush();
+  await broken.nextSet("the failed press");
   b = broken.render(enlargeProps);
   console.warn = warn;
   const failedMarkup = draw(b);
@@ -431,7 +452,7 @@ async function main() {
   // code arrives, and the press that failed is not replayed.
   Object.assign(globalThis, { window: fakeWindow });
   (wrapperOf(b).props.onPointerEnter as () => void)();
-  await flush();
+  await broken.nextSet("the prefetch, back online");
   b = broken.render(enlargeProps);
   const openedLaterByPointer = find(b, (el) => el.type === BigPhone) !== null;
   const failureSaidAfterFetch = saysFailed(b);
