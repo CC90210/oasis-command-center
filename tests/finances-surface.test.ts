@@ -44,7 +44,7 @@ async function main() {
   const labelsOn = (p: string) => visibleFoundersSections(p, FOUNDERS_PORTAL.sections).chips.map((s) => s.label);
   assert.deepEqual(labelsOn("/founders/finances"), ["Content", "Finances"], "no Content sub-chips on Finances");
   assert.deepEqual(labelsOn("/founders/finances/reports"), ["Content", "Finances"]);
-  assert.deepEqual(labelsOn("/founders/marketing/library"), ["Content", "Finances", "Library", "Train", "Performance"]);
+  assert.deepEqual(labelsOn("/founders/marketing/library"), ["Content", "Finances", "Library", "Content Tools", "Performance"]);
   assert.equal(visibleFoundersSections("/founders/marketing/performance", FOUNDERS_PORTAL.sections).active, "/founders/marketing/performance");
   assert.equal(visibleFoundersSections("/founders/finances/taxes", FOUNDERS_PORTAL.sections).active, "/founders/finances");
   assert.equal(labelsOn("/founders/marketingx").includes("Library"), false, "prefix match needs a path boundary");

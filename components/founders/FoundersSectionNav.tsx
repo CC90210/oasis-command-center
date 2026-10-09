@@ -4,7 +4,7 @@
  * Header chips for the founders portal.
  *
  * Top-level destinations (Marketing, Finances) always show. A section with a
- * `parent` (Marketing's Library / Train / Performance) shows only while the
+ * `parent` (Marketing's Library / Content Tools / Performance) shows only while the
  * viewer is inside that parent — so Marketing's sub-pages never appear on a
  * Finances page, and Finances' own tabs live in its own layout instead of up
  * here. The rule is lib/portals/registry.ts visibleFoundersSections (pure,
