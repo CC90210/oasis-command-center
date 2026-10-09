@@ -474,6 +474,12 @@ const TESTS = [
   "tests/support-inbox-rules.test.ts",
   // Two requests for one message or one draft, released together: one state.
   "tests/support-inbox-races.test.ts",
+  // Skills Training: the store, the machine-keyed check-in routes a PC calls,
+  // and the founder-only admin routes. Registered here because package.json
+  // and ci.yml were leased by another build track when this landed.
+  "tests/skills-training-store.test.ts",
+  "tests/skills-training-checkin.test.ts",
+  "tests/skills-training-admin.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
