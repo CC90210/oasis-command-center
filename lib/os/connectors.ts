@@ -317,6 +317,18 @@ export function keyTestStates(
   return states;
 }
 
+/**
+ * A self-hosted address (an owner's own n8n or mail server) that OASIS's
+ * servers cannot connect to safely: they cannot lock the connection to the
+ * address they checked (lib/integrations/host-safety.ts), so nothing was sent.
+ */
+const SELF_HOSTED_CANNOT_PIN: TestState = {
+  kind: "configured",
+  label: "Set up · this address can't be tested from OASIS yet",
+  detail:
+    "OASIS only tests a self-hosted address when it can lock the connection to the address it checked, and its servers can't do that yet, so nothing was sent. Addresses run by the provider itself (n8n Cloud, or a big mail provider's server name) test normally.",
+};
+
 /** The workspace's own mail server: a sign-in refused, or an address OASIS never connects to. */
 const SMTP_TEST_STATES: Readonly<Record<string, TestState>> = {
   missing_fields: {
@@ -337,8 +349,14 @@ const SMTP_TEST_STATES: Readonly<Record<string, TestState>> = {
   blocked_host: {
     kind: "attention",
     label: "Server name not allowed",
-    detail: "OASIS only connects to a public server name on a standard mail port (587, 465, 2525 or 25). Use the name your email provider gives you.",
+    detail: "OASIS only connects to a public server name on a standard mail port (587, 465, 2525 or 25) whose addresses are all on the public internet. Use the name your email provider gives you.",
   },
+  not_found: {
+    kind: "attention",
+    label: "Server name not found",
+    detail: "OASIS could not find an address for this server name. Check the name with your email provider, then run Test.",
+  },
+  cannot_pin: SELF_HOSTED_CANNOT_PIN,
 };
 
 // ── The catalog ────────────────────────────────────────────────────────────
@@ -874,8 +892,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
           blocked_host: {
             kind: "attention",
             label: "Address not allowed",
-            detail: "OASIS only connects to a public https:// address, never an IP address or an internal name. Use the address you open n8n at from the internet.",
+            detail: "OASIS only connects to a public https:// address whose name points to the public internet, never an IP address, an internal name or a name that points inside a network. Use the address you open n8n at from the internet.",
           },
+          cannot_pin: SELF_HOSTED_CANNOT_PIN,
         },
         verifiable: true,
       },

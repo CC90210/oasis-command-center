@@ -34,6 +34,7 @@ import {
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
 import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
+import { checkPublicHost, dohResolver } from "@/lib/integrations/host-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,6 +85,26 @@ export async function POST(req: NextRequest) {
   const validation = validateIntegrationValue(fieldDef, value);
   if (validation) {
     return NextResponse.json({ ok: false, error: validation }, { status: 422 });
+  }
+  // An address OASIS will connect to (an owner's n8n or mail server) is judged
+  // by what its name RESOLVES to, not only its spelling: a public-looking name
+  // that points inside a network is refused here, and again at every Test
+  // (lib/integrations/host-safety.ts).
+  if (fieldDef.validation === "public_hostname" || fieldDef.validation === "public_https_url") {
+    const host = fieldDef.validation === "public_hostname" ? value.trim() : new URL(value.trim()).hostname;
+    const checked = await checkPublicHost(host, dohResolver());
+    if (!checked.ok) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            checked.reason === "private_address"
+              ? "That address points inside a private network, so OASIS will not connect to it. Use the address your provider gives you for the internet."
+              : "OASIS could not find that address on the internet. Check it, then save again.",
+        },
+        { status: 422 },
+      );
+    }
   }
   // Client workspaces connect Stripe READ-ONLY, with a restricted key, through
   // Settings › Connections (/api/connections/stripe/connect). This editor would

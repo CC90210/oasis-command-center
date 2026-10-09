@@ -101,15 +101,53 @@ const VENDOR_HOSTS = new Set([
   "api.fireflies.ai",
   "zernio.com",
   "services.leadconnectorhq.com",
-  "automations.alpha.test",
-  "ghost.alpha.test",
+  "alpha.app.n8n.cloud",
+  "ghost.app.n8n.cloud",
   "api.stripe.com",
+  "cloudflare-dns.com",
 ]);
 
 function credentialOf(host: string, headers: Headers): string {
   if (host === "api.fathom.ai") return headers.get("x-api-key") ?? "";
-  if (host.endsWith(".alpha.test")) return headers.get("x-n8n-api-key") ?? "";
+  if (host.endsWith(".app.n8n.cloud")) return headers.get("x-n8n-api-key") ?? "";
   return (headers.get("authorization") ?? "").replace(/^Bearer /, "");
+}
+
+// -- DNS, mocked at the same boundary (DNS over HTTPS) ---------------------------
+//
+// Public answers use 93.184.216.34 / 2606:2800:220:1::1; the hostile ones point
+// inside a network, partly or wholly, or change between lookups (rebinding).
+const PUBLIC_V4 = "93.184.216.34";
+const DNS: Record<string, { A?: string[]; AAAA?: string[]; nx?: boolean }> = {
+  "alpha.app.n8n.cloud": { A: [PUBLIC_V4] },
+  "ghost.app.n8n.cloud": { A: [PUBLIC_V4] },
+  "automations.alpha.test": { A: [PUBLIC_V4], AAAA: ["2606:2800:220:1::1"] },
+  "smtp.alpha.test": { A: [PUBLIC_V4] },
+  "evil.alpha.test": { A: ["10.0.0.5"] },
+  "loop.alpha.test": { A: ["127.0.0.1"] },
+  "meta.alpha.test": { A: ["169.254.169.254"] },
+  "mixed.alpha.test": { A: [PUBLIC_V4, "192.168.1.20"] },
+  "mapped.alpha.test": { A: [PUBLIC_V4], AAAA: ["::ffff:10.1.2.3"] },
+  "ula.alpha.test": { AAAA: ["fd00::1"] },
+  "smtp.office365.com": { A: [PUBLIC_V4] },
+  "nowhere.alpha.test": { nx: true },
+};
+/** rebind.alpha.test answers a public address the first time it is asked, then a private one. */
+const rebindAsked = { A: 0, AAAA: 0 };
+let dnsLookups = 0;
+
+function dnsAnswer(url: URL): Response {
+  dnsLookups += 1;
+  const name = url.searchParams.get("name") ?? "";
+  const type = url.searchParams.get("type") === "AAAA" ? "AAAA" : "A";
+  const code = type === "A" ? 1 : 28;
+  let entry = DNS[name];
+  if (name === "rebind.alpha.test") {
+    rebindAsked[type] += 1;
+    entry = rebindAsked[type] === 1 ? { A: [PUBLIC_V4] } : { A: ["127.0.0.1"] };
+  }
+  if (!entry || entry.nx) return json(200, { Status: 3, Answer: [] });
+  return json(200, { Status: 0, Answer: (entry[type] ?? []).map((data) => ({ name, type: code, data })) });
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -118,6 +156,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const url = new URL(href);
   if (!VENDOR_HOSTS.has(url.hostname)) throw new Error(`unexpected network call in test: ${href}`);
+  if (url.hostname === "cloudflare-dns.com") return dnsAnswer(url);
   const headers = new Headers(init?.headers);
   const credential = credentialOf(url.hostname, headers);
   calls.push({ host: url.hostname, path: url.pathname + url.search, method: (init?.method || "GET").toUpperCase(), credential });
@@ -159,11 +198,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (id === "loc-missing") return json(404, { message: "Location not found" });
       return json(200, { location: { id, name: "Alpha Plumbing HQ", email: "owner@alpha.test" } });
     }
-    case "automations.alpha.test":
+    case "alpha.app.n8n.cloud":
       assert.equal(url.pathname, "/api/v1/workflows");
       assert.equal(url.searchParams.get("limit"), "1", "n8n is asked for one workflow, never more");
       return json(200, { data: [{ id: "1", name: "Lead intake" }], nextCursor: null });
-    case "ghost.alpha.test":
+    case "ghost.app.n8n.cloud":
       return json(404, { message: "not found" });
   }
   throw new Error(`unhandled ${href}`);
@@ -196,7 +235,7 @@ const APPS: App[] = [
   { slug: "fireflies", service: "fireflies", good: { api_key: "ff-alpha-key-00000000000001" }, secretField: "api_key", passDetail: /Fireflies account: Alpha Plumbing/ },
   { slug: "zernio", service: "late", good: { api_key: "sk_alpha000000000000000000000001" }, secretField: "api_key", passDetail: /2 profiles/ },
   { slug: "gohighlevel", service: "gohighlevel", good: { private_token: "pit-alpha-0000000000000001", location_id: "loc-alpha-1" }, secretField: "private_token", passDetail: /sub-account: Alpha Plumbing HQ/ },
-  { slug: "n8n", service: "n8n", good: { base_url: "https://automations.alpha.test", api_key: "n8n-alpha-key-00000000001" }, secretField: "api_key", passDetail: /n8n accepted the key/ },
+  { slug: "n8n", service: "n8n", good: { base_url: "https://alpha.app.n8n.cloud", api_key: "n8n-alpha-key-00000000001" }, secretField: "api_key", passDetail: /n8n accepted the key/ },
 ];
 
 async function main() {
@@ -465,7 +504,7 @@ async function main() {
     assert.equal((await card(ALPHA, "gohighlevel")).label, "Not found");
     await saveAll("gohighlevel", APPS[5].good);
 
-    await save("n8n", "base_url", "https://ghost.alpha.test");
+    await save("n8n", "base_url", "https://ghost.app.n8n.cloud");
     t = await runTest("n8n");
     assert.equal(t.body.error, "not_found");
     assert.match((await card(ALPHA, "n8n")).detail ?? "", /no n8n API at this address/);
@@ -544,6 +583,165 @@ async function main() {
     assert.match(smtpStates.smtp_auth_failed.label, /Could not sign in/);
     assert.match(smtpStates.provider_unreachable.label, /Could not reach/);
     assert.match(smtpStates.blocked_host.label, /not allowed/);
+  });
+
+  // -- 6b. What a name RESOLVES to (Codex review, 2026-10-09) ---------------------
+
+  const hostSafety = await import("../lib/integrations/host-safety");
+
+  await check("every private, loopback, link-local, multicast, unspecified and reserved address is refused, IPv4 and IPv6, mapped forms included", () => {
+    const blocked = [
+      "0.0.0.0", "10.1.2.3", "100.64.0.1", "127.0.0.1", "127.255.255.254", "169.254.169.254", "172.16.0.1", "172.31.255.255",
+      "192.0.0.8", "192.0.2.1", "192.88.99.1", "192.168.1.1", "198.18.0.1", "198.51.100.7", "203.0.113.9", "224.0.0.1", "239.1.1.1",
+      "240.0.0.1", "255.255.255.255",
+      "::", "::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:7f00:1", "::10.0.0.1", "64:ff9b::a00:1", "2002:c0a8:101::1",
+      "fc00::1", "fd12:3456::1", "fe80::1", "fec0::1", "ff02::1", "100::1", "2001::1", "2001:db8::1", "[::1]",
+      "not-an-ip", "", "1.2.3", "300.1.1.1",
+    ];
+    for (const ip of blocked) assert.equal(hostSafety.isBlockedAddress(ip), true, `${ip} must be refused`);
+    for (const ip of ["93.184.216.34", "8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:2800:220:1::1", "2a00:1450:4001::200e", "::ffff:93.184.216.34", "2002:5db8:d822::1"]) {
+      assert.equal(hostSafety.isBlockedAddress(ip), false, `${ip} is public`);
+    }
+  });
+
+  await check("a public-looking name that resolves (wholly or partly) inside a network is refused at save, and nothing is saved", async () => {
+    await login(USERS.ownerA);
+    for (const name of ["evil.alpha.test", "loop.alpha.test", "meta.alpha.test", "mixed.alpha.test", "mapped.alpha.test", "ula.alpha.test", "nowhere.alpha.test"]) {
+      const n8n = await save("n8n", "base_url", `https://${name}`);
+      assert.equal(n8n.status, 422, `n8n ${name}: ${n8n.text}`);
+      assert.match(String(n8n.body.error), name === "nowhere.alpha.test" ? /could not find that address/ : /points inside a private network/);
+      const smtp = await save("smtp", "host", name);
+      assert.equal(smtp.status, 422, `smtp ${name}: ${smtp.text}`);
+    }
+    const rows = await db.execute({ sql: "SELECT field_key, encrypted_value FROM tenant_integration_credentials WHERE tenant_id = ? AND service IN ('n8n','smtp') AND field_key IN ('base_url','host')", args: [ALPHA] });
+    for (const r of rows.rows) {
+      const v = decryptField(String(r.encrypted_value));
+      assert.ok(!/evil|loop|meta|mixed|mapped|ula|nowhere/.test(v), `${v} must not have been saved`);
+    }
+  });
+
+  await check("every Test resolves again: a name that answered a public address at save and a private one now is refused, and nothing is sent", async () => {
+    await login(USERS.ownerA);
+    const saved = await save("n8n", "base_url", "https://rebind.alpha.test");
+    assert.equal(saved.status, 200, `the first answer was public: ${saved.text}`);
+    const before = calls.length;
+    const t = await runTest("n8n");
+    assert.equal(t.body.error, "blocked_host", t.text);
+    assert.equal(calls.length, before, "no request was made to the re-pointed name");
+    await saveAll("n8n", APPS[6].good);
+  });
+
+  await check("a self-hosted address is reached at the ONE address that was checked (pinned), with the name kept for SNI, Host and the certificate; DNS is never asked again", async () => {
+    let lookups = 0;
+    // Rebinding: the first answer is public, every later answer is loopback.
+    const resolve: import("../lib/integrations/host-safety").Resolver = async (_name, type) => {
+      lookups += 1;
+      if (type === "AAAA") return [];
+      return lookups <= 2 ? [PUBLIC_V4] : ["127.0.0.1"];
+    };
+    const got: { ip: string; hostname: string; path: string; headers: Record<string, string> }[] = [];
+    const before = calls.length;
+    const r = await probes.runKeyProbe(
+      "n8n",
+      { base_url: "https://automations.alpha.test", api_key: "n8n-self-hosted-key-0001" },
+      {
+        runtime: "node",
+        resolve,
+        pinnedHttpsGet: async (i) => {
+          got.push({ ip: i.ip, hostname: i.hostname, path: i.path, headers: i.headers });
+          return { status: 200, body: JSON.stringify({ data: [] }) };
+        },
+      },
+    );
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(lookups, 2, "one A and one AAAA lookup per Test, none at connect time");
+    assert.deepEqual(got.map((g) => [g.ip, g.hostname, g.path]), [[PUBLIC_V4, "automations.alpha.test", "/api/v1/workflows?limit=1"]]);
+    assert.equal(got[0].headers["X-N8N-API-KEY"], "n8n-self-hosted-key-0001");
+    assert.equal(calls.length, before, "no fetch by name for a self-hosted address");
+    // The real pinned client connects to the address with the name as SNI and Host.
+    const src = read("lib/integrations/key-probes.ts");
+    assert.match(src, /https\.request\(\s*\{ host: ip, port: 443, servername: hostname, method: "GET", path, headers: \{ \.\.\.headers, Host: hostname \}/);
+    assert.match(src, /host: connectHost,[\s\S]{0,300}tls: \{ servername: host \}/, "SMTP connects to the checked address and verifies the saved name");
+
+    // SMTP: the sign-in goes to the checked address.
+    const seen: { host: string; connectHost: string }[] = [];
+    const s = await probes.runKeyProbe(
+      "smtp",
+      { host: "smtp.alpha.test", port: "587", user: "u@alpha.test", password: "pw-0001", from_address: "u@alpha.test" },
+      { runtime: "node", smtpVerify: async (i) => void seen.push({ host: i.host, connectHost: i.connectHost }) },
+    );
+    assert.equal(s.ok, true);
+    assert.deepEqual(seen, [{ host: "smtp.alpha.test", connectHost: PUBLIC_V4 }]);
+  });
+
+  await check("where a connection cannot be pinned (the Worker), a self-hosted address is refused and nothing is sent; a vendor's own host still tests by name", async () => {
+    let pinned = 0;
+    let signedIn: string[] = [];
+    const before = calls.length;
+    const n8n = await probes.runKeyProbe(
+      "n8n",
+      { base_url: "https://automations.alpha.test", api_key: "n8n-self-hosted-key-0001" },
+      { runtime: "workers", pinnedHttpsGet: async () => ((pinned += 1), { status: 200, body: "{}" }) },
+    );
+    assert.equal(n8n.error, "cannot_pin");
+    const smtp = await probes.runKeyProbe(
+      "smtp",
+      { host: "smtp.alpha.test", port: "587", user: "u", password: "p", from_address: "u@alpha.test" },
+      { runtime: "workers", smtpVerify: async (i) => void signedIn.push(i.connectHost) },
+    );
+    assert.equal(smtp.error, "cannot_pin");
+    assert.equal(pinned + signedIn.length, 0, "nothing was connected to");
+    assert.equal(calls.length, before);
+    // n8n Cloud and a big provider's SMTP name: only the vendor controls their DNS.
+    const cloud = await probes.runKeyProbe("n8n", { base_url: "https://alpha.app.n8n.cloud", api_key: "n8n-alpha-key-00000000001" }, { runtime: "workers" });
+    assert.equal(cloud.ok, true, JSON.stringify(cloud));
+    signedIn = [];
+    const o365 = await probes.runKeyProbe(
+      "smtp",
+      { host: "smtp.office365.com", port: "587", user: "u@alpha.test", password: "p", from_address: "u@alpha.test" },
+      { runtime: "workers", smtpVerify: async (i) => void signedIn.push(i.connectHost) },
+    );
+    assert.equal(o365.ok, true);
+    assert.deepEqual(signedIn, ["smtp.office365.com"]);
+    // Even a vendor's host is resolved and refused if it pointed inside a network.
+    const cloudEvil = await probes.runKeyProbe("n8n", { base_url: "https://alpha.app.n8n.cloud", api_key: "k-00000000" }, {
+      runtime: "workers",
+      resolve: async (_n, t) => (t === "A" ? ["10.0.0.9"] : []),
+    });
+    assert.equal(cloudEvil.error, "blocked_host");
+    // The card says it in words.
+    const words = (connectors.connectorBySlug("n8n")!.live!.source as { failureStates: Record<string, { label: string; kind: string }> }).failureStates.cannot_pin;
+    assert.equal(words.kind, "configured");
+    assert.match(words.label, /can't be tested from OASIS yet/);
+    assert.equal(hostSafety.connectPlan("n8n", "automations.alpha.test", "workers"), "refuse");
+    assert.equal(hostSafety.connectPlan("n8n", "automations.alpha.test", "node"), "pinned");
+    assert.equal(hostSafety.connectPlan("n8n", "x.app.n8n.cloud.evil.test", "workers"), "refuse", "a look-alike suffix is not n8n's");
+  });
+
+  // -- 6c. Who may run a Test (Codex review, 2026-10-09) ----------------------------
+
+  await check("a member gets 403 for every key-backed service: no credential is read, no vendor or DNS is called, no Test state changes", async () => {
+    await login(USERS.ownerA);
+    const snapshot = async () =>
+      JSON.stringify((await db.execute({ sql: "SELECT service, field_key, last_tested_at, last_test_ok, last_test_error FROM tenant_integration_credentials WHERE tenant_id = ? ORDER BY service, field_key", args: [ALPHA] })).rows);
+    const before = await snapshot();
+    const callsBefore = calls.length;
+    const dnsBefore = dnsLookups;
+    await login(USERS.memberA);
+    const services = schemas.TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS.map((s) => s.service);
+    assert.ok(services.length >= 12, services.join(","));
+    for (const service of services) {
+      const t = await runTest(service);
+      assert.equal(t.status, 403, `${service}: ${t.text}`);
+      assert.equal(t.body.ok, false);
+      assert.doesNotMatch(t.text, /Alpha Plumbing|owner@alpha|Signed in|account/i, `${service}: nothing about the account`);
+    }
+    assert.equal(calls.length, callsBefore, "no vendor was called");
+    assert.equal(dnsLookups, dnsBefore, "no DNS lookup was made");
+    await login(USERS.ownerA);
+    assert.equal(await snapshot(), before, "no Test result changed");
+    // The owner still can.
+    assert.equal((await runTest("calendly")).status, 200);
   });
 
   // -- 7. Tenant isolation ------------------------------------------------------

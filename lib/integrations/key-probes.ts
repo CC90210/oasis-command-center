@@ -22,6 +22,10 @@
  *   provider_unreachable the vendor did not answer (network, timeout)
  *   provider_error       any other answer (a 5xx, an unexpected shape)
  *   blocked_host         the address points somewhere OASIS never connects to
+ *                        (by its spelling, or by what its name RESOLVES to)
+ *   cannot_pin           a self-hosted address this runtime cannot connect to
+ *                        safely (no way to pin it to the checked address):
+ *                        nothing was sent (lib/integrations/host-safety.ts)
  *   smtp_auth_failed     the mail server refused the username and password
  *   missing_fields       a required value is not saved
  *
@@ -32,7 +36,9 @@
  *
  * Self-hosted addresses (n8n, SMTP) are re-checked here with the same rule the
  * save used (isPublicHostname), so a value saved before that rule, or set some
- * other way, still cannot aim a Test at an internal address.
+ * other way, still cannot aim a Test at an internal address. Then their name is
+ * resolved and every address checked, and the connection goes to the checked
+ * address, or nowhere (lib/integrations/host-safety.ts).
  */
 
 import "server-only";
@@ -43,6 +49,7 @@ import {
   requiredIntegrationFieldKeys,
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
+import { checkPublicHost, connectPlan, dohResolver, type Resolver } from "@/lib/integrations/host-safety";
 
 export type KeyProbeResult = {
   ok: boolean;
@@ -53,17 +60,34 @@ export type KeyProbeResult = {
 };
 
 export type SmtpVerify = (input: {
+  /** The name the owner saved: the TLS server name and the certificate check. */
   host: string;
+  /** Where the connection goes: the checked address (pinned), or the name itself (a vendor's mail server). */
+  connectHost: string;
   port: number;
   secure: boolean;
   user: string;
   password: string;
 }) => Promise<void>;
 
+/** One HTTPS GET to a checked address, with the name as SNI, Host and the certificate's name. */
+export type PinnedHttpsGet = (input: {
+  ip: string;
+  hostname: string;
+  path: string;
+  headers: Record<string, string>;
+  timeoutMs: number;
+}) => Promise<{ status: number; body: string }>;
+
 export type KeyProbeDeps = {
   fetchImpl?: typeof fetch;
   smtpVerify?: SmtpVerify;
   timeoutMs?: number;
+  /** DNS lookups for owner-typed hosts (default: DNS over HTTPS). */
+  resolve?: Resolver;
+  /** Where this runs, which decides whether a connection can be pinned (default: detected). */
+  runtime?: "workers" | "node";
+  pinnedHttpsGet?: PinnedHttpsGet;
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -268,32 +292,106 @@ export function n8nApiRoot(raw: string): string | null {
   return `${u.origin}${path}/api/v1`;
 }
 
+/**
+ * Resolve and check an owner-typed host, then decide how to reach it
+ * (lib/integrations/host-safety.ts): a refusal result, or the address to use.
+ * One lookup per Test: the connection never asks DNS again, so the answer
+ * cannot be swapped between the check and the connect.
+ */
+async function reachableHost(
+  kind: "n8n" | "smtp",
+  host: string,
+  deps: KeyProbeDeps,
+): Promise<{ ok: true; connectTo: string; pinned: boolean } | { ok: false; result: KeyProbeResult }> {
+  const checked = await checkPublicHost(host, deps.resolve ?? dohResolver(deps.fetchImpl ?? fetch));
+  if (!checked.ok) {
+    console.error("[key-probe.host]", kind, checked.reason);
+    return { ok: false, result: { ok: false, error: checked.reason === "private_address" ? "blocked_host" : "not_found" } };
+  }
+  const plan = connectPlan(kind, host, deps.runtime);
+  if (plan === "refuse") return { ok: false, result: { ok: false, error: "cannot_pin" } };
+  return plan === "by_name" ? { ok: true, connectTo: host, pinned: false } : { ok: true, connectTo: checked.addresses[0], pinned: true };
+}
+
+/** Node's https, to the checked address, with the name as SNI, Host and the certificate's name. */
+const defaultPinnedHttpsGet: PinnedHttpsGet = async ({ ip, hostname, path, headers, timeoutMs }) => {
+  const https = await import("node:https");
+  return await new Promise((resolve, reject) => {
+    const req = https.request(
+      { host: ip, port: 443, servername: hostname, method: "GET", path, headers: { ...headers, Host: hostname }, timeout: timeoutMs },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size <= 1_000_000) chunks.push(c);
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
+    req.on("error", reject);
+    req.end();
+  });
+};
+
 /** n8n: GET <instance>/api/v1/workflows?limit=1 with X-N8N-API-KEY. Lists, never runs. */
 async function probeN8n(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
   const root = n8nApiRoot(bundle.base_url);
   if (!root) return { ok: false, error: "blocked_host" };
-  const r = await call(deps, `${root}/workflows?limit=1`, {
-    method: "GET",
-    headers: { "X-N8N-API-KEY": bundle.api_key.trim(), Accept: "application/json" },
-  });
-  if (!r.ok) return r.result;
+  const url = new URL(`${root}/workflows?limit=1`);
+  const reach = await reachableHost("n8n", url.hostname, deps);
+  if (!reach.ok) return reach.result;
+  const headers = { "X-N8N-API-KEY": bundle.api_key.trim(), Accept: "application/json" };
+  let status: number;
+  let body: Record<string, unknown> | null;
+  if (reach.pinned) {
+    try {
+      const r = await (deps.pinnedHttpsGet ?? defaultPinnedHttpsGet)({
+        ip: reach.connectTo,
+        hostname: url.hostname,
+        path: `${url.pathname}${url.search}`,
+        headers,
+        timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      });
+      status = r.status;
+      try {
+        const parsed = JSON.parse(r.body) as unknown;
+        body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        body = null;
+      }
+    } catch (err) {
+      const name = err instanceof Error ? err.name : "error";
+      console.error("[key-probe.network]", "n8n pinned", name);
+      return { ok: false, error: `provider_unreachable: ${name}` };
+    }
+  } else {
+    const r = await call(deps, url.toString(), { method: "GET", headers });
+    if (!r.ok) return r.result;
+    status = r.res.status;
+    body = status === 200 ? await jsonOf(r.res) : null;
+  }
   // A redirect or a 404 is an address with no n8n API behind it (or the API is
   // switched off, as on n8n Cloud's free trial): never followed anywhere else.
-  if (r.res.status === 404 || (r.res.status >= 300 && r.res.status < 400)) return { ok: false, error: "not_found" };
-  if (r.res.status !== 200) return { ok: false, error: httpFailureCode(r.res.status) };
-  const body = await jsonOf(r.res);
+  if (status === 404 || (status >= 300 && status < 400)) return { ok: false, error: "not_found" };
+  if (status !== 200) return { ok: false, error: httpFailureCode(status) };
   if (!body || !Array.isArray(body.data)) return { ok: false, error: "not_found" };
   return { ok: true, detail: "n8n accepted the key" };
 }
 
-const defaultSmtpVerify: SmtpVerify = async ({ host, port, secure, user, password }) => {
+const defaultSmtpVerify: SmtpVerify = async ({ host, connectHost, port, secure, user, password }) => {
   const nodemailer = await import("nodemailer");
   const transport = nodemailer.createTransport({
-    host,
+    // The checked address (or a vendor's own name); the saved name stays the
+    // TLS server name, so the certificate is checked against it.
+    host: connectHost,
     port,
     secure,
     // Never send the password in the clear: a server that will not start TLS is refused.
     requireTLS: !secure,
+    tls: { servername: host },
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,
     socketTimeout: 20_000,
@@ -308,15 +406,19 @@ const defaultSmtpVerify: SmtpVerify = async ({ host, port, secure, user, passwor
 
 /**
  * SMTP: sign in (EHLO, STARTTLS or TLS, AUTH) and quit. Sends nothing. Only a
- * public host name on a standard mail port, and never without TLS.
+ * public host name on a standard mail port, whose every address is public,
+ * reached at the checked address, and never without TLS.
  */
 async function probeSmtp(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
   const host = bundle.host.trim().toLowerCase();
   const port = bundle.port.trim();
   if (!isPublicHostname(host) || !SMTP_PORTS.has(port)) return { ok: false, error: "blocked_host" };
+  const reach = await reachableHost("smtp", host, deps);
+  if (!reach.ok) return reach.result;
   try {
     await (deps.smtpVerify ?? defaultSmtpVerify)({
       host,
+      connectHost: reach.connectTo,
       port: Number(port),
       secure: port === "465",
       user: bundle.user.trim(),
