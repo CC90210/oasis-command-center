@@ -662,6 +662,10 @@ async function main() {
     const src = read("lib/integrations/key-probes.ts");
     assert.match(src, /https\.request\(\s*\{ host: ip, port: 443, servername: hostname, method: "GET", path, headers: \{ \.\.\.headers, Host: hostname \}/);
     assert.match(src, /host: connectHost,[\s\S]{0,300}tls: \{ servername: host \}/, "SMTP connects to the checked address and verifies the saved name");
+    // One total deadline (the request's own `timeout` is only an idle limit),
+    // and an answer past 1 MB ends the request instead of being read on (CodeRabbit #563).
+    assert.match(src, /deadline = setTimeout\(\(\) => req\.destroy\(/);
+    assert.match(src, /if \(size > 1_000_000\) \{\s*req\.destroy\(/);
 
     // SMTP: the sign-in goes to the checked address.
     const seen: { host: string; connectHost: string }[] = [];

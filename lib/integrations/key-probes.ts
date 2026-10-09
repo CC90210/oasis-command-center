@@ -317,6 +317,14 @@ async function reachableHost(
 const defaultPinnedHttpsGet: PinnedHttpsGet = async ({ ip, hostname, path, headers, timeoutMs }) => {
   const https = await import("node:https");
   return await new Promise((resolve, reject) => {
+    // `timeout` below is only the socket's idle limit: a server sending a byte
+    // at a time would hold the Test open. One total deadline ends it, and an
+    // answer past 1 MB is cut off instead of read to the end (CodeRabbit #563).
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const fail = (err: Error) => {
+      clearTimeout(deadline);
+      reject(err);
+    };
     const req = https.request(
       { host: ip, port: 443, servername: hostname, method: "GET", path, headers: { ...headers, Host: hostname }, timeout: timeoutMs },
       (res) => {
@@ -324,14 +332,22 @@ const defaultPinnedHttpsGet: PinnedHttpsGet = async ({ ip, hostname, path, heade
         let size = 0;
         res.on("data", (c: Buffer) => {
           size += c.length;
-          if (size <= 1_000_000) chunks.push(c);
+          if (size > 1_000_000) {
+            req.destroy(Object.assign(new Error("response too large"), { name: "ResponseTooLarge" }));
+            return;
+          }
+          chunks.push(c);
         });
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
-        res.on("error", reject);
+        res.on("end", () => {
+          clearTimeout(deadline);
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+        });
+        res.on("error", fail);
       },
     );
+    deadline = setTimeout(() => req.destroy(Object.assign(new Error("timeout"), { name: "TimeoutError" })), timeoutMs);
     req.on("timeout", () => req.destroy(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
-    req.on("error", reject);
+    req.on("error", fail);
     req.end();
   });
 };
