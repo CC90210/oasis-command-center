@@ -23,7 +23,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { SWEEP_ERROR_LINES } from "@/lib/tools/errors";
 import { toolByKey, type ToolDef } from "@/lib/tools/registry";
 import type { ToolsViewer } from "@/lib/tools/access";
-import type { ToolStorage } from "@/lib/tools/runner-handlers";
+import { removeUnusedUploads, type ToolStorage } from "@/lib/tools/runner-handlers";
 import {
   finishWorkerJob,
   findByIdempotencyKey,
@@ -39,7 +39,9 @@ import {
   toolTablesInstalled,
   type ToolJob,
 } from "@/lib/tools/store";
-import { WORKER_EXECUTORS, type WorkerContext, type WorkerResult } from "@/lib/tools/worker";
+// Types only: the executors (and the fetcher and model code under them) are
+// loaded inside runWorker, so the jobs route, polled every 3 s, never loads them.
+import type { WorkerContext, WorkerResult } from "@/lib/tools/worker";
 
 export type SessionDeps = {
   db: Client;
@@ -66,14 +68,8 @@ async function sweepFor(deps: SessionDeps, tenantId: string): Promise<void> {
   const swept = await sweepToolJobs(deps.db, [tenantId], deps.now());
   if (!swept.orphanUploads.length || !deps.storage) return;
   const storage = await deps.storage().catch(() => null);
-  if (!storage) return;
-  for (const o of swept.orphanUploads) {
-    try {
-      await storage.remove(o.path);
-    } catch (err) {
-      console.error("[tools.jobs.sweep] could not delete an unused upload", { tenantId: o.tenantId, path: o.path, error: err instanceof Error ? err.message : String(err) });
-    }
-  }
+  // The same delete the runner routes use: only a path under the job's own workspace.
+  await removeUnusedUploads(storage, swept.orphanUploads, "jobs.sweep");
 }
 
 // ---------------------------------------------------------------------------
@@ -172,9 +168,10 @@ async function reuseInflight(db: Client, tenantId: string, dedupeKey: string | n
 
 /** Run a worker tool to its end, inside this request. Every path leaves the run done or failed. */
 async function runWorker(tool: ToolDef, input: Record<string, unknown>, jobId: string, viewer: ToolsViewer, deps: SessionDeps): Promise<void> {
-  const exec = WORKER_EXECUTORS[tool.key];
   let outcome: WorkerResult;
   try {
+    const { WORKER_EXECUTORS } = await import("@/lib/tools/worker");
+    const exec = WORKER_EXECUTORS[tool.key];
     if (!exec) throw new Error(`no executor for ${tool.key}`);
     outcome = await exec(input, {
       db: deps.db,

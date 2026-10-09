@@ -8,7 +8,8 @@
  *   claim       the runner checks in (tool_runners) and takes the oldest job
  *               of OASIS's own workspaces, with a lease (lib/tools/store.ts)
  *   heartbeat   every 60 s while it works: the lease is extended, the stage
- *               (downloading, uploading) shown on the card
+ *               (downloading, uploading) shown on the card; never past 45
+ *               minutes from the claim (MAX_LEASE_HOLD_SECONDS)
  *   upload-url  the file's size and hashes are recorded; the server reserves
  *               the Library asset id and the storage path ONCE per job (a retry
  *               overwrites the same object) and answers a presigned PUT for that
@@ -44,6 +45,7 @@ import {
   HEARTBEAT_SECONDS,
   LEASE_SECONDS,
   MARKETING_MEDIA_BUCKET,
+  MAX_LEASE_HOLD_SECONDS,
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
   RUN_TIMEOUT_SECONDS,
@@ -125,8 +127,16 @@ function shortText(v: unknown, max: number): string | null {
   return typeof v === "string" && v.length >= 1 && v.length <= max && !CONTROL_RE.test(v) ? v : null;
 }
 
-/** Delete objects nothing points at. Best effort: a failure is logged, never thrown. */
-async function removeQuietly(storage: ToolStorage | null, paths: Array<{ tenantId: string; path: string }>, where: string): Promise<void> {
+/**
+ * Delete uploads nothing points at (a sweep's or a failed job's). Only a path
+ * inside the job's own workspace is ever deleted. Best effort: a failure is
+ * logged, never thrown. The jobs route's sweep uses it too.
+ */
+export async function removeUnusedUploads(
+  storage: ToolStorage | null,
+  paths: Array<{ tenantId: string; path: string }>,
+  where: string,
+): Promise<void> {
   if (!storage) return;
   for (const p of paths) {
     if (!pathBelongsToTenant(p.tenantId, p.path)) continue;
@@ -165,7 +175,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
 
   await upsertRunner(deps.db, { tenantIds: ident.tenantIds, runnerKey: ident.runnerKey, label: label.trim(), tools, version, now: deps.now });
   const swept = await sweepToolJobs(deps.db, ident.tenantIds, deps.now);
-  await removeQuietly(deps.storage, swept.orphanUploads, "claim.sweep");
+  await removeUnusedUploads(deps.storage, swept.orphanUploads, "claim.sweep");
 
   const leaseId = newLeaseId();
   const job = await claimNextJob(deps.db, { tenantIds: ident.tenantIds, toolKeys: tools, runnerKey: ident.runnerKey, leaseId, now: deps.now });
@@ -206,12 +216,23 @@ export async function handleToolsHeartbeat(req: Request, deps: RunnerDeps): Prom
 
   const at = deps.now.toISOString();
   const expires = new Date(deps.now.getTime() + LEASE_SECONDS * 1000).toISOString();
+  // A heartbeat extends the lease only within MAX_LEASE_HOLD_SECONDS of the
+  // claim: a runner whose work is stuck while its heartbeat still beats cannot
+  // hold a job (and one of the five in-flight places) forever. Past it the
+  // answer is lease_lost; the lease then runs out and the job is taken again or
+  // given up (attempts), like any lease that expires.
+  const claimedSince = new Date(deps.now.getTime() - MAX_LEASE_HOLD_SECONDS * 1000).toISOString();
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'running', stage = ?, heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
-    args: [stage, at, expires, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)}) AND claimed_at >= ?`,
+    args: [stage, at, expires, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds, claimedSince],
   });
-  if (rs.rowsAffected !== 1) return leaseLost();
+  if (rs.rowsAffected !== 1) {
+    if (await jobUnderLease(deps.db, ref)) {
+      console.warn("[tools.heartbeat] refused: the job has been held past its limit", { jobId: ref.jobId, runner: ref.runnerKey });
+    }
+    return leaseLost();
+  }
   await touchRunner(deps.db, ref.tenantIds, ref.runnerKey, deps.now);
   return toolsJson(200, { ok: true, lease_expires_at: expires });
 }
@@ -605,7 +626,7 @@ export async function handleToolsFail(req: Request, deps: RunnerDeps): Promise<R
     return leaseLost();
   }
   const path = row.upload_path === null || row.upload_path === undefined ? null : String(row.upload_path);
-  if (path) await removeQuietly(deps.storage, [{ tenantId: String(row.tenant_id), path }], "fail");
+  if (path) await removeUnusedUploads(deps.storage, [{ tenantId: String(row.tenant_id), path }], "fail");
   return toolsJson(200, { ok: true, duplicate: false });
 }
 

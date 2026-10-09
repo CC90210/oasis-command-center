@@ -13,8 +13,16 @@
  * would confirm the route exists).
  */
 import "server-only";
-import { resolveFounder } from "@/lib/founders/gate";
-import { resolveSessionContext } from "@/lib/api-auth";
+import { resolveFounder, type FounderContext } from "@/lib/founders/gate";
+import { resolveSessionContext, type SessionContext } from "@/lib/api-auth";
+
+/** The two reads the gate makes; tests pass their own to pin how they are combined. */
+export type ToolsViewerReads = {
+  founder: () => Promise<FounderContext | null>;
+  session: () => Promise<SessionContext>;
+};
+
+const SESSION_READS: ToolsViewerReads = { founder: resolveFounder, session: resolveSessionContext };
 
 export type ToolsViewer = {
   tenantId: string;
@@ -26,10 +34,10 @@ export type ToolsViewer = {
   email: string | null;
 };
 
-export async function resolveToolsViewer(): Promise<ToolsViewer | null> {
-  const founder = await resolveFounder();
+export async function resolveToolsViewer(reads: ToolsViewerReads = SESSION_READS): Promise<ToolsViewer | null> {
+  const founder = await reads.founder();
   if (!founder) return null;
-  const session = await resolveSessionContext();
+  const session = await reads.session();
   // Both reads must name the same workspace; a disagreement is refused, never guessed.
   if (!session.ok || session.tenantId !== founder.tenantId) return null;
   return {

@@ -39,8 +39,8 @@ export type CatalogTool = {
   runsOn: "worker" | "runner";
   fields: ToolField[];
   state: CatalogToolState;
-  /** The runner that will do the work (runner tools only). Minutes, formatted by the grid. */
-  runner?: { label: string; lastSeenMinutes: number };
+  /** The runner that will do the work (runner tools only). lastSeenAt is ISO; the grid turns it into "seen n min ago" on the viewer's clock. */
+  runner?: { label: string; lastSeenAt: string };
 };
 
 export type ToolCatalog = { installed: false } | { installed: true; tools: CatalogTool[] };

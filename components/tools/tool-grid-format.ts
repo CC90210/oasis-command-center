@@ -7,6 +7,7 @@
  * rendered as text would disagree with the browser's clock and redraw the page
  * (React #418). The grid renders no time at all in its first render.
  */
+import type { ToolField } from "@/lib/tools/registry";
 import type { JobView } from "@/lib/tools/types";
 
 export const STATUS_WAITING = "Waiting";
@@ -25,9 +26,44 @@ export const RUN_STOPPED = "This run stopped before it finished. Run it again.";
 /** Poll a card's runs every 3 s while one is in flight, for at most 30 minutes. */
 export const POLL_EVERY_MS = 3_000;
 export const POLL_FOR_MS = 30 * 60_000;
+/** How often an open card counts "seen n min ago" again. */
+export const SEEN_REFRESH_MS = 30_000;
 
 export function isInFlight(job: Pick<JobView, "status">): boolean {
   return job.status === "queued" || job.status === "claimed" || job.status === "running";
+}
+
+/**
+ * When a card reads its runs again: POLL_EVERY_MS from now while one of them is
+ * in flight, until POLL_FOR_MS after the polling started; null = no read.
+ */
+export function nextPollIn(jobs: ReadonlyArray<Pick<JobView, "status">> | null, pollStartedAt: number | null, nowMs: number): number | null {
+  if (!(jobs ?? []).some(isInFlight)) return null;
+  if (pollStartedAt !== null && nowMs - pollStartedAt > POLL_FOR_MS) return null;
+  return POLL_EVERY_MS;
+}
+
+/** A card's runs after the run route answered one: that run first, never twice, five at most. */
+export function withRun(jobs: readonly JobView[] | null, job: JobView): JobView[] {
+  return [job, ...(jobs ?? []).filter((j) => j.id !== job.id)].slice(0, 5);
+}
+
+/**
+ * What a card sends to run its tool: each field's value, except a select the
+ * person never changed. The tool decides then: Learn gives a new note the
+ * default label, and a link already learned keeps the label it has.
+ */
+export function runInput(
+  fields: ReadonlyArray<Pick<ToolField, "name" | "kind">>,
+  values: Readonly<Record<string, string>>,
+  chosen: ReadonlySet<string>,
+): Record<string, string> {
+  const input: Record<string, string> = {};
+  for (const f of fields) {
+    if (f.kind === "select" && !chosen.has(f.name)) continue;
+    input[f.name] = values[f.name] ?? "";
+  }
+  return input;
 }
 
 /** The one-word state of a run. A claimed download is already in the runner's hands. */
@@ -59,6 +95,12 @@ export function runTime(iso: string, locale?: string, timeZone?: string): string
 
 export const runsOnText = (label: string) => `Runs on ${label}`;
 export const seenText = (minutes: number) => `seen ${Math.max(0, Math.floor(minutes))} min ago`;
+
+/** "seen n min ago" for a runner last seen at `lastSeenAt` (ISO), on the viewer's clock; null when the time does not parse. */
+export function seenLine(lastSeenAt: string, nowMs: number): string | null {
+  const seen = Date.parse(lastSeenAt);
+  return Number.isFinite(seen) ? seenText((nowMs - seen) / 60_000) : null;
+}
 export const scoreText = (pct: number) => `Score ${pct}%`;
 export const charsText = (n: number, max: number) => `${n} of ${max} characters`;
 export const OVER_LIMIT = "Over the limit";

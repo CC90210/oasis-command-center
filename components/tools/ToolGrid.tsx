@@ -17,26 +17,30 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { copyText } from "@/lib/clipboard";
+import { CORPUS_LABEL_COPY, type CorpusLabel } from "@/lib/founders/ingest-core";
 import { toolByKey } from "@/lib/tools/registry";
 import type { CatalogTool, JobView, ToolCatalog } from "@/lib/tools/types";
 import {
   AI_UNREADABLE,
   CONNECT_AI,
   NOT_SET_UP,
-  POLL_EVERY_MS,
-  POLL_FOR_MS,
   RUN_STOPPED,
   SAVED_TO_TRAINING,
+  SEEN_REFRESH_MS,
   hardFailLine,
   isInFlight,
+  nextPollIn,
   refusalLine,
+  runInput,
   runTime,
   runsOnText,
   scoreText,
-  seenText,
+  seenLine,
   statusLabel,
   urlFieldLine,
   variantLines,
+  withRun,
 } from "@/components/tools/tool-grid-format";
 
 export type ToolGridProps = {
@@ -97,14 +101,19 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(tool.fields.map((f) => [f.name, f.defaultValue ?? ""])),
   );
+  /** The selects the person changed: an untouched one is not sent (runInput). */
+  const [chosen, setChosen] = useState<ReadonlySet<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobView[] | null>(null);
   const [mounted, setMounted] = useState(false);
+  /** The viewer's clock for "seen n min ago", set after mount and every SEEN_REFRESH_MS. */
+  const [clock, setClock] = useState<number | null>(null);
   /** Counts finished reads, so a failed read still schedules the next poll. */
   const [reads, setReads] = useState(0);
   const pollStart = useRef<number | null>(null);
   const ready = tool.state === "ready";
+  const lastSeenAt = tool.runner?.lastSeenAt ?? null;
 
   const load = useCallback(async () => {
     try {
@@ -129,6 +138,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
     return () => window.removeEventListener("focus", onFocus);
   }, [ready, load]);
 
+  useEffect(() => {
+    if (!lastSeenAt) return;
+    setClock(Date.now());
+    const timer = window.setInterval(() => setClock(Date.now()), SEEN_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [lastSeenAt]);
+
   const inFlight = (jobs ?? []).some(isInFlight);
   useEffect(() => {
     if (!inFlight) {
@@ -136,8 +152,9 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
       return;
     }
     if (pollStart.current === null) pollStart.current = Date.now();
-    if (Date.now() - pollStart.current > POLL_FOR_MS) return;
-    const timer = window.setTimeout(() => void load(), POLL_EVERY_MS);
+    const wait = nextPollIn(jobs, pollStart.current, Date.now());
+    if (wait === null) return;
+    const timer = window.setTimeout(() => void load(), wait);
     return () => window.clearTimeout(timer);
   }, [inFlight, jobs, reads, load]);
 
@@ -153,13 +170,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
         method: "POST",
         headers: { "content-type": "application/json" },
         // A fresh key per press: a retried request is one run, a second press is another.
-        body: JSON.stringify({ tool: tool.key, input: values, idempotency_key: crypto.randomUUID() }),
+        body: JSON.stringify({ tool: tool.key, input: runInput(tool.fields, values, chosen), idempotency_key: crypto.randomUUID() }),
       });
       const body = (await res.json().catch(() => null)) as { ok?: boolean; job?: JobView } | null;
       if (res.ok && body?.ok && body.job) {
         const job = body.job;
         pollStart.current = null;
-        setJobs((prev) => [job, ...(prev ?? []).filter((j) => j.id !== job.id)].slice(0, 5));
+        setJobs((prev) => withRun(prev, job));
         if (tool.runsOn === "runner") setValues((v) => ({ ...v, url: "" }));
       } else {
         setRefusal(refusalLine(res.status, body));
@@ -172,6 +189,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
   }
 
   const latest = jobs?.[0] ?? null;
+  const seen = clock !== null && lastSeenAt ? seenLine(lastSeenAt, clock) : null;
 
   return (
     <article className="flex flex-col gap-3 rounded-xl border border-bg-border bg-bg-panel p-4" aria-labelledby={`tool-${tool.key}`}>
@@ -183,7 +201,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
         {tool.runner && (
           <p className="text-[11px] text-fg-dim">
             {runsOnText(tool.runner.label)}
-            {mounted ? `, ${seenText(tool.runner.lastSeenMinutes)}` : null}
+            {seen ? `, ${seen}` : null}
           </p>
         )}
       </header>
@@ -201,6 +219,9 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
       {ready && (
         <form
           className="space-y-3"
+          // The tool's own validator decides (a link without https:// is fine);
+          // the browser's built-in URL check would block it with its own bubble.
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             void run();
@@ -230,7 +251,16 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
                     onChange={(e) => set(e.target.value)}
                   />
                 ) : f.kind === "select" ? (
-                  <select id={id} className={`select ${TAP}`} value={value} disabled={busy} onChange={(e) => set(e.target.value)}>
+                  <select
+                    id={id}
+                    className={`select ${TAP}`}
+                    value={value}
+                    disabled={busy}
+                    onChange={(e) => {
+                      set(e.target.value);
+                      setChosen((prev) => new Set(prev).add(f.name));
+                    }}
+                  >
                     {(f.options ?? []).map((o) => (
                       <option key={o.value} value={o.value}>
                         {o.label}
@@ -295,7 +325,8 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
   );
 }
 
-function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobView; tool: CatalogTool; assetHrefPrefix: string; showCodes: boolean }) {
+/** The last run of a card, as the card shows it. Exported so tests render every result with real payloads. */
+export function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobView; tool: Pick<CatalogTool, "key" | "runsOn">; assetHrefPrefix: string; showCodes: boolean }) {
   if (isInFlight(job)) return <p className="text-xs font-medium text-fg-muted">{statusLabel(job, tool.runsOn)}</p>;
   if (job.status === "failed") {
     return (
@@ -372,13 +403,7 @@ function RepurposeResult({ r }: { r: Record<string, unknown> }) {
           <div key={key} className="space-y-1.5 rounded-lg border border-bg-border p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-fg">{name}</span>
-              <button
-                type="button"
-                className={`btn-secondary inline-flex items-center justify-center ${TAP}`}
-                onClick={() => void navigator.clipboard?.writeText(text)}
-              >
-                Copy
-              </button>
+              <CopyTextButton text={text} />
             </div>
             <p className="whitespace-pre-wrap break-words text-sm text-fg">{text}</p>
             <p className={`text-[11px] ${v.over_limit === true ? "text-status-hot" : "text-fg-dim"}`}>{lines.join(". ")}</p>
@@ -386,6 +411,29 @@ function RepurposeResult({ r }: { r: Record<string, unknown> }) {
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Copy, then "Copied" for a moment. lib/clipboard's copyText never throws: where
+ * the browser refuses the clipboard it opens a prompt holding the text to copy
+ * by hand, and the button does not claim it copied.
+ */
+function CopyTextButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className={`btn-secondary inline-flex items-center justify-center ${TAP}`}
+      onClick={async () => {
+        if (await copyText(text)) {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }
+      }}
+    >
+      {copied ? "Copied" : "Copy"}
+    </button>
   );
 }
 
@@ -400,6 +448,9 @@ const ANALYSIS_LABELS: Array<[string, string]> = [
 
 function LearnResult({ r }: { r: Record<string, unknown> }) {
   const a = (r.analysis ?? {}) as Record<string, unknown>;
+  // The note's label as saved: a link learned before keeps the label it had, so
+  // the card shows which one it is rather than the select's default.
+  const labelTitle = typeof r.label === "string" ? CORPUS_LABEL_COPY[r.label as CorpusLabel]?.title : undefined;
   return (
     <div className="space-y-2">
       <dl className="space-y-1.5">
@@ -414,6 +465,12 @@ function LearnResult({ r }: { r: Record<string, unknown> }) {
             </div>
           );
         })}
+        {labelTitle && (
+          <div>
+            <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-dim">This is</dt>
+            <dd className="text-xs leading-5 text-fg">{labelTitle}</dd>
+          </div>
+        )}
       </dl>
       <p className="text-xs text-fg-muted">{SAVED_TO_TRAINING}</p>
     </div>

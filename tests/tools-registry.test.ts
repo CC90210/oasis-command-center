@@ -12,8 +12,10 @@
  *   - a runner job with a key outside the registry is never claimed, and a
  *     runner asking for such a key is refused;
  *   - the URL rules: Download takes one Instagram, TikTok or YouTube post,
- *     canonical and https, and nothing else; Learn refuses video links and any
- *     address inside a network.
+ *     canonical and https, and nothing else (a TikTok link with no video id
+ *     only as a share link: never a profile, tag or sound page); Learn refuses
+ *     video links and any address inside a network, and sends no label the
+ *     person did not choose.
  *
  * Run: node --conditions=react-server --import tsx tests/tools-registry.test.ts
  */
@@ -103,6 +105,8 @@ async function main() {
       ["http://instagram.com/p/XYZ789", "https://www.instagram.com/p/XYZ789/", "instagram"],
       ["https://www.tiktok.com/@someone/video/7300000000000000000?is_from_webapp=1", "https://www.tiktok.com/@someone/video/7300000000000000000", "tiktok"],
       ["http://vm.tiktok.com/ZMabc123/", "https://vm.tiktok.com/ZMabc123/", "tiktok"],
+      ["https://vt.tiktok.com/ZSabc123/", "https://vt.tiktok.com/ZSabc123/", "tiktok"],
+      ["https://www.tiktok.com/t/ZTRabc123/", "https://www.tiktok.com/t/ZTRabc123/", "tiktok"],
       ["https://youtu.be/dQw4w9WgXcQ?si=abc", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube"],
       ["https://www.youtube.com/shorts/dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube"],
       ["  www.youtube.com/watch?v=dQw4w9WgXcQ&feature=share  ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "youtube"],
@@ -120,6 +124,21 @@ async function main() {
     refused(download, "", "required");
     refused(download, "https://www.instagram.com/someone/", "unsupported_url");
     refused(download, "https://www.youtube.com/@channel", "unsupported_url");
+    // A TikTok address with no video id is one post only as a share link:
+    // a profile, a tag, a sound, Discover or the home page is many videos.
+    for (const page of [
+      "https://www.tiktok.com/@someone",
+      "https://www.tiktok.com/@someone/",
+      "https://www.tiktok.com/tag/fyp",
+      "https://www.tiktok.com/music/original-sound-123",
+      "https://www.tiktok.com/discover",
+      "https://www.tiktok.com/",
+      "https://vm.tiktok.com/",
+      "https://www.tiktok.com/t/",
+      "https://www.tiktok.com/@someone/photo/7300000000000000000",
+    ]) {
+      refused(download, page, "unsupported_url");
+    }
     refused(download, "https://vimeo.com/123456", "unsupported_url");
     refused(download, "https://example.com/video.mp4", "unsupported_url");
     refused(download, "https://user:pass@www.instagram.com/reel/ABC/", "invalid_url");
@@ -134,9 +153,11 @@ async function main() {
     const page = ok(learn, "https://example.com/blog/post?utm_source=x");
     if (page.ok) {
       assert.equal(page.value.url, "https://example.com/blog/post");
-      assert.equal(page.value.label, "exemplar", "the default label");
+      assert.equal(page.value.label, null, "no label chosen: the tool decides (a new note takes the default, a learned link keeps its own)");
       assert.equal(page.dedupeKey, "learn_from_link:https://example.com/blog/post");
     }
+    const blank = learn.validate({ url: "https://example.com/", label: "" });
+    assert.ok(blank.ok && blank.value.label === null, "an empty label is no choice");
     const repo = learn.validate({ url: "github.com/vercel/next.js", label: "counter_example" });
     assert.ok(repo.ok && repo.value.source_kind === "github" && repo.value.external_id === "vercel/next.js" && repo.value.label === "counter_example");
     for (const v of ["https://www.instagram.com/reel/ABC/", "https://youtu.be/dQw4w9WgXcQ", "https://www.tiktok.com/@a/video/1"]) {

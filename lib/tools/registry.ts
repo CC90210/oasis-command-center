@@ -98,6 +98,26 @@ function checkPastedUrl(raw: unknown): UrlCheck {
 
 const VIDEO_KINDS = new Set(["youtube", "instagram", "tiktok"]);
 
+/** A TikTok share code: the path part of vm.tiktok.com/<code>/ and tiktok.com/t/<code>/. */
+const TIKTOK_SHARE_CODE = /^[A-Za-z0-9_-]{4,40}$/;
+
+/**
+ * A TikTok link with no video id in it names ONE post only when it is a share
+ * link: vm.tiktok.com/<code>/, vt.tiktok.com/<code>/ or tiktok.com/t/<code>/
+ * (the runner follows it to the post). Every other TikTok address without an id
+ * (a profile, a tag, a sound, Discover, the home page) is a page of many videos,
+ * and handing it to the downloader would walk a whole channel.
+ */
+function isTikTokShareLink(u: URL): boolean {
+  const h = u.hostname.toLowerCase().replace(/^www\./, "").replace(/^m\./, "");
+  const seg = u.pathname.split("/").filter(Boolean);
+  if (h === "vm.tiktok.com" || h === "vt.tiktok.com") return seg.length === 1 && TIKTOK_SHARE_CODE.test(seg[0]);
+  return h === "tiktok.com" && seg.length === 2 && seg[0] === "t" && TIKTOK_SHARE_CODE.test(seg[1]);
+}
+
+/** The label a new training note takes when the person did not choose one. */
+export const LEARN_DEFAULT_LABEL: CorpusLabel = "exemplar";
+
 const videoDownload: ToolDef = {
   key: "video_download",
   title: "Download a video",
@@ -118,6 +138,11 @@ const videoDownload: ToolDef = {
     // A profile link parses as Instagram but is not a post: only a link to ONE
     // video can be downloaded.
     if (!VIDEO_KINDS.has(t.kind) || t.extractor !== "video") return { ok: false, field: "url", code: "unsupported_url" };
+    // ingest-core keeps ANY tiktok.com link it cannot read an id from (Train
+    // queues it for a reader); here only a share link may stand in for a post.
+    if (t.kind === "tiktok" && t.externalId === null && !isTikTokShareLink(new URL(t.canonicalUrl))) {
+      return { ok: false, field: "url", code: "unsupported_url" };
+    }
     // The canonical link, always https. A TikTok short link keeps its own URL
     // (ingest-core cannot resolve it without a network hop), so its scheme is
     // forced here; the runner follows the short link itself.
@@ -145,7 +170,7 @@ const learnFromLink: ToolDef = {
       kind: "select",
       required: true,
       options: CORPUS_LABELS.map((l) => ({ value: l, label: CORPUS_LABEL_COPY[l].title })),
-      defaultValue: "exemplar",
+      defaultValue: LEARN_DEFAULT_LABEL,
     },
   ],
   validate(input) {
@@ -161,13 +186,17 @@ const learnFromLink: ToolDef = {
     if (VIDEO_KINDS.has(t.kind)) return { ok: false, field: "url", code: "video_link_not_supported" };
     if (t.kind !== "web" && t.kind !== "github") return { ok: false, field: "url", code: "invalid_url" };
     if (t.canonicalUrl.length > MAX_URL_LENGTH) return { ok: false, field: "url", code: "too_long" };
-    const rawLabel = text(f.label) || "exemplar";
-    if (!(CORPUS_LABELS as readonly string[]).includes(rawLabel)) return { ok: false, field: "label", code: "invalid_choice" };
+    // null = the person did not choose (the grid leaves an untouched select out):
+    // a new note then takes LEARN_DEFAULT_LABEL, and a link already learned keeps
+    // the label (and the contributor) it has. A label someone chose is never
+    // replaced by a default nobody picked.
+    const rawLabel = text(f.label);
+    if (rawLabel && !(CORPUS_LABELS as readonly string[]).includes(rawLabel)) return { ok: false, field: "label", code: "invalid_choice" };
     return {
       ok: true,
       value: {
         url: t.canonicalUrl,
-        label: rawLabel as CorpusLabel,
+        label: rawLabel ? (rawLabel as CorpusLabel) : null,
         source_kind: t.kind,
         extractor: t.extractor,
         external_id: t.externalId,

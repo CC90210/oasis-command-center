@@ -333,12 +333,30 @@ export async function finishWorkerJob(
 
 export type SweepResult = { failed: number; orphanUploads: Array<{ tenantId: string; path: string }> };
 
-/** The three sweeps (see the header), for these workspaces only, in one transaction. */
+/**
+ * The three sweeps (see the header), for these workspaces only, in one
+ * transaction. A read first asks whether ANY job could be due (a runner lease
+ * that has expired, a runner job queued past the offline wait, a request-run
+ * past the interrupted wait): the jobs route runs this on every poll, and with
+ * nothing due it costs that one read instead of a write transaction. The read
+ * covers every sweep's rows, so it never skips one that is due.
+ */
 export async function sweepToolJobs(db: Client, tenantIds: readonly string[], now: Date): Promise<SweepResult> {
   if (!tenantIds.length) return { failed: 0, orphanUploads: [] };
   const at = now.toISOString();
   const tin = placeholders(tenantIds.length);
   const offlineCutoff = minutesBefore(now, QUEUED_OFFLINE_MINUTES);
+  const interruptedCutoff = minutesBefore(now, WORKER_INTERRUPTED_MINUTES);
+  const due = await db.execute({
+    sql: `SELECT 1 AS due FROM tool_jobs
+          WHERE tenant_id IN (${tin})
+            AND ((runs_on = 'runner' AND status IN ('claimed','running') AND lease_expires_at < ?)
+              OR (runs_on = 'runner' AND status = 'queued' AND created_at < ?)
+              OR (runs_on = 'worker' AND status = 'running' AND updated_at < ?))
+          LIMIT 1`,
+    args: [...tenantIds, at, offlineCutoff, interruptedCutoff],
+  });
+  if (!due.rows.length) return { failed: 0, orphanUploads: [] };
   const results = await db.batch(
     [
       {
@@ -363,8 +381,9 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
       {
         sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'interrupted', error_message = ?,
                      finished_at = ?, updated_at = ?
-              WHERE runs_on = 'worker' AND tenant_id IN (${tin}) AND status = 'running' AND updated_at < ?`,
-        args: [toolErrorLine("interrupted", "worker"), at, at, ...tenantIds, minutesBefore(now, WORKER_INTERRUPTED_MINUTES)],
+              WHERE runs_on = 'worker' AND tenant_id IN (${tin}) AND status = 'running' AND updated_at < ?
+              RETURNING id`,
+        args: [toolErrorLine("interrupted", "worker"), at, at, ...tenantIds, interruptedCutoff],
       },
     ],
     "write",
@@ -376,7 +395,9 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
       if (path) orphanUploads.push({ tenantId: String(r.tenant_id), path });
     }
   }
-  return { failed: results.reduce((n, rs) => n + rs.rowsAffected, 0), orphanUploads };
+  // Counted from the rows each statement returned: libSQL reports rowsAffected 0
+  // for a statement that returns rows (the local driver does), so it is no count here.
+  return { failed: results.reduce((n, rs) => n + rs.rows.length, 0), orphanUploads };
 }
 
 // ---------------------------------------------------------------------------

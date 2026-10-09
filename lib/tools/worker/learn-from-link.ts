@@ -28,6 +28,7 @@ import type { Client, InStatement } from "@libsql/client";
 import { assertSafeUrl, fetchWithCap } from "@/lib/cloud-tool-runner";
 import { normalizeUrl } from "@/lib/founders/ingest-core";
 import { INJECTION_GUARD, safeJsonExtract, wrapUntrusted } from "@/lib/llm-input-boundary";
+import { LEARN_DEFAULT_LABEL } from "@/lib/tools/registry";
 import { runToolModelCall, type ToolModelDeps } from "@/lib/tools/worker/ai";
 
 export type PageAnswer = { status: number; contentType: string; body: string; truncated: boolean; location: string | null };
@@ -96,24 +97,121 @@ export function decodeEntities(s: string): string {
 
 const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
 
-/** The readable text of an HTML page, and its title (og:title, else <title>). */
-export function htmlToText(html: string): { title: string | null; text: string } {
-  const og =
-    /<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']*)["']/i.exec(html) ??
-    /<meta[^>]+content=["']([^"']*)["'][^>]*property=["']og:title["']/i.exec(html);
-  const tag = /<title[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
-  const rawTitle = og?.[1] ?? tag?.[1] ?? "";
-  const title = collapse(decodeEntities(rawTitle.replace(/<[^>]+>/g, " "))) || null;
-  // The head (title, meta, scripts) is not the page's text; the title is kept above.
-  const text = collapse(
-    decodeEntities(
-      html
-        .replace(/<!--[\s\S]*?-->/g, " ")
-        .replace(/<(head|title|script|style|noscript)\b[\s\S]*?<\/\1\s*>/gi, " ")
-        .replace(/<[^>]+>/g, " "),
-    ),
-  );
-  return { title, text };
+/**
+ * The most of a page htmlToText reads; the rest is dropped before parsing. The
+ * model sees the first 12,000 characters of text and the note keeps 50,000, so
+ * the first MiB of markup is plenty (the fetch may bring up to 5 MB).
+ */
+export const HTML_READ_MAX = 1024 * 1024;
+
+/** Elements whose content is never page text: dropped whole. */
+const DROPPED_ELEMENTS = new Set(["title", "script", "style", "noscript"]);
+
+const isNameChar = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57);
+
+/** The lowercase tag name that starts at `at` (just after "<"), read no further than `end`; "" when none does. */
+function tagNameAt(lower: string, at: number, end: number): string {
+  let i = at;
+  while (i < end && isNameChar(lower.charCodeAt(i))) i += 1;
+  return lower.slice(at, i);
+}
+
+/**
+ * Where the first "</name" at or after `from` starts, and the index just past
+ * its ">"; null when there is none ("</scripts" is not "</script"). Each search
+ * moves forward, so a page is scanned once.
+ */
+function closingTag(lower: string, name: string, from: number): { start: number; end: number } | null {
+  const needle = `</${name}`;
+  for (let at = lower.indexOf(needle, from); at !== -1; at = lower.indexOf(needle, at + needle.length)) {
+    if (isNameChar(lower.charCodeAt(at + needle.length))) continue;
+    const gt = lower.indexOf(">", at + needle.length);
+    return gt === -1 ? null : { start: at, end: gt + 1 };
+  }
+  return null;
+}
+
+/** Every "<...>" as a space; a "<" with no ">" after it stays as written. One pass. */
+function stripTags(s: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const lt = s.indexOf("<", i);
+    const gt = lt === -1 ? -1 : s.indexOf(">", lt + 1);
+    if (gt === -1) return out + s.slice(i);
+    out += s.slice(i, lt) + (gt === lt + 1 ? "<>" : " ");
+    i = gt + 1;
+  }
+}
+
+const OG_TITLE_PROPERTY = /property=["']og:title["']/i;
+const CONTENT_ATTRIBUTE = /content=["']([^"']*)["']/i;
+
+/** The content of an og:title meta tag (the tag alone, never the page), or null when this tag is not one. */
+function ogTitleOf(tag: string): string | null {
+  if (!OG_TITLE_PROPERTY.test(tag)) return null;
+  return CONTENT_ATTRIBUTE.exec(tag)?.[1] ?? null;
+}
+
+/**
+ * The readable text of an HTML page, and its title (og:title, else <title>).
+ *
+ * ONE forward pass with indexOf, never a regular expression over the page: the
+ * page is a stranger's markup, and lazy patterns such as <script ...</script>
+ * or <!-- ... --> rescan the rest of the page from every unclosed opening, so
+ * 256 KB of "<script " took 14 s (PR #560 review). Comments, title, script,
+ * style and noscript are dropped with their content; one that never closes
+ * drops the rest of the page, as a browser treats it. Every other tag becomes a
+ * space; a "<" with no ">" after it is text.
+ */
+export function htmlToText(page: string): { title: string | null; text: string } {
+  const html = page.length > HTML_READ_MAX ? page.slice(0, HTML_READ_MAX) : page;
+  const lower = html.toLowerCase();
+  const parts: string[] = [];
+  let ogTitle: string | null = null;
+  let tagTitle: string | null = null;
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1) {
+      parts.push(html.slice(i));
+      break;
+    }
+    parts.push(html.slice(i, lt));
+    if (lower.startsWith("<!--", lt)) {
+      const end = html.indexOf("-->", lt + 4);
+      if (end === -1) break;
+      parts.push(" ");
+      i = end + 3;
+      continue;
+    }
+    const gt = html.indexOf(">", lt + 1);
+    if (gt === -1) {
+      // No ">" anywhere after it, so no tag can close: the rest is text as written.
+      parts.push(html.slice(lt));
+      break;
+    }
+    if (gt === lt + 1) {
+      parts.push("<>");
+      i = gt + 1;
+      continue;
+    }
+    const name = tagNameAt(lower, lt + 1, gt);
+    if (name === "meta" && ogTitle === null) ogTitle = ogTitleOf(html.slice(lt, gt + 1));
+    if (DROPPED_ELEMENTS.has(name)) {
+      const close = closingTag(lower, name, gt + 1);
+      if (!close) break;
+      if (name === "title" && tagTitle === null) tagTitle = html.slice(gt + 1, close.start);
+      parts.push(" ");
+      i = close.end;
+      continue;
+    }
+    parts.push(" ");
+    i = gt + 1;
+  }
+  const rawTitle = ogTitle ?? tagTitle ?? "";
+  const title = collapse(decodeEntities(stripTags(rawTitle))) || null;
+  return { title, text: collapse(decodeEntities(parts.join(""))) };
 }
 
 const READABLE_TYPE = /^(text\/html|application\/xhtml\+xml|text\/plain|text\/markdown|text\/x-rst)\b/i;
@@ -198,7 +296,8 @@ export function parseAnalysis(text: string): Analysis | "empty" | null {
 
 export type LearnInput = {
   url: string;
-  label: string;
+  /** null: the person did not choose (lib/tools/registry.ts): a new note takes the default, a learned link keeps its own. */
+  label: string | null;
   source_kind: string;
   extractor: string;
   external_id: string | null;
@@ -234,10 +333,10 @@ export async function runLearnFromLink(
   // Another read of this link is in flight (the background reader, or a drop on
   // the Training page): do not read it twice.
   const existing = await ctx.db.execute({
-    sql: `SELECT id, state FROM marketing_corpus WHERE tenant_id = ? AND source_url = ? ORDER BY created_at DESC, id DESC LIMIT 20`,
+    sql: `SELECT id, state, label FROM marketing_corpus WHERE tenant_id = ? AND source_url = ? ORDER BY created_at DESC, id DESC LIMIT 20`,
     args: [ctx.tenantId, input.url],
   });
-  const rows = existing.rows.map((r) => ({ id: String(r.id), state: String(r.state) }));
+  const rows = existing.rows.map((r) => ({ id: String(r.id), state: String(r.state), label: String(r.label) }));
   if (rows.some((r) => r.state === "queued" || r.state === "extracting")) return { ok: false, code: "already_being_read" };
 
   const page = await readLink(input, ctx.fetchPage ?? defaultPageFetch);
@@ -278,15 +377,19 @@ export async function runLearnFromLink(
   const noReadInFlight = `NOT EXISTS (SELECT 1 FROM marketing_corpus WHERE tenant_id = ? AND source_url = ? AND ${IN_FLIGHT})`;
 
   // The newest finished row for this link is updated in place; none means a new row.
+  // Its label and contributor are someone's judgement: a re-read refreshes the
+  // analysis and keeps them, unless this person chose a label for this run (then
+  // the label is theirs, and so is the note).
   const corpusId = rows[0]?.id ?? randomUUID();
+  const chosenBy = input.label ? ctx.contributedBy : null;
   const write: InStatement = rows[0]
     ? {
         sql: `UPDATE marketing_corpus
-                 SET label = ?, title = ?, transcript = ?, extraction = ?, search_text = ?, state = 'indexed',
-                     attempts = attempts + 1, last_error = NULL, contributed_by = ?, updated_at = ?, indexed_at = ?
+                 SET label = COALESCE(?, label), title = ?, transcript = ?, extraction = ?, search_text = ?, state = 'indexed',
+                     attempts = attempts + 1, last_error = NULL, contributed_by = COALESCE(?, contributed_by), updated_at = ?, indexed_at = ?
                WHERE id = ? AND tenant_id = ? AND state IN ('indexed','failed','skipped')
                  AND ${jobRunning} AND ${noReadInFlight}`,
-        args: [input.label, title, transcript, extraction, searchText, ctx.contributedBy, at, at,
+        args: [input.label, title, transcript, extraction, searchText, chosenBy, at, at,
           corpusId, ctx.tenantId, ctx.jobId, ctx.tenantId, ctx.tenantId, input.url],
       }
     : {
@@ -294,12 +397,12 @@ export async function runLearnFromLink(
                                             state, attempts, last_error, contributed_by, created_at, updated_at, indexed_at)
               SELECT ?, ?, 'link', ?, ?, ?, ?, ?, ?, 'indexed', 1, NULL, ?, ?, ?, ?
               WHERE ${jobRunning} AND ${noReadInFlight}`,
-        args: [corpusId, ctx.tenantId, input.label, title, input.url, transcript, extraction, searchText, ctx.contributedBy, at, at, at,
+        args: [corpusId, ctx.tenantId, input.label ?? LEARN_DEFAULT_LABEL, title, input.url, transcript, extraction, searchText, ctx.contributedBy, at, at, at,
           ctx.jobId, ctx.tenantId, ctx.tenantId, input.url],
       };
   return {
     ok: true,
-    result: { corpus_id: corpusId, title, label: input.label, analysis },
+    result: { corpus_id: corpusId, title, label: input.label ?? rows[0]?.label ?? LEARN_DEFAULT_LABEL, analysis },
     commit: {
       statements: [write],
       // The run is done only if the row it names now carries this run's id.

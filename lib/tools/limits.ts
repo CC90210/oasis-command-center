@@ -28,6 +28,12 @@ export const SIGNATURE_WINDOW_SECONDS = 300;
 export const RUNNER_BODY_MAX_BYTES = 64 * 1024;
 /** How long a presigned upload URL stays valid (lib/r2-storage.ts signs PUTs for this long). */
 export const UPLOAD_URL_TTL_SECONDS = 900;
+/**
+ * The longest one claim may keep a job by heartbeats, counted from the claim:
+ * the run timeout, one upload URL's whole life, and 10 minutes of slack (45
+ * minutes). A heartbeat after it is answered lease_lost.
+ */
+export const MAX_LEASE_HOLD_SECONDS = RUN_TIMEOUT_SECONDS + UPLOAD_URL_TTL_SECONDS + 600;
 /** How long a runner waits between claims when there is nothing to do. */
 export const POLL_AFTER_SECONDS = 30;
 /** At most this many runner jobs queued or running per workspace. */

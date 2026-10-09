@@ -57,8 +57,9 @@ export async function getToolCatalog(viewer: { tenantId: string }, deps: Catalog
     if (t.runsOn === "runner") {
       const runner = runners.find((r) => r.tools.includes(t.key));
       if (!runner) continue;
-      const minutes = Math.max(0, Math.floor((now.getTime() - Date.parse(runner.lastSeenAt)) / 60_000));
-      tools.push({ ...base, state: "ready", runner: { label: runner.label, lastSeenMinutes: minutes } });
+      // The time itself, not minutes: the grid counts the minutes on the
+      // viewer's clock and keeps counting while the page stays open.
+      tools.push({ ...base, state: "ready", runner: { label: runner.label, lastSeenAt: runner.lastSeenAt } });
       continue;
     }
     tools.push({ ...base, state: t.needsAiAccount ? aiState : "ready" });
