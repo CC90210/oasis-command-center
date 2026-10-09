@@ -20,13 +20,41 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { runHealthChecks, checkFleetHeartbeat, OASIS_GLOBAL_CHECKS, ESTATE_WIDE_CHECKS } from "@/lib/health/runner";
+import {
+  runHealthChecks,
+  checkFleetHeartbeat,
+  OASIS_GLOBAL_CHECKS,
+  ESTATE_WIDE_CHECKS,
+  DEPARTMENT_CHAT_CHECKS,
+  type RunSummary,
+} from "@/lib/health/runner";
+import { departmentChatTenantIds } from "@/lib/health/department-chat-checks";
 import { worstVerdict } from "@/lib/health/checks-core";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+/**
+ * Department chat, once per workspace that had a department turn in the last 6
+ * h (OASIS always). Per tenant, not under OASIS: a client's broken chat pages
+ * against that client's own alert ladder and history. Needs the ai_usage_events
+ * ledger only, so it adds nothing to the calendar probe's wall-clock budget.
+ */
+async function runDepartmentChat(notify: boolean): Promise<Array<{ tenantId: string; summary: RunSummary }>> {
+  const { tenantIds, error } = await departmentChatTenantIds();
+  // OASIS is still graded below. A ledger that is down fails that run as
+  // check_broken and pages; this line covers only a narrower failure of the
+  // tenant list, which would otherwise leave client workspaces unwatched.
+  if (error) console.error("[health-check] department chat tenant discovery failed", error);
+  return Promise.all(
+    tenantIds.map(async (tenantId) => ({
+      tenantId,
+      summary: await runHealthChecks(tenantId, { notify, checks: DEPARTMENT_CHAT_CHECKS }),
+    })),
+  );
+}
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
@@ -52,7 +80,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // checks graded SunBiz only, so they stop with it. The estate-wide checks
     // that had ridden along (production serves main, alert delivery, the form
     // dead-letter table) now run under the OASIS tenant instead.
-    const [calendarSummary, estateSummary, heartbeat] = await Promise.all([
+    const [calendarSummary, estateSummary, heartbeat, departmentRuns] = await Promise.all([
       runHealthChecks(WEBDEV_TENANT_ID, {
         notify,
         checks: OASIS_GLOBAL_CHECKS,
@@ -62,15 +90,28 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         checks: ESTATE_WIDE_CHECKS,
       }),
       checkFleetHeartbeat(getServiceSupabase()),
+      runDepartmentChat(notify),
     ]);
-    const results = [...estateSummary.results, ...calendarSummary.results];
+    // A client workspace's ids carry its tenant so two workspaces' rows differ.
+    const tag = (tenantId: string, id: string) => (tenantId === WEBDEV_TENANT_ID ? id : `${tenantId.slice(0, 8)}:${id}`);
+    const departmentResults = departmentRuns.flatMap((d) =>
+      d.summary.results.map((r) => ({ ...r, id: tag(d.tenantId, r.id) })));
+    const results = [...estateSummary.results, ...calendarSummary.results, ...departmentResults];
 
     return NextResponse.json({
       ok: true,
       worst: worstVerdict(results),
-      ran: estateSummary.ran + calendarSummary.ran,
-      alerted: [...estateSummary.alerted, ...calendarSummary.alerted],
-      recovered: [...estateSummary.recovered, ...calendarSummary.recovered],
+      ran: estateSummary.ran + calendarSummary.ran + departmentRuns.reduce((n, d) => n + d.summary.ran, 0),
+      alerted: [
+        ...estateSummary.alerted,
+        ...calendarSummary.alerted,
+        ...departmentRuns.flatMap((d) => d.summary.alerted.map((id) => tag(d.tenantId, id))),
+      ],
+      recovered: [
+        ...estateSummary.recovered,
+        ...calendarSummary.recovered,
+        ...departmentRuns.flatMap((d) => d.summary.recovered.map((id) => tag(d.tenantId, id))),
+      ],
       fleet_heartbeat: { verdict: heartbeat.verdict, reason: heartbeat.reason },
       results: results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
