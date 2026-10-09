@@ -31,10 +31,12 @@ import { canManageTeam, getSessionContext } from "@/lib/team";
 import { getTenant } from "@/lib/queries";
 import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentBrain } from "@/lib/ai/department-brain";
-import { readAgentEngine, readSavedProviders, saveAgentEngine } from "@/lib/ai/agent-engine-store";
+import { isOasisWorkspace, readAgentEngine, readSavedProviders, saveAgentEngine } from "@/lib/ai/agent-engine-store";
 import { parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { bridgeCallerForSession, testBridgeEngine } from "@/lib/ai/bridge-turn";
 import { DEPARTMENT_REPLY_MAX_TOKENS, DEPARTMENT_TEST_ASK, DEPARTMENT_TEST_SYSTEM } from "@/lib/os/channel/reply-budget";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { harnessForDepartment } from "@/lib/admin/harness-targets";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -44,16 +46,23 @@ const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
 const fail = (status: number, error: string, message: string) => NextResponse.json({ ok: false, error, message }, { status });
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+/** OASIS: the Test answers in the Chief of Staff's harness, the road a real department turn takes. */
+function testHarness(tenantSlug: string | null): { agent: string; department: string } | null {
+  const target = isOasisSurfaceTenant(tenantSlug) ? harnessForDepartment("chief_of_staff") : null;
+  return target ? { agent: target.agent, department: "Chief of Staff" } : null;
+}
+
 export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
   const tenantId = ctx.tenantId;
   try {
-    const [engine, account, savedProviders, caller] = await Promise.all([
+    const [engine, account, savedProviders, caller, oasis] = await Promise.all([
       readAgentEngine(tenantId),
       readWorkspaceAiAccount(tenantId),
       readSavedProviders(tenantId),
       bridgeCallerForSession(tenantId),
+      isOasisWorkspace(tenantId),
     ]);
     const brain = hasUsableKey(account) ? departmentBrain(account) : null;
     return NextResponse.json(
@@ -65,6 +74,9 @@ export async function GET() {
           : null,
         savedProviders,
         bridge: { reachable: caller !== null },
+        // OASIS's own workspace runs its agents' harnesses through the bridge;
+        // AI brain shows that workflow first (API keys stay for clients).
+        workspace: oasis ? "oasis" : "client",
         canManage: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
       },
       { headers: { "cache-control": "no-store" } },
@@ -100,6 +112,7 @@ export async function POST(req: NextRequest) {
     caller,
     engine: choice,
     tenantSlug: tenant?.slug ?? "",
+    harness: testHarness(tenant?.slug ?? null),
     system: DEPARTMENT_TEST_SYSTEM,
     ask: DEPARTMENT_TEST_ASK,
     maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
@@ -150,6 +163,7 @@ export async function PUT(req: NextRequest) {
       caller,
       engine: choice,
       tenantSlug: tenant?.slug ?? "",
+      harness: testHarness(tenant?.slug ?? null),
       system: DEPARTMENT_TEST_SYSTEM,
       ask: DEPARTMENT_TEST_ASK,
       maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,

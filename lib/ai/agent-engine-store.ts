@@ -35,6 +35,7 @@ import { decryptField, encryptField } from "@/lib/field-encryption";
 import type { Provider } from "@/lib/providers";
 import { ENGINE_AGENT_KEY, engineFromRow, engineRow, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { LOCAL_MODEL_PROVIDER, WORKSPACE_AI_AGENT_KEY } from "@/lib/ai/workspace-account";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 /** The agent_key of a provider's saved team key. */
 export function savedKeyAgentKey(provider: string): string {
@@ -51,17 +52,36 @@ function writeClient() {
   return getTursoClient();
 }
 
-/** The workspace's engine choice. No row = the API account. Throws when the read fails. */
+/**
+ * The workspace's engine choice. No row: OASIS's own workspace runs on the CLI
+ * bridge (CC, 2026-10-09: "for my workspace they don't use API keys ... you
+ * should know our workflow"), Claude Code by default; every other workspace
+ * runs on its API account. Throws when the read fails.
+ */
 export async function readAgentEngine(tenantId: string): Promise<AgentEngineChoice> {
-  const { data, error } = await getServiceSupabase()
-    .from("agent_model_config")
-    .select("provider, model")
-    .eq("tenant_id", tenantId)
-    .is("user_id", null)
-    .eq("agent_key", ENGINE_AGENT_KEY)
-    .maybeSingle();
+  const [{ data, error }, oasis] = await Promise.all([
+    getServiceSupabase()
+      .from("agent_model_config")
+      .select("provider, model")
+      .eq("tenant_id", tenantId)
+      .is("user_id", null)
+      .eq("agent_key", ENGINE_AGENT_KEY)
+      .maybeSingle(),
+    isOasisWorkspace(tenantId),
+  ]);
   if (error) throw new Error(`agent engine: agent_model_config read failed: ${error.message}`);
+  if (!data) return oasis ? OASIS_DEFAULT_ENGINE : { kind: "api" };
   return engineFromRow(data as { provider?: unknown; model?: unknown } | null);
+}
+
+/** OASIS's own workspace, when no choice is saved: its agents' harnesses on CC's computer, through the bridge. */
+export const OASIS_DEFAULT_ENGINE: AgentEngineChoice = { kind: "cli", cli: "claude" };
+
+/** Whether this is OASIS's own workspace (lib/role-surfaces.ts). Throws when the read fails. */
+export async function isOasisWorkspace(tenantId: string): Promise<boolean> {
+  const { data, error } = await getServiceSupabase().from("tenants").select("slug").eq("id", tenantId).maybeSingle();
+  if (error) throw new Error(`agent engine: tenants read failed: ${error.message}`);
+  return isOasisSurfaceTenant((data as { slug?: string | null } | null)?.slug ?? null);
 }
 
 /** Save the choice (one statement, an upsert on the workspace's engine row). Throws when it fails. */

@@ -53,7 +53,8 @@ import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 import { DEPARTMENT_REPLY_MAX_TOKENS } from "@/lib/os/channel/reply-budget";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
-import { bridgeEngineLine, spendFor, type AgentEngineChoice, type EngineSpend } from "@/lib/ai/agent-engine";
+import { bridgeEngineLine, harnessEngineLine, spendFor, type AgentEngineChoice, type EngineSpend } from "@/lib/ai/agent-engine";
+import { harnessForDepartment } from "@/lib/admin/harness-targets";
 import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
 import { streamBridgeTurn, type BridgeCaller, type BridgeEngine } from "@/lib/ai/bridge-turn";
 
@@ -105,7 +106,15 @@ export type AgentTurnRequest = {
  */
 export type TurnEngine =
   | { kind: "api"; runsOn: string; spend: EngineSpend; fellBackFrom: string | null }
-  | (BridgeEngine & { runsOn: string; spend: EngineSpend; caller: BridgeCaller; tenantSlug: string; fellBackFrom: null });
+  | (BridgeEngine & {
+      runsOn: string;
+      spend: EngineSpend;
+      caller: BridgeCaller;
+      tenantSlug: string;
+      fellBackFrom: null;
+      /** The department's agent harness the app runs in (lib/admin/harness-targets.ts). */
+      harness: { agent: string; department: string; label: string };
+    });
 
 export type PreparedTurn = {
   tenantId: string;
@@ -197,12 +206,16 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // binds to that department (config.ts departmentChannelFor), so a department
   // label is never pinned on another agent, and a lead switched off answers
   // nothing.
+  // OASIS's own workspace: its department turns may run in the department's
+  // agent harness on the paired computer (lib/admin/harness-targets.ts).
+  let oasisWorkspace = false;
   if (dept) {
     // getTenant answers null when the tenants read fails. That is not "not
     // OASIS": judging the binding on it would refuse OASIS's own departments.
     const tenant = await getTenant(tenantId);
     if (!tenant?.slug) return { ok: false, status: 503, error: "workspace_unavailable" };
-    const lead = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug), manifest });
+    oasisWorkspace = isOasisSurfaceTenant(tenant.slug);
+    const lead = departmentChannelFor(dept.key, { oasis: oasisWorkspace, manifest });
     if (lead.kind !== "agent" || lead.agentSlug !== agentSlug) {
       return { ok: false, status: 400, error: "department_agent_mismatch" };
     }
@@ -243,10 +256,15 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // person; then no key, no API credits and no budget are involved. Otherwise
   // the API account below answers, and the reply says what was chosen instead.
   const bridgeEngine: BridgeEngine | null = chosen.kind === "api" ? null : chosen;
+  // The harness path is OASIS's department channels only, until client
+  // harness packs exist: anyone else on a CLI engine is answered by the API
+  // account (in-app desk agent), and the turn says so.
+  const target = dept && oasisWorkspace ? harnessForDepartment(dept.key) : null;
+  const harness = target && dept ? { agent: target.agent, department: dept.label, label: target.departments } : null;
   // Asked only when an engine on the paired computer is chosen; a gate that
   // throws is "can't be reached", never a crash of the turn.
-  const caller = bridgeEngine && req.bridge ? await req.bridge().catch(() => null) : null;
-  const viaBridge = bridgeEngine && caller ? { engine: bridgeEngine, caller } : null;
+  const caller = bridgeEngine && harness && req.bridge ? await req.bridge().catch(() => null) : null;
+  const viaBridge = bridgeEngine && harness && caller ? { engine: bridgeEngine, caller, harness } : null;
   const fellBackFrom = bridgeEngine && !viaBridge ? bridgeEngineLine(bridgeEngine) : null;
   if (viaBridge) {
     // Named for the logs and the operator's model detail; no key is sent.
@@ -342,11 +360,12 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const engine: TurnEngine = viaBridge
     ? {
         ...viaBridge.engine,
-        runsOn: bridgeEngineLine(viaBridge.engine),
+        runsOn: harnessEngineLine(viaBridge.engine, viaBridge.harness.label),
         spend: spendFor(viaBridge.engine),
         caller: viaBridge.caller,
         tenantSlug,
         fellBackFrom: null,
+        harness: viaBridge.harness,
       }
     : {
         kind: "api",
@@ -393,6 +412,7 @@ export function streamAgentTurn(
       system: turn.system,
       messages,
       maxTokens,
+      harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
     });
   }
   const isOllama = turn.provider === "ollama";

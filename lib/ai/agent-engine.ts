@@ -96,6 +96,31 @@ export function bridgeEngineLine(choice: Exclude<AgentEngineChoice, { kind: "api
     : `${choice.model} (local model) on your paired computer`;
 }
 
+/**
+ * What answered a department turn on the paired computer, harness included:
+ * "Codex in the Marketing harness on your paired computer". A local model
+ * answers through the bridge's model server, not in a harness folder.
+ */
+export function harnessEngineLine(choice: Exclude<AgentEngineChoice, { kind: "api" }>, harnessLabel: string): string {
+  return choice.kind === "cli" ? `${CLI_ENGINE_LABEL[choice.cli]} in the ${harnessLabel} harness on your paired computer` : bridgeEngineLine(choice);
+}
+
+/**
+ * The coding harness's route, read from the SAME choice (CC, 2026-10-09: "the
+ * coding harness and the department agents should share the same connection
+ * ... on the same functionality"). There is no second picker: an app on the
+ * paired computer runs the harness on that app; an AI account runs it on the
+ * cloud API. A local model cannot edit files, so the harness then runs on
+ * Claude Code on the same computer, and says so.
+ */
+export function harnessRouteFor(choice: AgentEngineChoice): { mode: "cli" | "cloud_only"; runtime: CliEngine; note: string | null } {
+  if (choice.kind === "cli") return { mode: "cli", runtime: choice.cli, note: null };
+  if (choice.kind === "local") {
+    return { mode: "cli", runtime: "claude", note: "Your agents use a local model; the coding harness edits files, so it runs on Claude Code on the same computer." };
+  }
+  return { mode: "cloud_only", runtime: "claude", note: null };
+}
+
 /** "Agents: ..." in the coding harness header: the choice in a few words. */
 export function agentsEngineLine(choice: AgentEngineChoice): string {
   return choice.kind === "api" ? "your AI account (API credits)" : bridgeEngineLine(choice);

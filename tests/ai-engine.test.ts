@@ -56,6 +56,16 @@ stub("next/headers", {
   draftMode: async () => ({ isEnabled: false }),
 });
 
+// Two client modules this suite drives (the paired-computer card's sign-in
+// call, the harness header's reads) import next/link, which creates a context
+// at import time; react-server's React exports none. The same inert stand-ins
+// as tests/ai-workspace-account.test.ts: nothing here renders them.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS export object tsx-compiled modules read
+const reactCjs = require("react") as Record<string, unknown>;
+if (typeof reactCjs.createContext !== "function") {
+  reactCjs.createContext = (value: unknown) => ({ _currentValue: value, Provider: ({ children }: { children?: unknown }) => children, Consumer: () => null });
+}
+
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const ALPHA = "a1a1a1a1-0000-4000-8000-0000000000a1";
 const BRIDGE = "https://bridge.oasis.test";
@@ -215,6 +225,8 @@ async function main() {
       { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, '__workspace__', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)", args: [ALPHA, anthCipher, stamp] },
       { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'sdr', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)", args: [ALPHA, anthCipher, stamp] },
       { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'customer-support', 'openrouter', 'anthropic/claude-sonnet-4.6', ?, 1, ?)", args: [ALPHA, encryptField(KEY_OR), stamp] },
+      // OASIS's legacy `bravo` account row: the fallback when CC's computer can't be reached.
+      { sql: "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at) VALUES (?, NULL, 'bravo', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)", args: [OASIS, encryptField("sk-ant-oasis-fallback-0003"), stamp] },
     ],
     "write",
   );
@@ -229,6 +241,8 @@ async function main() {
   const outcome = await import("../lib/os/channel/outcome");
   const providerRoute = await import("../app/api/agent-config/workspace-provider/route");
   const bulk = await import("../app/api/agent-config/bulk-provider/route");
+  const cliAuth = await import("../app/api/bridge/cli-auth/route");
+  const harness = await import("../lib/admin/harness-targets");
   const engineRoute = await import("../app/api/ai/engine/route");
   const chat = await import("../app/api/agents/chat/route");
   const cliStatus = await import("../lib/bridge-cli-status");
@@ -345,6 +359,11 @@ async function main() {
     await login(USERS.cc);
     sent = [];
     answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
+    // OASIS with nothing saved runs on the CLI bridge (CC: "for my workspace they don't use API keys").
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
+    const shown = await jsonOf(await engineRoute.GET());
+    assert.equal(shown.body.workspace, "oasis");
+    assert.deepEqual(shown.body.bridge, { reachable: true });
     const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "codex" } })));
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(sent.length, 1);
@@ -352,7 +371,8 @@ async function main() {
     assert.equal(sent[0].headers.authorization, "Bearer bearer-oasis-test", "the server-only bearer, as the coding harness's proxy sends it");
     assert.equal(sent[0].body?.cli_provider, "codex", "an owner keeps the app they chose");
     assert.equal(sent[0].body?.chat_mode, "plan");
-    assert.equal(sent[0].body?.agent, "bravo");
+    assert.equal(sent[0].body?.agent, "bravo", "the test answers in the Chief of Staff's harness");
+    assert.match(String((sent[0].body?.messages as Array<{ content: string }>)[0].content), /^This message comes from the Chief of Staff channel of the OASIS Command Center\./);
     assert.equal(sent[0].body?.tenant_id, OASIS);
     assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
     // A test that fails changes nothing.
@@ -363,10 +383,24 @@ async function main() {
     assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
   });
 
-  // -- 2. Department turns run on the chosen engine ------------------------------
+  // -- 2. Department turns run in the department's agent harness -----------------
   console.log("2. department turns");
-  const fakeCaller = { target: { baseUrl: BRIDGE, bearerToken: "bearer-oasis-test" }, tenantId: ALPHA, userId: USERS.alpha.id, teamRole: "owner" };
-  const turnFor = (bridge: (() => Promise<typeof fakeCaller | null>) | null) =>
+  const ccCaller = { target: { baseUrl: BRIDGE, bearerToken: "bearer-oasis-test" }, tenantId: OASIS, userId: USERS.cc.id, teamRole: "owner" };
+  const dept = (slug: string) => departmentBySlug(slug)!;
+  type Caller = typeof ccCaller;
+  const oasisTurn = (deptSlug: string, agentSlug: string, bridge: (() => Promise<Caller | null>) | null) =>
+    prepareAgentTurn({
+      tenantId: OASIS,
+      tenantSlug: "oasis-ai-cc",
+      agentSlug,
+      department: dept(deptSlug),
+      operator: { name: "CC", email: USERS.cc.email },
+      platformFallback: null,
+      revealModel: true,
+      userId: USERS.cc.id,
+      bridge,
+    });
+  const clientTurn = (bridge: (() => Promise<Caller | null>) | null) =>
     prepareAgentTurn({
       tenantId: ALPHA,
       tenantSlug: "alpha-co",
@@ -378,14 +412,14 @@ async function main() {
       userId: USERS.alpha.id,
       bridge,
     });
-  await check("an app engine with the computer reachable: the turn goes to the bridge with the department's own instructions, no key, no API credits", async () => {
-    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude" });
-    const prepared = await turnFor(async () => fakeCaller);
+  await check("OASIS Sales on Codex: the turn runs in the Chief of Staff's harness through the bridge, with the channel's instructions, no key, no API credits", async () => {
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+    const prepared = await oasisTurn("sales", "sdr", async () => ccCaller);
     assert.ok(prepared.ok, JSON.stringify(prepared));
-    if (!prepared.ok) return;
-    assert.equal(prepared.turn.engine.kind, "cli");
-    assert.equal(prepared.turn.engine.runsOn, "Claude Code on your paired computer");
+    if (!prepared.ok || prepared.turn.engine.kind === "api") return assert.fail("not a bridge turn");
+    assert.equal(prepared.turn.engine.runsOn, "Codex in the Chief of Staff & Operations harness on your paired computer");
     assert.equal(prepared.turn.engine.spend, "cli_subscription");
+    assert.equal(prepared.turn.engine.harness.agent, "bravo");
     assert.equal(prepared.turn.apiKey, "", "no key is used");
     sent = [];
     answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
@@ -393,25 +427,53 @@ async function main() {
     for await (const ev of streamAgentTurn(prepared.turn, [{ role: "user", content: "earlier" }, { role: "assistant", content: "ok" }, { role: "user", content: "How is the pipeline?" }])) events.push(ev);
     assert.deepEqual(events, [{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }]);
     assert.equal(sent.length, 1, "only the bridge was called: no AI provider");
+    assert.equal(sent[0].body?.agent, "bravo", "Sales runs in the Chief of Staff's harness (its CLAUDE.md and skills route it)");
+    assert.equal(sent[0].body?.cli_provider, "codex");
+    assert.equal(sent[0].body?.chat_mode, "plan", "read and answer only");
     const msgs = sent[0].body?.messages as Array<{ role: string; content: string }>;
     assert.equal(msgs.length, 1, "the bridge runs the app on one message");
-    assert.ok(msgs[0].content.startsWith("INSTRUCTIONS FOR THIS REPLY"), "the department's instructions lead");
-    assert.ok(msgs[0].content.includes(prepared.turn.system.trim().slice(0, 80)), "the department's own system prompt, identity lock included");
+    assert.match(msgs[0].content, /^This message comes from the Sales channel of the OASIS Command Center\. Work it the way you normally do in this folder/);
+    assert.ok(msgs[0].content.includes(prepared.turn.system.trim().slice(0, 80)), "the channel's own instructions, identity lock included");
     assert.match(msgs[0].content, /CONVERSATION SO FAR:\nUser: earlier\n\nYou: ok/);
     assert.match(msgs[0].content, /MESSAGE TO ANSWER:\nHow is the pipeline\?$/);
   });
 
-  await check("an app engine with the computer NOT reachable: the AI account answers, and the turn says what was chosen instead", async () => {
-    const prepared = await turnFor(async () => null);
+  await check("each OASIS department runs in its own harness: Marketing in the CMO's, Finance in the CFO's, the rest in the Chief of Staff's", async () => {
+    const want: Record<string, string> = { chief_of_staff: "bravo", sales: "bravo", client_success: "bravo", operations: "bravo", marketing: "maven", finance: "atlas" };
+    for (const [key, agent] of Object.entries(want)) assert.equal(harness.harnessForDepartment(key)?.agent, agent, key);
+    const marketing = await oasisTurn("marketing", "maven", async () => ccCaller);
+    assert.ok(marketing.ok, JSON.stringify(marketing));
+    if (!marketing.ok || marketing.turn.engine.kind === "api") return assert.fail("not a bridge turn");
+    assert.equal(marketing.turn.engine.harness.agent, "maven");
+    assert.equal(marketing.turn.engine.runsOn, "Codex in the Marketing harness on your paired computer");
+    const req2 = bridgeTurn.bridgeTurnRequest({ caller: ccCaller, engine: { kind: "cli", cli: "claude" }, agentSlug: "atlas", tenantSlug: "oasis-ai-cc", system: "S", messages: [{ role: "user", content: "hi" }], maxTokens: 10, harness: { agent: "atlas", department: "Finance" } });
+    assert.equal(req2.body.agent, "atlas");
+  });
+
+  await check("OASIS with the computer NOT reachable: the AI account answers, and the turn says what was chosen", async () => {
+    const prepared = await oasisTurn("sales", "sdr", async () => null);
     assert.ok(prepared.ok, JSON.stringify(prepared));
     if (!prepared.ok) return;
     assert.equal(prepared.turn.engine.kind, "api");
-    assert.equal(prepared.turn.engine.fellBackFrom, "Claude Code on your paired computer");
+    assert.equal(prepared.turn.engine.fellBackFrom, "Codex on your paired computer");
     assert.equal(prepared.turn.engine.spend, "api_credits");
-    assert.equal(prepared.turn.provider, "anthropic");
     // A Slack mention (no resolver) does the same.
-    const slack = await turnFor(null);
+    const slack = await oasisTurn("sales", "sdr", null);
     assert.ok(slack.ok && slack.turn.engine.kind === "api" && slack.turn.engine.fellBackFrom !== null);
+  });
+
+  await check("the harness path is OASIS-only: a client workspace on an app engine is answered by its API account, even with a reachable bridge", async () => {
+    await store.saveAgentEngine(ALPHA, { kind: "cli", cli: "claude" });
+    let asked = 0;
+    const prepared = await clientTurn(async () => {
+      asked += 1;
+      return { ...ccCaller, tenantId: ALPHA };
+    });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    if (!prepared.ok) return;
+    assert.equal(prepared.turn.engine.kind, "api");
+    assert.equal(prepared.turn.provider, "anthropic");
+    assert.equal(asked, 0, "the bridge is not even asked for a client workspace");
   });
 
   await check("the chat route tells the owner what answered and whose credits it spent (agent event)", async () => {
@@ -424,12 +486,13 @@ async function main() {
     assert.ok(agentEv, JSON.stringify(evs));
     assert.equal(agentEv.data.spend, "api_credits");
     assert.match(String(agentEv.data.runs_on), /\(API\)$/);
-    assert.equal(agentEv.data.fell_back_from, "Claude Code on your paired computer", "the reply says the chosen app could not be reached");
+    assert.equal(agentEv.data.fell_back_from, "Claude Code on your paired computer", "the reply says the chosen app did not answer");
     assert.equal(agentEv.data.model, undefined, "the model id stays operator detail");
+    await store.saveAgentEngine(ALPHA, { kind: "api" });
   });
 
   await check("bridge errors become two plain failure codes, never raw text", async () => {
-    const prepared = await turnFor(async () => fakeCaller);
+    const prepared = await oasisTurn("sales", "sdr", async () => ccCaller);
     assert.ok(prepared.ok);
     if (!prepared.ok) return;
     const drain = async () => {
@@ -452,8 +515,8 @@ async function main() {
   });
 
   await check("a local model goes to the bridge's /local-chat with the real system prompt; the server never calls a local address", async () => {
-    await store.saveAgentEngine(ALPHA, { kind: "local", model: "llama3.3" });
-    const prepared = await turnFor(async () => fakeCaller);
+    await store.saveAgentEngine(OASIS, { kind: "local", model: "llama3.3" });
+    const prepared = await oasisTurn("sales", "sdr", async () => ccCaller);
     assert.ok(prepared.ok);
     if (!prepared.ok) return;
     sent = [];
@@ -465,7 +528,7 @@ async function main() {
     assert.equal(sent[0].body?.model, "llama3.3");
     assert.equal(sent[0].body?.system, prepared.turn.system);
     assert.ok(sent.every((s) => s.url.startsWith(BRIDGE)));
-    await store.saveAgentEngine(ALPHA, { kind: "api" });
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
   await check("one rule for who runs which app: a member is pinned to Claude Code with its tools switched off; the proxy route uses the same rule", () => {
@@ -474,13 +537,14 @@ async function main() {
     assert.ok(member.disallowedTools.length > 0);
     assert.deepEqual(policy.bridgeCliPolicy("owner", "gemini"), { cliProvider: "gemini", disallowedTools: [] });
     const turnReq = bridgeTurn.bridgeTurnRequest({
-      caller: { ...fakeCaller, teamRole: "closer" },
+      caller: { ...ccCaller, teamRole: "closer" },
       engine: { kind: "cli", cli: "codex" },
       agentSlug: "sdr",
       tenantSlug: "oasis-ai-cc",
       system: "S",
       messages: [{ role: "user", content: "hi" }],
       maxTokens: 100,
+      harness: { agent: "bravo", department: "Sales" },
     });
     assert.equal(turnReq.body.cli_provider, "claude");
     assert.ok((turnReq.body.disallowed_tools as string[]).length > 0);
@@ -499,23 +563,95 @@ async function main() {
     assert.equal(await bridgeTurn.bridgeCallerForSession(ALPHA), null);
   });
 
-  await check("the channel header says what powers it, and says when the chosen app can't be reached", () => {
+  await check("the channel header names the engine AND the harness, and says when the chosen app can't be reached", () => {
     const brain = { provider: "anthropic" as const, providerLabel: "Anthropic", model: "claude-sonnet-4-6", modelLabel: "Claude Sonnet 4.6", savedModel: null };
-    assert.deepEqual(channelEngine({ kind: "cli", cli: "codex" }, true, brain), { line: "Codex on your paired computer", spend: "cli_subscription", note: null });
-    const fell = channelEngine({ kind: "cli", cli: "codex" }, false, brain);
+    assert.deepEqual(channelEngine({ kind: "cli", cli: "codex" }, true, brain, "Marketing"), {
+      line: "Codex in the Marketing harness on your paired computer",
+      spend: "cli_subscription",
+      note: null,
+    });
+    const fell = channelEngine({ kind: "cli", cli: "codex" }, false, brain, "Marketing");
     assert.equal(fell.spend, "api_credits");
     assert.match(String(fell.note), /^Codex on your paired computer is chosen, but the computer can't be reached right now, so your AI account answers\.$/);
     assert.deepEqual(channelEngine({ kind: "api" }, false, brain).note, null);
   });
 
-  await check("the coding harness follows your agents' app, unless a pick was made for the harness alone", () => {
-    assert.deepEqual(cliRuntime.harnessRuntime("codex", "claude", null), { runtime: "codex", source: "agents" });
-    assert.deepEqual(cliRuntime.harnessRuntime("codex", "claude", "gemini"), { runtime: "gemini", source: "harness" });
-    assert.deepEqual(cliRuntime.harnessRuntime(null, "gemini", null), { runtime: "gemini", source: "browser" });
-    // Nothing that powers a department reads the browser-local harness pick.
+  await check("ONE setting: the coding harness's route comes from what powers your agents, and there is no second picker", () => {
+    assert.deepEqual(engineLib.harnessRouteFor({ kind: "cli", cli: "codex" }), { mode: "cli", runtime: "codex", note: null });
+    assert.deepEqual(engineLib.harnessRouteFor({ kind: "api" }), { mode: "cloud_only", runtime: "claude", note: null });
+    assert.equal(engineLib.harnessRouteFor({ kind: "local", model: "llama3.3" }).runtime, "claude");
+    const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
+    assert.doesNotMatch(widget, /aria-label="Chat route"|renderCliOption|writeHarnessOverride/, "the harness's own route picker is gone");
+    assert.match(widget, /const route = harnessRouteFor\(engine\);/);
+    assert.match(widget, /setChatModeState\(route\.mode\);\s*setCliRuntimeState\(route\.runtime\);/);
+    const card = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
+    assert.doesNotMatch(card, /role="radiogroup"|chooseCli|writeCliRuntime/, "the paired-computer card has no picker");
+    // Nothing that powers a department reads the browser-local route.
     for (const rel of ["lib/os/department-agent.ts", "lib/ai/bridge-turn.ts", "app/api/agents/chat/route.ts"]) {
       assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), /cli-runtime|readCliRuntime|cliRuntime/, rel);
     }
+  });
+
+  await check("Connect / Reconnect: the bridge starts the app's own sign-in on the paired computer, with the app's real command", async () => {
+    // The real commands (checked against the installed apps on CC's PC, 2026-10-09).
+    assert.equal(cliStatus.CLI_SIGN_IN.claude.command, "claude auth login");
+    assert.equal(cliStatus.CLI_SIGN_IN.codex.command, "codex login");
+    assert.match(cliStatus.CLI_SIGN_IN.gemini.command, /^gemini\s+\(then choose "Sign in with Google", or type \/auth\)$/);
+    await login(USERS.cc);
+    sent = [];
+    answer = (s) =>
+      s.url === `${BRIDGE}/exec-tool`
+        ? new Response(JSON.stringify({ ok: true, output: "codex sign-in started. https://auth.openai.com/...", is_error: false }), { status: 200 })
+        : new Response("x", { status: 599 });
+    const r = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "codex" }) })));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].headers.authorization, "Bearer bearer-oasis-test");
+    assert.deepEqual(sent[0].body, { tool_name: "cli_auth_start", input: { provider: "codex" } });
+    assert.equal(r.body.command, "codex login");
+    assert.match(String(r.body.output), /https:\/\/auth\.openai\.com/);
+    // A bridge that does not answer is said plainly, with the command to run there.
+    answer = () => {
+      throw new TypeError("fetch failed");
+    };
+    const down = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "claude" }) })));
+    assert.equal(down.status, 502);
+    assert.match(String(down.body.message), /On that computer, run: claude auth login$/);
+    // A client owner reaches no bridge: refused before anything is sent.
+    await login(USERS.alpha);
+    sent = [];
+    const client = await jsonOf(await cliAuth.POST(new Request("http://localhost/api/bridge/cli-auth", { method: "POST", body: JSON.stringify({ provider: "gemini" }) })));
+    assert.equal(client.status, 403);
+    assert.equal(sent.length, 0);
+    // The card's button calls exactly this route.
+    const calls: string[] = [];
+    const { startCliSignIn } = await import("../components/settings/LocalCliProvidersCard");
+    const res = await startCliSignIn("codex", async (url, init) => {
+      calls.push(`${init.method} ${url} ${String(init.body)}`);
+      return new Response(JSON.stringify({ ok: true, message: "Started.", output: "" }), { status: 200 });
+    });
+    assert.deepEqual(res, { ok: true, text: "Started." });
+    assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex"}']);
+    const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
+    assert.match(src, /\{cs !== "ready" && \(/, "every card that is not ready offers Connect");
+  });
+
+  await check("the coding harness never spins forever: each read has a time limit and says why it failed", async () => {
+    const readiness = await import("../lib/admin/chat-readiness");
+    const timeout = Object.assign(new Error("signal timed out"), { name: "TimeoutError" });
+    assert.equal(readiness.agentConfigReadFailure(timeout), "Couldn't read your agent settings: the server didn't answer within 15 seconds. Refresh to try again.");
+    const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
+    assert.match(widget, /fetch\("\/api\/agent-config", \{ signal: AbortSignal\.timeout\(CONFIG_READ_TIMEOUT_MS\) \}\)/);
+    assert.match(widget, /if \(configsError\) \{/);
+    const header = await import("../components/admin/RunnerStatusHeader");
+    const hung = await header.readRunner("/api/bridge/warm-status", async () => {
+      throw timeout;
+    });
+    assert.deepEqual(hung, { error: "timeout" });
+    assert.equal(header.describeRunner({ warm: hung, cli: null }).computer, "Couldn't check your computer: no answer in 12 seconds.");
+    const src = readFileSync(join(ROOT, "components/admin/RunnerStatusHeader.tsx"), "utf8");
+    assert.doesNotMatch(src, /await Promise\.all\(\[readRunner/, "one slow read must not hold the other line");
+    assert.match(src, /signal: AbortSignal\.timeout\(RUNNER_READ_TIMEOUT_MS\)/);
   });
 
   // -- 3. CLI status words --------------------------------------------------------

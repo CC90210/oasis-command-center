@@ -360,7 +360,7 @@ async function main() {
     // account, or an app on the paired computer: lib/ai/agent-engine.ts),
     // still from the account's brain when the account is what answers.
     assert.match(channel, /brain = departmentBrain\(account\);/);
-    assert.match(channel, /if \(reachable \|\| brain\) return \{ readiness: "ready", brain, accountChangedAt: changedAt, engine \};/);
+    assert.match(channel, /if \(reachable \|\| brain\) return \{ readiness: "ready", brain, accountChangedAt: changedAt, engine, engineRead \};/);
     assert.match(channel, /brain: owner \? brain : null,/);
     const deptChannel = readFileSync(join(ROOT, "components/os/department/DepartmentChannel.tsx"), "utf8");
     assert.match(deptChannel, /state\.engine \?\? \(state\.brain \? \{ line: brainLine\(state\.brain\), spend: "api_credits", note: null \} : null\)/);
@@ -530,18 +530,18 @@ async function main() {
 
   // -- 5. The local CLI card says exactly what it powers ------------------------
   console.log("5. local CLIs");
-  await check("the paired-computer card points at the one engine choice, and its picker changes the coding harness alone", async () => {
-    // 2026-10-09 (PR fix/ai-brain-engine): departments CAN run on an app on the
-    // paired computer now, chosen in ONE place (What powers your agents). The
-    // card no longer says departments never use the apps; it says where the
-    // choice is, and that its own picker is the coding harness's alone.
+  await check("the paired-computer card chooses nothing: it reports the apps and points at the one engine setting", async () => {
+    // 2026-10-09 (PR fix/ai-brain-engine, CC: "they should be on the same
+    // functionality"): what powers the agents AND the coding harness is ONE
+    // setting (What powers your agents). The card is the computer's report,
+    // with Connect, and has no picker of its own.
     const cli = await import("../components/settings/local-cli-scope");
-    assert.match(cli.LOCAL_CLI_SCOPE, /What powers your agents is chosen above, in What powers your agents\./);
-    assert.match(cli.LOCAL_CLI_PICKER_SCOPE, /pick another here to change the coding harness alone \(in this browser\)\. It never changes what your agents use\./);
+    assert.match(cli.LOCAL_CLI_SCOPE, /Which app your agents and the coding harness use is the one setting above, in What powers your agents\./);
     // The bridge may run on another computer than this browser (hosted mode): "the paired computer".
-    assert.doesNotMatch(cli.LOCAL_CLI_SCOPE + cli.LOCAL_CLI_PICKER_SCOPE, /this computer/);
+    assert.doesNotMatch(cli.LOCAL_CLI_SCOPE, /this computer/);
     const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
     assert.doesNotMatch(src, /Active CLI|title="Local AI CLIs"/, "the card's old wording, which read as choosing the department brain");
+    assert.doesNotMatch(src, /role="radiogroup"|writeCliRuntime|chooseCli/, "a second picker that can disagree with the setting");
     assert.match(src, /subtitle=\{LOCAL_CLI_SCOPE\}/);
     // What the choice really drives: only the operator's Coding harness (ChatWidget) sends it.
     const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");

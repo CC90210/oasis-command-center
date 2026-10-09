@@ -17,6 +17,8 @@ export type EngineState = {
   savedProviders: Provider[];
   bridgeReachable: boolean;
   canManage: boolean;
+  /** OASIS's own workspace: its agents run in their harnesses through the bridge; API keys are the fallback. */
+  oasis: boolean;
 };
 
 const READ_FAILED = "We could not read what powers your agents just now. Refresh to try again.";
@@ -54,6 +56,7 @@ export async function readEngine(fetchImpl: FetchLike = defaultFetch): Promise<{
         savedProviders: Array.isArray(r.body.savedProviders) ? (r.body.savedProviders as Provider[]) : [],
         bridgeReachable: bridge?.reachable === true,
         canManage: r.body.canManage === true,
+        oasis: r.body.workspace === "oasis",
       },
     };
   } catch {

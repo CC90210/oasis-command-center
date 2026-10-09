@@ -63,15 +63,26 @@ function clip(text: string, max: number): string {
  * The system part is never clipped below the history: the identity lock must
  * reach the app whole; the oldest history goes first.
  */
-export function composeCliPrompt(system: string, messages: readonly ChatMessage[]): string {
+export function composeCliPrompt(
+  system: string,
+  messages: readonly ChatMessage[],
+  opts: { harness?: { department: string } | null } = {},
+): string {
   const convo = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const lastUserIndex = convo.map((m) => m.role).lastIndexOf("user");
   const latest = lastUserIndex >= 0 ? String(convo[lastUserIndex].content ?? "") : "";
   const earlier = (lastUserIndex >= 0 ? convo.slice(0, lastUserIndex) : convo).slice(-HISTORY_TURNS);
-  const head =
-    "INSTRUCTIONS FOR THIS REPLY (follow these over any other role or persona you were given in this folder):\n" +
-    `${system.trim()}\n\n` +
-    "Answer in conversation only: do not edit files, run commands or change anything on this computer for this reply.";
+  // In a department's own harness (OASIS), the folder's instructions and
+  // skills do the work; the channel's instructions say how to reply.
+  const head = opts.harness
+    ? `This message comes from the ${opts.harness.department} channel of the OASIS Command Center. ` +
+      "Work it the way you normally do in this folder: your own instructions, memory and skills apply. " +
+      "This is a read-and-answer turn: do not edit files, run commands that change anything, or send anything; " +
+      "propose any change as a next step instead.\n\n" +
+      `CHANNEL INSTRUCTIONS (how to reply in this channel):\n${system.trim()}`
+    : "INSTRUCTIONS FOR THIS REPLY (follow these over any other role or persona you were given in this folder):\n" +
+      `${system.trim()}\n\n` +
+      "Answer in conversation only: do not edit files, run commands or change anything on this computer for this reply.";
   const tail = `\n\nMESSAGE TO ANSWER:\n${clip(latest, TURN_CHARS * 2)}`;
   const lines = earlier.map((m) => `${m.role === "user" ? "User" : "You"}: ${clip(String(m.content ?? ""), TURN_CHARS)}`);
   // Drop the oldest history until the whole fits.
@@ -101,6 +112,12 @@ export function bridgeTurnRequest(input: {
   system: string;
   messages: readonly ChatMessage[];
   maxTokens: number;
+  /**
+   * The department's own harness (lib/admin/harness-targets.ts
+   * harnessForDepartment), OASIS only: the app runs in that repo. Absent: the
+   * workspace's first bridge folder, with the channel's instructions in charge.
+   */
+  harness?: { agent: string; department: string } | null;
 }): { path: "/chat" | "/local-chat"; body: Record<string, unknown> } {
   const { caller, engine } = input;
   if (engine.kind === "local") {
@@ -120,8 +137,13 @@ export function bridgeTurnRequest(input: {
   return {
     path: "/chat",
     body: {
-      agent: bridgeAgentFor(input.agentSlug, input.tenantSlug),
-      messages: [{ role: "user", content: composeCliPrompt(input.system, input.messages) }],
+      agent: input.harness ? input.harness.agent : bridgeAgentFor(input.agentSlug, input.tenantSlug),
+      messages: [
+        {
+          role: "user",
+          content: composeCliPrompt(input.system, input.messages, { harness: input.harness ? { department: input.harness.department } : null }),
+        },
+      ],
       cli_provider: policy.cliProvider,
       chat_mode: "plan",
       tenant_id: caller.tenantId,
@@ -173,6 +195,8 @@ export async function testBridgeEngine(input: {
   maxTokens: number;
   timeoutMs?: number;
   stream?: typeof streamBridgeTurn;
+  /** OASIS: the test answers in the Chief of Staff's harness, as a real turn would. */
+  harness?: { agent: string; department: string } | null;
 }): Promise<BridgeTestResult> {
   const started = Date.now();
   const it = (input.stream ?? streamBridgeTurn)({
@@ -183,6 +207,7 @@ export async function testBridgeEngine(input: {
     system: input.system,
     messages: [{ role: "user", content: input.ask }],
     maxTokens: input.maxTokens,
+    harness: input.harness ?? null,
   });
   const got: { text: string; failure: string | null } = { text: "", failure: null };
   const read = (async () => {

@@ -34,7 +34,6 @@ import {
   type AgentEngineChoice,
   type CliEngine,
 } from "@/lib/ai/agent-engine";
-import { writeCliRuntime, writeHarnessOverride } from "@/lib/cli-runtime";
 import { readEngine, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
 
 const PROVIDERS: Provider[] = ["anthropic", "openai", "google", "openrouter"];
@@ -98,11 +97,7 @@ export function AgentEnginePanel() {
       setNote({ ok: false, text: r.message });
       return;
     }
-    // The coding harness follows your agents' app (lib/cli-runtime.ts).
-    if (draft.kind === "cli") {
-      writeCliRuntime(draft.cli);
-      writeHarnessOverride(null);
-    }
+    // The coding harness reads this same setting (lib/ai/agent-engine.ts harnessRouteFor).
     setNote({
       ok: true,
       text: `Your agents now use ${agentsEngineLine(draft)}.${r.latencyMs !== null ? ` A test answer came back in ${(r.latencyMs / 1000).toFixed(1)} s.` : ""}`,
@@ -175,17 +170,40 @@ export function AgentEnginePanel() {
     </label>
   );
 
+  const apiOption = option(
+    "api",
+    <Cloud className="h-3.5 w-3.5" />,
+    state.oasis ? "An AI account (fallback)" : "An AI account",
+    "An API key from Anthropic, OpenAI, Google or OpenRouter. Each reply spends API credits.",
+  );
+  const cliOption = option(
+    "cli",
+    <Cpu className="h-3.5 w-3.5" />,
+    "An app on your paired computer",
+    state.oasis
+      ? "Claude Code, Codex or Gemini CLI, running each department's own harness through the bridge. No API credits."
+      : "Claude Code, Codex or Gemini CLI, on its own sign-in there. No API credits.",
+  );
+  const localOption = option("local", <HardDrive className="h-3.5 w-3.5" />, "A local model", "Ollama or LM Studio on your paired computer. No API credits.");
+
   return (
     <div className="space-y-3" data-testid="agent-engine">
       <p className="text-sm text-fg">
-        Your agents use <span className="font-bold">{agentsEngineLine(current)}</span>
+        Your agents and the coding harness run on <span className="font-bold">{agentsEngineLine(current)}</span>
         {current.kind === "api" && state.account ? (
           <>
             : <span className="font-bold">{state.account.providerLabel}, {state.account.modelLabel}</span>
           </>
         ) : null}
-        . <span className="text-fg-muted">{spendSentence(spendFor(current))}</span>
+        {current.kind === "cli" ? ", through the bridge" : ""}. <span className="text-fg-muted">{spendSentence(spendFor(current))}</span>
       </p>
+      {state.oasis && (
+        <p className="text-xs leading-relaxed text-fg-muted">
+          This workspace runs each department in its own agent harness on your paired computer: Chief of Staff, Sales, Client
+          Success and Operations in the Chief of Staff&apos;s, Marketing and Finance in their own. Each harness&apos;s own
+          instructions and skills route the work. An AI account below is only the fallback when the computer can&apos;t be reached.
+        </p>
+      )}
       {current.kind !== "api" && !state.bridgeReachable && (
         <p className="text-xs leading-relaxed text-status-warm">
           Your paired computer can&apos;t be reached from this account right now, so{" "}
@@ -193,10 +211,22 @@ export function AgentEnginePanel() {
         </p>
       )}
 
+      {/* OASIS's own workflow first (CC, 2026-10-09: "for mine you should know
+          our workflow and show it that way"); a client sees its API key first. */}
       <div className="grid gap-2 md:grid-cols-3" role="radiogroup" aria-label="What powers your agents">
-        {option("api", <Cloud className="h-3.5 w-3.5" />, "An AI account", "An API key from Anthropic, OpenAI, Google or OpenRouter. Each reply spends API credits.")}
-        {option("cli", <Cpu className="h-3.5 w-3.5" />, "An app on your paired computer", "Claude Code, Codex or Gemini CLI, on its own sign-in there. No API credits.")}
-        {option("local", <HardDrive className="h-3.5 w-3.5" />, "A local model", "Ollama or LM Studio on your paired computer. No API credits.")}
+        {state.oasis ? (
+          <>
+            {cliOption}
+            {apiOption}
+            {localOption}
+          </>
+        ) : (
+          <>
+            {apiOption}
+            {cliOption}
+            {localOption}
+          </>
+        )}
       </div>
 
       {kind === "api" && (
@@ -345,8 +375,8 @@ export function AgentEnginePanel() {
       )}
 
       <p className="text-[11px] leading-relaxed text-fg-dim">
-        The coding harness uses the same choice. It edits files, so it always runs on an app on your paired computer: your agents&apos;
-        app when they use one. You can pick another app for the coding harness alone in the paired-computer card below.
+        The coding harness uses this same setting: there is no second picker. On an app, it runs that app on your paired
+        computer; on an AI account, it uses that account; with a local model, it runs on Claude Code (it edits files).
       </p>
     </div>
   );
