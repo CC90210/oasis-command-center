@@ -4,15 +4,16 @@
  * nothing when it is only asked.
  *
  * WHY. CC, 2026-10-02: "It says that SunBiz and Breeze are clients, and
- * they're not." The script archives the BreezeAdvance client record and
- * retires the two seed deals behind it, in production, at the merge gate. It
+ * they're not." The script archives the two client records the seed deals
+ * became (BreezeAdvance, converted 2026-09-30; SunBiz, filed under Past on
+ * 2026-10-07) and retires the two deals, in production, at the merge gate. It
  * is run twice there: dry, then with --apply. This runs it against a local
  * libSQL copy of the same rows (the live ids, stages, tags and links as read on
- * 2026-10-02) through the app's real code paths, and pins:
+ * 2026-10-02 and 2026-10-08) through the app's real code paths, and pins:
  *   - the dry run writes NOTHING (every table byte-identical) and lists the
- *     five changes it would make;
- *   - --apply makes exactly those: the record archived (lifecycle and contact
- *     kept), both deals lost through manual_archive with their
+ *     six changes it would make;
+ *   - --apply makes exactly those: both records archived (lifecycle and
+ *     contacts kept), both deals lost through manual_archive with their
  *     BRAVO_LEAD_AUTO_BUMPED events, a dated correction, the active-client tag
  *     gone, `notes` untouched, and the SunBiz deal naming the retired tenant;
  *   - nothing is deleted, and afterwards Clients is a blank start: no listed
@@ -38,6 +39,9 @@ const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 const CC = "c88bdce9-b11c-4731-bdc8-4357f96f820c";
 const CUSTOMER = "4fe4b614-0200-45ff-904a-b77d49293eae";
 const CONTACT = "19ca3463-1b8c-42e2-8291-dff06deeadae";
+// Made 2026-10-07 by "Mark engagement ended" on the SunBiz deal (read 2026-10-08).
+const SUNBIZ_CUSTOMER = "4d936fb1-4062-4339-a991-c4fab08ae56f";
+const SUNBIZ_CONTACT = "9757ebeb-6693-4f55-928a-b3698bd84fe9";
 const BREEZE_LEAD = "349ad3d2-72bf-4874-9134-b815fc2e5181";
 const SUNBIZ_LEAD = "db0d4123-9e92-4647-965f-9f8776249504";
 const BREEZE_NOTES = "Active client. Breeze and SunBiz are the current OASIS client portfolio and pay $10,000/month collectively.";
@@ -106,6 +110,16 @@ async function main() {
               VALUES (?, ?, ?, 'David', '2026-09-30T04:11:06.759Z', '2026-09-30T04:11:06.759Z')`,
         args: [CONTACT, OASIS, CUSTOMER],
       },
+      {
+        sql: `INSERT INTO customers (id, tenant_id, display_name, company_name, lifecycle, owner_user_id, source_lead_id, tags, custom_fields, created_at, updated_at)
+              VALUES (?, ?, 'SunBiz', 'SunBiz', 'churned', ?, ?, '[]', '{}', '2026-10-07T02:35:08.232Z', '2026-10-07T02:35:08.949Z')`,
+        args: [SUNBIZ_CUSTOMER, OASIS, CC, SUNBIZ_LEAD],
+      },
+      {
+        sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, created_at, updated_at)
+              VALUES (?, ?, ?, 'Ezra', '2026-10-07T02:35:08.232Z', '2026-10-07T02:35:08.232Z')`,
+        args: [SUNBIZ_CONTACT, OASIS, SUNBIZ_CUSTOMER],
+      },
     ],
     "write",
   );
@@ -124,33 +138,42 @@ async function main() {
   console.log("clients-blank-start:");
 
   const original = await snapshot();
-  await check("the dry run writes nothing and lists the five changes it would make", async () => {
+  await check("the dry run writes nothing and lists the six changes it would make", async () => {
     const steps = await clientsBlankStart({ apply: false, db, now: NOW });
     assert.deepEqual(steps.map((s) => [s.step, s.state]), [
       ["archive customer", "would_change"],
       ["retire deal", "would_change"],
       ["correct deal", "would_change"],
+      ["archive customer", "would_change"],
       ["retire deal", "would_change"],
       ["correct deal", "would_change"],
     ]);
-    assert.match(steps[0].detail, /archived_at null -> now; contact 19ca3463-1b8c-42e2-8291-dff06deeadae kept/);
+    assert.match(steps[0].detail, new RegExp(`^customer ${CUSTOMER} \\(BreezeAdvance, active\\): archived_at null -> now; contact ${CONTACT} kept$`));
     assert.match(steps[1].detail, /stage launched -> lost \(manual_archive, operator_archived_lead\)/);
     assert.match(steps[2].detail, /tags \["breeze","active-client","retainer"\] -> \["breeze","retainer"\]/);
     assert.doesNotMatch(steps[2].detail, /client_tenant_id/, "the BreezeAdvance deal names no workspace");
-    assert.match(steps[4].detail, new RegExp(`client_tenant_id \\(none\\) -> "${SUNBIZ}"`));
+    // The record "Mark engagement ended" made on 2026-10-07: found by its deal.
+    assert.match(steps[3].detail, new RegExp(`^customer ${SUNBIZ_CUSTOMER} \\(SunBiz, churned\\): archived_at null -> now; contact ${SUNBIZ_CONTACT} kept$`));
+    assert.match(steps[5].detail, new RegExp(`client_tenant_id \\(none\\) -> "${SUNBIZ}"`));
     assert.deepEqual(await snapshot(), original, "a dry run changed a row");
   });
 
-  await check("--apply archives the record (lifecycle and contact kept) and retires both deals through manual_archive", async () => {
+  await check("--apply archives both records (lifecycle and contacts kept) and retires both deals through manual_archive", async () => {
     const steps = await clientsBlankStart({ apply: true, db, now: NOW });
-    assert.deepEqual(steps.map((s) => s.state), ["changed", "changed", "changed", "changed", "changed"]);
+    assert.deepEqual(steps.map((s) => s.state), ["changed", "changed", "changed", "changed", "changed", "changed"]);
     const c = (await db.execute({ sql: "SELECT * FROM customers WHERE id = ?", args: [CUSTOMER] })).rows[0];
     assert.equal(c.archived_at, NOW.toISOString());
     assert.equal(c.lifecycle, "active", "archived, not moved to Past");
     assert.equal(c.display_name, "BreezeAdvance");
     assert.equal(c.source_lead_id, BREEZE_LEAD);
-    const contact = (await db.execute({ sql: "SELECT * FROM customer_contacts WHERE id = ?", args: [CONTACT] })).rows[0];
-    assert.equal(contact?.customer_id, CUSTOMER, "the contact row is kept");
+    const sb = (await db.execute({ sql: "SELECT * FROM customers WHERE id = ?", args: [SUNBIZ_CUSTOMER] })).rows[0];
+    assert.equal(sb.archived_at, NOW.toISOString());
+    assert.equal(sb.lifecycle, "churned", "archived, still a past engagement");
+    assert.equal(sb.source_lead_id, SUNBIZ_LEAD);
+    for (const [contactId, customerId] of [[CONTACT, CUSTOMER], [SUNBIZ_CONTACT, SUNBIZ_CUSTOMER]]) {
+      const contact = (await db.execute({ sql: "SELECT * FROM customer_contacts WHERE id = ?", args: [contactId] })).rows[0];
+      assert.equal(contact?.customer_id, customerId, "the contact row is kept");
+    }
     for (const id of [BREEZE_LEAD, SUNBIZ_LEAD]) assert.equal((await leadData(id)).stage, "lost");
     const bumps = (await db.execute("SELECT payload FROM agent_events WHERE event_type = 'BRAVO_LEAD_AUTO_BUMPED' ORDER BY 1")).rows
       .map((r) => JSON.parse(String(r.payload)) as Record<string, unknown>)
@@ -171,6 +194,7 @@ async function main() {
     assert.equal(sunbiz.notes, SUNBIZ_NOTES, "the original notes are untouched");
     assert.match(String(breeze.notes_correction), /^2026-10-02: Not an OASIS client \(CC\)\./);
     assert.match(String(sunbiz.notes_correction), /^2026-10-02: Not an OASIS client \(CC\)\. SunBiz is a business OASIS retired on 2026-09-28/);
+    assert.match(String(sunbiz.notes_correction), /filed as a past client record on 2026-10-07\. The deal is now lost \(operator_archived_lead\), that client record is archived/);
     assert.deepEqual(breeze.tags, ["breeze", "retainer"]);
     assert.deepEqual(sunbiz.tags, ["sunbiz", "retainer"]);
     assert.equal(sunbiz.client_tenant_id, SUNBIZ);
@@ -186,7 +210,10 @@ async function main() {
     }
     const store = await import("../lib/os/customers/store");
     assert.deepEqual((await store.listCustomers(db, OASIS, {})).rows, [], "a listed client record");
-    assert.deepEqual((await store.listCustomers(db, OASIS, { includeArchived: true })).rows.map((r) => r.display_name), ["BreezeAdvance"]);
+    // The archive keeps both, reachable under Include archived (restorable).
+    assert.deepEqual((await store.listCustomers(db, OASIS, { includeArchived: true })).rows.map((r) => r.display_name), ["BreezeAdvance", "SunBiz"]);
+    // Bravo's check at the gate: no client record of OASIS's is left unarchived.
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM customers WHERE tenant_id = ? AND archived_at IS NULL", args: [OASIS] })).rows[0].n), 0);
     const { buildClientRows } = await import("../components/os/landings/clients-model");
     const leads = [BREEZE_LEAD, SUNBIZ_LEAD].map(async (id) => ({ id, data: await leadData(id) }));
     const built = buildClientRows({ leads: await Promise.all(leads), projects: [], tickets: [] });
@@ -203,7 +230,7 @@ async function main() {
   await check("a second --apply changes nothing", async () => {
     const before = await snapshot();
     const steps = await clientsBlankStart({ apply: true, db, now: new Date(NOW.getTime() + 60_000) });
-    assert.deepEqual(steps.map((s) => s.state), ["already_done", "already_done", "already_done", "already_done", "already_done"]);
+    assert.deepEqual(steps.map((s) => s.state), ["already_done", "already_done", "already_done", "already_done", "already_done", "already_done"]);
     assert.deepEqual(await snapshot(), before);
   });
 

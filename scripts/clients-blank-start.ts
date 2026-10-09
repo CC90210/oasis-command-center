@@ -3,27 +3,30 @@
  *
  * CC: "It says that SunBiz and Breeze are clients, and they're not. We need to
  * remove that from here—obviously we're starting from blank." Two seed deals
- * from June and July said BreezeAdvance and SunBiz paid OASIS a retainer; one
- * of them was converted into a client record on 2026-09-30. This retires all
- * three, ARCHIVE ONLY: nothing is deleted, and every original value stays
- * readable.
+ * from June and July said BreezeAdvance and SunBiz paid OASIS a retainer. Each
+ * has since become a client record: BreezeAdvance converted on 2026-09-30
+ * (Active), SunBiz filed under Past by "Mark engagement ended" on 2026-10-07.
+ * This retires all four rows, ARCHIVE ONLY: nothing is deleted, and every
+ * original value stays readable.
  *
  *   node --conditions=react-server --import tsx scripts/clients-blank-start.ts           dry run: prints what it would change
  *   node --conditions=react-server --import tsx scripts/clients-blank-start.ts --apply   writes
  *
  * Run from a checkout whose env reaches the production Turso database (the same
- * env the app uses; @next/env loads it). Each change goes through the app's own
- * code path:
- *   1. customers 4fe4b614 (BreezeAdvance): updateCustomer(..., { archived: true }),
+ * env the app uses; @next/env loads it). For each deal, BreezeAdvance then
+ * SunBiz, each change goes through the app's own code path:
+ *   1. the client record made from the deal (found by its source deal, so one
+ *      made after this was written is found too; read 2026-10-08: 4fe4b614
+ *      BreezeAdvance and 4d936fb1 SunBiz): updateCustomer(..., { archived: true }),
  *      the store call PATCH /api/customers/<id> makes for the record's Archive
- *      button. Its contact 19ca3463 is kept. The record stays reachable under
+ *      button. Its contacts are kept. The record stays reachable under
  *      "Include archived".
- *   2. leads 349ad3d2 (BreezeAdvance) and db0d4123 (SunBiz, Ezra):
+ *   2. the deal, 349ad3d2 (BreezeAdvance) or db0d4123 (SunBiz, Ezra):
  *      recordOasisLeadStageEvent({ type: "manual_archive" }), so launched ->
  *      lost with reason operator_archived_lead and its BRAVO_LEAD_AUTO_BUMPED event.
- *   3. the same two leads' data, guarded on stage = lost: a dated
+ *   3. the same deal's data, guarded on stage = lost: a dated
  *      notes_correction, the "active-client" tag dropped, `notes` untouched; the
- *      SunBiz lead also gets data.client_tenant_id = the retired SunBiz tenant,
+ *      SunBiz deal also gets data.client_tenant_id = the retired SunBiz tenant,
  *      so Clients can never list or convert it again (lib/os/customers/retired.ts).
  *
  * Safe to re-run: each step reads its own state first and skips what is already
@@ -34,8 +37,11 @@ import { loadEnvConfig } from "@next/env";
 import type { Client } from "@libsql/client";
 
 export const OASIS_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+/** The records these deals became, as read on 2026-10-08 (the run finds them by deal, not by these ids). */
 export const BREEZE_CUSTOMER_ID = "4fe4b614-0200-45ff-904a-b77d49293eae";
 export const BREEZE_CONTACT_ID = "19ca3463-1b8c-42e2-8291-dff06deeadae";
+export const SUNBIZ_CUSTOMER_ID = "4d936fb1-4062-4339-a991-c4fab08ae56f";
+export const SUNBIZ_CONTACT_ID = "9757ebeb-6693-4f55-928a-b3698bd84fe9";
 export const BREEZE_LEAD_ID = "349ad3d2-72bf-4874-9134-b815fc2e5181";
 export const SUNBIZ_LEAD_ID = "db0d4123-9e92-4647-965f-9f8776249504";
 const FOUNDER_EMAIL = "conaugh@oasisai.work";
@@ -53,8 +59,9 @@ export function leadCorrections(sunbizTenantId: string): Record<string, { notes_
     [SUNBIZ_LEAD_ID]: {
       notes_correction:
         "2026-10-02: Not an OASIS client (CC). SunBiz is a business OASIS retired on 2026-09-28; this deal was seeded " +
-        "in 2026-07 as an active client. The deal is now lost (operator_archived_lead) and names the retired SunBiz " +
-        "workspace, so Clients never lists it again. The notes below are out of date and kept for history.",
+        "in 2026-07 as an active client and was filed as a past client record on 2026-10-07. The deal is now lost " +
+        "(operator_archived_lead), that client record is archived, and the deal names the retired SunBiz workspace, " +
+        "so Clients never lists it again. The notes below are out of date and kept for history.",
       client_tenant_id: sunbizTenantId,
     },
   };
@@ -74,34 +81,40 @@ const show = (v: unknown) => (v === undefined ? "(none)" : JSON.stringify(v));
  */
 export async function clientsBlankStart(opts: { apply: boolean; db: Client; now: Date }): Promise<BlankStartStep[]> {
   const { apply, db, now } = opts;
-  const { getCustomer, updateCustomer, listContacts } = await import("../lib/os/customers/store");
+  const { getCustomerBySourceLead, updateCustomer, listContacts } = await import("../lib/os/customers/store");
   const { getRecord, updateRecord } = await import("../lib/manifest/data");
   const { recordOasisLeadStageEvent } = await import("../lib/oasis-lead-stage-engine");
   const { SUNBIZ_RETIRED_TENANT_ID } = await import("../lib/tenant/retired");
   const out: BlankStartStep[] = [];
-
-  // ── 1. BreezeAdvance's client record: archived, its contact kept ────────
-  const customer = await getCustomer(db, OASIS_TENANT_ID, BREEZE_CUSTOMER_ID);
-  if (!customer) throw new Error(`customer ${BREEZE_CUSTOMER_ID} not found in OASIS's workspace: stopping`);
-  const contacts = await listContacts(db, OASIS_TENANT_ID, BREEZE_CUSTOMER_ID);
-  if (!contacts.some((c) => c.id === BREEZE_CONTACT_ID)) throw new Error(`contact ${BREEZE_CONTACT_ID} is not on the record: stopping`);
-  const label = `customer ${BREEZE_CUSTOMER_ID} (${customer.display_name}, ${customer.lifecycle})`;
-  if (customer.archived_at) {
-    out.push({ step: "archive customer", state: "already_done", detail: `${label}: archived at ${customer.archived_at}` });
-  } else if (!apply) {
-    out.push({ step: "archive customer", state: "would_change", detail: `${label}: archived_at null -> now; contact ${BREEZE_CONTACT_ID} kept` });
-  } else {
-    const actor = await founderUserId(db);
-    const r = await updateCustomer(db, OASIS_TENANT_ID, BREEZE_CUSTOMER_ID, { archived: true }, now, actor);
-    if (!r.ok || !r.customer.archived_at) throw new Error(`archiving ${BREEZE_CUSTOMER_ID} failed: ${JSON.stringify(r)}`);
-    out.push({ step: "archive customer", state: "changed", detail: `${label}: archived at ${r.customer.archived_at}; contact kept` });
-  }
-
-  // ── 2 and 3. the two seed deals: lost, then corrected ───────────────────
   const corrections = leadCorrections(SUNBIZ_RETIRED_TENANT_ID);
+
   for (const leadId of [BREEZE_LEAD_ID, SUNBIZ_LEAD_ID]) {
     const lead = await getRecord({ tenant_id: OASIS_TENANT_ID, entity: "lead", id: leadId });
     if (!lead) throw new Error(`lead ${leadId} not found in OASIS's pipeline: stopping`);
+
+    // ── 1. the client record this deal became: archived, its contacts kept ─
+    const customer = await getCustomerBySourceLead(db, OASIS_TENANT_ID, leadId);
+    if (!customer) {
+      out.push({ step: "archive customer", state: "already_done", detail: `lead ${leadId}: no client record was made from this deal` });
+    } else {
+      const contacts = (await listContacts(db, OASIS_TENANT_ID, customer.id)).map((c) => c.id);
+      const label = `customer ${customer.id} (${customer.display_name}, ${customer.lifecycle})`;
+      const kept = contacts.length ? `contact ${contacts.join(", ")} kept` : "no contacts";
+      if (customer.archived_at) {
+        out.push({ step: "archive customer", state: "already_done", detail: `${label}: archived at ${customer.archived_at}` });
+      } else if (!apply) {
+        out.push({ step: "archive customer", state: "would_change", detail: `${label}: archived_at null -> now; ${kept}` });
+      } else {
+        const actor = await founderUserId(db);
+        const r = await updateCustomer(db, OASIS_TENANT_ID, customer.id, { archived: true }, now, actor);
+        if (!r.ok || !r.customer.archived_at) throw new Error(`archiving ${customer.id} failed: ${JSON.stringify(r)}`);
+        const after = (await listContacts(db, OASIS_TENANT_ID, customer.id)).map((c) => c.id);
+        if (after.join(",") !== contacts.join(",")) throw new Error(`archiving ${customer.id} changed its contacts: stopping`);
+        out.push({ step: "archive customer", state: "changed", detail: `${label}: archived at ${r.customer.archived_at}; ${kept}` });
+      }
+    }
+
+    // ── 2 and 3. the deal: lost, then corrected ─────────────────────────
     const data = (lead.data || {}) as Record<string, unknown>;
     const name = `lead ${leadId} (${String(data.company ?? data.name ?? "unnamed")})`;
     const stage = String(data.stage ?? "");
