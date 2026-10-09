@@ -1,0 +1,270 @@
+{
+  "recorded_at": "2026-10-08",
+  "source": "CMO-Agent scripts/hook_scorer.py score --text <hook> [--caption <caption>] --json (no --persist)",
+  "scorer_version": "1.0.0",
+  "weights_version": 0,
+  "cases": [
+    {
+      "why": "callout (conditional), the brief's verified example",
+      "hook": "If you run a clinic, stop answering the phone at 9pm",
+      "expected": {
+        "score": 10.875,
+        "max_score": 11.75,
+        "score_pct": 92.6,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "retain_structure"
+        ],
+        "hook_type": "conditional",
+        "suggestions": []
+      }
+    },
+    {
+      "why": "label: audience noun addressed then punctuated",
+      "hook": "Clinic owners: your front desk is losing 12 calls a week",
+      "expected": {
+        "score": 8.0,
+        "max_score": 11.75,
+        "score_pct": 68.1,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "news_values",
+          "contrast"
+        ],
+        "hook_type": "label",
+        "suggestions": [
+          "give the first two sentences a turn (but / instead / stop / wrong)",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "list with a promised number",
+      "hook": "3 mistakes that cost contractors $4,000 every month",
+      "expected": {
+        "score": 9.5,
+        "max_score": 11.75,
+        "score_pct": 80.9,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "contrast"
+        ],
+        "hook_type": "list",
+        "suggestions": [
+          "give the first two sentences a turn (but / instead / stop / wrong)"
+        ]
+      }
+    },
+    {
+      "why": "question",
+      "hook": "Why do most agencies lose their best clients in 90 days?",
+      "expected": {
+        "score": 9.875,
+        "max_score": 11.75,
+        "score_pct": 84.0,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "contrast"
+        ],
+        "hook_type": "question",
+        "suggestions": [
+          "give the first two sentences a turn (but / instead / stop / wrong)"
+        ]
+      }
+    },
+    {
+      "why": "narrative, first person",
+      "hook": "I spent 6 months answering every lead by hand and it nearly broke me.",
+      "expected": {
+        "score": 4.5,
+        "max_score": 11.75,
+        "score_pct": 38.3,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "news_values",
+          "contrast",
+          "for_you",
+          "plain_language"
+        ],
+        "hook_type": "narrative",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "give the first two sentences a turn (but / instead / stop / wrong)",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "preamble hard-fail",
+      "hook": "Hey guys, welcome back to the channel, today we talk about leads",
+      "expected": {
+        "score": 0.0,
+        "max_score": 11.75,
+        "score_pct": 0.0,
+        "passed": false,
+        "hard_fails": [
+          "preamble"
+        ],
+        "warns": [
+          "callout",
+          "news_values",
+          "contrast",
+          "for_you",
+          "retain_structure"
+        ],
+        "hook_type": "statement",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "give the first two sentences a turn (but / instead / stop / wrong)",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "more than 5 hashtags in the caption (hard-fail)",
+      "hook": "Stop guessing which ads work for your gym",
+      "caption": "Read this before you spend another dollar. #marketing #ads #growth #smallbusiness #leads #sales #gyms",
+      "expected": {
+        "score": 0.0,
+        "max_score": 11.75,
+        "score_pct": 0.0,
+        "passed": false,
+        "hard_fails": [
+          "hashtags"
+        ],
+        "warns": [
+          "callout",
+          "specificity",
+          "retain_structure"
+        ],
+        "hook_type": "command",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "put one exact number, $ or timeframe in the first sentence"
+        ]
+      }
+    },
+    {
+      "why": "undefined acronyms",
+      "hook": "Our CRM sends every SQL to the right rep in 5 minutes",
+      "expected": {
+        "score": 4.5,
+        "max_score": 11.75,
+        "score_pct": 38.3,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "news_values",
+          "contrast",
+          "for_you",
+          "acronyms_defined"
+        ],
+        "hook_type": "statement",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "give the first two sentences a turn (but / instead / stop / wrong)",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "all caps display copy (acronym rule skipped)",
+      "hook": "STOP LOSING LEADS AFTER 5PM",
+      "expected": {
+        "score": 7.5,
+        "max_score": 11.75,
+        "score_pct": 63.8,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "news_values",
+          "retain_structure"
+        ],
+        "hook_type": "command",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "contrast across two sentences",
+      "hook": "Everyone thinks they need more leads. Actually, they need faster replies.",
+      "expected": {
+        "score": 5.875,
+        "max_score": 11.75,
+        "score_pct": 50.0,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "specificity",
+          "news_values",
+          "retain_structure"
+        ],
+        "hook_type": "statement",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "put one exact number, $ or timeframe in the first sentence",
+          "borrow a second news value (recency, conflict, unusual, ongoing ...)"
+        ]
+      }
+    },
+    {
+      "why": "proper noun (celebrity news value) and recency",
+      "hook": "Last week Tesla raised prices again, and every dealer in Toronto noticed",
+      "expected": {
+        "score": 5.75,
+        "max_score": 11.75,
+        "score_pct": 48.9,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "contrast",
+          "plain_language",
+          "retain_structure"
+        ],
+        "hook_type": "narrative",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "give the first two sentences a turn (but / instead / stop / wrong)"
+        ]
+      }
+    },
+    {
+      "why": "defined acronym and a caption with a comment keyword",
+      "hook": "The ROI (return on investment) of a missed call is worse than you think",
+      "caption": "Comment AUDIT and I will send you the checklist.",
+      "expected": {
+        "score": 3.25,
+        "max_score": 11.75,
+        "score_pct": 27.7,
+        "passed": true,
+        "hard_fails": [],
+        "warns": [
+          "callout",
+          "specificity",
+          "news_values",
+          "contrast",
+          "acronyms_defined",
+          "retain_structure"
+        ],
+        "hook_type": "statement",
+        "suggestions": [
+          "name the reader in the first 8 words (\"if you run a ...\" or the audience noun)",
+          "put one exact number, $ or timeframe in the first sentence",
+          "give the first two sentences a turn (but / instead / stop / wrong)"
+        ]
+      }
+    }
+  ]
+}

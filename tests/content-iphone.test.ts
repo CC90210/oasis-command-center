@@ -651,7 +651,8 @@ async function main() {
 
   await check("D16: no Music tab (its slug files under Personal, never under Clients); no Requests card or count", async () => {
     const m = await import("../lib/founders-marketing-core");
-    assert.deepEqual(m.BRAND_GROUPS.map((g) => g.label), ["OASIS AI", "Personal", "Clients"]);
+    // Downloads is the Toolkit's tab for videos fetched from a link (PR #560); still no Music tab.
+    assert.deepEqual(m.BRAND_GROUPS.map((g) => g.label), ["OASIS AI", "Personal", "Downloads", "Clients"]);
     assert.equal(m.brandGroupFor("nostalgic-requests"), "conaugh", "a music asset lands in Personal");
     for (const g of m.BRAND_GROUPS) assert.doesNotMatch(g.empty, INTERNAL, `${g.label}: ${g.empty}`);
     const overview = code("app/founders/marketing/page.tsx");

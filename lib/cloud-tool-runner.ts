@@ -2017,7 +2017,7 @@ async function toolTextTorrentUnblock(input: Record<string, unknown>, ctx: ToolC
 // HTTP tools — open-web access with safety rails
 // ----------------------------------------------------------------------------
 
-function assertSafeUrl(url: string): URL {
+export function assertSafeUrl(url: string): URL {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -2077,7 +2077,7 @@ function assertSafeUrl(url: string): URL {
  *
  * 2026-05-16 Codex review finding #6 hardening.
  */
-async function assertResolvedIpIsPublic(host: string): Promise<void> {
+export async function assertResolvedIpIsPublic(host: string): Promise<void> {
   // Skip when the host is already a literal IP — assertSafeUrl above
   // handled it.
   if (/^[0-9.]+$/.test(host) || /^\[?[0-9a-f:]+\]?$/i.test(host)) return;
@@ -2143,7 +2143,15 @@ function sanitizeHeaders(input: unknown): Record<string, string> {
   return out;
 }
 
-async function fetchWithCap(url: URL, init: RequestInit): Promise<{ status: number; contentType: string; body: string; truncated: boolean }> {
+/**
+ * Exported for lib/tools/worker/learn-from-link.ts, which follows redirects by
+ * hand (a new assertSafeUrl and DNS check per hop): `location` is the 3xx
+ * answer's Location header, null otherwise.
+ */
+export async function fetchWithCap(
+  url: URL,
+  init: RequestInit,
+): Promise<{ status: number; contentType: string; body: string; truncated: boolean; location: string | null }> {
   // DNS-aware SSRF guard — resolves the hostname and rejects if it
   // points at a private / loopback / IMDS address. Defends against
   // attacker-controlled hostnames like `evil.com` that resolve to
@@ -2159,8 +2167,9 @@ async function fetchWithCap(url: URL, init: RequestInit): Promise<{ status: numb
     // the new URL (which re-runs SSRF checks).
     const res = await fetch(url.toString(), { ...init, signal: controller.signal, redirect: "manual" });
     const contentType = res.headers.get("content-type") || "";
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
     const reader = res.body?.getReader();
-    if (!reader) return { status: res.status, contentType, body: "", truncated: false };
+    if (!reader) return { status: res.status, contentType, body: "", truncated: false, location };
     const decoder = new TextDecoder();
     let body = "";
     let bytes = 0;
@@ -2176,7 +2185,7 @@ async function fetchWithCap(url: URL, init: RequestInit): Promise<{ status: numb
       }
       body += decoder.decode(value, { stream: true });
     }
-    return { status: res.status, contentType, body, truncated };
+    return { status: res.status, contentType, body, truncated, location };
   } finally {
     clearTimeout(timer);
   }

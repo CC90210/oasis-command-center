@@ -87,7 +87,7 @@ export const FOUNDERS_OWN_BRAND = "oasis-ai";
  * now sits in Personal - it is CC's own music brand - so the day one is
  * registered it shows there, and never falls into Clients by accident.
  */
-export type BrandGroupKey = "oasis-ai" | "conaugh" | "clients";
+export type BrandGroupKey = "oasis-ai" | "conaugh" | "downloads" | "clients";
 
 export type BrandGroup = {
   key: BrandGroupKey;
@@ -118,6 +118,17 @@ export const BRAND_GROUPS: readonly BrandGroup[] = [
     slugs: ["conaugh", "nostalgic-requests"],
     // Plain words: no agent name and no stored value on the screen.
     empty: "Nothing under the personal brand yet. What the marketing agent makes for CC's own channels lands here.",
+  },
+  {
+    // Videos the Toolkit's "Download a video" saved from Instagram, TikTok or
+    // YouTube (lib/tools/runner-handlers.ts): someone else's work with unknown
+    // rights, kept for analysis. Their own tab, so they never sit in OASIS's
+    // tab or its counts, and the founders publish route refuses any brand but
+    // OASIS's own, so a download cannot be posted from OASIS's accounts.
+    key: "downloads",
+    label: "Downloads",
+    slugs: ["downloads"],
+    empty: "Nothing downloaded yet.",
   },
   {
     key: "clients",
