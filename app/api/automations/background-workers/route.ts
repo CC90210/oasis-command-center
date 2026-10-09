@@ -10,7 +10,7 @@
  * Response shape:
  *   {
  *     ok: true,
- *     bridge_online: boolean,        // bridge_pairings.last_seen_at < 120s
+ *     bridge_online: boolean,        // lib/devices/presence.ts isOnline(bridge_pairings.last_seen_at)
  *     last_seen_at: string | null,
  *     workers: Array<{
  *       service: string,             // "pm2.sequence-runner", "skool_engine"
@@ -59,6 +59,7 @@ import {
 } from "@/lib/automations/worker-status";
 import { jsonRoute } from "@/lib/api-helpers";
 import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
+import { isOnline } from "@/lib/devices/presence";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -152,9 +153,8 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     );
   }
   const lastSeenAt = (pairing.data as { last_seen_at: string | null } | null)?.last_seen_at ?? null;
-  const bridgeOnline = lastSeenAt
-    ? Date.now() - new Date(lastSeenAt).getTime() < 120_000
-    : false;
+  // The one online rule every screen uses (lib/devices/presence.ts).
+  const bridgeOnline = isOnline(lastSeenAt, Date.now());
 
   // integrations_health is keyed (profile_id, service). When the bridge
   // hasn't pushed (no profile_id, or no rows), fall back to "unconfigured".

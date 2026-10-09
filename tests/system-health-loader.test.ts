@@ -357,12 +357,57 @@ async function main() {
     const offline = sh.describeVerdict({ machines: pc(3 * H), guards: sh.describeGuards(null, NOW), now: NOW });
     assert.match(offline.text, /CCPC \(Windows\) last checked in 3 h ago\.$/);
   });
-  await check("computer: online under 90 s, idle under 5 min, else offline", () => {
-    assert.equal(at.machineState(ago(89 * S), NOW), "online");
-    assert.equal(at.machineState(ago(91 * S), NOW), "idle");
-    assert.equal(at.machineState(ago(5 * MIN - S), NOW), "idle");
-    assert.equal(at.machineState(ago(5 * MIN + S), NOW), "offline");
+  await check("computer: ONE rule on every screen (lib/devices/presence.ts): online under 150 s, idle under 10 min, else offline", async () => {
+    const presence = await import("../lib/devices/presence");
+    assert.equal(at.machineState, presence.machineState, "System health reads the one rule");
+    assert.equal(at.machineState(ago(149 * S), NOW), "online");
+    assert.equal(at.machineState(ago(151 * S), NOW), "idle");
+    assert.equal(at.machineState(ago(10 * MIN - S), NOW), "idle");
+    assert.equal(at.machineState(ago(10 * MIN + S), NOW), "offline");
     assert.equal(at.machineState(null, NOW), "offline");
+    assert.equal(presence.isOnline(ago(149 * S), NOW), true);
+    assert.equal(presence.isOnline(ago(151 * S), NOW), false, "idle is not online");
+    // Every reader of a computer's check-in asks the one rule, and keeps no cutoff
+    // of its own (they were 5 min, 90 s then 5 min, and 2 min).
+    const { readFileSync, readdirSync, statSync } = await import("node:fs");
+    const { join, relative, sep } = await import("node:path");
+    const root = join(__dirname, "..");
+    const READERS = [
+      "lib/admin/attention.ts",
+      "lib/queries.ts",
+      "app/operations/page.tsx",
+      "lib/health/worker-reporter-checks.ts",
+      "app/api/automations/background-workers/route.ts",
+      "lib/setup-readiness.ts",
+      "components/settings/DevicesEditor.tsx",
+    ];
+    // The cutoffs they kept (90 s, 2 min, 5 min); other durations in them are not about a computer.
+    const OLD_CUTOFFS = /\b(?:90|120)_000\b|\b90 \* 1000\b|\b5 \* 60 \* 1000\b|\b5 \* 60_000\b/;
+    for (const f of READERS) {
+      const src = readFileSync(join(root, f), "utf8");
+      assert.match(src, /from "(?:@\/lib|\.)\/devices\/presence"/, `${f} does not read the one rule`);
+      assert.doesNotMatch(src, OLD_CUTOFFS, `${f} keeps a cutoff of its own`);
+    }
+    // Anywhere else: no line compares a check-in's age with a number of its own.
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const name of readdirSync(dir)) {
+        const full = join(dir, name);
+        if (/node_modules|\.next/.test(full)) continue;
+        if (statSync(full).isDirectory()) walk(full, out);
+        else if (/\.(ts|tsx)$/.test(name)) out.push(full);
+      }
+      return out;
+    };
+    const offenders: string[] = [];
+    for (const full of ["app", "components", "lib"].flatMap((d) => walk(join(root, d)))) {
+      const rel = relative(root, full).split(sep).join("/");
+      if (rel === "lib/devices/presence.ts") continue;
+      readFileSync(full, "utf8").split(/\r?\n/).forEach((line, i) => {
+        const code = line.replace(/\/\/.*$|^\s*\*.*$/, "");
+        if (/last_?seen/i.test(code) && /(?:getTime\(\)|Date\.parse\([^)]*\)|lastSeen)\s*<|<\s*\d/.test(code)) offenders.push(`${rel}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(offenders, [], "a check-in compared with a cutoff outside lib/devices/presence.ts");
   });
   await check("attention: 'warning' is 'warn'; each failure gets a what-to-do", () => {
     assert.equal(at.normaliseSeverity("warning"), "warn");

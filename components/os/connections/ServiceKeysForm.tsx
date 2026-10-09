@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
+import { testResultNotice } from "@/components/os/connections/test-notice";
 import type { ConnectorStatus } from "@/lib/os/connectors";
 
 type Row = {
@@ -67,7 +68,28 @@ function plainFailure(status: number, data: Record<string, unknown> | null): str
   if (status === 422 && typeof data?.error === "string" && data.error.trim()) return data.error;
   if (status === 401) return "Your session ended. Sign in again, then retry.";
   if (status === 403) return "Only an owner or admin can change these keys.";
-  return "OASIS could not finish that just now. Nothing else changed; try again in a minute.";
+  return "OASIS could not finish that just now. Try again in a minute.";
+}
+
+/** "A", "A and B", "A, B and C". */
+function listed(labels: readonly string[]): string {
+  return labels.length <= 1 ? labels.join("") : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
+/**
+ * A save or a removal that stopped part way, field by field: each field is its
+ * own request, so the ones before the failure did change. Says which did, which
+ * failed and why, and which were not tried, never "nothing else changed".
+ */
+function partWay(verb: "saved" | "removed", done: readonly string[], failed: string, why: string, untried: readonly string[]): string {
+  const were = (labels: readonly string[]) => (labels.length === 1 ? "was" : "were");
+  return [
+    done.length > 0 ? `${listed(done)} ${were(done)} ${verb}.` : "",
+    `${failed} was not ${verb}: ${why}`,
+    untried.length > 0 ? `${listed(untried)} ${were(untried)} not ${verb} either.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function ServiceKeysForm({
@@ -101,11 +123,11 @@ export function ServiceKeysForm({
         setLoadError(null);
       } else {
         console.error("[connections.keys.load]", r.status, j.error);
-        setLoadError(plainFailure(r.status, null));
+        setLoadError(r.status === 401 ? plainFailure(r.status, null) : "Refresh the page in a minute to try again.");
       }
     } catch (err) {
       console.error("[connections.keys.load]", err);
-      setLoadError("OASIS could not be reached. Check your connection.");
+      setLoadError("OASIS could not be reached. Check your connection, then refresh the page.");
     }
   }, [service]);
 
@@ -141,18 +163,22 @@ export function ServiceKeysForm({
     }
   };
 
+  const labelOf = (key: string) => schema.fields.find((f) => f.key === key)?.label ?? key;
+
   const save = () =>
     run("save", async () => {
       const entries = Object.entries(drafts).filter(([, v]) => v.trim());
-      for (const [field_key, value] of entries) {
+      const saved: string[] = [];
+      for (const [i, [field_key, value]] of entries.entries()) {
         const r = await send("POST", "/api/integrations/keys", { service, field_key, value });
         if (!r.ok) {
-          const label = schema.fields.find((f) => f.key === field_key)?.label ?? field_key;
-          setNotice({ tone: "err", text: `${label} was not saved: ${r.msg}` });
+          const untried = entries.slice(i + 1).map(([key]) => labelOf(key));
+          setNotice({ tone: "err", text: partWay("saved", saved, labelOf(field_key), r.msg, untried) });
           await reload();
           onChanged();
           return;
         }
+        saved.push(labelOf(field_key));
         setDrafts((d) => ({ ...d, [field_key]: "" }));
       }
       setNotice({ tone: "ok", text: "Saved." });
@@ -163,36 +189,26 @@ export function ServiceKeysForm({
   const test = () =>
     run("test", async () => {
       const r = await send("POST", "/api/integrations/keys/test", { service });
-      const detail = typeof r.data?.detail === "string" ? r.data.detail : null;
-      // A plain-state answer (Twilio) is shown as the provider check put it.
-      // Anything else names no code: the Status above, re-read after this,
-      // says in plain words what the check found.
-      const message = typeof r.data?.message === "string" ? r.data.message : null;
-      setNotice(
-        message
-          ? { tone: r.ok ? "ok" : "err", text: detail ? `${message} ${detail}` : message }
-          : r.ok
-            ? {
-                tone: "ok",
-                // Telegram names the bot and the chat it reached: the one thing
-                // that shows the alerts land where the owner reads them.
-                text: service === "telegram" && detail ? `The check with ${appName} passed: ${detail}.` : `The check with ${appName} passed.`,
-              }
-            : { tone: "err", text: `The check with ${appName} did not pass. The status above says what it found.` },
-      );
+      // What the check found, in the card's own words (test-notice.ts). The
+      // result is saved where the card reads it, so the Status above shows it
+      // after this re-read; when it could not be saved, the notice says so.
+      setNotice(testResultNotice({ service, appName, ok: r.ok, data: r.data, requestFailure: r.msg }));
       await reload();
       onChanged();
     });
 
   const remove = () =>
     run("remove", async () => {
+      const removed: string[] = [];
       try {
-        for (const r of stored) {
+        for (const [i, r] of stored.entries()) {
           const res = await send("DELETE", "/api/integrations/keys", { service, field_key: r.field_key });
           if (!res.ok) {
-            setNotice({ tone: "err", text: `Could not remove every saved value: ${res.msg}` });
+            const untried = stored.slice(i + 1).map((x) => labelOf(x.field_key));
+            setNotice({ tone: "err", text: partWay("removed", removed, labelOf(r.field_key), res.msg, untried) });
             break;
           }
+          removed.push(labelOf(r.field_key));
         }
       } finally {
         // Some fields may be gone even when a later one failed: always re-read,
@@ -224,7 +240,7 @@ export function ServiceKeysForm({
         <p className="text-[13px] text-fg-dim">Loading…</p>
       ) : loadError ? (
         <p className="rounded-lg border border-status-warm/30 bg-status-warm/10 px-3 py-2 text-[13px] leading-5 text-fg">
-          The saved keys could not be read, so nothing here is shown as set or missing. {loadError} Refresh to try again.
+          The saved keys could not be read, so nothing here is shown as set or missing. {loadError}
         </p>
       ) : (
         <form

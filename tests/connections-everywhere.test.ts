@@ -224,7 +224,7 @@ async function main() {
       // about OASIS's own vendor accounts, apps or approvals.
       assert.match(reason, /^Nothing in OASIS /, `${def.slug}: ${reason}`);
       assert.doesNotMatch(reason, /OASIS's own|OASIS's (Intuit|Xero|Plaid|Zoom|Meta|GoHighLevel)|partner access/i, `${def.slug}: ${reason}`);
-      const status = connectors.resolveConnectorStatus(def, { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [] }, Date.now());
+      const status = connectors.resolveConnectorStatus(def, { keyRows: [], personalGoogle: null, connections: [] }, Date.now());
       assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", "Not built yet", reason]);
     }
     assert.equal("plannedFor" in (notBuilt[0] as object), false, "the era label is gone from the catalog");

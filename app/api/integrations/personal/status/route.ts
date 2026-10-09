@@ -5,8 +5,9 @@
  *
  * Returns just presence + the few non-sensitive fields the Settings
  * UI needs to render the connected state. Tokens stay encrypted in
- * the DB; only the gmail_address + expires_at surface (so the operator
- * can see which account is linked + that it hasn't expired).
+ * the DB; only the Google address and the resolved status surface
+ * (lib/os/connectors.ts personalGoogleStatus): which account is linked,
+ * and whether it is ready for client invitations.
  */
 
 import { NextResponse } from "next/server";

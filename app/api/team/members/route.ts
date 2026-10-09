@@ -1,9 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
-import { getUserIntegrationBundle } from "@/lib/user-integration-store";
-import { systemCalendarConfig, hasRequiredScope } from "@/lib/integrations/google-calendar";
+import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
+import { readPersonalGoogleForLiveCheck } from "@/lib/integrations/personal-google";
+import { personalGoogleState } from "@/lib/os/connectors";
 import {
   canManageTeam,
   isTrueAdminRole,
@@ -114,7 +115,7 @@ async function probeToken(
   return verdict !== "dead";
 }
 
-async function calendarReadiness(tenantId: string, userId: string | null, profileEmail: string | null) {
+async function calendarReadiness(tenantId: string, userId: string | null) {
   if (!userId) {
     return {
       calendar_connected: false,
@@ -124,7 +125,16 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
     };
   }
   try {
-    const bundle = await getUserIntegrationBundle(tenantId, userId, "gmail_oauth");
+    // ═══ THE ONE READER FIRST (PR #553 review U6) ══════════════════════════
+    //
+    // The host's own Google connection is read through the one reader and
+    // predicate every other screen uses for it (lib/integrations/personal-
+    // google.ts, lib/os/connectors.ts personalGoogleState): Settings, the
+    // Connections card and Today say the same state for the same row. This
+    // form used to read the row with its own rule. It adds one thing only: a
+    // connection those screens call ready is spent against Google below.
+    const { fact, refreshToken } = await readPersonalGoogleForLiveCheck(tenantId, userId);
+    const state = personalGoogleState(fact);
     // ═══ PRESENCE IS NOT VALIDITY ═══════════════════════════════════════════
     //
     // This read `Boolean(bundle.refresh_token)` and called it connected. That is
@@ -143,16 +153,13 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
     // refresh token against Google's token endpoint. Revocation has no local
     // signal at all -- checking an `expires_at` column would not have caught
     // this, because the token had not expired, it had been withdrawn.
-    const hasToken = Boolean(bundle.refresh_token);
-    const connectedAddress = String(bundle.gmail_address || "").trim().toLowerCase();
-    const expectedAddress = String(profileEmail || "").trim().toLowerCase();
-    const identityMatches = Boolean(connectedAddress && expectedAddress && connectedAddress === expectedAddress);
-    // Only spend a network call when the cheap checks already pass -- a host
-    // with no token or the wrong scope is not connected regardless of Google.
-    const workspaceConnected =
-      hasToken && hasRequiredScope(bundle.scope) && identityMatches
-        ? await tokenUsable(String(bundle.refresh_token))
-        : false;
+    //
+    // Only spend a network call when the shared state is already "ready" -- a
+    // host with no token, the wrong scope or the wrong account is not
+    // connected regardless of Google. The token comes from the same read as
+    // the state: a second read of the row, which could fail on its own and
+    // then count the host as ready, is gone (PR #558 review).
+    const workspaceConnected = state === "ready" && refreshToken ? await tokenUsable(refreshToken) : false;
     // ═══ THESE TWO FLAGS WERE ALWAYS FALSE ═════════════════════════════════
     //
     // They read `workspaceConnected && !calendarConnected` and
@@ -169,19 +176,20 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
     // structurally incapable of being true is worse than an absent flag: it
     // reads as a definite "no problem here". (Caught by CC's agent, 2026-08-26.)
     //
-    // Each is now derived from the INPUTS rather than from the conclusion, so no
-    // flag can depend on the thing it is meant to explain.
+    // Each is now derived from the INPUTS (the shared state, and the live
+    // check) rather than from the conclusion, so no flag can depend on the
+    // thing it is meant to explain.
     const calendarConnected = workspaceConnected;
-    const identityMismatch = hasToken && Boolean(connectedAddress && expectedAddress) && !identityMatches;
+    const identityMismatch = state === "wrong_account";
     // A token that exists but does not work, for any reason OTHER than the host
     // having connected the wrong account -- that case gets its own, more
     // specific message and must not be flattened into a generic "reconnect".
-    const reconnectRequired = hasToken && !calendarConnected && !identityMismatch;
+    const reconnectRequired = state === "reconnect" || (state === "ready" && !calendarConnected);
     return {
       calendar_connected: calendarConnected,
       calendar_reconnect_required: reconnectRequired,
       calendar_identity_mismatch: identityMismatch,
-      connected_google_address: connectedAddress || null,
+      connected_google_address: fact.address?.trim().toLowerCase() || null,
     };
   } catch (err) {
     // Host readiness fails closed. Never include decrypted bundle fields in
@@ -243,8 +251,8 @@ export async function GET(req: NextRequest) {
       // A deactivated teammate cannot host a booking, so their token is never
       // spent on a Google probe; the null user id returns the not-connected shape.
       readiness: isActiveMember(member)
-        ? await calendarReadiness(ctx.tenantId, member.auth_user_id, member.email)
-        : await calendarReadiness(ctx.tenantId, null, null),
+        ? await calendarReadiness(ctx.tenantId, member.auth_user_id)
+        : await calendarReadiness(ctx.tenantId, null),
     })),
   );
   return NextResponse.json({

@@ -1,7 +1,7 @@
 /**
  * The facts the Connections hub computes statuses from, read once per render.
  *
- * Three reads, each failing on its own: a failed read becomes `null`, which
+ * Four reads, each failing on its own: a failed read becomes `null`, which
  * lib/os/connectors.ts turns into "Status unavailable" for exactly the cards
  * that depend on it. None of them is ever turned into "not connected", and no
  * credential VALUE leaves this file — listTenantIntegrationStatus returns
@@ -18,11 +18,15 @@
  *                      listActiveConnections). Before migration bravo__187 is
  *                      applied this read fails, and the cards it feeds say
  *                      "Status unavailable", not "Not connected".
+ *   serverChecks       OASIS's own workspaces only: the real checks of the
+ *                      values OASIS sets on its server, which have no saved
+ *                      row (lib/integrations/server-checks.ts — the latest Test
+ *                      of each app, and the mailbox's last send).
  *
- * No integrations_health heartbeat is read here any more (2026-10-08): for
- * Google and Telegram the only writer is OASIS's own computer reporting that a
- * key NAME is in its env file, which proved nothing and showed "Connected,
- * verified just now".
+ * A heartbeat that only says a key NAME is in an env file on OASIS's computer
+ * is never read as a check (2026-10-08): it proved nothing and showed
+ * "Connected, verified just now". The one heartbeat read is OASIS's own email
+ * sender's report of a real Gmail sign-in, through server-checks.ts.
  */
 
 import "server-only";
@@ -30,6 +34,7 @@ import "server-only";
 import { getTursoClient } from "@/lib/turso";
 import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
+import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
 import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
 import {
@@ -41,6 +46,7 @@ import {
   type ConnectorStatus,
   type KeyRowFact,
   type PersonalGoogleFact,
+  type ServerCheckFact,
 } from "@/lib/os/connectors";
 
 async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
@@ -72,6 +78,20 @@ async function loadPersonalGoogle(tenantId: string, userId: string): Promise<Per
   }
 }
 
+/**
+ * The real checks of the values OASIS sets on its own server. A client
+ * workspace never reads a server value, so it has none and costs no read.
+ */
+async function loadServerChecks(tenantId: string): Promise<ServerCheckFact[] | null> {
+  if (!tenantMayUseEnvFallback(tenantId)) return [];
+  try {
+    return await listServerChecks(tenantId);
+  } catch (error) {
+    console.error("[connections.facts.server_checks]", error);
+    return null;
+  }
+}
+
 async function loadConnections(tenantId: string): Promise<ConnectionFact[] | null> {
   try {
     const rows = await listActiveConnections(getTursoClient(), tenantId);
@@ -95,15 +115,25 @@ async function loadConnections(tenantId: string): Promise<ConnectionFact[] | nul
 export async function loadConnectorFacts(input: {
   tenantId: string;
   userId: string;
+  /**
+   * Read the viewer's own Google connection (the default). A screen that only
+   * counts the workspace's cards or shows cards other than Google's (the
+   * rail's dot, the Operations tile, Notifications, Chat apps) passes false:
+   * no card's kind depends on it, and the read decrypts the person's Google
+   * token bundle and reads their profile on every page (PR #553 review F5).
+   */
+  personal?: boolean;
 }): Promise<ConnectorFacts> {
-  const [keyRows, personalGoogle, connections] = await Promise.all([
+  const [keyRows, personalGoogle, connections, serverChecks] = await Promise.all([
     loadKeyRows(input.tenantId),
-    loadPersonalGoogle(input.tenantId, input.userId),
+    input.personal === false ? Promise.resolve(undefined) : loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
+    loadServerChecks(input.tenantId),
   ]);
   return {
     keyRows,
-    personalGoogle,
+    serverChecks,
+    ...(personalGoogle === undefined ? {} : { personalGoogle }),
     connections,
     appNotConfigured: appNotConfiguredProviders(),
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
@@ -115,9 +145,10 @@ export async function loadConnectorFacts(input: {
 /**
  * One workspace card's status, for a line elsewhere that must agree with that
  * card (the department tab's Slack line, the AI Team rows). The same resolver,
- * fed only the read the card's source needs: no card's state depends on the
- * viewer's own accounts, and one read instead of four keeps a busy page's
- * database reads bounded. Null for a slug the catalog does not have.
+ * fed only the reads the card's source needs (a key card in an OASIS
+ * workspace also reads its server checks): no card's state depends on the
+ * viewer's own accounts, and fewer reads keep a busy page's database reads
+ * bounded. Null for a slug the catalog does not have.
  */
 export async function loadWorkspaceConnectorStatus(
   tenantId: string,
@@ -127,15 +158,17 @@ export async function loadWorkspaceConnectorStatus(
   const def = connectorBySlug(slug);
   if (!def) return null;
   const framework = def.live?.source.kind === "tenant_connection";
-  const [keyRows, connections] = await Promise.all([
+  const [keyRows, connections, serverChecks] = await Promise.all([
     framework ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
     framework ? loadConnections(tenantId) : Promise.resolve([] as ConnectionFact[]),
+    framework ? Promise.resolve([] as ServerCheckFact[]) : loadServerChecks(tenantId),
   ]);
   return resolveConnectorStatus(
     def,
     {
+      // No personal read: no workspace card's state depends on the viewer.
       keyRows,
-      personalGoogle: null,
+      serverChecks,
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),

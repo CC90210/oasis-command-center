@@ -24,15 +24,33 @@
  *   - Bumps bridge_pairings.last_seen_at + last_seen_ip for the active token.
  *   - Stamps bridge_pairings.tool_capabilities when present in the body.
  *   - Upserts each service into integrations_health for the resolved tenant.
+ *     A report that only says a key NAME is on the computer (metadata.via
+ *     "env_key_present" / "local_install", lib/integrations/presence-heartbeat.ts)
+ *     never replaces a REAL result on the same row: OASIS's own email sender
+ *     writes its Gmail sign-in outcome to the "gws" row, and this minute-by-
+ *     minute scan used to reset it to healthy and clear its error (PR #553
+ *     review W5). The scan still creates a row, and refreshes its own. Any
+ *     key-name report takes that guarded write, whatever status it carries.
+ *   - Marks every row it writes as a computer's report (metadata._reported_by,
+ *     lib/integrations/presence-heartbeat.ts BRIDGE_REPORT_KEY), so no paired
+ *     computer can post a result that reads as OASIS's own email sender's
+ *     (PR #558 review).
  *
- * Returns: { ok, pairing_id, services_recorded, tool_capabilities_recorded }
+ * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded }
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient } from "@/lib/turso";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { CLI_INVENTORY_SERVICE } from "@/lib/bridge-cli-status";
+import {
+  BRIDGE_REPORT_KEY,
+  BRIDGE_REPORT_VALUE,
+  PRESENCE_ONLY_VIA,
+  isPresenceOnlyHeartbeat,
+} from "@/lib/integrations/presence-heartbeat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -134,11 +152,13 @@ export async function POST(req: NextRequest) {
   const tenantId = pairing.data.tenant_id;
   const services = body.services || {};
   let recorded = 0;
+  let realResultsKept = 0;
   let cliInventoryPersistFailed = false;
   for (const [service, report] of Object.entries(services)) {
     if (!service) continue;
     const status = (report.status || "unconfigured") as
       | "healthy" | "degraded" | "down" | "unconfigured";
+    const reported = report.metadata && typeof report.metadata === "object" && !Array.isArray(report.metadata) ? report.metadata : {};
     const payload: Record<string, unknown> = {
       tenant_id: tenantId,
       profile_id: profileId,
@@ -146,8 +166,24 @@ export async function POST(req: NextRequest) {
       status,
       last_ping_at: new Date().toISOString(),
       last_error: report.last_error || null,
-      metadata: report.metadata || {},
+      // Every row a computer reports is marked as its report (set last, so a
+      // computer cannot send it away): it is never read as the check of a value
+      // OASIS keeps on its server (lib/integrations/presence-heartbeat.ts).
+      metadata: { ...reported, [BRIDGE_REPORT_KEY]: BRIDGE_REPORT_VALUE },
     };
+    // Any key-name report, whatever status it carries, takes the guarded write:
+    // an older bridge's "unconfigured" scan must not erase a real result either.
+    if (isPresenceOnlyHeartbeat(payload.metadata)) {
+      const written = await recordPresence(payload);
+      if (written === null) {
+        if (service === CLI_INVENTORY_SERVICE) cliInventoryPersistFailed = true;
+      } else if (written) {
+        recorded += 1;
+      } else {
+        realResultsKept += 1;
+      }
+      continue;
+    }
     const r = await db
       .from("integrations_health")
       .upsert(payload, { onConflict: "profile_id,service" });
@@ -173,6 +209,45 @@ export async function POST(req: NextRequest) {
     ok: true,
     pairing_id: pairing.data.id,
     services_recorded: recorded,
+    real_results_kept: realResultsKept,
     tool_capabilities_recorded: toolCapsRecorded,
   });
+}
+
+/**
+ * A key-name report, written only where it cannot erase a real result: it
+ * creates the row, or refreshes a row that is itself a key-name report or
+ * holds no result ("unconfigured"). A row a real check wrote (a status of
+ * healthy, degraded or down with no key-name marker) is left as it is, in the
+ * same statement, so a check landing between a read and a write cannot be lost.
+ * True: written. False: a real result was kept. Null: the write failed (logged).
+ */
+async function recordPresence(payload: Record<string, unknown>): Promise<boolean | null> {
+  const via = PRESENCE_ONLY_VIA.map(() => "?").join(", ");
+  try {
+    const r = await getTursoClient().execute({
+      sql: `INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at, last_error, metadata, updated_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+            ON CONFLICT (profile_id, service) DO UPDATE SET
+              tenant_id = excluded.tenant_id, status = excluded.status, last_ping_at = excluded.last_ping_at,
+              last_error = NULL, metadata = excluded.metadata, updated_at = excluded.updated_at
+            WHERE COALESCE(integrations_health.status, '') NOT IN ('healthy', 'degraded', 'down')
+               OR (json_valid(integrations_health.metadata)
+                   AND json_extract(integrations_health.metadata, '$.via') IN (${via}))`,
+      args: [
+        payload.tenant_id as string,
+        payload.profile_id as string,
+        payload.service as string,
+        payload.status as string,
+        payload.last_ping_at as string,
+        JSON.stringify(payload.metadata ?? {}),
+        payload.last_ping_at as string,
+        ...PRESENCE_ONLY_VIA,
+      ],
+    });
+    return r.rowsAffected > 0;
+  } catch (error) {
+    console.error("[bridge.ping.presence]", { service: payload.service, error: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
 }

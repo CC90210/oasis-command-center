@@ -7,6 +7,12 @@
  * outbound SMS, no email, no Stripe charge). Test results are
  * persisted on the credential rows so the settings panel can render
  * "Verified · 5m ago" vs "Failed · invalid token".
+ *
+ * A value OASIS sets on its own server (an OASIS workspace's env fallback)
+ * has no credential row, so its result is kept on the workspace's check row
+ * instead (lib/integrations/server-checks.ts), which its card reads. The
+ * response says whether the result was saved where the card reads it
+ * (`recorded`), so the form never points at a status that cannot change.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -14,7 +20,9 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import {
   getTenantIntegrationBundle,
   recordIntegrationTest,
+  tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
+import { recordIntegrationCheck, serverSetFieldKeys } from "@/lib/integrations/server-checks";
 import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
@@ -25,7 +33,15 @@ import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type ProbeResult = { ok: boolean; error?: string; detail?: string; state?: string; message?: string };
+type ProbeResult = {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  state?: string;
+  message?: string;
+  /** Nothing was asked of the provider (a presence check, or no probe): never kept as a check. */
+  noLiveCheck?: boolean;
+};
 
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
@@ -73,6 +89,32 @@ export async function POST(req: NextRequest) {
     ),
   );
 
+  // Values OASIS sets on its own server have no row for the result above to
+  // land on: the workspace's check row carries it, and the card reads it for
+  // exactly those values. A presence-only "test" is not a check and is not kept.
+  let recorded = true;
+  if (!result.noLiveCheck) {
+    const fieldKeys = schema.fields.map((f) => f.key);
+    let serverSet: string[];
+    try {
+      serverSet = await serverSetFieldKeys(sess.tenantId, service, bundle, fieldKeys);
+    } catch (err) {
+      console.error("[integration-test.server_fields]", err);
+      // Unknown which values came from the server: keep the result (the card
+      // reads it for server values only, so it can never mislabel a saved one).
+      serverSet = tenantMayUseEnvFallback(sess.tenantId) ? fieldKeys : [];
+    }
+    if (serverSet.length > 0) {
+      recorded = await recordIntegrationCheck({
+        tenantId: sess.tenantId,
+        service,
+        ok: result.ok,
+        code: result.ok ? null : result.error || "unknown_error",
+        checkedBy: sess.profileId ?? null,
+      });
+    }
+  }
+
   // Twilio: the test also writes the workspace's webhook routing row, which
   // picks up OASIS's own deployment number too (never stored, so never saved).
   const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "tested") : undefined;
@@ -80,6 +122,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: result.ok,
     service,
+    recorded,
     error: result.ok ? null : result.error || "unknown_error",
     detail: result.detail || null,
     // Twilio: one plain state ("needs_number", ...) and the sentence the owner
@@ -134,7 +177,7 @@ async function runProbe(
         password: bundle.app_password,
       });
     default:
-      return { ok: false, error: `no_probe_for_${service}` };
+      return { ok: false, error: `no_probe_for_${service}`, noLiveCheck: true };
   }
 }
 
@@ -181,17 +224,17 @@ async function probeSmtp(input: {
 async function probePresence(
   service: string,
   bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
+): Promise<ProbeResult> {
   const schema = findTenantManuallyEditableIntegrationSchema(service);
-  if (!schema) return { ok: false, error: "unknown_service" };
+  if (!schema) return { ok: false, error: "unknown_service", noLiveCheck: true };
   const missing = schema.fields
     .filter((f) => !f.label.toLowerCase().includes("(optional)"))
     .filter((f) => !bundle[f.key])
     .map((f) => f.key);
   if (missing.length > 0) {
-    return { ok: false, error: `missing_fields: ${missing.join(", ")}` };
+    return { ok: false, error: `missing_fields: ${missing.join(", ")}`, noLiveCheck: true };
   }
-  return { ok: true, detail: "all required fields present (no live probe available)" };
+  return { ok: true, detail: "all required fields present (no live probe available)", noLiveCheck: true };
 }
 
 /**

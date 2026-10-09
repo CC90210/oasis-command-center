@@ -54,7 +54,7 @@ export default async function SettingsNotificationsPage() {
   const nowMs = Date.now();
   const [workspaceBot, yours] = await Promise.all([
     viewer.access.canManage && telegram
-      ? loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId }).then((facts) =>
+      ? loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId, personal: false }).then((facts) =>
           resolveConnectorStatus(telegram, facts, nowMs),
         )
       : Promise.resolve(null),
@@ -75,7 +75,8 @@ export default async function SettingsNotificationsPage() {
               <p className="mt-1 text-[13px] leading-5 text-fg-muted">
                 {workspaceBot
                   ? `The team bot set up in Connections, with the same status it shows there. ${workspaceBot.detail ?? ""}`
-                  : "The team bot is set up in Connections by an owner or admin."}
+                  : // Members are not shown the bot's status, so this says who sets it up, never that one exists.
+                    "An owner or admin sets up the team bot in Connections."}
               </p>
             </div>
             {workspaceBot && (

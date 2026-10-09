@@ -123,6 +123,7 @@ export default async function AiTeamPage() {
                 slack={lead.slack}
                 slackProblem={team.channels.slackProblem}
                 telegramSetUp={team.channels.telegramSetUp}
+                telegramProblem={team.channels.telegramProblem}
                 href={lead.departments[0]?.href ?? null}
                 control={lead.toggle ? <TeammateToggle {...lead.toggle} name={lead.name} /> : undefined}
               />
@@ -161,6 +162,7 @@ export default async function AiTeamPage() {
                 web={c.web}
                 webReason={c.webReason}
                 telegramSetUp={team.channels.telegramSetUp}
+                telegramProblem={team.channels.telegramProblem}
                 href={c.webHref}
                 badge={c.enabled ? "On" : "Off"}
                 control={c.toggle ? <TeammateToggle {...c.toggle} name={c.name} /> : undefined}

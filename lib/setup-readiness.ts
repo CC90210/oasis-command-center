@@ -21,6 +21,7 @@ import { aiServicesWithKey } from "@/lib/queries";
 import { readPersonalAiServices } from "@/lib/ai/workspace-account";
 import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
 import { connectorHref } from "@/lib/os/connectors";
+import { ONLINE_MS, isOnline } from "@/lib/devices/presence";
 import type { ManifestRequiredService } from "@/lib/manifest/schema";
 
 export type ReadinessItem = {
@@ -275,11 +276,8 @@ export async function loadReadinessReport(args: {
     last_seen_at: string | null;
   }[];
   const live = bridges.filter((b) => !b.revoked_at);
-  const fresh = live.filter((b) => {
-    if (!b.last_seen_at) return false;
-    const seen = Date.parse(b.last_seen_at);
-    return !Number.isNaN(seen) && Date.now() - seen < 5 * 60 * 1000;
-  });
+  // The one online rule every screen uses (lib/devices/presence.ts).
+  const fresh = live.filter((b) => isOnline(b.last_seen_at, Date.now()));
   tenant.push({
     key: "tenant.bridge",
     label: "Bridge / automations runner",
@@ -288,7 +286,8 @@ export async function loadReadinessReport(args: {
       fresh.length > 0
         ? `${fresh.length} bridge(s) live with fresh heartbeat.`
         : live.length > 0
-          ? `${live.length} paired but no heartbeat in last 5 min.`
+          ? // The cutoff is the one online rule's (ONLINE_MS), never a number of its own.
+            `${live.length} paired, but none is online (no check-in in the last ${ONLINE_MS / 60_000} minutes).`
           : "No bridge paired — automations (drips, daily plan, renewals) cannot fire.",
     cta:
       live.length === 0

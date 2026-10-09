@@ -274,7 +274,7 @@ async function main() {
     assert.deepEqual(appNotConfiguredProviders({}), ["slack"]);
     const status = connectors.resolveConnectorStatus(
       connectors.connectorBySlug("slack")!,
-      { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [], appNotConfigured: appNotConfiguredProviders({}) },
+      { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: appNotConfiguredProviders({}) },
       Date.now(),
     );
     assert.equal(status.kind, "coming_soon");

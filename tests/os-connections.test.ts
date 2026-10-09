@@ -847,8 +847,10 @@ async function main() {
     const feedA = await loadTenantFeed({ tenantId: TENANT_A });
     assert.ok(feedA.ok && !feedA.rows.some((r) => r.event_type === "CONNECTION_NEEDS_ATTENTION"), "another workspace saw B's alert");
     const item = (await needsYouFor(TENANT_B)).items.find((i) => i.id === "connection-stripe");
-    assert.deepEqual([item?.tone, item?.href], ["attention", "/settings/connections"]);
+    // The row is the Stripe card's own answer, and opens that card's drawer.
+    assert.deepEqual([item?.tone, item?.href], ["attention", "/settings/connections?app=stripe"]);
     assert.match(String(item?.detail), /^Missing: Subscriptions read\./);
+    assert.equal(String(item?.detail), String(card.detail), "the row says what the card says");
 
     STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false }) });
     assert.equal(((await test("stripe")).body.connection as Record<string, unknown>).verified, true);
