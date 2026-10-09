@@ -95,8 +95,9 @@ export function OfferBuilder({
   const pendingTicks = useRef<{ confirm: string[]; unconfirm: string[] }>({ confirm: [], unconfirm: [] });
   const conflict = useRef(false);
 
-  const saveOnce = useCallback(async (next: OfferPageDoc) => {
-    if (conflict.current) return;
+  /** One draft save; true only when the server took it. */
+  const saveOnce = useCallback(async (next: OfferPageDoc): Promise<boolean> => {
+    if (conflict.current) return false;
     setSaving("saving");
     const ticks = pendingTicks.current;
     pendingTicks.current = { confirm: [], unconfirm: [] };
@@ -116,15 +117,17 @@ export function OfferBuilder({
               ? `Not saved. ${fieldLabel(data.path, next)}: ${data.reason ?? "needs a change"}.`
               : "Not saved. Try again in a moment."),
         );
-        return;
+        return false;
       }
       versionRef.current = data.offer.version;
       setView(data.offer);
       setSaving("saved");
       setSaveError(null);
+      return true;
     } catch {
       setSaving("error");
       setSaveError("Not saved: the connection dropped. Your changes are still here; they save on the next edit.");
+      return false;
     }
   }, [form.id]);
   // One save at a time (lib/offer-pages/save-queue.ts): each sends the version
@@ -184,8 +187,14 @@ export function OfferBuilder({
       timer.current = null;
       if (doc) await save(doc);
     }
-    // A save already on its way moves the version on: publish the one it returns.
-    await saver.idle();
+    // A save already on its way moves the version on: publish the one it returns,
+    // and only once it landed. A refused or dropped save leaves the stored draft
+    // older than what the editor shows, and that older draft must not go live.
+    if (!(await saver.idle())) {
+      setPublishErrors(["Your latest changes aren't saved, so nothing was published. Fix what the message at the top says, then publish."]);
+      setBusy(false);
+      return;
+    }
     try {
       const res = await fetch(`/api/forms/${form.id}/offer/publish`, {
         method: "POST",

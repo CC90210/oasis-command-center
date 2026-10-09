@@ -13,7 +13,10 @@
  *   - while it waits only the newest value is kept (three edits made mid-save
  *     go out as one save, of the last edit);
  *   - save() resolves only once its value (or a newer one) is saved;
- *   - idle() waits for the save in flight (Publish reads the version after it);
+ *   - idle() waits for the save in flight (Publish reads the version after it),
+ *     and answers whether the last save landed: a refused save, someone else's
+ *     save or a throw is "not landed", so Publish never sends an older stored
+ *     draft while the editor shows newer changes (CodeRabbit on #557, round 2);
  *   - a save that throws does not jam the queue: the next one goes out;
  *   - the builder is wired to it (components/offer-pages/builder/OfferBuilder.tsx,
  *     read as source: a client component has no DOM to drive here): every
@@ -66,12 +69,14 @@ function server(): Server {
   };
 }
 
-/** The builder's side: every save sends the version the last save returned. */
+/** The builder's side: every save sends the version the last save returned, and says whether it landed. */
 function builder(s: Server) {
   let versionRef = 0;
   return serialSaver(async (value: string) => {
     const r = await s.put(value, versionRef);
-    if (r !== "draft_conflict") versionRef = r;
+    if (r === "draft_conflict") return false;
+    versionRef = r;
+    return true;
   });
 }
 
@@ -161,10 +166,37 @@ async function main() {
     const q = serialSaver(async (v: string) => {
       calls += 1;
       if (v === "boom") throw new Error("connection dropped");
+      return true;
     });
     await assert.rejects(q.save("boom"), /connection dropped/);
     await q.save("after");
     assert.equal(calls, 2);
+  });
+
+  await t("idle() says whether the last save landed: refused, conflicted or thrown is not landed", async () => {
+    let answer: boolean | "throw" = true;
+    const q = serialSaver(async () => {
+      if (answer === "throw") throw new Error("connection dropped");
+      return answer;
+    });
+    assert.equal(await q.idle(), true, "before any save there is nothing unsaved");
+    answer = false;
+    await q.save("refused");
+    assert.equal(await q.idle(), false, "a refused save reads as landed: Publish would send the older stored draft");
+    answer = true;
+    await q.save("fixed");
+    assert.equal(await q.idle(), true);
+    answer = "throw";
+    await q.save("dropped").catch(() => undefined);
+    assert.equal(await q.idle(), false, "a save that threw reads as landed");
+    // While a save is in flight, idle() waits for it and answers for it.
+    let release: (ok: boolean) => void = () => undefined;
+    const held = serialSaver(() => new Promise<boolean>((resolve) => (release = resolve)));
+    void held.save("slow");
+    await turn();
+    const pending = held.idle();
+    release(false);
+    assert.equal(await pending, false, "idle() answered before the save in flight had landed");
   });
 
   await t("the builder is wired to the queue: every save goes through it, Publish waits for it", async () => {
@@ -173,9 +205,16 @@ async function main() {
     assert.match(src, /const save = saver\.save;/, "the builder's save bypasses the queue (two saves in flight read as someone else's edit)");
     assert.equal((src.match(/\bsaveOnce\(/g) || []).length, 0, "saveOnce is called directly, outside the queue");
     const publish = src.slice(src.indexOf("async function publish()"), src.indexOf("async function unpublish()"));
-    const idleAt = publish.indexOf("await saver.idle();");
-    assert.ok(idleAt > 0, "Publish does not wait for the save in flight");
+    const idleAt = publish.indexOf("if (!(await saver.idle())) {");
+    assert.ok(idleAt > 0, "Publish does not wait for the save in flight, or publishes after a save that did not land");
     assert.ok(idleAt < publish.indexOf("/offer/publish"), "Publish reads the version before the save in flight lands");
+    const stop = publish.slice(idleAt, publish.indexOf("/offer/publish"));
+    assert.match(stop, /setPublishErrors\(/, "a save that did not land stops Publish without telling the owner");
+    assert.match(stop, /return;/, "Publish goes ahead after a save that did not land");
+    // saveOnce answers for every path: true only once the server took the draft.
+    const once = src.slice(src.indexOf("const saveOnce = useCallback("), src.indexOf("const saver = useMemo("));
+    assert.equal((once.match(/return true;/g) || []).length, 1, "saveOnce reports success other than after the server took the draft");
+    assert.equal((once.match(/return false;/g) || []).length, 3, "a refused save, a conflict or a dropped connection does not report failure");
     // A refused save names the field in words (lib/offer-pages/field-labels.ts), never by its path.
     assert.match(src, /fieldLabel\(data\.path, next\)/, "a refused save no longer names the field in words");
     assert.doesNotMatch(src, /\$\{data\.path/, "a refused save prints the raw path");

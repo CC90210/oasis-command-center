@@ -10,19 +10,25 @@
  * for the one in flight; while it waits only the newest value is kept, and it
  * is sent once the first save has moved the version on.
  *
+ * DID IT LAND. saveOnce answers whether the server took the save (a refused
+ * field, someone else's save, a dropped connection: false). idle() hands that
+ * answer to Publish, which must never publish the stored draft while the
+ * editor shows newer changes that did not save (CodeRabbit on #557).
+ *
  * Pure, and per builder instance (never module scope), so the test drives it
  * with promises it controls.
  */
 export type SerialSaver<T> = {
   /** Save `value` after any save in flight. Resolves once it, or a newer value, is saved. */
   save(value: T): Promise<void>;
-  /** Resolves when no save is in flight (at once when none is). */
-  idle(): Promise<void>;
+  /** Resolves when no save is in flight (at once when none is): did the last save land? (true before any.) */
+  idle(): Promise<boolean>;
 };
 
-export function serialSaver<T>(saveOnce: (value: T) => Promise<void>): SerialSaver<T> {
+export function serialSaver<T>(saveOnce: (value: T) => Promise<boolean>): SerialSaver<T> {
   let queued: { value: T } | null = null;
   let running: Promise<void> | null = null;
+  let lastLanded = true;
   return {
     save(value: T): Promise<void> {
       queued = { value };
@@ -32,7 +38,9 @@ export function serialSaver<T>(saveOnce: (value: T) => Promise<void>): SerialSav
           while (queued) {
             const next = queued.value;
             queued = null;
-            await saveOnce(next);
+            // Not landed until saveOnce says so: a save that throws counts as failed.
+            lastLanded = false;
+            lastLanded = (await saveOnce(next)) === true;
           }
         } finally {
           running = null;
@@ -40,8 +48,9 @@ export function serialSaver<T>(saveOnce: (value: T) => Promise<void>): SerialSav
       })();
       return running;
     },
-    idle(): Promise<void> {
-      return running ?? Promise.resolve();
+    async idle(): Promise<boolean> {
+      if (running) await running.catch(() => undefined);
+      return lastLanded;
     },
   };
 }
