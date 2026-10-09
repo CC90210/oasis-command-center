@@ -270,7 +270,7 @@ async function main() {
     ]);
   });
 
-  await check("with the secrets absent, the Slack card says 'app not configured yet' and offers no connect", () => {
+  await check("with the secrets absent, the Slack card says OASIS is registering with Slack and offers no connect", () => {
     assert.deepEqual(appNotConfiguredProviders({}), ["slack"]);
     const status = connectors.resolveConnectorStatus(
       connectors.connectorBySlug("slack")!,
@@ -278,7 +278,7 @@ async function main() {
       Date.now(),
     );
     assert.equal(status.kind, "coming_soon");
-    assert.equal(status.label, "Slack app not configured yet");
+    assert.equal(status.label, "OASIS is registering with Slack");
     assert.deepEqual(appNotConfiguredProviders(SLACK_ENV), []);
   });
 
@@ -373,12 +373,13 @@ async function main() {
     assert.equal(alpha.account, "Alpha Slack");
     const bravo = (await loadConnectorStatuses({ tenantId: BRAVO_CO, userId: USERS.ownerB.id })).slack;
     assert.notEqual(bravo.kind, "connected", "another workspace's card is untouched");
-    // CC's model (W10a R1): a client connects its own Slack app, which is not
-    // built yet; OASIS's own workspace uses the OASIS app.
-    assert.deepEqual([bravo.kind, bravo.label], ["coming_soon", "Not built yet"]);
-    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["Your own Slack app", "Not built yet"]]);
+    // CC, 2026-10-02 / 2026-10-09: every workspace, client or OASIS, installs
+    // the one OASIS Slack app; a client never builds one. With OASIS's app set
+    // up here, another client can install it too.
+    assert.deepEqual([bravo.kind, bravo.label], ["not_connected", "Not connected"]);
+    assert.deepEqual(bravo.paths?.map((p) => [p.title, p.state]), [["The OASIS Slack app", "Available"]]);
     const paths = connectors.connectorBySlug("slack")!.paths ?? [];
-    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "Your own Slack app", false]]);
+    assert.deepEqual(paths.map((p) => [p.audience, p.title, p.built]), [["oasis", "The OASIS Slack app", true], ["client", "The OASIS Slack app", true]]);
     assert.ok(paths.every((p) => !/OASIS's own included|every workspace/i.test(p.body)), "no path claims to be every workspace's way in");
   });
 
