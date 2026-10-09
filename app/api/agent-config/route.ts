@@ -1,7 +1,12 @@
 /**
  * GET  /api/agent-config              — list this tenant's per-agent configs
- *                                        (api key NEVER returned, only `has_key: true|false`)
+ *                                        (api key NEVER returned, only `has_key: true|false`).
+ *                                        The workspace's AI account row
+ *                                        (lib/ai/workspace-account.ts) is not a
+ *                                        teammate and is never listed.
  * POST /api/agent-config              — upsert config + encrypted key
+ *                                        (provider "ollama": the verified
+ *                                        platform operator only, 403 otherwise)
  *
  * POST body:
  *   {
@@ -15,11 +20,12 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
+import { getAuthedSupabase, getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { PROVIDER_LABEL, PROVIDER_MODELS, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { canManageTeam, getSessionContext } from "@/lib/team";
+import { LOCAL_MODEL_REFUSAL, WORKSPACE_AI_AGENT_KEY, mayUseLocalModel } from "@/lib/ai/workspace-account";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -58,7 +64,8 @@ export async function GET(req: NextRequest) {
   }
   const { data, error } = await q;
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  const configs = (data || []).map((row) => ({
+  // The workspace's AI account row is not a teammate: no list may show it.
+  const configs = (data || []).filter((row) => row.agent_key !== WORKSPACE_AI_AGENT_KEY).map((row) => ({
     agent_key: row.agent_key,
     provider: row.provider,
     model: row.model,
@@ -94,6 +101,14 @@ export async function POST(req: NextRequest) {
   const provider = String(body?.provider || "");
   if (!Object.keys(PROVIDER_MODELS).includes(provider)) {
     return NextResponse.json({ ok: false, error: `invalid_provider:${provider}` }, { status: 400 });
+  }
+  // A local model server's "key" is a web address the server calls: the
+  // verified platform operator's only (lib/ai/workspace-account.ts, AIP-11).
+  if (provider === "ollama") {
+    const user = await getSessionUser();
+    if (!(await mayUseLocalModel(user?.id, user?.email))) {
+      return NextResponse.json({ ok: false, error: "local_model_not_allowed", message: LOCAL_MODEL_REFUSAL }, { status: 403 });
+    }
   }
   const model = String(body?.model || "").trim();
   if (!model) return NextResponse.json({ ok: false, error: "missing_model" }, { status: 400 });

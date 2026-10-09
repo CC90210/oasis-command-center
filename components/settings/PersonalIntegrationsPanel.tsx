@@ -24,17 +24,54 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Loader2, Check, AlertCircle, X } from "lucide-react";
+import { StatusLine } from "@/components/os/connections/StatusLine";
+import type { ConnectorStatus } from "@/lib/os/connectors";
 
 type PersonalStatus = {
   service: string;
   connected: boolean;
   gmail_address?: string | null;
-  expires_at?: string | null;
   calendar_connected?: boolean;
   calendar_reconnect_required?: boolean;
   calendar_identity_mismatch?: boolean;
   expected_work_email?: string | null;
+  /**
+   * Your own Google account in the words every screen uses for it
+   * (lib/os/connectors.ts personalGoogleStatus, served by the status route):
+   * the Connections card and Today say the same.
+   */
+  status?: { state: string; kind: ConnectorStatus["kind"]; label: string; detail: string | null };
 };
+
+/** Why Google's sign-in came back without a connection, in plain words (the callback's reason codes). */
+function googleSignInProblem(reason: string | null): string {
+  switch (reason) {
+    case "access_denied":
+      return "You cancelled on Google's screen.";
+    case "state_secret_missing":
+    case "client_creds_missing":
+      return "Google sign-in is not set up on this deployment yet.";
+    case "missing_code_or_state":
+    case "malformed_state":
+    case "state_signature_invalid":
+    case "state_expired":
+    case "session_mismatch":
+    case "unknown_mailbox":
+      return "The sign-in link expired or was opened in another session. Start again from this page.";
+    case "gmail_send_scope_not_granted":
+    case "gmail_readonly_scope_not_granted":
+    case "calendar_events_scope_not_granted":
+      return "Google did not grant every permission OASIS asks for. Connect again and leave every box ticked.";
+    case "userinfo_email_missing":
+      return "Google did not say which address signed in. Try again.";
+    case "google_account_must_match_profile_email":
+      return "That Google account is not your work email. Sign in with your work account.";
+    case "store_failed":
+      return "Google signed you in, but OASIS could not save the connection. Try again.";
+    default:
+      return "Google did not finish the sign-in. Try again.";
+  }
+}
 
 export function PersonalIntegrationsPanel({
   // When false (shared-inbox tenants like SunBiz), suppress the personal
@@ -327,7 +364,8 @@ export function PersonalIntegrationsPanel({
         message?: string;
       };
       if (!body.ok || !body.url) {
-        setError(body.message || body.error || `connect_failed:${r.status}`);
+        console.error("[PersonalIntegrationsPanel.connectGmail]", r.status, body.error);
+        setError(body.message || "OASIS could not start the Google sign-in. Try again in a minute.");
         setBusyService(null);
         return;
       }
@@ -336,13 +374,14 @@ export function PersonalIntegrationsPanel({
       // /settings/connections?app=google-workspace&gmail_oauth=connected (or =error).
       window.location.href = body.url;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "connect_failed");
+      console.error("[PersonalIntegrationsPanel.connectGmail]", e);
+      setError("OASIS could not reach Google sign-in. Check your connection and try again.");
       setBusyService(null);
     }
   }
 
   async function disconnectGmail() {
-    if (!confirm("Disconnect Google Workspace? Email sends will fall back to the workspace default sender, and this host will no longer be able to create founder meetings.")) return;
+    if (!confirm("Disconnect your own Google account? Email sends will fall back to the workspace default sender, and you will no longer be able to send Calendar invites as yourself.")) return;
     setBusyService("gmail_oauth");
     try {
       const r = await fetch("/api/integrations/personal/disconnect", {
@@ -352,7 +391,8 @@ export function PersonalIntegrationsPanel({
       });
       if (!r.ok) {
         const body = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(body.error || `disconnect_failed:${r.status}`);
+        console.error("[PersonalIntegrationsPanel.disconnectGmail]", r.status, body.error);
+        setError("OASIS could not disconnect your Google account. It is still connected; try again.");
       } else {
         await refresh();
       }
@@ -363,9 +403,13 @@ export function PersonalIntegrationsPanel({
 
   const gmailStatus = statuses?.find((s) => s.service === "gmail_oauth");
   const gmailConnected = gmailStatus?.connected === true;
-  const calendarConnected = gmailStatus?.calendar_connected === true;
-  const calendarReconnectRequired = gmailStatus?.calendar_reconnect_required === true;
-  const calendarIdentityMismatch = gmailStatus?.calendar_identity_mismatch === true;
+  // Your own Google account, exactly as the Connections card and Today say it.
+  // A response without it (an older server mid-deploy) is "could not check",
+  // never "Not connected".
+  const yourGoogle: ConnectorStatus = gmailStatus?.status
+    ? { kind: gmailStatus.status.kind, label: gmailStatus.status.label, detail: gmailStatus.status.detail ?? undefined }
+    : { kind: "unknown", label: "Status unavailable", detail: "OASIS could not check your Google account right now. That does not mean it is disconnected." };
+  const calendarReconnectRequired = gmailStatus?.status?.state === "reconnect" || gmailStatus?.status?.state === "wrong_account";
 
   return (
     <div className="space-y-4">
@@ -376,24 +420,20 @@ export function PersonalIntegrationsPanel({
           <span>
             {oauthMailbox === "personal"
               ? `Personal Gmail connected${oauthEmail ? ` (${oauthEmail})` : ""}. This mailbox is kept separate from client Calendar invitations.`
-              : `Google Workspace connected${oauthEmail ? ` (${oauthEmail})` : ""}. Gmail and founder-meeting Calendar access are ready after the work-address identity check.`}
+              : `Google signed you in${oauthEmail ? ` as ${oauthEmail}` : ""}. Its state is below.`}
           </span>
         </div>
       )}
       {oauthFlash === "denied" && (
         <div className="flex items-start gap-2 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-md p-3">
           <X className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>
-            Google Workspace connection cancelled{oauthReason ? ` (${oauthReason})` : ""}. You can try again any time.
-          </span>
+          <span>Google sign-in was not completed. {googleSignInProblem(oauthReason)}</span>
         </div>
       )}
       {oauthFlash === "error" && (
         <div className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-md p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>
-            Google Workspace connection failed{oauthReason ? `: ${oauthReason}` : ""}. Reach out to support if it persists.
-          </span>
+          <span>Your Google account was not connected. {googleSignInProblem(oauthReason)}</span>
         </div>
       )}
 
@@ -425,34 +465,12 @@ export function PersonalIntegrationsPanel({
           <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-fg">Your work Google Workspace (Gmail + Calendar)</span>
-                  {calendarConnected ? (
-                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                      <Check className="w-3 h-3" />
-                      Connected
-                    </span>
-                  ) : calendarIdentityMismatch ? (
-                    <span className="badge badge-danger">Wrong Google account</span>
-                  ) : calendarReconnectRequired ? (
-                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                      <AlertCircle className="w-3 h-3" />
-                      Reconnect once
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
-                      Not connected
-                    </span>
-                  )}
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-semibold text-sm text-fg">Your own Google account (Gmail + Calendar)</span>
+                  <StatusLine status={yourGoogle} />
                 </div>
                 <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-                  {calendarConnected
-                    ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}. Gmail sends and read-only monitoring are active, and this host can create Google Calendar invites with Meet links.`
-                    : calendarIdentityMismatch
-                      ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this profile must send client invitations as ${gmailStatus?.expected_work_email || "its OASIS work email"}. Reconnect with the matching work account.`
-                    : calendarReconnectRequired
-                      ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Founder hosts reconnect once to enable Calendar invites and Google Meet.`
-                      : "No personal Google OAuth is saved for this login. A shared workspace sender may still be available, but this status describes only your seat. Connect your own work account for Gmail sends, read-only deal-email monitoring, and Calendar invites with Google Meet."}
+                  {yourGoogle.detail} This is your login only; the workspace&apos;s shared mailbox is a separate card in Connections.
                 </div>
               </div>
               <div className="shrink-0 flex flex-col gap-1.5">
@@ -484,7 +502,7 @@ export function PersonalIntegrationsPanel({
                     className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
                   >
                     {busyService === "gmail_oauth" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                    Connect Google Workspace
+                    Connect your Google account
                   </button>
                 )}
                 {calendarReconnectRequired && (

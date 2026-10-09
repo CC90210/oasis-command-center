@@ -16,10 +16,11 @@
  *   - a department speaks only through the agent this workspace binds to it
  *     (components/os/department/config.ts): a client workspace never gets an
  *     OASIS persona, and the reply names the DEPARTMENT, never the agent;
- *   - the model is paid by the WORKSPACE's own key (agent_model_config `bravo`
- *     row with user_id IS NULL) or, only when the caller hands one in, the
- *     platform key: each caller resolves it behind the verified operator check
- *     (lib/platform-operator.ts), never this module;
+ *   - the model is paid by the WORKSPACE's own AI account (lib/ai/
+ *     workspace-account.ts: the account row the team-wide connect writes, or
+ *     the legacy `bravo` workspace row) or, only when the caller hands one in,
+ *     the platform key: each caller resolves it behind the verified operator
+ *     check (lib/platform-operator.ts), never this module;
  *   - the month's AI budget is checked before a model is called, and every
  *     model call is metered (lib/ai/usage.ts), under the department.
  *
@@ -29,7 +30,6 @@
  */
 import "server-only";
 import { decryptField } from "@/lib/field-encryption";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider, type StreamEvent } from "@/lib/providers";
 import type { OperatorFallback } from "@/lib/operator-credentials";
 import { getAgentBySlug } from "@/lib/agents/loader";
@@ -47,7 +47,7 @@ import {
   type TurnFailureCode,
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
-import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
+import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
 import { redactAll } from "@/lib/secret-redaction";
 
@@ -72,6 +72,13 @@ export type AgentTurnRequest = {
   /** The job the turn belongs to (a Slack event), for the usage ledger. */
   jobId?: string | null;
   chatMode?: "plan" | "build";
+  /**
+   * The caller verified the person is the platform operator: a workspace
+   * account on a local model server (its "key" is a web address the server
+   * calls) may answer for them, and for nobody else. Absent (a Slack mention)
+   * is no: such an account is treated as no usable account.
+   */
+  localModelAllowed?: boolean;
 };
 
 export type PreparedTurn = {
@@ -87,6 +94,8 @@ export type PreparedTurn = {
   system: string;
   meter: ModelCallMeter;
   revealModel: boolean;
+  /** Carried to lib/providers.ts, which calls a local model server only with it. */
+  localModelAllowed: boolean;
 };
 
 export type PrepareRefusal = {
@@ -172,33 +181,32 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const channelKey = dept ? departmentChannelKey(dept.key) : agentChannelKey(agent.slug);
   const binding = manifest.agents.find((a) => a.slug === agent.slug);
 
-  // The WORKSPACE row (user_id IS NULL) of the `bravo` config: a teammate's
-  // personal key never answers a shared channel.
-  const service = getServiceSupabase();
-  const cfgRes = await service
-    .from("agent_model_config")
-    .select("provider, model, encrypted_api_key, enabled")
-    .eq("tenant_id", tenantId)
-    .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
-    .is("user_id", null)
-    .maybeSingle();
-  // A failed read is not "no key": answering 412 would send the owner to
-  // connect an account that is already connected.
-  if (cfgRes.error) {
-    console.error("[department-agent.config]", { tenantId, error: cfgRes.error.message });
+  // The workspace's AI account (lib/ai/workspace-account.ts): the account the
+  // owner connected for the whole team, whatever teammates the workspace has.
+  // A teammate's personal key never answers a shared channel.
+  let cfg: WorkspaceAiAccount | null;
+  try {
+    cfg = await readWorkspaceAiAccount(tenantId);
+  } catch (err) {
+    // A failed read is not "no key": answering 412 would send the owner to
+    // connect an account that is already connected.
+    console.error("[department-agent.config]", { tenantId, error: err instanceof Error ? err.message : String(err) });
     return { ok: false, status: 503, error: "config_unavailable" };
   }
-  const cfg = cfgRes.data as { provider: string; model: string; encrypted_api_key: string | null; enabled: unknown } | null;
 
   let provider: Provider;
   let model: string;
   let apiKey = "";
   let keySource: "tenant" | "platform" = "tenant";
-  if (cfg && (cfg.enabled === true || cfg.enabled === 1) && cfg.encrypted_api_key) {
-    provider = cfg.provider as Provider;
+  // A local model account answers only with the caller's verified-operator
+  // verdict; for anyone else (and for every Slack mention) it is no usable
+  // account, so no request to its address is ever made (Codex review, PR #535).
+  const localModelAllowed = req.localModelAllowed === true;
+  if (hasUsableKey(cfg) && (cfg.provider !== LOCAL_MODEL_PROVIDER || localModelAllowed)) {
+    provider = cfg.provider;
     model = binding?.model_override || cfg.model;
     try {
-      apiKey = decryptField(cfg.encrypted_api_key);
+      apiKey = decryptField(cfg.encryptedApiKey);
     } catch {
       return { ok: false, status: 500, error: "key_unreadable", recordAs: "key_unreadable", agentSlug: agent.slug, channelKey };
     }
@@ -280,6 +288,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       system,
       meter,
       revealModel: req.revealModel,
+      localModelAllowed,
     },
   };
 }
@@ -292,6 +301,7 @@ export function streamAgentTurn(turn: PreparedTurn, messages: readonly ChatMessa
     model: turn.model,
     apiKey: isOllama ? "" : turn.apiKey,
     baseUrl: isOllama ? turn.apiKey : undefined,
+    allowLocalModel: turn.localModelAllowed,
     system: turn.system,
     messages: messages.filter((m) => m.role === "user" || m.role === "assistant"),
     maxTokens,

@@ -12,6 +12,8 @@
  * is what lets tests/os-connectors.test.ts exercise every persona in bare node.
  */
 
+import { dbBool } from "@/lib/db-bool";
+
 export type SettingsSectionKey =
   | "profile"
   | "team"
@@ -107,12 +109,14 @@ export function canManageWorkspaceSettings(
   } | null,
   canSeeSystemSurfaces: boolean | undefined,
 ): boolean {
+  // Both flags through dbBool (lib/db-bool.ts): `!!` read a stored "0" as an
+  // owner, `=== true` refused the stored grant (1).
   return (
     !!profile &&
-    (!!profile.is_owner ||
+    (dbBool(profile.is_owner) ||
       profile.team_role === "owner" ||
       profile.team_role === "admin" ||
-      profile.admin_access === true) &&
+      dbBool(profile.admin_access)) &&
     (canSeeSystemSurfaces ?? true)
   );
 }

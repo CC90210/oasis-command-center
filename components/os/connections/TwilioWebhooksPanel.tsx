@@ -66,9 +66,10 @@ export function applyResultNotice(
     return { tone: "err", text: "OASIS did not answer, so the update could not be confirmed. Check the webhook settings in Twilio." };
   }
   if (res.ok && data?.ok) return { tone: "ok", text: data.message || "Twilio now calls OASIS." };
+  if (!data?.message) console.error("[connections.twilio.webhooks.apply]", res.status, data?.error);
   return {
     tone: "err",
-    text: data?.message || `The update could not be confirmed (${data?.error || `HTTP ${res.status}`}). Check the webhook settings in Twilio.`,
+    text: data?.message || "The update could not be confirmed. Check the webhook settings in Twilio.",
   };
 }
 
@@ -87,10 +88,12 @@ export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean
         setInfo(data);
         setLoadError(null);
       } else {
-        setLoadError(data?.error || `HTTP ${res.status}`);
+        console.error("[connections.twilio.webhooks.load]", res.status, data?.error);
+        setLoadError("OASIS could not read them just now.");
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "network_error");
+      console.error("[connections.twilio.webhooks.load]", err);
+      setLoadError("OASIS could not be reached.");
     }
   }, []);
 
@@ -130,7 +133,7 @@ export function TwilioWebhooksPanel({ canManage, version }: { canManage: boolean
 
       {loadError ? (
         <p className="rounded-lg border border-status-warm/30 bg-status-warm/10 px-3 py-2 text-[13px] leading-5 text-fg">
-          The webhook addresses could not be read ({loadError}). Refresh to try again.
+          The webhook addresses could not be read: {loadError} Refresh to try again.
         </p>
       ) : !info ? (
         <p className="text-[13px] text-fg-dim">Loading...</p>

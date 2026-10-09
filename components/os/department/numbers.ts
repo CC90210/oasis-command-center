@@ -73,7 +73,7 @@ import {
 import { loadEmpireRoutines, type Read } from "./routines";
 import type { OsViewer } from "./viewer";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import { connectionsHealth, type ConnectionsHealth } from "@/lib/os/connectors";
+import { connectionsHealth, connectorBySlug, type ConnectionsHealth } from "@/lib/os/connectors";
 
 export type AttentionItem = {
   id: string;
@@ -403,7 +403,6 @@ async function marketingNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
     loadFormSubmissions(tenantId),
     read("marketing.momentum", () => momentumMetrics(tenantId)),
   ]);
-  const owner = viewer.surface.persona === "founder";
   const published = momentum.ok ? momentum.value.contentPublished7d : null;
   const sends = momentum.ok ? momentum.value.contentSends7d : null;
   return {
@@ -425,12 +424,16 @@ async function marketingNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
             status: "live",
             hint: sends === null ? undefined : `${n(sends)} platform send${sends === 1 ? "" : "s"}`,
           },
+      // Ad spend would come from Meta. Its Connections card says "Not built
+      // yet" (nothing in OASIS reads Meta), and this tile said "Not connected"
+      // with a Connect link to that card, which cannot connect: the tile now
+      // says what the card says, and no spend is read here until it is built.
       {
         label: "Ad spend 7d",
         value: null,
-        status: "not_connected",
+        status: "no_data",
+        emptyText: connectorBySlug("meta")?.live ? "Not read here yet" : "Not built yet",
         hint: "Meta Ads",
-        ...(owner ? { connectHref: CONNECTIONS_HREF } : {}),
       },
     ],
     attention: [],
@@ -578,9 +581,10 @@ async function operationsNumbers(viewer: OsViewer, routines: Read<RoutineRow[]>)
                 ? `Last clean run ${formatOperatorDate({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }, new Date(health.value.lastSuccessAt))}`
                 : "No clean run recorded yet",
             },
-      // The workspace's number: the viewer's own Google link (a per-person
-      // fact the hub reports) must not make two people see different counts.
-      connectionTile(connectionsHealth({ ...facts, personalGoogleLinked: null }, Date.now()), viewer.surface.persona === "founder"),
+      // The workspace's number, the same count the rail's Connections dot reads:
+      // a card's kind never depends on the viewer's own accounts, so two
+      // people in one workspace see the same count.
+      connectionTile(connectionsHealth(facts, Date.now()), viewer.surface.persona === "founder"),
     ],
     attention: health.ok ? failureAttention(health.value) : [],
   };

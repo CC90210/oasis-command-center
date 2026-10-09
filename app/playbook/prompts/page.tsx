@@ -1,4 +1,4 @@
-import { requirePlaybookReader } from "@/lib/playbook-access";
+import { requirePlaybookFounder } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -21,8 +21,9 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
 ];
 
 export default async function PromptsLibraryPage() {
-  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
-  await requirePlaybookReader();
+  // OASIS's founders only (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS): the
+  // prompts drive OASIS's own agents by name; everyone else gets the 404.
+  await requirePlaybookFounder();
   // The departments this viewer may open (the rail's gate). A prompt whose
   // department they cannot open is offered as Copy only, never as a link
   // that answers "Page not found".

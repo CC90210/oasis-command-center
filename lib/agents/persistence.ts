@@ -10,6 +10,7 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isHouseAgentSlug } from "@/lib/agents";
 import type {
   AgentCategory,
   AgentLibraryEntry,
@@ -32,6 +33,11 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,62}$/;
  * Slugs a custom agent cannot take. A teammate's chat is /agents/<slug> and the
  * builder is /agents/new (app/agents/new); Next serves the static segment
  * first, so a teammate named "new" would have a chat nobody could open.
+ *
+ * An OASIS house agent's slug or alias (lib/agents.ts isHouseAgentSlug) is
+ * taken too: outside OASIS's own workspace no surface shows a teammate under
+ * one (lib/os/teammates.ts, lib/os/agent-names.ts), so a teammate a client
+ * built on it would vanish the moment it was saved.
  */
 export const RESERVED_AGENT_SLUGS: ReadonlySet<string> = new Set(["new"]);
 
@@ -62,7 +68,7 @@ function validateAgentInput(input: CreateAgentInput): void {
   if (!SLUG_RE.test(slug)) {
     throw new AgentPersistenceError("validation", "slug must match /^[a-z0-9][a-z0-9-]{1,62}$/");
   }
-  if (RESERVED_AGENT_SLUGS.has(slug)) {
+  if (RESERVED_AGENT_SLUGS.has(slug) || isHouseAgentSlug(slug)) {
     throw new AgentPersistenceError("validation", `slug "${slug}" is reserved; choose another URL slug`);
   }
   if (!input.name.trim()) {

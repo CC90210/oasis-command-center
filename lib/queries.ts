@@ -33,6 +33,7 @@ import {
   pipelineBreakdownTurso,
 } from "./turso-queries";
 import { resolveActiveProfileForUser } from "./active-profile-resolver";
+import { hasUsableKey, readPersonalAiServices, readWorkspaceAiAccount } from "./ai/workspace-account";
 
 // ============================================================================
 // Profile + Tenant
@@ -772,13 +773,18 @@ export async function integrationsHealth(
 // ============================================================================
 
 /**
- * Which AI provider services have credentials on file for this tenant?
+ * Which AI provider service is this workspace's AI account on?
  *
  * Returns a Set of integration-registry service slugs (anthropic, openai_codex,
- * google_ai, openrouter) for any agent_model_config row with an encrypted key
- * and enabled=true. The /integrations and /settings pages use this to mark
- * provider cards as "Connected" instead of "Not connected" when a key exists
- * but no successful API call has been pinged yet.
+ * google_ai, openrouter) holding the WORKSPACE'S AI ACCOUNT's provider when
+ * that account is on and has a key (lib/ai/workspace-account.ts), the one key
+ * every department chat and Slack mention answers on. Settings, the setup
+ * checklist, /health and /integrations mark that provider "Connected".
+ *
+ * It used to count any keyed row (2026-10-02, AIP-02): another agent's row, or
+ * the viewer's own personal key, read "Connected" while every department chat
+ * said "No AI account is connected". A personal key is reported separately
+ * (personalAiServicesWithKey): department chats don't use it.
  *
  * Throws when agent_model_config cannot be read (2026-09-29). The empty set it
  * used to answer drew every provider "Not connected" and told the owner to
@@ -797,20 +803,24 @@ export { PROVIDER_TO_SERVICE };
 export async function aiServicesWithKey(tenantId: string | null): Promise<Set<string>> {
   const out = new Set<string>();
   if (!tenantId) return out;
-  const db = getServiceSupabase();
-  const user = await getSessionUser().catch(() => null);
-  const { data, error } = await db
-    .from("agent_model_config")
-    .select("provider, encrypted_api_key, enabled, user_id")
-    .eq("tenant_id", tenantId);
-  if (error) throw new Error(`aiServicesWithKey: agent_model_config read failed: ${error.message}`);
-  for (const row of (data || []) as Array<{ provider: string; encrypted_api_key: string | null; enabled: boolean; user_id: string | null }>) {
-    if (row.user_id && row.user_id !== user?.id) continue;
-    if (!row.encrypted_api_key || !row.enabled) continue;
-    const svc = PROVIDER_TO_SERVICE[row.provider];
-    if (svc) out.add(svc);
-  }
+  const account = await readWorkspaceAiAccount(tenantId);
+  if (!hasUsableKey(account)) return out;
+  const svc = PROVIDER_TO_SERVICE[account.provider];
+  if (svc) out.add(svc);
   return out;
+}
+
+/**
+ * The AI services the SIGNED-IN person saved a key for, for their own chats
+ * only. Department chats and Slack mentions never use these, so Settings shows
+ * them apart from "Connected": "Your personal key; department chats don't use
+ * it." Throws when the read fails; empty with no tenant or no session.
+ */
+export async function personalAiServicesWithKey(tenantId: string | null): Promise<Set<string>> {
+  if (!tenantId) return new Set<string>();
+  const user = await getSessionUser().catch(() => null);
+  if (!user?.id) return new Set<string>();
+  return readPersonalAiServices(tenantId, user.id);
 }
 
 const AI_KEY_SERVICES: ReadonlySet<string> = new Set(Object.values(PROVIDER_TO_SERVICE));

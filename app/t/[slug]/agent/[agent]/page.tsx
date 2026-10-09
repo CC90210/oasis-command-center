@@ -7,6 +7,8 @@ import { aiTeamServes } from "@/components/os/aiteam/access";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
+import { libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveSessionContext, type SessionContext } from "@/lib/api-auth";
 import { resolvePersona } from "@/lib/role-surfaces";
@@ -62,7 +64,9 @@ export default async function TenantAgentChatPage({
   const owned = access === "own";
 
   const agentDef = await getAgentBySlug(agent, tenantId);
-  if (!agentDef) notFound();
+  // An OASIS house agent's own page is for OASIS's founders only
+  // (lib/os/agent-names.ts); its department channel is everyone else's.
+  if (!agentDef || !libraryOffersAgent(agentDef.slug, await viewerReadsInternalAgentNames())) notFound();
   if (!agentDef.is_public && agentDef.tenant_id !== tenantId) notFound();
 
   // A custom teammate this workspace built has an OS page, /agents/<agent>: a

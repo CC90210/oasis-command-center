@@ -15,6 +15,8 @@ import { resolveAssignedScope, leadScopingEnabled, canViewAllTenantLeads } from 
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
+import { agentNameFor } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 
 export const dynamic = "force-dynamic";
 
@@ -67,7 +69,7 @@ export default async function TenantLandingPage({
     );
   }
 
-  return <GenericSummary slug={normalised} manifest={manifest} />;
+  return <GenericSummary slug={normalised} manifest={manifest} internalNames={await viewerReadsInternalAgentNames()} />;
 }
 
 async function RootPageRenderer({
@@ -165,9 +167,12 @@ function UnknownEntity({ name }: { name?: string }) {
 function GenericSummary({
   slug,
   manifest,
+  internalNames,
 }: {
   slug: string;
   manifest: Awaited<ReturnType<typeof getManifest>>;
+  /** The viewer reads OASIS's internal agent names (lib/os/agent-names.ts). */
+  internalNames: boolean;
 }) {
   const enabledAgents = manifest.agents.filter((a) => a.enabled);
   const navGroups = Array.from(new Set(manifest.nav.map((n) => n.group)));
@@ -185,7 +190,7 @@ function GenericSummary({
           <div className="space-y-2.5">
             {enabledAgents.map((agent) => (
               <div key={agent.slug} className="flex items-center justify-between text-sm">
-                <span className="font-medium text-fg">{agent.display_name}</span>
+                <span className="font-medium text-fg">{agentNameFor({ slug: agent.slug, name: agent.display_name }, internalNames)}</span>
                 <span className="text-xs uppercase tracking-wider text-fg-dim">
                   {agent.primary ? "primary" : "enabled"}
                 </span>

@@ -15,10 +15,12 @@
  *      → count 1 (route: 200). Foreign tenant → count 0 AND the row survives
  *      (route: 404, correctly this time). Plus update({count}) for parity.
  *   2. Wiring — create (POST /api/forms) and delete (DELETE /api/forms/[id])
- *      must resolve the caller's tenant through the SAME resolveTenantId()
- *      from lib/api-auth. If either route ever grows its own tenant lookup,
- *      "a just-created form is deletable by its creator" is no longer
- *      guaranteed by construction — this pins the shared path.
+ *      must resolve the caller's tenant through the SAME formsSession() from
+ *      lib/forms/access (the session's workspace, via resolveSessionContext,
+ *      and the editor check, MKT-02 2026-10-02). If either route ever grows
+ *      its own tenant lookup, "a just-created form is deletable by its
+ *      creator" is no longer guaranteed by construction — this pins the
+ *      shared path. tests/forms-safe.test.ts runs the routes themselves.
  */
 
 import assert from "node:assert/strict";
@@ -115,8 +117,8 @@ async function main() {
 
   // ---------------------------------------------------------------- wiring
   // Create and delete must share ONE tenant resolution path. Both route files
-  // must import resolveTenantId from lib/api-auth and call it — no bespoke
-  // profile lookup on either side.
+  // must import formsSession from lib/forms/access and call it for their
+  // writes — no bespoke profile lookup on either side.
   const root = path.join(__dirname, "..");
   const createRoute = readFileSync(path.join(root, "app", "api", "forms", "route.ts"), "utf8");
   const deleteRoute = readFileSync(
@@ -129,10 +131,11 @@ async function main() {
   ] as const) {
     assert.match(
       src,
-      /import\s*{[^}]*\bresolveTenantId\b[^}]*}\s*from\s*"@\/lib\/api-auth"/,
-      `${label} must import resolveTenantId from @/lib/api-auth`,
+      /import\s*{[^}]*\bformsSession\b[^}]*}\s*from\s*"@\/lib\/forms\/access"/,
+      `${label} must import formsSession from @/lib/forms/access`,
     );
-    assert.match(src, /await resolveTenantId\(\)/, `${label} must call resolveTenantId()`);
+    assert.match(src, /await formsSession\(\{ edit: true \}\)/, `${label} must call formsSession({ edit: true }) for its writes`);
+    assert.doesNotMatch(src, /user_profiles|resolveTenantId|getSessionUser/, `${label} must not find the workspace another way`);
   }
 
   console.log("forms-delete-tenant-scope: all assertions passed");

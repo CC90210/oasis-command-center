@@ -37,9 +37,11 @@
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
+import type { SurfaceCapabilities } from "@/lib/role-surfaces";
 import { formatPublisher } from "@/lib/event-bus-display";
 import { namesPersona } from "@/lib/os/channel/identity";
-import { OS_DEPARTMENTS } from "@/lib/os/departments";
+import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
+import { mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
 import { withDepartmentNames } from "@/components/os/department/config";
 
 export type FeedEventRow = {
@@ -230,6 +232,93 @@ export type FeedViewerScope = {
   /** Departments the viewer's rail draws (mayOpenOsHref over OS_DEPARTMENTS). */
   departments: ReadonlySet<DepartmentKey>;
 };
+
+/** The departments this viewer's rail opens: the Feed's chips, and its department cut. */
+export function feedDepartmentsFor(navInput: BuildOsNavInput): OsDepartment[] {
+  return OS_DEPARTMENTS.filter((d) => mayOpenOsHref(navInput, d.href));
+}
+
+/**
+ * The Feed's scope for one viewer. The /feed page and /api/event-feed both
+ * build it here, so the endpoint can never show a viewer more of the tape than
+ * the page does.
+ */
+export function feedViewerScope(
+  navInput: BuildOsNavInput,
+  capabilities: Pick<SurfaceCapabilities, "canSeeSystemSurfaces" | "canSeeCompanyFinancials">,
+): FeedViewerScope {
+  return {
+    canSeeTape: capabilities.canSeeSystemSurfaces,
+    canSeeCompanyFinancials: capabilities.canSeeCompanyFinancials,
+    departments: new Set(feedDepartmentsFor(navInput).map((d) => d.key)),
+  };
+}
+
+/**
+ * A customer's own words on a Feed row: their phone number and their message,
+ * under one payload key of their own (lib/sms/reply-agent.ts writes it when a
+ * workspace's customer texts in).
+ *
+ * WHY A KEY OF ITS OWN (2026-10-02). They first went in `preview`, which:
+ *   - /api/event-feed handed raw to any member of the workspace, a
+ *     commission-only rep included;
+ *   - the Feed's summary prints through the persona rule (feedSummary), so a
+ *     customer who wrote "Hi it's Lex" or "Atlas Roofing here" lost the line;
+ *   - BEA's event router copies into its log on CC's PC for every workspace
+ *     (it prints `note`, `preview` and a few other keys, never this one).
+ * Only the workspace's own viewers who may see client identities read this
+ * key (withCustomerMessagesFor strips it for everyone else), and it is shown
+ * as written, never through the persona rule: a customer typing "Atlas" is not
+ * an OASIS name on a client's screen.
+ */
+export const CUSTOMER_MESSAGE_KEY = "customer_message";
+
+export type CustomerMessage = { phone: string; text: string };
+
+/** The customer's words on a row, or null when it carries none (or they were stripped). */
+export function customerMessageOf(payload: unknown): CustomerMessage | null {
+  const value = payloadObject(payload)[CUSTOMER_MESSAGE_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { phone, text } = value as Record<string, unknown>;
+  if (typeof phone !== "string" || !phone.trim()) return null;
+  return { phone: phone.trim(), text: typeof text === "string" ? text : "" };
+}
+
+/** The Feed rows written about a customer's own text (lib/sms/reply-agent.ts handOffToWorkspace). */
+export const CUSTOMER_TEXT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "CUSTOMER_TEXT_NEEDS_REPLY",
+  "CUSTOMER_OPTED_OUT_OF_TEXTS",
+]);
+
+/**
+ * What a customer-text row keeps for a viewer who may not read the customer.
+ * An ALLOW-list, not "remove the one key": a row written in any other shape
+ * keeps the customer out too. This change's own first draft put the number and
+ * words in `preview` and `phone`; it never reached production (no row of
+ * either type exists there, 2026-10-08), and a later producer adding a key
+ * must not reopen it either.
+ */
+const CUSTOMER_TEXT_SHAREABLE_KEYS = ["tenant_id", "note", "channel", "lead_id", "sms_agent_job_id"] as const;
+
+/** Rows with the customer's words kept only where `mayRead` says so, and removed everywhere else. */
+export function withCustomerMessagesFor<T extends { payload: unknown; event_type?: string | null }>(
+  rows: readonly T[],
+  mayRead: (row: T) => boolean,
+): T[] {
+  return rows.map((row) => {
+    if (mayRead(row)) return row;
+    const p = payloadObject(row.payload);
+    if (CUSTOMER_TEXT_EVENT_TYPES.has(row.event_type || "")) {
+      const shareable: Record<string, unknown> = {};
+      for (const key of CUSTOMER_TEXT_SHAREABLE_KEYS) if (key in p) shareable[key] = p[key];
+      return { ...row, payload: shareable };
+    }
+    if (!(CUSTOMER_MESSAGE_KEY in p)) return row;
+    const rest: Record<string, unknown> = { ...p };
+    delete rest[CUSTOMER_MESSAGE_KEY];
+    return { ...row, payload: rest };
+  });
+}
 
 /** The rows this viewer may see, in the order given. */
 export function visibleFeedRows<T extends FeedEventRow>(rows: readonly T[], scope: FeedViewerScope): T[] {

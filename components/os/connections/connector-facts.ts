@@ -10,37 +10,38 @@
  *   keyRows            tenant_integration_credentials presence + last test
  *                      (listTenantIntegrationStatus — the same reader the
  *                      Credentials panel uses)
- *   heartbeats         integrations_health for the shared services, newest
- *                      first — the workspace-summary query, same ordering
- *   personalGoogle     the viewer's own gmail_oauth link
- *                      (listUserIntegrationStatus — the personal status API's
- *                      reader)
+ *   personalGoogle     the viewer's own Google connection
+ *                      (lib/integrations/personal-google.ts — the one reader
+ *                      Settings and Today use for it too)
  *   connections        the tenant's live tenant_connections rows (state and
  *                      health only — lib/connections/store.ts
  *                      listActiveConnections). Before migration bravo__187 is
  *                      applied this read fails, and the cards it feeds say
  *                      "Status unavailable", not "Not connected".
+ *
+ * No integrations_health heartbeat is read here any more (2026-10-08): for
+ * Google and Telegram the only writer is OASIS's own computer reporting that a
+ * key NAME is in its env file, which proved nothing and showed "Connected,
+ * verified just now".
  */
 
 import "server-only";
 
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
-import { listUserIntegrationStatus } from "@/lib/user-integration-store";
+import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listActiveConnections } from "@/lib/connections/store";
 import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
+  connectorBySlug,
   resolveConnectorStatus,
   type ConnectionFact,
   type ConnectorFacts,
   type ConnectorStatus,
-  type HeartbeatFact,
   type KeyRowFact,
+  type PersonalGoogleFact,
 } from "@/lib/os/connectors";
-
-const HEARTBEAT_SERVICES = ["gws", "telegram"] as const;
 
 async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
   try {
@@ -62,37 +63,9 @@ async function loadKeyRows(tenantId: string): Promise<KeyRowFact[] | null> {
   }
 }
 
-async function loadHeartbeats(tenantId: string): Promise<HeartbeatFact[] | null> {
+async function loadPersonalGoogle(tenantId: string, userId: string): Promise<PersonalGoogleFact | null> {
   try {
-    const result = await getServiceSupabase()
-      .from("integrations_health")
-      .select("service,status,last_ping_at")
-      .eq("tenant_id", tenantId)
-      .in("service", [...HEARTBEAT_SERVICES])
-      // Several profiles can report the same shared service. The newest
-      // tenant-scoped heartbeat is the workspace truth, and a null timestamp
-      // must not sort ahead of a real one.
-      .order("last_ping_at", { ascending: false, nullsFirst: false });
-    if (result.error) throw new Error(result.error.message);
-    const seen = new Set<string>();
-    const out: HeartbeatFact[] = [];
-    for (const row of (result.data || []) as HeartbeatFact[]) {
-      if (seen.has(row.service)) continue;
-      seen.add(row.service);
-      out.push({ service: row.service, status: row.status ?? null, last_ping_at: row.last_ping_at ?? null });
-    }
-    return out;
-  } catch (error) {
-    console.error("[connections.facts.heartbeats]", error);
-    return null;
-  }
-}
-
-async function loadPersonalGoogle(tenantId: string, userId: string): Promise<boolean | null> {
-  try {
-    const rows = await listUserIntegrationStatus(tenantId, userId);
-    // The refresh token is the load-bearing field, as in the personal status API.
-    return rows.some((r) => r.service === "gmail_oauth" && r.field_key === "refresh_token" && r.has_value);
+    return await readPersonalGoogleFact(tenantId, userId);
   } catch (error) {
     console.error("[connections.facts.personal_google]", error);
     return null;
@@ -123,22 +96,52 @@ export async function loadConnectorFacts(input: {
   tenantId: string;
   userId: string;
 }): Promise<ConnectorFacts> {
-  const [keyRows, heartbeats, personalGoogleLinked, connections] = await Promise.all([
+  const [keyRows, personalGoogle, connections] = await Promise.all([
     loadKeyRows(input.tenantId),
-    loadHeartbeats(input.tenantId),
     loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
   ]);
   return {
     keyRows,
-    heartbeats,
-    personalGoogleLinked,
+    personalGoogle,
     connections,
     appNotConfigured: appNotConfiguredProviders(),
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
     // OASIS's apps; every other workspace is a client and is shown its own path.
     oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
   };
+}
+
+/**
+ * One workspace card's status, for a line elsewhere that must agree with that
+ * card (the department tab's Slack line, the AI Team rows). The same resolver,
+ * fed only the read the card's source needs: no card's state depends on the
+ * viewer's own accounts, and one read instead of four keeps a busy page's
+ * database reads bounded. Null for a slug the catalog does not have.
+ */
+export async function loadWorkspaceConnectorStatus(
+  tenantId: string,
+  slug: string,
+  nowMs: number = Date.now(),
+): Promise<ConnectorStatus | null> {
+  const def = connectorBySlug(slug);
+  if (!def) return null;
+  const framework = def.live?.source.kind === "tenant_connection";
+  const [keyRows, connections] = await Promise.all([
+    framework ? Promise.resolve([] as KeyRowFact[]) : loadKeyRows(tenantId),
+    framework ? loadConnections(tenantId) : Promise.resolve([] as ConnectionFact[]),
+  ]);
+  return resolveConnectorStatus(
+    def,
+    {
+      keyRows,
+      personalGoogle: null,
+      connections,
+      appNotConfigured: appNotConfiguredProviders(),
+      oasisWorkspace: tenantMayUseEnvFallback(tenantId),
+    },
+    nowMs,
+  );
 }
 
 /**

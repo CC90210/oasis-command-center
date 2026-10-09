@@ -17,15 +17,23 @@
  * property is about the WHOLE TREE — "no marketing surface soft-navigates to an
  * ambiguous path" — and cannot be established by rendering any one component. A
  * comment in the file cannot fail a build. This can.
+ *
+ * It also pins the root shell's hydration (React error #418, 2026-10-08):
+ * nothing app/layout.tsx draws inside <head> comes from a "use client" module,
+ * and the shell's first browser render equals the server's whether the sidebar
+ * is stored as collapsed or not.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import ts from "typescript";
 
 import { REPO_ROOT as ROOT, repoRelative as rel, sourceTree } from "./_tree";
 
 import { ALL_MARKETING_PATHS, SHELL_AMBIGUOUS_PATHS } from "../lib/marketing/routes";
 import { FULL_BLEED_PREFIXES, isFullBleedPath } from "../lib/os/full-bleed";
+import { SIDEBAR_BOOT_SCRIPT, SIDEBAR_COLLAPSED_KEY } from "../lib/sidebar-boot";
 import { isPublic, PUBLIC_PATH_PREFIXES } from "../middleware";
 
 
@@ -219,8 +227,214 @@ assert.ok(!isPublic("/desktop-link"), "/desktop-link mints a pair code for a sig
   assert.deepEqual(crossings, [], "a <Link> from a full-bleed page into the OS shell renders it without the rail; use a plain <a>");
 }
 
+// -- the root layout's <head> arrives complete (React error #418, 2026-10-08) --
+//
+// app/layout.tsx is a Server Component. A value it imports from a "use client"
+// module reaches the browser as a reference to a JS chunk, not as the value, and
+// React cannot draw the element that uses it until that chunk has loaded. The
+// <head> boot script was such a value (exported by the "use client" hook
+// lib/useSidebarCollapsed.ts). When the chunk was still loading as hydration
+// began, React paused inside <head>; React 19.2 then resumes <head> with its
+// saved place in <body> overwritten by <head>'s own first child, so it looked
+// for <body>'s first element among <head>'s children, found none, and threw
+// #418, redrawing the whole page in the browser. A probe build that recorded
+// React's state at the throw showed it on every failure the crawl caught: the
+// failing element was <body>'s first child and React's cursor sat on
+// <meta charset> in <head>. Nothing drawn inside <head> may come from a
+// "use client" module.
+
+/** True when a module's directive prologue says "use client". */
+function isClientModule(file: string): boolean {
+  const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+  for (const stmt of sf.statements) {
+    if (!ts.isExpressionStatement(stmt) || !ts.isStringLiteral(stmt.expression)) break;
+    if (stmt.expression.text === "use client") return true;
+  }
+  return false;
+}
+
+/** A module specifier as app/layout.tsx writes it, to a file in the repo (or null). */
+function resolveModule(specifier: string, fromFile: string): string | null {
+  const base = specifier.startsWith("@/")
+    ? join(ROOT, specifier.slice(2))
+    : specifier.startsWith(".")
+      ? join(dirname(fromFile), specifier)
+      : null;
+  if (!base) return null;
+  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, "index.ts"), join(base, "index.tsx")]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Every identifier used inside the <head> element of `source`, with the module
+ * it is imported from and whether that module is "use client".
+ */
+function headImports(source: string, fileName: string): { names: string[]; fromClient: string[]; heads: number } {
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const importedFrom = new Map<string, string>();
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    const clause = stmt.importClause;
+    if (!clause || clause.isTypeOnly) continue;
+    const spec = stmt.moduleSpecifier.text;
+    if (clause.name) importedFrom.set(clause.name.text, spec);
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const el of clause.namedBindings.elements) if (!el.isTypeOnly) importedFrom.set(el.name.text, spec);
+    }
+  }
+  const names = new Set<string>();
+  let heads = 0;
+  const collect = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && importedFrom.has(node.text)) names.add(node.text);
+    ts.forEachChild(node, collect);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(sf) === "head") {
+      heads += 1;
+      collect(node);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  const fromClient: string[] = [];
+  for (const name of names) {
+    const spec = importedFrom.get(name) as string;
+    const file = resolveModule(spec, fileName);
+    assert.ok(file, `${rel(fileName)}: <head> uses ${name} from "${spec}", which does not resolve to a file in the repo`);
+    if (isClientModule(file)) fromClient.push(`${name} from "${spec}"`);
+  }
+  return { names: [...names].sort(), fromClient, heads };
+}
+
+{
+  const layoutFile = join(ROOT, "app", "layout.tsx");
+  const head = headImports(readFileSync(layoutFile, "utf8"), layoutFile);
+  // anti-vacuity: the scan found the one <head> and the boot script inside it.
+  assert.equal(head.heads, 1, "app/layout.tsx should draw exactly one <head>; the scan found " + head.heads);
+  assert.ok(head.names.includes("SIDEBAR_BOOT_SCRIPT"), `the scan did not see SIDEBAR_BOOT_SCRIPT inside <head> (saw: ${head.names.join(", ") || "nothing"})`);
+  assert.deepEqual(
+    head.fromClient,
+    [],
+    "app/layout.tsx draws a value from a \"use client\" module inside <head>. The browser gets a chunk " +
+      "reference instead of the value, React pauses inside <head> while the chunk loads, loses its place in " +
+      "<body> and throws React error #418, redrawing every page. Import it from a plain module (lib/sidebar-boot.ts).",
+  );
+
+  // The rule would catch the bug it exists for: the same <head> fed the boot
+  // script from the "use client" hook module, as it was before the fix.
+  const regressed = headImports(
+    'import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";\n' +
+      "export default function L() { return <html><head><script dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }} /></head><body /></html>; }\n",
+    layoutFile,
+  );
+  assert.deepEqual(regressed.fromClient, ['SIDEBAR_BOOT_SCRIPT from "@/lib/useSidebarCollapsed"'], "the <head> rule must flag a value from a \"use client\" module");
+  assert.ok(isClientModule(join(ROOT, "lib", "useSidebarCollapsed.ts")), "lib/useSidebarCollapsed.ts is the \"use client\" hook this rule is measured against");
+  assert.ok(!isClientModule(join(ROOT, "lib", "sidebar-boot.ts")), "lib/sidebar-boot.ts must stay a plain module: the root layout's <head> reads it");
+}
+
+// The boot script and the hook keep ONE storage key, so the value the script
+// applies before paint is the one the hook writes when the operator toggles.
+{
+  assert.equal(typeof SIDEBAR_BOOT_SCRIPT, "string", "the boot script is a plain string on the server");
+  assert.ok(SIDEBAR_BOOT_SCRIPT.includes(JSON.stringify(SIDEBAR_COLLAPSED_KEY)), "the boot script reads SIDEBAR_COLLAPSED_KEY");
+  const hook = readFileSync(join(ROOT, "lib", "useSidebarCollapsed.ts"), "utf8");
+  assert.match(hook, /import \{ SIDEBAR_COLLAPSED_KEY \} from "@\/lib\/sidebar-boot";/, "the hook reads the key from lib/sidebar-boot.ts");
+  assert.ok(!hook.includes(SIDEBAR_COLLAPSED_KEY), "the hook must not spell the storage key itself (two copies drift)");
+}
+
+// -- the shell's first browser render is the server's (React error #418) ------
+//
+// The second cause, found by the same probe once <head> was fixed: for anyone
+// who had collapsed the sidebar, EVERY page failed to hydrate. The hook read
+// the stored choice during its first render, so the browser drew the floating
+// reopen button the server never drew, and React found <aside> where it
+// expected that <button>. The shell is drawn here as the server draws it and as
+// a browser's first render draws it with the sidebar stored collapsed and
+// expanded (tests/shell-hydration.render.ts); all three must be the same
+// markup, byte for byte.
+//
+// The third: React replays the PARENT of an element that was still waiting on
+// a JS chunk when hydration reached it, and replaying a host element (<div>)
+// claims it again from a cursor that already points inside it. The page element
+// Next sends carries app/error.tsx as a module reference, and MainShell put it
+// straight inside a <div>; the probe caught #418 there once the first two were
+// fixed. The page's direct parent must be a component (PageSlot), on a normal
+// page and on the chat shell.
+{
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, TSX_TSCONFIG_PATH: "tests/tsconfig.render.json" };
+  const tokens = (process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t.length > 0);
+  const kept: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === "--conditions" || tokens[i] === "-C") {
+      i += 1;
+      continue;
+    }
+    if (/^(--conditions=|-C=)/.test(tokens[i])) continue;
+    kept.push(tokens[i]);
+  }
+  if (kept.length) childEnv.NODE_OPTIONS = kept.join(" ");
+  else delete childEnv.NODE_OPTIONS;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/shell-hydration.render.ts"], { cwd: ROOT, encoding: "utf8", env: childEnv });
+  assert.equal(r.status, 0, `tests/shell-hydration.render.ts failed:\n${r.stderr}`);
+  const html = JSON.parse(r.stdout) as {
+    server: string;
+    collapsedFirstRender: string;
+    expandedFirstRender: string;
+    storedCollapsed: { states: boolean[]; writes: string[]; attribute: string[]; final: string };
+    pageParent: Record<string, string>;
+  };
+
+  assert.deepEqual(
+    html.pageParent,
+    { "/settings": "PageSlot", "/agent": "PageSlot" },
+    "the page element sits straight inside a host element in components/MainShell.tsx. When it is still waiting on a " +
+      "JS chunk as hydration reaches it, React replays that element, claims it from the wrong place and throws #418. " +
+      "Wrap {children} in <PageSlot>.",
+  );
+
+  // anti-vacuity: it drew the real shell, rail and reopen button included.
+  assert.match(html.server, /id="sidebar-drawer"/, "the render did not reach the rail");
+  assert.match(html.server, /aria-label="Open navigation"/, "the render did not reach the reopen button");
+
+  assert.equal(
+    html.collapsedFirstRender,
+    html.server,
+    "with the sidebar stored as collapsed, the browser's first render of the shell differs from the server's: " +
+      "React error #418 on every page for that person. Read the stored choice after mount (lib/useSidebarCollapsed.ts) " +
+      "and let html[data-sidebar] drive what shows before then.",
+  );
+  assert.equal(html.expandedFirstRender, html.server, "with the sidebar stored as expanded, the first browser render must equal the server's");
+
+  // After hydration the stored choice is applied, and the default the first
+  // render used is never written over it: a collapsed sidebar stays collapsed,
+  // in storage and on <html>, with no flicker to expanded.
+  const after = html.storedCollapsed;
+  assert.equal(after.states[0], false, "the hook's first render must be the server's (not collapsed)");
+  assert.equal(after.states[after.states.length - 1], true, "after mount the hook must apply the stored collapsed choice");
+  assert.deepEqual(after.writes.filter((w) => !w.endsWith("=true")), [], "the hook wrote over the stored collapsed choice before reading it");
+  assert.deepEqual(after.attribute.filter((v) => v !== "collapsed"), [], "html[data-sidebar] flipped to expanded during startup for a collapsed viewer");
+  assert.equal(after.final, "collapsed", "html[data-sidebar] ends as the stored choice");
+
+  // The reopen button is always drawn and shown by CSS, never by React state.
+  const reopen = html.server.match(/<button[^>]*aria-label="Open navigation"[^>]*>/)?.[0] ?? "";
+  assert.match(reopen, /class="os-rail-reopen /, "the reopen button carries os-rail-reopen, the class app/globals.css shows it by");
+  assert.doesNotMatch(reopen, /(^|\s|")(hidden|md:inline-flex)(\s|")/, "a display utility on the reopen button would override the CSS that shows it");
+
+  const css = readFileSync(join(ROOT, "app", "globals.css"), "utf8");
+  assert.match(css, /\.os-rail-reopen\s*\{\s*display:\s*none;\s*\}/, "app/globals.css hides the reopen button by default");
+  assert.match(
+    css,
+    /@media \(min-width: 768px\) \{\s*html\[data-sidebar="collapsed"\] #sidebar-drawer \{\s*transform: translateX\(-100%\);\s*\}\s*html\[data-sidebar="collapsed"\] \.os-rail-reopen \{\s*display: inline-flex;\s*\}\s*\}/,
+    "app/globals.css must take the collapsed rail off-screen and show the reopen button from html[data-sidebar] at md+",
+  );
+}
+
 console.log(
   `shell-boundary: OK — ${files.length} marketing files scanned, ` +
     `${SHELL_AMBIGUOUS_PATHS.length} ambiguous path(s), 0 soft-nav boundary crossings; ` +
-    `${publicPages.length} public pages, every one full-bleed`,
+    `${publicPages.length} public pages, every one full-bleed; <head> holds no "use client" value; ` +
+    `the shell's first browser render equals the server's, sidebar collapsed or not; the page sits in a PageSlot`,
 );

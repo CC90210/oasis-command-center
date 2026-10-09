@@ -12,6 +12,7 @@ import {
 import type { DiffEntry } from "@/lib/manifest/diff";
 import type { MutationArgs } from "@/lib/manifest/mutators";
 import type { TenantManifest } from "@/lib/manifest/schema";
+import { agentNameFor } from "@/lib/os/agent-names";
 
 type ChatTurn =
   | { role: "user"; content: string }
@@ -28,9 +29,15 @@ type Props = {
   slug: string;
   initialManifest: TenantManifest;
   initialVersion: number;
+  /**
+   * The viewer reads OASIS's internal agent names (an OASIS founder;
+   * lib/os/agent-names.ts). Anyone else sees each agent by the workspace's
+   * name for it, or its department.
+   */
+  internalNames: boolean;
 };
 
-export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Props) {
+export function ManifestEditorChat({ slug, initialManifest, initialVersion, internalNames }: Props) {
   const [manifest, setManifest] = useState<TenantManifest>(initialManifest);
   const [version, setVersion] = useState<number>(initialVersion);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -180,6 +187,14 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
     }
   };
 
+  // Every agent named on this page goes through lib/os/agent-names.ts. The
+  // rename example names one this workspace actually runs (it said "Rename the
+  // Bravo agent" to every workspace, a client's included), by the stored name
+  // the editor knows it by, so the command it suggests resolves. A binding this
+  // viewer is shown only by its department is not offered as the example.
+  const agentName = (a: TenantManifest["agents"][number]) => agentNameFor({ slug: a.slug, name: a.display_name }, internalNames);
+  const exampleAgent = manifest.agents.find((a) => a.enabled && agentName(a) === a.display_name.trim());
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_0.95fr] gap-6">
       {/* Chat pane */}
@@ -200,7 +215,9 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
               Tell the editor what to change. Try:
               <ul className="mt-2 ml-4 list-disc space-y-1 text-fg-dim">
                 <li>&ldquo;Add a referral_source field to the lead entity.&rdquo;</li>
-                <li>&ldquo;Rename the Bravo agent to &lsquo;Ops Lead&rsquo;.&rdquo;</li>
+                {exampleAgent && (
+                  <li>&ldquo;Rename the {agentName(exampleAgent)} agent to &lsquo;Ops Lead&rsquo;.&rdquo;</li>
+                )}
                 <li>&ldquo;Add a Pipeline section to the sidebar with a Deals link.&rdquo;</li>
                 <li>&ldquo;Change the brand color to navy.&rdquo;</li>
               </ul>
@@ -346,7 +363,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion }: Pr
                   label="Agents"
                   value={manifest.agents
                     .filter((a) => a.enabled)
-                    .map((a) => `${a.display_name}${a.primary ? " (primary)" : ""}`)
+                    .map((a) => `${agentName(a)}${a.primary ? " (primary)" : ""}`)
                     .join(", ") || "none"}
                 />
                 <SnapshotRow
