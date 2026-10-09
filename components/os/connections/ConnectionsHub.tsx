@@ -46,7 +46,7 @@ function isYourTool(def: ConnectorDef, status: ConnectorStatus | undefined): boo
 
 const POPUP_ERRORS: Record<string, string> = {
   admin_only: "Only an owner or admin can connect this.",
-  not_configured: "This app is not enabled for your workspace yet. Ask OASIS to turn it on.",
+  not_configured: "OASIS's own app for this is still waiting on the vendor's approval, so it cannot connect here yet. Nothing is wrong on your side.",
   login_required: "Your session expired. Sign in again, then retry.",
 };
 
@@ -204,12 +204,14 @@ export function ConnectionsHub({
     (def: ConnectorDef) => {
       const action = def.live?.connect;
       const next = connectorClickAction(def, embedded);
-      if (next === "drawer" || !action) return openDrawer(def.slug);
+      // A card this workspace cannot connect yet (OASIS's app still waiting on
+      // the vendor) opens its drawer, which says why: never a popup that fails.
+      if (next === "drawer" || !action || statuses[def.slug]?.kind === "coming_soon") return openDrawer(def.slug);
       setDrawerOpen(false);
       if (next === "popup" && action.kind === "popup") return runPopup(def, action.href, action.messageSource);
       if (action.kind === "link") router.push(action.href);
     },
-    [openDrawer, router, runPopup, embedded],
+    [openDrawer, router, runPopup, embedded, statuses],
   );
 
   const visible = useMemo(
@@ -217,8 +219,15 @@ export function ConnectionsHub({
     [query],
   );
   const yours = visible.filter((def) => isYourTool(def, statuses[def.slug]));
-  const available = visible.filter((def) => def.live && !isYourTool(def, statuses[def.slug]));
-  const later = visible.filter((def) => !def.live);
+  // A card this workspace cannot connect today (nothing built, or OASIS's own
+  // app with the vendor still waiting) is never offered under "Connect today".
+  const waiting = (def: ConnectorDef) => !def.live || statuses[def.slug]?.kind === "coming_soon";
+  const available = visible.filter((def) => def.live && !isYourTool(def, statuses[def.slug]) && !waiting(def));
+  const pending = visible.filter((def) => !isYourTool(def, statuses[def.slug]) && waiting(def));
+  // One click once the vendor approves OASIS's own app (registration), apart
+  // from anything nothing is built for.
+  const oneClick = pending.filter((def) => def.registration);
+  const later = pending.filter((def) => !def.registration);
   const q = query.trim().toLowerCase();
   const customVisible = !q || CUSTOM_KEYS.words.some((w) => w.includes(q) || q.includes(w));
 
@@ -324,6 +333,32 @@ export function ConnectionsHub({
               </ul>
             </div>
           )}
+        </section>
+      )}
+
+      {oneClick.length > 0 && (
+        <section aria-labelledby="one-click-heading">
+          <h2 id="one-click-heading" className="text-sm font-semibold text-fg">
+            One click, once approved
+          </h2>
+          <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
+            OASIS is registering its own app with each of these. Once the vendor approves it, you connect with one click
+            and never create an app yourself. Open one to see where it stands.
+          </p>
+          <ul className="mt-3 flex flex-wrap gap-1.5">
+            {oneClick.map((def) => (
+              <li key={def.slug}>
+                <button
+                  type="button"
+                  onClick={() => openDrawer(def.slug)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-hairline bg-bg-panel py-1 pl-1 pr-2.5 text-[13px] text-fg-muted transition-colors duration-150 hover:border-bg-border-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
+                >
+                  <ConnectorIcon def={def} size="sm" />
+                  {def.name}
+                </button>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 

@@ -15,8 +15,11 @@
  *     status (its Connections card's own). Two-way AI teammates in Telegram
  *     chats are not built, and the card says exactly that: a state, never a
  *     release promise, with a button that asks OASIS for it.
- *   - Discord, Microsoft Teams, WhatsApp: not built. Each opens the shared
- *     Connections drawer, which says why and files the request (no dead chip).
+ *   - Discord, Microsoft Teams, WhatsApp: one click once the vendor approves
+ *     OASIS's own app (each card's status, from the Connections resolver, says
+ *     "OASIS is registering with <vendor>"). Each opens the shared Connections
+ *     drawer, which says where it stands and files the request (no dead chip).
+ *   - Slack: every workspace, client or OASIS, installs the same OASIS app.
  *
  * OASIS's own Telegram bridges on CC's machine are not this and never appear
  * here; they are CC's personal channel (plan decision 3).
@@ -51,9 +54,6 @@ import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { SLACK_RETENTION_DAYS } from "@/lib/slack/retention";
 
 export const dynamic = "force-dynamic";
-
-/** An app nothing is built for yet: the state, with no date or phase attached. */
-const NOT_BUILT: ConnectorStatus = { kind: "coming_soon", label: "Not built yet" };
 
 /** The not-built Telegram capability, as its request names it on OASIS's desk. */
 const TELEGRAM_TEAMMATES = "AI teammates in Telegram";
@@ -145,8 +145,8 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
             ) : !slackSettings.appConfigured ? (
               <div className="space-y-1.5">
                 <p className="text-[13px] leading-5 text-fg-muted">
-                  OASIS&apos;s Slack app is not set up on this deployment yet, so Slack cannot be installed here. Nothing is
-                  broken on your side.
+                  {slackCardStatus?.detail ??
+                    "OASIS is registering with Slack; you'll connect Slack with one click once approved. Nothing is broken on your side."}
                 </p>
                 {viewer.access.isOperator && slackSettings.missingSecrets.length > 0 && (
                   <p className="text-[12px] leading-4 text-fg-dim">
@@ -260,32 +260,38 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
 
         {later.length > 0 && (
           <section className="rounded-xl border border-hairline bg-bg-panel px-4 py-4">
-            <h2 className="text-sm font-semibold text-fg">Not built</h2>
+            <h2 className="text-sm font-semibold text-fg">One click, once approved</h2>
             <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-              Nothing exists for these yet, so there is nothing to set up. Open one to see why, and ask OASIS for it.
+              OASIS is registering its own app with each of these. Once the vendor approves it, you add it with one click
+              and never create an app yourself. Open one to see where it stands.
             </p>
             <ul className="mt-3 grid gap-2 sm:grid-cols-3">
-              {later.map((d) => (
-                <li key={d.slug}>
-                  {/* The same drawer as Settings > Connections: why, and the request (no dead chip). */}
-                  <ConnectorDrawerButton
-                    slug={d.slug}
-                    status={resolveConnectorStatus(d, facts, nowMs)}
-                    requestFrom="Settings > Chat apps"
-                    ariaLabel={`${d.name}: not built yet. Open to see why and ask OASIS for it`}
-                    className="flex w-full items-center gap-2.5 rounded-lg border border-hairline bg-bg-raised/40 px-3 py-2 text-left transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
-                    label={
-                      <>
-                        <ConnectorIcon def={d} size="sm" />
-                        <span className="min-w-0">
-                          <span className="block truncate text-[13px] font-medium text-fg">{d.name}</span>
-                          <StatusLine status={NOT_BUILT} />
-                        </span>
-                      </>
-                    }
-                  />
-                </li>
-              ))}
+              {later.map((d) => {
+                // The card's own status, from the Connections resolver: the same
+                // words the hub and its drawer use (never a label built here).
+                const status = resolveConnectorStatus(d, facts, nowMs);
+                return (
+                  <li key={d.slug}>
+                    {/* The same drawer as Settings > Connections: why, and the request (no dead chip). */}
+                    <ConnectorDrawerButton
+                      slug={d.slug}
+                      status={status}
+                      requestFrom="Settings > Chat apps"
+                      ariaLabel={`${d.name}: ${status.label}. Open to see where it stands`}
+                      className="flex w-full items-center gap-2.5 rounded-lg border border-hairline bg-bg-raised/40 px-3 py-2 text-left transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
+                      label={
+                        <>
+                          <ConnectorIcon def={d} size="sm" />
+                          <span className="min-w-0">
+                            <span className="block truncate text-[13px] font-medium text-fg">{d.name}</span>
+                            <StatusLine status={status} />
+                          </span>
+                        </>
+                      }
+                    />
+                  </li>
+                );
+              })}
             </ul>
           </section>
         )}
