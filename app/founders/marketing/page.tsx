@@ -520,6 +520,11 @@ async function TrainingCard({ tenantId }: { tenantId: string }) {
  * placeholder is worse than an empty state: it tells the operator a working
  * feature does not exist, so nobody opens it. It needs no data, so it renders
  * with the frame. It names "your posting account", never the vendor behind it.
+ *
+ * It promises only what the tab shows for every channel (review, 2026-10-09):
+ * it said "views, engagement and retention for every connected channel", but
+ * LinkedIn reports impressions, a quiet channel has no recent numbers (the tab
+ * says when it last posted instead), and only Instagram Reels report watch time.
  */
 function PerformanceCard() {
   return (
@@ -538,8 +543,9 @@ function PerformanceCard() {
       <div className="flex items-center gap-3">
         <BarChart3 size={18} className="text-accent" aria-hidden />
         <div className="text-sm text-fg-muted">
-          Views, engagement and retention for every connected channel, pulled from
-          your posting account on a schedule.
+          Each connected channel&apos;s views (impressions on LinkedIn) and
+          engagement, and how long ago a quiet one last posted. Pulled from your
+          posting account on a schedule.
         </div>
       </div>
     </Card>

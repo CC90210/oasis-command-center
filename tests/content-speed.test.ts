@@ -519,7 +519,7 @@ async function main() {
     assert.match(frameText, /Content/);
     assert.match(
       frameText,
-      /Performance.*Per channel.*Views, engagement and retention for every connected channel, pulled from\s+your posting account/s,
+      /Performance.*Per channel.*Each connected channel's views \(impressions on\s+LinkedIn\) and\s+engagement, and how long ago a quiet one last posted\.\s+Pulled from your\s+posting account/s,
       "the Performance card needs no read, and names the posting account, not its vendor",
     );
     assert.ok(hosts(overview).some((h) => h.type === "a" && h.props.href === "/founders/marketing/performance"), "and links to its tab");

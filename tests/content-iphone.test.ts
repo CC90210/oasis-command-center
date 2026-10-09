@@ -642,6 +642,12 @@ async function main() {
     assert.match(overview, /approved, not posted/);
     assert.match(overview, /queued by the poster/);
     assert.doesNotMatch(overview, /ready to book|"booked"/);
+    // The Performance card promises only what that tab shows for every
+    // channel: LinkedIn reports impressions, a quiet channel has no recent
+    // numbers, and only Reels report watch time (review, 2026-10-09).
+    assert.doesNotMatch(overview, /retention for every connected channel/i);
+    assert.match(overview, /views \(impressions on\s+LinkedIn\)/);
+    assert.match(overview, /how long ago a quiet one last posted/);
     const library = screenText("app/founders/marketing/library/page.tsx").join(" | ");
     assert.match(library, /New content appears here when the marketing agent or the daily poster adds it\./);
     assert.doesNotMatch(library, /Drop links/, "training material never adds to the Library");
