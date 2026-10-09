@@ -148,7 +148,7 @@ async function main() {
     assert.equal(articles(markup.noAi), 3);
     assert.deepEqual(buttons(markup.noAi), ["Score"], "only the tool that can run has a button");
     assert.equal(html.split(CONNECT_AI).length - 1, 2);
-    assert.equal((markup.noAi.match(/href="\/settings\/ai"/g) ?? []).length, 2);
+    assert.equal((markup.noAi.match(/href="\/settings\/ai#providers"/g) ?? []).length, 2);
     assert.ok(!html.includes("Download a video"));
     assert.ok(!/<textarea[^>]*id="tool-repurpose_post-post"/.test(markup.noAi), "no field for a tool that cannot run");
     const u = decode(markup.unreadable);

@@ -36,6 +36,8 @@ import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events
 import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { probeJevKey } from "@/lib/jev/client";
+import { connectorBySlug } from "@/lib/os/connectors";
+import { setupHref } from "@/lib/setup-links";
 import { authTest as slackAuthTest } from "@/lib/slack/client";
 import {
   BOT_TOKEN_FIELD,
@@ -522,7 +524,7 @@ export async function probeStoredConnection(
 }
 
 /** Where the owner fixes a connection (Settings › Connections). */
-export const CONNECTIONS_SETTINGS_HREF = "/settings/connections";
+export const CONNECTIONS_SETTINGS_HREF = setupHref("connections");
 
 /**
  * Tell the workspace a connection got worse (doc 03 a.3: the health cron
@@ -566,7 +568,8 @@ export async function alertConnectionWorsened(
         code: input.code,
         detail: input.detail,
         source: input.source,
-        href: CONNECTIONS_SETTINGS_HREF,
+        // The one app's card when the catalog has it, else the hub.
+        href: connectorBySlug(input.provider) ? setupHref(`connector:${input.provider}`) : CONNECTIONS_SETTINGS_HREF,
       },
     });
   } catch (err) {

@@ -55,6 +55,7 @@ import {
   CLI_RUNTIME_STORAGE_KEY,
   type CliRuntime,
 } from "@/lib/cli-runtime";
+import { setupHref } from "@/lib/setup-links";
 import { ENGINE_SETTINGS_HREF, agentsEngineLine, harnessRouteFor, parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
@@ -3001,7 +3002,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           </button>
         )}
         <Link
-          href="/settings#providers"
+          href={setupHref("ai_account")}
           className="text-fg-dim hover:text-accent transition-colors p-1"
           title="Configure agent in Settings"
         >
@@ -3237,7 +3238,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="font-bold">Your saved AI key needs a refresh.</div>
                   <div className="text-xs text-fg-muted font-sans">
                     The encryption envelope on your stored provider key has changed since you last saved it, so it can no longer be decrypted. Open{" "}
-                    <Link href="/settings#providers" className="text-accent underline">
+                    <Link href={setupHref("ai_account")} className="text-accent underline">
                       Settings → AI setup
                     </Link>{" "}
                     and click <strong>Replace key</strong> on the affected provider — paste the same value, save, and you&apos;re back. Takes 30 seconds.
@@ -3288,7 +3289,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                 <>
                   <div className="font-bold">Provider had a hiccup.</div>
                   <div className="text-xs text-fg-muted font-sans">
-                    The chat retried 3 times and the upstream LLM is still unhappy. Usually clears in a minute. Try again, or switch model in <Link href="/settings#providers" className="text-accent underline">Settings</Link>.
+                    The chat retried 3 times and the upstream LLM is still unhappy. Usually clears in a minute. Try again, or switch model in <Link href={setupHref("ai_account")} className="text-accent underline">Settings</Link>.
                   </div>
                 </>
               ) : (
@@ -3306,7 +3307,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "agent_not_configured" && (
                 <div className="text-xs text-fg-muted font-sans">
                   No provider key on file. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI provider accounts
                   </Link>{" "}
                   and click Connect — it applies to every agent in one shot.
@@ -3315,7 +3316,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "no_api_key" && (
                 <div className="text-xs text-fg-muted font-sans">
                   This agent&apos;s provider row exists but has no key. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI provider accounts
                   </Link>{" "}
                   and Connect (or Replace key) for the matching provider.
@@ -3324,7 +3325,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               {error === "agent_disabled" && (
                 <div className="text-xs text-fg-muted font-sans">
                   This agent is switched off for this workspace. Open{" "}
-                  <Link href="/settings#providers" className="text-accent underline">
+                  <Link href={setupHref("ai_account")} className="text-accent underline">
                     Settings → AI brain
                   </Link>{" "}
                   to check your workspace agents.
@@ -3678,7 +3679,7 @@ function EmptyTranscript({
               Get OpenRouter key
             </a>
           )}
-          <Link href="/settings#providers" className="btn-secondary text-xs">
+          <Link href={setupHref("ai_account")} className="btn-secondary text-xs">
             Open Settings
           </Link>
         </div>

@@ -28,6 +28,7 @@
  */
 
 import type { KpiTileProps } from "@/components/os/KpiTile";
+import { setupHref } from "@/lib/setup-links";
 
 /** The slice of loadOverviewPage's result this page reads. */
 export type MoneyOverviewInput = {
@@ -51,10 +52,10 @@ export type MoneyOverviewInput = {
 };
 
 export const MONEY_LINKS = {
-  importStatement: "/founders/finances/transactions#import",
-  stripeSettings: "/founders/finances/settings#stripe",
-  exchangeRates: "/founders/finances/settings#exchange-rates",
-} as const;
+  importStatement: setupHref("finance_bank_import"),
+  stripeSettings: setupHref("finance_stripe"),
+  exchangeRates: setupHref("finance_exchange_rates"),
+};
 
 export type MoneyTile = KpiTileProps & { id: string };
 

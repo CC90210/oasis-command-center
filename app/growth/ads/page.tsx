@@ -23,11 +23,13 @@ import { KpiTile } from "@/components/os/KpiTile";
 import { PageFrame } from "@/components/os/PageFrame";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { resolveFounder } from "@/lib/founders/gate";
+import { setupHref } from "@/lib/setup-links";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Ads" };
 
-const CONNECTIONS_HREF = "/settings/connections";
+// Meta's own card in Connections (lib/setup-links.ts), not the hub.
+const META_CONNECT_HREF = setupHref("connector:meta");
 const ICON = { size: 16, strokeWidth: 1.75 } as const;
 
 const TILES = ["Ad spend 7d", "Cost per lead", "Leads from ads 7d", "Cost per paid customer"] as const;
@@ -73,7 +75,7 @@ export default async function AdsPage() {
       subtitle="Meta ads, run by your Marketing department once your ad account is connected."
       actions={
         canConnect ? (
-          <Link href={CONNECTIONS_HREF} prefetch={false} className="btn-primary">
+          <Link href={META_CONNECT_HREF} prefetch={false} className="btn-primary">
             Connect Meta Ads Manager
           </Link>
         ) : undefined
@@ -87,7 +89,7 @@ export default async function AdsPage() {
               label={label}
               value={null}
               status="not_connected"
-              connectHref={canConnect ? CONNECTIONS_HREF : undefined}
+              connectHref={canConnect ? META_CONNECT_HREF : undefined}
               hint="Meta Ads"
             />
           ))}

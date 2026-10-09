@@ -667,7 +667,7 @@ async function main() {
     const state = await resolveChannelState(dept("sales"), viewer);
     assert.equal(state.kind, "not_connected");
     if (state.kind === "not_connected") {
-      assert.deepEqual(state.action, { href: "/settings/ai", label: "Connect an AI account" });
+      assert.deepEqual(state.action, { href: "/settings/ai#providers", label: "Connect an AI account" });
       rendered.push(state.reason);
     }
   });
@@ -783,7 +783,7 @@ async function main() {
     assert.doesNotMatch(page, /\bWorking\b/, "a Working pill over a refused key");
     const alert = alertOf("refused_owner");
     assert.match(alert, /Your AI account refused the request\. Check its billing or key\./, "the last turn's failure is not shown before typing");
-    assert.match(alert, /href="\/settings\/ai"[^>]*>Open AI settings</, "an owner's banner carries the fix link");
+    assert.match(alert, /href="\/settings\/ai#providers"[^>]*>Open AI settings</, "an owner's banner carries the fix link");
     // One red for one failure: the pill's status-hot tokens, not raw Tailwind red.
     assert.match(alert, /border-status-hot\/40 bg-status-hot\/10/);
     assert.doesNotMatch(alert, /red-\d/);

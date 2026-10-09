@@ -31,6 +31,7 @@ import { getSessionUser } from "@/lib/supabase-server";
 import { redirect } from "next/navigation";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
+import { setupHref } from "@/lib/setup-links";
 import { HARNESS_REPO } from "@/lib/install-scripts";
 import { InstallBridgeWizard } from "./InstallBridgeWizard";
 import { PairBridgeOnly } from "./PairBridgeOnly";
@@ -46,7 +47,7 @@ export default async function BridgeInstallPage() {
 
   const back = (
     <Link
-      href={op.operator ? "/settings#devices" : "/settings"}
+      href={op.operator ? setupHref("bridge_devices") : setupHref("profile")}
       className="text-xs text-fg-muted hover:text-fg inline-flex items-center gap-1"
     >
       <ArrowLeft className="w-3 h-3" /> Back to Settings

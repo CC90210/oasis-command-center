@@ -15,6 +15,7 @@
  * Server component, no hooks. The bar is two flat fills: no gradient, no glow.
  */
 import Link from "next/link";
+import { setupHref } from "@/lib/setup-links";
 import { usd, type GoalPaceView } from "@/components/os/today/model";
 
 /**
@@ -23,7 +24,7 @@ import { usd, type GoalPaceView } from "@/components/os/today/model";
  * page with nothing to set. The fragment opens the collapsed section
  * (components/settings/OpenSectionOnHash.tsx).
  */
-export const REVENUE_GOAL_SETTINGS_HREF = "/settings/team#revenue-goal";
+export const REVENUE_GOAL_SETTINGS_HREF = setupHref("revenue_goal");
 
 const STATUS_TEXT: Record<Extract<GoalPaceView, { kind: "live" }>["status"], string> = {
   met: "text-status-engaged",

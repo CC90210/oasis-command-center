@@ -39,6 +39,7 @@ import { mayOpenOsHref, type BuildOsNavInput } from "../lib/os/nav";
 import type { DepartmentKey } from "../lib/os/types";
 import {
   CONNECTIONS_HREF,
+  SOCIAL_CONNECT_HREF,
   buildDepartmentCards,
   buildNeedsYou,
   cashView,
@@ -660,7 +661,7 @@ async function main() {
   const neverConnected = content({ published: 0, lastSyncedAt: null, zernioConnected: false });
   assert.deepEqual(
     [neverConnected.status, neverConnected.tone, neverConnected.connection?.state, neverConnected.connection?.href],
-    ["Connect a social account", "quiet", "not_connected", CONNECTIONS_HREF],
+    ["Connect a social account", "quiet", "not_connected", SOCIAL_CONNECT_HREF],
   );
   const neverText = render(createElement(DepartmentCard, { card: neverConnected }));
   assert.doesNotMatch(neverText, /Zernio|Nothing synced/, `a tool the owner never connected, shown as a sync: ${neverText}`);

@@ -372,7 +372,7 @@ export async function modelRegistryChecks(check: Check): Promise<void> {
       "The AI model Gemini 2.5 Pro (gemini-2.5-pro) was not found: Google has retired it or does not offer it to this AI account. Pick another model in AI settings, such as Gemini 3.8 Flash.",
     );
     assert.equal(named.short, "the AI model Gemini 2.5 Pro (gemini-2.5-pro) was not found");
-    assert.deepEqual(named.fix, { href: "/settings/ai", label: "Open AI settings" });
+    assert.deepEqual(named.fix, { href: "/settings/ai#providers", label: "Open AI settings" });
     const unknownModel = outcome.failureCopy("provider_404", { canManageAi: false, model: reg.modelFactsForCopy("openrouter", "anthropic/claude-sonnet-4") });
     assert.equal(
       unknownModel.sentence,

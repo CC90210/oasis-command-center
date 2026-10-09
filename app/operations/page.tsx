@@ -32,6 +32,7 @@ import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou } from "@/lib/admin/attention";
 import { machineState, type MachineState } from "@/lib/devices/presence";
+import { setupHref } from "@/lib/setup-links";
 
 export const dynamic = "force-dynamic";
 
@@ -276,7 +277,7 @@ export default async function OperationsPage({
           <EmptyState
             message="No machines paired yet."
             cta={
-              <Link href="/settings/devices" className="btn-primary inline-flex items-center gap-1">
+              <Link href={setupHref("bridge_devices")} className="btn-primary inline-flex items-center gap-1">
                 Open Settings → Devices
               </Link>
             }
