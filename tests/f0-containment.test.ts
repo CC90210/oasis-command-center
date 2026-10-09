@@ -25,8 +25,9 @@
  *      where viewer checks are not allowed, offers it only in OASIS's own
  *      workspace.
  *   3c. Every /playbook page 404s for anyone outside an OASIS workspace (by
- *      tenant id and slug), renders for OASIS members, and signed-out visitors
- *      are sent to /login by middleware.
+ *      tenant id and slug), renders for OASIS members (the founders' pages for
+ *      the founders only), and signed-out visitors are sent to /login by
+ *      middleware.
  *   4. /start, /configure and /demo/sun: middleware sends a signed-out visitor
  *      to /login (they are off the public list, like any unknown path), and a
  *      signed-in viewer gets the 404. No string literal in app, components, lib,
@@ -784,12 +785,24 @@ async function main() {
       for (const file of playbookPages) assert.equal(await is404(() => renderPlaybookPage(file)), true, playbookName(file));
     });
   }
+  // The founders' pages (the operator prompts library and the client-deploy
+  // runbook, lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS) render for a
+  // founder and are the 404 for every other OASIS member: they drive OASIS's
+  // own agents by name (tests/agent-names.test.ts).
+  const founderOnly = (file: string) => playbookAccess.FOUNDER_PLAYBOOK_PATHS.includes(`/${playbookName(file).replace(/\/page\.tsx$/, "")}`);
+  await check("the founders' Playbook pages are exactly the prompts library and the client-deploy runbook", () => {
+    assert.deepEqual(playbookPages.filter(founderOnly).map(playbookName).sort(), ["playbook/client-deploy/page.tsx", "playbook/prompts/page.tsx"]);
+  });
   for (const viewer of ["cc", "rep"] as const) {
-    await check(`${viewer} (OASIS member): every /playbook page renders`, async () => {
+    await check(`${viewer} (OASIS member): every /playbook page renders${viewer === "rep" ? ", but a founders' page is the 404" : ""}`, async () => {
       await login(viewer);
       for (const file of playbookPages) {
         if (isOnboardingRedirect(file)) {
           await assert.rejects(() => Promise.resolve(renderPlaybookPage(file)), /NEXT_REDIRECT;\/playbook#operating-manual/, `${playbookName(file)} did not redirect for ${viewer}`);
+          continue;
+        }
+        if (viewer === "rep" && founderOnly(file)) {
+          assert.equal(await is404(() => renderPlaybookPage(file)), true, `${playbookName(file)} rendered for a rep`);
           continue;
         }
         const out = await renderPlaybookPage(file);

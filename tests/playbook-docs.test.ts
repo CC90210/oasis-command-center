@@ -563,7 +563,7 @@ async function main() {
   const docs = await import("../lib/playbook/documents");
 
   // ── 3b. ask links follow the rail ────────────────────────────────────────
-  await check("a sales rep is handed no /team/<dept> link they cannot open (drills, client-deploy, prompts); a founder still is", async () => {
+  await check("a sales rep is handed no /team/<dept> link they cannot open and no founders' page (drills, client-deploy, prompts); a founder still is", async () => {
     const { resolveOsViewer } = await import("../components/os/department/viewer");
     const { departmentGate } = await import("../components/os/department/gate");
     const { OS_DEPARTMENTS } = await import("../lib/os/departments");
@@ -582,7 +582,18 @@ async function main() {
       const os = await resolveOsViewer();
       assert.ok(os.ok, `${who}: the rail could not resolve the viewer`);
       allowed[who] = new Set(OS_DEPARTMENTS.filter((d) => departmentGate(d.slug, os.navInput)).map((d) => d.slug));
-      links[who] = [...collectHrefs(await drills({})), ...collectHrefs(await deploy({}))];
+      links[who] = collectHrefs(await drills({}));
+      if (who === "rep") {
+        // The founders' pages (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS)
+        // are the 404 for a rep, so they hand a rep no link at all, and the
+        // drills do not link the runbook (tests/agent-names.test.ts).
+        assert.equal(await is404(() => deploy({})), true, "the client-deploy runbook rendered for a rep");
+        assert.equal(await is404(() => prompts({})), true, "the prompts library rendered for a rep");
+        assert.ok(!links.rep.includes("/playbook/client-deploy"), "the drills link a rep to a founders' page");
+        continue;
+      }
+      links[who].push(...collectHrefs(await deploy({})));
+      assert.ok(links[who].includes("/playbook/client-deploy"), "the drills still link a founder to the runbook");
       const filter = findElement(await prompts({}), (el) => typeof el.props === "object" && el.props !== null && "openDepartments" in (el.props as object));
       assert.ok(filter, "the prompts page renders the library filter");
       const props = filter.props as Record<string, unknown>;
@@ -613,7 +624,8 @@ async function main() {
     assert.deepEqual([...new Set(blocked)], [], "the rep was handed links to departments that 404 for them");
     assert.ok(teamLinks("rep").includes("chief-of-staff"), "the rep still gets the asks they may open");
     assert.ok(teamLinks("cc").includes("marketing"), "a founder still gets Ask Marketing");
-    assert.ok(/Ask Marketing/.test(html.cc ?? "") && !/Ask Marketing/.test(html.rep ?? ""), "the prompts library draws Ask Marketing for the founder only");
+    assert.ok(/Ask Marketing/.test(html.cc ?? ""), "the prompts library draws Ask Marketing for a founder");
+    assert.deepEqual(Object.keys(html), ["cc"], "only a founder's prompts library was rendered");
   });
 
   await check("the privacy policy document is the live /privacy text, with Copy and Download", async () => {

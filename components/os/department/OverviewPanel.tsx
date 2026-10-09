@@ -28,18 +28,26 @@ const CONNECTIONS_HREF = "/settings/connections";
 const CHAT_APPS_HREF = "/settings/chat-apps";
 const ROUTINES_SHOWN = 6;
 
-/** Where this department answers in Slack, from the workspace's real state (lib/slack/status.ts). */
-function SlackLine({ slack, canManage }: { slack: SlackHome; canManage: boolean }) {
+/**
+ * Where this department answers in Slack, from the workspace's real state
+ * (lib/slack/status.ts). A connection whose own Slack card says it needs
+ * attention, or could not be checked, answers nobody: the line says the card's
+ * words (`problem`, lib/os/connectors.ts connectionProblem), never the channels.
+ */
+export function SlackLine({ slack, problem, canManage }: { slack: SlackHome; problem: string | null; canManage: boolean }) {
+  const answers = slack.kind === "channels" || slack.kind === "mention_only";
   const text =
-    slack.kind === "channels"
-      ? `Answers @mentions in ${slack.names.map((n) => `#${n}`).join(", ")}.`
-      : slack.kind === "mention_only"
-        ? "No channel is mapped to this department. It answers an @mention that names it."
-        : slack.kind === "not_connected"
-          ? "Slack is not connected to this workspace."
-          : slack.kind === "not_configured"
-            ? "OASIS's Slack app is not set up on this deployment yet."
-            : "Could not check Slack just now.";
+    answers && problem
+      ? `The Slack connection says: ${problem}. Nothing is answered in Slack until it is fixed.`
+      : slack.kind === "channels"
+        ? `Answers @mentions in ${slack.names.map((n) => `#${n}`).join(", ")}.`
+        : slack.kind === "mention_only"
+          ? "No channel is mapped to this department. It answers an @mention that names it."
+          : slack.kind === "not_connected"
+            ? "Slack is not connected to this workspace."
+            : slack.kind === "not_configured"
+              ? "OASIS's Slack app is not set up on this deployment yet."
+              : "Could not check Slack just now.";
   return (
     <p className="mb-2.5 text-[13px] leading-5 text-fg-muted">
       <span className="font-medium text-fg">Slack</span> {text}
@@ -224,6 +232,8 @@ export type OverviewPanelProps = {
   connections: readonly DepartmentAppChip[];
   /** Where this department lives in Slack; null when it has no teammate to answer there. */
   slack?: SlackHome | null;
+  /** The Slack card's words when its connection is a problem; null when it is fine. */
+  slackProblem?: string | null;
   canManageConnections: boolean;
   asks: readonly SuggestedAsk[];
 };
@@ -236,6 +246,7 @@ export function OverviewPanel({
   routines,
   connections,
   slack = null,
+  slackProblem = null,
   canManageConnections,
   asks,
 }: OverviewPanelProps) {
@@ -257,7 +268,7 @@ export function OverviewPanel({
         <Routines routines={routines} />
       </Section>
       <Section title="Connections">
-        {slack && <SlackLine slack={slack} canManage={canManageConnections} />}
+        {slack && <SlackLine slack={slack} problem={slackProblem} canManage={canManageConnections} />}
         <Connections apps={connections} canManage={canManageConnections} />
       </Section>
       {asks.length > 0 && (

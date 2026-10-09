@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { authMode } from "@/lib/auth-client";
+import { loginFailureMessage } from "@/lib/login-error";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export function LoginForm() {
@@ -68,8 +69,7 @@ export function LoginForm() {
           body: JSON.stringify({ email, password }),
         });
         if (!r.ok) {
-          setErr(r.status === 429 ? "Too many attempts — wait a few minutes."
-                                  : "Invalid email or password.");
+          setErr(loginFailureMessage(r.status));
           return;
         }
         if (inviteToken) {

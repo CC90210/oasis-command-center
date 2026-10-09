@@ -219,7 +219,7 @@ async function main() {
   });
 
   // ── The glance ────────────────────────────────────────────────────────────
-  const status = { ok: true as const, value: { personal: { connected: false, address: null }, workspace: null } };
+  const status = { ok: true as const, value: { personal: { connected: false, label: "Not connected", address: null }, workspace: null } };
   const at = (hhmm: string) => Date.parse(`2026-09-30T${hhmm}:00-04:00`);
   const block = (title: string, s: string, e: string) => ({ key: title, title, startMs: at(s), endMs: at(e), allDay: false });
   type Block = ReturnType<typeof block>;

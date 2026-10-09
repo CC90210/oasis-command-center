@@ -32,8 +32,9 @@ import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
 import { momentumMetrics, priorityInbound } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { operatorCalendarStatus, systemCalendarConfig } from "@/lib/integrations/google-calendar";
-import { getUserIntegrationBundleForStatus } from "@/lib/user-integration-store";
+import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
+import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
+import { personalGoogleStatus } from "@/lib/os/connectors";
 import { loadEmpireRoutines, loadTenantRoutines } from "@/components/os/department/routines";
 import { empireReadFor, mergeRoutineReads, routineHealth, type EmpireLane, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
@@ -368,10 +369,14 @@ export function loadWorkspaceAlerts(tenantId: string): Promise<Read<WorkspaceAle
  */
 export function loadCalendarStatus(tenantId: string, userId: string, oasisWorkspace: boolean): Promise<Read<CalendarStatus>> {
   return read("calendar", async () => {
-    const status = await operatorCalendarStatus(tenantId, userId, { getBundle: getUserIntegrationBundleForStatus });
+    // Your own Google account through the one reader and resolver Settings and
+    // the Connections card use (lib/integrations/personal-google.ts), so a
+    // wrong account reads "Wrong Google account" here too, never "Connected".
+    const fact = await readPersonalGoogleFact(tenantId, userId);
+    const status = personalGoogleStatus(fact);
     const system = oasisWorkspace ? systemCalendarConfig() : null;
     return {
-      personal: { connected: status.connected, address: status.address ?? null },
+      personal: { connected: status.state === "ready", label: status.label, address: fact.address },
       workspace: oasisWorkspace ? { configured: system !== null, address: system?.organizerEmail || null } : null,
     };
   });

@@ -41,8 +41,8 @@ import { mayOpenOsHref } from "@/lib/os/nav";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackPresence, slackHomeFor } from "@/lib/slack/status";
-import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import { connectorBySlug, connectorHref, resolveConnectorStatus } from "@/lib/os/connectors";
+import { loadConnectorFacts, loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
+import { connectionProblem, connectorBySlug, connectorHref, resolveConnectorStatus } from "@/lib/os/connectors";
 
 export const dynamic = "force-dynamic";
 
@@ -125,6 +125,19 @@ export default async function DepartmentPage({
       status: connectorFacts && def ? resolveConnectorStatus(def, connectorFacts, nowMs) : null,
     };
   });
+  // The Slack card's own status, read only where this tab's Slack line would
+  // say the department answers there (Slack is installed): a failing
+  // connection answers nobody, and the line then says the card's words
+  // (connectionProblem). The facts above serve when they were read.
+  const slackDef = connectorBySlug("slack");
+  const slackProblem =
+    binding.kind === "agent" && slackPresence.kind === "connected" && slackDef
+      ? connectionProblem(
+          connectorFacts
+            ? resolveConnectorStatus(slackDef, connectorFacts, nowMs)
+            : await loadWorkspaceConnectorStatus(tenantId, "slack", nowMs),
+        )
+      : null;
 
   const deptRoutines = routines.ok
     ? {
@@ -167,6 +180,7 @@ export default async function DepartmentPage({
         connections: apps,
         // Only a department with a teammate answers in Slack.
         slack: binding.kind === "agent" ? slackHomeFor(slackPresence, [dept.key]) : null,
+        slackProblem,
         canManageConnections,
         asks: suggestedAsksFor(dept.key, { oasis: viewer.oasis }),
       }}

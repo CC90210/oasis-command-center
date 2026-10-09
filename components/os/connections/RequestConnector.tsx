@@ -69,7 +69,8 @@ export function RequestConnector({
       } else if (res.status === 401 || res.status === 403) {
         setNotice({ tone: "err", text: "Your role cannot file requests here. Ask the workspace owner or an admin to send it." });
       } else {
-        setNotice({ tone: "err", text: `The request was not sent (${data?.error || `HTTP ${res.status}`}). Try again.` });
+        console.error("[connections.request]", res.status, data?.error);
+        setNotice({ tone: "err", text: "The request was not sent. Try again in a minute." });
       }
     } catch (err) {
       console.error("[connections.request]", err);

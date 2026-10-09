@@ -750,7 +750,7 @@ async function main() {
       schedule: {
         meetings: null,
         partial: false,
-        calendar: { ok: true, value: { personal: { connected: false, address: null }, workspace: null } },
+        calendar: { ok: true, value: { personal: { connected: false, label: "Not connected", address: null }, workspace: null } },
         connectHref: "/settings",
       },
       goal: null,
