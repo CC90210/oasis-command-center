@@ -11,14 +11,19 @@
  *   - another workspace's form id: 404, and nothing of it changes;
  *   - a support desk's form (OASIS's /support, and a client's registered
  *     desk): Turn into an offer answers 409 support_desk_form;
- *   - an owner of the workspace: makes the page (a draft), reads it back.
+ *   - an owner of the workspace: makes the page (a draft), reads it back;
+ *   - the line saying who hears of a new lead quotes the workspace's Telegram
+ *     card in Connections (never set up, not tested, refused, passed).
  *
  * Real routes and sessions against a local libSQL file with bravo__203.
  *
  * Run: node --conditions=react-server --import tsx tests/offer-pages-access.test.ts
  */
-import { CLIENT_A, CLIENT_B, OASIS, USERS, done, formRow, login, setupOfferDatabase, step, CONTACT_STEPS, minimalDoc, offerRow } from "./_offer-pages-harness";
+import { AT, CLIENT_A, CLIENT_B, OASIS, USERS, done, formRow, login, setupOfferDatabase, step, CONTACT_STEPS, minimalDoc, offerRow } from "./_offer-pages-harness";
 import assert from "node:assert/strict";
+
+// A saved Telegram bot is stored encrypted (lib/field-encryption.ts).
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "offer-pages-access-field-key-material";
 
 const FORM_A = "f0ac0000-0000-4000-8000-00000000000a";
 const FORM_A_DESK = "f0ac0000-0000-4000-8000-0000000000de";
@@ -158,6 +163,53 @@ async function main() {
     assert.match(alert.line, /No alert channel connected/);
     const lib = await json(library.GET(req("GET", `/api/forms/${FORM_A}/offer/library-videos`), p(FORM_A)));
     assert.deepEqual(lib.body, { ok: true, available: false, videos: [] });
+  });
+
+  // One answer per integration (#553): the builder's alert line is the
+  // Telegram card's own status in Connections, quoted, never a second verdict
+  // drawn from the saved fields alone.
+  await step("the alert line says what Connections says about the workspace's Telegram bot, in the card's words", async () => {
+    const { encryptField } = await import("../lib/field-encryption");
+    const { loadWorkspaceConnectorStatus } = await import("../components/os/connections/connector-facts");
+    const { clientAlertLine, offerAlertStatus } = await import("../lib/offer-pages/alert-status");
+    await login(USERS.clientA);
+    const line = async () => (await json(offer.GET(req("GET", `/api/forms/${FORM_A}/offer`), p(FORM_A)))).body.alert as { connected: boolean; line: string };
+    const card = () => loadWorkspaceConnectorStatus(CLIENT_A, "telegram");
+    await db.batch(
+      [
+        { sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'telegram', 'bot_token', ?)", args: [CLIENT_A, encryptField("3003:client-a-own-bot")] },
+        { sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'telegram', 'chat_id', ?)", args: [CLIENT_A, encryptField("-1003330003")] },
+      ],
+      "write",
+    );
+    // Saved, never tested.
+    let c = await card();
+    assert.equal(c?.kind, "configured", JSON.stringify(c));
+    let l = await line();
+    assert.equal(l.connected, false);
+    assert.ok(l.line.includes(`"${c!.label}"`), `the line does not quote the card: ${l.line}`);
+    // The last Test failed: Telegram refused the token.
+    await db.execute({
+      sql: "UPDATE tenant_integration_credentials SET last_tested_at = ?, last_test_ok = 0, last_test_error = 'telegram_http_401' WHERE tenant_id = ?",
+      args: [AT, CLIENT_A],
+    });
+    c = await card();
+    assert.equal(c?.kind, "attention", JSON.stringify(c));
+    l = await line();
+    assert.equal(l.connected, false);
+    assert.ok(l.line.includes(`"${c!.label}"`), `the line does not quote the card: ${l.line}`);
+    assert.doesNotMatch(l.line, /alert your Telegram bot/, "a bot Telegram refused is said to be alerting");
+    // The last Test passed.
+    await db.execute({ sql: "UPDATE tenant_integration_credentials SET last_test_ok = 1, last_test_error = NULL WHERE tenant_id = ?", args: [CLIENT_A] });
+    assert.equal((await card())?.kind, "connected");
+    assert.deepEqual(await line(), { connected: true, line: "New leads alert your Telegram bot." });
+    // A card that could not be read is never "no channel".
+    assert.match(clientAlertLine(null).line, /Couldn't check/);
+    const failing = await offerAlertStatus(CLIENT_A, async () => {
+      throw new Error("read failed");
+    });
+    assert.deepEqual([failing.connected, /Couldn't check/.test(failing.line)], [false, true]);
+    await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ?", args: [CLIENT_A] });
   });
 
   await step("a hand-made draft that changes its template or carries markup is refused with the path", async () => {

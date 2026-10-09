@@ -101,11 +101,17 @@ export async function setupOfferDatabase(opts: { migrate?: boolean; library?: bo
   if (opts.migrate !== false) await applyOfferMigration(db);
   if (opts.library !== false) await createLibraryTables(db);
   // Connections > Telegram's saved fields (lib/tenant-integration-store.ts),
-  // empty: no workspace has saved a bot unless a test writes one.
+  // empty: no workspace has saved a bot unless a test writes one. The live
+  // shape, test state included: the Telegram card's status (and so the
+  // builder's alert line, lib/offer-pages/alert-status.ts) reads
+  // last_tested_at / last_test_ok / last_test_error.
   await db.executeMultiple(`
     CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-      tenant_id TEXT NOT NULL, profile_id TEXT, service TEXT NOT NULL, field_key TEXT NOT NULL, encrypted_value TEXT,
-      created_at TEXT, updated_at TEXT);
+      tenant_id TEXT NOT NULL, service TEXT NOT NULL, field_key TEXT NOT NULL, encrypted_value TEXT NOT NULL,
+      last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT, created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+    CREATE UNIQUE INDEX tic_key ON tenant_integration_credentials (tenant_id, service, field_key);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
   `);

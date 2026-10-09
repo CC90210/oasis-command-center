@@ -38,7 +38,7 @@ import { emptyDocForTemplate } from "@/lib/offer-pages/templates";
 import { applyClaimTicks, lintDoc, stampConfirmations } from "@/lib/offer-pages/claims";
 import { createOfferRow, isSupportDeskForm, offerPagesDb, readOfferRow, saveDraft } from "@/lib/offer-pages/store";
 import { editableForm, fallbackHeadline, offerView } from "@/lib/offer-pages/operator";
-import { offerAlertStatus } from "@/lib/offer-pages/notify";
+import { offerAlertStatus } from "@/lib/offer-pages/alert-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

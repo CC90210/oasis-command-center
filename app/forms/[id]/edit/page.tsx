@@ -41,7 +41,7 @@ import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { formsEditRefusal } from "@/lib/forms/access";
 import { isSupportDeskForm, offerPagesDb, readOfferRow } from "@/lib/offer-pages/store";
 import { offerView } from "@/lib/offer-pages/operator";
-import { offerAlertStatus } from "@/lib/offer-pages/notify";
+import { offerAlertStatus } from "@/lib/offer-pages/alert-status";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { resolveBookingUrl } from "@/lib/booking-link";
 import Link from "next/link";

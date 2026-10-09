@@ -32,7 +32,6 @@ import { recordAlertFailure } from "@/lib/forms/alert-failure";
 import { AI_AUDIT_SLUG, AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { OASIS_FUNNEL_SLUG, OASIS_FUNNEL_TENANT_ID } from "@/lib/forms/oasis-funnel-seed";
 import { SUPPORT_FORM_SLUG, SUPPORT_FORM_TENANT_ID } from "@/lib/delivery/support-form";
-import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { hasOfferPage } from "./store";
 
 /** Marker source for an undeliverable offer alert (never an idempotency key). */
@@ -83,34 +82,8 @@ export function buildOfferLeadAlert(offerName: string, answers: Record<string, u
 /** A client that connected no bot chose to hear nothing outside the app: not a failure. */
 const NOT_CONNECTED = workspaceTelegramOutcome({ ok: false, reason: "workspace_telegram_not_connected" });
 
-export type OfferAlertStatus = { connected: boolean; line: string };
-
-/**
- * The builder's line about who hears of a new lead, shown before Publish so
- * nobody publishes a silent drop box. Reads only whether the workspace's bot
- * fields are saved, never their values.
- */
-export async function offerAlertStatus(
-  tenantId: string,
-  read: (tenantId: string, service: string, field: string) => Promise<{ ok: boolean; reason?: string }> = readTenantCredentialStrict,
-): Promise<OfferAlertStatus> {
-  const audience = alertAudienceFor(tenantId);
-  if (audience === "oasis_operator") return { connected: true, line: "New leads alert you on Telegram." };
-  if (audience === "card_only") return { connected: false, line: "This workspace is closed, so new leads alert no one." };
-  const unknown = { connected: false, line: "Couldn't check your alert channel. Leads still appear in Offers and the pipeline." };
-  try {
-    const [token, chat] = await Promise.all([read(tenantId, "telegram", "bot_token"), read(tenantId, "telegram", "chat_id")]);
-    if (token.ok && chat.ok) return { connected: true, line: "New leads alert your Telegram bot." };
-    // A lookup that failed, or a saved bot that will not decrypt, is not "none".
-    if ([token, chat].some((r) => !r.ok && r.reason !== "missing")) return unknown;
-  } catch {
-    return unknown;
-  }
-  return {
-    connected: false,
-    line: "No alert channel connected - leads will only appear in Offers and the pipeline. Connect Telegram under Connections to be told.",
-  };
-}
+// The builder's line about who hears of a new lead is ./alert-status.ts: it
+// reads the Telegram card's status, which this send path never needs.
 
 export type OfferAlertResult = "sent" | "not_offer" | "repeat" | "not_sent";
 

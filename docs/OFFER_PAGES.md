@@ -19,7 +19,7 @@ entity, and `/offers` is its 404 route (`tests/os-redirects.test.ts`).
 | Video links (YouTube, Vimeo, Loom) | `lib/offer-pages/providers.ts` |
 | Library video: resolve, sign, oEmbed | `lib/offer-pages/video.ts` |
 | Reads and writes (missing-table tolerant) | `lib/offer-pages/store.ts` |
-| New-lead alerts | `lib/offer-pages/notify.ts` |
+| New-lead alerts | `lib/offer-pages/notify.ts` (the send); `lib/offer-pages/alert-status.ts` (the builder's line, in the words of the Telegram card in Connections) |
 | The public page | `app/f/[tenant_slug]/[form_slug]/page.tsx`, `components/offer-pages/OfferPage.tsx` |
 | The marketing faces, preload off | `app/fonts/offer-fonts.ts` (pinned to the marketing layout's faces by `tests/marketing-accent-parity.test.ts`) |
 | The builder | `/forms/[id]/edit`, `components/offer-pages/builder/` |
