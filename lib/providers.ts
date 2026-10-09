@@ -311,7 +311,89 @@ type UsageAcc = {
   ledger: ModelUsage;
   /** The provider's final usage report arrived (the message completed). */
   complete: boolean;
+  /**
+   * Why the provider says it stopped, normalised (finishKind): "length" (the
+   * output budget ran out), "blocked" (a safety or content filter), "stop" (a
+   * natural end) or "other". null until the provider says.
+   */
+  finish: FinishKind | null;
 };
+
+/**
+ * Why a reply stopped, in one word per meaning, whatever the provider calls it:
+ *   Google    candidate.finishReason MAX_TOKENS / SAFETY, RECITATION, ... / STOP,
+ *             or promptFeedback.blockReason (the prompt itself was blocked);
+ *   Anthropic message_delta stop_reason max_tokens / refusal / end_turn;
+ *   OpenAI-compatible choice.finish_reason length / content_filter / stop.
+ */
+export type FinishKind = "length" | "blocked" | "stop" | "other";
+
+const GOOGLE_BLOCKED = new Set([
+  "SAFETY",
+  "RECITATION",
+  "LANGUAGE",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_RECITATION",
+]);
+
+/** A provider's own stop word, as a FinishKind. */
+export function finishKind(provider: Provider, raw: unknown): FinishKind | null {
+  if (typeof raw !== "string" || !raw) return null;
+  if (provider === "google") {
+    if (raw === "MAX_TOKENS") return "length";
+    if (raw === "STOP") return "stop";
+    if (GOOGLE_BLOCKED.has(raw)) return "blocked";
+    return raw === "FINISH_REASON_UNSPECIFIED" ? null : "other";
+  }
+  if (provider === "anthropic") {
+    if (raw === "max_tokens") return "length";
+    if (raw === "refusal") return "blocked";
+    if (raw === "end_turn" || raw === "stop_sequence") return "stop";
+    return "other";
+  }
+  if (raw === "length") return "length";
+  if (raw === "content_filter") return "blocked";
+  if (raw === "stop") return "stop";
+  return "other";
+}
+
+/**
+ * The error message of a reply that finished with NO answer text, by why
+ * (lib/os/channel/outcome.ts classifyStreamError turns it into a failure code):
+ *   empty_reply:thinking  the output budget ran out before any answer text: on a
+ *                         thinking model the budget went to its thinking
+ *                         (thinking tokens count against the output cap, Gemini
+ *                         docs "Thinking", and OpenAI's reasoning tokens alike);
+ *   empty_reply:blocked   a safety or content filter stopped it;
+ *   empty_reply:empty     the provider ended normally with nothing to say.
+ * Never a success: an empty answer is a failed turn, in the channel and in the
+ * usage ledger (CC, 2026-10-09: Chief of Staff showed "The reply came back
+ * empty" while its ai_usage_events row said "ok").
+ */
+export type EmptyReplyKind = "thinking" | "blocked" | "empty";
+
+export function emptyReplyKind(finish: FinishKind | null): EmptyReplyKind {
+  if (finish === "length") return "thinking";
+  if (finish === "blocked") return "blocked";
+  return "empty";
+}
+
+/**
+ * Thinking models spend part of the output cap on thinking before they write
+ * a word (Gemini 3.x and OpenAI's reasoning models both count those tokens
+ * against it). The caller's maxTokens is the ANSWER's budget; this much more is
+ * sent as the cap on those models so the answer still has its room.
+ */
+export const THINKING_HEADROOM_TOKENS = 4096;
+
+/** Gemini 3.x takes thinkingConfig.thinkingLevel; 2.5 and older do not (a 400). */
+export function geminiTakesThinkingLevel(model: string): boolean {
+  return /^gemini-3(?:[.-]|$)/.test(model);
+}
 
 type MeteredSpec = {
   provider: Provider;
@@ -347,6 +429,7 @@ async function* metered(meter: ModelCallMeter, spec: MeteredSpec): AsyncGenerato
     doneOut: 0,
     ledger: { inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null },
     complete: false,
+    finish: null,
   };
   let end: CallEnd | null = null;
   try {
@@ -360,7 +443,21 @@ async function* metered(meter: ModelCallMeter, spec: MeteredSpec): AsyncGenerato
       yield { type: "error", message: spec.refusal(res.status, detail) };
       return;
     }
-    yield* spec.read(res.body, acc);
+    // An answer is text someone can read: a stream that ends without any is a
+    // FAILED turn with its reason, in the ledger and to the caller, never an
+    // "ok" with nothing in it (see EmptyReplyKind). Whatever the provider
+    // billed for it (a budget spent thinking) is still recorded.
+    let answered = false;
+    for await (const ev of spec.read(res.body, acc)) {
+      if (ev.type === "delta" && ev.text.trim()) answered = true;
+      yield ev;
+    }
+    if (!answered) {
+      const kind = emptyReplyKind(acc.finish);
+      end = { outcome: "error", errorCode: `empty_reply_${kind}`, usage: acc.complete ? acc.ledger : null };
+      yield { type: "error", message: `empty_reply:${kind}` };
+      return;
+    }
     end = { outcome: "ok", usage: acc.complete ? acc.ledger : null };
     yield { type: "done", inputTokens: acc.doneIn, outputTokens: acc.doneOut };
   } catch (err) {
@@ -407,6 +504,7 @@ async function* readOpenAICompatible(body: ReadableStream<Uint8Array>, acc: Usag
     const choice = firstSSERecord(data.choices);
     const delta = asSSERecord(choice?.delta)?.content;
     if (typeof delta === "string" && delta.length) yield { type: "delta", text: delta };
+    acc.finish = finishKind("openai", choice?.finish_reason) ?? acc.finish;
     const usage = asSSERecord(data.usage);
     if (usage) readOpenAIUsage(usage, acc);
   }
@@ -545,6 +643,7 @@ async function* readAnthropic(body: ReadableStream<Uint8Array>, acc: UsageAcc): 
       const text = asSSERecord(data.delta)?.text;
       if (typeof text === "string") yield { type: "delta", text };
     } else if (event.event === "message_delta") {
+      acc.finish = finishKind("anthropic", asSSERecord(data.delta)?.stop_reason) ?? acc.finish;
       const usage = asSSERecord(data.usage);
       if (typeof usage?.output_tokens === "number") {
         acc.doneOut = usage.output_tokens;
@@ -565,7 +664,9 @@ function streamOpenAI(req: ChatRequest): AsyncGenerator<StreamEvent> {
   if (req.system) messages.push({ role: "system", content: req.system });
   messages.push(...req.messages);
 
-  const maxTokens = req.maxTokens ?? 4096;
+  // GPT-5.x and later reason before they answer, and those reasoning tokens
+  // count against max_completion_tokens: the answer's budget plus the headroom.
+  const maxTokens = (req.maxTokens ?? 4096) + THINKING_HEADROOM_TOKENS;
   return metered(req.meter, {
     provider: "openai",
     model: req.model,
@@ -601,14 +702,24 @@ function streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
       req.model
     )}:streamGenerateContent?alt=sse`;
 
-  const maxTokens = req.maxTokens ?? 4096;
+  // Gemini 3.x thinks before it answers, by default at a "medium" level, and
+  // its thinking tokens count against maxOutputTokens (Gemini docs "Thinking":
+  // the cap is "the maximum number of tokens a response can generate,
+  // including thought tokens"; a cap reached while thinking ends MAX_TOKENS
+  // with the answer empty, thinking still billed). A chat reply asks for the
+  // LOW level, which every Gemini 3.x model takes (3.8 Flash does not take
+  // "minimal"), and the cap is the answer's budget plus thinking headroom.
+  const thinks = geminiTakesThinkingLevel(req.model);
+  const maxTokens = (req.maxTokens ?? 4096) + (thinks ? THINKING_HEADROOM_TOKENS : 0);
   const contents = req.messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
   const body: Record<string, unknown> = {
     contents,
-    generationConfig: { maxOutputTokens: maxTokens },
+    generationConfig: thinks
+      ? { maxOutputTokens: maxTokens, thinkingConfig: { thinkingLevel: "low" } }
+      : { maxOutputTokens: maxTokens },
   };
   if (req.system) {
     body.systemInstruction = { role: "user", parts: [{ text: req.system }] };
@@ -632,7 +743,15 @@ function streamGoogle(req: ChatRequest): AsyncGenerator<StreamEvent> {
  * usageMetadata repeats, cumulative, on every chunk: the last one is the total.
  * promptTokenCount includes the cached prefix (cachedContentTokenCount), and
  * thinking tokens (thoughtsTokenCount) are billed as output but are not in
- * candidatesTokenCount, so the ledger adds them.
+ * candidatesTokenCount, so the ledger adds them. A reply that spent its whole
+ * cap thinking has NO candidatesTokenCount at all, only thoughtsTokenCount:
+ * that is zero answer tokens, not an unknown count, so the ledger still
+ * records the thinking it billed.
+ *
+ * A part marked `thought: true` is the model's thinking (a summary, sent only
+ * when asked for), never answer text. finishReason says why it stopped, and a
+ * promptFeedback.blockReason says the prompt itself was blocked (no candidate
+ * at all): both are kept for the empty-reply verdict in metered().
  */
 async function* readGoogle(body: ReadableStream<Uint8Array>, acc: UsageAcc): AsyncGenerator<StreamEvent> {
   for await (const event of parseSSE(body)) {
@@ -643,21 +762,26 @@ async function* readGoogle(body: ReadableStream<Uint8Array>, acc: UsageAcc): Asy
     if (Array.isArray(parts)) {
       for (const p of parts) {
         const part = asSSERecord(p);
+        if (part?.thought === true) continue;
         if (typeof part?.text === "string" && part.text.length) {
           yield { type: "delta", text: part.text };
         }
       }
     }
+    acc.finish = finishKind("google", candidate?.finishReason) ?? acc.finish;
+    if (typeof asSSERecord(data.promptFeedback)?.blockReason === "string") acc.finish = "blocked";
     const usageMetadata = asSSERecord(data.usageMetadata);
     if (usageMetadata) {
       acc.doneIn = numberOr(usageMetadata.promptTokenCount, acc.doneIn);
       acc.doneOut = numberOr(usageMetadata.candidatesTokenCount, acc.doneOut);
       const prompt = typeof usageMetadata.promptTokenCount === "number" ? usageMetadata.promptTokenCount : null;
-      const candidates = typeof usageMetadata.candidatesTokenCount === "number" ? usageMetadata.candidatesTokenCount : null;
+      const thoughts = typeof usageMetadata.thoughtsTokenCount === "number" ? usageMetadata.thoughtsTokenCount : null;
+      const candidates =
+        typeof usageMetadata.candidatesTokenCount === "number" ? usageMetadata.candidatesTokenCount : thoughts !== null ? 0 : null;
       const cached = numberOr(usageMetadata.cachedContentTokenCount, 0);
       acc.ledger = {
         inputTokens: prompt === null ? null : Math.max(prompt - cached, 0),
-        outputTokens: candidates === null ? null : candidates + numberOr(usageMetadata.thoughtsTokenCount, 0),
+        outputTokens: candidates === null ? null : candidates + (thoughts ?? 0),
         cacheReadTokens: cached,
         cacheWriteTokens: 0,
       };
