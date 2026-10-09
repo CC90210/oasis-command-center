@@ -10,8 +10,15 @@
  * result, and the hub re-reads every status from the server afterwards
  * (onChanged → router.refresh). The card only goes green from that server read.
  *
- * Stripe is the only restricted-key provider today, so the pre-check below is
- * Stripe's key format; a second such provider brings its own check.
+ * Each pasted-key provider is pre-checked with ITS OWN format rule, the same
+ * one the server enforces (lib/connections/service.ts KEY_FORMAT): Stripe's
+ * restricted-key rule for Stripe, TypeSafe's for Jev. Every key used to be
+ * checked with Stripe's, so a TypeSafe key was refused in the browser as "not
+ * a Stripe restricted key" and never reached the server (audit 2026-10-09).
+ *
+ * Test: the key is checked live with the provider WITHOUT being saved
+ * (/api/connections/[provider]/check), so an owner sees whether it works, and
+ * for Stripe which permissions are missing, before connecting it.
  *
  * The key: a password field with autocomplete off. A full secret key (sk_…)
  * or publishable key (pk_…) is refused HERE, before it leaves the browser —
@@ -21,12 +28,12 @@
  */
 
 import { useState } from "react";
-import { checkStripeRestrictedKey } from "@/lib/connections/rules";
+import { clientKeyCheck } from "@/components/os/connections/key-rules";
 import type { RestrictedKeyConfig } from "@/lib/connections/registry";
 import type { ConnectorStatus } from "@/lib/os/connectors";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 
-type Busy = "connect" | "test" | "disconnect" | null;
+type Busy = "connect" | "check" | "test" | "disconnect" | null;
 
 async function post(url: string, body?: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> | null }> {
   const res = await fetch(url, {
@@ -83,14 +90,40 @@ export function KeyConnectionPanel({
     }
   };
 
-  const connect = () =>
-    run("connect", async () => {
-      const check = checkStripeRestrictedKey(key);
-      if (!check.ok) {
-        if (check.error === "secret_key_refused" || check.error === "publishable_key_refused") setKey("");
-        setNotice({ tone: "err", text: check.message });
+  /** The browser-side rule; a refused full secret or publishable key is cleared from the page. */
+  const precheck = (): string | null => {
+    const check = clientKeyCheck(providerId, key);
+    if (check.ok) return check.key;
+    if (check.error === "secret_key_refused" || check.error === "publishable_key_refused") setKey("");
+    setNotice({ tone: "err", text: check.message });
+    return null;
+  };
+
+  const checkOnly = () =>
+    run("check", async () => {
+      const clean = precheck();
+      if (!clean) return;
+      const r = await post(`${base}/check`, { key: clean });
+      if (!r.ok) {
+        setNotice({ tone: "err", text: serverMessage(r, "The test could not run") });
         return;
       }
+      const result = r.data?.check as { passed?: boolean; detail?: string | null; account_label?: string | null } | undefined;
+      setNotice(
+        result?.passed
+          ? {
+              tone: "ok",
+              text: `The test with ${providerName} passed${result.account_label ? `: ${result.account_label}` : ""}. Nothing is saved until you press Connect.`,
+            }
+          : { tone: "err", text: `${result?.detail || `The test with ${providerName} did not pass.`} Nothing was saved.` },
+      );
+    });
+
+  const connect = () =>
+    run("connect", async () => {
+      const clean = precheck();
+      if (!clean) return;
+      const check = { key: clean };
       const r = await post(`${base}/connect`, { key: check.key });
       if (!r.ok) {
         setNotice({ tone: "err", text: serverMessage(r, `${providerName} could not be connected`) });
@@ -232,6 +265,9 @@ export function KeyConnectionPanel({
             <div className="flex gap-2 pt-1">
               <button type="submit" disabled={busy !== null || !key.trim()} className="btn-primary">
                 {busy === "connect" ? `Checking with ${providerName}…` : hasConnection ? "Save new key" : `Connect ${providerName}`}
+              </button>
+              <button type="button" onClick={checkOnly} disabled={busy !== null || !key.trim()} className="btn-secondary">
+                {busy === "check" ? `Testing with ${providerName}…` : "Test"}
               </button>
               {replacing && (
                 <button

@@ -521,7 +521,14 @@ async function main() {
       if (p.availability === "live" || (p.liveWhenEnv?.length ?? 0) > 0) {
         assert.deepEqual(def!.live?.source, { kind: "tenant_connection", provider: p.id });
       } else {
-        assert.equal(def!.live, null, `${p.id} is coming soon but its card has a connect path`);
+        // Not live in the framework: the card never connects through it. It may
+        // connect another way that exists today (GoHighLevel: a private
+        // integration token from the client's own account, in the key store,
+        // tested live), while the one-click sign-in waits on OASIS's own app.
+        assert.ok(
+          def!.live === null || (def!.live.source.kind === "tenant_keys" && def!.live.connect.kind === "keys"),
+          `${p.id} is coming soon but its card has a framework connect path`,
+        );
       }
     }
   });

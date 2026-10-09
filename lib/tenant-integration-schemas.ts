@@ -16,9 +16,22 @@ export type IntegrationFieldDef = {
   /** Render as a password input (masked). */
   sensitive: boolean;
   /** Server-side pattern check applied at upsert. */
-  validation?: "phone_e164" | "url" | "email" | "alphanum_uppercase" | "twilio_sid";
+  validation?:
+    | "phone_e164"
+    | "url"
+    | "email"
+    | "alphanum_uppercase"
+    | "twilio_sid"
+    | "public_https_url"
+    | "public_hostname"
+    | "smtp_port"
+    | "single_line_token";
   /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
   sidPrefix?: "AC" | "SK" | "MG";
+  /** Not needed for the app to work (a label that says "(optional)" counts too). */
+  optional?: boolean;
+  /** Shown inside the empty input, never a real value. */
+  placeholder?: string;
 };
 
 export type IntegrationSchema = {
@@ -56,6 +69,11 @@ export type IntegrationSchema = {
    * SMTP / etc. only matter to operators who explicitly need them.
    */
   advanced?: boolean;
+  /**
+   * Where the owner creates the key in the vendor's own account, linked as
+   * "Get your key" beside the fields (opens in a new tab).
+   */
+  getKey?: { href: string; label: string };
 };
 
 export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
@@ -111,27 +129,36 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
       { key: "from_address", label: "Workspace email address", sensitive: false, validation: "email", hint: "The Google Workspace address that created this App Password." },
     ],
   },
+  // Any mail server the workspace already sends from (its email host, Microsoft
+  // 365, SendGrid, Amazon SES). Test signs in over SMTP (RFC 4954 AUTH) and sends
+  // nothing. Only a public host name and a standard submission port are
+  // accepted, so the Test can never be pointed at an internal address.
   {
     service: "smtp",
-    label: "Custom SMTP",
-    description: "Direct SMTP for outbound email (alternative to Gmail App Password — only set this if you're using SendGrid, AWS SES, or a self-hosted MTA instead of Gmail).",
-    advanced: true,
+    label: "Email server (SMTP)",
+    description:
+      "The mail server your business already sends from: your email host, Microsoft 365, SendGrid or Amazon SES. Test signs in to it with these details and sends nothing.",
     fields: [
-      { key: "host", label: "Host", sensitive: false, hint: "e.g. smtp.sendgrid.net" },
-      { key: "port", label: "Port", sensitive: false, hint: "Usually 587 (STARTTLS) or 465 (SSL)" },
-      { key: "user", label: "Username", sensitive: false },
-      { key: "password", label: "Password", sensitive: true },
-      { key: "from_address", label: "From Address", sensitive: false, validation: "email" },
-    ],
-  },
+      { key: "host", label: "Server", sensitive: false, validation: "public_hostname", placeholder: "smtp.example.com", hint: "Your provider's SMTP server name, e.g. smtp.office365.com or smtp.sendgrid.net. A public name, not an IP address." },
+      { key: "port", label: "Port", sensitive: false, validation: "smtp_port", placeholder: "587", hint: "587 (most providers), 465, 2525 or 25." },
+      { key: "user", label: "Username", sensitive: false, hint: "Usually your full email address. SendGrid uses the word apikey." },
+      { key: "password", label: "Password", sensitive: true, hint: "Your mailbox password, an app password, or the provider's SMTP key." },
+      { key: "from_address", label: "Send from", sensitive: false, validation: "email", placeholder: "you@yourbusiness.com", hint: "The address your emails come from." },
+    ],  },
+  // n8n public REST API: X-N8N-API-KEY header, base <instance>/api/v1.
+  // https://docs.n8n.io/api/authentication/ and
+  // https://docs.n8n.io/api/using-api-playground/ (read 2026-10-09). The API is
+  // not available on n8n Cloud's free trial.
   {
     service: "n8n",
     label: "n8n",
-    description: "Inbound webhook bridge (the Inbound Qualifier workflow posts here).",
+    description:
+      "Your own n8n, on n8n Cloud or your own server: its web address and an API key. Test lists one workflow with the key, which changes nothing.",
     fields: [
-      { key: "outbound_url", label: "Outbound URL", sensitive: false, validation: "url" },
-      { key: "outbound_secret", label: "Webhook Secret", sensitive: true },
+      { key: "base_url", label: "n8n address", sensitive: false, validation: "public_https_url", placeholder: "https://yourname.app.n8n.cloud", hint: "The address you open n8n at. It must start with https:// and be reachable from the internet." },
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In n8n: Settings > n8n API > Create an API key. Copy it when it is shown." },
     ],
+    getKey: { href: "https://docs.n8n.io/api/authentication/", label: "n8n's guide to API keys" },
   },
   {
     service: "stripe",
@@ -142,11 +169,87 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
       { key: "publishable_key", label: "Publishable Key", sensitive: false, hint: "starts with pk_" },
     ],
   },
+  // Zernio (formerly Late): Bearer API key, base https://zernio.com/api/v1;
+  // GET /v1/profiles is the read-only check. https://docs.zernio.com and
+  // https://docs.zernio.com/profiles/list-profiles.mdx (read 2026-10-09).
   {
     service: "late",
-    label: "Late / Zernio",
-    description: "Multi-platform social media scheduling.",
-    fields: [{ key: "api_key", label: "API Key", sensitive: true }],
+    label: "Zernio",
+    description:
+      "Your own Zernio (formerly Late) account: one API key. Test lists your Zernio profiles with it, which changes nothing.",
+    fields: [
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", placeholder: "sk_...", hint: "In Zernio: Dashboard > API keys > Create API key. It starts with sk_ and is shown once." },
+    ],
+    getKey: { href: "https://zernio.com/dashboard/api-keys", label: "Get your Zernio API key" },
+  },
+  // Calendly Personal Access Token: Bearer; GET https://api.calendly.com/users/me
+  // (scope users:read). https://developer.calendly.com/docs/authentication/how-to-authenticate-with-personal-access-tokens.md
+  // and https://developer.calendly.com/openapi/calendly-api.yaml (read 2026-10-09).
+  {
+    service: "calendly",
+    label: "Calendly",
+    description:
+      "A personal access token from your own Calendly account. Test asks Calendly who the token belongs to, which changes nothing.",
+    fields: [
+      { key: "access_token", label: "Personal access token", sensitive: true, validation: "single_line_token", hint: "In Calendly: Integrations > API & Webhooks > Generate new token. Calendly shows it once." },
+    ],
+    getKey: { href: "https://developer.calendly.com/docs/authentication/how-to-authenticate-with-personal-access-tokens", label: "Calendly's guide to personal access tokens" },
+  },
+  // Cal.com API v2: Bearer key (cal_live_... or cal_... for test);
+  // GET https://api.cal.com/v2/me. https://cal.com/docs/api-reference/v2/introduction
+  // and https://cal.com/docs/api-reference/v2/me/get-my-profile (read 2026-10-09).
+  {
+    service: "cal_com",
+    label: "Cal.com",
+    description:
+      "An API key from your own Cal.com account. Test asks Cal.com whose key it is, which changes nothing.",
+    fields: [
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", placeholder: "cal_live_...", hint: "In Cal.com: Settings > Developer > API keys > New. It starts with cal_live_." },
+    ],
+    getKey: { href: "https://cal.com/docs/api-reference/v2/introduction", label: "Cal.com's guide to API keys" },
+  },
+  // Fathom (the meeting notetaker, fathom.ai): X-Api-Key header, base
+  // https://api.fathom.ai/external/v1; GET /meetings is the read-only check.
+  // https://developers.fathom.ai/quickstart.md and
+  // https://developers.fathom.ai/api-reference/meetings/list-meetings.md (read 2026-10-09).
+  {
+    service: "fathom",
+    label: "Fathom",
+    description:
+      "An API key from your own Fathom account. Test lists your recent meetings with it, which changes nothing. A key sees only meetings you recorded or that were shared with you.",
+    fields: [
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In Fathom: Settings > API Access > Generate API key." },
+    ],
+    getKey: { href: "https://fathom.video/customize#api-access-header", label: "Get your Fathom API key" },
+  },
+  // Fireflies.ai GraphQL: POST https://api.fireflies.ai/graphql, Bearer key;
+  // the `user` query with no id returns the key's owner.
+  // https://docs.fireflies.ai/getting-started/quickstart and
+  // https://docs.fireflies.ai/graphql-api/query/user (read 2026-10-09).
+  {
+    service: "fireflies",
+    label: "Fireflies",
+    description:
+      "An API key from your own Fireflies account. Test asks Fireflies whose key it is, which changes nothing.",
+    fields: [
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In Fireflies: Integrations > Fireflies API > copy your API key." },
+    ],
+    getKey: { href: "https://docs.fireflies.ai/getting-started/quickstart", label: "Fireflies' guide to API keys" },
+  },
+  // GoHighLevel Private Integration Token: Bearer, Version 2021-07-28, base
+  // https://services.leadconnectorhq.com; GET /locations/{locationId}.
+  // https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken
+  // and https://marketplace.gohighlevel.com/docs/ghl/locations/get-location (read 2026-10-09).
+  {
+    service: "gohighlevel",
+    label: "GoHighLevel",
+    description:
+      "A private integration token from your own GoHighLevel account, and the sub-account it reads. Test asks GoHighLevel for that sub-account's name, which changes nothing.",
+    fields: [
+      { key: "private_token", label: "Private integration token", sensitive: true, validation: "single_line_token", placeholder: "pit-...", hint: "In GoHighLevel: Settings > Private Integrations > create one named OASIS. Give it read access to locations (sub-accounts), contacts and opportunities. GoHighLevel shows the token once." },
+      { key: "location_id", label: "Sub-account (location) ID", sensitive: false, validation: "single_line_token", hint: "In the sub-account: Settings > Business Profile, or the part of the address after /location/." },
+    ],
+    getKey: { href: "https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken", label: "GoHighLevel's guide to private integration tokens" },
   },
   {
     service: "telegram",
@@ -253,7 +356,61 @@ export function validateIntegrationValue(
         ? null
         : `expected a Twilio SID: ${prefix || "two letters"} followed by 32 letters and digits (0-9, a-f)`;
     }
+    case "single_line_token": {
+      const v = value.trim();
+      return v.length >= 8 && v.length <= 4096 && /^[\x21-\x7e]+$/.test(v)
+        ? null
+        : "That does not look like a key: paste it as one line, with no spaces.";
+    }
+    case "public_hostname":
+      return isPublicHostname(value) ? null : "Use the server's public name (like smtp.example.com), not an IP address or an internal name.";
+    case "smtp_port":
+      return SMTP_PORTS.has(value.trim()) ? null : "Use one of the standard mail ports: 587, 465, 2525 or 25.";
+    case "public_https_url": {
+      let u: URL;
+      try {
+        u = new URL(value.trim());
+      } catch {
+        return "That is not a web address. It should look like https://yourname.app.n8n.cloud";
+      }
+      if (u.protocol !== "https:") return "The address must start with https://";
+      if (u.username || u.password) return "Leave any username or password out of the address.";
+      if (u.port && u.port !== "443") return "Use the address without a port number (https on port 443).";
+      return isPublicHostname(u.hostname) ? null : "Use the public address you open n8n at, not an IP address or an internal name.";
+    }
     default:
       return null;
   }
+}
+
+/** The submission ports a mail server listens on (RFC 6409 587, RFC 8314 465, 25, and 2525 by convention). */
+export const SMTP_PORTS: ReadonlySet<string> = new Set(["587", "465", "2525", "25"]);
+
+/**
+ * A host name OASIS may connect to for an owner's self-hosted app (their mail
+ * server, their n8n): a DNS name with a letter top-level label. That refuses
+ * every IP literal (an IPv4 address ends in a number, an IPv6 one has colons),
+ * localhost and the internal suffixes, so a Test can never be aimed at an
+ * address inside a network. A public name that resolves to a private address is
+ * not reachable from the Worker's edge network either.
+ */
+export function isPublicHostname(raw: string): boolean {
+  const host = raw.trim().toLowerCase().replace(/\.$/, "");
+  if (host.length > 253 || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host)) return false;
+  const labels = host.split(".");
+  if (labels.some((l) => !l || l.length > 63 || l.startsWith("-") || l.endsWith("-"))) return false;
+  if (!/^[a-z][a-z0-9-]*$/.test(labels[labels.length - 1])) return false;
+  return !/(^|\.)(localhost|local|internal|intranet|lan|home|corp|localdomain|home\.arpa|in-addr\.arpa|ip6\.arpa)$/.test(host);
+}
+
+/**
+ * The fields an app needs before it can be tested: every field not marked
+ * optional (a label saying "(optional)" counts as marked, as Twilio's do).
+ */
+export function isOptionalIntegrationField(field: IntegrationFieldDef): boolean {
+  return field.optional === true || field.label.toLowerCase().includes("(optional)");
+}
+
+export function requiredIntegrationFieldKeys(schema: IntegrationSchema): string[] {
+  return schema.fields.filter((f) => !isOptionalIntegrationField(f)).map((f) => f.key);
 }

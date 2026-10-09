@@ -217,6 +217,45 @@ export async function connectWithRestrictedKey(
 }
 
 /**
+ * Test a pasted key WITHOUT connecting it: the same format rule and the same
+ * live probe as connectWithRestrictedKey, and nothing else. No claim, no saved
+ * key, no health row, no audit entry: the owner learns whether the key works
+ * (and, for Stripe, which permissions are missing) before deciding to connect.
+ * The key is never echoed back; only the probe's own words and the account's
+ * name are.
+ */
+export async function checkRestrictedKey(
+  deps: ConnectionsDeps,
+  provider: ProviderDef,
+  rawKey: unknown,
+): Promise<ServiceResult> {
+  if (provider.authKind !== "restricted_key" || !provider.restrictedKey) {
+    return fail(400, "wrong_connect_method", `${provider.label} does not connect with a pasted key.`);
+  }
+  const check = KEY_FORMAT[provider.id]?.(rawKey) ?? null;
+  if (!check) return fail(500, "key_rule_missing", `OASIS has no key rule for ${provider.label}.`);
+  if (!check.ok) return fail(422, check.error, check.message);
+  const probe = probeFor(provider.id);
+  if (!probe) return fail(500, "probe_missing", `OASIS has no live check for ${provider.label}.`);
+  const result = await probe(check.key, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
+  const passed = result.verdict === "healthy" && !!result.accountId;
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      check: {
+        passed,
+        code: passed ? null : (result.code ?? "unexpected_response"),
+        detail: passed ? null : (result.detail ?? "The key did not pass the connection check."),
+        account_label: passed ? result.accountLabel : null,
+        environment: passed ? result.environment : null,
+        saved: false,
+      },
+    },
+  };
+}
+
+/**
  * Put back a claim whose credential could not be saved, so no connection is
  * ever left looking set up without its key:
  *   - a brand-new claim is deleted;

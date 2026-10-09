@@ -27,7 +27,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { findTenantManuallyEditableIntegrationSchema, requiredIntegrationFieldKeys } from "@/lib/tenant-integration-schemas";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 import { testResultNotice } from "@/components/os/connections/test-notice";
 import type { ConnectorStatus } from "@/lib/os/connectors";
@@ -141,10 +141,11 @@ export function ServiceKeysForm({
   const has = (key: string) => !!row(key)?.has_value;
   // Twilio: the Auth Token, or an API key with its secret; and a sender.
   const twilioCredential = has("account_sid") && (has("auth_token") || (has("api_key_sid") && has("api_key_secret")));
+  // Every field the app needs; an optional one never holds back Test.
   const allSet =
     service === "twilio"
       ? twilioCredential && (has("from_number") || has("messaging_service_sid"))
-      : schema.fields.every((f) => has(f.key));
+      : requiredIntegrationFieldKeys(schema).every(has);
   // Twilio's test runs before a sender is saved: "needs a number" is its answer.
   const testable = service === "twilio" ? twilioCredential : allSet;
   const stored = (rows ?? []).filter((r) => r.has_value && r.source !== "environment");
@@ -224,6 +225,13 @@ export function ServiceKeysForm({
       <div>
         <h3 className="mb-1.5 text-xs font-medium text-fg-dim">{allSet ? `${appName} keys` : `Connect ${appName}`}</h3>
         <p className="text-[13px] leading-5 text-fg-muted">{schema.description}</p>
+        {schema.getKey && (
+          <p className="mt-1.5 text-[13px] leading-5">
+            <a href={schema.getKey.href} target="_blank" rel="noopener noreferrer" className="text-accent underline-offset-2 hover:underline">
+              {schema.getKey.label}
+            </a>
+          </p>
+        )}
       </div>
 
       <Notice notice={notice} />
@@ -270,7 +278,7 @@ export function ServiceKeysForm({
                   disabled={!canManage || busy !== null}
                   value={drafts[f.key] ?? ""}
                   onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
-                  placeholder={r?.has_value ? "Saved. Paste a new value to replace it" : ""}
+                  placeholder={r?.has_value ? "Saved. Paste a new value to replace it" : f.placeholder ?? ""}
                   className={`input w-full ${f.sensitive ? "font-mono" : ""}`}
                 />
                 {f.hint && <p className="text-[12px] leading-4 text-fg-dim">{f.hint}</p>}

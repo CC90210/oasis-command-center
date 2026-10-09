@@ -213,7 +213,9 @@ async function main() {
   await check("every app with nothing behind it says why, in words that promise no date and claim nothing about OASIS's own accounts", () => {
     assert.deepEqual(
       notBuilt.map((d) => d.slug).sort(),
-      ["cal-com", "calendly", "discord", "fathom", "fireflies", "gohighlevel", "meta", "microsoft-teams", "plaid", "quickbooks", "whatsapp", "xero", "zernio", "zoom"],
+      // 2026-10-09: Calendly, Cal.com, Fathom, Fireflies, GoHighLevel and Zernio
+      // connect with a key from the client's own account (tests/connectors-by-key.test.ts).
+      ["discord", "meta", "microsoft-teams", "plaid", "quickbooks", "whatsapp", "xero", "zoom"],
       "the not-built list changed: update the PR's list and this one together",
     );
     for (const def of notBuilt) {
