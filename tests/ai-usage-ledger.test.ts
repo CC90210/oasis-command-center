@@ -87,6 +87,9 @@ function splitStatements(sql: string): string[] {
   return out.filter(Boolean);
 }
 const USAGE_SQL = readFileSync(join(ROOT, "database", "turso", "bravo__192_ai_usage.sql"), "utf8");
+// The current models' prices (lib/ai/model-registry.ts): applied after
+// bravo__192, as Bravo applies it.
+const PRICES_SQL = readFileSync(join(ROOT, "database", "turso", "bravo__204_model_prices_current.sql"), "utf8");
 
 // ── provider stub ─────────────────────────────────────────────────────────
 type Sent = { url: string; body: string };
@@ -163,6 +166,7 @@ async function main() {
   const db = createClient({ url: `file:${dbFile}` });
   const statements = splitStatements(USAGE_SQL);
   for (const s of statements) await db.execute(s);
+  for (const s of splitStatements(PRICES_SQL)) await db.execute(s);
 
   const usage = await import("../lib/ai/usage");
   const codes = await import("../lib/ai/usage-codes");
@@ -234,20 +238,24 @@ async function main() {
     await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
   });
 
-  await check("model_prices holds only traced prices, for exactly the non-OpenRouter models this repo sends", async () => {
+  await check("model_prices holds only traced prices, for models the registry knows, and every model the code sends by default has one", async () => {
     const all = (await db.execute("SELECT * FROM model_prices ORDER BY provider, model, input_tokens_above")).rows;
+    const registry = await import("../lib/ai/model-registry");
     for (const r of all) {
       assert.ok(String(r.source_url).startsWith("https://"), `${r.model} has no source_url`);
       assert.match(String(r.source_fetched_on), /^\d{4}-\d{2}-\d{2}$/, `${r.model} has no fetch date`);
-      assert.notEqual(String(r.provider), "openrouter", "OpenRouter reports its own cost; no OpenRouter price was verified");
+      // OpenRouter rows (bravo__204) come from its own live catalog; the
+      // call's own reported cost still wins over them (cost below).
+      if (String(r.provider) === "openrouter") assert.equal(String(r.source_url), "https://openrouter.ai/api/v1/models");
     }
-    // Every Anthropic / OpenAI / Google model the code can send has a price: the
-    // pickers, the platform fallback, the probe default, the extractor.
+    // Every model the code can send without being told one has a price: the
+    // pickers (the registry's offered models), the platform fallback, the
+    // probe default, the extractor.
     const sentModels = new Set<string>();
     for (const p of PROVIDER_REGISTRY) {
-      if (p.value === "anthropic" || p.value === "openai" || p.value === "google") for (const m of p.models) sentModels.add(`${p.value}/${m.id}`);
+      if (p.value !== "ollama") for (const m of p.models) sentModels.add(`${p.value}/${m.id}`);
     }
-    for (const [p, m] of Object.entries(probe.PROBE_MODEL)) if (p !== "openrouter") sentModels.add(`${p}/${m}`);
+    for (const [p, m] of Object.entries(probe.PROBE_MODEL)) sentModels.add(`${p}/${m}`);
     sentModels.add("anthropic/claude-sonnet-4-6"); // lib/ai-document-extractor.ts EXTRACT_MODEL
     for (const k of ["PLATFORM_DEFAULT_ANTHROPIC_API_KEY", "PLATFORM_DEFAULT_OPENAI_API_KEY", "PLATFORM_DEFAULT_GOOGLE_API_KEY"]) {
       const saved = process.env;
@@ -260,7 +268,15 @@ async function main() {
     }
     const priced = new Set(all.map((r) => `${r.provider}/${r.model}`));
     assert.deepEqual([...sentModels].filter((m) => !priced.has(m)), [], "a model the code sends has no verified price");
-    assert.deepEqual([...priced].filter((m) => !sentModels.has(m)), [], "a price for a model the code never sends");
+    // A model a workspace saved earlier keeps its price (it is still sent
+    // while it answers), so a price is not tied to the pickers; every priced
+    // model is one the registry knows (tests/model-registry.checks.ts pins
+    // each number to it).
+    assert.deepEqual(
+      [...priced].filter((m) => !registry.modelInfo(m.slice(0, m.indexOf("/")), m.slice(m.indexOf("/") + 1))),
+      [],
+      "a price for a model the registry does not know",
+    );
     // The verified numbers themselves (micro-USD per million tokens), read 2026-09-29.
     const pin = (key: string) => all.filter((r) => `${r.provider}/${r.model}` === key).map((r) => [Number(r.input_tokens_above), Number(r.input_micro_usd_per_mtok), Number(r.output_micro_usd_per_mtok), r.cache_read_micro_usd_per_mtok === null ? null : Number(r.cache_read_micro_usd_per_mtok), r.cache_write_micro_usd_per_mtok === null ? null : Number(r.cache_write_micro_usd_per_mtok)]);
     assert.deepEqual(pin("anthropic/claude-sonnet-4-6"), [[0, 3000000, 15000000, 300000, 3750000]]);
@@ -364,13 +380,61 @@ async function main() {
         [null, { candidates: [{ content: { parts: [{ text: "!" }] } }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10, thoughtsTokenCount: 30 } }],
       ]),
     );
-    const events = await chat("google", "gemini-2.5-flash");
+    // gemini-2.5-flash is served only to projects that used it before: the
+    // current Flash-Lite (bravo__204, the same price) stands in for it here.
+    const events = await chat("google", "gemini-3.5-flash-lite");
     assert.deepEqual(events.at(-1), { type: "done", inputTokens: 100, outputTokens: 10 });
     const r = await newRows(mark);
     assert.equal(r.length, 1);
     assert.deepEqual([r[0].input_tokens, r[0].output_tokens].map(Number), [100, 40]);
     // 100 x $0.30 + 40 x $2.50 = 30 + 100.
     assert.equal(Number(r[0].cost_micro_usd), 130);
+    assert.equal(r[0].fallback_reason, null, "a current model is sent as saved");
+  });
+
+  // A saved model the registry knows is gone (lib/ai/model-registry.ts).
+  await check("a saved model Google serves only to past users is SENT as its replacement, same provider and key, and the row says why", async () => {
+    const mark = await total();
+    play(
+      sse([
+        [null, { candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10 } }],
+      ]),
+    );
+    const events = await chat("google", "gemini-2.5-pro");
+    assert.deepEqual(events.at(-1), { type: "done", inputTokens: 100, outputTokens: 10 });
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].url, /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-3\.8-flash:streamGenerateContent/);
+    assert.doesNotMatch(sent[0].url + sent[0].body, /gemini-2\.5-pro/, "the gone model still went out");
+    const r = await newRows(mark);
+    assert.equal(r.length, 1);
+    assert.deepEqual([r[0].provider, r[0].model, r[0].fallback_reason], ["google", "gemini-3.8-flash", "model_access_limited:gemini-2.5-pro"]);
+    // Priced at the model that answered (bravo__204): 100 x $0.75 + 10 x $3.75.
+    assert.equal(Number(r[0].cost_micro_usd), 113);
+  });
+  await check("a retired model in either tool loop and the key test: the replacement is sent, and every row records why", async () => {
+    const mark = await total();
+    play(anthropicStream("ok", { input: 100, output: 20 }));
+    await drain(runner.streamAnthropicWithTools(
+      { apiKey: "k", model: "claude-3-5-sonnet-20241022", system: "s", messages: [{ role: "user", content: "hi" }], excludeDeferredTools: true, bridgeAdvertisedTools: null, toolPalette: ["list_records"], meter: meter({ surface: "chat.tools" }) },
+      { tenantId: CLIENT, userId: USER, agentKey: "sales-agent", authUserId: USER, isAdmin: false },
+    ));
+    assert.equal(JSON.parse(sent[0].body).model, "claude-sonnet-5-5");
+    play(openAIStream("ok", { prompt_tokens: 100, completion_tokens: 10 }));
+    await drain(runner.streamOpenAICompatibleWithTools(
+      { provider: "openai", apiKey: "k", model: "gpt-5.2-codex", system: "s", messages: [{ role: "user", content: "hi" }], toolPalette: ["list_records"], meter: meter({ surface: "chat.tools" }) },
+      { tenantId: CLIENT, userId: USER, agentKey: "sales-agent", authUserId: USER, isAdmin: false },
+    ));
+    assert.equal(JSON.parse(sent[0].body).model, "gpt-5.6-terra");
+    play(new Response(JSON.stringify({ usageMetadata: { promptTokenCount: 8 } }), { status: 200 }));
+    const tested = await probe.probeProvider("google", "k", { model: "gemini-2.5-pro", meter: meter({ surface: "probe" }) });
+    assert.deepEqual(tested.ok && tested.model, "gemini-3.8-flash", "Test asked a model the channels no longer send");
+    assert.match(sent[0].url, /models\/gemini-3\.8-flash:generateContent$/);
+    const r = await newRows(mark);
+    assert.deepEqual(r.map((x) => [x.surface, x.model, x.fallback_reason, x.cost_micro_usd === null ? null : Number(x.cost_micro_usd)]), [
+      ["chat.tools", "claude-sonnet-5-5", "model_retired:claude-3-5-sonnet-20241022", 400], // 100 x $2 + 20 x $10
+      ["chat.tools", "gpt-5.6-terra", "model_retired:gpt-5.2-codex", 320], // 100 x $2 + 10 x $12
+      ["probe", "gemini-3.8-flash", "model_access_limited:gemini-2.5-pro", 6], // 8 x $0.75
+    ]);
   });
 
   await check("a local model (Ollama): billing local, cost NULL (no per-call price), still one row", async () => {
@@ -889,9 +953,11 @@ async function main() {
     const bad = await probe.probeProvider("anthropic", "k", { meter: meter({ surface: "probe" }) });
     assert.equal(bad.ok, false);
     const r = await newRows(mark);
+    // The probe model is the registry's (Claude Sonnet 4.6, the default, bravo__192):
+    // it answers a one-token test without thinking first (PR #555 review).
     assert.deepEqual(r.map((x) => [x.surface, x.model, x.outcome, x.error_code, Number(x.cost_micro_usd)]), [
-      ["probe", "claude-haiku-4-5", "ok", null, 17], // 12 x $1 + 1 x $5
-      ["probe", "claude-haiku-4-5", "error", "http_401", 0],
+      ["probe", "claude-sonnet-4-6", "ok", null, 51], // 12 x $3 + 1 x $15
+      ["probe", "claude-sonnet-4-6", "error", "http_401", 0],
     ]);
     // An OpenAI probe with a cached prefix: prompt_tokens includes it, so the uncached input is 30.
     const cachedMark = await total();
@@ -1091,6 +1157,13 @@ async function main() {
     // The invented price table is gone.
     assert.doesNotMatch(src("app/api/chat/route.ts"), /estimateCostUsd/);
   });
+
+  // -- 10. The model registry ------------------------------------------------
+  // lib/ai/model-registry.ts: consistent, read by every list, its prices are
+  // bravo__192 + bravo__204, and the saved-model mover moves and undoes
+  // exactly (tests/model-registry.checks.ts).
+  const { modelRegistryChecks } = await import("./model-registry.checks");
+  await modelRegistryChecks(check);
 
   console.log(`\n${passed} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);

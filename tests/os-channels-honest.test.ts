@@ -217,8 +217,10 @@ async function main() {
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, updated_at TEXT);
   `);
   // Every channel turn and every "Test" is a metered model call (lib/ai/usage.ts),
-  // so the AI usage tables are applied as written (bravo__192, what the lead runs).
+  // so the AI usage tables are applied as written (bravo__192, what the lead runs),
+  // with the current models' prices (bravo__204: the probe's model is one).
   await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__192_ai_usage.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__204_model_prices_current.sql"), "utf8"));
   const { encryptField } = await import("../lib/field-encryption");
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (id: string, user: U, tenant: string, role: string, owner: 0 | 1, updated: string) => ({
@@ -823,7 +825,9 @@ async function main() {
       ["openrouter", "https://openrouter.ai/api/v1/chat/completions", (b: Record<string, unknown>) => b.max_tokens, 16],
       [
         "google",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        // The registry's probe model (lib/ai/model-registry.ts): gemini-2.5-flash
+        // is served only to projects that used it before.
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
         (b: Record<string, unknown>) => (b.generationConfig as { maxOutputTokens?: number }).maxOutputTokens,
         1,
       ],
@@ -949,7 +953,11 @@ async function main() {
     assert.equal(sent[0].headers["x-api-key"], WORKSPACE_KEY);
     assert.equal(body.ok, false);
     assert.equal(body.code, "provider_404");
-    assert.equal(body.message, "The model claude-sonnet-4-6 was not found for this key. Pick another model in AI settings.");
+    // Named the way a channel names it: retired, or not offered to this account, and what to pick.
+    assert.equal(
+      body.message,
+      "The AI model Claude Sonnet 4.6 (claude-sonnet-4-6) was not found: Anthropic has retired it or does not offer it to this AI account. Pick another model in AI settings, such as Claude Sonnet 5.5.",
+    );
     // A key with no model saved yet is asked on the cheap probe model, and a
     // 403 there says it is about THAT model, not the key in general.
     const forbidden = await probeProvider("openai", "k", { meter: probeMeter(), fetchImpl: async () => new Response("{}", { status: 403 }) });
@@ -1119,7 +1127,9 @@ async function main() {
   // ── 7. The channel UI: plain errors, no empty bubble, Enter sends ───────
   await check("AgentChat renders failures through failureCopy, drops the empty bubble, sends on Enter", () => {
     const src = readFileSync(join(process.cwd(), "components/agents/AgentChat.tsx"), "utf8");
-    assert.match(src, /failureCopy\(failure, \{ canManageAi \}\)/, "errors go through the plain-sentence table");
+    // With the model a "not found" was about, when the route named it (lib/ai/model-registry.ts).
+    assert.match(src, /failureCopy\(failure, \{ canManageAi, model: failureModel \}\)/, "errors go through the plain-sentence table");
+    assert.match(src, /setFailureModel\(asFailureModel\(\(payload as \{ model\?: unknown \}\)\.model\)\)/, "the route's named model is not read");
     assert.doesNotMatch(src, /setError\(detail\)|\(payload as \{ message\?: string \}\)\.message/, "raw error text reaches the screen");
     assert.match(src, /if \(!assistantText\) \{\s*dropEmptyPlaceholder\(\);/, "an empty reply bubble stays on screen");
     assert.match(src, /e\.key === "Enter" && !e\.shiftKey && !e\.nativeEvent\.isComposing/, "Enter sends, Shift+Enter is a newline");

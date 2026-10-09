@@ -70,7 +70,9 @@
 
 /* ── Hairline section rule ─────────────────────────────────────────────
    The eyebrow device: a mono label preceded by a short rule that fades
-   out. Reads as a console section header rather than a decorative divider. */
+   out. Reads as a console section header rather than a decorative divider.
+   The rule reads --accent (an offer page sets it on its root); nothing on the
+   marketing site sets it, so it falls back to signal exactly as before. */
 .m-eyebrow::before {
   content: "";
   display: inline-block;
@@ -78,7 +80,7 @@
   height: 1px;
   margin-right: 0.75rem;
   vertical-align: middle;
-  background: linear-gradient(to right, theme("colors.signal.DEFAULT"), transparent);
+  background: linear-gradient(to right, var(--accent, theme("colors.signal.DEFAULT")), transparent);
 }
 
 /* ── Fleet roster ──────────────────────────────────────────────────────

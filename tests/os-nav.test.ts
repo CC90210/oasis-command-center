@@ -383,6 +383,19 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   assert.equal(activeRailMode({ manual: "money", pathMode: null, remembered: null, available }), "team", "a tab the viewer lacks is ignored");
 }
 
+// -- Offers (2026-10-08) -------------------------------------------------------
+// The Marketing row is labelled "Offers" (every form can carry a full landing
+// page). Only the label moved: the URL stays /forms, because /offers is the
+// retired SunBiz lender route (tests/os-redirects.test.ts).
+{
+  const row = OS_NAV_CATALOG.find((r) => r.id === "forms");
+  assert.ok(row, "the forms row is gone from the catalog");
+  assert.equal(row.label, "Offers");
+  assert.equal(row.href, "/forms", "the Offers row must keep /forms; /offers is a retired route");
+  assert.equal(row.group, "Marketing");
+  assert.ok(!OS_NAV_CATALOG.some((r) => r.href === "/offers" || r.href.startsWith("/offers/")), "a rail row links the retired /offers");
+}
+
 console.log(
   `os-nav: OK — ${OS_NAV_CATALOG.length} catalog rows, ${PERSONAS.length} personas, ` +
     `${OS_DEPARTMENTS.length} departments, non-OASIS / unprovisioned / non-owner / non-operator all fail closed`,

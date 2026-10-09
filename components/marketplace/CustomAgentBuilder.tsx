@@ -13,6 +13,7 @@ import {
 import { builderPaths, type BuilderHome } from "./builder-paths";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { templateDraft } from "@/components/os/aiteam/templates";
+import { defaultModelFor } from "@/lib/ai/model-registry";
 
 type EditingAgent = {
   slug: string;
@@ -300,7 +301,7 @@ export function CustomAgentBuilder({ tenantSlug, editing, home }: Props) {
             type="text"
             value={suggestedModel}
             onChange={(e) => setSuggestedModel(e.target.value)}
-            placeholder="claude-sonnet-4-6"
+            placeholder={defaultModelFor("anthropic")}
             className="w-full rounded-xl border border-bg-border bg-bg-deep/80 px-3 py-2 text-sm font-mono text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none"
           />
         </Field>

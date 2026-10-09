@@ -168,6 +168,14 @@ jobs:
           # tests/test-suite-coverage.test.ts (in test:os) now fails the build
           # when any tests/ file is reachable from no group this step runs.
           npm run test:funnels
+          # ADDED 2026-10-08 (Offers PR1). Every form can carry a full landing
+          # page: the strict document parser, what is drawn and what never is
+          # (unconfirmed results, values, guarantees), the claims gate on
+          # Publish, Library video signed only for a published ref, a page that
+          # renders byte-identical to today's form when nothing is published,
+          # the missing-table fallback, and lead alerts that stay in their
+          # workspace. Plus the marketing CTA parity the shared accent needs.
+          npm run test:offers
           npm run test:lead-advancements
           npm run test:legal
           npm run test:media

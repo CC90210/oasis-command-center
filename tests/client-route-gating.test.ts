@@ -858,18 +858,22 @@ async function main() {
 
   await check("/forms and /sequences, client workspace: no SunBiz agent in the copy, no link to the retired Metrics", () => {
     const forms = html.client.formsList;
-    assert.ok(forms.includes("Intake"), "the forms list rendered the row");
+    // ">Intake<" is the row's name cell: the list's "Intake forms" heading is not.
+    assert.ok(forms.includes(">Intake<"), "the forms list rendered the row");
     const formsText = readable(forms);
     assert.doesNotMatch(formsText, /Solara|Helios|SunBiz|Sun Biz/i, "SunBiz agent copy on a client's /forms");
     // MKT-04: the developer-API instructions for "Personalized links" are gone.
     assert.doesNotMatch(forms, /Personalized links|mint-link|lead_id|step_outcomes/, "an API call shown as instructions on /forms");
     // MKT-02 / MKT-05: an owner gets the controls; a member who may not change
     // forms gets none of them, and both open each form's responses.
-    assert.match(formsText, /New form/);
+    // The page is labelled Offers (2026-10-08): New offer builds a page around a
+    // form, New intake form is the old New form.
+    assert.match(formsText, /New offer/);
+    assert.match(formsText, /New intake form/);
     assert.ok(forms.includes('href="/forms/f-1/edit"') && />\s*Delete\s*</.test(forms), "an owner's row has Edit and Delete");
     const readOnly = html.client.formsListReadOnly;
-    assert.ok(readOnly.includes("Intake"), "the read-only list rendered the row");
-    assert.doesNotMatch(readable(readOnly), /New form|Delete/, "a member who may not edit is offered New form or Delete");
+    assert.ok(readOnly.includes(">Intake<"), "the read-only list rendered the row");
+    assert.doesNotMatch(readable(readOnly), /New offer|New intake form|Delete/, "a member who may not edit is offered New offer, New intake form or Delete");
     assert.ok(!readOnly.includes("/forms/f-1/edit"), "a member who may not edit is offered the editor");
     assert.doesNotMatch(readOnly, /<button[^>]*>(?:(?!<\/button>)[\s\S])*Live/, "a member who may not edit gets the on/off switch");
     assert.match(readable(readOnly), /Only owners and admins can create or change forms/);

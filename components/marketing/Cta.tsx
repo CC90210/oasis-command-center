@@ -26,15 +26,25 @@ import { ArrowRight } from "lucide-react";
  * face at a comfortable size. Buttons keep their weight and their size; they
  * lost the costume.
  */
+/**
+ * ACCENT (offer pages, 2026-10-08). The fill and the inline-link colour read
+ * the CSS variable --accent, defaulting to the signal cyan (#00D4FF, the same
+ * value as tailwind's `signal`). Nothing on the marketing site sets --accent,
+ * so the site draws exactly the colour it always has; an offer page sets it on
+ * its own root, and its CTAs and eyebrows follow. One set of class strings for
+ * both, so the two can never drift (tests/marketing-accent-parity.test.ts).
+ */
+export const ACCENT_DEFAULT = "#00D4FF";
+
 export const CTA_PRIMARY =
-  "inline-flex items-center justify-center gap-2 rounded-md bg-signal px-6 py-3 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110 disabled:opacity-60";
+  "inline-flex items-center justify-center gap-2 rounded-md bg-[color:var(--accent,#00D4FF)] px-6 py-3 text-[15px] font-semibold tracking-[-0.01em] text-ops-void transition-all hover:brightness-110 disabled:opacity-60";
 
 export const CTA_SECONDARY =
   "inline-flex items-center justify-center gap-2 rounded-md border border-ops-edge px-6 py-3 text-[15px] font-medium tracking-[-0.01em] text-fg-muted transition-colors hover:border-fg-dim hover:text-fg";
 
 /** Inline "read more" link. Sentence case, arrow carries the affordance. */
 export const CTA_INLINE =
-  "inline-flex items-center gap-1.5 text-[15px] font-medium text-signal transition-colors hover:text-fg";
+  "inline-flex items-center gap-1.5 text-[15px] font-medium text-[color:var(--accent,#00D4FF)] transition-colors hover:text-fg";
 
 export function CtaLink({
   href,

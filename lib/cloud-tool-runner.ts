@@ -107,6 +107,7 @@ import {
 import { resolveTextTorrentSenderId } from "./integrations/texttorrent-sender";
 import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "./ai/usage";
 import { meterRefusalCode } from "./ai/usage-codes";
+import { resolveCall } from "./ai/model-registry";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const utf8 = new TextEncoder();
@@ -2644,10 +2645,13 @@ export async function* streamOpenAICompatibleWithTools(
   let totalIn = 0;
   let totalOut = 0;
   let unreportedCalls = 0;
+  // A saved model the registry knows is gone is sent as its replacement on
+  // the same provider, with the same key; each step's ledger row records why.
+  const { model, meter } = resolveCall(req.provider, req.model, req.meter);
 
   for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
     const body: Record<string, unknown> = {
-      model: req.model,
+      model,
       messages: [{ role: "system", content: system }, ...history],
       stream: true,
       stream_options: { include_usage: true },
@@ -2673,9 +2677,9 @@ export async function* streamOpenAICompatibleWithTools(
     // Each iteration is its own metered call: reserve before sending.
     let modelCall: ModelCall;
     try {
-      modelCall = await req.meter.begin({
+      modelCall = await meter.begin({
         provider: req.provider,
-        model: req.model,
+        model,
         maxOutputTokens: req.maxTokens ?? 4096,
         promptBytes: utf8.encode(json).length,
       });
@@ -2960,7 +2964,11 @@ export function resolveActiveTools(args: {
 async function* runIterationLoop(
   args: IterationLoopArgs,
 ): AsyncGenerator<StreamYield> {
-  const { apiKey, model, system, maxTokens, ctx, history } = args;
+  const { apiKey, system, maxTokens, ctx, history } = args;
+  // A saved model the registry knows is gone is sent as its Anthropic
+  // replacement, with the same key, and each iteration's ledger row records
+  // why (lib/ai/model-registry.ts). A paused turn resumes on the model it ran on.
+  const { model, meter } = resolveCall("anthropic", args.model, args.meter);
   const enableTools = args.enableTools !== false;
   // Resolve which tools the model sees this turn (resolveActiveTools). The
   // filters compose in order — most-restrictive last so the operator's
@@ -3044,7 +3052,7 @@ async function* runIterationLoop(
     // tenant's month before it is sent, and a refusal ends the loop here.
     let call: ModelCall;
     try {
-      call = await args.meter.begin({
+      call = await meter.begin({
         provider: "anthropic",
         model,
         maxOutputTokens: maxTokens ?? 4096,

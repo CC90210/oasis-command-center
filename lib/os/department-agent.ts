@@ -49,6 +49,7 @@ import {
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
+import { resolveCall, type ModelSwap } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 
 export type AgentTurnRequest = {
@@ -88,7 +89,14 @@ export type PreparedTurn = {
   department: OsDepartment | null;
   displayName: string;
   provider: Provider;
+  /** The model the request sends: the saved one, or its registry replacement (`swap`). */
   model: string;
+  /**
+   * Set when the saved model is gone (lib/ai/model-registry.ts): the turn sends
+   * the replacement on the same provider and key, and `meter` records why on
+   * every call it opens (ai_usage_events.fallback_reason).
+   */
+  swap: ModelSwap | null;
   apiKey: string;
   keySource: "tenant" | "platform";
   system: string;
@@ -263,15 +271,23 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const { composeSystemPrompt, normalizeMode } = await import("@/lib/chat-modes/plan-mode");
   const system = composeSystemPrompt(baseSystem, normalizeMode(req.chatMode));
 
-  const meter = modelCallMeter({
-    tenantId,
-    surface: "agents.chat",
-    ...billing,
-    departmentKey: dept?.key ?? null,
-    teammateId: agent.slug,
-    userId: req.userId,
-    jobId: req.jobId ?? null,
-  });
+  // The saved model, unless the registry knows it is gone: then its
+  // replacement on the same provider and key, and the meter records why
+  // (lib/ai/model-registry.ts). Resolved here, not only where the request is
+  // built, so the turn names the model it really sends.
+  const picked = resolveCall(
+    provider,
+    model,
+    modelCallMeter({
+      tenantId,
+      surface: "agents.chat",
+      ...billing,
+      departmentKey: dept?.key ?? null,
+      teammateId: agent.slug,
+      userId: req.userId,
+      jobId: req.jobId ?? null,
+    }),
+  );
 
   return {
     ok: true,
@@ -282,11 +298,12 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       department: dept,
       displayName,
       provider,
-      model,
+      model: picked.model,
+      swap: picked.swap,
       apiKey,
       keySource,
       system,
-      meter,
+      meter: picked.meter,
       revealModel: req.revealModel,
       localModelAllowed,
     },
