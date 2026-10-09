@@ -272,6 +272,23 @@ export async function getCustomerBySourceLead(db: Client, tenantId: string, lead
 }
 
 /**
+ * Is this deal about a retired business: does its data.client_tenant_id name
+ * a retired workspace (lib/os/customers/retired.ts)? The same test
+ * convertLeadToCustomer refuses with, for the deal page's client card. A deal
+ * that is not in this workspace's pipeline is not.
+ */
+export async function isLeadAboutRetiredBusiness(db: Client, tenantId: string, leadId: string): Promise<boolean> {
+  requireTenant(tenantId);
+  const lead = rows(
+    await db.execute({
+      sql: "SELECT data FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead' LIMIT 1",
+      args: [tenantId, leadId],
+    }),
+  )[0];
+  return lead ? isRetiredClientRef(parseJson<Record<string, unknown>>(lead.data, {}, "tenant_records.data")) : false;
+}
+
+/**
  * Which of these leads already became a client record in THIS workspace, as
  * lead id → client id. Archived records count: a converted deal stays
  * converted when its client is archived, and is never offered for conversion

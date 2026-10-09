@@ -695,6 +695,125 @@ async function main() {
       await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
     }
   });
+  await check("OASIS's desk never matches a requester through a project that names a retired business's workspace; a live client's project still matches", async () => {
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    // The candidate read keeps the 20 most recently updated projects; twenty
+    // newer SunBiz ones would fill it if the guard ran after that LIMIT.
+    const newerSunbiz = Array.from({ length: 20 }, (_, i) => ({
+      sql: `INSERT INTO delivery_projects (id, tenant_id, title, client_tenant_id, client_email, stage, updated_at)
+            VALUES (?, ?, ?, ?, 'two@projects.test', 'building', ?)`,
+      args: [`p-sb-two-${i}`, OASIS, `SunBiz rebuild ${i}`, SUNBIZ, `2026-10-02T00:00:${String(i).padStart(2, "0")}Z`],
+    }));
+    await db.batch(
+      [
+        { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'submissions', 'SunBiz')", args: [SUNBIZ] },
+        {
+          // Linked before the retirement, stored in capitals as some callers type it.
+          sql: `INSERT INTO delivery_projects (id, tenant_id, title, client_tenant_id, client_email, stage, updated_at) VALUES
+                  ('p-sb-only', ?, 'SunBiz site', ?, 'ezra@sunbiz.test', 'building', '2026-10-01T00:00:00Z'),
+                  ('p-a-two', ?, 'Client A site', ?, 'two@projects.test', 'building', '2026-09-01T00:00:00Z')`,
+          args: [OASIS, SUNBIZ.toUpperCase(), OASIS, CLIENT_A],
+        },
+        ...newerSunbiz,
+      ],
+      "write",
+    );
+    try {
+      const none = { client_tenant_id: null, project_id: null, client_match: "none" };
+      assert.deepEqual(await delivery.matchClientByEmail(db, "ezra@sunbiz.test", null), none, "a ticket from the SunBiz project's email names SunBiz's workspace");
+      // On twenty SunBiz projects and on client A's: no SunBiz one is a
+      // candidate, so client A's is the only project and is matched without a hint.
+      assert.deepEqual(
+        await delivery.matchClientByEmail(db, "two@projects.test", null),
+        { client_tenant_id: CLIENT_A, project_id: "p-a-two", client_match: "email_project" },
+        "a SunBiz project took part in the match",
+      );
+    } finally {
+      await db.execute("DELETE FROM delivery_projects WHERE id IN ('p-sb-only', 'p-a-two') OR id LIKE 'p-sb-two-%'");
+      await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
+    }
+  });
+  await check("a project or ticket linked to a retired business's workspace before the retirement can still be saved and unlinked, and is never linked to it anew", async () => {
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    const projectRoute = await import("../app/api/projects/[id]/route");
+    await db.batch(
+      [
+        { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'submissions', 'SunBiz')", args: [SUNBIZ] },
+        {
+          sql: `INSERT INTO delivery_projects (id, tenant_id, title, client_tenant_id, client_name, client_email, stage)
+                VALUES ('p-sb-linked', ?, 'SunBiz site', ?, 'Ezra', 'ezra@sunbiz.test', 'building')`,
+          args: [OASIS, SUNBIZ],
+        },
+        {
+          sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, severity, client_tenant_id, client_match, sla_target)
+                VALUES ('t-sb-linked', ?, 60001, 'T-60001', 'SunBiz form', 'open', 'low', ?, 'manual', '2099-01-01T00:00:00.000Z')`,
+          args: [OASIS, SUNBIZ],
+        },
+      ],
+      "write",
+    );
+    const linkOf = async (table: string, id: string) =>
+      (await db.execute({ sql: `SELECT client_tenant_id FROM ${table} WHERE id = ?`, args: [id] })).rows[0].client_tenant_id;
+    const patchProject = (body: Json) => call(projectRoute.PATCH(req("PATCH", "/api/projects/p-sb-linked", body), params({ id: "p-sb-linked" })));
+    const patchTicket = (body: Json) => call(ticket.PATCH(req("PATCH", "/api/tickets/t-sb-linked", body), params({ id: "t-sb-linked" })));
+    try {
+      await login(USERS.cc);
+      // Exactly what the project editor sends on Save (components/delivery/ProjectForms.tsx): every field, the stored link included.
+      const renamed = await patchProject({ title: "SunBiz site (old)", description: null, client_tenant_id: SUNBIZ, client_name: "Ezra", client_email: "ezra@sunbiz.test", lead_id: null });
+      assert.equal(renamed.status, 200, `a rename re-sending the stored link was refused: ${JSON.stringify(renamed.body)}`);
+      assert.equal(await linkOf("delivery_projects", "p-sb-linked"), SUNBIZ, "the save changed the link");
+      const keptOnTicket = await patchTicket({ client_tenant_id: SUNBIZ, severity: "high" });
+      assert.equal(keptOnTicket.status, 200, JSON.stringify(keptOnTicket.body));
+      // Unlinking always works.
+      assert.equal((await patchProject({ client_tenant_id: null })).status, 200);
+      assert.equal(await linkOf("delivery_projects", "p-sb-linked"), null);
+      assert.equal((await patchTicket({ client_tenant_id: null })).status, 200);
+      assert.equal(await linkOf("support_tickets", "t-sb-linked"), null);
+      // Once unlinked, naming SunBiz's workspace again is a NEW link, and refused.
+      for (const r of [await patchProject({ client_tenant_id: SUNBIZ }), await patchTicket({ client_tenant_id: SUNBIZ })]) {
+        assert.deepEqual([r.status, r.body.error], [400, "client_tenant_not_found"], JSON.stringify(r.body));
+      }
+      assert.equal(await linkOf("delivery_projects", "p-sb-linked"), null);
+      assert.equal(await linkOf("support_tickets", "t-sb-linked"), null);
+      // Control: a live client's workspace still links.
+      assert.equal((await patchProject({ client_tenant_id: CLIENT_A })).status, 200);
+      assert.equal(await linkOf("delivery_projects", "p-sb-linked"), CLIENT_A);
+    } finally {
+      await db.execute("DELETE FROM ticket_comments WHERE ticket_id = 't-sb-linked'");
+      await db.execute("DELETE FROM support_tickets WHERE id = 't-sb-linked'");
+      await db.execute("DELETE FROM delivery_updates WHERE project_id = 'p-sb-linked'");
+      await db.execute("DELETE FROM delivery_projects WHERE id = 'p-sb-linked'");
+      await db.execute({ sql: "DELETE FROM tenants WHERE id = ?", args: [SUNBIZ] });
+    }
+  });
+  await check("the client-workspace select on a ticket and a project shows a link the list no longer offers, as a choice that cannot be made, so None clears it", async () => {
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    const { ClientWorkspaceOptions } = await import("../components/delivery/client-workspace-options");
+    type El = { type?: unknown; props?: { value?: string; disabled?: boolean; children?: unknown } };
+    const flat = (n: unknown): El[] =>
+      Array.isArray(n) ? n.flatMap(flat) : n && typeof n === "object" ? ((n as El).type === "option" ? [n as El] : flat((n as El).props?.children)) : [];
+    const shown = (current: string | null) =>
+      flat(ClientWorkspaceOptions({ current, options: [{ value: CLIENT_A, label: "Client A Plumbing" }], noneLabel: "None" })).map((o) => ({
+        value: o.props?.value,
+        label: String(o.props?.children),
+        disabled: o.props?.disabled === true,
+      }));
+    assert.deepEqual(shown(SUNBIZ), [
+      { value: "", label: "None", disabled: false },
+      { value: SUNBIZ, label: "Former client workspace", disabled: true },
+      { value: CLIENT_A, label: "Client A Plumbing", disabled: false },
+    ]);
+    const plain = [
+      { value: "", label: "None", disabled: false },
+      { value: CLIENT_A, label: "Client A Plumbing", disabled: false },
+    ];
+    assert.deepEqual(shown(CLIENT_A), plain, "a listed link gets no extra option");
+    assert.deepEqual(shown(null), plain, "no link, no extra option");
+    // Both editors draw their workspace select from it, with the row's STORED link.
+    const src = (f: string) => readFileSync(join(__dirname, "..", "components", "delivery", f), "utf8");
+    assert.match(src("TicketForms.tsx"), /<ClientWorkspaceOptions current=\{ticket\.client_tenant_id\} options=\{clientTenants\} noneLabel="None" \/>/);
+    assert.match(src("ProjectForms.tsx"), /<ClientWorkspaceOptions current=\{project\.client_tenant_id\} options=\{clientTenants\} noneLabel="No portal \(email only\)" \/>/);
+  });
   await check("SLA cron: a workspace desk's breach is flagged (its Breaching view) but alerted through no lane; OASIS's alerts", async () => {
     const sent: string[] = [];
     const fake = {
@@ -817,6 +936,28 @@ async function main() {
     const b = await page(TicketsPage({ searchParams: Promise.resolve({ status: "all" }) }));
     assert.doesNotMatch(b, /Gutter quote wrong|The quote page is blank/);
     assert.match(b, /\/f\/client-b\/support/);
+  });
+  await check("a database without the support desk registry: Tickets and turning the form on say so in plain words, never a migration's name (CS-16); the cause is logged", async () => {
+    await login(USERS.clientA);
+    await db.execute("ALTER TABLE support_desks RENAME TO support_desks_unapplied");
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map((x) => (x instanceof Error ? x.message : String(x))).join(" "));
+    try {
+      const shown = await page(TicketsPage({ searchParams: Promise.resolve({}) }));
+      assert.match(shown, /The public support form isn.t available right now\. The error has been logged\./);
+      const on = await call(deskRoute.POST());
+      assert.deepEqual([on.status, on.body.error], [503, "support_desk_unavailable"], JSON.stringify(on.body));
+      assert.match(String(on.body.message), /can.t be turned on right now\. Nothing was changed/);
+      for (const t of [shown, String(on.body.message)]) assert.doesNotMatch(t, /migration|bravo__/i);
+      assert.ok(
+        logged.some((l) => l.startsWith("[delivery.desks.form]") && /support_desks is missing/.test(l) && /bravo__188/.test(l)),
+        `the cause is not in the log: ${JSON.stringify(logged)}`,
+      );
+    } finally {
+      console.error = realError;
+      await db.execute("ALTER TABLE support_desks_unapplied RENAME TO support_desks");
+    }
   });
 
   // ── the submit route's shape ───────────────────────────────────────────

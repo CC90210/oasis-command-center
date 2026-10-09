@@ -24,7 +24,7 @@ import {
   serverError,
 } from "@/lib/delivery/session";
 import {
-  clientTenantExists,
+  clientTenantChangeAllowed,
   deskCustomerExists,
   deskLeadExists,
   getProject,
@@ -93,7 +93,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     if ("client_tenant_id" in changes && !isOasisDesk(viewer)) {
       return deliveryError(400, "client_workspace_links_are_oasis_only", undefined, { field: "client_tenant_id" });
     }
-    if (changes.client_tenant_id && !(await clientTenantExists(db, changes.client_tenant_id))) {
+    if (!(await clientTenantChangeAllowed(db, changes.client_tenant_id, access.project.client_tenant_id))) {
       return deliveryError(400, "client_tenant_not_found", undefined, { field: "client_tenant_id" });
     }
     if (changes.lead_id && !(await deskLeadExists(db, desk, changes.lead_id))) {

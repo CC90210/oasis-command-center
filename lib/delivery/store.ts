@@ -635,6 +635,22 @@ export async function clientTenantExists(db: Client, tenantId: string): Promise<
   return rs.rows.length > 0;
 }
 
+/**
+ * May an edit set a project's or ticket's client workspace to `next`? Only a
+ * NEW link is checked (clientTenantExists). Clearing it always may, and so may
+ * re-sending the link the row already has: the project editor sends every
+ * field on Save, and a link made before its business was retired must not
+ * make the row unsaveable.
+ */
+export async function clientTenantChangeAllowed(
+  db: Client,
+  next: string | null | undefined,
+  stored: string | null,
+): Promise<boolean> {
+  if (!next || next === stored) return true;
+  return clientTenantExists(db, next);
+}
+
 /** Is `leadId` a lead in THIS desk's own pipeline? */
 export async function deskLeadExists(db: Client, tenantId: string, leadId: string): Promise<boolean> {
   const rs = await db.execute({
@@ -1864,10 +1880,12 @@ export type ClientMatch = {
  *      project (and its client workspace). With several projects, the free-text
  *      project hint picks one when it matches exactly one title.
  *   2. Otherwise, their email belongs to portal users of exactly ONE client
- *      workspace -> that workspace, no project. A retired business's
- *      workspace is not a client (lib/os/customers/retired.ts), so its users
- *      are not counted.
+ *      workspace -> that workspace, no project.
  *   3. Otherwise nothing. Ambiguity is never guessed through.
+ *
+ * A retired business's workspace is not a client (lib/os/customers/retired.ts):
+ * a project naming it is never a candidate in step 1 (excluded in the query,
+ * before its LIMIT), and its users are not counted in step 2.
  *
  * The public form's email is UNVERIFIED. client_match records that the link was
  * inferred, so the ticket page can say so.
@@ -1880,12 +1898,13 @@ export async function matchClientByEmail(
   email: string,
   projectHint: string | null,
 ): Promise<ClientMatch> {
+  const liveProject = notRetiredTenantSql("client_tenant_id");
   const projects = rows(
     await db.execute({
       sql: `SELECT id, title, client_tenant_id FROM delivery_projects
-            WHERE tenant_id = ? AND client_email = ? AND archived_at IS NULL
+            WHERE tenant_id = ? AND client_email = ? AND archived_at IS NULL AND ${liveProject.sql}
             ORDER BY updated_at DESC, id LIMIT 20`,
-      args: [DELIVERY_TENANT_ID, email],
+      args: [DELIVERY_TENANT_ID, email, ...liveProject.args],
     }),
   );
   let project: Row | undefined;

@@ -16,17 +16,32 @@
  *              listCustomers (Include archived too), listLinkableWorkspaces,
  *              listClientTenants (lib/delivery/store.ts);
  *   pickers    listCustomerOptions (the ticket and project Client select),
- *              listClientTenants (their client-workspace select);
+ *              listClientTenants (their client-workspace select, where a
+ *              row's existing link to a retired workspace shows as a
+ *              disabled "Former client workspace" that None clears:
+ *              components/delivery/client-workspace-options.tsx);
  *   matches    matchCustomerByEmail and isCustomerEmail (support intake,
- *              email purpose), matchClientByEmail's workspace step;
- *   validators clientTenantExists, deskCustomerExists (lib/delivery/store.ts),
- *              convertLeadToCustomer and POST /api/customers/convert,
- *              setClientWorkspace and POST /api/clients/[id]/link-workspace
- *              (409 retired_business);
+ *              email purpose), matchClientByEmail (its project step and its
+ *              workspace step);
+ *   validators clientTenantExists, deskCustomerExists (lib/delivery/store.ts;
+ *              an edit is refused a NEW retired link only, so a row linked
+ *              before the retirement can still be saved and unlinked:
+ *              clientTenantChangeAllowed), convertLeadToCustomer and POST
+ *              /api/customers/convert, setClientWorkspace and POST
+ *              /api/clients/[id]/link-workspace (409 retired_business);
  *   the record loadClientHeader and loadClientRecord: a record linked to a
  *              retired workspace is a 404, like another workspace's record,
- *              so no tab ever reads the retired workspace (Usage included).
- * tests/retired-tenant-producers.test.ts pins each one.
+ *              so no tab ever reads the retired workspace (Usage included);
+ *              ClientRecordCard draws no card on a deal about a retired
+ *              business or on one whose record is linked to its workspace.
+ * tests/retired-tenant-producers.test.ts pins each one, with
+ * tests/os-customers.test.ts (the matcher's project step, editing an existing
+ * link, the select) and tests/clients-hub.test.ts (the record, the deal card).
+ *
+ * Not consulted yet: the Slack channel mapper (app/api/slack/channels and
+ * saveChannelRoute in lib/slack/routing.ts) reads customers directly. That
+ * code is on hold with the Slack work; when it resumes it must take its
+ * records from listCustomerOptions.
  *
  * A typed name is not a link: a deal or project that only SAYS "SunBiz" is
  * not caught here, because a name proves nothing. Rows like that are retired
@@ -60,6 +75,13 @@ export type SqlGuard = { sql: string; args: string[] };
  * (NULL is kept: no business named), with its arguments. Applied in the query,
  * never after it, so a LIMITed read cannot spend its rows on records it then
  * drops. Case-insensitive, like isRetiredTenant.
+ *
+ * The one exception is won deals (loadWonDeals in
+ * components/os/landings/clients-data.ts): a deal names its business inside
+ * its JSON data, which the shared lead reader cannot filter on, so those rows
+ * are dropped with isRetiredClientRef after the read. That read is capped at
+ * 1000 deals and the page says when the cap is hit, so a dropped row can cost
+ * a slot but never hides that the list was cut.
  */
 export function notRetiredTenantSql(column: string): SqlGuard {
   if (!SQL_COLUMN.test(column)) throw new Error(`notRetiredTenantSql: not a column name: ${column}`);

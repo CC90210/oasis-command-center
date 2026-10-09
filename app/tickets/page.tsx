@@ -509,7 +509,7 @@ function SupportFormCard({ form, oasis }: { form: DeskFormState | null; oasis: b
       case "unavailable":
         return (
           <p className="text-sm text-status-warm">
-            The public support form is not set up in this database yet (migration bravo__188). Tickets you file here still work.
+            The public support form isn&apos;t available right now. The error has been logged. Tickets you file here still work.
           </p>
         );
     }

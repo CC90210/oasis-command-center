@@ -1453,6 +1453,39 @@ async function main() {
     assert.match(await page(record(R.id, "usage")), /Retired Link Co/);
     assert.match(await page(ClientsPage({ searchParams: Promise.resolve({}) })), /Retired Link Co/);
   });
+  await check("the deal page's client card: none on a deal about a retired business or on one whose record is linked to its workspace; a live client's deal still gets its card", async () => {
+    await login(USERS.cc);
+    const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+    const { ClientRecordCard } = await import("../components/os/landings/clients-record-card");
+    const card = async (leadId: string) => {
+      const el = await ClientRecordCard({ tenantId: OASIS, leadId, stage: "won" });
+      return el === null ? null : textOf(el).join("\n");
+    };
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES ('lead-card-sb', ?, 'lead', ?), ('lead-card-made', ?, 'lead', ?)",
+      args: [
+        OASIS,
+        JSON.stringify({ stage: "won", company: "SunBiz", client_tenant_id: SUNBIZ.toUpperCase() }),
+        OASIS,
+        JSON.stringify({ stage: "won", company: "Card Made Co" }),
+      ],
+    });
+    // A deal about SunBiz: no "Convert to client", which would answer 409 retired_business.
+    assert.equal(await card("lead-card-sb"), null, "a SunBiz deal is offered Convert to client");
+    // A record made from a deal and linked to SunBiz's workspace: no "Open client", which would open as not found.
+    const made = await store.createCustomer(db, OASIS, { ...base, display_name: "Card Made Co", primary_email: "ops@card-made.test", source_lead_id: "lead-card-made" }, USERS.cc.id, T0);
+    assert.ok(made.ok, JSON.stringify(made));
+    await db.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [SUNBIZ, made.customer.id] });
+    assert.equal(await card("lead-card-made"), null, "a record linked to SunBiz's workspace is offered Open client");
+    // Controls: the same record linked to a live client's workspace (a fresh one:
+    // one workspace belongs to one record), and the deal once it names no retired business.
+    const LIVE = "c0c0c0c0-0000-4000-8000-0000000000c1";
+    await db.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'card-live', 'Card Live Co')", args: [LIVE] });
+    await db.execute({ sql: "UPDATE customers SET client_tenant_id = ? WHERE id = ?", args: [LIVE, made.customer.id] });
+    assert.match(String(await card("lead-card-made")), /Card Made Co[\s\S]*Open client/);
+    await db.execute({ sql: "UPDATE tenant_records SET data = ? WHERE id = 'lead-card-sb'", args: [JSON.stringify({ stage: "won", company: "Live Deal Co" })] });
+    assert.match(String(await card("lead-card-sb")), /This deal is won/);
+  });
 
   finish("clients-hub");
 }

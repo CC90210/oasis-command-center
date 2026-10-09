@@ -18,6 +18,7 @@ import {
   type TaskStatus,
 } from "@/lib/delivery/rules";
 import { useDeliveryAction, type Option } from "@/components/delivery/useDeliveryAction";
+import { ClientWorkspaceOptions } from "@/components/delivery/client-workspace-options";
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? <p className="text-sm text-status-hot" role="alert">{error}</p> : null;
@@ -294,10 +295,7 @@ export function ProjectControls({
               <label>
                 <span className="label">Client portal workspace</span>
                 <select className="select" value={d.client_tenant_id} onChange={(e) => setD({ ...d, client_tenant_id: e.target.value })}>
-                  <option value="">No portal (email only)</option>
-                  {clientTenants.map((t) => (
-                    <option key={t.value} value={t.value}>{t.label}</option>
-                  ))}
+                  <ClientWorkspaceOptions current={project.client_tenant_id} options={clientTenants} noneLabel="No portal (email only)" />
                 </select>
               </label>
             )}

@@ -94,7 +94,8 @@ const MESSAGES: Record<string, string> = {
   invalid_json: "The request body is not valid JSON.",
   support_slug_taken:
     "This workspace already has a form at /support that creates leads. Rename that form first, then turn the support form on.",
-  support_desk_unavailable: "The support desk is not set up in this database yet (migration bravo__188).",
+  // The cause (the support desk registry is missing) is logged by getDeskForm (lib/delivery/desks.ts), never shown.
+  support_desk_unavailable: "The support form can't be turned on right now. Nothing was changed; the error has been logged.",
   oasis_desk_is_seeded: "OASIS's support form is already on.",
   tenant_not_found: "This workspace could not be found.",
   // The client record's composer (POST /api/clients/[id]/reply).
