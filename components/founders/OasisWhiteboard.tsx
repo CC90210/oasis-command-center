@@ -356,7 +356,6 @@ export function OasisWhiteboard() {
   const [presentMode, setPresentMode] = useState<PresentMode>("idle");
   /** Read inside the mount-only effect below without making it re-run per toggle. */
   const presentModeRef = useRef<PresentMode>("idle");
-  presentModeRef.current = presentMode;
   const presentButtonRef = useRef<HTMLButtonElement>(null);
   const exitButtonRef = useRef<HTMLButtonElement>(null);
   const presentModeDidMount = useRef(false);
@@ -448,6 +447,13 @@ export function OasisWhiteboard() {
     }
     if (presentMode !== "idle") exitButtonRef.current?.focus();
     else presentButtonRef.current?.focus();
+  }, [presentMode]);
+
+  // Keep presentModeRef in step with the committed mode. Written here, not
+  // during render: React can replay or discard a render, and the Escape
+  // listener reads this ref (CodeRabbit, PR 579).
+  useEffect(() => {
+    presentModeRef.current = presentMode;
   }, [presentMode]);
 
   const actions: ToolbarActions = {

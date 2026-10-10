@@ -1475,7 +1475,22 @@ async function main() {
       // run here); this file proves the Present button exists and is
       // wired, and whiteboard-present.ts (pure, tested above) proves the
       // label and fallback decision.
-      assert.equal(pendingEffects.length, 4, "the board's mount effect, Present's listeners, the shell-raise flag, and the focus move");
+      // A fifth effect keeps presentModeRef in step with the committed mode
+      // (CodeRabbit, PR 579: the ref is never written during render).
+      {
+        const src = (await import("node:fs")).readFileSync(
+          (await import("node:path")).join(__dirname, "..", "components", "founders", "OasisWhiteboard.tsx"),
+          "utf8",
+        );
+        const writes = src.match(/presentModeRef\.current = presentMode;/g) ?? [];
+        assert.equal(writes.length, 1, "presentModeRef is written in exactly one place");
+        assert.match(
+          src,
+          /useEffect\(\(\) => \{\s*presentModeRef\.current = presentMode;\s*\}, \[presentMode\]\);/,
+          "presentModeRef is written inside an effect, never during render",
+        );
+      }
+      assert.equal(pendingEffects.length, 5, "the board's mount effect, Present's listeners, the shell-raise flag, the focus move, and the presentModeRef sync");
       const cleanup = pendingEffects[0]();
       assert.equal(typeof cleanup, "function", "the effect returns its cleanup");
       assert.equal(canvas.width, 400, "the effect sized the canvas to its container");
