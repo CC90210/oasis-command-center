@@ -104,7 +104,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     ["/training", "growth"], ["/commissions", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
     ["/founders/marketing", "growth"], ["/seo", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
     ["/analytics", "money"], ["/operations", "admin"], ["/automations", "admin"], ["/health", "admin"],
-    ["/agent", "admin"], ["/admin/agents", "admin"], ["/runs", "admin"], ["/inbox", "admin"],
+    ["/agent", "admin"], ["/admin/agents", "admin"], ["/admin/agent-training", "admin"], ["/runs", "admin"], ["/inbox", "admin"],
   ];
   // One System health (2026-09-30): /system-health folded into /health and
   // redirects there, so the catalog has no row for it.
@@ -216,7 +216,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
 
 // ── 5. Admin: platform operators in an OASIS workspace ────────────────────
 {
-  const ADMIN = ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox"];
+  const ADMIN = ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/admin/agent-training", "/runs", "/inbox"];
   const operator = oasisViewer("founder", { isOperator: true });
   const admin = buildOsNav(operator).find((s) => s.key === "admin");
   assert.ok(admin, "an operator gets the Admin section");

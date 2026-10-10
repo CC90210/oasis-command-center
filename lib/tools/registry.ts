@@ -27,7 +27,7 @@ import {
   type CorpusLabel,
 } from "@/lib/founders/ingest-core";
 
-export type ToolKey = "video_download" | "learn_from_link" | "score_hook" | "repurpose_post";
+export type ToolKey = "video_download" | "learn_from_link" | "repurpose_post";
 
 export type ToolField = {
   name: string;
@@ -52,15 +52,21 @@ export type ToolDef = {
   runLabel: string;
   runsOn: "worker" | "runner";
   needsAiAccount: boolean;
-  produces: "library_asset" | "training_note" | "score" | "text";
+  produces: "library_asset" | "training_note" | "text";
   fields: ToolField[];
+  /**
+   * OASIS-operators-only (2026-10-10): the tool is left out of the Content
+   * Tools catalog a workspace founder sees (getToolCatalog's default "client"
+   * audience) and the session routes refuse it to anyone resolvePlatformOperatorForAuthUser
+   * does not clear, even a founder of this very workspace. Absent = every
+   * founder of the workspace may use it, as before.
+   */
+  operatorOnly?: boolean;
   validate(input: unknown): ToolValidation;
 };
 
 /** The longest link either URL tool accepts, before and after canonicalising. */
 export const MAX_URL_LENGTH = 2048;
-export const HOOK_MAX = 500;
-export const CAPTION_MAX = 2200;
 export const POST_MIN = 20;
 export const POST_MAX = 3000;
 
@@ -162,6 +168,9 @@ const learnFromLink: ToolDef = {
   runsOn: "worker",
   needsAiAccount: true,
   produces: "training_note",
+  // Agent-harness training material, OASIS-operators-only (moved off Content
+  // Tools to Admin > Agent training, 2026-10-10).
+  operatorOnly: true,
   fields: [
     { name: "url", label: "Link", kind: "url", required: true, maxLength: MAX_URL_LENGTH },
     {
@@ -207,39 +216,14 @@ const learnFromLink: ToolDef = {
   },
 };
 
-const scoreHook: ToolDef = {
-  key: "score_hook",
-  title: "Score a hook",
-  description: "Scores an opening line and says what it is missing.",
-  runLabel: "Score",
-  runsOn: "worker",
-  needsAiAccount: false,
-  produces: "score",
-  fields: [
-    { name: "hook", label: "Hook", kind: "text", required: true, minLength: 1, maxLength: HOOK_MAX },
-    { name: "caption", label: "Caption (optional)", kind: "textarea", required: false, maxLength: CAPTION_MAX },
-  ],
-  validate(input) {
-    const f = fieldsOf(input);
-    if (!f) return { ok: false, field: "hook", code: "required" };
-    const hook = text(f.hook);
-    if (!hook) return { ok: false, field: "hook", code: "required" };
-    if (hook.length > HOOK_MAX) return { ok: false, field: "hook", code: "too_long" };
-    if (hasControlCharacters(hook)) return { ok: false, field: "hook", code: "invalid_characters" };
-    if (f.caption !== undefined && f.caption !== null && typeof f.caption !== "string") {
-      return { ok: false, field: "caption", code: "invalid" };
-    }
-    const caption = text(f.caption);
-    if (caption.length > CAPTION_MAX) return { ok: false, field: "caption", code: "too_long" };
-    if (hasControlCharacters(caption)) return { ok: false, field: "caption", code: "invalid_characters" };
-    return { ok: true, value: { hook, caption }, dedupeKey: null };
-  },
-};
-
 const repurposePost: ToolDef = {
   key: "repurpose_post",
   title: "Repurpose a post",
-  description: "Turns one post into versions for LinkedIn, Instagram and Threads.",
+  // "not OASIS's coding engine" (the contrast a founder would need to know
+  // "Coding harness" to understand) dropped: Codex review round 3, LOW -
+  // every Content Tools viewer sees this line, including non-technical
+  // staff, and the phrase names nothing in the product's own vocabulary.
+  description: "Turns one post into versions for LinkedIn, Instagram and Threads, using your workspace's AI account (Settings > AI brain).",
   runLabel: "Repurpose",
   runsOn: "worker",
   needsAiAccount: true,
@@ -258,7 +242,7 @@ const repurposePost: ToolDef = {
 };
 
 /** Every tool, in the order the grid shows them. */
-export const TOOL_REGISTRY: readonly ToolDef[] = [scoreHook, repurposePost, learnFromLink, videoDownload];
+export const TOOL_REGISTRY: readonly ToolDef[] = [repurposePost, learnFromLink, videoDownload];
 
 export function toolByKey(k: unknown): ToolDef | null {
   return typeof k === "string" ? (TOOL_REGISTRY.find((t) => t.key === k) ?? null) : null;
