@@ -212,6 +212,13 @@ async function main() {
     assert.deepEqual(writes, [], "operator rows are added and revoked by hand, never by product code");
   });
 
+  await check("the /api/pg bridge refuses platform_operators to every bearer", () => {
+    const route = readFileSync(join(ROOT, "app/api/pg/rest/v1/[...path]/route.ts"), "utf8");
+    const set = /const FORBIDDEN_TABLES = new Set\(\[([\s\S]*?)\]\);/.exec(route);
+    assert.ok(set, "FORBIDDEN_TABLES not found in the bridge route");
+    assert.match(set![1], /^\s*"platform_operators",/m, "a leaked bridge bearer must not be able to write itself into operator power");
+  });
+
   if (failures > 0) {
     console.log(`platform-operator-table: ${failures} failure(s)`);
     process.exit(1);
