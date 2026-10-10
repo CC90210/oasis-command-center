@@ -110,7 +110,10 @@ type Json = Record<string, unknown>;
 type Status = { kind: string; label: string; detail?: string; paths?: Array<{ title: string; body: string; state: string; requestable: boolean }> };
 
 /** Render the drawer and hub for real (react-dom/server, in a child process without react-server). */
-function renderClient(input: unknown): { markup: Record<string, string>; clicks: Array<{ slug: string; embedded: boolean; action: string }> } {
+function renderClient(input: unknown): {
+  markup: Record<string, string>;
+  clicks: Array<{ slug: string; embedded: boolean; action: string; statusKind?: string; fromDrawer?: boolean; manageOpensDrawer?: boolean | null }>;
+} {
   const r = spawnSync(process.execPath, ["--import", "tsx", "tests/connections-everywhere.render.ts"], {
     cwd: root,
     input: JSON.stringify(input),
@@ -427,6 +430,52 @@ async function main() {
     assert.match(button, /const close = useCallback\(\(\) => setOpen\(false\), \[\]\);/, "a stable close keeps the sheet's focus handling from re-running");
     assert.match(read("app/settings/ai/page.tsx"), /await loadConnectorStatuses\(\{ tenantId, userId, nowMs \}\)/);
     assert.match(read("app/settings/connections/page.tsx"), /await loadConnectorStatuses\(\{ tenantId: viewer\.tenantId, userId: viewer\.userId \}\)/);
+  });
+
+  await check("an OAuth card already connected, configured or needing attention opens its details drawer on click instead of starting sign-in again; its drawer's own Reconnect still starts the popup (CodeRabbit PR #574)", () => {
+    const { clicks } = renderClient({
+      cases: [],
+      clicks: [
+        { slug: "constant-contact", embedded: false, statusKind: "connected" },
+        { slug: "constant-contact", embedded: false, statusKind: "connected", fromDrawer: true },
+        { slug: "constant-contact", embedded: false, statusKind: "not_connected" },
+        { slug: "xero", embedded: false, statusKind: "configured" },
+        { slug: "xero", embedded: false, statusKind: "attention" },
+        { slug: "xero", embedded: false, statusKind: "attention", fromDrawer: true },
+        { slug: "xero", embedded: false, statusKind: "unknown" },
+      ],
+    });
+    assert.deepEqual(
+      clicks.map((c) => `${c.slug}:${c.statusKind}:${!!c.fromDrawer}:${c.action}:${c.manageOpensDrawer}`),
+      [
+        "constant-contact:connected:false:popup:true",
+        "constant-contact:connected:true:popup:false",
+        "constant-contact:not_connected:false:popup:false",
+        "xero:configured:false:popup:true",
+        "xero:attention:false:popup:true",
+        "xero:attention:true:popup:false",
+        "xero:unknown:false:popup:false",
+      ],
+      "a connected/configured/attention card's click opens the drawer; fromDrawer (its own Reconnect) and not_connected/unknown still pop up",
+    );
+  });
+
+  await check("a full-window sign-in that had to fall back when the popup was blocked shows the same banner the popup would have, read from the URL on the hub's own first render (CodeRabbit PR #574)", () => {
+    const { markup } = renderClient({
+      cases: [
+        { id: "ok", kind: "hub", statuses: {}, initialApp: "xero", initialStatus: "connected" },
+        { id: "denied", kind: "hub", statuses: {}, initialApp: "xero", initialStatus: "denied" },
+        { id: "err", kind: "hub", statuses: {}, initialApp: "xero", initialStatus: "error", initialReason: "account_connected_elsewhere" },
+        { id: "none", kind: "hub", statuses: {}, initialApp: "xero" },
+      ],
+      clicks: [],
+    });
+    const banner = (html: string) => html.slice(0, html.indexOf("your-tools-heading"));
+    assert.match(text(banner(markup.ok)), /Xero connected\./);
+    assert.match(banner(markup.ok), /role="status"/, "the banner is announced, like every other Connections notice");
+    assert.match(text(banner(markup.denied)), /Connection cancelled\./);
+    assert.match(text(banner(markup.err)), /That account is already connected to another OASIS workspace\. Disconnect it there first\./);
+    assert.doesNotMatch(banner(markup.none), /role="status"/, "no ?status= on arrival shows no banner");
   });
 
   // -- 3. Slack: each workspace is shown its own path (W10a R1) ---------------------

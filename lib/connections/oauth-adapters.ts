@@ -259,15 +259,54 @@ const XERO_TOKEN_URL = "https://identity.xero.com/connect/token";
 const XERO_REVOKE_URL = "https://identity.xero.com/connect/revocation";
 const XERO_CONNECTIONS_URL = "https://api.xero.com/connections";
 
-type XeroOrg = { tenantId: string; tenantName: string | null };
+export type XeroOrg = { tenantId: string; tenantName: string | null; authEventId: string | null };
 
 function xeroOrgs(body: unknown): XeroOrg[] {
   if (!Array.isArray(body)) return [];
   return body.flatMap((row) => {
     const o = asObj(row);
     const tenantId = text(o?.tenantId);
-    return tenantId ? [{ tenantId, tenantName: text(o?.tenantName) }] : [];
+    return tenantId ? [{ tenantId, tenantName: text(o?.tenantName), authEventId: text(o?.authEventId) }] : [];
   });
+}
+
+/**
+ * The access token's own `authentication_event_id` claim: which consent this
+ * is (developer.xero.com/documentation/guides/oauth2/tenants, read
+ * 2026-10-10). Read without verifying the signature — the token just came
+ * from Xero's own token endpoint over TLS (the same trust the Bearer header
+ * already relies on), so its claims are good enough for picking WHICH of the
+ * caller's organisations this is, never for authenticating anything. Not
+ * every token carries one (a malformed one, or a test double), so a caller
+ * treats a miss as "unknown", not as Xero's fault.
+ */
+export function xeroAuthEventId(accessToken: string): string | null {
+  const parts = accessToken.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = asObj(JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")));
+    return text(payload?.authentication_event_id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which organisation THIS consent approved. `GET /connections` can list every
+ * organisation the signed-in Xero user has EVER approved for OASIS's app, not
+ * only the one just granted (CodeRabbit, PR #574): Xero does not document the
+ * array's order, and `createdDateUtc` is each connection's original creation
+ * time, not this consent's time, so neither says "current" — picking `[0]` or
+ * the newest `createdDateUtc` can both pin the wrong organisation. Xero's own
+ * answer is `authEventId`: every connection row carries the auth event that
+ * authorised it, and the access token carries the auth event THIS consent
+ * just ran. One organisation is unambiguous either way; more than one needs a
+ * match, or this refuses rather than guess (never silently pick an arbitrary one).
+ */
+export function xeroCurrentOrg(orgs: readonly XeroOrg[], authEventId: string | null): XeroOrg | null {
+  if (orgs.length === 1) return orgs[0];
+  if (orgs.length === 0 || !authEventId) return null;
+  return orgs.find((o) => o.authEventId === authEventId) ?? null;
 }
 
 const xero: OAuthAdapter = {
@@ -278,15 +317,19 @@ const xero: OAuthAdapter = {
   refresh: (client, refreshToken, deps, signal) =>
     basicTokenCall("Xero", XERO_TOKEN_URL, client, { grant_type: "refresh_token", refresh_token: refreshToken }, deps, "refresh", refreshToken, signal),
   async identify(_client, grant, _query, deps) {
-    const r = await send(deps, XERO_CONNECTIONS_URL, {
+    const authEventId = xeroAuthEventId(grant.accessToken);
+    const url = authEventId ? `${XERO_CONNECTIONS_URL}?authEventId=${encodeURIComponent(authEventId)}` : XERO_CONNECTIONS_URL;
+    const r = await send(deps, url, {
       method: "GET",
       headers: { Authorization: `Bearer ${grant.accessToken}`, Accept: "application/json" },
     });
     const orgs = xeroOrgs(r.body);
     if (r.status !== 200) throw new OAuthExchangeError("exchange_failed", `Xero would not list the organisation (HTTP ${r.status})`);
-    // One OASIS workspace connects one Xero organisation: the first the owner approved.
-    if (orgs.length === 0) throw new OAuthExchangeError("account_unidentified", "Xero did not say which organisation was connected");
-    return { accountId: orgs[0].tenantId, accountLabel: orgs[0].tenantName, environment: null };
+    // One OASIS workspace connects one Xero organisation: the one THIS consent
+    // approved (xeroCurrentOrg), never an arbitrary pick off someone's whole history.
+    const org = xeroCurrentOrg(orgs, authEventId);
+    if (!org) throw new OAuthExchangeError("account_unidentified", "Xero did not say which organisation was connected");
+    return { accountId: org.tenantId, accountLabel: org.tenantName, environment: null };
   },
   async probe(accessToken, accountId, deps) {
     const started = Date.now();

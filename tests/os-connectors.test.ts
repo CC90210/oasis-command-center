@@ -895,6 +895,31 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // A card this workspace cannot connect yet (coming_soon) also opens the drawer.
   assert.match(hub, /const next = connectorClickAction\(def, embedded\);[\s\S]{0,300}if \(next === "drawer" \|\| !action \|\| statuses\[def\.slug\]\?\.kind === "coming_soon"\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
+  // A connected/configured/attention OAuth card's click opens the drawer
+  // (never restarts sign-in); only the drawer's own footer button bypasses it
+  // with fromDrawer — real execution of this decision is proven in
+  // tests/connections-everywhere.test.ts, which runs it in a real React render
+  // (CodeRabbit PR #574).
+  assert.match(
+    hub,
+    /export function oauthManageOpensDrawer\(statusKind: ConnectorStatusKind \| undefined, fromDrawer: boolean\): boolean \{\s*return !fromDrawer && \(statusKind === "connected" \|\| statusKind === "configured" \|\| statusKind === "attention"\);/,
+  );
+  assert.match(
+    hub,
+    /if \(next === "popup" && oauthManageOpensDrawer\(statuses\[def\.slug\]\?\.kind, !!opts\?\.fromDrawer\)\) return openDrawer\(def\.slug\);/,
+    "connect() checks it before ever starting a popup",
+  );
+  assert.match(hub, /onConnect=\{\(d\) => connect\(d, \{ fromDrawer: true \}\)\}/, "the drawer's own footer button is the one caller that bypasses it");
+  // A full-window sign-in that fell back when the popup was blocked comes back
+  // on the URL (?connection=&status=&reason=); page.tsx hands it to the hub,
+  // which reads it into its OWN first render (not an effect after), so the
+  // banner shows before anything clears those params.
+  assert.match(page, /const initialStatus = one\(sp\.status\);\s*const initialReason = one\(sp\.reason\);/);
+  assert.match(page, /<ConnectionsHub[\s\S]{0,200}initialStatus=\{initialStatus\}[\s\S]{0,80}initialReason=\{initialReason\}/);
+  assert.match(
+    hub,
+    /const \[banner, setBanner\] = useState<NoticeValue>\(\(\) =>\s*resultBanner\(connectorBySlug\(initialApp \?\? ""\)\?\.name \?\? "That app", initialStatus, initialReason\),/,
+  );
   // Google's sign-in comes back to its drawer, not to a removed anchor.
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
   assert.match(page, /one\(sp\.gmail_oauth\) \? "google-workspace"/);

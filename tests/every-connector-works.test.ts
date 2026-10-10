@@ -122,8 +122,24 @@ const calls: Call[] = [];
 /** Every secret value that ever crossed the mocked wire or was typed in: none may appear in a log or an answer. */
 const SENSITIVE = new Set<string>();
 
-type TokenMode = { refuse: boolean; revokeFails: boolean; metaRefreshCode: number | null };
-const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null };
+type TokenMode = {
+  refuse: boolean;
+  revokeFails: boolean;
+  metaRefreshCode: number | null;
+  /** The access token Xero issues carries this as its `authentication_event_id` claim (a real JWT shape) instead of the default opaque string. */
+  xeroAuthEventId: string | null;
+  /** GET /connections answers with this instead of the one default organisation. */
+  xeroOrgs: Array<Record<string, unknown>> | null;
+};
+const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null, xeroAuthEventId: null, xeroOrgs: null };
+
+/** A JWT shape good enough for xeroAuthEventId to read (lib/connections/oauth-adapters.ts): unsigned, never verified by that code. */
+const xeroJwt = (authEventId: string) =>
+  [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ authentication_event_id: authEventId })).toString("base64url"),
+    "test-unsigned",
+  ].join(".");
 
 /** What each OAuth vendor last issued; a token that is not the latest is rejected, as the rotating vendors do. */
 const issued: Record<string, { n: number; access: string; refresh: string; revoked: boolean }> = {};
@@ -181,7 +197,7 @@ const basicOf = (app: OAuthApp) => `Basic ${Buffer.from(`${Object.values(app.env
 function issue(v: string): { access: string; refresh: string } {
   const s = live(v);
   s.n += 1;
-  s.access = `${v}-access-token-${s.n}-${"A".repeat(20)}`;
+  s.access = v === "xero" && mode.xeroAuthEventId ? xeroJwt(mode.xeroAuthEventId) : `${v}-access-token-${s.n}-${"A".repeat(20)}`;
   s.refresh = v === "whatsapp" ? s.access : `${v}-refresh-token-${s.n}-${"R".repeat(20)}`;
   s.revoked = false;
   SENSITIVE.add(s.access).add(s.refresh);
@@ -229,7 +245,8 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
       return tokenEndpoint("xero");
     case "api.xero.com/connections":
       if (!accessOk("xero", call.headers)) return json(401, { Title: "Unauthorized" });
-      return json(200, [{ id: "conn-1", tenantId: app("xero").account, tenantType: "ORGANISATION", tenantName: app("xero").label }]);
+      if (mode.xeroOrgs) return json(200, mode.xeroOrgs);
+      return json(200, [{ id: "conn-1", tenantId: app("xero").account, tenantType: "ORGANISATION", tenantName: app("xero").label, authEventId: "evt-default" }]);
     case "identity.xero.com/connect/revocation":
       return revoke("xero", (_c, f) => f.get("token") ?? "", live("xero").refresh);
     // Zoom
@@ -464,6 +481,7 @@ async function main() {
   const probes = await import("../lib/integrations/key-probes");
   const registry = await import("../lib/connections/registry");
   const adapters = await import("../lib/connections/oauth-adapters");
+  const oauthConnect = await import("../lib/connections/oauth-connect");
   const live_ = await import("../lib/connections/oauth-live");
   const store = await import("../lib/connections/store");
   const tokenStore = await import("../lib/connections/token-store");
@@ -1205,6 +1223,93 @@ async function main() {
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp"));
   });
 
+  await check("Xero's own authEventId claim, not array order or createdDateUtc, picks which organisation a consent approved", () => {
+    const org = (tenantId: string, authEventId: string | null) => ({ tenantId, tenantName: `${tenantId} name`, authEventId });
+    // One organisation is unambiguous either way, even with no claim at all.
+    assert.deepEqual(adapters.xeroCurrentOrg([org("t1", null)], null), org("t1", null));
+    // The match wins even though it sorts second and is not index 0.
+    assert.deepEqual(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("real", "evt-now")], "evt-now"), org("real", "evt-now"));
+    // No row matches this consent: refuse rather than guess (never orgs[0]).
+    assert.equal(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("other", "evt-older")], "evt-now"), null);
+    // No claim to go on, and more than one organisation: also refuse.
+    assert.equal(adapters.xeroCurrentOrg([org("a", "evt-1"), org("b", "evt-2")], null), null);
+    assert.equal(adapters.xeroCurrentOrg([], "evt-now"), null);
+
+    // The claim is read from the token's own JWT payload, never guessed.
+    assert.equal(adapters.xeroAuthEventId(xeroJwt("evt-abc")), "evt-abc");
+    assert.equal(adapters.xeroAuthEventId("xero-access-token-1-AAAAAAAAAAAAAAAAAAAA"), null, "a non-JWT token (today's mock shape) is an honest miss, not a crash");
+    assert.equal(adapters.xeroAuthEventId("a.b"), null, "two segments is not a JWT");
+    assert.equal(adapters.xeroAuthEventId(`${Buffer.from("{}").toString("base64url")}.not-json.sig`), null, "unparseable payload is an honest miss");
+  });
+
+  await check("Xero: more than one organisation comes back, and the access token says which consent this is: the match connects even though it is not index 0 or the newest createdDateUtc, and no match refuses rather than guess", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+    try {
+      // The decoy sorts FIRST and was created more recently: picking orgs[0] or
+      // the newest createdDateUtc would both connect the wrong organisation.
+      mode.xeroAuthEventId = "evt-this-consent";
+      mode.xeroOrgs = [
+        { id: "conn-decoy", tenantId: "xero-tenant-decoy", tenantType: "ORGANISATION", tenantName: "Decoy Co", authEventId: "evt-old", createdDateUtc: "2026-10-01T00:00:00Z" },
+        { id: "conn-real", tenantId: app.account, tenantType: "ORGANISATION", tenantName: app.label, authEventId: "evt-this-consent", createdDateUtc: "2020-01-01T00:00:00Z" },
+      ];
+      const ok = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
+      assert.equal(ok.status, "connected", JSON.stringify(ok));
+      const row = await connectedRow(ALPHA, app);
+      assert.deepEqual([row.external_account_id, row.external_account_label], [app.account, app.label], "the decoy must never be the one stored");
+      await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+
+      // Neither row's authEventId is this consent's: refuse, never guess.
+      const before = (await connectionRows(ALPHA, "xero")).length;
+      mode.xeroOrgs = [
+        { id: "conn-decoy", tenantId: "xero-tenant-decoy", tenantType: "ORGANISATION", tenantName: "Decoy Co", authEventId: "evt-old" },
+        { id: "conn-other", tenantId: "xero-tenant-other", tenantType: "ORGANISATION", tenantName: "Other Co", authEventId: "evt-older" },
+      ];
+      const refused = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
+      assert.deepEqual([refused.status, refused.reason], ["error", "account_unidentified"]);
+      assert.equal((await connectionRows(ALPHA, "xero")).length, before, "no NEW row was connected on an unresolved consent");
+    } finally {
+      mode.xeroAuthEventId = null;
+      mode.xeroOrgs = null;
+    }
+  });
+
+  await check("revokeAfterRefusal is best-effort and never masks the original refusal (unit; the live path is pinned in the 'exclusive account' check below)", async () => {
+    // Unit: revokeAfterRefusal is best-effort and NEVER throws or changes what
+    // the caller already decided — it only logs, and only the provider, tenant
+    // and reason, never a token (lib/connections/oauth-connect.ts).
+    const grant = { accessToken: "unit-test-access-should-not-log", refreshToken: "unit-test-refresh-should-not-log", expiresInSec: 3600 };
+    const client = { clientId: "c", clientSecret: "s" };
+    const deps_ = { fetchImpl: (async () => new Response(null, { status: 200 })) as typeof fetch, timeoutMs: 1000, env: {} };
+    const fakeAdapter = (revoke: () => Promise<boolean>) => ({ revoke } as unknown as Parameters<typeof oauthConnect.revokeAfterRefusal>[0]);
+    const loggedBefore = logged.length;
+    await oauthConnect.revokeAfterRefusal(fakeAdapter(async () => true), client, grant, deps_, { providerId: "unit", tenantId: "t", reason: "unit_ok" });
+    assert.equal(logged.length, loggedBefore, "a successful revoke logs nothing extra");
+    await oauthConnect.revokeAfterRefusal(fakeAdapter(async () => false), client, grant, deps_, { providerId: "unit", tenantId: "t", reason: "unit_false" });
+    await oauthConnect.revokeAfterRefusal(
+      fakeAdapter(async () => {
+        throw new Error("vendor unreachable");
+      }),
+      client,
+      grant,
+      deps_,
+      { providerId: "unit", tenantId: "t", reason: "unit_throw" },
+    );
+    for (const line of logged.slice(loggedBefore)) assert.doesNotMatch(line, /unit-test-(access|refresh)/, "a logged revoke failure must never carry the token");
+
+    // The second refusal path (a failed token save) is not reachable without
+    // sabotaging the shared test database other checks depend on, so its
+    // revoke call is pinned at the source instead of driven live: both must
+    // call the SAME helper, proven above.
+    const connectSrc = read("lib/connections/oauth-connect.ts");
+    assert.match(
+      connectSrc,
+      /await undoUnsavedClaim\(deps, tenantId, claim\);\s*await revokeAfterRefusal\(adapter, client, grant, a, \{ providerId: provider\.id, tenantId, reason: "token_save_failed" \}\);\s*return \{ ok: false, failure: "token_save_failed" \};/,
+      "a failed token save also revokes the grant before returning",
+    );
+  });
+
   await check("a refresh in flight during a reconnect cannot overwrite the fresh tokens (the reconnect bumps token_version)", async () => {
     setOAuthEnv(true);
     await login(USERS.ownerA);
@@ -1311,16 +1416,20 @@ async function main() {
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
   });
 
-  await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told", async () => {
+  await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told, and the grant OASIS could not use is revoked at the vendor, not left live", async () => {
     setOAuthEnv(true);
     for (const app of OAUTH_APPS.filter((a) => a.exclusive)) {
       await login(USERS.ownerA);
       assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
       await login(USERS.ownerB);
+      live(app.id).revoked = false;
       const refused = await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!);
       assert.deepEqual([popupOutcome(refused.html).status, popupOutcome(refused.html).reason], ["error", "account_connected_elsewhere"], app.id);
       assert.equal((await connectionRows(BRAVO_CO, app.id)).length, 0);
       assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n, 0, "tokens were saved for the refused workspace");
+      // The refused sign-in's own grant (ownerB's, just exchanged) must not
+      // stay live at Xero/QuickBooks for weeks (CodeRabbit PR #574).
+      assert.equal(live(app.id).revoked, true, `${app.id}: the grant OASIS could not use was revoked at the vendor, not left live`);
       await login(USERS.ownerA);
       await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx(app.id));
     }

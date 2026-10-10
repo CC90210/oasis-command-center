@@ -43,6 +43,7 @@ import {
   oauthStartHref,
   type ConnectorDef,
   type ConnectorStatus,
+  type ConnectorStatusKind,
 } from "@/lib/os/connectors";
 
 /** A live connector counts as "yours" once it reports anything but a clean "not connected". */
@@ -71,6 +72,23 @@ const POPUP_ERRORS: Record<string, string> = {
   another_account_connected: "A different account is already connected here. Disconnect it first, then connect the other one.",
   token_save_failed: "OASIS could not save the sign-in, so nothing was connected. Try again.",
 };
+
+/**
+ * The banner for a sign-in's result: the popup's own postMessage (runPopup's
+ * onDone), or a full-window sign-in that had to fall back when the popup was
+ * blocked, which comes back on the URL instead (page.tsx's
+ * ?connection=&status=&reason=, CodeRabbit PR #574). Both read the same codes,
+ * so the result reads the same words either way.
+ */
+function resultBanner(appName: string, status: string | undefined | null, reason: string | undefined | null): NoticeValue {
+  if (!status) return null;
+  if (status === "connected") return { tone: "ok", text: `${appName} connected.` };
+  if (status === "denied") return { tone: "err", text: "Connection cancelled." };
+  return {
+    tone: "err",
+    text: POPUP_ERRORS[reason || ""] ?? `${appName} did not finish connecting. Try again in a minute.`,
+  };
+}
 
 /** What opened a sheet on arrival: ?app=, and Google's sign-in result (page.tsx). */
 export const DEEP_LINK_PARAMS = ["app", "gmail_oauth", "reason", "gmail", "mailbox", "connection", "status"] as const;
@@ -107,6 +125,18 @@ export function connectorClickAction(def: ConnectorDef, embedded: boolean): "dra
   return "popup";
 }
 
+/**
+ * A sign-in card already connected, configured or needing attention says
+ * "Manage": its primary click should open the details drawer, exactly like
+ * its own Details button, rather than start a fresh sign-in (CodeRabbit PR
+ * #574, ConnectionsHub.tsx card click). `fromDrawer` is the one exception:
+ * the drawer's own footer button (Reconnect/Manage) passes it, because from
+ * inside the drawer one of those statuses is exactly when the popup IS wanted.
+ */
+export function oauthManageOpensDrawer(statusKind: ConnectorStatusKind | undefined, fromDrawer: boolean): boolean {
+  return !fromDrawer && (statusKind === "connected" || statusKind === "configured" || statusKind === "attention");
+}
+
 /** The drawer a `?app=` deep link opens on the first render (not after it), or null. */
 function deepLinkedApp(initialApp: string | null): string | null {
   return initialApp && initialApp !== "custom-keys" && connectorBySlug(initialApp) ? initialApp : null;
@@ -118,6 +148,8 @@ export function ConnectionsHub({
   initialApp,
   personalGoogle,
   embedded = false,
+  initialStatus = null,
+  initialReason = null,
 }: {
   statuses: Record<string, ConnectorStatus>;
   supportHref: string | null;
@@ -131,6 +163,14 @@ export function ConnectionsHub({
    * another Settings page opens its drawer, which says where.
    */
   embedded?: boolean;
+  /**
+   * A sign-in's result when the popup was blocked and fell back to a
+   * full-window navigation: it comes back on the URL (page.tsx's
+   * ?connection=&status=&reason=) instead of the popup's postMessage, so the
+   * hub reads the same words from its own first render (CodeRabbit PR #574).
+   */
+  initialStatus?: string | null;
+  initialReason?: string | null;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
@@ -139,7 +179,12 @@ export function ConnectionsHub({
   const [drawerSlug, setDrawerSlug] = useState<string | null>(() => deepLinkedApp(initialApp));
   const [drawerOpen, setDrawerOpen] = useState(() => deepLinkedApp(initialApp) !== null);
   const [customOpen, setCustomOpen] = useState(() => initialApp === "custom-keys");
-  const [banner, setBanner] = useState<NoticeValue>(null);
+  // A full-window sign-in's result (the popup was blocked) is already on the
+  // URL at first render, so its banner is read then — not in an effect after —
+  // and shows before anything clears those params (CodeRabbit PR #574).
+  const [banner, setBanner] = useState<NoticeValue>(() =>
+    resultBanner(connectorBySlug(initialApp ?? "")?.name ?? "That app", initialStatus, initialReason),
+  );
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
   const openDrawer = useCallback((slug: string) => {
@@ -197,17 +242,10 @@ export function ConnectionsHub({
         onDone: ({ status, reason }) => {
           stopWatch.current = null;
           setBusySlug(null);
-          if (status === "connected") {
-            setBanner({ tone: "ok", text: `${def.name} connected.` });
-          } else if (status === "denied") {
-            setBanner({ tone: "err", text: "Connection cancelled." });
-          } else if (status) {
-            if (!POPUP_ERRORS[reason || ""]) console.error("[connections.popup]", def.slug, reason);
-            setBanner({
-              tone: "err",
-              text: POPUP_ERRORS[reason || ""] ?? `${def.name} did not finish connecting. Try again in a minute.`,
-            });
+          if (status && status !== "connected" && status !== "denied" && !POPUP_ERRORS[reason || ""]) {
+            console.error("[connections.popup]", def.slug, reason);
           }
+          setBanner(resultBanner(def.name, status, reason));
           // Re-read every status from the server either way: a popup closed with
           // no message may still have finished.
           router.refresh();
@@ -223,12 +261,16 @@ export function ConnectionsHub({
   );
 
   const connect = useCallback(
-    (def: ConnectorDef) => {
+    (def: ConnectorDef, opts?: { fromDrawer?: boolean }) => {
       const action = def.live?.connect;
       const next = connectorClickAction(def, embedded);
       // A card this workspace cannot connect yet (OASIS's app still waiting on
       // the vendor) opens its drawer, which says why: never a popup that fails.
       if (next === "drawer" || !action || statuses[def.slug]?.kind === "coming_soon") return openDrawer(def.slug);
+      // Connected, configured or needing attention says "Manage": the card
+      // opens the drawer instead of starting sign-in again. Only the drawer's
+      // own footer button bypasses this (fromDrawer) — that IS its Reconnect.
+      if (next === "popup" && oauthManageOpensDrawer(statuses[def.slug]?.kind, !!opts?.fromDrawer)) return openDrawer(def.slug);
       setDrawerOpen(false);
       if (next === "popup" && action.kind === "popup") return runPopup(def, action.href, action.messageSource);
       if (next === "popup" && action.kind === "oauth") return runPopup(def, oauthStartHref(action.provider), OAUTH_POPUP_SOURCE);
@@ -398,7 +440,7 @@ export function ConnectionsHub({
         def={drawerDef}
         status={drawerDef ? statuses[drawerDef.slug] ?? null : null}
         onClose={closeDrawer}
-        onConnect={connect}
+        onConnect={(d) => connect(d, { fromDrawer: true })}
         onChanged={() => router.refresh()}
         personalGoogle={personalGoogle}
         embedded={embedded}
