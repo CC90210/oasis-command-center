@@ -22,7 +22,8 @@ import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorke
 import { BreezeDealsPanel } from "@/components/automations/BreezeDealsPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
-import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
+import { getActiveProfile, getOnlineBridgeComputerLabels, getTenant } from "@/lib/queries";
+import { bridgeConnectionHeadline } from "@/lib/bridge-online-copy";
 import { safe } from "@/lib/api-helpers";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
@@ -54,13 +55,18 @@ export async function AutomationsContent({
   }
 
   const profile = await safe("automations.profile", getActiveProfile(), null);
-  // null = the heartbeat could not be read (getBridgeOnline throws): the
-  // banner says "Couldn't check", never "Computer not connected yet".
-  const bridgeOnline = await safe(
+  // null = the heartbeat could not be read (getOnlineBridgeComputerLabels
+  // throws): the banner says "Couldn't check", never "Computer not
+  // connected yet". Named labels, not a boolean (2026-10-10): the shared
+  // OASIS workspace can have more than one paired computer, and "Your
+  // computer is connected" was true only for CC's — Adon read a claim
+  // about HIS machine that was false. See lib/bridge-online-copy.ts.
+  const onlineLabels = await safe(
     "automations.bridge_online",
-    getBridgeOnline(profile?.tenant_id || null),
+    getOnlineBridgeComputerLabels(profile?.tenant_id || null),
     null,
   );
+  const bridgeOnline = onlineLabels === null ? null : onlineLabels.length > 0;
 
   const tenantIdForSlug = profile?.tenant_id ?? null;
   const tenantSlug = overrideSlug ?? (
@@ -122,19 +128,19 @@ export async function AutomationsContent({
         <div className="flex-1 text-xs leading-relaxed">
           {bridgeOnline === null ? (
             <>
-              <span className="text-fg-muted font-bold">Couldn&apos;t check your computer.</span>{" "}
+              <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
               The connection could not be read just now, so this is not saying it is disconnected.
               Reload in a minute.
             </>
           ) : bridgeOnline ? (
             <>
-              <span className="text-status-engaged font-bold">Your computer is connected.</span>{" "}
+              <span className="text-status-engaged font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
               Jobs run on the schedule below. Edits take effect within a minute. Switch any job off
               and it stops firing — the spec stays saved so you can flip it back on later.
             </>
           ) : (
             <>
-              <span className="text-fg-muted font-bold">Computer not connected yet.</span>{" "}
+              <span className="text-fg-muted font-bold">{bridgeConnectionHeadline(onlineLabels)}</span>{" "}
               Local agent jobs are paused until a machine is paired. Cloud sales workers, including
               founder-meeting invitations and reminders, continue independently.{" "}
               {canInstallBridge ? (
