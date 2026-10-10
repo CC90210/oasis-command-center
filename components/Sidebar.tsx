@@ -50,6 +50,7 @@ export function Sidebar({
   isOperator = false,
   showConnections = false,
   connectionsStatus = null,
+  mayOpenAiSettings = false,
   notifications,
   badges,
   operatorName,
@@ -80,6 +81,8 @@ export function Sidebar({
   showConnections?: boolean;
   /** Measured connection health, or null for no dot. OS rail only. */
   connectionsStatus?: ConnectionsStatus | null;
+  /** maySeeSettingsSection(access, "ai"): the footer's AI door for a non-operator. OS rail only. */
+  mayOpenAiSettings?: boolean;
   /** Notifications slot in the footer. OS rail only. */
   notifications?: ReactNode;
   /** Counter map keyed by NavItem.badgeKey (e.g. {inbox: 3, applications: 247}). */
@@ -342,6 +345,7 @@ export function Sidebar({
           badges={badgeMap}
           showConnections={showConnections}
           connectionsStatus={connectionsStatus}
+          mayOpenAiSettings={mayOpenAiSettings}
           notifications={notifications}
           intentFor={intentFor}
           isMobileOpen={isMobileOpen}

@@ -28,25 +28,36 @@ type Case = {
   showConnections: boolean;
   connectionsStatus: "ok" | "attention" | null;
   isOperator: boolean;
+  adminActive: boolean;
+  mayOpenAiSettings: boolean;
 };
 
 /**
- * settingsActive / connectionsPathActive: the gear must be the active door
- * on both paths now that Connections has no door of its own.
- * attention / ok / notMeasured: the three connectionsStatus values, all with
- * showConnections true, covering the dot + accessible-name matrix.
- * hiddenAttention: attention status but showConnections false — the viewer
- * who could never open Connections must not see its signal either.
- * operator: isOperator true, to prove the shield is unaffected.
+ * settingsActive / connectionsPathActive: the person door must be the active
+ * door on both paths (Connections has no door of its own).
+ * attention / ok / notMeasured / hiddenAttention: the dot + accessible-name
+ * matrix, unchanged by the icon swap.
+ * operatorInactive / operatorActive: the AI door for a platform operator —
+ * a console TOGGLE (aria-pressed), never a link, regardless of
+ * mayOpenAiSettings.
+ * aiAllowed / aiAllowedActive: the AI door for a non-operator who may open
+ * /settings/ai — a real link, active only on that path, and the person door
+ * must give up "active" there (exactly one active door per path).
+ * aiNotAllowed: a non-operator who may not open /settings/ai gets no AI door
+ * at all — never a button that leads to a refusal.
  */
 const CASES: Case[] = [
-  { id: "settingsActive", pathname: "/settings", showConnections: true, connectionsStatus: null, isOperator: false },
-  { id: "connectionsPathActive", pathname: "/settings/connections", showConnections: true, connectionsStatus: null, isOperator: false },
-  { id: "attention", pathname: "/pipeline", showConnections: true, connectionsStatus: "attention", isOperator: false },
-  { id: "ok", pathname: "/pipeline", showConnections: true, connectionsStatus: "ok", isOperator: false },
-  { id: "notMeasured", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: false },
-  { id: "hiddenAttention", pathname: "/pipeline", showConnections: false, connectionsStatus: "attention", isOperator: false },
-  { id: "operator", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: true },
+  { id: "settingsActive", pathname: "/settings", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "connectionsPathActive", pathname: "/settings/connections", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "attention", pathname: "/pipeline", showConnections: true, connectionsStatus: "attention", isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "ok", pathname: "/pipeline", showConnections: true, connectionsStatus: "ok", isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "notMeasured", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "hiddenAttention", pathname: "/pipeline", showConnections: false, connectionsStatus: "attention", isOperator: false, adminActive: false, mayOpenAiSettings: false },
+  { id: "operatorInactive", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: true, adminActive: false, mayOpenAiSettings: false },
+  { id: "operatorActive", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: true, adminActive: true, mayOpenAiSettings: false },
+  { id: "aiAllowed", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: true },
+  { id: "aiAllowedActive", pathname: "/settings/ai", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: true },
+  { id: "aiNotAllowed", pathname: "/pipeline", showConnections: true, connectionsStatus: null, isOperator: false, adminActive: false, mayOpenAiSettings: false },
 ];
 
 async function main() {
@@ -74,9 +85,10 @@ async function main() {
         operatorEmail: "alex@acme-plumbing.test",
         showConnections: c.showConnections,
         connectionsStatus: c.connectionsStatus,
+        mayOpenAiSettings: c.mayOpenAiSettings,
         notifications: null,
         isOperator: c.isOperator,
-        adminActive: false,
+        adminActive: c.adminActive,
         onToggleAdmin: () => undefined,
       }),
     );
