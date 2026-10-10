@@ -100,7 +100,8 @@ export type AgentTurnRequest = {
    * The ledger surface every row of this turn is filed under: a chat (the
    * default, "agents.chat") or a department task's run ("automations.run"),
    * so an automation's spend is counted apart and never pages the chat's
-   * health check.
+   * health check (lib/health/department-chat-checks.ts NOT_CHAT_SURFACES
+   * leaves those rows out, department key and all).
    */
   surface?: "agents.chat" | "automations.run";
   chatMode?: "plan" | "build";

@@ -10,8 +10,12 @@
  * AN AUTOMATION IS NARROWER. A department task's run (lib/automations) passes
  * `only`, the lookups its owner chose: the palette offers only those and
  * execute() refuses the rest, and its drafts follow ./proposals.ts
- * proposeAutomationEmail (a test run files nothing). Which tools a person may
- * use at all is deskToolAvailability, the same predicate run() asks first.
+ * proposeAutomationEmail (a test run files nothing). Its department_numbers
+ * reads its OWN department's page and nothing else (automationDepartment):
+ * Chief of Staff's reach into other pages is the chat's, and through it an
+ * automation would read figures (Finance's company money, another page's
+ * counts) its owner never chose. Which tools a person may use at all is
+ * deskToolAvailability, the same predicate run() asks first.
  *
  * THE TENANT IS THE VIEWER'S. Every read takes `viewer.surface.tenantId`
  * (the session's active workspace, checked against the route's tenant before
@@ -47,7 +51,7 @@ import {
   ProposalRefused,
   type AutomationProposalPolicy,
 } from "./proposals";
-import { DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
+import { AUTOMATION_DEPARTMENT_NUMBERS, DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
 import { followUpsFrom, leadLine, openLead, pipelineScope, readPipeline, searchLeads } from "./reads";
 import { deskDeliveryViewer, loadDeskConnections } from "./state";
 
@@ -143,7 +147,13 @@ function refused(name: string, error: string): ToolResultBlock {
   return { content: JSON.stringify({ error, tool: name }), is_error: true, summary: `${name} refused: ${error}` };
 }
 
-/** The department a department_numbers / approvals_list call may read. */
+/**
+ * The department a department_numbers / approvals_list call may read in a
+ * CHAT. An automation's department_numbers never comes here
+ * (automationDepartment). Its approvals_list may: Chief of Staff's approvals
+ * are every department's already (deskApprovals with no department), so
+ * naming one only narrows what its owner chose to let it read.
+ */
 function targetDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
   const key = text(raw);
   if (!key || key === ctx.dept.key) return ctx.dept;
@@ -153,6 +163,17 @@ function targetDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
   const d = OS_DEPARTMENTS.find((x) => x.key === key);
   if (!d || departmentGate(d.slug, ctx.viewer.navInput) === null) throw new NotAvailable("department_not_open_to_you");
   return d;
+}
+
+/**
+ * The page an AUTOMATION's department_numbers reads: its own department's,
+ * the "Always included" numbers its owner was shown, whatever department the
+ * model names (Chief of Staff included).
+ */
+function automationDepartment(ctx: DeskToolContext, raw: unknown): OsDepartment {
+  const key = text(raw);
+  if (key && key !== ctx.dept.key) throw new NotAvailable("automation_reads_its_own_department_only");
+  return ctx.dept;
 }
 
 type RunState = { proposed: number };
@@ -165,7 +186,9 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
   if (!available.ok) throw new NotAvailable(available.reason);
   switch (name) {
     case "department_numbers": {
-      const d = targetDepartment(ctx, input.department);
+      // An automation: its own page only (automationDepartment). A chat: Chief
+      // of Staff may read another page its rail opens (targetDepartment).
+      const d = ctx.only ? automationDepartment(ctx, input.department) : targetDepartment(ctx, input.department);
       const n = await loadDepartmentNumbers(d, v, await loadTenantRoutines(v.surface.tenantId));
       // An automation gets the page's COUNTS: a Needs-you line can carry a
       // title (an alert, a reply's subject) it was not given to read.
@@ -363,7 +386,11 @@ export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: 
   // An automation's allowlist narrows the department's palette; a proposal
   // needs the automation's proposal rules as well (fail closed without them).
   const automation = ctx.only ? new Set<string>(ctx.only.filter((n) => DESK_TOOLS[n]?.kind !== "proposal" || !!ctx.proposal)) : null;
-  const palette = automation ? departmentPalette.filter((t) => automation.has(t.name)) : departmentPalette;
+  // An automation is told what runs for it: department_numbers reads its own
+  // page only (run(): automationDepartment), so it is offered that version.
+  const palette = automation
+    ? departmentPalette.filter((t) => automation.has(t.name)).map((t) => (t.name === "department_numbers" ? AUTOMATION_DEPARTMENT_NUMBERS : t))
+    : departmentPalette;
   // Proposals this run made (an automation's cap per run, ./proposals.ts).
   const state: RunState = { proposed: 0 };
   return {

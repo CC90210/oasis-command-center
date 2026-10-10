@@ -91,9 +91,12 @@ export type ExecutorDeps = {
   recordOutcome: (o: { channelKey: string; agentSlug: string; ok: boolean; code: TurnFailureCode | null }) => Promise<void>;
   /**
    * The run's time limit, from its start. Past it the run is stopped the way
-   * Stop stops it (the model call's ledger row says cancelled) and fails with
-   * `run_timeout`. Absent: no limit (a chat run, which a person can Stop).
-   * An automation run always has one (driveAutomationRun refuses without).
+   * Stop stops it and fails with `run_timeout`. The model call's ledger row is
+   * closed as cancelled once its stream unwinds; a provider stream that never
+   * yields again is left behind after UNWIND_MS, and its row stays pending
+   * until the reservation sweep expires it. Absent: no limit (a chat run,
+   * which a person can Stop). An automation run always has one
+   * (driveAutomationRun refuses without).
    */
   deadlineMs?: number;
   /**

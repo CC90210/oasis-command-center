@@ -28,6 +28,15 @@
  * (the person pressed Stop or left the page) are not failures of the chat.
  * 'expired' IS one: the call began and its end was never recorded.
  *
+ * WHAT IS NOT A CHAT TURN. An automation's model calls carry a department key
+ * too, under their own surfaces (NOT_CHAT_SURFACES). They are left out of both
+ * the grading and the workspace discovery: graded here, a Sales automation
+ * that failed at its slot (a 429, a call that never finished and expired)
+ * would page "department chat failing" while the chat works, and one that
+ * succeeded after a failing chat turn would become Sales' latest word and
+ * hide a real outage. Automations are graded by the scheduler's own health
+ * check, which ships with the scheduler (nothing runs one before it).
+ *
  * NO DATA IS NOT HEALTH, AND NOT AN ALERT. The verdict vocabulary has no
  * "unknown" (ok / degraded / failing / check_broken), and a workspace nobody
  * chatted in for six hours has not broken. So no graded turns is `ok` whose
@@ -56,6 +65,7 @@
 
 import "server-only";
 import { CLI_ENGINE_LABEL, ENGINE_FALLBACK_PREFIX, ENGINE_SETTINGS_HREF, isCliEngine } from "@/lib/ai/agent-engine";
+import type { UsageSurface } from "@/lib/ai/usage";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getTursoClient } from "@/lib/turso";
 import { isRetiredTenant } from "@/lib/tenant/retired";
@@ -78,6 +88,12 @@ export const DEPARTMENT_CHAT_MIN_TURNS_FOR_RATE = 2;
 export const DEPARTMENT_CHAT_RECOVERY_NOTICE_MS = 30 * 60_000;
 /** A busy workspace's window is bounded; newest rows are read first, so the latest turns always count. */
 const READ_LIMIT = 5000;
+/**
+ * Ledger surfaces that carry a department key but are not a department chat
+ * turn: a department task's run and its drafter (lib/ai/usage.ts
+ * USAGE_SURFACES). See "WHAT IS NOT A CHAT TURN" above.
+ */
+export const NOT_CHAT_SURFACES: readonly UsageSurface[] = ["automations.run", "automations.draft"];
 
 export type DepartmentTurn = {
   occurredAt: string;
@@ -358,6 +374,8 @@ async function readDepartmentTurns(db: Db, tenantId: string, endMs: number): Pro
       .select("occurred_at, department_key, outcome, error_code, output_tokens, fallback_reason")
       .eq("tenant_id", tenantId)
       .not("department_key", "is", null)
+      // An automation's calls are not chat turns ("WHAT IS NOT A CHAT TURN").
+      .not("surface", "in", `(${NOT_CHAT_SURFACES.join(",")})`)
       .gte("occurred_at", new Date(endMs - DEPARTMENT_CHAT_WINDOW_MS).toISOString())
       .lt("occurred_at", new Date(endMs).toISOString())
       .order("occurred_at", { ascending: false })
@@ -504,7 +522,9 @@ async function fallbackObservation(
 /**
  * Every workspace that had a department turn in the window, plus OASIS, which
  * is always graded (its chats are the ones CC uses; a quiet OASIS reads as
- * "nothing to grade", and an unreadable ledger reads as check_broken).
+ * "nothing to grade", and an unreadable ledger reads as check_broken). An
+ * automation's calls are not a chat turn (NOT_CHAT_SURFACES), so a workspace
+ * whose only department rows are automations is not discovered here.
  *
  * A failed discovery read returns just OASIS and says so via `error`: the
  * OASIS run reads the same table, so a ledger that is down surfaces there as
@@ -518,8 +538,9 @@ export async function departmentChatTenantIds(
     const r = await getTursoClient().execute({
       sql:
         `SELECT DISTINCT tenant_id FROM ai_usage_events ` +
-        `WHERE department_key IS NOT NULL AND occurred_at >= ? AND occurred_at < ?`,
-      args: [new Date(nowMs - DEPARTMENT_CHAT_WINDOW_MS).toISOString(), new Date(nowMs).toISOString()],
+        `WHERE department_key IS NOT NULL AND surface NOT IN (${NOT_CHAT_SURFACES.map(() => "?").join(", ")}) ` +
+        `AND occurred_at >= ? AND occurred_at < ?`,
+      args: [...NOT_CHAT_SURFACES, new Date(nowMs - DEPARTMENT_CHAT_WINDOW_MS).toISOString(), new Date(nowMs).toISOString()],
     });
     const found = r.rows.map((row) => String(row.tenant_id)).filter((id) => id && !isRetiredTenant(id));
     return { tenantIds: [...new Set([WEBDEV_TENANT_ID, ...found])], error: null };

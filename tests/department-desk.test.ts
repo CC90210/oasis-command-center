@@ -729,6 +729,56 @@ async function main() {
     // An empty allowlist is an empty palette, never "everything".
     assert.deepEqual(deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: [] }).palette, []);
   });
+  await check("an automation reads only its OWN department's numbers: Chief of Staff's reach into other pages stays the chat's, and the tool it is offered says so", async () => {
+    // OASIS's founder: the rail opens every department page, Finance (company money) included.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const base = viewerFor(OASIS, "oasis-ai-cc", "founder", OWNER, "OASIS") as any;
+    const oasisFounder = { ...base, oasis: true, navInput: { ...base.navInput, isOasisTenant: true, founders: { content: true, finances: true } } };
+    const read = async (t: ReturnType<typeof deskToolset>, input: Record<string, unknown>) => {
+      const r = await t.execute("department_numbers", input);
+      return { r, body: JSON.parse(r.content) as { error?: string; department?: string; needs_you_count?: number } };
+    };
+    // Anti-vacuity: the CHAT reads other pages from Chief of Staff, Finance's money tiles included.
+    const chat = deskToolset({ viewer: oasisFounder, dept: dept("chief_of_staff"), agentSlug: "cos" });
+    const chatFinance = await read(chat, { department: "finance" });
+    assert.equal(chatFinance.r.is_error, false, chatFinance.r.content);
+    assert.equal(chatFinance.body.department, "Finance");
+    assert.match(chatFinance.r.content, /Collected 7d/);
+    assert.equal((await read(chat, { department: "sales" })).body.department, "Sales");
+    // The automation: its own page only, whatever department the model names.
+    const cases: Array<[string, unknown, string[]]> = [
+      ["OASIS", oasisFounder, ["finance", "sales", "marketing", "operations", "client_success"]],
+      ["a client workspace", acmeOwner, ["sales", "marketing", "operations", "client_success"]],
+    ];
+    for (const [where, viewer, others] of cases) {
+      const t = deskToolset({ viewer: viewer as typeof acmeOwner, dept: dept("chief_of_staff"), agentSlug: "cos", only: ["department_numbers"] });
+      for (const key of others) {
+        const { r, body } = await read(t, { department: key });
+        assert.equal(r.is_error, true, `${where}: a Chief of Staff automation read the ${key} page: ${r.content}`);
+        assert.equal(body.error, "automation_reads_its_own_department_only");
+        assert.doesNotMatch(r.content, /Collected|MRR|Goal pace|"department":/);
+      }
+      // ...and still answers its own page, named or not, with the Needs-you COUNT.
+      for (const input of [{}, { department: "chief_of_staff" }]) {
+        const own = await read(t, input);
+        assert.equal(own.r.is_error, false, `${where}: ${own.r.content}`);
+        assert.equal(own.body.department, "Chief of Staff");
+        assert.equal(typeof own.body.needs_you_count, "number");
+      }
+    }
+    // Another department's automation: its own page only, as its chat already is.
+    const sales = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["department_numbers"] });
+    assert.equal((await read(sales, { department: "marketing" })).body.error, "automation_reads_its_own_department_only");
+    assert.equal((await read(sales, {})).body.department, "Sales");
+    // What the model is told is what runs: no other department's page on offer, and no department to pick.
+    const offered = deskToolset({ viewer: oasisFounder, dept: dept("chief_of_staff"), agentSlug: "cos", only: ["department_numbers"] });
+    const tool = offered.tools.find((x) => x.name === "department_numbers")!;
+    assert.doesNotMatch(tool.description, /another department/);
+    assert.deepEqual(Object.keys((tool.input_schema as { properties?: Record<string, unknown> }).properties ?? {}), []);
+    assert.doesNotMatch(offered.palette.find((x) => x.name === "department_numbers")!.summary, /\ba department page\b/);
+    // The chat keeps its reach, and says so.
+    assert.match(chat.tools.find((x) => x.name === "department_numbers")!.description, /another department's page/);
+  });
   await check("deskToolAvailability is the predicate run() enforces: finance, tickets and routines agree for every viewer", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const oasisOwner = { ...(viewerFor(OASIS, "oasis-ai-cc", "founder", OWNER, "OASIS") as any), oasis: true };

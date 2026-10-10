@@ -70,7 +70,10 @@ export type RunSource = "worker" | "producer" | "automation";
  * Why an automation run failed, beyond the channel's own failure codes
  * (lib/os/channel/outcome.ts TURN_FAILURE_CODES):
  *   run_timeout          the run reached its time limit (ExecutorDeps.deadlineMs)
- *                        and was stopped; the model call's ledger row says cancelled;
+ *                        and was stopped. Its model call's ledger row is closed
+ *                        as cancelled once the stream unwinds; a provider stream
+ *                        that never yields again leaves the row pending until
+ *                        the reservation sweep expires it (RESERVATION_TTL_MS);
  *   sources_unavailable  the department's data could not be read for the run, so
  *                        no model was asked.
  * Neither is a verdict on the workspace's AI account or the department chat, so
