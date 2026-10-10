@@ -188,6 +188,38 @@ export async function getBridgeToolCapabilities(
   return { online: status.online, tools: status.tools };
 }
 
+/**
+ * Labels of every non-revoked pairing currently online for a tenant — the
+ * same freshness rule as getTenantBridgeStatus (isOnline), but naming WHICH
+ * computer(s), not just whether any one is. Added 2026-10-10: the
+ * Automations and /sequences banners said "Your computer is connected" off
+ * the any-pairing rule above, which in the shared OASIS workspace is always
+ * CC's PC — so Adon read a claim about HIS machine that was false. Render
+ * via lib/bridge-online-copy.ts:bridgeConnectionHeadline, which names the
+ * pairing(s) instead. Per-person ownership is a separate, later change —
+ * bridge_pairings has no owner column yet.
+ *
+ * An online pairing with a blank/missing label is still reported (as ""):
+ * this read never drops a real connection for lack of a name. The caller
+ * (bridgeConnectionHeadline) supplies the "a paired computer" fallback text.
+ *
+ * Throws when bridge_pairings cannot be read — same "Couldn't check"
+ * contract as getTenantBridgeStatus; callers wrap with safe().
+ */
+export async function getOnlineBridgeComputerLabels(tenantId: string | null): Promise<string[]> {
+  if (!tenantId) return [];
+  const db = getServiceSupabase();
+  const r = await db
+    .from("bridge_pairings")
+    .select("label, last_seen_at")
+    .eq("tenant_id", tenantId)
+    .is("revoked_at", null);
+  if (r.error) throw new Error(`getOnlineBridgeComputerLabels: bridge_pairings read failed: ${r.error.message}`);
+  const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null }>;
+  const now = Date.now();
+  return rows.filter((row) => isOnline(row.last_seen_at ?? null, now)).map((row) => row.label || "");
+}
+
 // getTodayPlan and getPlanTemplates are gone (2026-09-29): nothing called
 // them, and each turned a failed read into "no plan" / "no templates".
 
