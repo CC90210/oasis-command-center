@@ -320,6 +320,13 @@ export async function undoUnsavedClaim(
     code: "credential_missing",
     detail: "OASIS could not save the new key. Paste it again.",
     now: deps.now(),
+    // A reconnect (same account, possibly a DIFFERENT vendor user) already
+    // overwrote vendor_principal_id before this token save failed; the row's
+    // STORED tokens are still the ones from claim.previous's owner, so the
+    // principal must go back to matching them (security review, PR #574).
+    // A brand-new claim has no previous principal to restore — its own id
+    // was never wrong, so the key is omitted rather than passed as null.
+    ...(claim.previous ? { restorePreviousVendorPrincipalId: { value: claim.previous.vendor_principal_id } } : {}),
   });
 }
 

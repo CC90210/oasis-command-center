@@ -39,7 +39,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { format } from "node:util";
-import { createClient } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 
 const dbFile = join(mkdtempSync(join(tmpdir(), "every-connector-works-")), "test.db");
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
@@ -242,7 +242,10 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
     if (!accessOk("xero", call.headers)) return json(401, { Title: "Unauthorized" });
     mode.xeroDeletedConnectionIds.add(decodeURIComponent(url.pathname.slice("/connections/".length)));
     live("xero").revoked = true;
-    return new Response(null, { status: 200 });
+    // Xero answers 204 No Content on a successful DELETE, never 200 (Codex
+    // review, PR #574) — the fixture must match the real vendor or the 200-
+    // only bug this tests for would never surface.
+    return new Response(null, { status: 204 });
   }
   // A WhatsApp Business Account's own name lookup, by whichever id the sign-in pinned (not only the fixture default).
   const wabaId = url.hostname === "graph.facebook.com" ? /^\/v23\.0\/(\d{5,25})$/.exec(url.pathname)?.[1] : null;
@@ -535,6 +538,8 @@ async function main() {
   const live_ = await import("../lib/connections/oauth-live");
   const store = await import("../lib/connections/store");
   const tokenStore = await import("../lib/connections/token-store");
+  const oauthConnect = await import("../lib/connections/oauth-connect");
+  const rules = await import("../lib/connections/rules");
   const health = await import("../lib/connections/health");
   const popup = await import("../lib/connections/popup");
   const { setTenantIntegrationValue, getTenantIntegrationBundle } = await import("../lib/tenant-integration-store");
@@ -974,6 +979,30 @@ async function main() {
     return row;
   };
   const deps = () => ({ db, now: () => new Date() });
+  /**
+   * A db whose batch() throws for any statement matching `match`, everything
+   * else passed straight through to the real connection. Drives the REAL
+   * completeOAuthConnect into its actual save-failed catch branch (Codex
+   * review, PR #574: the fenced-save regression test only ever called
+   * saveConnectionTokensFenced directly, never the real function it is
+   * inside) — never a hand-simulated "pretend this failed".
+   */
+  const dbThrowingOnBatch = (match: (sql: string) => boolean): Client =>
+    new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "batch") {
+          return async (...args: Parameters<Client["batch"]>) => {
+            const stmts = Array.isArray(args[0]) ? args[0] : [args[0]];
+            if (stmts.some((s) => match(typeof s === "string" ? s : s.sql))) {
+              throw new Error("simulated_token_save_failure (test)");
+            }
+            return target.batch(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
 
   await check("without OASIS's app secrets: a client sees 'Not available', OASIS's operator sees the secret names, and the button answers a sentence, never a 500", async () => {
     setOAuthEnv(false);
@@ -1437,6 +1466,168 @@ async function main() {
     assert.equal(res.body.vendor_revoked, false);
     assert.equal(res.body.vendor_revoke_skipped_reason, "vendor_principal_unknown");
     assert.equal(live("whatsapp").revoked, false);
+  });
+
+  await check("WhatsApp: a DIFFERENT Meta user reconnecting the SAME WhatsApp Business Account, whose token save then fails, leaves the OLD principal paired with the OLD (still-stored) tokens, never the new user's id over the old tokens — so Disconnect's sharing check, and any vendor revoke, run against the right person (Codex review, PR #574)", async () => {
+    setOAuthEnv(true);
+    const app = OAUTH_APPS.find((a) => a.id === "whatsapp")!;
+    mode.metaUserId = "meta-user-1";
+    let rowBeforeId: string | null = null;
+    let rowBravoId: string | null = null;
+    try {
+      // ALPHA connects normally with Meta user 1.
+      await login(USERS.ownerA);
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      const rowBefore = await connectedRow(ALPHA, app);
+      rowBeforeId = rowBefore.id;
+      assert.equal(rowBefore.vendor_principal_id, "meta-user-1");
+
+      // BRAVO also holds a live connection for Meta user 1 (a different
+      // WABA), so meta-user-1 is genuinely shared before anything else happens.
+      await login(USERS.ownerB);
+      mode.whatsappTargetIds = ["104000000000098"];
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      mode.whatsappTargetIds = null;
+      const rowBravo = await connectedRow(BRAVO_CO, app);
+      rowBravoId = rowBravo.id;
+      assert.equal(rowBravo.vendor_principal_id, "meta-user-1");
+
+      // ALPHA's owner reconnects the SAME WABA, but this time a DIFFERENT
+      // real Facebook user completes the consent. completeOAuthConnect is
+      // called directly (with a db whose batch() throws only for the token
+      // write) so the save fails AFTER claimConnection already wrote the new
+      // principal — the exact ordering the finding describes.
+      await login(USERS.ownerA);
+      mode.metaUserId = "meta-user-2";
+      const state = (await startSignIn(app)).searchParams.get("state")!;
+      const failed = await oauthConnect.completeOAuthConnect(
+        { db: dbThrowingOnBatch((sql) => sql.includes("tenant_integration_credentials")), now: () => new Date() },
+        {
+          providerId: "whatsapp",
+          state,
+          code: "good-code",
+          query: new URLSearchParams(),
+          redirectUri: "https://oasisai.work/api/connections/whatsapp/callback",
+          session: { tenantId: ALPHA, userId: USERS.ownerA.id, email: USERS.ownerA.email },
+        },
+      );
+      assert.equal(failed.ok, false);
+      assert.equal(!failed.ok && failed.failure, "token_save_failed");
+
+      // The row is errored, but its principal must still match the tokens
+      // ACTUALLY stored (meta-user-1's, from the first connect) — never the
+      // new user's id the failed claim wrote before the save threw.
+      const rowAfter = (await store.getConnection(db, ALPHA, rowBefore.id))!;
+      assert.equal(rowAfter.status, "error");
+      assert.equal(rowAfter.vendor_principal_id, "meta-user-1", "the principal must be restored to match the tokens still on disk, not left as the new user's id");
+
+      // Disconnect must therefore see meta-user-1 (shared with BRAVO) and
+      // skip the vendor revoke; with the bug, it would see the unshared
+      // meta-user-2 and call Meta's /me/permissions, deauthorizing the whole
+      // Meta user BRAVO's still-live connection depends on.
+      mode.metaUserId = "meta-user-1";
+      live("whatsapp").revoked = false;
+      const res = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp")));
+      assert.equal(res.body.disconnected, true);
+      assert.equal(res.body.vendor_revoked, false);
+      assert.equal(res.body.vendor_revoke_skipped_reason, "shared_with_another_workspace");
+      assert.equal(live("whatsapp").revoked, false, "Meta's /me/permissions was never called");
+
+      // Bravo's connection (the one that would have been collateral damage) is untouched.
+      assert.equal((await store.getConnection(db, BRAVO_CO, rowBravo.id))!.revoked_at, null);
+    } finally {
+      mode.metaUserId = "meta-user-1";
+      mode.whatsappTargetIds = null;
+      // Unconditional cleanup: if an assertion above threw (exactly what a
+      // reverted fix should do), the disconnect calls that would otherwise
+      // have left a clean slate never ran. A later check assuming ALPHA/
+      // BRAVO have no live WhatsApp connection must never be fooled by THIS
+      // test's own (correct, mutation-proving) failure path.
+      for (const id of [rowBeforeId, rowBravoId]) {
+        if (!id) continue;
+        await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE service = ?", args: [rules.credentialServiceFor(id)] });
+        await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [id] });
+      }
+    }
+  });
+
+  await check("claimConnection: two reconnects racing the SAME existing row each fence their token save on the version THEIR OWN update produced, never a later writer's (Codex reproduced: both callers got version 2)", async () => {
+    const provider = registry.providerById("whatsapp")!;
+    const base = {
+      tenantId: ALPHA,
+      provider: "whatsapp",
+      authKind: provider.authKind,
+      scopeKind: provider.scopeKind,
+      userId: null,
+      externalAccountId: "race-test-waba",
+      externalAccountLabel: "Race Test WABA",
+      vendorPrincipalId: "meta-user-1",
+      environment: null,
+      grantedScopes: [],
+      scopeSetVersion: 1,
+      connectedBy: USERS.ownerA.id,
+    } as const;
+    const first = await store.claimConnection(db, { ...base, now: new Date() });
+    assert.equal(first.ok, true);
+    if (!first.ok) throw new Error("unreachable");
+    assert.equal(first.created, true);
+    const rowId = first.connection.id;
+    try {
+    // Deterministically force the exact interleaving Codex reproduced: BOTH
+    // reconnect updates commit first, and only THEN does caller A's
+    // version-read run — on the pre-fix code (a separate getConnection SELECT
+    // after the UPDATE) this makes A and B both read the SAME, newer version.
+    // The fix (UPDATE ... RETURNING, one statement) has no separate read to
+    // delay, so this gate is simply never engaged against it.
+    let sawFirstSelect = false;
+    let updateCount = 0;
+    let releaseFirstSelect: () => void = () => {};
+    const firstSelectGate = new Promise<void>((resolve) => {
+      releaseFirstSelect = resolve;
+    });
+    const raceDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "execute") {
+          return async (stmt: { sql: string; args?: unknown[] }) => {
+            const sql = stmt.sql;
+            const args = stmt.args ?? [];
+            const isReconnectUpdate = sql.includes("token_version = token_version + 1") && args.includes(rowId);
+            const isLegacyVersionRead = sql.trim().startsWith("SELECT") && sql.includes("FROM tenant_connections WHERE tenant_id = ? AND id = ?") && args.includes(rowId);
+            if (isLegacyVersionRead && !sawFirstSelect) {
+              sawFirstSelect = true;
+              await firstSelectGate;
+            }
+            const result = await target.execute(stmt as never);
+            if (isReconnectUpdate) {
+              updateCount += 1;
+              if (updateCount === 2) releaseFirstSelect();
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as Client;
+
+    const [a, b] = await Promise.all([store.claimConnection(raceDb, { ...base, now: new Date() }), store.claimConnection(raceDb, { ...base, now: new Date() })]);
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    if (!a.ok || !b.ok) throw new Error("unreachable");
+    assert.notEqual(
+      a.connection.token_version,
+      b.connection.token_version,
+      "two overlapping reconnects must each fence their token save on the version THEIR OWN write produced, never the same version twice",
+    );
+    } finally {
+      // This test's own fixture row, never saved credentials and never
+      // disconnected through a real route — remove it so later checks that
+      // assume ALPHA has no stray live WhatsApp connection are not fooled by
+      // this test's leftover state (the lesson from every prior round's
+      // mutation testing: a hardcoded "must be zero" elsewhere breaks on
+      // whatever earlier checks left behind).
+      await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [rowId] });
+    }
   });
 
   await check("Xero: more than one organisation comes back, and the access token says which consent this is: the match connects even though it is not index 0 or the newest createdDateUtc, and no match refuses rather than guess", async () => {

@@ -402,7 +402,11 @@ const xero: OAuthAdapter = {
       method: "DELETE",
       headers: { Authorization: `Bearer ${tokens.accessToken}`, Accept: "application/json" },
     });
-    return del.status === 200;
+    // Xero's DELETE /connections/{id} answers 204 No Content on success, never
+    // 200 (Codex review, PR #574); accepting only 200 reported a real
+    // disconnect as vendor_revoked:false and told the owner to remove OASIS
+    // there manually.
+    return del.status === 200 || del.status === 204;
   },
 };
 

@@ -359,7 +359,14 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
       // Reconnect / new key for the same account. A revoked row comes back as a
       // fresh connection: new connected_at, cleared health, cleared failures.
       const reactivating = existing.revoked_at !== null;
-      await db.execute({
+      // RETURNING the row THIS statement produced, not a second SELECT after
+      // it: two reconnects racing the same row otherwise both read whichever
+      // token_version the LAST UPDATE left behind, so both fence their token
+      // save on the same (wrong, for one of them) version (Codex review, PR
+      // #574 — reproduced as both callers getting version 2). SQLite/libSQL
+      // serializes writes, so each UPDATE's own RETURNING is exactly that
+      // statement's result, never a later writer's.
+      const updateRs = await db.execute({
         sql: `UPDATE tenant_connections SET
                 status = 'pending',
                 revoked_at = NULL,
@@ -380,7 +387,8 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
                 last_health_detail = CASE WHEN ? THEN NULL ELSE last_health_detail END,
                 consecutive_failures = CASE WHEN ? THEN 0 ELSE consecutive_failures END,
                 updated_at = ?
-              WHERE id = ? AND tenant_id = ?`,
+              WHERE id = ? AND tenant_id = ?
+              RETURNING ${CONNECTION_COLUMNS}`,
         args: [
           input.authKind,
           input.externalAccountLabel,
@@ -400,9 +408,9 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
           input.tenantId,
         ],
       });
-      const updated = await getConnection(db, input.tenantId, existing.id);
-      if (!updated) throw new Error("connection_claim_vanished");
-      return { ok: true, connection: updated, created: false, previous: existing };
+      const updatedRow = rows(updateRs)[0];
+      if (!updatedRow) throw new Error("connection_claim_vanished");
+      return { ok: true, connection: toConnection(updatedRow), created: false, previous: existing };
     }
 
     const id = randomUUID();
@@ -485,6 +493,7 @@ export async function restoreRevokedClaim(
             refresh_lease_until = ?,
             auth_kind = ?,
             external_account_label = ?,
+            vendor_principal_id = ?,
             environment = ?,
             granted_scopes_json = ?,
             scope_set_version = ?,
@@ -504,6 +513,7 @@ export async function restoreRevokedClaim(
       p.refresh_lease_until,
       p.auth_kind,
       p.external_account_label,
+      p.vendor_principal_id,
       p.environment,
       p.granted_scopes_json,
       p.scope_set_version,
@@ -522,15 +532,40 @@ export async function restoreRevokedClaim(
   return rs.rowsAffected === 1;
 }
 
-/** A write around the connection failed (e.g. the credential could not be saved). */
+/**
+ * A write around the connection failed (e.g. the credential could not be
+ * saved). `restorePreviousVendorPrincipalId` is for a LIVE row whose claim
+ * already overwrote vendor_principal_id with a new vendor user before the
+ * token save that would have matched it failed: without this, the row is
+ * left errored with the NEW user's id paired against the OLD user's still-
+ * stored tokens, so a later Disconnect's sharing check runs against the
+ * wrong person and can revoke a vendor grant another workspace still depends
+ * on (security review, PR #574). Passing `{ value: null }` is a real
+ * instruction to restore null, not "leave it alone" — only passing nothing
+ * leaves the column untouched (a brand-new claim has no previous principal
+ * to restore, and its own id was never wrong).
+ */
 export async function markConnectionError(
   db: Client,
-  input: { tenantId: string; connectionId: string; code: ProbeErrorCode; detail: string; now: Date },
+  input: {
+    tenantId: string;
+    connectionId: string;
+    code: ProbeErrorCode;
+    detail: string;
+    now: Date;
+    restorePreviousVendorPrincipalId?: { value: string | null };
+  },
 ): Promise<boolean> {
+  const restore = input.restorePreviousVendorPrincipalId;
   const rs = await db.execute({
-    sql: `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, updated_at = ?
+    sql: restore
+      ? `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, vendor_principal_id = ?, updated_at = ?
+          WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`
+      : `UPDATE tenant_connections SET status = 'error', last_health_code = ?, last_health_detail = ?, updated_at = ?
           WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
-    args: [input.code, input.detail.slice(0, 500), input.now.toISOString(), input.connectionId, input.tenantId],
+    args: restore
+      ? [input.code, input.detail.slice(0, 500), restore.value, input.now.toISOString(), input.connectionId, input.tenantId]
+      : [input.code, input.detail.slice(0, 500), input.now.toISOString(), input.connectionId, input.tenantId],
   });
   return rs.rowsAffected === 1;
 }
