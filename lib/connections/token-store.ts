@@ -260,10 +260,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function getAccessToken(db: Client, input: GetAccessTokenInput): Promise<string> {
   const now = input.now ?? (() => new Date());
-  // A loser must outwait the winner's refresh (aborted at REFRESH_TIMEOUT_MS), or a
-  // slow vendor makes it give up with refresh_busy instead of re-reading the
-  // tokens the winner saved.
-  const waitMs = input.waitMs ?? REFRESH_TIMEOUT_MS + LOSER_WAIT_MARGIN_MS;
+  // A loser must outwait the winner's refresh (aborted at REFRESH_TIMEOUT_MS) AND
+  // the winner's fenced save (bounded by TOKEN_SAVE_TIMEOUT_MS) before the lease
+  // releases — both are bounded and still land well inside the 120 s lease — or a
+  // slow vendor plus a slow save makes it give up with refresh_busy instead of
+  // re-reading the tokens the winner saved.
+  const waitMs = input.waitMs ?? REFRESH_TIMEOUT_MS + TOKEN_SAVE_TIMEOUT_MS + LOSER_WAIT_MARGIN_MS;
   const pollMs = input.pollMs ?? 150;
 
   const conn = await getConnection(db, input.tenantId, input.connectionId);

@@ -1253,6 +1253,64 @@ async function main() {
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
   });
 
+  await check("a healthy refresh whose vendor call AND fenced save are both slow, together past the old 35 s wait default but short of the 120 s lease: the losing caller still gets the winner's tokens, not refresh_busy", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+    const b = await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false });
+    await tokenStore.saveConnectionTokens(ALPHA, String(row.id), { access_token: b.access_token, refresh_token: b.refresh_token, expires_at: Date.now() - 60_000 });
+
+    // Each phase stays under its own real cap (REFRESH_TIMEOUT_MS, TOKEN_SAVE_TIMEOUT_MS)
+    // so neither a provider abort nor the save's own withTimeout fires; together they
+    // land past the OLD waitMs default (35 s) but well short of the 120 s lease.
+    const refreshDelayMs = 20_000;
+    const saveDelayMs = 20_000;
+    const combinedMs = refreshDelayMs + saveDelayMs;
+    assert.ok(refreshDelayMs < tokenStore.REFRESH_TIMEOUT_MS, "the vendor-call delay must fit its own cap");
+    assert.ok(saveDelayMs < tokenStore.TOKEN_SAVE_TIMEOUT_MS, "the save delay must fit its own cap");
+    assert.ok(combinedMs > tokenStore.REFRESH_TIMEOUT_MS + tokenStore.LOSER_WAIT_MARGIN_MS, "combined delay must exceed the OLD default wait (the bug)");
+    assert.ok(
+      combinedMs < tokenStore.REFRESH_TIMEOUT_MS + tokenStore.TOKEN_SAVE_TIMEOUT_MS + tokenStore.LOSER_WAIT_MARGIN_MS,
+      "combined delay must still fit the NEW default wait (the fix)",
+    );
+
+    // getConnection, takeRefreshLease and releaseRefreshLease all call db.execute;
+    // only the fenced save (saveConnectionTokensFenced) calls db.batch. Delaying
+    // batch alone slows only the winner's save step, and only the winner (whichever
+    // of the three callers takes the lease) ever reaches it — losers never call it.
+    const slowDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return (...args: Parameters<typeof db.batch>) =>
+            new Promise<void>((r) => setTimeout(r, saveDelayMs)).then(() => target.batch(...args));
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    let refreshes = 0;
+    const slow = (callerLabel: string) =>
+      tokenStore.getAccessToken(slowDb, {
+        tenantId: ALPHA,
+        connectionId: String(row.id),
+        refresh: async () => {
+          refreshes += 1;
+          SENSITIVE.add(`slow-both-access-${callerLabel}-${"S".repeat(12)}`);
+          await new Promise((r) => setTimeout(r, refreshDelayMs));
+          return { access_token: `slow-both-access-${callerLabel}-${"S".repeat(12)}`, refresh_token: `slow-both-refresh-${"S".repeat(12)}`, expires_at: Date.now() + 3_600_000 };
+        },
+      });
+    const results = await Promise.allSettled([slow("one"), slow("two"), slow("three")]);
+    assert.equal(refreshes, 1, "only one caller refreshes");
+    assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled"], JSON.stringify(results.map((r) => (r as PromiseRejectedResult).reason?.message)));
+    const tokens = new Set(results.map((r) => (r as PromiseFulfilledResult<string>).value));
+    assert.equal(tokens.size, 1, "the losers got the winner's token, not a refresh_busy rejection");
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+  });
+
   await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told", async () => {
     setOAuthEnv(true);
     for (const app of OAUTH_APPS.filter((a) => a.exclusive)) {
