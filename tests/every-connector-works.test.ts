@@ -130,8 +130,10 @@ type TokenMode = {
   xeroAuthEventId: string | null;
   /** GET /connections answers with this instead of the one default organisation. */
   xeroOrgs: Array<Record<string, unknown>> | null;
+  /** Zoom's /v2/users/me answers with this account_id instead of the fixture default, to simulate a second, different Zoom account signing in. */
+  zoomAccountOverride: string | null;
 };
-const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null, xeroAuthEventId: null, xeroOrgs: null };
+const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null, xeroAuthEventId: null, xeroOrgs: null, zoomAccountOverride: null };
 
 /** A JWT shape good enough for xeroAuthEventId to read (lib/connections/oauth-adapters.ts): unsigned, never verified by that code. */
 const xeroJwt = (authEventId: string) =>
@@ -254,7 +256,7 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
       return tokenEndpoint("zoom");
     case "api.zoom.us/v2/users/me":
       if (!accessOk("zoom", call.headers)) return json(401, { code: 124, message: "Invalid access token." });
-      return json(200, { id: "zoom-user-1", account_id: app("zoom").account, email: app("zoom").label, display_name: "Alpha Owner" });
+      return json(200, { id: "zoom-user-1", account_id: mode.zoomAccountOverride ?? app("zoom").account, email: app("zoom").label, display_name: "Alpha Owner" });
     case "zoom.us/oauth/revoke":
       return revoke("zoom", (_c, f) => f.get("token") ?? "", live("zoom").access);
     // WhatsApp, through Meta's Graph API
@@ -481,7 +483,6 @@ async function main() {
   const probes = await import("../lib/integrations/key-probes");
   const registry = await import("../lib/connections/registry");
   const adapters = await import("../lib/connections/oauth-adapters");
-  const oauthConnect = await import("../lib/connections/oauth-connect");
   const live_ = await import("../lib/connections/oauth-live");
   const store = await import("../lib/connections/store");
   const tokenStore = await import("../lib/connections/token-store");
@@ -1275,39 +1276,65 @@ async function main() {
     }
   });
 
-  await check("revokeAfterRefusal is best-effort and never masks the original refusal (unit; the live path is pinned in the 'exclusive account' check below)", async () => {
-    // Unit: revokeAfterRefusal is best-effort and NEVER throws or changes what
-    // the caller already decided — it only logs, and only the provider, tenant
-    // and reason, never a token (lib/connections/oauth-connect.ts).
-    const grant = { accessToken: "unit-test-access-should-not-log", refreshToken: "unit-test-refresh-should-not-log", expiresInSec: 3600 };
-    const client = { clientId: "c", clientSecret: "s" };
-    const deps_ = { fetchImpl: (async () => new Response(null, { status: 200 })) as typeof fetch, timeoutMs: 1000, env: {} };
-    const fakeAdapter = (revoke: () => Promise<boolean>) => ({ revoke } as unknown as Parameters<typeof oauthConnect.revokeAfterRefusal>[0]);
-    const loggedBefore = logged.length;
-    await oauthConnect.revokeAfterRefusal(fakeAdapter(async () => true), client, grant, deps_, { providerId: "unit", tenantId: "t", reason: "unit_ok" });
-    assert.equal(logged.length, loggedBefore, "a successful revoke logs nothing extra");
-    await oauthConnect.revokeAfterRefusal(fakeAdapter(async () => false), client, grant, deps_, { providerId: "unit", tenantId: "t", reason: "unit_false" });
-    await oauthConnect.revokeAfterRefusal(
-      fakeAdapter(async () => {
-        throw new Error("vendor unreachable");
-      }),
-      client,
-      grant,
-      deps_,
-      { providerId: "unit", tenantId: "t", reason: "unit_throw" },
-    );
-    for (const line of logged.slice(loggedBefore)) assert.doesNotMatch(line, /unit-test-(access|refresh)/, "a logged revoke failure must never carry the token");
-
-    // The second refusal path (a failed token save) is not reachable without
-    // sabotaging the shared test database other checks depend on, so its
-    // revoke call is pinned at the source instead of driven live: both must
-    // call the SAME helper, proven above.
+  await check("a refused connect (account_connected_elsewhere, another_account_connected, or a failed token save) never revokes the grant at the vendor: Zoom/Intuit/Meta's revoke is not scoped to one token and could disconnect a DIFFERENT workspace's live connection (security review of 9f96a852, PR #574)", async () => {
+    // No code path calls adapter.revoke at all any more; the two refusal
+    // points instead say in a comment why not. A revoke call reappearing at
+    // either site, even spelled differently, fails this.
     const connectSrc = read("lib/connections/oauth-connect.ts");
+    assert.doesNotMatch(connectSrc, /\.revoke\(/, "nothing in the connect flow calls adapter.revoke any more");
+    assert.doesNotMatch(connectSrc, /revokeAfterRefusal/, "the removed helper must not reappear");
     assert.match(
       connectSrc,
-      /await undoUnsavedClaim\(deps, tenantId, claim\);\s*await revokeAfterRefusal\(adapter, client, grant, a, \{ providerId: provider\.id, tenantId, reason: "token_save_failed" \}\);\s*return \{ ok: false, failure: "token_save_failed" \};/,
-      "a failed token save also revokes the grant before returning",
+      /if \(!claim\.ok\) \{\s*\/\/ Deliberately NOT revoked at the vendor:/,
+      "the claim-refusal path explains why it does not revoke",
     );
+    assert.match(
+      connectSrc,
+      /await undoUnsavedClaim\(deps, tenantId, claim\);\s*\/\/ Same reasoning as the claim refusal above:/,
+      "the token-save-failure path explains why it does not revoke either",
+    );
+  });
+
+  await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told, and the FIRST workspace's grant is left alone at the vendor, not revoked", async () => {
+    setOAuthEnv(true);
+    for (const app of OAUTH_APPS.filter((a) => a.exclusive)) {
+      await login(USERS.ownerA);
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      await login(USERS.ownerB);
+      live(app.id).revoked = false;
+      const refused = await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!);
+      assert.deepEqual([popupOutcome(refused.html).status, popupOutcome(refused.html).reason], ["error", "account_connected_elsewhere"], app.id);
+      assert.equal((await connectionRows(BRAVO_CO, app.id)).length, 0);
+      assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n, 0, "tokens were saved for the refused workspace");
+      // Revoking ownerB's refused grant would ALSO kill ownerA's live
+      // connection to the same account at the vendor (Zoom/Intuit/Meta's
+      // revoke is account- or company-wide, not scoped to one token).
+      assert.equal(live(app.id).revoked, false, `${app.id}: a refused second sign-in must never revoke the account's live grant`);
+      const stillLive = await connectedRow(ALPHA, app);
+      assert.equal(stillLive.external_account_id, app.account, "ownerA's connection is untouched");
+      await login(USERS.ownerA);
+      await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx(app.id));
+    }
+  });
+
+  await check("a DIFFERENT account for an app this workspace already has connected (Zoom) is refused as another_account_connected, and the fresh grant is NOT revoked: that would also disconnect the FIRST, still-working account", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "zoom")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    live(app.id).revoked = false;
+    try {
+      mode.zoomAccountOverride = "zoom-account-second";
+      const refused = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
+      assert.deepEqual([refused.status, refused.reason], ["error", "another_account_connected"]);
+      assert.equal(live(app.id).revoked, false, "the second (refused) grant must not be revoked");
+      const row = await connectedRow(ALPHA, app);
+      assert.equal(row.external_account_id, app.account, "the FIRST account is still the one connected, untouched by the refusal");
+      assert.equal((await connectionRows(ALPHA, "zoom")).length, 1, "the refused second account created no new connection row");
+    } finally {
+      mode.zoomAccountOverride = null;
+    }
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom"));
   });
 
   await check("a refresh in flight during a reconnect cannot overwrite the fresh tokens (the reconnect bumps token_version)", async () => {
@@ -1414,25 +1441,6 @@ async function main() {
     const tokens = new Set(results.map((r) => (r as PromiseFulfilledResult<string>).value));
     assert.equal(tokens.size, 1, "the losers got the winner's token, not a refresh_busy rejection");
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
-  });
-
-  await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told, and the grant OASIS could not use is revoked at the vendor, not left live", async () => {
-    setOAuthEnv(true);
-    for (const app of OAUTH_APPS.filter((a) => a.exclusive)) {
-      await login(USERS.ownerA);
-      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
-      await login(USERS.ownerB);
-      live(app.id).revoked = false;
-      const refused = await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!);
-      assert.deepEqual([popupOutcome(refused.html).status, popupOutcome(refused.html).reason], ["error", "account_connected_elsewhere"], app.id);
-      assert.equal((await connectionRows(BRAVO_CO, app.id)).length, 0);
-      assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n, 0, "tokens were saved for the refused workspace");
-      // The refused sign-in's own grant (ownerB's, just exchanged) must not
-      // stay live at Xero/QuickBooks for weeks (CodeRabbit PR #574).
-      assert.equal(live(app.id).revoked, true, `${app.id}: the grant OASIS could not use was revoked at the vendor, not left live`);
-      await login(USERS.ownerA);
-      await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx(app.id));
-    }
   });
 
   // ===========================================================================================

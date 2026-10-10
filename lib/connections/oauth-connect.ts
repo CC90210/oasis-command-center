@@ -30,14 +30,7 @@ import { claimConnection, getConnection, recordHealthCheck, type ConnectionRow }
 import { auditConnection, type ConnectionsDeps } from "@/lib/connections/health";
 import { undoUnsavedClaim } from "@/lib/connections/service";
 import { saveConnectionTokens } from "@/lib/connections/token-store";
-import {
-  OAuthExchangeError,
-  oauthAdapterFor,
-  type AdapterDeps,
-  type OAuthAdapter,
-  type OAuthClient,
-  type TokenGrant,
-} from "@/lib/connections/oauth-adapters";
+import { OAuthExchangeError, oauthAdapterFor } from "@/lib/connections/oauth-adapters";
 import { adapterDeps, grantToTokens, oauthClientFor } from "@/lib/connections/oauth-live";
 
 export type OAuthConnectFailure =
@@ -57,44 +50,6 @@ export type OAuthConnectResult =
   | { ok: false; failure: OAuthConnectFailure; detail?: string };
 
 type Env = Readonly<Record<string, string | undefined>>;
-
-/**
- * The vendor already issued tokens by the time OASIS can still refuse the
- * sign-in: claimConnection's account_connected_elsewhere / another_account_connected,
- * or a failed token save. Nothing is connected on OASIS's side either way, but
- * without this the grant stays live at the vendor for as long as a real
- * connection would have — 60-90 days for most of these (CodeRabbit, PR #574).
- *
- * Best-effort and bounded by the adapter's own deadline (AdapterDeps.timeoutMs,
- * the same send() every adapter call already uses): a revoke that fails is
- * logged by provider and reason only, never the tokens, and never changes
- * what the caller returns, so the ORIGINAL refusal is always what the caller sees.
- */
-export async function revokeAfterRefusal(
-  adapter: OAuthAdapter,
-  client: OAuthClient,
-  grant: TokenGrant,
-  deps: AdapterDeps,
-  context: { providerId: string; tenantId: string; reason: string },
-): Promise<void> {
-  try {
-    const revoked = await adapter.revoke(client, { accessToken: grant.accessToken, refreshToken: grant.refreshToken }, deps);
-    if (!revoked) {
-      console.error("[connections.oauth] vendor grant left live after a refused connect", {
-        provider: context.providerId,
-        tenantId: context.tenantId,
-        reason: context.reason,
-      });
-    }
-  } catch (err) {
-    console.error("[connections.oauth] revoking after a refused connect threw", {
-      provider: context.providerId,
-      tenantId: context.tenantId,
-      reason: context.reason,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
 
 export async function completeOAuthConnect(
   deps: ConnectionsDeps,
@@ -159,7 +114,16 @@ export async function completeOAuthConnect(
     now,
   });
   if (!claim.ok) {
-    await revokeAfterRefusal(adapter, client, grant, a, { providerId: provider.id, tenantId, reason: claim.error });
+    // Deliberately NOT revoked at the vendor: the account this refused grant
+    // names is exactly the one already live elsewhere (claim.error says which
+    // way), and Zoom, Intuit and Meta's revoke endpoints are not scoped to
+    // this one token — they deauthorize the whole account (Zoom), company
+    // (Intuit) or app-for-that-user (Meta). Revoking here could disconnect
+    // the OTHER, working connection this same refusal just protected, and
+    // anyone who can sign in to that vendor account could trigger it from
+    // their own workspace (security review of 9f96a852, PR #574). These
+    // tokens are never stored, so leaving the unused grant to lapse at the
+    // vendor is the lesser harm.
     return claim.error === "account_connected_elsewhere"
       ? { ok: false, failure: "account_connected_elsewhere" }
       : { ok: false, failure: "another_account_connected", detail: claim.current.external_account_label ?? undefined };
@@ -176,7 +140,9 @@ export async function completeOAuthConnect(
       error: err instanceof Error ? err.message : String(err),
     });
     await undoUnsavedClaim(deps, tenantId, claim);
-    await revokeAfterRefusal(adapter, client, grant, a, { providerId: provider.id, tenantId, reason: "token_save_failed" });
+    // Same reasoning as the claim refusal above: this can be a reconnect of
+    // an account that already has a live grant (its own, or another
+    // workspace's survived a race); not revoking never risks disconnecting it.
     return { ok: false, failure: "token_save_failed" };
   }
 
