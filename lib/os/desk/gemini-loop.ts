@@ -80,7 +80,11 @@ export async function* streamGeminiWithTools(req: GeminiToolLoopRequest): AsyncG
     const body: Record<string, unknown> = {
       contents,
       systemInstruction: { role: "user", parts: [{ text: req.system }] },
-      generationConfig: thinks ? { maxOutputTokens: maxOut, thinkingConfig: { thinkingLevel: "low" } } : { maxOutputTokens: maxOut },
+      // includeThoughts: the thought SUMMARIES come back as parts marked thought:true, shown in
+      // the activity trail and never in the reply. Thinking tokens are billed either way.
+      generationConfig: thinks
+        ? { maxOutputTokens: maxOut, thinkingConfig: { thinkingLevel: "low", includeThoughts: true } }
+        : { maxOutputTokens: maxOut },
     };
     if (declarations.length > 0) {
       body.tools = [{ functionDeclarations: declarations }];
@@ -128,7 +132,10 @@ export async function* streamGeminiWithTools(req: GeminiToolLoopRequest): AsyncG
           if (!part) continue;
           // Kept verbatim (signature and all) for the next request.
           modelParts.push(part);
-          if (part.thought === true) continue;
+          if (part.thought === true) {
+            if (typeof part.text === "string" && part.text.trim()) yield { type: "thinking", text: part.text };
+            continue;
+          }
           if (typeof part.text === "string" && part.text.length > 0) {
             if (part.text.trim()) iterAnswered = true;
             yield { type: "delta", text: part.text };

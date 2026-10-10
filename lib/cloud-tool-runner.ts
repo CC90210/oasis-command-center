@@ -2334,6 +2334,8 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
 
 export type StreamYield =
   | { type: "delta"; text: string }
+  /** The model's reasoning summary, where its provider shows one (the Gemini department loop). Never reply text. */
+  | { type: "thinking"; text: string }
   | { type: "tool_use"; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; name: string; summary: string; ok: boolean }
   /**

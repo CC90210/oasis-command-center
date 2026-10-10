@@ -64,7 +64,9 @@ export type DeskTurn = {
 
 export type DeskEvent =
   | { type: "delta"; text: string }
-  | { type: "tool"; phase: "start" | "done"; label: string; ok: boolean | null }
+  | { type: "tool"; phase: "start" | "done"; label: string; ok: boolean | null; detail?: string | null; size?: number | null }
+  /** The model's reasoning summary, where its provider shows one: the activity trail, never the reply. */
+  | { type: "thinking"; text: string }
   /** usageKnown false: a step reported no usage, so the sums are not the turn's. */
   | { type: "done"; inputTokens: number; outputTokens: number; usageKnown?: boolean }
   | { type: "error"; message: string };
@@ -128,9 +130,19 @@ async function* redactedStream(source: AsyncGenerator<DeskEvent>, vault: VaultSe
       if (safe) yield { type: "delta", text: safe };
       continue;
     }
+    // Reasoning and a lookup's result line are scrubbed like the reply: the
+    // model reads workspace data, and what it writes about it reaches the browser.
+    if (ev.type === "thinking") {
+      yield { type: "thinking", text: redactTenantVaultSecrets(redactAll(ev.text), vault) };
+      continue;
+    }
     const rest = redactor.flush();
     if (rest) yield { type: "delta", text: rest };
-    yield ev.type === "error" ? { type: "error", message: redactAll(ev.message) } : ev;
+    yield ev.type === "error"
+      ? { type: "error", message: redactAll(ev.message) }
+      : ev.type === "tool" && ev.detail
+        ? { ...ev, detail: redactTenantVaultSecrets(redactAll(ev.detail), vault) }
+        : ev;
   }
   const tail = redactor.flush();
   if (tail) yield { type: "delta", text: tail };
@@ -144,8 +156,16 @@ async function* fromLoop(source: AsyncGenerator<StreamYield>): AsyncGenerator<De
       yield ev;
     } else if (ev.type === "tool_use") {
       yield { type: "tool", phase: "start", label: deskToolLabel(ev.name), ok: null };
+    } else if (ev.type === "thinking") {
+      yield ev;
     } else if (ev.type === "tool_result") {
-      yield { type: "tool", phase: "done", label: deskToolLabel(ev.name), ok: ev.ok };
+      // The result's one-line summary ("Pipeline: 12 leads") is already scrubbed
+      // (the toolset wrapper) and names no table or persona: it is the "result
+      // size" the trail shows. A refused or failed lookup shows no detail.
+      const label = deskToolLabel(ev.name);
+      const prefix = `${label}: `;
+      const line = ev.summary.startsWith(prefix) ? ev.summary.slice(prefix.length) : ev.summary;
+      yield { type: "tool", phase: "done", label, ok: ev.ok, detail: ev.ok && line.trim() ? line.trim().slice(0, 120) : null };
     } else if (ev.type === "done") {
       // A turn with no answer text is a failed turn, here as on every channel.
       if (!text.trim()) {

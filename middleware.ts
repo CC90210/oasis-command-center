@@ -178,9 +178,22 @@ const PUBLIC_FILE_EXTENSIONS = [
 const METADATA_IMAGE_ROUTE =
   /^\/(opengraph-image|twitter-image|icon|apple-icon)(-[A-Za-z0-9]+)?(\.[a-z0-9]+)?$/;
 
+/**
+ * A department run's PRODUCER door: the paired computer's bridge posts a run's
+ * events to /api/os/runs/<id>/events (lib/os/runs/producer.ts). The bridge holds
+ * no session cookie; the route authenticates it INSIDE with a run-scoped HMAC
+ * credential (lib/os/runs/producer-auth.ts) and answers 503 when no signing key
+ * is set. Without this entry middleware 401s before the credential is read and
+ * a bridge-produced run never receives an event. Anchored to the exact path,
+ * so /api/os/runs (send a message) and /api/os/runs/<id>/stream (follow a run)
+ * stay behind the session.
+ */
+const RUN_PRODUCER_ROUTE = /^\/api\/os\/runs\/[A-Za-z0-9-]{8,64}\/events$/;
+
 export function isPublic(pathname: string): boolean {
   if (PUBLIC_PATH_PREFIXES.some((p) => matchesPathPrefix(pathname, p))) return true;
   if (METADATA_IMAGE_ROUTE.test(pathname)) return true;
+  if (RUN_PRODUCER_ROUTE.test(pathname)) return true;
   const lower = pathname.toLowerCase();
   return PUBLIC_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
