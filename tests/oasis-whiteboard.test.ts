@@ -67,6 +67,13 @@ import {
   type View,
 } from "../components/founders/whiteboard-model";
 import { mountWhiteboard, type SurfaceEnv, type WhiteboardHandle, type WhiteboardState } from "../components/founders/whiteboard-surface";
+import {
+  EXIT_PRESENTING_LABEL,
+  PRESENT_LABEL,
+  isPresenting,
+  modeAfterRequest,
+  presentButtonLabel,
+} from "../components/founders/whiteboard-present";
 
 const root = join(__dirname, "..");
 const SKY = "#38bdf8";
@@ -1319,6 +1326,20 @@ async function main() {
     assert.equal(r.canvas.inked(), inked);
   });
 
+  // -- Present (full screen), as data ---------------------------------------
+  await check("whiteboard-present.ts: labels, pressed state, and the fallback decision - pure, no DOM", () => {
+    assert.equal(presentButtonLabel("idle"), PRESENT_LABEL);
+    assert.equal(presentButtonLabel("fullscreen"), EXIT_PRESENTING_LABEL);
+    assert.equal(presentButtonLabel("maximized"), EXIT_PRESENTING_LABEL);
+    assert.deepEqual(["idle", "fullscreen", "maximized"].map(isPresenting), [false, true, true]);
+    // No Fullscreen API at all: never asked, straight to the fallback.
+    assert.equal(modeAfterRequest(false, false), "maximized");
+    assert.equal(modeAfterRequest(false, true), "maximized");
+    // The API exists: granted is real full screen, refused is the fallback.
+    assert.equal(modeAfterRequest(true, true), "fullscreen");
+    assert.equal(modeAfterRequest(true, false), "maximized");
+  });
+
   // -- the component itself ------------------------------------------------
   await check("OasisWhiteboard mounts the board on its own canvas, its buttons drive it, and unmounting leaves nothing attached", async () => {
     const reactPath = require.resolve("react");
@@ -1344,7 +1365,13 @@ async function main() {
       const container: FakeContainer = { clientWidth: 400, clientHeight: 300 };
       (canvasEl!.props.ref as { current: unknown }).current = canvas;
       (containerEl!.props.ref as { current: unknown }).current = container;
-      assert.equal(pendingEffects.length, 1, "one mount effect");
+      // Two mount-only effects: the board itself (pendingEffects[0], driven
+      // below) and Present's fullscreenchange/Escape listeners
+      // (pendingEffects[1]) - real fullscreen entry/exit needs a real
+      // browser (not run here); this file proves the Present button exists
+      // and is wired, and whiteboard-present.ts (pure, tested above) proves
+      // the label and fallback decision.
+      assert.equal(pendingEffects.length, 2, "the board's mount effect, and Present's");
       const cleanup = pendingEffects[0]();
       assert.equal(typeof cleanup, "function", "the effect returns its cleanup");
       assert.equal(canvas.width, 400, "the effect sized the canvas to its container");
@@ -1377,6 +1404,8 @@ async function main() {
       tree = render();
       assert.equal(button(tree, "Eraser").props["aria-pressed"], true, "the Eraser button shows it is on");
       assert.equal(button(tree, "Draw in Sky").props["aria-pressed"], false);
+      assert.equal(button(tree, "Present").props["aria-pressed"], false, "not presenting yet");
+      assert.equal(typeof button(tree, "Present").props.onClick, "function", "the Present button is wired");
 
       (cleanup as () => void)();
       assert.equal(canvas.listeners.count(), 0, "unmount removed the canvas listeners");
@@ -1397,6 +1426,7 @@ async function main() {
       { id: "start", kind: "toolbar", ui: {} },
       { id: "erasing", kind: "toolbar", ui: { erasing: true, empty: false, canUndo: true } },
       { id: "custom", kind: "toolbar", ui: { color: "#123456", empty: false, canUndo: true, canRedo: true } },
+      { id: "presenting", kind: "toolbar", ui: {}, presentMode: "fullscreen" },
     ]);
     const tags = tagsOf(m.start);
     const group = tags.find((t) => t.attrs.role === "group");
@@ -1405,7 +1435,7 @@ async function main() {
     assert.ok(!classesOf(group!).some((c) => /(^|:)absolute$/.test(c)), "the toolbar never floats over the drawing");
 
     const buttons = tags.filter((t) => t.name === "button");
-    assert.equal(buttons.length, 11, "6 colours + Eraser, Undo, Redo, Clear, Download");
+    assert.equal(buttons.length, 12, "6 colours + Eraser, Undo, Redo, Clear, Download, Present");
     const range = tags.find((t) => t.name === "input" && t.attrs.type === "range")!;
     const colorInput = tags.find((t) => t.name === "input" && t.attrs.type === "color")!;
     const colorLabel = tags.filter((t) => t.name === "label" && t.index < colorInput.index).pop()!;
@@ -1432,6 +1462,7 @@ async function main() {
     assert.deepEqual(pressed(m.start), ["Draw in Sky"], "at the start: the Sky pen");
     assert.deepEqual(pressed(m.erasing), ["Eraser"], "erasing: no colour is on");
     assert.deepEqual(pressed(m.custom), [], "a colour from the picker: no swatch claims it");
+    assert.deepEqual(pressed(m.presenting), ["Draw in Sky", "Exit presentation"], "presenting: the button says so, by name and by aria-pressed");
     for (const b of buttons) assert.ok(b.attrs["aria-pressed"] !== undefined || ["Undo", "Redo", "Clear", "Download"].includes(b.attrs["aria-label"]), `${b.attrs["aria-label"]} says whether it is on`);
 
     const disabled = (html: string) =>
@@ -1441,6 +1472,7 @@ async function main() {
     assert.deepEqual(disabled(m.start), ["Undo", "Redo", "Clear", "Download"], "nothing to undo, clear or download on an empty board");
     assert.deepEqual(disabled(m.erasing), ["Redo"]);
     assert.deepEqual(disabled(m.custom), []);
+    assert.ok(!disabled(m.presenting).includes("Present") && !disabled(m.presenting).includes("Exit presentation"), "Present/Exit is never disabled");
 
     const page = tagsOf(m.page);
     const canvas = page.find((t) => t.name === "canvas")!;
@@ -1456,7 +1488,12 @@ async function main() {
 
   // -- source rules --------------------------------------------------------
   await check("client-only and ASCII: no window or document outside a function; the page says the board is not saved", () => {
-    const files = ["components/founders/OasisWhiteboard.tsx", "components/founders/whiteboard-model.ts", "components/founders/whiteboard-surface.ts"];
+    const files = [
+      "components/founders/OasisWhiteboard.tsx",
+      "components/founders/whiteboard-model.ts",
+      "components/founders/whiteboard-surface.ts",
+      "components/founders/whiteboard-present.ts",
+    ];
     for (const f of files) {
       const src = readFileSync(join(root, f), "utf8");
       assert.doesNotMatch(src, /[^\x00-\x7f]/, `${f} is ASCII (tests/worker-source-one-byte.test.ts)`);

@@ -17,7 +17,6 @@ import type { WorkerCommit } from "@/lib/tools/store";
 import type { ToolModelDeps } from "@/lib/tools/worker/ai";
 import { runLearnFromLink, type LearnInput, type PageFetch } from "@/lib/tools/worker/learn-from-link";
 import { runRepurposePost } from "@/lib/tools/worker/repurpose-post";
-import { runScoreHook } from "@/lib/tools/worker/score-hook";
 
 export type WorkerContext = {
   db: Client;
@@ -39,7 +38,6 @@ export type WorkerResult =
 export type WorkerExecutor = (input: Record<string, unknown>, ctx: WorkerContext) => Promise<WorkerResult>;
 
 export const WORKER_EXECUTORS: Readonly<Record<string, WorkerExecutor>> = {
-  score_hook: (input) => runScoreHook({ hook: String(input.hook ?? ""), caption: String(input.caption ?? "") }),
   repurpose_post: (input, ctx) =>
     runRepurposePost({ post: String(input.post ?? "") }, { tenantId: ctx.tenantId, userId: ctx.userId, jobId: ctx.jobId }, ctx.ai),
   learn_from_link: (input, ctx) => runLearnFromLink(input as unknown as LearnInput, ctx),

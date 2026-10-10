@@ -170,16 +170,24 @@ async function main() {
     assert.deepEqual(badLabel, { ok: false, field: "label", code: "invalid_choice" });
   });
 
-  await check("Score a hook and Repurpose a post: required, bounded, no control characters", () => {
-    const score = toolByKey("score_hook")!;
+  await check("Repurpose a post: required, bounded, no control characters", () => {
     const repurpose = toolByKey("repurpose_post")!;
-    assert.deepEqual(score.validate({ hook: "  " }), { ok: false, field: "hook", code: "required" });
-    assert.deepEqual(score.validate({ hook: "x".repeat(501) }), { ok: false, field: "hook", code: "too_long" });
-    assert.deepEqual(score.validate({ hook: "a\u0000b" }), { ok: false, field: "hook", code: "invalid_characters" });
-    assert.deepEqual(score.validate({ hook: " Hook ", caption: "line one\nline two" }), { ok: true, value: { hook: "Hook", caption: "line one\nline two" }, dedupeKey: null });
     assert.deepEqual(repurpose.validate({ post: "too short" }), { ok: false, field: "post", code: "too_short" });
     assert.deepEqual(repurpose.validate({ post: "x".repeat(3001) }), { ok: false, field: "post", code: "too_long" });
+    assert.deepEqual(repurpose.validate({ post: "a\u0000b".padEnd(25, "x") }), { ok: false, field: "post", code: "invalid_characters" });
     assert.equal(repurpose.validate({ post: "A post that is long enough to repurpose." }).ok, true);
+  });
+
+  await check("Score a hook is gone: no registry entry, no key a run or a claim can ever accept", () => {
+    assert.equal(toolByKey("score_hook"), null, "removed from the registry (2026-10-10)");
+    assert.equal(TOOL_REGISTRY.some((t) => t.key === "score_hook"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(WORKER_EXECUTORS, "score_hook"), false, "no executor left either");
+  });
+
+  await check("Learn from a link is operatorOnly in the registry (gated in lib/tools/session-handlers.ts and Admin > Agent training)", () => {
+    const learn = toolByKey("learn_from_link")!;
+    assert.equal(learn.operatorOnly, true);
+    assert.equal(toolByKey("repurpose_post")!.operatorOnly, undefined, "repurpose_post is not operator-only");
   });
 
   finish("tools registry");

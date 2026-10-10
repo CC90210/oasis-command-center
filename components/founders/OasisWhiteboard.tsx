@@ -16,13 +16,26 @@
  * - the board lives in this tab only, and the page says so: Download keeps a
  *   picture.
  *
- * whiteboard-surface.ts owns the canvas (input, size, keys, download); this
- * file is the toolbar and the frame. tests/oasis-whiteboard.test.ts covers all
- * three files.
+ * whiteboard-surface.ts owns the canvas (input, size, keys, download);
+ * whiteboard-present.ts owns the Present (full screen) mode as data; this
+ * file is the toolbar, the frame, and the one place that calls the browser's
+ * real Fullscreen API. tests/oasis-whiteboard.test.ts covers all four files.
+ *
+ * PRESENT (2026-10-10): the board's own container (containerRef, already
+ * sized to fit the page) is the Fullscreen target - the drawing fills the
+ * screen for whoever is watching the Google Meet share, the way presenting a
+ * canvas-only surface usually works. The toolbar sits above it and is NOT
+ * inside it, so a floating "Exit presentation" control is rendered inside
+ * the container itself (the only thing still on screen while presenting) -
+ * the same control for both real full screen and the CSS-only "maximized"
+ * fallback below. Escape exits native full screen on its own (every
+ * browser's default); "maximized" has no such default, so this file adds
+ * its own Escape listener only while that fallback is showing.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { MAX_SIZE, MIN_SIZE, PALETTE } from "@/components/founders/whiteboard-model";
+import { isPresenting, modeAfterRequest, presentButtonLabel, type PresentMode } from "@/components/founders/whiteboard-present";
 import {
   INITIAL_STATE,
   mountWhiteboard,
@@ -38,6 +51,7 @@ export type ToolbarActions = {
   redo: () => void;
   clear: () => void;
   download: () => void;
+  present: () => void;
 };
 
 /** Every control's touch target: at least 44 x 44 CSS px, at every width. */
@@ -58,7 +72,15 @@ const ICON = {
   "aria-hidden": true,
 };
 
-export function WhiteboardToolbar({ ui, actions }: { ui: WhiteboardState; actions: ToolbarActions }) {
+export function WhiteboardToolbar({
+  ui,
+  actions,
+  presentMode = "idle",
+}: {
+  ui: WhiteboardState;
+  actions: ToolbarActions;
+  presentMode?: PresentMode;
+}) {
   const customOn = !ui.erasing && !PALETTE.some((s) => s.color === ui.color);
   return (
     <div
@@ -176,6 +198,31 @@ export function WhiteboardToolbar({ ui, actions }: { ui: WhiteboardState; action
           </svg>
           <span className="hidden sm:inline">Download</span>
         </button>
+        <button
+          type="button"
+          title={presentMode === "idle" ? "Full screen, for a Google Meet call" : "Back to the normal page"}
+          aria-label={presentButtonLabel(presentMode)}
+          aria-pressed={isPresenting(presentMode)}
+          onClick={actions.present}
+          className={`${TOOL_BUTTON} ${isPresenting(presentMode) ? TOOL_ON : ""}`}
+        >
+          {isPresenting(presentMode) ? (
+            <svg {...ICON}>
+              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+            </svg>
+          ) : (
+            <svg {...ICON}>
+              <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+              <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+              <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+              <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+            </svg>
+          )}
+          <span className="hidden sm:inline">{presentButtonLabel(presentMode)}</span>
+        </button>
       </div>
     </div>
   );
@@ -196,6 +243,30 @@ export function OasisWhiteboard() {
   const handleRef = useRef<WhiteboardHandle | null>(null);
   const [ui, setUi] = useState<WhiteboardState>(INITIAL_STATE);
   const [unsupported, setUnsupported] = useState(false);
+  const [presentMode, setPresentMode] = useState<PresentMode>("idle");
+  /** Read inside the mount-only effect below without making it re-run per toggle. */
+  const presentModeRef = useRef<PresentMode>("idle");
+  presentModeRef.current = presentMode;
+
+  async function present(): Promise<void> {
+    if (presentMode !== "idle") {
+      if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
+      setPresentMode("idle");
+      return;
+    }
+    const el = containerRef.current;
+    const apiAvailable = Boolean(el && typeof el.requestFullscreen === "function" && document.fullscreenEnabled !== false);
+    if (!el || !apiAvailable) {
+      setPresentMode(modeAfterRequest(false, false));
+      return;
+    }
+    try {
+      await el.requestFullscreen();
+      setPresentMode(modeAfterRequest(true, true));
+    } catch {
+      setPresentMode(modeAfterRequest(true, false));
+    }
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -218,6 +289,28 @@ export function OasisWhiteboard() {
     };
   }, []);
 
+  // Mount-only, same lifetime as the board above but its own effect (so the
+  // board's own mount/cleanup stays pendingEffects[0] for anything that
+  // reads hooks in call order, tests included): the browser's own
+  // fullscreenchange (covers Escape, which every browser already exits
+  // native full screen on) and, only while the CSS-only "maximized"
+  // fallback is showing, this file's own Escape handler (nothing native is
+  // active to catch it there).
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) setPresentMode((m) => (m === "fullscreen" ? "idle" : m));
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && presentModeRef.current === "maximized") setPresentMode("idle");
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   const actions: ToolbarActions = {
     setColor: (hex) => handleRef.current?.setColor(hex),
     setSize: (size) => handleRef.current?.setSize(size),
@@ -226,15 +319,19 @@ export function OasisWhiteboard() {
     redo: () => handleRef.current?.redo(),
     clear: () => handleRef.current?.clear(),
     download: () => handleRef.current?.download(),
+    present: () => void present(),
   };
   const hint = boardHint(ui);
+  const presenting = isPresenting(presentMode);
 
   return (
     <div className="flex flex-col gap-3">
-      <WhiteboardToolbar ui={ui} actions={actions} />
+      <WhiteboardToolbar ui={ui} actions={actions} presentMode={presentMode} />
       <div
         ref={containerRef}
-        className="relative h-[70vh] min-h-[420px] w-full overflow-hidden rounded-2xl border border-bg-border bg-bg-deep"
+        className={`relative w-full overflow-hidden border-bg-border bg-bg-deep ${
+          presentMode === "maximized" ? "fixed inset-0 z-50 h-screen w-screen rounded-none border-0" : "h-[70vh] min-h-[420px] rounded-2xl border"
+        }`}
       >
         <canvas
           ref={canvasRef}
@@ -249,6 +346,22 @@ export function OasisWhiteboard() {
             This browser can&apos;t draw here. Open the page in Chrome, Safari or Edge.
           </p>
         ) : null}
+        {presenting && (
+          <button
+            type="button"
+            onClick={actions.present}
+            aria-label={presentButtonLabel(presentMode)}
+            className="absolute right-3 top-3 z-10 inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-white/10 bg-bg-panel/85 px-3 text-[0.85rem] font-medium text-fg backdrop-blur-md hover:bg-bg-panel focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+            </svg>
+            <span>{presentButtonLabel(presentMode)}</span>
+          </button>
+        )}
         <p
           aria-live="polite"
           className={`pointer-events-none absolute bottom-6 left-1/2 max-w-[90%] -translate-x-1/2 rounded-full border border-white/10 bg-bg-panel/70 px-[18px] py-2 text-center text-[0.78rem] text-fg-muted backdrop-blur-md transition-opacity duration-500 ${

@@ -9,7 +9,10 @@
  *
  * Who: lib/tools/access.ts resolveToolsViewer, the one gate. Anyone else gets
  * 404 not_found (never 403). Every read and write is the viewer's workspace;
- * a job id from another workspace is "not found".
+ * a job id from another workspace is "not found". A tool marked operatorOnly
+ * in the registry (Learn from a link: agent-harness training material) is
+ * refused the same way to a founder who passed that gate but is not a
+ * verified platform operator (refusedToNonOperator, below).
  *
  * A worker tool runs inside this request and the answer carries the finished
  * run; a tool that FAILED is still a 200, the failure is in the run (its code
@@ -20,6 +23,7 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { SWEEP_ERROR_LINES } from "@/lib/tools/errors";
 import { toolByKey, type ToolDef } from "@/lib/tools/registry";
 import type { ToolsViewer } from "@/lib/tools/access";
@@ -64,6 +68,19 @@ function json(status: number, body: Record<string, unknown>): Response {
 const notFound = () => json(404, { ok: false, error: "not_found" });
 const notSetUp = () => json(503, { ok: false, error: "not_set_up", message: "Tools are not set up yet." });
 
+/**
+ * True when `tool` is operatorOnly (lib/tools/registry.ts) and `viewer` is not
+ * a verified platform operator (lib/platform-operator.ts - auth-user-verified,
+ * never an email string). A founder who passed the Toolkit's own gate above is
+ * refused here just the same: operatorOnly means OASIS operators, not every
+ * founder of the workspace an operator happens to also run.
+ */
+async function refusedToNonOperator(tool: Pick<ToolDef, "operatorOnly">, viewer: ToolsViewer): Promise<boolean> {
+  if (!tool.operatorOnly) return false;
+  const check = await resolvePlatformOperatorForAuthUser(viewer.userId, viewer.email);
+  return !check.operator;
+}
+
 async function sweepFor(deps: SessionDeps, tenantId: string): Promise<void> {
   const swept = await sweepToolJobs(deps.db, [tenantId], deps.now());
   if (!swept.orphanUploads.length || !deps.storage) return;
@@ -92,6 +109,7 @@ export async function handleToolRun(req: Request, deps: SessionDeps): Promise<Re
   if (!(await toolTablesInstalled(deps.db))) return notSetUp();
   const tool = toolByKey(body.tool);
   if (!tool) return json(422, { ok: false, error: "unknown_tool" });
+  if (await refusedToNonOperator(tool, viewer)) return notFound();
   const key = body.idempotency_key;
   if (typeof key !== "string" || !UUID_V4.test(key)) {
     return json(422, { ok: false, error: "invalid_input", field: "idempotency_key", code: "invalid" });
@@ -216,10 +234,14 @@ export async function handleToolJobs(req: Request, deps: SessionDeps): Promise<R
   if (id) {
     if (!JOB_ID.test(id)) return notFound();
     const job = await getJob(deps.db, viewer.tenantId, id);
-    return job ? json(200, { ok: true, job: jobView(job) }) : notFound();
+    if (!job) return notFound();
+    const jobTool = toolByKey(job.toolKey);
+    if (jobTool && (await refusedToNonOperator(jobTool, viewer))) return notFound();
+    return json(200, { ok: true, job: jobView(job) });
   }
   const tool = toolByKey(toolParam);
   if (!tool) return json(422, { ok: false, error: "unknown_tool" });
+  if (await refusedToNonOperator(tool, viewer)) return notFound();
   const rawLimit = Number(url.searchParams.get("limit") ?? DEFAULT_LIST);
   const limit = Number.isInteger(rawLimit) && rawLimit >= 1 ? Math.min(rawLimit, MAX_LIST) : DEFAULT_LIST;
   const jobs = await listJobs(deps.db, viewer.tenantId, tool.key, limit);

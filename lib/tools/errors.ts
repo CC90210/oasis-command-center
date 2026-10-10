@@ -57,6 +57,7 @@ export const WORKER_ERROR_LINES: Readonly<Record<string, string>> = {
   ai_account_missing: "Connect an AI account in Settings > AI brain to use this tool.",
   ai_account_unreadable: "Couldn't read the AI account. Try again.",
   ai_failed: "The AI account didn't answer. Try again.",
+  ai_timeout: "The AI account took too long to answer; nothing was saved. Try a shorter post or try again.",
   [AI_BUDGET_EXHAUSTED]: AI_BUDGET_SENTENCES[AI_BUDGET_EXHAUSTED],
   [AI_BUDGET_UNPRICED_MODEL]: AI_BUDGET_SENTENCES[AI_BUDGET_UNPRICED_MODEL],
   [AI_USAGE_UNAVAILABLE]: AI_USAGE_UNAVAILABLE_SENTENCE,
