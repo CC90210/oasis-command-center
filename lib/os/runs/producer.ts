@@ -145,7 +145,8 @@ export async function ingestBatch(db: Client, run: Run, events: readonly Produce
     const seq = PRODUCER_SEQ_BASE + e.seq;
     switch (e.type) {
       case "status":
-        stored.push({ seq, kind: "status", data: { phase: "thinking", label: ctx.scrub(e.label ?? "Working on it") } });
+        // A status label is free text from the producer: scrubbed like reasoning (credentials, vault values, house-agent names).
+        stored.push({ seq, kind: "status", data: { phase: "thinking", label: ctx.scrubReasoning(e.label ?? "Working on it") } });
         break;
       case "thinking":
         if (ctx.showThinking && e.text) stored.push({ seq, kind: "thinking", data: { text: ctx.scrubReasoning(e.text) } });

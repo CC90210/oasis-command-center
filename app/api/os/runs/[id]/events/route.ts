@@ -80,12 +80,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (run.source !== "producer") return json(409, { ok: false, error: "run_not_producer" });
 
     const label = OS_DEPARTMENTS.find((d) => d.key === run.department)?.label ?? "this";
-    let vault: VaultSecret[] = [];
+    // COMPLETE or nothing (the rule the department turn follows, lib/os/desk/turn.ts): an entry that
+    // cannot be read or decrypted fails the read, and the batch is refused rather than written
+    // scrubbed of only some secrets. The producer resends it (idempotent by seq).
+    let vault: VaultSecret[];
     try {
-      vault = await fetchTenantVaultSecretsForRedaction(run.tenantId);
+      vault = await fetchTenantVaultSecretsForRedaction(run.tenantId, { requireComplete: true });
     } catch (err) {
-      // Env-secret scrubbing still applies below; the vault read failing is logged, not hidden.
-      console.error("[os.runs.events] vault read failed; scrubbing environment secrets only", { runId: id, error: err instanceof Error ? err.message : String(err) });
+      console.error("[os.runs.events] vault read failed; the batch was refused", { runId: id, error: err instanceof Error ? err.message : String(err) });
+      return json(503, { ok: false, error: "scrub_unavailable" });
     }
     const scrub = (t: string) => redactTenantVaultSecrets(redactAll(t), vault);
     const result = await ingestBatch(db, run, parsed.events, {

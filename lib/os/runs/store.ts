@@ -604,10 +604,13 @@ export async function requestCancel(db: Client, scope: RunScope, runId: string, 
     args: [at, runId, scope.tenantId, scope.userId, ...cutoffs(now)],
   });
   if (live.rowsAffected > 0) return "requested";
+  // A dead driver's partial answer is kept, as reapStale keeps it: read it BEFORE
+  // closing the run deletes the reply fragments.
+  const partial = await partialText(db, scope, runId);
   const dead = await exec(db, {
-    sql: `UPDATE dept_chat_runs SET status = 'cancelled', finished_at = ?
+    sql: `UPDATE dept_chat_runs SET status = 'cancelled', final_text = ?, finished_at = ?
           WHERE id = ? AND tenant_id = ? AND user_id = ? AND status = 'running' AND ${STALE}`,
-    args: [at, runId, scope.tenantId, scope.userId, ...cutoffs(now)],
+    args: [partial.trim() ? partial : null, at, runId, scope.tenantId, scope.userId, ...cutoffs(now)],
   });
   if (dead.rowsAffected > 0) {
     await closeRun(db, scope, runId, "cancelled", null, now);

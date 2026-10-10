@@ -635,6 +635,36 @@ async function main() {
       assert.ok(!(await store.readEvents(db, scopeA, run.id, 0)).some((e) => e.kind === "thinking"), "reasoning was kept after the run ended");
     }
   });
+  await check("a producer batch is refused whole when the workspace vault cannot be read in full (never written scrubbed of only some secrets); a status label is scrubbed like reasoning", async () => {
+    const { run } = await producerRun();
+    const good = bearer(await credential(run.id, ACME));
+    const batch = { events: [{ seq: 1, type: "status", label: `Asking Bravo about ${ENV_SECRET}` }, { seq: 2, type: "delta", text: "hi" }] };
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value, created_at, updated_at) VALUES (?, 'custom', 'broken_key', 'not-a-ciphertext', ?, ?)",
+      args: [ACME, new Date().toISOString(), new Date().toISOString()],
+    });
+    try {
+      const refused = await post(run.id, batch, good);
+      assert.deepEqual([refused.status, refused.json.error], [503, "scrub_unavailable"]);
+      assert.deepEqual(await store.readEvents(db, scopeA, run.id, 0), [], "events were written although the vault could not be read in full");
+    } finally {
+      await db.execute("DELETE FROM tenant_integration_credentials");
+    }
+    assert.equal((await post(run.id, batch, good)).status, 200, "the producer resends the same batch");
+    const stored = JSON.stringify(await store.readEvents(db, scopeA, run.id, 0));
+    assert.ok(!stored.includes(ENV_SECRET) && !identity.namesPersona(stored), `a status label carried a credential or a persona name: ${stored}`);
+  });
+  await check("Stop on a run whose driver is dead cancels it and keeps the partial answer", async () => {
+    const conv = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });
+    await store.enqueueRun(db, scopeA, { conversationId: conv.id, text: "half", chatMode: "build", showThinking: false, now: now() });
+    const run = await store.claimNextRun(db, scopeA, conv.id, `lease-${Math.random()}`, now());
+    assert.ok(run);
+    await store.appendEvents(db, scopeA, run!.id, [{ seq: 1, kind: "delta", data: { text: "so far " } }, { seq: 2, kind: "delta", data: { text: "so good" } }], now());
+    const later = new Date(Date.now() + types.RUN_STALE_MS + 1000);
+    assert.equal(await store.requestCancel(db, scopeA, run!.id, later), "cancelled");
+    const fin = await store.getRun(db, scopeA, run!.id);
+    assert.deepEqual([fin?.status, fin?.finalText], ["cancelled", "so far so good"], "the partial answer was lost");
+  });
   await check("a producer is given up on after 120 s of silence, a Worker driver after 45 s", async () => {
     const p = await producerRun();
     const w = await producerRun({ source: "worker" });
