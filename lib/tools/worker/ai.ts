@@ -29,13 +29,27 @@
  * Gemini call ran 132 s and the platform's own edge cut it off as http_524 at
  * roughly 100 s - the run never got a chance to fail cleanly, and the card
  * showed the generic `ai_failed` line as though the model had answered and
- * refused, which it never did. `streamChat` is now raced against
- * TOOL_MODEL_TIMEOUT_MS: past it, the run is told so honestly (`ai_timeout`,
+ * refused, which it never did. `streamChat` is now raced against a budget
+ * (modelBudgetMs, below): past it, the run is told so honestly (`ai_timeout`,
  * lib/tools/errors.ts) well inside both Cloudflare's cutoff and
  * app/api/tools/run/route.ts's own `maxDuration`, instead of riding either
  * one out. The provider's own HTTP call is not aborted (lib/providers.ts
  * takes no AbortSignal today) - only this function's wait on it is bounded;
  * a true cancel needs a signal threaded through every provider there.
+ *
+ * WHOLE-REQUEST BUDGET (Codex review round 2, 2026-10-10): a flat 55 s timer
+ * STARTING at the model call undercounts whatever ran before it in the same
+ * request - the account read, the budget check, and for Learn from a link
+ * the page fetch itself (lib/tools/worker/learn-from-link.ts), all inside the
+ * same `maxDuration` the route declares. A slow pre-model phase plus a full
+ * 55 s model wait could outlive the route's own 60 s and get the request
+ * killed before finishWorkerJob ever records the failure, leaving the job
+ * stuck `running` instead of ending honestly. modelBudgetMs subtracts what
+ * has already elapsed since the REQUEST started (ToolModelCall.requestStartedAt,
+ * set once in lib/tools/session-handlers.ts) and a FINISH_RESERVE_MS slice for
+ * writing that failure, so the model is never given more time than the
+ * request plausibly has left. Too little left (<=0): the model is never
+ * called at all - the run fails fast with the same honest `ai_timeout`.
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -82,6 +96,24 @@ export function defaultToolModelDeps(): ToolModelDeps {
  */
 export const TOOL_MODEL_TIMEOUT_MS = 55_000;
 
+/** Mirrors app/api/tools/run/route.ts's own `maxDuration`: the whole request's declared ceiling. */
+const REQUEST_BUDGET_MS = 60_000;
+/** Reserved, inside REQUEST_BUDGET_MS, for finishWorkerJob to write the failure once the model gives up. */
+const FINISH_RESERVE_MS = 5_000;
+
+/**
+ * How long is left to wait on the model, given how much of the WHOLE
+ * request's budget (REQUEST_BUDGET_MS) is already spent since
+ * `requestStartedAt` - never more than TOOL_MODEL_TIMEOUT_MS, never less than
+ * 0 (0 means: do not call the model at all, there is no time left to answer
+ * and still record the failure).
+ */
+export function modelBudgetMs(requestStartedAt: Date, nowMs: number = Date.now()): number {
+  const elapsed = nowMs - requestStartedAt.getTime();
+  const remaining = REQUEST_BUDGET_MS - elapsed - FINISH_RESERVE_MS;
+  return Math.max(0, Math.min(TOOL_MODEL_TIMEOUT_MS, remaining));
+}
+
 /** Thrown by the race below when the model has not answered within `timeoutMs`. */
 class ToolModelTimedOut extends Error {}
 
@@ -109,6 +141,8 @@ export type ToolModelCall = {
   system: string;
   prompt: string;
   maxTokens: number;
+  /** Set once, at the top of the request (lib/tools/session-handlers.ts), never per-call: modelBudgetMs reads it. */
+  requestStartedAt: Date;
 };
 
 export type ToolModelResult = { ok: true; text: string; provider: string; model: string } | { ok: false; code: string };
@@ -119,6 +153,16 @@ export function accountState(account: WorkspaceAiAccount | null): "ready" | "nee
 }
 
 export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps = defaultToolModelDeps()): Promise<ToolModelResult> {
+  const timeoutMs = deps.timeoutMs ?? modelBudgetMs(call.requestStartedAt);
+  if (timeoutMs <= 0) {
+    // Whatever ran earlier in this request (account read, budget check, or
+    // for Learn from a link the page fetch) already spent the whole budget:
+    // calling the model now could not answer AND leave time to record the
+    // failure before the route's own maxDuration kills the request. Fail
+    // fast and honestly instead of starting a call nobody will see finish.
+    console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, reason: "no_budget_left_before_model_call" });
+    return { ok: false, code: "ai_timeout" };
+  }
   let account: WorkspaceAiAccount | null;
   try {
     account = await deps.readAccount(call.tenantId);
@@ -177,11 +221,11 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
           }
         }
       })(),
-      deps.timeoutMs ?? TOOL_MODEL_TIMEOUT_MS,
+      timeoutMs,
     );
   } catch (err) {
     if (err instanceof ToolModelTimedOut) {
-      console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, afterMs: deps.timeoutMs ?? TOOL_MODEL_TIMEOUT_MS });
+      console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, afterMs: timeoutMs });
       return { ok: false, code: "ai_timeout" };
     }
     if (err instanceof ToolModelRefusal) return { ok: false, code: err.code };

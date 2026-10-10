@@ -70,6 +70,7 @@ import { mountWhiteboard, type SurfaceEnv, type WhiteboardHandle, type Whiteboar
 import {
   EXIT_PRESENTING_LABEL,
   PRESENT_LABEL,
+  boardContainerClasses,
   isPresenting,
   modeAfterRequest,
   presentButtonLabel,
@@ -1338,6 +1339,23 @@ async function main() {
     // The API exists: granted is real full screen, refused is the fallback.
     assert.equal(modeAfterRequest(true, true), "fullscreen");
     assert.equal(modeAfterRequest(true, false), "maximized");
+  });
+
+  await check("boardContainerClasses: relative and fixed are mutually exclusive, by mode (Codex review round 2 - both on the same element meant .relative always won)", () => {
+    const classesOf = (s: string) => new Set(s.split(/\s+/).filter(Boolean));
+    for (const mode of ["idle", "fullscreen", "maximized"] as const) {
+      const classes = classesOf(boardContainerClasses(mode));
+      const hasRelative = classes.has("relative");
+      const hasFixed = classes.has("fixed");
+      assert.ok(hasRelative !== hasFixed, `${mode}: exactly one of relative/fixed, never both or neither (got ${[...classes].join(" ")})`);
+    }
+    const idle = classesOf(boardContainerClasses("idle"));
+    const fullscreen = classesOf(boardContainerClasses("fullscreen"));
+    const maximized = classesOf(boardContainerClasses("maximized"));
+    assert.deepEqual(idle, fullscreen, "idle and fullscreen size the same way: the real Fullscreen API's own UA rule covers the viewport, no CSS of ours needed");
+    assert.ok(idle.has("relative") && idle.has("h-[70vh]"), "idle/fullscreen: the normal, page-sized box");
+    assert.ok(maximized.has("fixed") && maximized.has("inset-0") && !maximized.has("h-[70vh]"), "maximized: the CSS-only fallback actually covers the viewport");
+    for (const classes of [idle, maximized]) assert.ok(classes.has("bg-bg-deep"), "the board colour is never lost either way");
   });
 
   // -- the component itself ------------------------------------------------

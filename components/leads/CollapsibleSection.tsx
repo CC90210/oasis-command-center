@@ -13,6 +13,15 @@
  * The `collapsedPreview` slot lets the caller show a compact one-line
  * summary while collapsed — name+company+email tag for the contact
  * band, for instance.
+ *
+ * `keepMounted` (Codex review round 2, 2026-10-10): default false unmounts
+ * `children` while collapsed (the pipeline drawer's own form/band hold
+ * nothing worth keeping once hidden). A caller whose children hold state
+ * that must survive a collapse - the Oasis Whiteboard's canvas and undo
+ * history, a Tools card's in-progress form and poll timers
+ * (app/founders/marketing/tools/page.tsx) - passes `keepMounted` instead:
+ * `children` stay in the tree always, hidden with the `hidden` attribute
+ * (display:none), so React never unmounts them on a collapse/reopen.
  */
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -24,6 +33,7 @@ export function CollapsibleSection({
   storageKey,
   defaultCollapsed = true,
   collapsedPreview,
+  keepMounted = false,
   children,
 }: {
   title: string;
@@ -31,6 +41,7 @@ export function CollapsibleSection({
   storageKey?: string;
   defaultCollapsed?: boolean;
   collapsedPreview?: ReactNode;
+  keepMounted?: boolean;
   children: ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState<boolean | null>(null);
@@ -93,8 +104,12 @@ export function CollapsibleSection({
           )}
         </div>
       </button>
-      {!isCollapsed && (
-        <div className="border-t border-bg-border p-5">{children}</div>
+      {keepMounted ? (
+        <div className="border-t border-bg-border p-5" hidden={isCollapsed}>
+          {children}
+        </div>
+      ) : (
+        !isCollapsed && <div className="border-t border-bg-border p-5">{children}</div>
       )}
     </section>
   );

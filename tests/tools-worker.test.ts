@@ -51,6 +51,7 @@ async function main() {
   console.log("tools worker:");
   const db = await setupToolsDatabase();
   const { handleToolRun, handleToolJobs } = await import("../lib/tools/session-handlers");
+  const { modelBudgetMs } = await import("../lib/tools/worker/ai");
   const { resolveToolsViewer } = await import("../lib/tools/access");
   const { fetchFollowing, htmlToText } = await import("../lib/tools/worker/learn-from-link");
   const { INJECTION_GUARD } = await import("../lib/llm-input-boundary");
@@ -114,12 +115,29 @@ async function main() {
     return { fetchPage, asked };
   }
 
-  const deps = (ai = fakeAi("{}").deps, fetchPage?: (u: URL) => Promise<PageAnswer>, d: Client = db) => ({
+  const deps = (ai = fakeAi("{}").deps, fetchPage?: (u: URL) => Promise<PageAnswer>, d: Client = db, now: () => Date = () => new Date()) => ({
     db: d,
-    now: () => new Date(),
+    now,
     viewer: resolveToolsViewer,
     worker: { ai, fetchPage },
   });
+
+  /**
+   * A `now()` whose FIRST call (requestStartedAt, captured once at the top of
+   * handleToolRun) is already `secondsAgo` in the past; every later call
+   * (job timestamps) is the real clock. Simulates a slow pre-model phase
+   * without the test actually waiting that long.
+   */
+  function backdatedNow(secondsAgo: number): () => Date {
+    let first = true;
+    return () => {
+      if (first) {
+        first = false;
+        return new Date(Date.now() - secondsAgo * 1000);
+      }
+      return new Date();
+    };
+  }
   const runReq = (tool: string, input: unknown, key: string = randomUUID()) =>
     new Request("https://oasisai.work/api/tools/run", {
       method: "POST",
@@ -225,6 +243,27 @@ async function main() {
     const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));
     assert.equal(j.status, "done", JSON.stringify(j));
   });
+
+  await check("modelBudgetMs: never more than the model's own cap, shrinks with elapsed time, floors at 0 (pure)", () => {
+    const start = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000);
+    assert.equal(modelBudgetMs(start(0)), 55_000, "nothing elapsed: the full 55 s cap");
+    assert.equal(modelBudgetMs(start(10)), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
+    assert.equal(modelBudgetMs(start(56)), 0, "almost the whole 60 s request budget already spent: no time left");
+    assert.equal(modelBudgetMs(start(999)), 0, "floors at 0, never negative");
+  });
+
+  await check(
+    "a slow pre-model phase shrinks the model's own budget against the WHOLE request: too little left, and the run fails fast with the honest timeout, never stuck running",
+    async () => {
+      const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" })); // would succeed, given the time
+      const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps, undefined, db, backdatedNow(56))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "ai_timeout", "The AI account took too long to answer; nothing was saved. Try a shorter post or try again."],
+      );
+      assert.equal(ai.seen.calls.length, 0, "no model call was even attempted: no time left to answer AND still record the failure");
+    },
+  );
 
   // -- Learn from a link ----------------------------------------------------------------
   const ARTICLE_HTML = (title: string) =>
@@ -381,6 +420,47 @@ async function main() {
     assert.deepEqual([stillRefused.status, stillRefused.body.error], [404, "not_found"]);
     await login(USERS.cc);
   });
+
+  await check(
+    "the operator check reads the SESSION's own email, never user_profiles.email: a profile whose stored email is the alias, with no platform_operators row, is still refused",
+    async () => {
+      // The squat lib/platform-operator.ts's own doc comment names: an OASIS
+      // owner row whose user_profiles.email COLUMN happens to be the alias
+      // string, but whose real authenticated session is someone else
+      // entirely (not an alias, not on the operator domain, no
+      // platform_operators row). The founders gate still admits them (an
+      // OASIS owner is a founder); the operator gate must not.
+      const squatterAuthId = "0e000000-0000-4000-8000-00000000a11a";
+      const stamp = new Date().toISOString();
+      // The REAL auth identity (what verifySessionAgainstDb actually trusts,
+      // lib/turso-auth.ts: it reads _supabase_auth_users.email, never the
+      // signed cookie's own email field) is the attacker's own address.
+      await db.execute({
+        sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`,
+        args: [squatterAuthId, "squatter@attacker.test"],
+      });
+      // The SPOOFED column: an OASIS owner profile whose user_profiles.email
+      // the squatter set to the alias string - the exact squat
+      // lib/platform-operator.ts's own doc comment names.
+      await db.execute({
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, joined_at, updated_at)
+              VALUES ('p-squatter-alias-email', ?, ?, ?, 'owner', 1, ?, ?, ?)`,
+        args: [squatterAuthId, "conaugh@oasisai.work", OASIS, stamp, stamp, stamp],
+      });
+      await login({ id: squatterAuthId, email: "squatter@attacker.test" });
+      // Prove the founders/viewer gate ADMITS this session (an OASIS owner
+      // row) before proving the operator check refuses it specifically - a
+      // tool with no operatorOnly flag must still work for them.
+      const passesFoundersGate = jobOf(await run("repurpose_post", { post: POST }, deps()));
+      assert.equal(passesFoundersGate.status, "failed", "reaches the run (a non-operator tool is not refused outright)");
+      assert.notEqual(passesFoundersGate.error_code, "not_found" as unknown, "sanity: this is a job outcome, not a gate refusal");
+      const refusedRun = await answerOf(await handleToolRun(runReq("learn_from_link", { url: "https://example.com/squat-attempt" }), deps()));
+      assert.deepEqual([refusedRun.status, refusedRun.body.error], [404, "not_found"], "a spoofed profile email never passes the operator check");
+      const refusedJobs = await answerOf(await handleToolJobs(jobsReq("tool=learn_from_link"), deps()));
+      assert.deepEqual([refusedJobs.status, refusedJobs.body.error], [404, "not_found"]);
+      await login(USERS.cc);
+    },
+  );
 
   await check("outside the gate (a sales rep, signed out): 404 not_found on run and jobs, nothing written", async () => {
     const before = Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs"));

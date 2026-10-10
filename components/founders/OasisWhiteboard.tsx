@@ -35,7 +35,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MAX_SIZE, MIN_SIZE, PALETTE } from "@/components/founders/whiteboard-model";
-import { isPresenting, modeAfterRequest, presentButtonLabel, type PresentMode } from "@/components/founders/whiteboard-present";
+import { boardContainerClasses, isPresenting, modeAfterRequest, presentButtonLabel, type PresentMode } from "@/components/founders/whiteboard-present";
 import {
   INITIAL_STATE,
   mountWhiteboard,
@@ -327,12 +327,7 @@ export function OasisWhiteboard() {
   return (
     <div className="flex flex-col gap-3">
       <WhiteboardToolbar ui={ui} actions={actions} presentMode={presentMode} />
-      <div
-        ref={containerRef}
-        className={`relative w-full overflow-hidden border-bg-border bg-bg-deep ${
-          presentMode === "maximized" ? "fixed inset-0 z-50 h-screen w-screen rounded-none border-0" : "h-[70vh] min-h-[420px] rounded-2xl border"
-        }`}
-      >
+      <div ref={containerRef} className={boardContainerClasses(presentMode)}>
         <canvas
           ref={canvasRef}
           role="img"

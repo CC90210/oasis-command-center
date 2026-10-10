@@ -10,7 +10,7 @@
 // A module, not a global script, so its `main` cannot collide under tsc.
 export {};
 
-type Case = { id: string; defaultCollapsed: boolean };
+type Case = { id: string; defaultCollapsed: boolean; keepMounted?: boolean };
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -33,6 +33,7 @@ async function main() {
       React.createElement(CollapsibleSection, {
         title: "Demo",
         defaultCollapsed: c.defaultCollapsed,
+        keepMounted: c.keepMounted ?? false,
         children: React.createElement("p", null, "the body is here"),
       }),
     );

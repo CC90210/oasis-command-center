@@ -26,6 +26,8 @@ export type WorkerContext = {
   /** Who a written row names as its author (the person's email, else their profile). */
   contributedBy: string;
   now: () => Date;
+  /** When THIS REQUEST started (set once in session-handlers.ts), not per-call: lib/tools/worker/ai.ts modelBudgetMs budgets the model call against what is left of the request, not a flat timer of its own. */
+  requestStartedAt: Date;
   /** Tests inject these; production uses the real AI account path and fetch. */
   ai?: ToolModelDeps;
   fetchPage?: PageFetch;
@@ -39,6 +41,10 @@ export type WorkerExecutor = (input: Record<string, unknown>, ctx: WorkerContext
 
 export const WORKER_EXECUTORS: Readonly<Record<string, WorkerExecutor>> = {
   repurpose_post: (input, ctx) =>
-    runRepurposePost({ post: String(input.post ?? "") }, { tenantId: ctx.tenantId, userId: ctx.userId, jobId: ctx.jobId }, ctx.ai),
+    runRepurposePost(
+      { post: String(input.post ?? "") },
+      { tenantId: ctx.tenantId, userId: ctx.userId, jobId: ctx.jobId, requestStartedAt: ctx.requestStartedAt },
+      ctx.ai,
+    ),
   learn_from_link: (input, ctx) => runLearnFromLink(input as unknown as LearnInput, ctx),
 };

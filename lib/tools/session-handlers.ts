@@ -24,6 +24,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { getSessionUser } from "@/lib/supabase-server";
 import { SWEEP_ERROR_LINES } from "@/lib/tools/errors";
 import { toolByKey, type ToolDef } from "@/lib/tools/registry";
 import type { ToolsViewer } from "@/lib/tools/access";
@@ -69,15 +70,32 @@ const notFound = () => json(404, { ok: false, error: "not_found" });
 const notSetUp = () => json(503, { ok: false, error: "not_set_up", message: "Tools are not set up yet." });
 
 /**
- * True when `tool` is operatorOnly (lib/tools/registry.ts) and `viewer` is not
- * a verified platform operator (lib/platform-operator.ts - auth-user-verified,
- * never an email string). A founder who passed the Toolkit's own gate above is
- * refused here just the same: operatorOnly means OASIS operators, not every
- * founder of the workspace an operator happens to also run.
+ * True when `tool` is operatorOnly (lib/tools/registry.ts) and the signed-in
+ * person is not a verified platform operator (lib/platform-operator.ts -
+ * auth-user-verified, never an email string). A founder who passed the
+ * Toolkit's own gate above is refused here just the same: operatorOnly means
+ * OASIS operators, not every founder of the workspace an operator happens to
+ * also run.
+ *
+ * DELIBERATELY NOT `viewer.email` (Codex review round 2, 2026-10-10):
+ * resolveToolsViewer's email prefers the FOUNDER row's `user_profiles.email`,
+ * a column its own owner can edit. lib/platform-operator.ts's own doc
+ * comment forbids exactly that - "NEVER a user_profiles.email: that is a
+ * column, and 'set my profile email to an alias' is the same squat as
+ * registering one." This reads getSessionUser() itself (the signed SESSION's
+ * own id and email, the same source app/admin/agent-training/page.tsx's
+ * requireOperator() and app/api/event-feed/route.ts's isPlatformOperatorForAuthUser
+ * call use), never the viewer object the founders gate already resolved.
+ * A session that cannot be read is refused, not assumed absent.
  */
-async function refusedToNonOperator(tool: Pick<ToolDef, "operatorOnly">, viewer: ToolsViewer): Promise<boolean> {
+async function refusedToNonOperator(tool: Pick<ToolDef, "operatorOnly">): Promise<boolean> {
   if (!tool.operatorOnly) return false;
-  const check = await resolvePlatformOperatorForAuthUser(viewer.userId, viewer.email);
+  const user = await getSessionUser().catch((err) => {
+    console.error("[tools.operator_gate] session read failed", err instanceof Error ? err.message : String(err));
+    return null;
+  });
+  if (!user?.id) return true;
+  const check = await resolvePlatformOperatorForAuthUser(user.id, user.email);
   return !check.operator;
 }
 
@@ -94,6 +112,10 @@ async function sweepFor(deps: SessionDeps, tenantId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function handleToolRun(req: Request, deps: SessionDeps): Promise<Response> {
+  // Captured before anything else: the model call's own budget (lib/tools/worker/ai.ts
+  // modelBudgetMs) is counted against the WHOLE request from this instant, not
+  // from whenever the executor happens to reach the model.
+  const requestStartedAt = deps.now();
   const viewer = await deps.viewer();
   if (!viewer) return notFound();
 
@@ -109,7 +131,7 @@ export async function handleToolRun(req: Request, deps: SessionDeps): Promise<Re
   if (!(await toolTablesInstalled(deps.db))) return notSetUp();
   const tool = toolByKey(body.tool);
   if (!tool) return json(422, { ok: false, error: "unknown_tool" });
-  if (await refusedToNonOperator(tool, viewer)) return notFound();
+  if (await refusedToNonOperator(tool)) return notFound();
   const key = body.idempotency_key;
   if (typeof key !== "string" || !UUID_V4.test(key)) {
     return json(422, { ok: false, error: "invalid_input", field: "idempotency_key", code: "invalid" });
@@ -166,7 +188,7 @@ export async function handleToolRun(req: Request, deps: SessionDeps): Promise<Re
   }
   if (tool.runsOn === "runner") return json(200, { ok: true, job: jobView((await getJob(deps.db, tenantId, jobId)) as ToolJob) });
 
-  await runWorker(tool, v.value, jobId, viewer, deps);
+  await runWorker(tool, v.value, jobId, viewer, deps, requestStartedAt);
   const job = await getJob(deps.db, tenantId, jobId);
   return json(200, { ok: true, job: job ? jobView(job) : null });
 }
@@ -185,7 +207,14 @@ async function reuseInflight(db: Client, tenantId: string, dedupeKey: string | n
 }
 
 /** Run a worker tool to its end, inside this request. Every path leaves the run done or failed. */
-async function runWorker(tool: ToolDef, input: Record<string, unknown>, jobId: string, viewer: ToolsViewer, deps: SessionDeps): Promise<void> {
+async function runWorker(
+  tool: ToolDef,
+  input: Record<string, unknown>,
+  jobId: string,
+  viewer: ToolsViewer,
+  deps: SessionDeps,
+  requestStartedAt: Date,
+): Promise<void> {
   let outcome: WorkerResult;
   try {
     const { WORKER_EXECUTORS } = await import("@/lib/tools/worker");
@@ -198,6 +227,7 @@ async function runWorker(tool: ToolDef, input: Record<string, unknown>, jobId: s
       jobId,
       contributedBy: viewer.email || `profile:${viewer.profileId}`,
       now: deps.now,
+      requestStartedAt,
       ai: deps.worker?.ai,
       fetchPage: deps.worker?.fetchPage,
     });
@@ -236,12 +266,12 @@ export async function handleToolJobs(req: Request, deps: SessionDeps): Promise<R
     const job = await getJob(deps.db, viewer.tenantId, id);
     if (!job) return notFound();
     const jobTool = toolByKey(job.toolKey);
-    if (jobTool && (await refusedToNonOperator(jobTool, viewer))) return notFound();
+    if (jobTool && (await refusedToNonOperator(jobTool))) return notFound();
     return json(200, { ok: true, job: jobView(job) });
   }
   const tool = toolByKey(toolParam);
   if (!tool) return json(422, { ok: false, error: "unknown_tool" });
-  if (await refusedToNonOperator(tool, viewer)) return notFound();
+  if (await refusedToNonOperator(tool)) return notFound();
   const rawLimit = Number(url.searchParams.get("limit") ?? DEFAULT_LIST);
   const limit = Number.isInteger(rawLimit) && rawLimit >= 1 ? Math.min(rawLimit, MAX_LIST) : DEFAULT_LIST;
   const jobs = await listJobs(deps.db, viewer.tenantId, tool.key, limit);

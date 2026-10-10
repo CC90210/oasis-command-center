@@ -6,10 +6,17 @@
  *
  *   1. CollapsibleSection's own server markup, for a few prop combinations:
  *      aria-expanded reflects the open/closed state, children are drawn ONLY
- *      when open (not merely hidden with CSS), and the toggle is a real
- *      <button type="button"> - keyboard-operable by construction (Enter and
- *      Space are the browser's own default activation on a button; this file
- *      adds nothing for that).
+ *      when open for the default (keepMounted=false) case (not merely hidden
+ *      with CSS), the toggle is a real <button type="button"> -
+ *      keyboard-operable by construction (Enter and Space are the browser's
+ *      own default activation on a button; this file adds nothing for that)
+ *      - and for `keepMounted` (Codex review round 2, 2026-10-10: collapsing
+ *      the Whiteboard must never unmount its canvas), the children stay IN
+ *      THE MARKUP even while closed, only marked `hidden`, so React's
+ *      reconciler never has a reason to unmount them on a collapse/reopen -
+ *      that "same instance survives" claim needs a real browser to run a
+ *      live reconciliation and is not re-proven here; this file proves the
+ *      structural precondition (children never leave the tree).
  *   2. The real Content Tools page (app/founders/marketing/tools/page.tsx),
  *      through the real founder gate: it wires exactly two
  *      CollapsibleSection elements, "Tools" and "Whiteboard", each with its
@@ -37,7 +44,7 @@ import { USERS, check, finish, login, setupToolsDatabase } from "./_tools-harnes
 
 const root = join(__dirname, "..");
 
-function renderMarkup(cases: Array<{ id: string; defaultCollapsed: boolean }>): Record<string, string> {
+function renderMarkup(cases: Array<{ id: string; defaultCollapsed: boolean; keepMounted?: boolean }>): Record<string, string> {
   const r = spawnSync(process.execPath, ["--import", "tsx", "tests/content-tools-collapsible.render.ts"], {
     cwd: root,
     input: JSON.stringify({ cases }),
@@ -62,11 +69,21 @@ async function main() {
     const m = renderMarkup([
       { id: "open", defaultCollapsed: false },
       { id: "closed", defaultCollapsed: true },
+      { id: "closedKept", defaultCollapsed: true, keepMounted: true },
+      { id: "openKept", defaultCollapsed: false, keepMounted: true },
     ]);
     assert.match(m.open, /<button type="button"[^>]*aria-expanded="true"/, "open: a real button, aria-expanded true");
     assert.match(m.closed, /<button type="button"[^>]*aria-expanded="false"/, "closed: aria-expanded false");
     assert.match(m.open, /the body is here/, "open: the children are drawn");
-    assert.doesNotMatch(m.closed, /the body is here/, "closed: the children are not drawn at all, not merely hidden");
+    assert.doesNotMatch(m.closed, /the body is here/, "closed, default: the children are not drawn at all, not merely hidden");
+
+    // keepMounted: closed still carries the children in the markup (hidden,
+    // not removed) - the structural guarantee that a real reconciler never
+    // unmounts them on a collapse/reopen.
+    assert.match(m.closedKept, /the body is here/, "closed, keepMounted: the children are still IN the markup");
+    assert.match(m.closedKept, /<div[^>]*\bhidden=""[^>]*>\s*<p>\s*the body is here/, "closed, keepMounted: the wrapper carries the hidden attribute");
+    assert.match(m.openKept, /the body is here/, "open, keepMounted: the children are drawn");
+    assert.doesNotMatch(m.openKept, /\bhidden=""/, "open, keepMounted: not hidden");
   });
 
   await check("the Content Tools page wires Tools and Whiteboard as two independent, open-by-default disclosures", async () => {
@@ -77,12 +94,12 @@ async function main() {
     const tree = await Page();
     const sections = nodes(tree).filter((n) => n.type === CollapsibleSection);
     assert.deepEqual(
-      sections.map((s) => [s.props.title, s.props.storageKey, s.props.defaultCollapsed]),
+      sections.map((s) => [s.props.title, s.props.storageKey, s.props.defaultCollapsed, s.props.keepMounted]),
       [
-        ["Tools", "content-tools:tools", false],
-        ["Whiteboard", "content-tools:whiteboard", false],
+        ["Tools", "content-tools:tools", false, true],
+        ["Whiteboard", "content-tools:whiteboard", false, true],
       ],
-      "two sections, each its own storage key, both open by default",
+      "two sections, each its own storage key, both open by default, both keepMounted (neither's state may be destroyed by a collapse)",
     );
   });
 

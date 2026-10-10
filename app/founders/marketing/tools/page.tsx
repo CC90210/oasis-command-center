@@ -19,7 +19,13 @@
  * CollapsibleSection.tsx: a disclosure button with aria-expanded, keyboard-
  * operable because it is a real <button>, open/closed remembered per browser
  * via localStorage) - open by default, since that was this page's behaviour
- * before 2026-10-10.
+ * before 2026-10-10. Both also pass `keepMounted` (Codex review round 2,
+ * 2026-10-10): collapsing must never unmount the Whiteboard (its canvas and
+ * undo history live only in whiteboard-surface.ts's closures, not in React
+ * state - an unmount is permanent data loss) or the Tools cards (an
+ * in-progress "Repurpose a post" draft, a card's poll timers while a run is
+ * in flight). `keepMounted` hides the closed section with the `hidden`
+ * attribute instead of removing it from the tree.
  *
  * The Tools section (components/tools/ToolsSection.tsx: Repurpose a post,
  * Download a video while the computer that runs downloads is on) sits above
@@ -48,10 +54,10 @@ export default async function ContentToolsPage() {
 
   return (
     <PageFrame title="Content Tools">
-      <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false}>
+      <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false} keepMounted>
         <ToolsSection tenantId={founder.tenantId} showCodes showHeading={false} className="" />
       </CollapsibleSection>
-      <CollapsibleSection title="Whiteboard" storageKey="content-tools:whiteboard" defaultCollapsed={false}>
+      <CollapsibleSection title="Whiteboard" storageKey="content-tools:whiteboard" defaultCollapsed={false} keepMounted>
         <div className="space-y-3">
           <p className="px-1 text-[13px] leading-5 text-fg-muted">
             Sketch ideas live on a Google Meet call, from a computer or a phone. The board is not saved when you leave this page: Download keeps a picture of it.
