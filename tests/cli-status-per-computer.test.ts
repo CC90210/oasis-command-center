@@ -175,6 +175,29 @@ async function main() {
     assert.equal(((await readStatus()).machines as unknown[]).length, 2);
   });
 
+  await check("probe 'unsupported' (Google ended Gemini CLI on a personal sign-in) is its own finished state, per computer", async () => {
+    const { cliStatusState, unsupportedProviders, CLI_STATE_LABEL } = await import("../lib/bridge-cli-status");
+    const REFUSED = providers(provider(true, true, "2.1.270"), provider(true, true, "codex-cli 0.146.0"), provider(true, false, null, "unsupported"));
+    assert.equal((await ping("win-token", REFUSED)).status, 200);
+    const body = await readStatus();
+    assert.equal(body.ok, true, JSON.stringify(body));
+    const win = machinesOfBody(body as never).find((m) => m.id === WIN);
+    assert.ok(win);
+    const g = win.data.gemini;
+    assert.equal(cliStatusState(g), "unsupported");
+    assert.equal(g.checked, true, "a verdict, not an unfinished check");
+    assert.notEqual(CLI_STATE_LABEL[cliStatusState(g)], CLI_STATE_LABEL.needs_sign_in);
+    assert.equal(cliStatusState(win.data.claude), "ready", "the other apps are untouched");
+    // The runner strip and the panel say it in their own words; never "Needs sign-in" / "not confirmed" for it.
+    const runner = describeRunner({ warm: null, cli: { status: 200, body: body as never } }).tools;
+    assert.match(runner, /CCPC \(Windows\): .*Not supported on this sign-in: Gemini/);
+    assert.doesNotMatch(runner.split("|").find((p) => p.includes("CCPC")) ?? "", /Needs sign-in|not confirmed/);
+    // Refused on the only computer that has it: listed. The Mac still has it unconfirmed, so a Mac that is not refused un-lists it.
+    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never).filter((m) => m.id === WIN)), ["gemini"]);
+    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never)), [], "the Mac's Gemini is installed and not refused");
+    await ping("win-token", READY);
+  });
+
   await check("a report with no providers writes nothing and says so", async () => {
     const res = await ping("win-token", null);
     assert.equal(res.status, 503);

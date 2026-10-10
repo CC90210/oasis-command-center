@@ -283,7 +283,7 @@ export async function SettingsContent({
           subtitle={
             tenant?.name
               ? `Editing the ${tenant.name} tenant. Switch tenants to manage a different one — integrations + creds + team are all per-tenant.`
-              : "Profile, AI setup, business app keys, team controls, and read-only integration health."
+              : "Profile, AI brain, business app keys, team controls, and read-only integration health."
           }
         />
       )}
@@ -447,32 +447,30 @@ export async function SettingsContent({
               subtitle="One choice for every department, Slack mention and the coding harness: an AI account (API key), an app on your paired computer (Claude Code, Codex, Gemini CLI), or a local model there."
             >
               <SafeBoundary label="What powers your agents">
-                <AgentEnginePanel />
-              </SafeBoundary>
-            </SettingsSection>
-          )}
-
-          {show("ai") && (
-            <SettingsSection
-              id="providers"
-              defaultOpen={focused}
-              title="AI setup"
-              subtitle={
-                canManageTenant
-                  ? "Your AI accounts: connect a key, then pick its model. Your agents use it when What powers your agents is an AI account, and as the fallback when the paired computer can't be reached. OpenRouter is the easiest (one key, many models); Anthropic, OpenAI and Google are the per-vendor alternatives."
-                  : "The team's AI account and model. An owner or admin connects it and picks the model."
-              }
-            >
-              <SafeBoundary label="AI provider accounts">
-                <ProviderAccountsCard
-                  connectedServices={connectedAiSet}
-                  personalServices={personalAiSet}
-                  bridgeOnline={bridgeOnline}
-                  canManageTeam={canManageTenant}
-                  canInstallBridge={isOperator}
-                  brain={aiBrain}
-                  accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
-                />
+                {/* The AI account (connect / replace / remove a key, the model,
+                    Test) lives INSIDE this panel, where its choice is made: the
+                    separate "AI setup" section that repeated the engine choice
+                    was removed 2026-10-10 (CC). The panel anchors it as
+                    id="providers", so every "Connect an AI account" link
+                    (lib/setup-links.ts ai_account) still lands on it. */}
+                <AgentEnginePanel>
+                  <div
+                    id="providers"
+                    className="scroll-mt-24"
+                  >
+                  <SafeBoundary label="AI provider accounts">
+                    <ProviderAccountsCard
+                      connectedServices={connectedAiSet}
+                      personalServices={personalAiSet}
+                      bridgeOnline={bridgeOnline}
+                      canManageTeam={canManageTenant}
+                      canInstallBridge={isOperator}
+                      brain={aiBrain}
+                      accountIsTheEngine={agentEngine === null || agentEngine.kind === "api"}
+                    />
+                  </SafeBoundary>
+                  </div>
+                </AgentEnginePanel>
               </SafeBoundary>
             </SettingsSection>
           )}
@@ -757,7 +755,7 @@ const PREVIEW_SECTIONS: { id?: string; title: string; subtitle: string; empty: s
   },
   {
     id: "providers",
-    title: "AI setup",
+    title: "AI account",
     subtitle: "AI provider account(s) connected to this tenant. Powers chat + agent reasoning for everyone in the tenant.",
     empty: "No AI providers connected to this tenant yet. The tenant operator connects them from here once signed in.",
   },

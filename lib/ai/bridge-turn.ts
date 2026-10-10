@@ -199,12 +199,22 @@ export async function bridgeResolutionForSession(tenantId: string, authorize?: B
   }
 }
 
-/** How long the engine Test waits: a CLI's first answer cold-starts the app (often 20-60 s). */
-export const BRIDGE_TEST_TIMEOUT_MS = 150_000;
+/**
+ * How long the engine Test / Save probe waits for ONE short answer. A CLI's first
+ * answer cold-starts the app (often 20-60 s), so this is generous, but it is a
+ * "short answer" check: past it the app is not answering and the person is told
+ * so. The Settings panel's own deadline (components/settings/agent-engine-client.ts
+ * ENGINE_CLIENT_DEADLINE_MS) sits a little above it. A department turn keeps its
+ * own, longer budget (BRIDGE_TURN_TIMEOUT_MS).
+ */
+export const BRIDGE_TEST_TIMEOUT_MS = 75_000;
 
 export type BridgeTestResult =
   | { ok: true; latency_ms: number; reply: string }
   | { ok: false; code: string; message: string };
+
+/** The code of a probe the person stopped (Cancel, or the page closed): nothing may be saved from it. */
+export const BRIDGE_TEST_CANCELLED = "cancelled";
 
 /**
  * Settings > AI brain's Test for an engine on the paired computer: ONE short
@@ -220,6 +230,8 @@ export async function testBridgeEngine(input: {
   ask: string;
   maxTokens: number;
   timeoutMs?: number;
+  /** The request's own signal: when the person cancels (or leaves), the probe stops and reports "cancelled". */
+  signal?: AbortSignal;
   stream?: typeof streamBridgeTurn;
   /** OASIS: the test answers in the Chief of Staff's harness, as a real turn would. */
   harness?: { agent: string; department: string } | null;
@@ -247,15 +259,29 @@ export async function testBridgeEngine(input: {
     return "read" as const;
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   const waited = await Promise.race([
     read,
     new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), input.timeoutMs ?? BRIDGE_TEST_TIMEOUT_MS);
     }),
-  ]).finally(() => clearTimeout(timer));
+    new Promise<"cancelled">((resolve) => {
+      if (!input.signal) return;
+      onAbort = () => resolve("cancelled");
+      if (input.signal.aborted) onAbort();
+      else input.signal.addEventListener("abort", onAbort, { once: true });
+    }),
+  ]).finally(() => {
+    clearTimeout(timer);
+    if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+  });
+  if (waited === "cancelled") {
+    void it.return(undefined).catch(() => undefined);
+    return { ok: false, code: BRIDGE_TEST_CANCELLED, message: "Stopped before the check finished. Nothing was changed." };
+  }
   if (waited === "timeout") {
     void it.return(undefined).catch(() => undefined);
-    return { ok: false, code: "timeout", message: "The app on your paired computer did not finish a short answer in time. Try again in a minute." };
+    return { ok: false, code: "timeout", message: "The app on your paired computer didn't answer in time. Try again, or pick another app." };
   }
   if (got.failure !== null) {
     const { classifyStreamError, failureCopy } = await import("@/lib/os/channel/outcome");

@@ -20,9 +20,10 @@
  * plainly whether it answers.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Cloud, Cpu, HardDrive, Loader2 } from "lucide-react";
+import { CLI_STATE_LABEL, cliUnsupportedDetail } from "@/lib/bridge-cli-status";
 import { PROVIDER_LABEL, type Provider } from "@/lib/providers";
 import {
   CLI_ENGINES,
@@ -34,14 +35,37 @@ import {
   type AgentEngineChoice,
   type CliEngine,
 } from "@/lib/ai/agent-engine";
-import { readEngine, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
+import { ENGINE_SERVER_WINDOW_MS, readEngine, readUnsupportedApps, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
 
 const PROVIDERS: Provider[] = ["anthropic", "openai", "google", "openrouter"];
 
 type Kind = AgentEngineChoice["kind"];
+
+function engineName(c: AgentEngineChoice): string {
+  return c.kind === "cli" ? CLI_ENGINE_LABEL[c.cli] : c.kind === "local" ? c.model : "Your AI account";
+}
 type Note = { ok: boolean; text: string } | null;
 
-export function AgentEnginePanel() {
+/**
+ * The AI account (connect, replace or remove a key, the model, Test), inside the
+ * panel where the engine is chosen. The card it wraps carries id="providers"
+ * (SettingsContent), the anchor every "Connect an AI account" link lands on
+ * (lib/setup-links.ts ai_account).
+ */
+function AccountSection({ heading, blurb, children }: { heading: string; blurb?: string; children?: React.ReactNode }) {
+  if (!children) return null;
+  return (
+    <div className="space-y-2 border-t border-hairline pt-3" data-testid="engine-ai-account">
+      <div className="text-sm font-semibold text-fg">{heading}</div>
+      <p className="text-[11px] leading-relaxed text-fg-dim">
+        Connect, replace or remove the API key, pick its model and test it here. {blurb}
+      </p>
+      {children}
+    </div>
+  );
+}
+
+export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const router = useRouter();
   const [state, setState] = useState<EngineState | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
@@ -49,17 +73,31 @@ export function AgentEnginePanel() {
   const [cli, setCli] = useState<CliEngine>("claude");
   const [localModel, setLocalModel] = useState("");
   const [provider, setProvider] = useState<Provider | "">("");
-  const [busy, setBusy] = useState<null | "save" | "test" | "provider">(null);
+  // Two independent busy states, and neither locks the page. A Test or Save
+  // check only disables the Test and Save buttons; switching a provider or
+  // removing a key only disables the provider controls. Radios, the app
+  // picker, the model box and everything else outside this panel stay live
+  // (CC, 2026-10-10: "I couldn't click anything else on the page").
+  const [check, setCheck] = useState<null | "save" | "test">(null);
+  const [providerBusy, setProviderBusy] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const [note, setNote] = useState<Note>(null);
+  const [unsupported, setUnsupported] = useState<CliEngine[]>([]);
+  const stopCheck = useRef<AbortController | null>(null);
+  const lateRead = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  async function load() {
-    const r = await readEngine();
+  async function load(opts: { keepDraft?: boolean; syncProvider?: boolean } = {}) {
+    const [r, refused] = await Promise.all([readEngine(), readUnsupportedApps()]);
+    setUnsupported(refused);
     if (!r.ok) {
-      setReadError(r.message);
+      // A failed refresh after a failed save keeps what is on screen.
+      if (!opts.keepDraft) setReadError(r.message);
       return;
     }
     setReadError(null);
     setState(r.state);
+    if (opts.syncProvider) setProvider(r.state.account?.provider ?? "");
+    if (opts.keepDraft) return;
     setKind(r.state.engine.kind);
     if (r.state.engine.kind === "cli") setCli(r.state.engine.cli);
     if (r.state.engine.kind === "local") setLocalModel(r.state.engine.model);
@@ -68,10 +106,34 @@ export function AgentEnginePanel() {
 
   useEffect(() => {
     void load();
+    // Leaving the page stops a check that is still waiting.
+    return () => {
+      stopCheck.current?.abort();
+      if (lateRead.current) clearTimeout(lateRead.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The seconds a check has been waiting, so a slow app never looks frozen.
+  useEffect(() => {
+    if (check === null) {
+      setElapsed(0);
+      return;
+    }
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [check]);
+
+  // The AI account stays reachable when the engine choice could not be read:
+  // a key is never locked away behind a failed read.
   if (readError) {
-    return <p className="text-sm text-fg-muted">{readError}</p>;
+    return (
+      <div className="space-y-3" data-testid="agent-engine">
+        <p className="text-sm text-fg-muted">{readError}</p>
+        <AccountSection heading="Your AI account">{children}</AccountSection>
+      </div>
+    );
   }
   if (!state) {
     return (
@@ -86,59 +148,101 @@ export function AgentEnginePanel() {
   const current = state.engine;
   const unchanged = draft !== null && JSON.stringify(draft) === JSON.stringify(current);
   const canManage = state.canManage;
+  // An app the vendor refuses on this sign-in: selectable only to show why, never offered a Test or Save.
+  const refused = kind === "cli" && unsupported.includes(cli);
+
+  /** Runs one Test or Save to an end: the result, or a plain sentence. The busy state always clears. */
+  async function runCheck(which: "save" | "test", work: (signal: AbortSignal) => Promise<void>) {
+    const ctl = new AbortController();
+    stopCheck.current = ctl;
+    setCheck(which);
+    setNote(null);
+    try {
+      await work(ctl.signal);
+    } catch {
+      setNote({ ok: false, text: "That couldn't be finished just now. Nothing was changed. Try again in a moment." });
+    } finally {
+      if (stopCheck.current === ctl) stopCheck.current = null;
+      setCheck(null);
+    }
+  }
 
   async function save() {
     if (!draft) return;
-    setBusy("save");
-    setNote(null);
-    const r = await saveEngine(draft);
-    setBusy(null);
-    if (!r.ok) {
-      setNote({ ok: false, text: r.message });
-      return;
-    }
-    // The coding harness reads this same setting (lib/ai/agent-engine.ts harnessRouteFor).
-    setNote({
-      ok: true,
-      text: `Your agents now use ${agentsEngineLine(draft)}.${r.latencyMs !== null ? ` A test answer came back in ${(r.latencyMs / 1000).toFixed(1)} s.` : ""}`,
+    const chosen = draft;
+    await runCheck("save", async (signal) => {
+      const r = await saveEngine(chosen, state?.engineVersion ?? null, undefined, { signal });
+      if (!r.ok) {
+        setNote({ ok: false, text: r.message });
+        // A save whose answer never came may have landed: read what is in use, keeping the pick on screen.
+        await load({ keepDraft: true });
+        // The server may still be finishing its own test: read once more after its window.
+        if (r.stopped) {
+          if (lateRead.current) clearTimeout(lateRead.current);
+          lateRead.current = setTimeout(() => void load({ keepDraft: true }), ENGINE_SERVER_WINDOW_MS);
+        }
+        return;
+      }
+      // The coding harness reads this same setting (lib/ai/agent-engine.ts harnessRouteFor).
+      setNote({
+        ok: true,
+        text: `Your agents now use ${agentsEngineLine(chosen)}.${r.latencyMs !== null ? ` A test answer came back in ${(r.latencyMs / 1000).toFixed(1)} s.` : ""}`,
+      });
+      await load();
+      router.refresh();
     });
-    await load();
-    router.refresh();
   }
 
   async function test() {
     if (!draft || draft.kind === "api") return;
-    setBusy("test");
-    setNote(null);
-    const r = await testEngine(draft);
-    setBusy(null);
-    setNote(r.ok ? { ok: true, text: `It answered in ${(r.latencyMs / 1000).toFixed(1)} s: "${r.reply.slice(0, 160)}"` } : { ok: false, text: r.message });
+    const chosen = draft;
+    await runCheck("test", async (signal) => {
+      const r = await testEngine(chosen, undefined, { signal });
+      // Named, because the pick can change while the test waits.
+      const name = engineName(chosen);
+      setNote(
+        r.ok
+          ? { ok: true, text: `${name} answered in ${(r.latencyMs / 1000).toFixed(1)} s: "${r.reply.slice(0, 160)}"` }
+          : { ok: false, text: `${name}: ${r.message}` },
+      );
+    });
+  }
+
+  function cancelCheck() {
+    stopCheck.current?.abort();
   }
 
   async function moveProvider(next: Provider) {
-    setBusy("provider");
+    setProviderBusy(true);
     setNote(null);
-    const r = await switchProvider(next);
-    setBusy(null);
-    if (!r.ok) {
-      setNote({ ok: false, text: r.message });
-      setProvider(state?.account?.provider ?? "");
-      return;
+    try {
+      const r = await switchProvider(next);
+      if (!r.ok) {
+        setNote({ ok: false, text: r.message });
+        setProvider(state?.account?.provider ?? "");
+        await load({ keepDraft: true, syncProvider: true });
+        return;
+      }
+      setNote({ ok: true, text: `Your AI account is now ${PROVIDER_LABEL[next]}, ${r.label}.` });
+      await load();
+      router.refresh();
+    } finally {
+      setProviderBusy(false);
     }
-    setNote({ ok: true, text: `Your AI account is now ${PROVIDER_LABEL[next]}, ${r.label}.` });
-    await load();
-    router.refresh();
   }
 
   async function forget(p: Provider) {
     if (typeof window !== "undefined" && !window.confirm(`Remove the saved ${PROVIDER_LABEL[p]} key from this workspace?`)) return;
-    setBusy("provider");
+    setProviderBusy(true);
     setNote(null);
-    const r = await removeSavedKey(p);
-    setBusy(null);
-    setNote(r.ok ? { ok: true, text: `The saved ${PROVIDER_LABEL[p]} key was removed.` } : { ok: false, text: r.message });
-    await load();
-    router.refresh();
+    try {
+      const r = await removeSavedKey(p);
+      setNote(r.ok ? { ok: true, text: `The saved ${PROVIDER_LABEL[p]} key was removed.` } : { ok: false, text: r.message });
+      await load(r.ok ? {} : { keepDraft: true, syncProvider: true });
+      router.refresh();
+    } finally {
+      setProviderBusy(false);
+    }
   }
 
   const option = (value: Kind, icon: React.ReactNode, title: string, sub: string) => (
@@ -152,7 +256,7 @@ export function AgentEnginePanel() {
         name="agent-engine"
         value={value}
         checked={kind === value}
-        disabled={!canManage || busy !== null}
+        disabled={!canManage}
         onChange={() => {
           setKind(value);
           setNote(null);
@@ -238,7 +342,7 @@ export function AgentEnginePanel() {
             <select
               id="engine-provider"
               value={provider}
-              disabled={!canManage || busy !== null}
+              disabled={!canManage || providerBusy}
               onChange={(e) => {
                 const next = e.target.value as Provider;
                 setProvider(next);
@@ -257,9 +361,9 @@ export function AgentEnginePanel() {
                 );
               })}
             </select>
-            {busy === "provider" && (
+            {providerBusy && (
               <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
-                <Loader2 className="h-3 w-3 animate-spin" /> Testing a short answer...
+                <Loader2 className="h-3 w-3 animate-spin" /> Switching...
               </span>
             )}
           </div>
@@ -275,7 +379,7 @@ export function AgentEnginePanel() {
                   <span>{PROVIDER_LABEL[p]}: key saved, not in use.</span>
                   <button
                     type="button"
-                    disabled={busy !== null}
+                    disabled={providerBusy}
                     onClick={() => void forget(p)}
                     className="text-fg-dim underline underline-offset-2 hover:text-status-warm disabled:opacity-50"
                   >
@@ -295,7 +399,7 @@ export function AgentEnginePanel() {
                 type="button"
                 role="radio"
                 aria-checked={cli === c}
-                disabled={!canManage || busy !== null}
+                disabled={!canManage}
                 onClick={() => {
                   setCli(c);
                   setNote(null);
@@ -304,10 +408,16 @@ export function AgentEnginePanel() {
                   cli === c ? "border-accent bg-accent/15 text-accent" : "border-bg-border bg-bg-deep/60 text-fg-muted hover:text-fg"
                 }`}
               >
-                {CLI_ENGINE_LABEL[c]}
+                {CLI_ENGINE_LABEL[c]}{" "}
+                {unsupported.includes(c) && <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wider text-status-warm">Not supported</span>}
               </button>
             ))}
           </div>
+          {refused && (
+            <p role="status" className="text-xs leading-relaxed text-status-warm" data-testid="engine-cli-unsupported">
+              <span className="font-semibold">{CLI_STATE_LABEL.unsupported}.</span> {cliUnsupportedDetail(cli)}
+            </p>
+          )}
           <p className="text-[11px] leading-relaxed text-fg-dim">
             Your agents answer through the app&apos;s own sign-in on your paired computer, reached by the OASIS bridge. It answers in
             plan mode: it reads and replies, and is told not to change files for a department reply. When the computer can&apos;t be
@@ -329,7 +439,7 @@ export function AgentEnginePanel() {
                 setLocalModel(e.target.value);
                 setNote(null);
               }}
-              disabled={!canManage || busy !== null}
+              disabled={!canManage}
               placeholder="llama3.3"
               className="input !py-1 !text-xs w-48"
             />
@@ -341,28 +451,45 @@ export function AgentEnginePanel() {
       )}
 
       {canManage ? (
-        <div className="flex flex-wrap items-center gap-2">
-          {kind !== "api" && (
+        <div className="flex flex-wrap items-center gap-2" data-testid="engine-actions">
+          {!refused && kind !== "api" && (
             <button
               type="button"
               onClick={() => void test()}
-              disabled={!draft || busy !== null}
+              disabled={!draft || check !== null}
               className="btn-secondary inline-flex items-center gap-1.5 !py-1.5 !text-xs disabled:opacity-50"
             >
-              {busy === "test" && <Loader2 className="h-3 w-3 animate-spin" />}
-              Test
+              {check === "test" && <Loader2 className="h-3 w-3 animate-spin" />}
+              {check === "test" ? "Testing..." : "Test"}
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={!draft || unchanged || busy !== null}
-            className="btn-primary inline-flex items-center gap-1.5 !py-1.5 !text-xs disabled:opacity-50"
-          >
-            {busy === "save" && <Loader2 className="h-3 w-3 animate-spin" />}
-            {busy === "save" ? "Testing a short answer..." : unchanged ? "In use" : "Use this for my agents"}
-          </button>
-          {kind !== "api" && <span className="text-[11px] text-fg-dim">An app&apos;s first answer can take up to a minute.</span>}
+          {!refused && (
+            <button
+              type="button"
+              onClick={() => void save()}
+              disabled={!draft || unchanged || check !== null || providerBusy}
+              className="btn-primary inline-flex items-center gap-1.5 !py-1.5 !text-xs disabled:opacity-50"
+            >
+              {check === "save" && <Loader2 className="h-3 w-3 animate-spin" />}
+              {check === "save" ? "Testing a short answer..." : unchanged ? "In use" : "Use this for my agents"}
+            </button>
+          )}
+          {check !== null && (
+            <>
+              <span role="status" className="text-[11px] text-fg-muted" data-testid="engine-elapsed">
+                Testing... {elapsed} s. An app&apos;s first answer can take up to a minute.
+              </span>
+              <button
+                type="button"
+                onClick={cancelCheck}
+                className="btn-secondary !py-1.5 !text-xs"
+                data-testid="engine-cancel"
+              >
+                Cancel
+              </button>
+            </>
+          )}
+          {check === null && !refused && kind !== "api" && <span className="text-[11px] text-fg-dim">An app&apos;s first answer can take up to a minute.</span>}
         </div>
       ) : (
         <p className="text-[11px] text-fg-dim">An owner or admin changes what powers your agents.</p>
@@ -373,6 +500,17 @@ export function AgentEnginePanel() {
           {note.text}
         </p>
       )}
+
+      <AccountSection
+        heading={kind === "api" ? "Your AI account" : "Your AI account (the fallback)"}
+        blurb={
+          current.kind === "api"
+            ? "Your agents answer with it."
+            : "Your agents answer with it only when the paired computer can't be reached, and Slack mentions always do."
+        }
+      >
+        {children}
+      </AccountSection>
 
       <p className="text-[11px] leading-relaxed text-fg-dim">
         The coding harness uses this same setting: there is no second picker. On an app, it runs that app on your paired

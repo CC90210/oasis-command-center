@@ -343,7 +343,7 @@ async function main() {
   await check("the engine route: a client workspace can't reach CC's computer, so an app engine is refused before anything is saved", async () => {
     await login(USERS.alpha);
     sent = [];
-    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "claude" } })));
+    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "claude" }, expected_version: null })));
     assert.equal(r.status, 409);
     assert.equal(r.body.error, "bridge_unavailable");
     assert.equal(sent.length, 0, "no request left the server");
@@ -364,7 +364,7 @@ async function main() {
     const shown = await jsonOf(await engineRoute.GET());
     assert.equal(shown.body.workspace, "oasis");
     assert.deepEqual(shown.body.bridge, { reachable: true });
-    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "codex" } })));
+    const r = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "codex" }, expected_version: null })));
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(sent.length, 1);
     assert.equal(sent[0].url, `${BRIDGE}/chat`);
@@ -377,10 +377,80 @@ async function main() {
     assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
     // A test that fails changes nothing.
     answer = () => sse([["error", { code: "cli_not_authenticated", message: "codex: not signed in" }], ["done", {}]]);
-    const bad = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "gemini" } })));
+    const bad = await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "gemini" }, expected_version: null })));
     assert.equal(bad.status, 422);
     assert.match(String(bad.body.message), /nothing was changed\. The AI app on your paired computer could not answer\./);
     assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
+  });
+
+  await check("ONLY THE LATEST CHOICE WINS: a stale save is refused (409), a cancelled one commits nothing, a late one cannot overwrite a newer one", async () => {
+    await login(USERS.cc);
+    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
+    const version = async () => (await jsonOf(await engineRoute.GET())).body.engineVersion as string | null;
+    const v0 = await version();
+    assert.equal(typeof v0, "string", "GET hands the page the choice's version");
+    const put = (engine: unknown, expected: unknown, signal?: AbortSignal) =>
+      engineRoute.PUT(
+        new NextRequest("http://localhost/api/ai/engine", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ engine, expected_version: expected }),
+          signal,
+        }),
+      );
+    // No version at all is refused (the page always sends one).
+    assert.equal((await jsonOf(await engineRoute.PUT(req("/api/ai/engine", "PUT", { engine: { kind: "cli", cli: "claude" } })))).body.error, "invalid_version");
+    // A version that is not current: refused, nothing changes.
+    const stale = await jsonOf(await put({ kind: "cli", cli: "claude" }, "2000-01-01T00:00:00.000Z"));
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.error, "stale_choice");
+    assert.match(String(stale.body.message), /A newer choice was saved/);
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
+    // A request cancelled while its test runs commits nothing, even though the test passed.
+    const ctl = new AbortController();
+    answer = () => {
+      ctl.abort();
+      return bridgeOk("Ready when you are.");
+    };
+    const cancelled = await jsonOf(await put({ kind: "cli", cli: "claude" }, v0, ctl.signal));
+    assert.equal(cancelled.status, 409);
+    assert.equal(cancelled.body.error, "cancelled");
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "codex" });
+    assert.equal(await version(), v0, "the cancelled save left the row alone");
+    // Cancel Gemini at 10 s, pick Claude, save: Claude commits, then the OLD Gemini test finishes and must NOT overwrite it.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    answer = async () => {
+      if (first) {
+        first = false;
+        await gate; // the slow Gemini probe
+      }
+      return bridgeOk("Ready when you are.");
+    };
+    const slow = put({ kind: "cli", cli: "gemini" }, v0);
+    await new Promise((r) => setTimeout(r, 20));
+    const claude = await jsonOf(await put({ kind: "cli", cli: "claude" }, v0));
+    assert.equal(claude.status, 200, JSON.stringify(claude.body));
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
+    release();
+    const late = await jsonOf(await slow);
+    assert.equal(late.status, 409, "the late Gemini save is refused");
+    assert.equal(late.body.error, "stale_choice");
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" }, "Claude stays the choice");
+    // The page that re-reads gets the new version and its save goes through.
+    const v1 = await version();
+    assert.notEqual(v1, v0);
+    answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Ready when you are.") : new Response("unexpected", { status: 599 }));
+    assert.equal((await jsonOf(await put({ kind: "cli", cli: "codex" }, v1))).status, 200);
+    // First-ever save (no row) goes in only while there is still no row.
+    await db.execute({ sql: "DELETE FROM agent_model_config WHERE tenant_id = ? AND agent_key = '__engine__' AND user_id IS NULL", args: [OASIS] });
+    assert.equal(await version(), null);
+    assert.equal((await jsonOf(await put({ kind: "cli", cli: "claude" }, null))).status, 200);
+    assert.equal((await jsonOf(await put({ kind: "cli", cli: "codex" }, null))).body.error, "stale_choice", "a second first-save finds the row there");
+    assert.deepEqual(await store.readAgentEngine(OASIS), { kind: "cli", cli: "claude" });
+    await store.saveAgentEngine(OASIS, { kind: "cli", cli: "codex" });
   });
 
   // -- 2. Department turns run in the department's agent harness -----------------
@@ -522,7 +592,7 @@ async function main() {
     assert.equal(outcome.classifyStreamError((down[0] as { message: string }).message), "bridge_unreachable");
     answer = () => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]);
     const cliErr = await drain();
-    assert.equal(outcome.classifyStreamError((cliErr[0] as { message: string }).message), "cli_failed");
+    assert.equal(outcome.classifyStreamError((cliErr[0] as { message: string }).message), "cli_not_found");
     answer = () => sse([["done", {}]]);
     assert.deepEqual(await drain(), [{ type: "error", message: "empty_reply:empty" }]);
     assert.match(outcome.failureCopy("bridge_unreachable", { canManageAi: true }).sentence, /computer could not be reached/);
@@ -761,7 +831,8 @@ async function main() {
     });
     assert.deepEqual([down.outcome, down.error_code, down.cost_micro_usd], ["error", "bridge_unreachable", 0]);
     const cli = await run(() => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]));
-    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_failed"]);
+    // The bridge names why (cli_error:<code>); a code outcome.ts has a sentence for is kept as the row's code.
+    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_not_found"]);
     const http = await run(() => new Response("no", { status: 503 }));
     assert.deepEqual([http.outcome, http.error_code], ["error", "bridge_unreachable"]);
     const empty = await run(() => sse([["done", { input_tokens: 5, output_tokens: 0 }]]));
@@ -906,7 +977,7 @@ async function main() {
     assert.deepEqual(res, { ok: true, text: "Started." });
     assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex"}']);
     const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.match(src, /\{cs !== "ready" && \(/, "every card that is not ready offers Connect");
+    assert.match(src, /\{cs !== "ready" && cs !== "unsupported" && \(/, "every card that is not ready offers Connect, except one the vendor refuses (signing in again cannot help)");
   });
 
   await check("the coding harness never spins forever: each read has a time limit and says why it failed", async () => {

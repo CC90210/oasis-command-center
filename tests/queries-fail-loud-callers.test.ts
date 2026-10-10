@@ -167,7 +167,9 @@ async function walk(node: unknown, out: string[], client: Recorded[], depth = 0)
     } catch (err) {
       if (CLIENT_ONLY.test((err as Error).message)) {
         client.push({ name: fn.name, props });
-        return;
+        // A client component's children are server-rendered elements it only
+        // lays out (AgentEnginePanel wraps the AI account card): read them too.
+        return walk(props.children, out, client, depth + 1);
       }
       throw err;
     }

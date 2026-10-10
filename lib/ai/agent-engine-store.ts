@@ -84,6 +84,52 @@ export async function isOasisWorkspace(tenantId: string): Promise<boolean> {
   return isOasisSurfaceTenant((data as { slug?: string | null } | null)?.slug ?? null);
 }
 
+/**
+ * The engine row's version: its updated_at, or null when no choice is saved.
+ * The panel reads it with the choice and hands it back on a save, so a save
+ * that finishes late (a cancelled or slow test) cannot overwrite a newer one.
+ * Throws when the read fails.
+ */
+export async function readAgentEngineVersion(tenantId: string): Promise<string | null> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_model_config")
+    .select("updated_at")
+    .eq("tenant_id", tenantId)
+    .is("user_id", null)
+    .eq("agent_key", ENGINE_AGENT_KEY)
+    .maybeSingle();
+  if (error) throw new Error(`agent engine: version read failed: ${error.message}`);
+  const at = (data as { updated_at?: unknown } | null)?.updated_at;
+  return typeof at === "string" && at ? at : null;
+}
+
+/**
+ * Save the choice ONLY IF the engine row is still the version the caller read
+ * (readAgentEngineVersion; null = no row yet). One statement, so a newer choice
+ * saved meanwhile makes this one a no-op: returns false and nothing changes.
+ * Throws when the write fails.
+ */
+export async function saveAgentEngineIfCurrent(tenantId: string, choice: AgentEngineChoice, expectedVersion: string | null): Promise<boolean> {
+  const row = engineRow(choice);
+  const now = new Date().toISOString();
+  const res =
+    expectedVersion === null
+      ? await writeClient().execute({
+          sql:
+            "INSERT INTO agent_model_config (tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)" +
+            " VALUES (?, NULL, ?, ?, ?, NULL, 1, ?)" +
+            " ON CONFLICT (tenant_id, agent_key) WHERE user_id IS NULL DO NOTHING",
+          args: [tenantId, ENGINE_AGENT_KEY, row.provider, row.model, now],
+        })
+      : await writeClient().execute({
+          sql:
+            "UPDATE agent_model_config SET provider = ?, model = ?, encrypted_api_key = NULL, enabled = 1, updated_at = ?" +
+            " WHERE tenant_id = ? AND agent_key = ? AND user_id IS NULL AND updated_at = ?",
+          args: [row.provider, row.model, now, tenantId, ENGINE_AGENT_KEY, expectedVersion],
+        });
+  return res.rowsAffected === 1;
+}
+
 /** Save the choice (one statement, an upsert on the workspace's engine row). Throws when it fails. */
 export async function saveAgentEngine(tenantId: string, choice: AgentEngineChoice): Promise<void> {
   const row = engineRow(choice);
