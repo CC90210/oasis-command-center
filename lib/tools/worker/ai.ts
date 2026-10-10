@@ -158,16 +158,7 @@ export function accountState(account: WorkspaceAiAccount | null): "ready" | "nee
 export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps = defaultToolModelDeps()): Promise<ToolModelResult> {
   const timeoutMs = deps.timeoutMs ?? modelBudgetMs(call.requestStartedAt);
   if (timeoutMs <= 0) {
-    // Whatever ran earlier in this request (account read, budget check, or
-    // for Learn from a link the page fetch) already spent the whole budget:
-    // calling the model now could not answer AND leave time to record the
-    // failure before the route's own maxDuration kills the request. Fail
-    // fast and honestly instead of starting a call nobody will see finish -
-    // request_timeout, NEVER ai_timeout (Codex review round 3, LOW): the AI
-    // account is never contacted on this path, so the card must not say it
-    // "took too long to answer".
-    console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, reason: "no_budget_left_before_model_call" });
-    return { ok: false, code: "request_timeout" };
+    return noBudgetLeft(call, "no_budget_left_before_model_call");
   }
   let account: WorkspaceAiAccount | null;
   try {
@@ -195,6 +186,18 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
   } catch (err) {
     console.error("[tools.ai.budget]", { tenantId: call.tenantId, error: err instanceof Error ? err.message : String(err) });
     return { ok: false, code: AI_USAGE_UNAVAILABLE };
+  }
+
+  // Recomputed, not reused (Codex review round 4, P2): readAccount and
+  // budgetExhaustedBeforeStream above are real round trips (a slow Turso
+  // read has been measured at ~10 s), and racing the stream against the
+  // timeoutMs computed BEFORE them let the total wait outlive the request's
+  // real budget - a stalled model could still leave the job "running" past
+  // the route's own maxDuration, with no failure ever recorded. Same rule as
+  // the check above: too little left, and the model is never called at all.
+  const streamTimeoutMs = deps.timeoutMs ?? modelBudgetMs(call.requestStartedAt);
+  if (streamTimeoutMs <= 0) {
+    return noBudgetLeft(call, "no_budget_left_after_account_read");
   }
 
   // The saved model, unless the registry knows it is gone: then its replacement
@@ -227,11 +230,11 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
           }
         }
       })(),
-      timeoutMs,
+      streamTimeoutMs,
     );
   } catch (err) {
     if (err instanceof ToolModelTimedOut) {
-      console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, afterMs: timeoutMs });
+      console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, afterMs: streamTimeoutMs });
       return { ok: false, code: "ai_timeout" };
     }
     if (err instanceof ToolModelRefusal) return { ok: false, code: err.code };
@@ -242,4 +245,19 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, code: "ai_failed" };
   return { ok: true, text: trimmed, provider: account.provider, model: picked.model };
+}
+
+/**
+ * Whatever ran earlier in this request (account read, budget check, or for
+ * Learn from a link the page fetch) already spent the whole budget: calling
+ * the model now could not answer AND leave time to record the failure
+ * before the route's own maxDuration kills the request. Fail fast and
+ * honestly instead of starting a call nobody will see finish -
+ * request_timeout, NEVER ai_timeout (Codex review round 3, LOW): the AI
+ * account is never contacted on this path, so the card must not say it
+ * "took too long to answer".
+ */
+function noBudgetLeft(call: Pick<ToolModelCall, "tenantId" | "surface">, reason: string): { ok: false; code: string } {
+  console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, reason });
+  return { ok: false, code: "request_timeout" };
 }

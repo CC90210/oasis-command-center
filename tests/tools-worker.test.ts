@@ -103,6 +103,20 @@ async function main() {
     return deps;
   }
 
+  /**
+   * A real (short) account-read delay layered onto a normal successful
+   * `fakeAi`: proves the budget is recomputed AFTER the account/budget
+   * reads, not only once at the top (Codex review round 4, P2). The delay
+   * is real wall-clock time (setTimeout), not a backdated clock, because
+   * that is exactly what the production bug missed - time actually spent
+   * reading the account, between the first budget check and the second.
+   */
+  function slowAccountAi(delayMs: number) {
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }));
+    const readAccount = ai.deps.readAccount;
+    return { deps: { ...ai.deps, readAccount: async (tenantId: string) => { await new Promise((r) => setTimeout(r, delayMs)); return readAccount(tenantId); } }, seen: ai.seen };
+  }
+
   type Page = Partial<PageAnswer> & { status: number };
   function fakeWeb(pages: Record<string, Page>) {
     const asked: string[] = [];
@@ -262,6 +276,24 @@ async function main() {
         ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
       );
       assert.equal(ai.seen.calls.length, 0, "no model call was even attempted: no time left to answer AND still record the failure");
+    },
+  );
+
+  await check(
+    "a slow ACCOUNT READ shrinks the budget too, even when the budget was fine when the request started: recomputed right before the stream, never the stale value from before the account/budget reads (Codex review round 4, P2)",
+    async () => {
+      // The budget is fine at the start (150 ms to spare) - the FIRST check
+      // (lib/tools/worker/ai.ts, before readAccount) lets this through. The
+      // account read then really does take 500 ms of wall-clock time, which
+      // a stale timeout computed before it would never see.
+      const slow = slowAccountAi(500);
+      const j = jobOf(await run("repurpose_post", { post: POST }, deps(slow.deps, undefined, db, backdatedNow(54.85))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
+        "recorded as a failure, never left running, and never blames the AI account it was never asked",
+      );
+      assert.equal(slow.seen.calls.length, 0, "the model itself was still never called: the recheck caught it before streaming started");
     },
   );
 

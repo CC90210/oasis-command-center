@@ -30,6 +30,7 @@ async function main() {
   const markup: Record<string, string> = {};
   for (const c of input.cases) {
     markup[c.id] = renderToStaticMarkup(
+      // eslint-disable-next-line react/no-children-prop -- CollapsibleSection's children prop is required, and createElement's rest-args overload does not satisfy a required `children` in its props type; the prop is the only form that type-checks here (no JSX in a .ts file).
       React.createElement(CollapsibleSection, {
         title: "Demo",
         defaultCollapsed: c.defaultCollapsed,
