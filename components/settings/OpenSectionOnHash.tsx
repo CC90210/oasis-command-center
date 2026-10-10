@@ -9,7 +9,7 @@ import { useEffect } from "react";
  * CC: "it should be a bunch of subheadings that I can click on") turned two
  * long-standing anchor targets into closed bars:
  *
- *     /settings#providers  -> "AI setup"
+ *     /settings#providers  -> "What powers your agents" (AI account)
  *     /settings#agents     -> "Override an agent's provider"
  *
  * Eight places link to them, and the ones that matter most are FAILURE states —
@@ -40,11 +40,16 @@ export function OpenSectionOnHash() {
         // A malformed fragment is not a crash — someone hand-edited the URL.
         return;
       }
-      if (!(el instanceof HTMLDetailsElement)) return;
-      el.open = true;
+      // The target is a section, or something inside one (#providers sits in
+      // the "What powers your agents" section): open the section that holds it.
+      if (!el) return;
+      const section = el instanceof HTMLDetailsElement ? el : el.closest("details");
+      if (!(section instanceof HTMLDetailsElement)) return;
+      section.open = true;
+      const target = el;
       // rAF so the layout reflows with the section expanded before we measure.
       requestAnimationFrame(() => {
-        el.scrollIntoView({ block: "start", behavior: "smooth" });
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
       });
     }
     openTarget();

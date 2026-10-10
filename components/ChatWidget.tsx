@@ -3239,7 +3239,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="text-xs text-fg-muted font-sans">
                     The encryption envelope on your stored provider key has changed since you last saved it, so it can no longer be decrypted. Open{" "}
                     <Link href={setupHref("ai_account")} className="text-accent underline">
-                      Settings → AI setup
+                      Settings → AI brain
                     </Link>{" "}
                     and click <strong>Replace key</strong> on the affected provider — paste the same value, save, and you&apos;re back. Takes 30 seconds.
                   </div>

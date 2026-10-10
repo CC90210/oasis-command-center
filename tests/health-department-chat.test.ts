@@ -528,7 +528,7 @@ async function main() {
     await bridgeTurn([{ type: "error", message: "cli_error:cli_not_found" }]);
     r = await nowRun(outcomes);
     assert.equal(r.verdict, "failing");
-    assert.match(r.reason, /the AI app on the paired computer could not answer \(cli_failed\)/);
+    assert.match(r.reason, /the AI app is not installed on the paired computer \(cli_not_found\)/);
   });
 
   await check("an EMPTY reply from the CLI alerts, whether it arrives as an error event or as a stream that simply ends", async () => {

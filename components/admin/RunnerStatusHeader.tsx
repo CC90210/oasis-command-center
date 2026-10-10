@@ -29,7 +29,7 @@ import { cliStatusState } from "@/lib/bridge-cli-status";
 const POLL_MS = 20_000;
 const WARM_STATUS_ROUTE = "/api/bridge/warm-status";
 
-type CliTools = Record<string, { installed: boolean; authenticated: boolean; checked?: boolean }>;
+type CliTools = Record<string, { installed: boolean; authenticated: boolean; checked?: boolean; unsupported?: boolean }>;
 type CliBody =
   | { ok: true; machines?: Array<{ label: string | null; data: CliTools }>; data?: CliTools }
   | { ok: false; reason: string };
@@ -87,15 +87,17 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
       const line = (data: CliTools) => {
         const named = (want: string) =>
           Object.entries(data)
-            .filter(([, v]) => cliStatusState({ installed: v.installed, authenticated: v.authenticated, checked: v.checked === true }) === want)
+            .filter(([, v]) => cliStatusState({ installed: v.installed, authenticated: v.authenticated, checked: v.checked === true, unsupported: v.unsupported === true }) === want)
             .map(([k]) => CLI_LABEL[k] ?? k);
         const signedIn = named("ready");
         const notSigned = named("needs_sign_in");
         const unconfirmed = named("unknown");
+        const unsupported = named("unsupported");
         return (
           (signedIn.length ? `Signed in: ${signedIn.join(", ")}` : "No AI tool is signed in") +
           (notSigned.length ? `. Needs sign-in: ${notSigned.join(", ")}` : "") +
-          (unconfirmed.length ? `. Sign-in not confirmed: ${unconfirmed.join(", ")}` : "")
+          (unconfirmed.length ? `. Sign-in not confirmed: ${unconfirmed.join(", ")}` : "") +
+          (unsupported.length ? `. Not supported on this sign-in: ${unsupported.join(", ")}` : "")
         );
       };
       const machines = body.machines ?? (body.data ? [{ label: null, data: body.data }] : []);

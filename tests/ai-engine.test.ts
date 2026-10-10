@@ -522,7 +522,7 @@ async function main() {
     assert.equal(outcome.classifyStreamError((down[0] as { message: string }).message), "bridge_unreachable");
     answer = () => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]);
     const cliErr = await drain();
-    assert.equal(outcome.classifyStreamError((cliErr[0] as { message: string }).message), "cli_failed");
+    assert.equal(outcome.classifyStreamError((cliErr[0] as { message: string }).message), "cli_not_found");
     answer = () => sse([["done", {}]]);
     assert.deepEqual(await drain(), [{ type: "error", message: "empty_reply:empty" }]);
     assert.match(outcome.failureCopy("bridge_unreachable", { canManageAi: true }).sentence, /computer could not be reached/);
@@ -761,7 +761,8 @@ async function main() {
     });
     assert.deepEqual([down.outcome, down.error_code, down.cost_micro_usd], ["error", "bridge_unreachable", 0]);
     const cli = await run(() => sse([["error", { code: "cli_not_found", message: "Claude Code CLI isn't installed" }], ["done", {}]]));
-    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_failed"]);
+    // The bridge names why (cli_error:<code>); a code outcome.ts has a sentence for is kept as the row's code.
+    assert.deepEqual([cli.outcome, cli.error_code], ["error", "cli_not_found"]);
     const http = await run(() => new Response("no", { status: 503 }));
     assert.deepEqual([http.outcome, http.error_code], ["error", "bridge_unreachable"]);
     const empty = await run(() => sse([["done", { input_tokens: 5, output_tokens: 0 }]]));
@@ -906,7 +907,7 @@ async function main() {
     assert.deepEqual(res, { ok: true, text: "Started." });
     assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex"}']);
     const src = readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8");
-    assert.match(src, /\{cs !== "ready" && \(/, "every card that is not ready offers Connect");
+    assert.match(src, /\{cs !== "ready" && cs !== "unsupported" && \(/, "every card that is not ready offers Connect, except one the vendor refuses (signing in again cannot help)");
   });
 
   await check("the coding harness never spins forever: each read has a time limit and says why it failed", async () => {

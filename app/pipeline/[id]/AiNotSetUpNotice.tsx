@@ -12,7 +12,7 @@
  */
 import { setupHref } from "@/lib/setup-links";
 
-/** Settings > AI brain > AI setup, where the key is saved (lib/setup-links.ts). */
+/** Settings > AI brain > What powers your agents > Your AI account, where the key is saved (lib/setup-links.ts). */
 export const AI_SETTINGS_HREF = setupHref("ai_account");
 
 export function AiNotSetUpNotice({ feature, canConfigureAi }: { feature: string; canConfigureAi: boolean }) {

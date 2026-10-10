@@ -17,7 +17,7 @@ export type CliInventoryMetadata = {
         installed?: unknown;
         authenticated?: unknown;
         version?: unknown;
-        /** Newer bridges: "ok", or why a check could not finish ("timeout", "error"). */
+        /** Newer bridges: "ok", "unsupported" (the vendor refuses this sign-in), or why a check could not finish ("timeout", "error"). */
         probe?: unknown;
       }
     >
@@ -35,6 +35,12 @@ export type CliStatusInfo = {
    * snapshot itself shows the sign-in check never ran.
    */
   checked: boolean;
+  /**
+   * The vendor refuses this computer's sign-in for this app (probe "unsupported":
+   * Google ended Gemini CLI on a personal Google sign-in). A finished verdict
+   * that signing in again cannot change. Absent on a snapshot from an older reader.
+   */
+  unsupported?: boolean;
 };
 
 /**
@@ -59,10 +65,14 @@ export type CliStatusInfo = {
  *                  bridge said timeout/error): it may well be signed in
  *   not_detected   the computer did not report it installed (it may be
  *                  missing, or its check may have timed out on an older bridge)
+ *   unsupported    installed, and the vendor refuses this sign-in (probe
+ *                  "unsupported"): a FINISHED check, never "Ready", and not
+ *                  "Needs sign-in" either (signing in again does not help)
  */
-export type CliState = "ready" | "needs_sign_in" | "unknown" | "not_detected";
+export type CliState = "ready" | "needs_sign_in" | "unknown" | "not_detected" | "unsupported";
 
-export function cliStatusState(info: Pick<CliStatusInfo, "installed" | "authenticated" | "checked">): CliState {
+export function cliStatusState(info: Pick<CliStatusInfo, "installed" | "authenticated" | "checked"> & { unsupported?: boolean }): CliState {
+  if (info.installed && info.unsupported) return "unsupported";
   if (info.installed && info.authenticated) return "ready";
   if (!info.installed) return "not_detected";
   return info.checked ? "needs_sign_in" : "unknown";
@@ -96,7 +106,18 @@ export const CLI_STATE_LABEL: Record<CliState, string> = {
   needs_sign_in: "Needs sign-in",
   unknown: "Sign-in not confirmed",
   not_detected: "Not detected",
+  unsupported: "Not supported on this sign-in",
 };
+
+/** Why an app is "unsupported" on this sign-in, in plain words (the same sentence the bridge's run error maps to, lib/os/channel/outcome.ts). */
+export const CLI_UNSUPPORTED_DETAIL = "Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account.";
+
+/** The same, for any app: only Gemini is refused today; another app's refusal gets a general sentence. */
+export function cliUnsupportedDetail(provider: CliProvider): string {
+  return provider === "gemini"
+    ? CLI_UNSUPPORTED_DETAIL
+    : "The app's maker does not allow this sign-in on this computer. Pick another app, or use an AI account.";
+}
 
 export type CliStatusSnapshot = Record<CliProvider, CliStatusInfo>;
 
@@ -136,12 +157,15 @@ function parseProviders(rawProviders: unknown): CliStatusSnapshot | null {
     // A check that did not finish: the bridge said so, or the sign-in check
     // could not have run (installed, not signed in, and no version read).
     const probeFailed = raw.probe === "timeout" || raw.probe === "error";
+    const unsupported = installed && raw.probe === "unsupported";
     providers[provider] = {
       installed,
       authenticated,
       version,
       install_hint_url: INSTALL_URLS[provider],
-      checked: !probeFailed && !(installed && !authenticated && version === null),
+      // "unsupported" is a verdict, not a check that failed to finish.
+      checked: unsupported || (!probeFailed && !(installed && !authenticated && version === null)),
+      unsupported,
     };
   }
   return providers;
@@ -197,6 +221,20 @@ export type NormalizedCliMachines =
       agents_run_on: string | null;
     }
   | { ok: false; reason: "missing" | "stale" | "invalid_inventory" };
+
+/**
+ * The apps the vendor refuses on EVERY computer that reports them installed
+ * (probe "unsupported"). One computer where the app is ready, or merely not
+ * confirmed, means it is not listed: only a finished refusal everywhere is one.
+ */
+export function unsupportedProviders(machines: readonly CliMachineSnapshot[]): CliProvider[] {
+  const out: CliProvider[] = [];
+  for (const provider of Object.keys(INSTALL_URLS) as CliProvider[]) {
+    const seen = machines.map((m) => m.data[provider]).filter((info) => info && info.installed);
+    if (seen.length > 0 && seen.every((info) => info.unsupported === true)) out.push(provider);
+  }
+  return out;
+}
 
 export const AGENTS_RUN_ON_UNKNOWN_NOTE = "Your agents use the computer your bridge points to.";
 

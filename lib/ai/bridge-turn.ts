@@ -199,8 +199,15 @@ export async function bridgeResolutionForSession(tenantId: string, authorize?: B
   }
 }
 
-/** How long the engine Test waits: a CLI's first answer cold-starts the app (often 20-60 s). */
-export const BRIDGE_TEST_TIMEOUT_MS = 150_000;
+/**
+ * How long the engine Test / Save probe waits for ONE short answer. A CLI's first
+ * answer cold-starts the app (often 20-60 s), so this is generous, but it is a
+ * "short answer" check: past it the app is not answering and the person is told
+ * so. The Settings panel's own deadline (components/settings/agent-engine-client.ts
+ * ENGINE_CLIENT_DEADLINE_MS) sits a little above it. A department turn keeps its
+ * own, longer budget (BRIDGE_TURN_TIMEOUT_MS).
+ */
+export const BRIDGE_TEST_TIMEOUT_MS = 75_000;
 
 export type BridgeTestResult =
   | { ok: true; latency_ms: number; reply: string }
@@ -255,7 +262,7 @@ export async function testBridgeEngine(input: {
   ]).finally(() => clearTimeout(timer));
   if (waited === "timeout") {
     void it.return(undefined).catch(() => undefined);
-    return { ok: false, code: "timeout", message: "The app on your paired computer did not finish a short answer in time. Try again in a minute." };
+    return { ok: false, code: "timeout", message: "The app on your paired computer didn't answer in time. Try again, or pick another app." };
   }
   if (got.failure !== null) {
     const { classifyStreamError, failureCopy } = await import("@/lib/os/channel/outcome");
