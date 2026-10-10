@@ -24,8 +24,10 @@
  * Who may run which app, and which tools are switched off, is the coding
  * harness's own rule (lib/bridge-cli-policy.ts).
  *
- * WHAT COMES BACK. The bridge streams SSE (delta / done / error, plus tool and
- * status events this ignores). It is read with the shared parser
+ * WHAT COMES BACK. The bridge streams SSE (delta / done / error, plus tool,
+ * tool_result and thinking events, which become the activity trail's steps and
+ * reasoning (their paths and commands are dropped: bridgeToolLabel); session
+ * and status events are ignored). It is read with the shared parser
  * (lib/sse-parser.ts) and handed back as lib/providers.ts StreamEvents, so the
  * route relays it exactly as it relays a cloud provider. Errors carry a
  * message lib/os/channel/outcome.ts classifies: bridge_unreachable:* (the
@@ -118,6 +120,8 @@ export function bridgeTurnRequest(input: {
    * workspace's first bridge folder, with the channel's instructions in charge.
    */
   harness?: { agent: string; department: string } | null;
+  /** The person pressed Stop: ends the request to the paired computer (the app there is told the connection closed). */
+  signal?: AbortSignal;
 }): { path: "/chat" | "/local-chat"; body: Record<string, unknown> } {
   const { caller, engine } = input;
   if (engine.kind === "local") {
@@ -294,6 +298,50 @@ export async function testBridgeEngine(input: {
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
+/**
+ * What a tool the app used on the paired computer is called in the activity
+ * trail. The bridge names tools by kind (bravo_cli/bridge_chat_server.py
+ * _map_tool_use: read_file, run_script, edit_file, write_file, glob, grep,
+ * web_fetch, mcp_call) and sends their paths, commands and patterns with them;
+ * none of that reaches a client. Only the kind does, in plain words.
+ */
+export function bridgeToolLabel(name: string): string {
+  switch (name.toLowerCase()) {
+    // The app's own tool names, should a bridge send them unmapped.
+    case "read":
+      return "Reading a file";
+    case "bash":
+    case "bashoutput":
+      return "Running a check";
+    case "webfetch":
+      return "Reading a web page";
+    case "edit":
+    case "multiedit":
+    case "notebookedit":
+    case "write":
+      return "Preparing a change";
+    case "read_file":
+      return "Reading a file";
+    case "grep":
+    case "glob":
+      return "Searching files";
+    case "web_fetch":
+      return "Reading a web page";
+    case "mcp_call":
+      return "Using a connected tool";
+    case "run_script":
+      return "Running a check";
+    case "edit_file":
+    case "write_file":
+      return "Preparing a change";
+    default:
+      return "Working on it";
+  }
+}
+
+/** Most thinking text one turn forwards: a long chain of thought is clipped, never the reply. */
+const THINKING_CHARS_MAX = 12_000;
+
 /** One department turn on the paired computer, as provider StreamEvents. Never throws. */
 export async function* streamBridgeTurn(input: Parameters<typeof bridgeTurnRequest>[0]): AsyncGenerator<StreamEvent> {
   const { path, body } = bridgeTurnRequest(input);
@@ -306,7 +354,7 @@ export async function* streamBridgeTurn(input: Parameters<typeof bridgeTurnReque
         authorization: `Bearer ${input.caller.target.bearerToken}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(BRIDGE_TURN_TIMEOUT_MS),
+      signal: input.signal ? AbortSignal.any([AbortSignal.timeout(BRIDGE_TURN_TIMEOUT_MS), input.signal]) : AbortSignal.timeout(BRIDGE_TURN_TIMEOUT_MS),
     });
   } catch (err) {
     yield { type: "error", message: `bridge_unreachable:${err instanceof Error ? err.name : "fetch"}` };
@@ -322,10 +370,33 @@ export async function* streamBridgeTurn(input: Parameters<typeof bridgeTurnReque
   let text = "";
   let inputTokens = 0;
   let outputTokens = 0;
+  let thinkingChars = 0;
+  // tool_use_id -> the plain label its `tool` event was shown under, so the
+  // matching `tool_result` closes the same step.
+  const openTools = new Map<string, string>();
   try {
     for await (const frame of parseSSE(res.body)) {
       const data = asSSERecord(frame.data);
-      if (frame.event === "delta") {
+      if (frame.event === "thinking") {
+        // The app's reasoning (a thinking block). Sent by the bridge once it
+        // forwards them; absent today, and then the trail shows its steps only.
+        const t = typeof data?.text === "string" ? data.text : "";
+        if (t && thinkingChars < THINKING_CHARS_MAX) {
+          thinkingChars += t.length;
+          yield { type: "thinking", text: t };
+        }
+      } else if (frame.event === "tool") {
+        const label = bridgeToolLabel(typeof data?.name === "string" ? data.name : "");
+        const id = typeof data?.tool_use_id === "string" ? data.tool_use_id : "";
+        if (id) openTools.set(id, label);
+        yield { type: "tool", phase: "start", label, ok: null };
+      } else if (frame.event === "tool_result") {
+        const id = typeof data?.tool_use_id === "string" ? data.tool_use_id : "";
+        const label = (id && openTools.get(id)) || "Working on it";
+        openTools.delete(id);
+        const body = typeof data?.body === "string" ? data.body : typeof data?.output === "string" ? data.output : "";
+        yield { type: "tool", phase: "done", label, ok: data?.error !== true, size: body.length };
+      } else if (frame.event === "delta") {
         const t = typeof data?.text === "string" ? data.text : "";
         if (t) {
           text += t;
