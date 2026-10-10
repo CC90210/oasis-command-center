@@ -29,7 +29,7 @@ delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
 process.env.BRAVO_FIELD_ENCRYPTION_KEY = "test-only-field-encryption-passphrase";
 process.env.STRIPE_SECRET_KEY = "sk_test_oasis_env_key";
-process.env.N8N_OUTBOUND_URL = "https://n8n.example.test/hook";
+process.env.SMTP_FROM_ADDRESS = "ops@oasis.example.test";
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const WEBDEV = "42423fde-be8b-454f-932a-750e8c9b743d";
@@ -98,8 +98,8 @@ async function main() {
   });
 
   await check("other services are OASIS-only too (no platform-wide env fallback)", async () => {
-    assert.equal(await store.getTenantIntegrationValue(SUNBIZ, "n8n", "outbound_url"), null);
-    assert.equal(await store.getTenantIntegrationValue(OASIS, "n8n", "outbound_url"), "https://n8n.example.test/hook");
+    assert.equal(await store.getTenantIntegrationValue(SUNBIZ, "smtp", "from_address"), null);
+    assert.equal(await store.getTenantIntegrationValue(OASIS, "smtp", "from_address"), "ops@oasis.example.test");
   });
 
   await check("a workspace that claims an OASIS slug under another id is refused", async () => {

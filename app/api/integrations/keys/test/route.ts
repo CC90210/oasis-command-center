@@ -23,12 +23,14 @@ import {
   tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
 import { recordIntegrationCheck, serverSetFieldKeys } from "@/lib/integrations/server-checks";
-import { findTenantManuallyEditableIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { findTenantManuallyEditableIntegrationSchema, hasHostBoundSecrets } from "@/lib/tenant-integration-schemas";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
+import { mayManageConnections } from "@/lib/connections/access";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { probeTwilioConnection } from "@/lib/twilio/connection";
 import { twilioWebhookUrls } from "@/lib/twilio/shared";
 import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
+import { hasKeyProbe, runKeyProbe } from "@/lib/integrations/key-probes";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,8 +50,18 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!(await canAccessSharedTenantResource(sess))) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  // A Test decrypts the workspace's saved credentials, calls the vendor with
+  // them, rewrites the shared Test result and answers with the account's
+  // identity (an SMTP host and username, a Calendly name). That is managing the
+  // connection, so it takes the same owner/admin rule as every
+  // /api/connections route (lib/connections/access.ts), checked before any
+  // credential is read. A member used to pass (canAccessSharedTenantResource is
+  // true for every member of a client workspace): Codex review, 2026-10-09.
+  if (!(await canAccessSharedTenantResource(sess)) || !mayManageConnections(sess)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", message: "Only the workspace owner or an admin can test connections." },
+      { status: 403 },
+    );
   }
 
   let body: { service?: unknown };
@@ -67,7 +79,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const bundle = await getTenantIntegrationBundle(sess.tenantId, service);
+  // An app that sends a secret to an address the owner typed (its mail server) is
+  // tested only with values saved TOGETHER here: never with a secret OASIS
+  // sets on its own server, which was never entered for that address.
+  const bundle = await getTenantIntegrationBundle(sess.tenantId, service, {
+    allowEnvFallback: !hasHostBoundSecrets(schema),
+  });
   let result: ProbeResult;
   try {
     result = await runProbe(service, bundle);
@@ -137,6 +154,12 @@ async function runProbe(
   service: string,
   bundle: Record<string, string>,
 ): Promise<ProbeResult> {
+  // The apps an owner connects with a pasted key (Calendly, Cal.com, Fathom,
+  // Fireflies, Zernio, GoHighLevel, their own mail server): one read each
+  // that changes nothing, against the vendor's documented endpoint
+  // (lib/integrations/key-probes.ts). SMTP connects only to a public
+  // host name, so this route is never an internal-network probe.
+  if (hasKeyProbe(service)) return runKeyProbe(service, bundle);
   switch (service) {
     case "twilio":
       return probeTwilio(bundle);
@@ -144,12 +167,8 @@ async function runProbe(
       return probeStripe(bundle);
     case "telegram":
       return probeTelegram(bundle);
-    case "n8n":
-      return probeN8n(bundle);
     case "texttorrent":
     case "kixie":
-    case "smtp":
-    case "late":
       // Side-effect-free verifications for these aren't trivial:
       //   - TextTorrent: no public "account" endpoint
       //   - Kixie: no read-only credential endpoint; a live probe would
@@ -159,11 +178,6 @@ async function runProbe(
       //     default_agent_email, webhook_secret) the badge doubles as a
       //     live setup checklist: it names exactly which fields are still
       //     missing instead of the cryptic no_probe_for_kixie failure.
-      //   - Custom SMTP: connecting to an operator-supplied host would make
-      //     this authenticated route an internal-network probe (SSRF). Presence
-      //     is the only safe generic test until hosts are allowlisted.
-      //   - GWS: fixed-host App Password verification uses smtp.gmail.com
-      //   - Late: no read endpoint
       // For now, "presence" is the test — every required field set
       // counts as a pass; the real verification is the first real
       // send. Better than a fake test that always returns ok.
@@ -334,28 +348,5 @@ async function probeTelegram(
     };
   } catch (err) {
     return { ok: false, error: `network_error: ${(err as Error).message}` };
-  }
-}
-
-async function probeN8n(
-  bundle: Record<string, string>,
-): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  const url = bundle.outbound_url;
-  if (!url) return { ok: false, error: "missing_outbound_url" };
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "https:" && u.protocol !== "http:") {
-      return { ok: false, error: "outbound_url_protocol" };
-    }
-    // HEAD request — n8n's webhook endpoints respond to HEAD with 200
-    // or 405 depending on workflow. Either is "endpoint exists";
-    // network failure / DNS failure means misconfigured.
-    const r = await fetch(url, { method: "HEAD" });
-    if (r.status >= 200 && r.status < 500) {
-      return { ok: true, detail: `reachable (http ${r.status})` };
-    }
-    return { ok: false, error: `n8n_http_${r.status}` };
-  } catch (err) {
-    return { ok: false, error: `unreachable: ${(err as Error).message}` };
   }
 }

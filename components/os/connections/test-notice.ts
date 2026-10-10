@@ -6,7 +6,8 @@
  *   no Test ran     signed out, not allowed, the request failed: the request's
  *                   own failure sentence, never "did not pass".
  *   plain state     Twilio's check answers in its own words: shown as it put them.
- *   passed          says so; Telegram names the bot and the chat it reached.
+ *   passed          says so, with what the vendor called the account (Telegram's
+ *                   bot and chat, Calendly's account name) when it said.
  *   failed          what the check found, in the words the app's card uses for
  *                   it (lib/os/connectors.ts testFailureWords), never the code.
  *   not saved       the result could not be saved where the card reads it, so
@@ -37,7 +38,9 @@ export function testResultNotice(input: {
   if (message) {
     text = detail ? `${message} ${detail}` : message;
   } else if (ok) {
-    text = service === "telegram" && detail ? `The check with ${appName} passed: ${detail}.` : `The check with ${appName} passed.`;
+    // The detail names what the vendor says the account is (Telegram's bot and
+    // chat, Calendly's account name): never a key, so it is shown as given.
+    text = detail ? `The check with ${appName} passed: ${detail}.` : `The check with ${appName} passed.`;
   } else {
     const words = testFailureWords(service, typeof data.error === "string" ? data.error : null);
     text = words ? `${words.label}. ${words.detail}` : `The check with ${appName} did not pass.`;

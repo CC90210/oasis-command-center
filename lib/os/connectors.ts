@@ -263,6 +263,100 @@ export const TELEGRAM_TEST_STATES: Readonly<Record<string, TestState>> = {
   },
 };
 
+/**
+ * The words for a FAILED Test of an app connected with a pasted key, keyed by
+ * the shared codes every such Test answers with (lib/integrations/key-probes.ts).
+ * `notFound` says what the Test could not find for this app (GoHighLevel's
+ * sub-account); an app whose Test never answers it omits it.
+ */
+export function keyTestStates(
+  appName: string,
+  extra: { notFound?: string; keyWord?: string } = {},
+): Readonly<Record<string, TestState>> {
+  const key = extra.keyWord ?? "key";
+  const states: Record<string, TestState> = {
+    key_rejected: {
+      kind: "attention",
+      label: `${appName} refused the ${key}`,
+      detail: `${appName} did not accept this ${key}. It may have been deleted or mistyped. Copy a new one from ${appName}, save it, then run Test.`,
+    },
+    missing_permission: {
+      kind: "attention",
+      label: `${appName} ${key} lacks access`,
+      detail: `${appName} accepted the ${key}, but it is not allowed to read what OASIS checks. Give it read access in ${appName}, save it again, then run Test.`,
+    },
+    plan_required: {
+      kind: "attention",
+      label: `${appName} plan has no API access`,
+      detail: `${appName} says this account's plan does not include API access. Upgrade the plan in ${appName}, then run Test.`,
+    },
+    rate_limited: {
+      kind: "configured",
+      label: `Set up · ${appName} asked OASIS to wait`,
+      detail: `${appName} asked OASIS to slow down during the last Test, so nothing is known about the ${key} yet. Run Test again in a few minutes.`,
+    },
+    provider_unreachable: {
+      kind: "configured",
+      label: `Set up · ${appName} did not answer the last Test`,
+      detail: `OASIS could not reach ${appName} during the last Test, so nothing is known about the ${key}. Run Test again.`,
+    },
+    provider_error: {
+      kind: "configured",
+      label: `Set up · ${appName} gave an unexpected answer`,
+      detail: `${appName} answered the last Test in a way OASIS did not expect, so nothing is known about the ${key}. Run Test again; if it repeats, tell OASIS support.`,
+    },
+    missing_fields: {
+      kind: "attention",
+      label: "Needs attention",
+      detail: "Setup is incomplete: some required details are missing.",
+    },
+  };
+  if (extra.notFound) states.not_found = { kind: "attention", label: "Not found", detail: extra.notFound };
+  return states;
+}
+
+/**
+ * A self-hosted mail server that OASIS's
+ * servers cannot connect to safely: they cannot lock the connection to the
+ * address they checked (lib/integrations/host-safety.ts), so nothing was sent.
+ */
+const SELF_HOSTED_CANNOT_PIN: TestState = {
+  kind: "configured",
+  label: "Set up · this address can't be tested from OASIS yet",
+  detail:
+    "OASIS only tests a self-hosted address when it can lock the connection to the address it checked, and its servers can't do that yet, so nothing was sent. A big mail provider's own server name (Microsoft 365, Gmail, SendGrid and the like) tests normally.",
+};
+
+/** The workspace's own mail server: a sign-in refused, or an address OASIS never connects to. */
+const SMTP_TEST_STATES: Readonly<Record<string, TestState>> = {
+  missing_fields: {
+    kind: "attention",
+    label: "Needs attention",
+    detail: "Setup is incomplete: some required details are missing.",
+  },
+  smtp_auth_failed: {
+    kind: "attention",
+    label: "Could not sign in to the mail server",
+    detail: "The mail server refused this username and password. Check both with your email provider, save them again, then run Test.",
+  },
+  provider_unreachable: {
+    kind: "attention",
+    label: "Could not reach the mail server",
+    detail: "OASIS could not open a secure connection to this server and port. Check the server name and port with your email provider, then run Test.",
+  },
+  blocked_host: {
+    kind: "attention",
+    label: "Server name not allowed",
+    detail: "OASIS only connects to a public server name on a standard mail port (587, 465, 2525 or 25) whose addresses are all on the public internet. Use the name your email provider gives you.",
+  },
+  not_found: {
+    kind: "attention",
+    label: "Server name not found",
+    detail: "OASIS could not find an address for this server name. Check the name with your email provider, then run Test.",
+  },
+  cannot_pin: SELF_HOSTED_CANNOT_PIN,
+};
+
 // ── The catalog ────────────────────────────────────────────────────────────
 
 export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
@@ -374,6 +468,33 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     docs: { href: "https://support.google.com/accounts/answer/185833", label: "Google's guide to App Passwords" },
   },
   {
+    // The workspace's own mail server (its email host, Microsoft 365, SendGrid,
+    // Amazon SES): for a business not on Google Workspace.
+    slug: "smtp",
+    name: "Email server (SMTP)",
+    summary: "Your own mail server, if you are not on Google",
+    category: "calendar_email",
+    departments: ["chief_of_staff", "sales", "client_success"],
+    brandColor: null,
+    icon: { kind: "monogram", letters: "SM", reason: "SMTP is a mail standard, not a brand" },
+    reads: ["Whether your mail server accepts the sign-in, when you run Test (Test signs in and sends nothing)"],
+    does: [
+      "Signs in to your mail server when you press Test, over an encrypted connection, and sends nothing",
+      "OASIS does not send your workspace's email through this server yet: that sender is not built",
+    ],
+    keywords: ["email", "smtp", "outlook", "microsoft 365", "office 365", "sendgrid", "ses", "mail server"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "smtp",
+        requireAll: ["host", "port", "user", "password", "from_address"],
+        failureStates: SMTP_TEST_STATES,
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect your mail server", service: "smtp" },
+    },
+  },
+  {
     slug: "calendly",
     name: "Calendly",
     summary: "Booking links",
@@ -381,11 +502,22 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales"],
     brandColor: "#006BFF",
     icon: { kind: "svg", file: "calendly.svg" },
-    reads: ["Calls booked through your Calendly links"],
-    does: ["Puts each booked call on the lead in Pipeline and on your schedule"],
-    keywords: ["booking", "scheduling"],
-    live: null,
-    pendingNote: "Nothing in OASIS reads Calendly bookings yet.",
+    reads: ["The name and email of the Calendly account the token belongs to, when you run Test"],
+    does: [
+      "Checks the token with Calendly when you press Test, and changes nothing in your Calendly",
+      "Bookings do not flow into Pipeline or your schedule from this token yet: that sync is not built",
+    ],
+    keywords: ["booking", "scheduling", "token", "api key"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "calendly",
+        requireAll: ["access_token"],
+        failureStates: keyTestStates("Calendly", { keyWord: "token" }),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Calendly", service: "calendly" },
+    },
   },
   {
     slug: "cal-com",
@@ -395,11 +527,22 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales"],
     brandColor: "#292929",
     icon: { kind: "svg", file: "caldotcom.svg" },
-    reads: ["Calls booked through your Cal.com links"],
-    does: ["Puts each booked call on the lead in Pipeline and on your schedule"],
-    keywords: ["booking", "scheduling", "cal"],
-    live: null,
-    pendingNote: "Nothing in OASIS reads Cal.com bookings yet.",
+    reads: ["The name and email of the Cal.com account the key belongs to, when you run Test"],
+    does: [
+      "Checks the key with Cal.com when you press Test, and changes nothing in your Cal.com",
+      "Bookings do not flow into Pipeline or your schedule from this key yet: that sync is not built",
+    ],
+    keywords: ["booking", "scheduling", "cal", "api key"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "cal_com",
+        requireAll: ["api_key"],
+        failureStates: keyTestStates("Cal.com"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Cal.com", service: "cal_com" },
+    },
   },
 
   // Meetings
@@ -429,11 +572,22 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       letters: "Fa",
       reason: "Simple Icons' Fathom is Fathom Analytics, a different company",
     },
-    reads: ["Transcripts and summaries of the calls Fathom recorded"],
-    does: ["Attaches call notes to the right lead or client"],
-    keywords: ["notetaker", "transcript", "recording"],
-    live: null,
-    pendingNote: "Nothing in OASIS reads Fathom's call notes yet.",
+    reads: ["Whether Fathom accepts the key, when you run Test (Test lists your recent meetings and keeps nothing)"],
+    does: [
+      "Checks the key with Fathom when you press Test, and changes nothing in your Fathom",
+      "Call notes do not reach your leads or clients from this key yet: that sync is not built",
+    ],
+    keywords: ["notetaker", "transcript", "recording", "api key"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "fathom",
+        requireAll: ["api_key"],
+        failureStates: keyTestStates("Fathom"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Fathom", service: "fathom" },
+    },
   },
   {
     slug: "fireflies",
@@ -443,11 +597,22 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales", "client_success"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Ff", reason: "Not in Simple Icons" },
-    reads: ["Transcripts and summaries of the calls Fireflies recorded"],
-    does: ["Attaches call notes to the right lead or client"],
-    keywords: ["notetaker", "transcript", "recording"],
-    live: null,
-    pendingNote: "Nothing in OASIS reads Fireflies' call notes yet.",
+    reads: ["The name and email of the Fireflies account the key belongs to, when you run Test"],
+    does: [
+      "Checks the key with Fireflies when you press Test, and changes nothing in your Fireflies",
+      "Call notes do not reach your leads or clients from this key yet: that sync is not built",
+    ],
+    keywords: ["notetaker", "transcript", "recording", "api key"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "fireflies",
+        requireAll: ["api_key"],
+        failureStates: keyTestStates("Fireflies"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Fireflies", service: "fireflies" },
+    },
   },
 
   // Messaging
@@ -629,11 +794,22 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["marketing"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Ze", reason: "Not in Simple Icons" },
-    reads: ["Your connected social profiles and the status of scheduled posts"],
-    does: ["Schedules the posts you approve across your social accounts"],
-    keywords: ["late", "social", "instagram", "tiktok", "linkedin", "posting"],
-    live: null,
-    pendingNote: "Nothing in OASIS posts with a workspace's own Zernio account yet.",
+    reads: ["How many Zernio profiles the key can see, when you run Test"],
+    does: [
+      "Checks the key with Zernio when you press Test, and posts nothing",
+      "Posts and their results do not flow into Marketing from this key yet: that sync is not built",
+    ],
+    keywords: ["late", "social", "instagram", "tiktok", "linkedin", "posting", "api key"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "late",
+        requireAll: ["api_key"],
+        failureStates: keyTestStates("Zernio"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Zernio", service: "late" },
+    },
   },
   {
     slug: "constant-contact",
@@ -666,11 +842,26 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales", "marketing"],
     brandColor: null,
     icon: { kind: "monogram", letters: "GH", reason: "Not in Simple Icons" },
-    reads: ["Contacts, opportunities and conversation history"],
-    does: ["Imports your leads and pipeline into OASIS", "Sends texts through your GoHighLevel number"],
-    keywords: ["ghl", "highlevel", "crm", "import"],
-    live: null,
-    pendingNote: "Nothing in OASIS connects to GoHighLevel yet.",
+    reads: ["The name of the sub-account the token opens, when you run Test"],
+    does: [
+      "Checks the token with GoHighLevel when you press Test, and changes nothing in your GoHighLevel",
+      "Contacts and opportunities are not imported into Pipeline from this token yet: that import is not built",
+    ],
+    keywords: ["ghl", "highlevel", "crm", "import", "private integration", "token"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "gohighlevel",
+        requireAll: ["private_token", "location_id"],
+        failureStates: keyTestStates("GoHighLevel", {
+          keyWord: "token",
+          notFound:
+            "GoHighLevel could not find that sub-account for this token. Check the sub-account ID, and that the token was made in (or can open) that sub-account, then run Test.",
+        }),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect GoHighLevel", service: "gohighlevel" },
+    },
   },
 
   // AI models

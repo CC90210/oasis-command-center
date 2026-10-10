@@ -325,7 +325,36 @@ const EXEMPT_HOSTS: Record<string, string> = {
   "api.transferwise.com": "OASIS's own business bank account (founders' finances); sends no customer data",
   "api.typesafe.ai":
     "Jev (TypeSafe): only the key check runs (list models, no data) while lib/jev/mode.ts JEV_TEXT_PROCESSING_APPROVED is false; flipping it needs TypeSafe on /privacy (asserted below)",
+  // The client's OWN accounts, connected in Settings > Connections with a key
+  // the client made (lib/integrations/key-probes.ts). Only the key's Test runs:
+  // one "whose key is this" read that sends nothing but the client's own key,
+  // and the account name it returns is shown once and never stored. A sync
+  // that reads the client's data from one of these moves it to SUBPROCESSORS.
+  "api.calendly.com": "client's own Calendly: key Test only (GET /users/me), sends no personal information, stores nothing returned",
+  "api.cal.com": "client's own Cal.com: key Test only (GET /v2/me), sends no personal information, stores nothing returned",
+  "api.fathom.ai": "client's own Fathom: key Test only (list meetings, discarded), sends no personal information, stores nothing returned",
+  "api.fireflies.ai": "client's own Fireflies: key Test only (user query), sends no personal information, stores nothing returned",
 };
+// Those exemptions are true only while the probes are the only callers.
+{
+  const callers = new Map<string, string[]>();
+  for (const dir of ["app", "lib", "components"]) {
+    for (const file of walk(dir)) {
+      const src = readFileSync(file, "utf8");
+      for (const host of ["api.calendly.com", "api.cal.com", "api.fathom.ai", "api.fireflies.ai"]) {
+        if (src.includes(`https://${host}`)) callers.set(host, [...(callers.get(host) ?? []), file.slice(root.length + 1).replace(/\\/g, "/")]);
+      }
+    }
+  }
+  for (const [host, files] of callers) {
+    for (const f of files) {
+      assert.ok(
+        f === "lib/integrations/key-probes.ts" || f === "lib/tenant-integration-schemas.ts",
+        `${f} calls ${host}: the exemption covers only the key Test. A sync that reads client data must list the vendor on /privacy.`,
+      );
+    }
+  }
+}
 
 // Jev may classify workspace text only in the same change that lists TypeSafe
 // as a processor: the exemption above is true only while the gate is shut.

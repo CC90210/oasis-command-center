@@ -26,6 +26,7 @@ import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
   listTenantIntegrationStatus,
+  readTenantCredentialStrict,
   tenantMayUseEnvFallback,
 } from "@/lib/tenant-integration-store";
 import { clearIntegrationCheck } from "@/lib/integrations/server-checks";
@@ -34,6 +35,7 @@ import {
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
 import { syncTwilioSenderRouteFor } from "@/lib/twilio/sender-route";
+import { checkPublicHost, dohResolver } from "@/lib/integrations/host-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,6 +87,26 @@ export async function POST(req: NextRequest) {
   if (validation) {
     return NextResponse.json({ ok: false, error: validation }, { status: 422 });
   }
+  // An address OASIS will connect to (an owner's mail server) is judged
+  // by what its name RESOLVES to, not only its spelling: a public-looking name
+  // that points inside a network is refused here, and again at every Test
+  // (lib/integrations/host-safety.ts).
+  if (fieldDef.validation === "public_hostname") {
+    const host = value.trim();
+    const checked = await checkPublicHost(host, dohResolver());
+    if (!checked.ok) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            checked.reason === "private_address"
+              ? "That address points inside a private network, so OASIS will not connect to it. Use the address your provider gives you for the internet."
+              : "OASIS could not find that address on the internet. Check it, then save again.",
+        },
+        { status: 422 },
+      );
+    }
+  }
   // Client workspaces connect Stripe READ-ONLY, with a restricted key, through
   // Settings › Connections (/api/connections/stripe/connect). This editor would
   // store a full secret key that can move money, so it stays OASIS's own
@@ -103,6 +125,32 @@ export async function POST(req: NextRequest) {
   if (!(await clearIntegrationCheck(sess.tenantId, service))) {
     return NextResponse.json({ ok: false, error: "check_clear_failed" }, { status: 500 });
   }
+  // An address a saved secret is SENT to (a mail server's host
+  // or port): a new one clears that secret BEFORE the address is saved, so the
+  // old key or password can never reach an address it was not entered for
+  // (Codex re-review, 2026-10-09). It must be pasted again for the new
+  // address; until then the Test has nothing to send. Order is the guarantee:
+  // a clear that fails stops the save (500, nothing changed but the secret's
+  // removal), and a save that fails after the clear leaves the OLD address with
+  // no secret. Re-saving the same address keeps the secret.
+  const cleared: string[] = [];
+  const bound = fieldDef.bindsSecrets ?? [];
+  if (bound.length > 0) {
+    const current = await readTenantCredentialStrict(sess.tenantId, service, fieldKey);
+    if (!current.ok && current.reason === "lookup_failed") {
+      return NextResponse.json({ ok: false, error: "credential_read_failed" }, { status: 500 });
+    }
+    const unchanged = current.ok && current.value.trim() === value.trim();
+    if (!unchanged) {
+      for (const secret of bound) {
+        const removed = await deleteTenantIntegrationValue({ tenantId: sess.tenantId, service, fieldKey: secret });
+        if (!removed.ok) {
+          return NextResponse.json({ ok: false, error: "secret_clear_failed" }, { status: 500 });
+        }
+        cleared.push(secret);
+      }
+    }
+  }
   const result = await setTenantIntegrationValue({
     tenantId: sess.tenantId,
     service,
@@ -116,7 +164,7 @@ export async function POST(req: NextRequest) {
   // Twilio: the webhooks find this workspace by its saved sender's routing row
   // (lib/twilio/sender-route.ts), so the row follows every save.
   const routing = service === "twilio" ? await syncTwilioSenderRouteFor(sess.tenantId, "key_saved") : undefined;
-  return NextResponse.json({ ok: true, id: result.id, ...(routing ? { routing } : {}) });
+  return NextResponse.json({ ok: true, id: result.id, ...(cleared.length > 0 ? { cleared } : {}), ...(routing ? { routing } : {}) });
 }
 
 export async function DELETE(req: NextRequest) {
