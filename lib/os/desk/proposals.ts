@@ -193,7 +193,15 @@ export async function proposeAutomationEmail(
     sql: `SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND idempotency_key LIKE ? ESCAPE '\\'`,
     args: [tenantId, `${likeEscape(`${DESK_KEY_PREFIX}:${me}:${tag}:${day}:`)}%`],
   });
-  if (Number(today.rows[0]?.n ?? 0) >= AUTOMATION_DRAFTS_PER_DAY) throw new ProposalRefused("automation_draft_limit_per_day");
+  // A preview files nothing, so this count never grows across the preview's
+  // own calls the way it does in a live run (each live draft is persisted
+  // before the next one is checked). Add back the drafts THIS preview has
+  // already accepted (run.proposed, incremented below in both modes) so the
+  // simulated cap matches what a live run would enforce. In live mode the
+  // persisted count already includes every draft this run has filed, so
+  // adding run.proposed there would double-count it.
+  const simulatedToday = Number(today.rows[0]?.n ?? 0) + (policy.mode === "preview" ? run.proposed : 0);
+  if (simulatedToday >= AUTOMATION_DRAFTS_PER_DAY) throw new ProposalRefused("automation_draft_limit_per_day");
 
   const title = `Automation ${automationLabel(policy.automationName)}: Email to ${payload.value.to}: ${payload.value.subject}`.slice(0, 200);
   if (policy.mode === "preview") {

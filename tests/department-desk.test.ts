@@ -901,6 +901,48 @@ async function main() {
     const n = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM approvals WHERE idempotency_key LIKE ?", args: [`desk:${OWNER}:${tag}:%`] })).rows[0].n);
     assert.equal(n, 10);
   });
+  await check("automation drafts: a preview counts drafts it already accepted THIS preview toward the simulated daily cap, so it matches what a live run would do", async () => {
+    const AUTOMATION = "7b2c3d4e-5f6a-4b7c-9d8e-0f1a2b3c4d5e";
+    const tag = `a.${AUTOMATION.replace(/-/g, "").slice(0, 26)}`;
+    const mail = (subject: string) => ({ to: "front@mapledental.test", lead_id: "lead-acme-mail", subject, body: "Hi." });
+    const live = () => deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "live", automationId: AUTOMATION, automationName: "Nine already filed" } });
+    const countFor = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM approvals WHERE idempotency_key LIKE ?", args: [`desk:${OWNER}:${tag}:%`] })).rows[0].n);
+    // 9 cards filed today already, 3 per run (the per-run cap), across 3 runs.
+    for (let runN = 0; runN < 3; runN++) {
+      const run = live();
+      for (let i = 0; i < 3; i++) {
+        const r = await run.execute("propose_email", mail(`Earlier today ${runN}-${i}`));
+        assert.equal(r.is_error, false, r.content);
+      }
+    }
+    assert.equal(await countFor(), 9);
+
+    // A preview of 3 distinct drafts against a 10-a-day cap with 9 already
+    // filed: a live run would accept only the first (the 10th card) and
+    // refuse the other two. The preview must match it - each check in a
+    // preview reads the same persisted count, so a draft THIS SAME preview
+    // already accepted has to be added back in by hand or the preview
+    // undercounts and accepts more than a live run would.
+    const preview = deskToolset({ viewer: acmeOwner, dept: dept("sales"), agentSlug: "sdr", only: ["propose_email"], proposal: { mode: "preview", automationId: AUTOMATION, automationName: "Nine already filed" } });
+    const previewResults: string[] = [];
+    for (const subject of ["Preview A", "Preview B", "Preview C"]) {
+      const r = await preview.execute("propose_email", mail(subject));
+      previewResults.push(r.is_error ? JSON.parse(r.content).error : "ok");
+    }
+    assert.deepEqual(previewResults, ["ok", "automation_draft_limit_per_day", "automation_draft_limit_per_day"]);
+    assert.equal(await countFor(), 9, "a preview filed a card");
+
+    // The equivalent live run: same automation, same 9 persisted, a fresh
+    // per-run state - exactly one of the three is accepted, same as preview.
+    const liveRun = live();
+    const liveResults: string[] = [];
+    for (const subject of ["Live A", "Live B", "Live C"]) {
+      const r = await liveRun.execute("propose_email", mail(subject));
+      liveResults.push(r.is_error ? JSON.parse(r.content).error : "ok");
+    }
+    assert.deepEqual(liveResults, ["ok", "automation_draft_limit_per_day", "automation_draft_limit_per_day"]);
+    assert.equal(await countFor(), 10);
+  });
 
   console.log("Wiring");
   await check("the chat route grounds department turns from the session viewer and relays lookups as plain labels", () => {
