@@ -238,3 +238,24 @@ test("no call to action points at n8n", () => {
   const offenders = SCANNED.filter((f) => /href=[^\n]*n8n/i.test(readFileSync(join(ROOT, f), "utf8")));
   assert.deepEqual(offenders, []);
 });
+
+test("n8n is removed from the product (CC, 2026-10-09: we don't use it)", () => {
+  // The inbound bridge route, its public-path allowance, and the one RPC only it called.
+  assert.equal(existsSync(join(ROOT, "app/api/inbound/n8n/route.ts")), false, "the n8n inbound route is back");
+  assert.ok(!/["']\/api\/inbound["']/.test(readFileSync(join(ROOT, "middleware.ts"), "utf8")), "/api/inbound is public again");
+  assert.ok(
+    !/record_inbound_from_n8n/.test(readFileSync(join(ROOT, "lib/turso-rpc-shim.ts"), "utf8")),
+    "the n8n inbound RPC is back in the shim",
+  );
+  // No agent tool, catalog entry, manifest service, or registry card names it.
+  const gone: Array<[string, RegExp]> = [
+    ["lib/cloud-tool-runner.ts", /name:\s*["']n8n["']/],
+    ["lib/agent-catalog.ts", /n8n/i],
+    ["lib/manifest/seeds.ts", /n8n/i],
+    ["lib/integrations-registry.ts", /n8n/i],
+    ["components/os/landings/AgentFleet.tsx", /n8n/i],
+  ];
+  for (const [file, pattern] of gone) {
+    assert.ok(!pattern.test(readFileSync(join(ROOT, file), "utf8")), `${file} names n8n again`);
+  }
+});

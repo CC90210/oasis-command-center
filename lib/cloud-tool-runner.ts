@@ -848,20 +848,6 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
     },
   },
   {
-    name: "n8n",
-    description:
-      "n8n workflow automation — list workflows, execute by name/ID, get execution status, manage webhooks. Use to kick off the operator's automated processes (lead enrichment, email sequences, etc.).",
-    defer: true,
-    input_schema: {
-      type: "object",
-      properties: {
-        action: { type: "string", description: "Subcommand. Pass '--help' to discover." },
-        args: { type: "array", items: { type: "string" }, description: "Argv for the action." },
-      },
-      required: ["action"],
-    },
-  },
-  {
     name: "firecrawl",
     description:
       "Firecrawl — scrape a URL or crawl a site, return clean markdown. Use for competitor research, page content extraction, drafting from a real source. Falls back to http_get if Firecrawl credentials aren't configured.",
@@ -3431,7 +3417,7 @@ export function cloudToolsPromptBlockV2(
     lines.push("DISCOVERY POSTURE (CRITICAL):");
     lines.push("- The operator has a library of pre-built playbooks (`skills/`) and Python tools (`scripts/`). DO NOT improvise workflows when one already exists — your job is to execute their established SOPs, not reinvent them.");
     lines.push("- For procedural requests (briefings, recurring workflows, named tasks): call list_skills FIRST to find the playbook, then load_skill to read its steps, then follow them.");
-    lines.push("- For 'do X with service Y' requests (Stripe, Supabase, n8n, Gmail, Twilio, Firecrawl): call list_scripts to see if there's a tool wrapper, then run_script with `--help` to see its commands, then run_script with the real args. Most documented tools support `--json` — use it so you get structured output.");
+    lines.push("- For 'do X with service Y' requests (Stripe, Supabase, Gmail, Twilio, Firecrawl): call list_scripts to see if there's a tool wrapper, then run_script with `--help` to see its commands, then run_script with the real args. Most documented tools support `--json` — use it so you get structured output.");
     lines.push("- Only fall back to raw bash when nothing in skills/ or scripts/ fits.");
   }
   return lines.join("\n");

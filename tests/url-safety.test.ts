@@ -5,7 +5,7 @@ type Case = [url: string, shouldBlock: boolean, label: string];
 const cases: Case[] = [
   // Legitimate public webhooks — must pass.
   ["https://hooks.zapier.com/abc", false, "zapier"],
-  ["https://n8n.example.com/webhook/foo", false, "n8n cloud"],
+  ["https://automation.example.com/webhook/foo", false, "hosted automation webhook"],
   ["http://104.21.34.56/", false, "public IPv4"],
   ["https://api.openai.com/v1/x", false, "well-known API"],
 

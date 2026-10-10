@@ -201,7 +201,7 @@ export function bridgeDisallowedToolsForRole(
  *
  * Every other tool in TOOL_REGISTRY (read_file, load_skill, list_scripts,
  * list_skills, write_file, bash, send_email, send_sms, run_script,
- * stripe, supabase, n8n, firecrawl, notebooklm, underwriting_run,
+ * stripe, supabase, firecrawl, notebooklm, underwriting_run,
  * shop_out_send_batch, install_cli, cli_auth_start) is denied for
  * non-owner/non-admin.
  *

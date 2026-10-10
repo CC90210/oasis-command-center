@@ -372,7 +372,7 @@ export async function recentInbound(tenantId: string, limit = 20): Promise<LeadI
 
 /**
  * High-signal inbound only. Filters recentInbound's output to rows the
- * n8n classifier marked as priority='high' / 'critical' OR intent in
+ * inbound classifier marked as priority='high' / 'critical' OR intent in
  * the set of "operator should look at this" signals (hot_lead, sales,
  * partnership, frustrated). Drops transactional, noreply, and low-signal
  * classifications so CC's Today page widget shows what matters instead
@@ -411,7 +411,7 @@ export async function priorityInbound(
     return false;
   });
 
-  // If the classifier hasn't tagged anything yet (e.g., n8n workflow
+  // If the classifier hasn't tagged anything yet (e.g., the classifier
   // wasn't running, or this is the brief window after migration 094),
   // surface the full list so CC isn't staring at an empty widget.
   if (highSignal.length === 0) return all.slice(0, limit);

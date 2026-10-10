@@ -126,7 +126,7 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
         lines.push(`    · [${r.intent || "unclassified"}] ${subj}${from}`);
       }
     } else {
-      lines.push("- Recent inbound: none in the last batch (n8n bridge may be stale — check /integrations).");
+      lines.push("- Recent inbound: none in the last batch (inbound email sync may be stale — check /integrations).");
     }
   }
 

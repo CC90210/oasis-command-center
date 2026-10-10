@@ -38,7 +38,7 @@ CC's working copy). Every push to `main` auto-deploys via Vercel.
 | `/operations` | Bridge + warm pool + per-CLI status + activity tape |
 | `/health` | Service health rollup |
 | `/analytics` | MRR trajectory + funnel + lead sources |
-| `/automations` | Cron jobs · n8n workflows · scheduled tasks |
+| `/automations` | Cron jobs · scheduled tasks |
 | `/settings` | Profile · AI provider keys · agent wiring · devices |
 
 ## How chat routing works
@@ -125,8 +125,6 @@ client-side too (bridge health every 30s, CLI status every 20s).
 - Provider API keys stored in `agent_model_config.encrypted_api_key`
   (AES-256-GCM via `BRAVO_FIELD_ENCRYPTION_KEY`). Two-tier: workspace default
   + per-user override.
-- `/api/inbound/n8n` is a plain Node route (not edge) — uses Node `crypto`
-  for SHA-256 HMAC verification on incoming webhook signatures.
 - Override approvals (`/overrides` was deprecated; the surface has been
   removed — `exec_guard` blocks now route through the local bridge's
   approval CLI directly).

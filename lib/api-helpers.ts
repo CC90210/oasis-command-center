@@ -53,7 +53,7 @@ export function jsonRoute<A extends unknown[]>(
 /**
  * SHA-256 of a UTF-8 string, hex-encoded. Used to hash bridge tokens
  * + HMAC secrets before storage / lookup. Five routes (auth/pair,
- * auth/pair-code/redeem, bridge/ping, inbound/n8n, outbound/log) were
+ * auth/pair-code/redeem, bridge/ping, outbound/log) were
  * each defining this same 3-line helper inline; consolidated
  * 2026-05-09 so future security tweaks (switching to BLAKE3,
  * normalizing input, etc.) happen in one place.

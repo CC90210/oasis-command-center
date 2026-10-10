@@ -2574,135 +2574,6 @@ export async function preview_tenant_invite(
     email_pinned: row.email ?? null,
   };
 }
-export async function record_inbound_from_n8n_v2(
-  client: Client,
-  args: Record<string, unknown>
-): Promise<unknown> {
-  // -- Named args (PostgREST style); undefined -> SQL NULL ------------------
-  const profileId = (args.p_profile_id ?? null) as string | null;
-  const secretHash = (args.p_secret_hash ?? null) as string | null;
-  const fromEmail = (args.p_from_email ?? null) as string | null;
-  const subject = (args.p_subject ?? null) as string | null;
-  const body = (args.p_body ?? null) as string | null;
-  const classification = args.p_classification === undefined ? null : args.p_classification;
-
-  // Postgres: every now() inside the function returns the same transaction
-  // timestamp — compute once, reuse everywhere. Stored as ISO-8601 TEXT.
-  const nowIso = new Date().toISOString();
-
-  // p_received_at timestamptz DEFAULT now():
-  //   omitted        -> now()
-  //   explicit null  -> NULL (explicit NULL overrides the column default, as in Postgres)
-  //   value          -> parsed + normalized to UTC ISO-8601 (Postgres normalizes timestamptz)
-  let receivedAt: string | null;
-  if (args.p_received_at === undefined) {
-    receivedAt = nowIso;
-  } else if (args.p_received_at === null) {
-    receivedAt = null;
-  } else {
-    const d = new Date(String(args.p_received_at));
-    if (Number.isNaN(d.getTime())) {
-      throw new Error(
-        `invalid input syntax for type timestamp with time zone: "${String(args.p_received_at)}"`
-      );
-    }
-    receivedAt = d.toISOString();
-  }
-
-  // -- Auth: validate secret hash (RAISE 'invalid_n8n_secret' / 42501) ------
-  const secretRes = await client.execute({
-    sql: `SELECT 1
-            FROM n8n_webhook_secrets
-           WHERE profile_id = ?
-             AND secret_hash = ?
-             AND revoked_at IS NULL
-           LIMIT 1`,
-    args: [profileId, secretHash],
-  });
-  if (secretRes.rows.length === 0) {
-    throw new Error("invalid_n8n_secret");
-  }
-
-  // -- Resolve tenant from profile (inlines public.resolve_tenant_for_profile:
-  //    SELECT tenant_id FROM user_profiles WHERE id = $1 LIMIT 1) -----------
-  const tenantRes = await client.execute({
-    sql: `SELECT tenant_id FROM user_profiles WHERE id = ? LIMIT 1`,
-    args: [profileId],
-  });
-  const tenantId =
-    tenantRes.rows.length > 0 ? (tenantRes.rows[0]["tenant_id"] as string | null) : null;
-  if (tenantId == null) {
-    throw new Error("profile has no tenant");
-  }
-
-  // -- Find the lead, scoped to tenant. lower() stays in SQL so NULL
-  //    semantics match Postgres: lower(email) = lower(NULL) never matches. --
-  const leadRes = await client.execute({
-    sql: `SELECT id FROM leads WHERE lower(email) = lower(?) AND tenant_id = ? LIMIT 1`,
-    args: [fromEmail, tenantId],
-  });
-  let leadId = leadRes.rows.length > 0 ? (leadRes.rows[0]["id"] as string) : null;
-
-  const interactionId = crypto.randomUUID();
-
-  // jsonb_build_object('from_identity', ..., 'classification', ..., 'profile_id', ...)
-  // SQL NULLs become JSON nulls, exactly as jsonb_build_object does.
-  const metadata = JSON.stringify({
-    from_identity: fromEmail,
-    classification: classification,
-    profile_id: profileId,
-  });
-
-  // -- All writes commit or roll back together: libsql batch('write') runs in
-  //    a single transaction, mirroring the PL/pgSQL function body. -----------
-  const writes: Array<{ sql: string; args: Array<string | number | null> }> = [];
-
-  // Bump secret usage (the source deliberately does NOT re-filter revoked_at here)
-  writes.push({
-    sql: `UPDATE n8n_webhook_secrets
-             SET last_used_at = ?, use_count = use_count + 1
-           WHERE profile_id = ? AND secret_hash = ?`,
-    args: [nowIso, profileId, secretHash],
-  });
-
-  if (leadId === null) {
-    leadId = crypto.randomUUID();
-    // split_part(p_from_email, '@', 1) — whole string when '@' is absent,
-    // '' when it starts with '@' — String.split matches both behaviors.
-    const leadName = fromEmail === null ? null : fromEmail.split("@")[0];
-    writes.push({
-      sql: `INSERT INTO leads (id, tenant_id, email, name, status, source, score)
-            VALUES (?, ?, ?, ?, 'new', 'n8n_inbound', 50)`,
-      args: [leadId, tenantId, fromEmail, leadName],
-    });
-  }
-
-  writes.push({
-    sql: `INSERT INTO lead_interactions
-            (id, tenant_id, lead_id, type, channel, subject, content, agent_source, metadata, created_at)
-          VALUES (?, ?, ?, 'email_received', 'email', ?, ?, 'n8n', ?, ?)`,
-    args: [interactionId, tenantId, leadId, subject, body, metadata, receivedAt],
-  });
-
-  // ON CONFLICT (profile_id, service) is backed by the unique index
-  // integrations_health_profile_id_service_key in the Turso schema.
-  writes.push({
-    sql: `INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at)
-          VALUES (?, ?, 'n8n_inbound', 'healthy', ?)
-          ON CONFLICT (profile_id, service) DO UPDATE SET
-            tenant_id = excluded.tenant_id,
-            status = 'healthy',
-            last_ping_at = ?,
-            last_error = NULL,
-            updated_at = ?`,
-    args: [tenantId, profileId, nowIso, nowIso, nowIso],
-  });
-
-  await client.batch(writes, "write");
-
-  // RETURNS uuid — supabase-js callers receive this scalar as { data }.
-  return interactionId;
-}
 /**
  * Port of public.record_outbound_from_gateway_v1 (PL/pgSQL, SECURITY DEFINER)
  * to @libsql/client over the 1:1-transpiled Turso schema.
@@ -3546,7 +3417,6 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
  *   record_lead_touch                  hand-ported + concurrency-tested  writes=True  confidence=high
  *   transition_commission_entry        hand-ported + transaction-tested  writes=True  confidence=high
  *   transition_pipeline_lead           hand-ported + transaction-tested  writes=True  confidence=high
- *   record_inbound_from_n8n_v2         ported-unverified  writes=True  confidence=high
  *   record_outbound_from_gateway_v1    ported-unverified  writes=True  confidence=high
  *   record_tenant_cron_run             ported-unverified  writes=True  confidence=high
  *   redeem_pair_code                   ported-unverified  writes=True  confidence=high
@@ -3565,7 +3435,6 @@ export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string
   patch_tenant_record_data,
   preview_tenant_invite,
   record_lead_touch,
-  record_inbound_from_n8n_v2,
   record_outbound_from_gateway_v1,
   record_tenant_cron_run,
   redeem_pair_code,
