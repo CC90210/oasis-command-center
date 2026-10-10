@@ -45,7 +45,7 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   "outbound.recorded": "Outbound logged",
   BRAVO_OUTBOUND_FAILED: "Outbound failed",
 
-  // Email-engagement (n8n webhook fires these when SendGrid reports open/click).
+  // Email-engagement (the email provider webhook fires these when SendGrid reports open/click).
   BRAVO_EMAIL_OPENED: "Email opened",
   BRAVO_EMAIL_CLICKED: "Email clicked",
   BRAVO_EMAIL_BOUNCED: "Email bounced",

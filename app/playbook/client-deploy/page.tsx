@@ -175,7 +175,7 @@ const PHASES: Phase[] = [
       {
         title: "Discover what's already running",
         detail:
-          "Before building on top of their stack, scan what they already have. The discover prompt lists their n8n workflows, Stripe products, database tables, Gmail labels — so you don't accidentally overwrite anything.",
+          "Before building on top of their stack, scan what they already have. The discover prompt lists their automations, Stripe products, database tables, Gmail labels — so you don't accidentally overwrite anything.",
         promptId: "client-discover-existing-stack",
       },
       {
@@ -414,7 +414,7 @@ export default async function ClientDeployPage() {
             <strong className="text-fg">The pair token</strong> — minted on first <code className="text-accent">oasis bridge serve</code> through the installed launcher. Stored at <code className="text-accent">~/.oasis/bridge_token</code> (chmod 600 on Unix). SHA-256 hashed in the <code className="text-accent">bridge_pairings</code> table. Idempotent by <code className="text-accent">(tenant_id, machine_fingerprint)</code> via partial unique index — re-pairing rotates the token instead of creating duplicates.
           </div>
           <div>
-            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (GitHub, n8n, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
+            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (GitHub, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
           </div>
         </div>
       </Card>

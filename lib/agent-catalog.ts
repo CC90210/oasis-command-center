@@ -17,7 +17,7 @@ export type CatalogEntry = {
   kind: "cron" | "process" | "workflow" | "skill-bundle";
   description: string;
   /** Where the entry runs. */
-  location: "vercel" | "local" | "n8n" | "supabase" | "browser";
+  location: "vercel" | "local" | "supabase" | "browser";
   /** Cron-style schedule when applicable. */
   schedule?: string;
 };
@@ -64,7 +64,6 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
       { name: "telegram bridge", kind: "process", description: "Mobile control surface; routes back to chat.", location: "local" },
     ],
     workflows: [
-      { name: "n8n inbound qualifier", kind: "workflow", description: "Classifies inbound email + posts to /api/inbound/n8n.", location: "n8n" },
       { name: "agent inbox", kind: "workflow", description: "Cross-agent async messages (Codex/Atlas/Maven post here).", location: "supabase" },
     ],
   },

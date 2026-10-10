@@ -67,8 +67,7 @@ export const OASIS_SEED: TenantManifest = {
     { slug: "atlas", display_name: "Finance", enabled: true, core: true, departments: ["finance"] },
   ],
   // OASIS Setup Readiness opinion — CC's empire stack. Distinct from
-  // SunBiz: includes Stripe (CC bills through OASIS), n8n for inbound
-  // webhooks. No Kixie / TextTorrent (CC doesn't use them for the
+  // SunBiz: includes Stripe (CC bills through OASIS). No Kixie / TextTorrent (CC doesn't use them for the
   // agency motion).
   required_services: [
     {
@@ -89,12 +88,6 @@ export const OASIS_SEED: TenantManifest = {
       label: "Stripe (billing)",
       kind: "tenant_credential",
       detail: "Subscription billing + ARR widget on the dashboard.",
-    },
-    {
-      service: "n8n",
-      label: "n8n (inbound webhook bridge)",
-      kind: "tenant_credential",
-      detail: "Inbound qualifier workflow posts here.",
     },
   ],
   nav: navToManifest(CC_NAV),

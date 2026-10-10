@@ -456,6 +456,12 @@ async function main() {
     const oasisOff = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).slack;
     assert.deepEqual([oasisOff.kind, oasisOff.label], ["coming_soon", "OASIS is registering with Slack"]);
     assert.deepEqual(oasisOff.paths?.map((p) => [p.title, p.state, p.requestable]), [["The OASIS Slack app", "Not set up on this deployment", false]]);
+    // While OASIS's app is missing the body says so first, and the original
+    // body follows untouched (a re-cased splice once read "oASIS's own").
+    for (const body of [oasisOff.paths![0].body, client.paths![0].body]) {
+      assert.match(body, /^Available once OASIS's app is set up here\. [A-Z]/);
+      assert.doesNotMatch(body, /oASIS/);
+    }
     const oasisOn = (await withSlackApp(() => loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id }))).slack;
     assert.deepEqual([oasisOn.kind, oasisOn.paths?.[0].state], ["not_connected", "Available"]);
     // With OASIS's Slack app set up, a client can install it too.

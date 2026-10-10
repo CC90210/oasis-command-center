@@ -125,7 +125,7 @@ export default async function InteractionDetailPage({
 
       {/* Classification — only when present */}
       {Object.keys(classification).length > 0 && (
-        <Card title="Classification" subtitle="From the n8n inbound qualifier or send_gateway">
+        <Card title="Classification" subtitle="From the inbound email classifier or send_gateway">
           <div className="grid sm:grid-cols-2 gap-3">
             {classification.intent !== undefined && (
               <Field label="Intent">
@@ -292,8 +292,8 @@ export default async function InteractionDetailPage({
         <div className="rounded-md border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <div>
-            This row has no body or classifier summary. The n8n workflow may have written
-            the row with metadata only, or the classifier didn&apos;t emit an{" "}
+            This row has no body or classifier summary. The row may have been written
+            with metadata only, or the classifier didn&apos;t emit an{" "}
             <code>oasis-routing</code> block. Check the agent&apos;s system prompt.
           </div>
         </div>

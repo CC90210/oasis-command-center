@@ -46,7 +46,10 @@ function isYourTool(def: ConnectorDef, status: ConnectorStatus | undefined): boo
 
 const POPUP_ERRORS: Record<string, string> = {
   admin_only: "Only an owner or admin can connect this.",
-  not_configured: "OASIS's own app for this is still waiting on the vendor's approval, so it cannot connect here yet. Nothing is wrong on your side.",
+  // Raised when OASIS's own app for the vendor is not available on this
+  // workspace: awaiting the vendor's approval, or not set up on this
+  // deployment. Both are true of this sentence; "waiting on approval" was not.
+  not_configured: "OASIS's own app for this isn't available on this workspace yet, so it can't connect here. Nothing is wrong on your side.",
   login_required: "Your session expired. Sign in again, then retry.",
 };
 

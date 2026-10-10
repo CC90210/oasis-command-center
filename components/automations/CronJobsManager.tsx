@@ -1334,7 +1334,7 @@ function JobEditor({
                 type="url"
                 value={String(actionPayload.url || "")}
                 onChange={(e) => setActionPayload({ ...actionPayload, url: e.target.value })}
-                placeholder="https://n8n.your-domain.com/webhook/..."
+                placeholder="https://your-domain.com/webhook/..."
                 className="input w-full text-sm font-mono"
               />
             </label>

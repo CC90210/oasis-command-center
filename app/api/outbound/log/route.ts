@@ -1,7 +1,7 @@
 /**
  * POST /api/outbound/log
  *
- * The outbound counterpart to /api/inbound/n8n. send_gateway.py POSTs every
+ * send_gateway.py POSTs every
  * confirmed send here. We auth via shared-secret header (same n8n_webhook_secrets
  * table — one HMAC per profile gates both inbound + outbound), then call
  * record_outbound_from_gateway_v1 which:

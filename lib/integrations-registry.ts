@@ -49,7 +49,7 @@ export type IntegrationDef = {
   used_by?: ("bravo" | "atlas" | "maven" | "aura" | "hermes" | "solara" | "helios")[];
   /**
    * Platform-infra integrations (Supabase, Vercel, Cloudflare, Hostinger,
-   * GitHub, n8n) are developer tools for the OASIS operator, not client
+   * GitHub) are developer tools for the OASIS operator, not client
    * tenants. Hidden from non-operator tenants regardless of agent
    * enablement. Settings + /integrations both honor this flag.
    */
@@ -397,25 +397,6 @@ export const KNOWN_INTEGRATIONS: IntegrationDef[] = [
   // 5 cards to 1 and matches the actual setup flow.)
 
   // ── Data / automation ──────────────────────────────────────────
-  {
-    // NOTE: the `service` key stays "n8n_inbound" for continuity — it's what
-    // integration_health rows are keyed on and renaming it would orphan the
-    // existing history. The pipeline behind it was migrated 2026-07-23 from the
-    // n8n "OASIS Inbound Qualifier" workflow to the native Bravo email brain
-    // (scripts/email_brain.py, driven by the "Inbound Email Sweep" cron every
-    // 5 min). Label/description reflect the real owner; the key is legacy.
-    service: "n8n_inbound",
-    label: "Inbound Email Brain",
-    category: "data",
-    description: "Native inbound email classifier — 4-brain router (support / opportunity / financial / archive) on the subscription Claude CLI",
-    connection_kind: "api_key",
-    signup_url: "https://n8n.io/cloud/",
-    api_key_url: "https://docs.n8n.io/api/authentication/",
-    setup_complexity: "advanced",
-    used_by: ["bravo"],
-    developer_only: true,
-    env_key: "N8N_API_KEY",
-  },
   // JotForm entry removed 2026-06-06 — SunBiz uses the dashboard's
   // native /forms designer + /f/<tenant>/<form>/<lead_token> public flow
   // for intake (lib/forms-render/). No third-party form vendor.
@@ -593,7 +574,7 @@ export function getIntegration(service: string): IntegrationDef | null {
  * Rules (in order):
  *   1. `developer_only: true` integrations are platform infra — hidden from
  *      non-operator tenants regardless of their enabled agents. Vercel,
- *      Cloudflare, Hostinger, GitHub, Supabase, n8n_inbound, Playwright,
+ *      Cloudflare, Hostinger, GitHub, Supabase, Playwright,
  *      Browser Harness, OpenAI Codex.
  *   2. If the integration has a `used_by` list, at least one of those
  *      agents must be in the tenant's `enabledAgents`. Stripe is only

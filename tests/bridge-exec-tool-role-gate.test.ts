@@ -36,7 +36,6 @@ const NON_MEMBER_DENIED_TOOLS = [
   "run_script",
   "stripe",
   "supabase",
-  "n8n",
   "firecrawl",
   "notebooklm",
   "underwriting_run",

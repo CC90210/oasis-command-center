@@ -157,7 +157,7 @@ function CatalogColumn({
 
 /** "lead_engine" → "Lead engine", "snapshot-mrr" → "Snapshot MRR" (acronyms kept). */
 export function prettifyEntryName(raw: string): string {
-  const ACRONYMS = new Set(["mrr", "edi", "pos", "crm", "kpi", "ai", "cmo", "cfo", "ceo", "n8n", "po", "rsvp", "fire"]);
+  const ACRONYMS = new Set(["mrr", "edi", "pos", "crm", "kpi", "ai", "cmo", "cfo", "ceo", "po", "rsvp", "fire"]);
   const cleaned = raw.replace(/[_-]+/g, " ").trim();
   return cleaned
     .split(/\s+/)

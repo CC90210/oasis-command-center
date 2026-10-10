@@ -95,7 +95,7 @@ export async function POST(req: Request) {
 
   // Role-based tool gate. The /exec-tool dispatcher uses bridge-registry
   // names (lowercase snake_case: bash, write_file, send_email, run_script,
-  // stripe, supabase, n8n, etc) — NOT the Claude CLI namespace
+  // stripe, supabase, etc) — NOT the Claude CLI namespace
   // (PascalCase: Bash, Write, Edit). Codex audit 2026-06-09 round-3
   // [critical]: my round-2 fix used bridgeDisallowedToolsForRole() which
   // returns PascalCase Claude tool names, so the exact-match check
