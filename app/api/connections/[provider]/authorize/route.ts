@@ -54,7 +54,13 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ provider: 
     if (!resolved.ok) {
       // A popup shows a sentence, not a JSON body: the status maps to the hub's own words.
       if (origin && GENERIC_OAUTH_PROVIDER_IDS.includes(providerId)) {
-        return connectionPopupResult({ provider: providerId, status: "error", reason: resolved.response.status === 401 ? "login_required" : "admin_only", origin });
+        // A profile-store or database outage answers 503, not 401/403: it is
+        // not "signed out" or "not an owner" (route-helpers.ts's own comment),
+        // so it gets its own honest reason instead of falling into admin_only
+        // (Codex review, PR #574).
+        const reason =
+          resolved.response.status === 401 ? "login_required" : resolved.response.status === 403 ? "admin_only" : "oasis_unavailable";
+        return connectionPopupResult({ provider: providerId, status: "error", reason, origin });
       }
       return resolved.response;
     }

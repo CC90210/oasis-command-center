@@ -371,7 +371,7 @@ async function probeTeams(bundle: Record<string, string>, deps: KeyProbeDeps): P
           $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
           type: "AdaptiveCard",
           version: "1.2",
-          body: [{ type: "TextBlock", wrap: true, text: "OASIS is connected to this channel. This is the one test message OASIS sends." }],
+          body: [{ type: "TextBlock", wrap: true, text: "OASIS is connected to this channel. This test message was sent because someone pressed Test in OASIS." }],
         },
       },
     ],

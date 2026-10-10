@@ -236,6 +236,7 @@ async function check(name: string, fn: () => Promise<void> | void) {
 const root = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 const MIGRATION = read("database/turso/bravo__187_os_connections.sql");
+const VENDOR_PRINCIPAL_MIGRATION = read("database/turso/bravo__209_connection_vendor_principal.sql");
 
 async function main() {
   const db = createClient({ url: `file:${dbFile}` });
@@ -276,6 +277,7 @@ async function main() {
   `);
   // The real migration, as one script (it carries triggers).
   await db.executeMultiple(MIGRATION);
+  await db.executeMultiple(VENDOR_PRINCIPAL_MIGRATION);
 
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({

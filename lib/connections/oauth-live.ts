@@ -112,9 +112,10 @@ export async function oauthProbeOutcome(deps: OAuthLiveDeps, row: ConnectionRow)
     ({ accessToken } = await getProviderAccessToken(deps, { tenantId: row.tenant_id, providerId: row.provider }));
   } catch (err) {
     if (!(err instanceof TokenStoreError)) throw err;
+    const name = providerForEnv(row.provider, env)?.label ?? row.provider;
     switch (err.code) {
       case "refresh_failed":
-        return { verdict: "down", code: "refresh_failed", detail: "The vendor refused to renew OASIS's access. Reconnect it.", ...NONE };
+        return { verdict: "down", code: "refresh_failed", detail: `${name} refused to renew OASIS's access. Reconnect it.`, ...NONE };
       case "refresh_unavailable":
       case "refresh_busy":
         return { verdict: "unknown", code: "provider_unreachable", detail: "OASIS could not renew its access just now. It will try again.", ...NONE };
@@ -169,7 +170,7 @@ export async function revokeAtVendor(deps: OAuthLiveDeps, row: ConnectionRow): P
       refreshToken: refresh.ok ? refresh.value : null,
     };
     if (!tokens.accessToken && !tokens.refreshToken) return false;
-    return await adapter.revoke(client, tokens, adapterDeps({ ...deps, env }));
+    return await adapter.revoke(client, tokens, adapterDeps({ ...deps, env }), row.external_account_id);
   } catch (err) {
     console.error("[connections.revoke] vendor revoke threw", { provider: row.provider, error: err instanceof Error ? err.name : "error" });
     return false;

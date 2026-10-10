@@ -132,8 +132,27 @@ type TokenMode = {
   xeroOrgs: Array<Record<string, unknown>> | null;
   /** Zoom's /v2/users/me answers with this account_id instead of the fixture default, to simulate a second, different Zoom account signing in. */
   zoomAccountOverride: string | null;
+  /** The ids debug_token's granular_scopes.target_ids answers with, instead of the one default WABA — several means one consent approved several accounts. */
+  whatsappTargetIds: string[] | null;
+  /** debug_token's data.user_id — the ONE Facebook user, regardless of which WhatsApp Business Account (WABA) they approved. */
+  metaUserId: string;
+  /** Every Xero connection id DELETE /connections/{id} has removed (the new, per-organisation revoke). */
+  xeroDeletedConnectionIds: Set<string>;
+  /** Set if anything ever calls the user-wide /connect/revocation endpoint again — a regression tripwire. */
+  xeroUserWideRevokeCalled: boolean;
 };
-const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null, xeroAuthEventId: null, xeroOrgs: null, zoomAccountOverride: null };
+const mode: TokenMode = {
+  refuse: false,
+  revokeFails: false,
+  metaRefreshCode: null,
+  xeroAuthEventId: null,
+  xeroOrgs: null,
+  zoomAccountOverride: null,
+  whatsappTargetIds: null,
+  metaUserId: "meta-user-1",
+  xeroDeletedConnectionIds: new Set(),
+  xeroUserWideRevokeCalled: false,
+};
 
 /** A JWT shape good enough for xeroAuthEventId to read (lib/connections/oauth-adapters.ts): unsigned, never verified by that code. */
 const xeroJwt = (authEventId: string) =>
@@ -212,6 +231,26 @@ const accessOk = (v: string, h: Headers) => bearerOf(h) === live(v).access && !l
 function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Response | null {
   const form = new URLSearchParams(typeof init?.body === "string" && !call.headers.get("content-type")?.includes("json") ? init.body : "");
   const app = (id: string) => OAUTH_APPS.find((a) => a.id === id)!;
+
+  // Xero's per-ORGANISATION revoke: GET /connections, then DELETE
+  // /connections/{id} for just the one pinned organisation — never the
+  // user-wide POST /connect/revocation, which would drop every other
+  // organisation the same Xero user ever connected (security review, PR #574).
+  if (url.hostname === "api.xero.com" && url.pathname.startsWith("/connections/")) {
+    assert.equal(call.method, "DELETE", "Xero's revoke must be a per-connection DELETE, never a POST to the user-wide endpoint");
+    if (mode.revokeFails) return json(500, { error: "server_error" });
+    if (!accessOk("xero", call.headers)) return json(401, { Title: "Unauthorized" });
+    mode.xeroDeletedConnectionIds.add(decodeURIComponent(url.pathname.slice("/connections/".length)));
+    live("xero").revoked = true;
+    return new Response(null, { status: 200 });
+  }
+  // A WhatsApp Business Account's own name lookup, by whichever id the sign-in pinned (not only the fixture default).
+  const wabaId = url.hostname === "graph.facebook.com" ? /^\/v23\.0\/(\d{5,25})$/.exec(url.pathname)?.[1] : null;
+  if (wabaId) {
+    if (!accessOk("whatsapp", call.headers)) return json(400, { error: { type: "OAuthException", code: 190, message: "Invalid OAuth access token." } });
+    return json(200, { id: wabaId, name: wabaId === app("whatsapp").account ? app("whatsapp").label : `WABA ${wabaId}` });
+  }
+
   // -- the token endpoints (Basic client auth, form body), the same shape for three vendors
   const tokenEndpoint = (v: string) => {
     assert.equal(call.method, "POST");
@@ -250,7 +289,14 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
       if (mode.xeroOrgs) return json(200, mode.xeroOrgs);
       return json(200, [{ id: "conn-1", tenantId: app("xero").account, tenantType: "ORGANISATION", tenantName: app("xero").label, authEventId: "evt-default" }]);
     case "identity.xero.com/connect/revocation":
-      return revoke("xero", (_c, f) => f.get("token") ?? "", live("xero").refresh);
+      // A tripwire, not a working mock: Xero's revoke must never call the
+      // user-wide endpoint again (it drops every organisation the same Xero
+      // user ever connected, security review PR #574) — only the
+      // per-connection DELETE /connections/{id} above. A throw inside the
+      // mocked fetch itself is swallowed by send()'s own try/catch, so this
+      // sets a flag the test asserts on instead of throwing here.
+      mode.xeroUserWideRevokeCalled = true;
+      return json(500, { error: "disabled_in_test" });
     // Zoom
     case "zoom.us/oauth/token":
       return tokenEndpoint("zoom");
@@ -279,10 +325,12 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
     }
     case "graph.facebook.com/v23.0/debug_token":
       assert.equal(bearerOf(call.headers), `${app("whatsapp").env.META_APP_ID}|${app("whatsapp").env.META_APP_SECRET}`);
-      return json(200, { data: { granular_scopes: [{ scope: "whatsapp_business_management", target_ids: [app("whatsapp").account] }] } });
-    case `graph.facebook.com/v23.0/${app("whatsapp").account}`:
-      if (!accessOk("whatsapp", call.headers)) return json(400, { error: { type: "OAuthException", code: 190, message: "Invalid OAuth access token." } });
-      return json(200, { id: app("whatsapp").account, name: app("whatsapp").label });
+      return json(200, {
+        data: {
+          user_id: mode.metaUserId,
+          granular_scopes: [{ scope: "whatsapp_business_management", target_ids: mode.whatsappTargetIds ?? [app("whatsapp").account] }],
+        },
+      });
     case "graph.facebook.com/v23.0/me/permissions":
       assert.equal(call.method, "DELETE");
       if (mode.revokeFails) return json(500, {});
@@ -451,6 +499,7 @@ async function main() {
       field_key TEXT, encrypted_value TEXT, last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT, updated_at TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
@@ -1121,7 +1170,10 @@ async function main() {
       assert.equal((await store.getConnection(db, ALPHA, String(row.id)))!.status, "expired");
       const c = await card(ALPHA, app.id);
       assert.equal(c.kind, "attention", `${app.id}: ${c.label}`);
-      assert.match(c.label, /no longer accepted/i);
+      // A sign-in never had a "key" (Codex review, PR #574): QuickBooks, Xero,
+      // Zoom and WhatsApp (connect.kind "oauth") get their own label; a
+      // pasted-key provider still gets the original one.
+      assert.match(c.label, /no longer accepted|sign-in expired/i);
       // Test again says so too, instead of crashing.
       const again = await toRes(await connTestRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx(app.id)));
       assert.equal(again.status, 200);
@@ -1261,12 +1313,130 @@ async function main() {
       ];
       const refused = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
       assert.equal(refused.status, "error");
-      assert.equal(refused.reason, "account_unidentified");
+      // Its OWN code, not the generic "account_unidentified" (Codex review,
+      // PR #574): the vendor DID name the organisations, so the hub's
+      // POPUP_ERRORS must say "approved more than one", not "did not say which".
+      assert.equal(refused.reason, "several_accounts");
       assert.equal((await connectionRows(ALPHA, "xero")).length, before, "neither organisation was connected");
     } finally {
       mode.xeroAuthEventId = null;
       mode.xeroOrgs = null;
     }
+  });
+
+  await check("Xero: disconnecting one organisation removes only that connection id (DELETE /connections/{id}), never the user-wide /connect/revocation, and never a DIFFERENT organisation the same Xero user approved in another workspace", async () => {
+    setOAuthEnv(true);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+    try {
+      await login(USERS.ownerA);
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+
+      // Bravo's owner — the SAME Xero user in the real-world scenario, though
+      // nothing here needs to model that — connects a DIFFERENT organisation.
+      // Xero's exclusivity is per-ORGANISATION (rules.ts), so this is allowed.
+      await login(USERS.ownerB);
+      mode.xeroOrgs = [{ id: "conn-bravo", tenantId: "xero-tenant-bravo", tenantType: "ORGANISATION", tenantName: "Bravo Org", authEventId: "evt-default" }];
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      const rowB = await connectedRow(BRAVO_CO, app);
+      mode.xeroOrgs = null;
+
+      // The decoy (Bravo's) sorts FIRST — picking GET /connections' [0], the
+      // original bug, would delete the wrong organisation.
+      mode.xeroOrgs = [
+        { id: "conn-bravo", tenantId: "xero-tenant-bravo", tenantType: "ORGANISATION", tenantName: "Bravo Org", authEventId: "evt-default" },
+        { id: "conn-1", tenantId: app.account, tenantType: "ORGANISATION", tenantName: app.label, authEventId: "evt-default" },
+      ];
+      await login(USERS.ownerA);
+      const res = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero")));
+      assert.equal(res.body.disconnected, true);
+      assert.equal(mode.xeroUserWideRevokeCalled, false, "Xero's user-wide /connect/revocation must never be called");
+      assert.deepEqual([...mode.xeroDeletedConnectionIds], ["conn-1"], "only ALPHA's own connection id was removed");
+
+      // Bravo's connection is completely untouched.
+      assert.equal((await store.getConnection(db, BRAVO_CO, String(rowB.id)))!.revoked_at, null);
+      assert.equal((await connectedRow(BRAVO_CO, app)).external_account_id, "xero-tenant-bravo");
+    } finally {
+      mode.xeroOrgs = null;
+      mode.xeroUserWideRevokeCalled = false;
+      mode.xeroDeletedConnectionIds.clear();
+      await login(USERS.ownerB);
+      await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+    }
+  });
+
+  await check("WhatsApp: one consent that approved SEVERAL WhatsApp Business Accounts is refused (several_accounts), not a silent pick of whichever sorts first", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "whatsapp")!;
+    try {
+      mode.whatsappTargetIds = ["104000000000001", "104000000000002"];
+      const before = (await connectionRows(ALPHA, "whatsapp")).length;
+      const refused = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
+      assert.equal(refused.status, "error");
+      assert.equal(refused.reason, "several_accounts", "the same code Xero's several-organisations refusal uses");
+      assert.equal((await connectionRows(ALPHA, "whatsapp")).length, before, "neither account was connected");
+    } finally {
+      mode.whatsappTargetIds = null;
+    }
+  });
+
+  await check("WhatsApp: the same Meta USER approves two different WhatsApp Business Accounts in two workspaces; disconnecting one never revokes Meta's whole-user grant that the other still depends on", async () => {
+    setOAuthEnv(true);
+    const app = OAUTH_APPS.find((a) => a.id === "whatsapp")!;
+    try {
+      await login(USERS.ownerA);
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      const rowA = await connectedRow(ALPHA, app);
+      assert.equal(rowA.vendor_principal_id, "meta-user-1", "the Meta user id is recorded at connect time");
+
+      // Bravo's owner, the SAME Meta user (debug_token's data.user_id is
+      // unchanged), approves a DIFFERENT WhatsApp Business Account.
+      await login(USERS.ownerB);
+      mode.whatsappTargetIds = ["104000000000099"];
+      assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+      mode.whatsappTargetIds = null;
+      const rowB = await connectedRow(BRAVO_CO, app);
+      assert.notEqual(rowA.external_account_id, rowB.external_account_id, "different WABAs");
+      assert.equal(rowB.vendor_principal_id, "meta-user-1", "the same Meta user");
+
+      // Alpha disconnects. DELETE /me/permissions would deauthorize OASIS's
+      // app for the WHOLE Meta user — Bravo's grant too — so it must be skipped.
+      await login(USERS.ownerA);
+      live("whatsapp").revoked = false;
+      const res = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp")));
+      assert.equal(res.body.disconnected, true);
+      assert.equal(res.body.vendor_revoked, false);
+      assert.equal(res.body.vendor_revoke_skipped_reason, "shared_with_another_workspace");
+      assert.equal(live("whatsapp").revoked, false, "Meta's /me/permissions was never called");
+      assert.equal(await store.findActiveConnection(db, ALPHA, "whatsapp"), null, "ALPHA's own connection is gone");
+
+      // Bravo's connection still works, untouched.
+      assert.equal((await store.getConnection(db, BRAVO_CO, String(rowB.id)))!.revoked_at, null);
+
+      // Now Bravo is the ONLY workspace left holding this Meta user: its OWN
+      // disconnect must revoke for real.
+      await login(USERS.ownerB);
+      const res2 = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp")));
+      assert.equal(res2.body.vendor_revoked, true);
+      assert.equal(live("whatsapp").revoked, true);
+    } finally {
+      mode.whatsappTargetIds = null;
+    }
+  });
+
+  await check("WhatsApp: when the vendor principal could not be read at all, the vendor revoke is skipped too — never a guess at whether sharing is safe", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "whatsapp")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+    // Simulate a row connected before this column existed, or whose debug_token read failed.
+    await db.execute({ sql: "UPDATE tenant_connections SET vendor_principal_id = NULL WHERE id = ?", args: [String(row.id)] });
+    live("whatsapp").revoked = false;
+    const res = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp")));
+    assert.equal(res.body.vendor_revoked, false);
+    assert.equal(res.body.vendor_revoke_skipped_reason, "vendor_principal_unknown");
+    assert.equal(live("whatsapp").revoked, false);
   });
 
   await check("Xero: more than one organisation comes back, and the access token says which consent this is: the match connects even though it is not index 0 or the newest createdDateUtc, and no match refuses rather than guess", async () => {
@@ -1328,10 +1498,15 @@ async function main() {
       assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
       await login(USERS.ownerB);
       live(app.id).revoked = false;
+      const credsBefore = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n;
       const refused = await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!);
       assert.deepEqual([popupOutcome(refused.html).status, popupOutcome(refused.html).reason], ["error", "account_connected_elsewhere"], app.id);
-      assert.equal((await connectionRows(BRAVO_CO, app.id)).length, 0);
-      assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n, 0, "tokens were saved for the refused workspace");
+      assert.equal(await store.findActiveConnection(db, BRAVO_CO, app.id), null, "no active connection for the refused workspace");
+      assert.equal(
+        (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [BRAVO_CO] })).rows[0].n,
+        credsBefore,
+        "no NEW tokens were saved for the refused workspace",
+      );
       // Revoking ownerB's refused grant would ALSO kill ownerA's live
       // connection to the same account at the vendor (Zoom/Intuit/Meta's
       // revoke is account- or company-wide, not scoped to one token).
@@ -1366,6 +1541,7 @@ async function main() {
   await check("two workspaces sharing one Zoom account (not exclusive): disconnecting the first skips the vendor revoke and says why, without naming the other workspace; the second workspace's grant still works; disconnecting the LAST one does revoke it", async () => {
     setOAuthEnv(true);
     const app = OAUTH_APPS.find((a) => a.id === "zoom")!;
+    const credsBeforeAlpha = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [ALPHA] })).rows[0].n;
     await login(USERS.ownerA);
     assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
     await login(USERS.ownerB);
@@ -1386,8 +1562,8 @@ async function main() {
     assert.equal(await store.findActiveConnection(db, ALPHA, "zoom"), null, "ALPHA's own connection is gone");
     assert.equal(
       (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [ALPHA] })).rows[0].n,
-      0,
-      "ALPHA's credentials are deleted regardless",
+      credsBeforeAlpha,
+      "ALPHA's zoom credentials are deleted regardless, back to the pre-test baseline",
     );
     // Bravo's connection is untouched by Alpha's disconnect.
     assert.equal((await connectedRow(BRAVO_CO, app)).external_account_id, app.account);
@@ -1488,6 +1664,67 @@ async function main() {
     } finally {
       setOAuthEnv(true);
     }
+  });
+
+  await check("getAccessToken re-reads the stored tokens INSIDE the lease: fresh tokens a moment-earlier refresh already saved are returned, never thrown away for the stale refresh_token this caller read before it even took the lease", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "zoom")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+
+    // Force the stored token to look expired, so getAccessToken's OWN first
+    // check (before it ever takes the lease) decides a refresh is needed.
+    const stale = await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false });
+    await tokenStore.saveConnectionTokens(ALPHA, String(row.id), { access_token: stale.access_token, refresh_token: stale.refresh_token, expires_at: Date.now() - 60_000 });
+
+    // The instant this caller's OWN lease-take UPDATE reaches the DB, inject
+    // what a DIFFERENT caller's refresh — one that finished moments earlier —
+    // would have left behind: fresh tokens, at the SAME version (a save and a
+    // release never bump it; CodeRabbit/Codex review, PR #574). This
+    // caller's own pre-lease read never saw them.
+    const FRESH_ACCESS = "race-fresh-access-AAAAAAAAAAAAAAAAAAAA";
+    const FRESH_REFRESH = "race-fresh-refresh-RRRRRRRRRRRRRRRRRRRR";
+    SENSITIVE.add(FRESH_ACCESS).add(FRESH_REFRESH);
+    let injected = false;
+    const racyDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (arg: Parameters<typeof db.execute>[0]) => {
+            const sql = typeof arg === "object" && arg !== null && "sql" in arg ? String((arg as { sql: unknown }).sql) : "";
+            if (!injected && sql.includes("token_version = token_version + 1") && sql.includes("refresh_lease_until")) {
+              injected = true;
+              await tokenStore.saveConnectionTokensFenced(target, {
+                tenantId: ALPHA,
+                connectionId: String(row.id),
+                version: row.token_version,
+                tokens: { access_token: FRESH_ACCESS, refresh_token: FRESH_REFRESH, expires_at: Date.now() + 3_600_000 },
+                now: new Date(),
+              });
+            }
+            return target.execute(arg);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    let refreshCalls = 0;
+    const result = await tokenStore.getAccessToken(racyDb, {
+      tenantId: ALPHA,
+      connectionId: String(row.id),
+      refresh: async () => {
+        refreshCalls += 1;
+        // What Zoom ("always use the latest refresh token") would say to a
+        // token it already rotated past.
+        throw new tokenStore.RefreshRefusedError({ httpStatus: 400, oauthError: "invalid_grant" });
+      },
+    });
+    assert.equal(refreshCalls, 0, "the fix re-reads and returns the fresh tokens; it must never call the vendor with the stale one");
+    assert.equal(result, FRESH_ACCESS);
+    assert.equal((await store.getConnection(db, ALPHA, String(row.id)))!.status, "connected", "the connection must stay connected, never wrongly marked expired");
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom"));
   });
 
   await check("a refresh in flight during a reconnect cannot overwrite the fresh tokens (the reconnect bumps token_version)", async () => {

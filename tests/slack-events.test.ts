@@ -218,6 +218,7 @@ async function main() {
       primary_email TEXT, archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   for (const stmt of splitSql(read("database/turso/bravo__186_os_approvals.sql"))) await db.execute(stmt);
   await db.executeMultiple(read("database/turso/bravo__190_ledger_core.sql"));
   await db.executeMultiple(read("database/turso/bravo__191_agent_turn_outcomes.sql"));
@@ -1002,6 +1003,7 @@ async function main() {
     const status = await import("../lib/slack/status");
     const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "slack-bare-")), "bare.db")}` });
     await bare.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+    await bare.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
     await bare.execute({
       sql: `INSERT INTO tenant_connections (id, tenant_id, provider, scope_kind, auth_kind, external_account_id, external_account_label,
               status, last_health_verdict, last_health_at, connected_at, created_at, updated_at)

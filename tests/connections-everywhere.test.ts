@@ -177,6 +177,7 @@ async function main() {
       PRIMARY KEY ("id"));
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   // Slack's channel map (Settings > Chat apps reads it once Slack is connected).
   await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
 
@@ -454,9 +455,9 @@ async function main() {
         "xero:configured:false:popup:true",
         "xero:attention:false:popup:true",
         "xero:attention:true:popup:false",
-        "xero:unknown:false:popup:false",
+        "xero:unknown:false:popup:true",
       ],
-      "a connected/configured/attention card's click opens the drawer; fromDrawer (its own Reconnect) and not_connected/unknown still pop up",
+      "a connected/configured/attention/unknown card's click opens the drawer; fromDrawer (its own Reconnect) and not_connected still pop up",
     );
   });
 
@@ -476,6 +477,39 @@ async function main() {
     assert.match(text(banner(markup.denied)), /Connection cancelled\./);
     assert.match(text(banner(markup.err)), /That account is already connected to another OASIS workspace\. Disconnect it there first\./);
     assert.doesNotMatch(banner(markup.none), /role="status"/, "no ?status= on arrival shows no banner");
+
+    // A FAILED full-window sign-in must not auto-open a drawer that has
+    // nothing in it to explain the refusal — on a phone it would fully cover
+    // this very banner, on desktop sit dimmed behind it (Codex review, PR
+    // #574). The drawer's dialog carries `inert` only while it is closed.
+    const drawerInert = (html: string) => {
+      const at = html.indexOf('role="dialog"');
+      assert.ok(at > 0, "the drawer markup is present");
+      return html.slice(Math.max(0, at - 400), at).includes("inert=\"\"");
+    };
+    assert.equal(drawerInert(markup.err), true, "a failed full-window sign-in must not auto-open the drawer");
+    assert.equal(drawerInert(markup.ok), false, "a successful one still opens the drawer, as before");
+  });
+
+  await check("connected, but OASIS's own app for it is missing on this deployment: no Reconnect, no Test again (both would only end in the SAME refusal), neutral copy, and the account name and Disconnect both stay (Codex review, PR #574)", () => {
+    const appMissingStatus = {
+      kind: "attention",
+      label: "Connected · needs attention",
+      detail: "OASIS can't check or renew this connection here until Xero's app is set up again on this deployment. You can still disconnect.",
+      account: "Acme Books",
+      appMissing: true,
+    };
+    const { markup } = renderClient({
+      cases: [{ id: "drawer", kind: "drawer", slug: "xero", status: appMissingStatus }],
+      clicks: [],
+    });
+    const html = markup.drawer;
+    assert.doesNotMatch(html, /Reconnect Xero/, "Reconnect would only end in the connect route's own refusal");
+    assert.doesNotMatch(text(html), /Test again/, "Test again would also only end in a refusal (test\\/route.ts's own gate)");
+    assert.doesNotMatch(text(html), /messages may not arrive/i, "the Slack-only wording must not leak onto Xero/QuickBooks/Zoom/WhatsApp");
+    assert.match(text(html), /Acme Books/, "the connected account's name is kept");
+    assert.match(text(html), /Disconnect/, "Disconnect is still offered");
+    assert.match(text(html), /OASIS can't (check or renew this connection here|start a new Xero sign-in here) until/, "provider-neutral, honest copy");
   });
 
   // -- 3. Slack: each workspace is shown its own path (W10a R1) ---------------------

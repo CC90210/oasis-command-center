@@ -13,7 +13,7 @@
  * tokens), and the hub re-reads every status afterwards (onChanged).
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 import type { ConnectorStatus } from "@/lib/os/connectors";
 
@@ -47,6 +47,20 @@ export function OAuthConnectionPanel({
   const [busy, setBusy] = useState<Busy>(null);
   const [notice, setNotice] = useState<NoticeValue>(null);
   const [confirming, setConfirming] = useState(false);
+  // The Disconnect button unmounts the moment it opens the confirm (it is
+  // `!confirming &&`), so a keyboard user's focus would otherwise fall to
+  // document.body inside this aria-modal drawer, and the next Tab jumps to
+  // the drawer's own Close button (Codex review, PR #574). Move focus to the
+  // confirm's own Disconnect button on open, and back on Cancel (or once the
+  // confirm itself unmounts) — never on the panel's own first mount.
+  const disconnectTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmDisconnectRef = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
+  useEffect(() => {
+    if (confirming) confirmDisconnectRef.current?.focus();
+    else if (wasConfirming.current) disconnectTriggerRef.current?.focus();
+    wasConfirming.current = confirming;
+  }, [confirming]);
 
   const hasConnection = status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention";
   const base = `/api/connections/${encodeURIComponent(providerId)}`;
@@ -109,11 +123,13 @@ export function OAuthConnectionPanel({
         <h3 className="mb-2 text-xs font-medium text-fg-dim">Connected account</h3>
         <p className="text-[13px] leading-5 text-fg">{status?.account ?? "Account name not available"}</p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" onClick={test} disabled={busy !== null} className="btn-secondary">
-            {busy === "test" ? "Checking…" : "Test again"}
-          </button>
+          {!status?.appMissing && (
+            <button type="button" onClick={test} disabled={busy !== null} className="btn-secondary">
+              {busy === "test" ? "Checking…" : "Test again"}
+            </button>
+          )}
           {!confirming && (
-            <button type="button" onClick={() => setConfirming(true)} disabled={busy !== null} className="btn-secondary">
+            <button type="button" ref={disconnectTriggerRef} onClick={() => setConfirming(true)} disabled={busy !== null} className="btn-secondary">
               Disconnect
             </button>
           )}
@@ -125,7 +141,7 @@ export function OAuthConnectionPanel({
               stops reading this account. You can connect it again at any time.
             </p>
             <div className="mt-3 flex gap-2">
-              <button type="button" onClick={disconnect} disabled={busy !== null} className="btn-danger">
+              <button type="button" ref={confirmDisconnectRef} onClick={disconnect} disabled={busy !== null} className="btn-danger">
                 {busy === "disconnect" ? "Disconnecting…" : "Disconnect"}
               </button>
               <button type="button" onClick={() => setConfirming(false)} disabled={busy !== null} className="btn-secondary">

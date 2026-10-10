@@ -52,6 +52,8 @@ export type ConnectionRow = {
   auth_kind: AuthKind;
   external_account_id: string | null;
   external_account_label: string | null;
+  /** The vendor-side PERSON who approved this (Meta's debug_token data.user_id). Null when not read or not applicable. */
+  vendor_principal_id: string | null;
   environment: ConnectionEnvironment | null;
   granted_scopes_json: string;
   scope_set_version: number;
@@ -85,7 +87,7 @@ export type HealthCheckRow = {
 };
 
 const CONNECTION_COLUMNS = `id, tenant_id, provider, scope_kind, user_id, auth_kind, external_account_id,
-  external_account_label, environment, granted_scopes_json, scope_set_version, status, token_version,
+  external_account_label, vendor_principal_id, environment, granted_scopes_json, scope_set_version, status, token_version,
   refresh_lease_until, last_health_at, last_health_verdict, last_health_code, last_health_detail,
   consecutive_failures, connected_by, connected_at, revoked_at, revoked_by, created_at, updated_at`;
 
@@ -115,6 +117,7 @@ function toConnection(r: Row): ConnectionRow {
     auth_kind: String(r.auth_kind) as AuthKind,
     external_account_id: str(r.external_account_id),
     external_account_label: str(r.external_account_label),
+    vendor_principal_id: str(r.vendor_principal_id),
     environment: str(r.environment) as ConnectionEnvironment | null,
     granted_scopes_json: str(r.granted_scopes_json) ?? "[]",
     scope_set_version: num(r.scope_set_version),
@@ -262,6 +265,27 @@ export async function isAccountHeldByAnotherTenant(
   return rs.rows.length > 0;
 }
 
+/**
+ * CROSS-TENANT, boolean only. Is this vendor PRINCIPAL (the person who
+ * approved the grant, not the account) live in some other tenant for this
+ * provider? Meta's revoke acts on the whole principal, so an account-keyed
+ * check alone misses a user who approved a DIFFERENT account elsewhere.
+ */
+export async function isPrincipalHeldByAnotherTenant(
+  db: Client,
+  tenantId: string,
+  provider: string,
+  vendorPrincipalId: string,
+): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `SELECT 1 FROM tenant_connections
+          WHERE provider = ? AND vendor_principal_id = ? AND revoked_at IS NULL AND tenant_id <> ?
+          LIMIT 1`,
+    args: [provider, vendorPrincipalId, tenantId],
+  });
+  return rs.rows.length > 0;
+}
+
 // ── Connect ───────────────────────────────────────────────────────────────
 
 export type ClaimInput = {
@@ -272,6 +296,8 @@ export type ClaimInput = {
   userId: string | null;
   externalAccountId: string;
   externalAccountLabel: string | null;
+  /** The vendor-side person who approved this (Meta's debug_token data.user_id). Null when not applicable or not read. */
+  vendorPrincipalId?: string | null;
   environment: ConnectionEnvironment | null;
   grantedScopes: readonly string[];
   scopeSetVersion: number;
@@ -342,6 +368,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
                 token_version = token_version + 1,
                 auth_kind = ?,
                 external_account_label = ?,
+                vendor_principal_id = ?,
                 environment = ?,
                 granted_scopes_json = ?,
                 scope_set_version = ?,
@@ -357,6 +384,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
         args: [
           input.authKind,
           input.externalAccountLabel,
+          input.vendorPrincipalId ?? null,
           input.environment,
           scopes,
           input.scopeSetVersion,
@@ -381,8 +409,8 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
     await db.execute({
       sql: `INSERT INTO tenant_connections (
               id, tenant_id, provider, scope_kind, user_id, auth_kind, external_account_id, external_account_label,
-              environment, granted_scopes_json, scope_set_version, status, connected_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+              vendor_principal_id, environment, granted_scopes_json, scope_set_version, status, connected_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
       args: [
         id,
         input.tenantId,
@@ -392,6 +420,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
         input.authKind,
         input.externalAccountId,
         input.externalAccountLabel,
+        input.vendorPrincipalId ?? null,
         input.environment,
         scopes,
         input.scopeSetVersion,
@@ -628,6 +657,22 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────
+
+/**
+ * FENCE a connection before Disconnect does anything slow (the vendor revoke
+ * can take up to ~10 s): bump token_version right away, so a save already in
+ * flight for the OLD version — the OAuth callback's fenced save, or a
+ * refresher that took the lease moments earlier — lands nothing once it
+ * finally runs, instead of racing the credential delete and the revoke that
+ * follow (Codex review, PR #574). Best-effort: Disconnect still proceeds
+ * either way, and the later revoke's own `revoked_at IS NULL` fences the rest.
+ */
+export async function fenceConnectionForDisconnect(db: Client, input: { tenantId: string; connectionId: string }): Promise<void> {
+  await db.execute({
+    sql: `UPDATE tenant_connections SET token_version = token_version + 1 WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL`,
+    args: [input.connectionId, input.tenantId],
+  });
+}
 
 /**
  * Mark a connection revoked and drop its webhook routes, in one batch. The

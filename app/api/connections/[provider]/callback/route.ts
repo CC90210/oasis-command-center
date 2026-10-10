@@ -47,7 +47,19 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ provider: s
       return NextResponse.json({ ok: false, error: "app_url_missing" }, { status: 500 });
     }
     const resolved = await resolveConnectionsActor();
-    if (!resolved.ok) return back(origin, providerId, "error", "signed_out_or_not_allowed");
+    if (!resolved.ok) {
+      // Same honesty as the authorize route: an outage (503) is not "signed
+      // out, or not an owner", so it gets its own reason (Codex review, PR #574).
+      const reason =
+        resolved.response.status === 401
+          ? "login_required"
+          : resolved.response.status === 403
+            ? "admin_only"
+            : resolved.response.status === 503
+              ? "oasis_unavailable"
+              : "signed_out_or_not_allowed";
+      return back(origin, providerId, "error", reason);
+    }
 
     const q = req.nextUrl.searchParams;
     if (q.get("error")) return back(origin, providerId, "denied");

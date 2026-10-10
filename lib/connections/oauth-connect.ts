@@ -41,6 +41,7 @@ export type OAuthConnectFailure =
   | "app_credentials_missing"
   | "exchange_failed"
   | "account_unidentified"
+  | "several_accounts"
   | "account_connected_elsewhere"
   | "another_account_connected"
   | "token_save_failed";
@@ -107,6 +108,7 @@ export async function completeOAuthConnect(
     userId: null,
     externalAccountId: identity.accountId,
     externalAccountLabel: identity.accountLabel,
+    vendorPrincipalId: identity.vendorPrincipalId,
     environment: identity.environment,
     grantedScopes: provider.scopes.base,
     scopeSetVersion: 1,

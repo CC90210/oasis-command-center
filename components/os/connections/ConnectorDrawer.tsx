@@ -209,6 +209,11 @@ export function ConnectorDrawer({
   // or needs an app this deployment lacks) offers no connect button: the body
   // says why, and requests what is not built.
   const blocked = !!live && status?.kind === "coming_soon";
+  // Connected, but OASIS's own app for it is missing here: Reconnect would
+  // only end in the SAME refusal the connect route already gives, so a
+  // sign-in app offers no button at all in that state (Codex review, PR
+  // #574) — Disconnect (in the body, OAuthConnectionPanel) is still there.
+  const appMissingSignIn = !!signIn && !!status?.appMissing;
   const footer =
     def && !setUpHere && !blocked ? (
       <footer className="border-t border-hairline px-5 py-4">
@@ -217,6 +222,10 @@ export function ConnectorDrawer({
             <p className="text-[13px] leading-5 text-fg-muted">
               {def.name} is set up in Settings ({def.seeAlso?.label ?? live.connect.label}) once your workspace setup is
               finished.
+            </p>
+          ) : appMissingSignIn ? (
+            <p className="text-[13px] leading-5 text-fg-muted">
+              OASIS can&apos;t start a new {def.name} sign-in here until its app is set up again on this deployment.
             </p>
           ) : (
             <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">

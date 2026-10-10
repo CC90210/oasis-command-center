@@ -1046,6 +1046,13 @@ export type ConnectorStatus = {
    * of workspace), each with its state on this deployment, for the drawer.
    */
   paths?: readonly ConnectorPathStatus[];
+  /**
+   * Connected, but OASIS's own app for it is missing on THIS deployment: a
+   * Reconnect or a Test again would only end in a refusal (the app can't be
+   * reached here at all), so the drawer and panel hide both and keep only
+   * Disconnect (Codex review, PR #574).
+   */
+  appMissing?: boolean;
 };
 
 export type ConnectorPathStatus = {
@@ -1499,12 +1506,21 @@ function frameworkStatus(
         account,
       };
     case "expired":
-      return {
-        kind: "attention",
-        label: "Key no longer accepted",
-        detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
-        account,
-      };
+      // A sign-in at the vendor's own page never had a "key"; it had a
+      // consent that expired or was refused (Codex review, PR #574).
+      return def.live?.connect.kind === "oauth"
+        ? {
+            kind: "attention",
+            label: "Sign-in expired · reconnect",
+            detail: row.last_health_detail ?? `${def.name} stopped accepting this sign-in. Reconnect it.`,
+            account,
+          }
+        : {
+            kind: "attention",
+            label: "Key no longer accepted",
+            detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
+            account,
+          };
     case "degraded":
     case "error":
       return {
@@ -1599,12 +1615,18 @@ export function resolveConnectorStatus(
     // A workspace that already connected is never told the app is unavailable:
     // its connection is real, it needs to see it and keep its Disconnect, and
     // the missing app is an attention state.
-    const alreadyConnected = !!facts.connections?.some((c) => c.provider === source.provider && c.status !== "revoked");
+    const connectedRow = facts.connections?.find((c) => c.provider === source.provider && c.status !== "revoked") ?? null;
+    const alreadyConnected = !!connectedRow;
     if (oasisAppMissing && alreadyConnected) {
       return withPaths({
         kind: "attention",
         label: "Connected · needs attention",
-        detail: `This workspace is connected to ${def.name}, but OASIS's ${def.name} app is not set up on this deployment, so messages may not arrive. You can still disconnect.`,
+        // Provider-neutral: "messages may not arrive" was Slack-only wording
+        // and means nothing for QuickBooks, Xero or Zoom (Codex review, PR
+        // #574). Also carries the account name on, same as every other status.
+        detail: `OASIS can't check or renew this connection here until ${def.name}'s app is set up again on this deployment. You can still disconnect.`,
+        account: accountLine(connectedRow),
+        appMissing: true,
       });
     }
     if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {

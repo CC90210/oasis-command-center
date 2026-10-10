@@ -259,6 +259,7 @@ async function main() {
       field_key TEXT, encrypted_value TEXT, last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT, updated_at TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)

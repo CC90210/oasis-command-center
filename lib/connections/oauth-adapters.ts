@@ -58,6 +58,8 @@ export type OAuthIdentity = {
   accountId: string;
   accountLabel: string | null;
   environment: ConnectionEnvironment | null;
+  /** The vendor-side PERSON who approved this (Meta's debug_token data.user_id). Null when the vendor has no such concept or it could not be read. */
+  vendorPrincipalId: string | null;
 };
 
 export type OAuthProbeResult = {
@@ -70,9 +72,9 @@ export type OAuthProbeResult = {
   environment: ConnectionEnvironment | null;
 };
 
-/** The code could not be turned into a grant, or the grant belongs to nobody OASIS can pin. */
+/** The code could not be turned into a grant, the grant belongs to nobody OASIS can pin, or it names more than one OASIS connects one at a time. */
 export class OAuthExchangeError extends Error {
-  code: "exchange_failed" | "account_unidentified";
+  code: "exchange_failed" | "account_unidentified" | "several_accounts";
   constructor(code: OAuthExchangeError["code"], message: string) {
     super(message);
     this.name = "OAuthExchangeError";
@@ -90,8 +92,13 @@ export type OAuthAdapter = {
   identify(client: OAuthClient, grant: TokenGrant, query: URLSearchParams, deps: AdapterDeps): Promise<OAuthIdentity>;
   /** A live read with the access token, compared with the account the connection is pinned to. */
   probe(accessToken: string, accountId: string, deps: AdapterDeps): Promise<OAuthProbeResult>;
-  /** Tell the vendor to forget the grant. False when it could not be done (the owner is told). */
-  revoke(client: OAuthClient, tokens: { accessToken: string | null; refreshToken: string | null }, deps: AdapterDeps): Promise<boolean>;
+  /**
+   * Tell the vendor to forget the grant. False when it could not be done (the
+   * owner is told). `accountId` is the connection's own pinned account, for an
+   * adapter whose revoke must be scoped to just this one account (Xero: it
+   * looks up and deletes only this one connection, never the user-wide revoke).
+   */
+  revoke(client: OAuthClient, tokens: { accessToken: string | null; refreshToken: string | null }, deps: AdapterDeps, accountId: string | null): Promise<boolean>;
 };
 
 // -- shared plumbing -----------------------------------------------------------
@@ -222,6 +229,7 @@ const quickbooks: OAuthAdapter = {
       accountId: realmId,
       accountLabel: text(info.CompanyName) ?? text(info.LegalName),
       environment: intuitEnvironment(deps.env) === "sandbox" ? "test" : "live",
+      vendorPrincipalId: null,
     };
   },
   async probe(accessToken, accountId, deps) {
@@ -256,17 +264,18 @@ const quickbooks: OAuthAdapter = {
 // -- Xero --------------------------------------------------------------------------
 
 const XERO_TOKEN_URL = "https://identity.xero.com/connect/token";
-const XERO_REVOKE_URL = "https://identity.xero.com/connect/revocation";
 const XERO_CONNECTIONS_URL = "https://api.xero.com/connections";
 
-export type XeroOrg = { tenantId: string; tenantName: string | null; authEventId: string | null };
+/** `id` is the CONNECTION's own id (what DELETE /connections/{id} takes); `tenantId` is the organisation. */
+export type XeroOrg = { id: string; tenantId: string; tenantName: string | null; authEventId: string | null };
 
 function xeroOrgs(body: unknown): XeroOrg[] {
   if (!Array.isArray(body)) return [];
   return body.flatMap((row) => {
     const o = asObj(row);
+    const id = text(o?.id);
     const tenantId = text(o?.tenantId);
-    return tenantId ? [{ tenantId, tenantName: text(o?.tenantName), authEventId: text(o?.authEventId) }] : [];
+    return id && tenantId ? [{ id, tenantId, tenantName: text(o?.tenantName), authEventId: text(o?.authEventId) }] : [];
   });
 }
 
@@ -342,14 +351,12 @@ const xero: OAuthAdapter = {
     // history, and never an arbitrary pick among several this ONE consent approved.
     const resolved = xeroCurrentOrg(orgs, authEventId);
     if (!resolved.ok) {
-      throw new OAuthExchangeError(
-        "account_unidentified",
-        resolved.reason === "several"
-          ? "This Xero sign-in covers several organisations; connect one organisation at a time"
-          : "Xero did not say which organisation was connected",
-      );
+      if (resolved.reason === "several") {
+        throw new OAuthExchangeError("several_accounts", "You approved more than one Xero organisation. Start again and choose only one.");
+      }
+      throw new OAuthExchangeError("account_unidentified", "Xero did not say which organisation was connected");
     }
-    return { accountId: resolved.org.tenantId, accountLabel: resolved.org.tenantName, environment: null };
+    return { accountId: resolved.org.tenantId, accountLabel: resolved.org.tenantName, environment: null, vendorPrincipalId: null };
   },
   async probe(accessToken, accountId, deps) {
     const started = Date.now();
@@ -374,14 +381,28 @@ const xero: OAuthAdapter = {
     }
     return probeFail("Xero", r, started, accountId);
   },
-  async revoke(client, tokens, deps) {
-    if (!tokens.refreshToken) return false;
-    const r = await send(deps, XERO_REVOKE_URL, {
-      method: "POST",
-      headers: { ...FORM, Authorization: basic(client) },
-      body: form({ token: tokens.refreshToken }),
+  /**
+   * NEVER the user-wide /connect/revocation: it "revokes a user's refresh
+   * token and removes all their connections to your app" (xero-node SDK),
+   * which would drop every OTHER organisation the same Xero user connected —
+   * possibly in a different OASIS workspace (security review, PR #574).
+   * Removing only THIS one: list the user's connections, find the row for
+   * the organisation OASIS has pinned, and delete just that connection id.
+   */
+  async revoke(_client, tokens, deps, accountId) {
+    if (!tokens.accessToken || !accountId) return false;
+    const list = await send(deps, XERO_CONNECTIONS_URL, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${tokens.accessToken}`, Accept: "application/json" },
     });
-    return r.status === 200;
+    if (list.status !== 200) return false;
+    const match = xeroOrgs(list.body).find((o) => o.tenantId === accountId);
+    if (!match) return false;
+    const del = await send(deps, `${XERO_CONNECTIONS_URL}/${encodeURIComponent(match.id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${tokens.accessToken}`, Accept: "application/json" },
+    });
+    return del.status === 200;
   },
 };
 
@@ -409,7 +430,7 @@ const zoom: OAuthAdapter = {
     const r = await send(deps, ZOOM_ME_URL, { method: "GET", headers: { Authorization: `Bearer ${grant.accessToken}`, Accept: "application/json" } });
     const who = zoomIdentity(r.body);
     if (r.status !== 200 || !who) throw new OAuthExchangeError("account_unidentified", `Zoom did not say whose account this is (HTTP ${r.status})`);
-    return { accountId: who.accountId, accountLabel: who.label, environment: null };
+    return { accountId: who.accountId, accountLabel: who.label, environment: null, vendorPrincipalId: null };
   },
   async probe(accessToken, accountId, deps) {
     const started = Date.now();
@@ -489,16 +510,25 @@ async function metaExtend(client: OAuthClient, token: string, deps: AdapterDeps,
   return { accessToken: longLived.token, refreshToken: longLived.token, expiresInSec: longLived.expiresInSec };
 }
 
-function wabaFrom(body: unknown): string | null {
+/** Every WhatsApp Business Account id this consent approved, de-duplicated. More than one is an ambiguous pin, never a guess (the same rule Xero's xeroCurrentOrg uses). */
+function wabaIds(body: unknown): string[] {
   const scopes = asObj(asObj(body)?.data)?.granular_scopes;
-  if (!Array.isArray(scopes)) return null;
+  if (!Array.isArray(scopes)) return [];
+  const ids = new Set<string>();
   for (const entry of scopes) {
     const o = asObj(entry);
     if (o?.scope !== "whatsapp_business_management" || !Array.isArray(o.target_ids)) continue;
-    const id = o.target_ids.map((t) => String(t)).find((t) => /^\d{5,25}$/.test(t));
-    if (id) return id;
+    for (const t of o.target_ids) {
+      const id = String(t);
+      if (/^\d{5,25}$/.test(id)) ids.add(id);
+    }
   }
-  return null;
+  return [...ids];
+}
+
+/** The vendor-side person who approved this: Meta's debug_token data.user_id. */
+function metaPrincipalId(body: unknown): string | null {
+  return text(asObj(asObj(body)?.data)?.user_id);
 }
 
 async function wabaName(accessToken: string, wabaId: string, deps: AdapterDeps): Promise<Reply> {
@@ -522,10 +552,19 @@ const whatsapp: OAuthAdapter = {
       method: "GET",
       headers: { Authorization: `Bearer ${appToken}`, Accept: "application/json" },
     });
-    const wabaId = debug.status === 200 ? wabaFrom(debug.body) : null;
-    if (!wabaId) throw new OAuthExchangeError("account_unidentified", "Meta did not say which WhatsApp Business Account was approved");
+    const ids = debug.status === 200 ? wabaIds(debug.body) : [];
+    if (ids.length === 0) throw new OAuthExchangeError("account_unidentified", "Meta did not say which WhatsApp Business Account was approved");
+    if (ids.length > 1) {
+      throw new OAuthExchangeError("several_accounts", "You approved more than one WhatsApp Business Account. Start again and choose only one.");
+    }
+    const wabaId = ids[0];
     const named = await wabaName(grant.accessToken, wabaId, deps);
-    return { accountId: wabaId, accountLabel: text(asObj(named.body)?.name), environment: null };
+    return {
+      accountId: wabaId,
+      accountLabel: text(asObj(named.body)?.name),
+      environment: null,
+      vendorPrincipalId: debug.status === 200 ? metaPrincipalId(debug.body) : null,
+    };
   },
   async probe(accessToken, accountId, deps) {
     const started = Date.now();

@@ -902,7 +902,8 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // (CodeRabbit PR #574).
   assert.match(
     hub,
-    /export function oauthManageOpensDrawer\(statusKind: ConnectorStatusKind \| undefined, fromDrawer: boolean\): boolean \{\s*return !fromDrawer && \(statusKind === "connected" \|\| statusKind === "configured" \|\| statusKind === "attention"\);/,
+    /export function oauthManageOpensDrawer\(statusKind: ConnectorStatusKind \| undefined, fromDrawer: boolean\): boolean \{[\s\S]{0,400}return !fromDrawer && \(statusKind === "connected" \|\| statusKind === "configured" \|\| statusKind === "attention" \|\| statusKind === "unknown"\);/,
+    "unknown (the read itself failed) must open the drawer too, same as its 'Manage' label (Codex review, PR #574)",
   );
   assert.match(
     hub,

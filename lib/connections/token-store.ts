@@ -305,12 +305,27 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
     throw new TokenStoreError("refresh_busy", "Another refresh is still running.");
   }
 
-  // This caller holds the lease.
+  // This caller holds the lease, but the tokens read above are from BEFORE it
+  // won: another caller can have refreshed, saved and released in the gap
+  // between that read and takeRefreshLease succeeding (Codex review, PR
+  // #574). The version bump alone does not prove the refresh_token read above
+  // is still current. Re-read inside the lease: if it is already fresh,
+  // someone else just saved it — release and return that, never refresh
+  // again. Otherwise refresh with THIS read's refresh_token, never the stale
+  // one, so a vendor that rotates on every use (Zoom) is never handed a
+  // token that is already dead, which would wrongly expire a healthy connection.
+  const held = await loadTokens(input.tenantId, input.connectionId);
+  if (held && now().getTime() < held.expires_at - REFRESH_SKEW_MS) {
+    await releaseRefreshLease(db, { tenantId: input.tenantId, connectionId: input.connectionId, version, now: now() });
+    return held.access_token;
+  }
+  const refreshToken = held?.refresh_token ?? tokens.refresh_token;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
   let refreshed: OAuthTokens;
   try {
-    refreshed = await input.refresh(tokens.refresh_token, controller.signal);
+    refreshed = await input.refresh(refreshToken, controller.signal);
   } catch (err) {
     clearTimeout(timer);
     const refused = isConfirmedRefreshRefusal(err);

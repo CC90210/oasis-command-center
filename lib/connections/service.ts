@@ -21,8 +21,10 @@ import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "
 import {
   claimConnection,
   deleteUnprovenClaim,
+  fenceConnectionForDisconnect,
   findActiveConnection,
   isAccountHeldByAnotherTenant,
+  isPrincipalHeldByAnotherTenant,
   listRecentHealthChecks,
   markConnectionError,
   recordHealthCheck,
@@ -352,6 +354,13 @@ export async function disconnectConnection(
   const row = await findActiveConnection(deps.db, actor.tenantId, provider.id);
   if (!row) return { status: 200, body: { ok: true, already_disconnected: true } };
 
+  // FENCE first, before anything slow starts (the vendor revoke below can
+  // take up to ~10 s): a save already in flight for the version this row held
+  // a moment ago — the OAuth callback's fenced save, or a refresher's — now
+  // lands nothing once it finally runs, instead of racing the delete and the
+  // revoke that follow (Codex review, PR #574).
+  await fenceConnectionForDisconnect(deps.db, { tenantId: actor.tenantId, connectionId: row.id });
+
   // What the provider kept that must go with the connection (Slack: the
   // channel map and the people it looked up). Worked out before anything is
   // deleted, and deleted in the revoke's own batch.
@@ -363,22 +372,27 @@ export async function disconnectConnection(
   // never blocks the disconnect: OASIS's copy still goes, and the answer says
   // the owner should also remove OASIS in the vendor's own settings.
   //
-  // UNLESS another workspace's live connection holds this exact vendor
-  // account for this provider (Zoom and WhatsApp are not exclusive — the
-  // same account can be connected to more than one OASIS workspace at once).
-  // Zoom's revoke deauthorizes the whole account, Intuit's disconnects the
-  // app from the whole company, and Meta's removes the app for that whole
-  // user: none are scoped to just this one grant, so revoking here would
-  // silently break the OTHER workspace's working connection too (Codex
-  // review, PR #574). This workspace's own copy is always deleted either
-  // way; the vendor is just never told to forget an account someone else
+  // UNLESS another workspace's live connection shares the same vendor-side
+  // ACCOUNT, or (for a provider whose revoke acts on the whole vendor USER,
+  // not the account — WhatsApp's DELETE /me/permissions de-authorizes every
+  // WhatsApp Business Account that Facebook user ever approved, for ANY
+  // workspace) the same vendor PRINCIPAL. Zoom's revoke deauthorizes the
+  // whole account and Intuit's the whole company — for them the account IS
+  // the right boundary, already covered by the account check. For WhatsApp,
+  // if the principal could not even be read at connect time, OASIS has no
+  // way to rule out another workspace sharing it, so it is not asked either
+  // (security review, PR #574). This workspace's own copy is always deleted
+  // either way; the vendor is just never told to forget access someone else
   // is still relying on.
   let vendorRevoked: boolean | null = null;
-  let vendorRevokeSkippedReason: "shared_with_another_workspace" | null = null;
+  let vendorRevokeSkippedReason: "shared_with_another_workspace" | "vendor_principal_unknown" | null = null;
   if (isGenericOAuthProvider(provider)) {
-    const shared = !!row.external_account_id && (await isAccountHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.external_account_id));
-    if (shared) {
+    const accountShared = !!row.external_account_id && (await isAccountHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.external_account_id));
+    const principalShared = !!row.vendor_principal_id && (await isPrincipalHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.vendor_principal_id));
+    if (accountShared || principalShared) {
       vendorRevokeSkippedReason = "shared_with_another_workspace";
+    } else if (provider.id === "whatsapp" && !row.vendor_principal_id) {
+      vendorRevokeSkippedReason = "vendor_principal_unknown";
     } else {
       vendorRevoked = await revokeAtVendor(deps, row);
     }

@@ -68,9 +68,11 @@ const POPUP_ERRORS: Record<string, string> = {
   wrong_person: "That sign-in was started by someone else. Start again from your own screen.",
   exchange_failed: "The app did not accept the sign-in. Try again in a minute.",
   account_unidentified: "The app did not say which account was approved. Try again and approve an account when it asks.",
+  several_accounts: "That sign-in covered more than one account. Start again and approve only one.",
   account_connected_elsewhere: "That account is already connected to another OASIS workspace. Disconnect it there first.",
   another_account_connected: "A different account is already connected here. Disconnect it first, then connect the other one.",
   token_save_failed: "OASIS could not save the sign-in, so nothing was connected. Try again.",
+  oasis_unavailable: "OASIS could not check your access just now. Try again in a minute.",
 };
 
 /**
@@ -134,7 +136,11 @@ export function connectorClickAction(def: ConnectorDef, embedded: boolean): "dra
  * inside the drawer one of those statuses is exactly when the popup IS wanted.
  */
 export function oauthManageOpensDrawer(statusKind: ConnectorStatusKind | undefined, fromDrawer: boolean): boolean {
-  return !fromDrawer && (statusKind === "connected" || statusKind === "configured" || statusKind === "attention");
+  // "unknown" (the connections read itself failed) still gets "Manage" as its
+  // accessible name (ConnectorCard's primaryLabel only special-cases
+  // coming_soon and not_connected), so its click must agree and open the
+  // drawer too, never restart a sign-in the card never offered (Codex review, PR #574).
+  return !fromDrawer && (statusKind === "connected" || statusKind === "configured" || statusKind === "attention" || statusKind === "unknown");
 }
 
 /** The drawer a `?app=` deep link opens on the first render (not after it), or null. */
@@ -174,17 +180,40 @@ export function ConnectionsHub({
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  // A full-window sign-in that FAILED (the popup was blocked) must show WHY:
+  // the banner below (role=status, the same words the popup would have
+  // shown) is the thing to see. An auto-opened drawer has nothing in it to
+  // explain a refusal — nothing was connected — and on a phone it fully
+  // covers the banner, on desktop it sits dimmed behind the dialog (Codex
+  // review, PR #574). A successful sign-in still opens its drawer, as before.
+  const deepLinkOpensDrawer = initialStatus !== "error";
   // A deep link opens its drawer in the first render, so the page arrives with
   // it open rather than opening a moment later.
-  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => deepLinkedApp(initialApp));
-  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkedApp(initialApp) !== null);
-  const [customOpen, setCustomOpen] = useState(() => initialApp === "custom-keys");
+  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => (deepLinkOpensDrawer ? deepLinkedApp(initialApp) : null));
+  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkOpensDrawer && deepLinkedApp(initialApp) !== null);
+  const [customOpen, setCustomOpen] = useState(() => deepLinkOpensDrawer && initialApp === "custom-keys");
   // A full-window sign-in's result (the popup was blocked) is already on the
   // URL at first render, so its banner is read then — not in an effect after —
   // and shows before anything clears those params (CodeRabbit PR #574).
   const [banner, setBanner] = useState<NoticeValue>(() =>
     resultBanner(connectorBySlug(initialApp ?? "")?.name ?? "That app", initialStatus, initialReason),
   );
+  // role="status" announces a CHANGE, not content already on the page at
+  // mount: a screen reader reading the page right after the full-window
+  // navigation can miss text that was there from the first paint (Codex
+  // review, PR #574). Clearing it and setting it back once, right after
+  // mount, gives assistive tech a real mutation to announce, while the
+  // first render (and the static markup this is tested against) still
+  // shows the words immediately for a sighted reader.
+  useEffect(() => {
+    if (!initialStatus) return;
+    setBanner(null);
+    const id = window.requestAnimationFrame(() =>
+      setBanner(resultBanner(connectorBySlug(initialApp ?? "")?.name ?? "That app", initialStatus, initialReason)),
+    );
+    return () => window.cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
   const openDrawer = useCallback((slug: string) => {
@@ -201,9 +230,10 @@ export function ConnectionsHub({
   }, []);
 
   useEffect(() => {
+    if (!deepLinkOpensDrawer) return;
     if (initialApp === "custom-keys") setCustomOpen(true);
     else if (initialApp && connectorBySlug(initialApp)) openDrawer(initialApp);
-  }, [initialApp, openDrawer]);
+  }, [initialApp, openDrawer, deepLinkOpensDrawer]);
 
   // The one popup being watched. Stopped on unmount and before another popup
   // starts, so its listener and poll never outlive this hub (popup-watch.ts).
