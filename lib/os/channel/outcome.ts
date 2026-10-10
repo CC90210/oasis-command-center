@@ -54,6 +54,15 @@ export const TURN_FAILURE_CODES = [
   // (lib/ai/agent-engine.ts, lib/ai/bridge-turn.ts).
   "bridge_unreachable", //     the paired computer could not be reached
   "cli_failed", //             it was reached, and the app there could not answer
+  // Why the app could not answer, when the bridge says (bridge_chat_server.py
+  // _split_cli_error: cli_error:<code>); anything else stays cli_failed.
+  "cli_account_unsupported", // the vendor refuses this sign-in (Gemini CLI on a personal Google sign-in)
+  "cli_auth_required", //      the app is not signed in on that computer
+  "cli_not_found", //          the app is not installed there
+  "cli_outdated", //           the installed app is too old
+  "cli_empty_output", //       the app ran and returned nothing
+  "cli_nonzero_exit", //       the app exited with an error
+  "cli_timeout", //            the app did not finish in time
 ] as const;
 
 export type TurnFailureCode = (typeof TURN_FAILURE_CODES)[number];
@@ -87,6 +96,13 @@ const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
   // One engine per workspace: every channel runs on the same paired computer.
   "bridge_unreachable",
   "cli_failed",
+  "cli_account_unsupported",
+  "cli_auth_required",
+  "cli_not_found",
+  "cli_outdated",
+  "cli_empty_output",
+  "cli_nonzero_exit",
+  "cli_timeout",
 ]);
 
 export function isAccountScoped(code: TurnFailureCode): boolean {
@@ -147,6 +163,17 @@ export function classifyProviderStatus(status: number, detail: string): TurnFail
  *   `empty_reply:thinking|blocked|empty`                     a 200 with no answer text
  *                                                            (lib/providers.ts EmptyReplyKind)
  */
+/** The `<code>` of a bridge `cli_error:<code>` that has its own sentence (bridge_chat_server.py _split_cli_error). */
+const CLI_ERROR_CODES: ReadonlySet<string> = new Set([
+  "cli_account_unsupported",
+  "cli_auth_required",
+  "cli_not_found",
+  "cli_outdated",
+  "cli_empty_output",
+  "cli_nonzero_exit",
+  "cli_timeout",
+]);
+
 export function classifyStreamError(message: string): TurnFailureCode {
   const msg = String(message || "");
   if (msg === "missing_api_key") return "agent_not_configured";
@@ -156,7 +183,10 @@ export function classifyStreamError(message: string): TurnFailureCode {
   if (msg === "empty_reply:empty") return "reply_empty";
   // lib/ai/bridge-turn.ts: the paired computer, or the AI app on it.
   if (msg.startsWith("bridge_unreachable:")) return "bridge_unreachable";
-  if (msg.startsWith("cli_error:")) return "cli_failed";
+  if (msg.startsWith("cli_error:")) {
+    const named = msg.slice("cli_error:".length).trim();
+    return CLI_ERROR_CODES.has(named) ? (named as TurnFailureCode) : "cli_failed";
+  }
   const busy = /^(?:provider|local_model)_temporarily_unavailable:(?:[a-z]+_)?(\d{3})\b/.exec(msg);
   if (busy) return classifyProviderStatus(Number(busy[1]), "");
   const refused = /^(?:openrouter|anthropic|openai|google|ollama)_(\d{3}):([\s\S]*)$/.exec(msg);
@@ -199,7 +229,7 @@ export type FailureCopy = {
   fix: FailureFix | null;
 };
 
-/** Settings › AI brain › AI setup: where the workspace's AI account (key and model) is saved. */
+/** Settings › AI brain › What powers your agents › Your AI account: where the workspace's AI account (key and model) is saved. */
 export const AI_SETTINGS_HREF = setupHref("ai_account");
 
 const OPEN_AI_SETTINGS: FailureFix = { href: AI_SETTINGS_HREF, label: "Open AI settings" };
@@ -312,6 +342,48 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
     sentence:
       "The AI app on your paired computer could not answer. Check that it is installed and signed in on that computer, or choose another engine in AI settings.",
     short: "the AI app on the paired computer could not answer",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_account_unsupported: {
+    sentence:
+      "Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account.",
+    short: "Gemini CLI is not supported on this Google sign-in",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_auth_required: {
+    sentence:
+      "The AI app on your paired computer is not signed in. Sign in to it on that computer, or choose another app or an AI account.",
+    short: "the AI app on the paired computer is not signed in",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_not_found: {
+    sentence:
+      "The AI app is not installed on your paired computer. Install it there, or choose another app or an AI account.",
+    short: "the AI app is not installed on the paired computer",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_outdated: {
+    sentence:
+      "The AI app on your paired computer is too old to answer. Update it there, or choose another app or an AI account.",
+    short: "the AI app on the paired computer is out of date",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_empty_output: {
+    sentence:
+      "The AI app on your paired computer ran but sent back nothing. Try again, or choose another app or an AI account.",
+    short: "the AI app on the paired computer sent back nothing",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_nonzero_exit: {
+    sentence:
+      "The AI app on your paired computer stopped with an error before it could answer. Try again, or choose another app or an AI account.",
+    short: "the AI app on the paired computer stopped with an error",
+    fix: OPEN_ENGINE_SETTINGS,
+  },
+  cli_timeout: {
+    sentence:
+      "The AI app on your paired computer did not answer in time. Try again, or choose another app or an AI account.",
+    short: "the AI app on the paired computer did not answer in time",
     fix: OPEN_ENGINE_SETTINGS,
   },
 };

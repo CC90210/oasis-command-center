@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  CLI_STATE_LABEL,
+  cliStatusState,
   normalizeCliSnapshot,
   type CliInventoryMetadata,
 } from "../lib/bridge-cli-status";
@@ -115,6 +117,35 @@ assert.ok(
   pingRoute.includes('error: "cli_inventory_persist_failed"') &&
     pingRoute.includes("{ status: 503 }"),
   "a failed CLI snapshot write must produce a non-success heartbeat",
+);
+
+// Google ended Gemini CLI on a personal sign-in: the bridge sends probe "unsupported".
+// It is a FINISHED check with its own state: never Ready, never Needs sign-in
+// (signing in again does not help), never "Sign-in not confirmed".
+const refused = normalizeCliSnapshot(
+  { providers: { ...metadata.providers, gemini: { installed: true, authenticated: false, version: null, probe: "unsupported" } } },
+  "2026-08-25T16:29:00.000Z",
+  NOW,
+);
+assert.equal(refused.ok, true);
+if (refused.ok) {
+  const state = cliStatusState(refused.data.gemini);
+  assert.equal(state, "unsupported");
+  assert.equal(CLI_STATE_LABEL[state], "Not supported on this sign-in");
+  assert.equal(refused.data.gemini.checked, true);
+  assert.equal(cliStatusState(refused.data.claude), "ready");
+}
+// The same shape without the probe still reads "not confirmed": only the bridge's verdict makes it final.
+const unversioned = normalizeCliSnapshot(
+  { providers: { ...metadata.providers, gemini: { installed: true, authenticated: false, version: null } } },
+  "2026-08-25T16:29:00.000Z",
+  NOW,
+);
+assert.equal(unversioned.ok && cliStatusState(unversioned.data.gemini), "unknown");
+assert.ok(localCliCard.includes('cs === "unsupported"'), "the paired-computer card shows the refused state with its reason");
+assert.ok(
+  localCliCard.includes('cs !== "ready" && cs !== "unsupported"'),
+  "a refused app is not offered Connect (signing in again cannot help)",
 );
 
 console.log("local-cli-heartbeat-status.test.ts: OK");

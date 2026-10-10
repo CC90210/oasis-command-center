@@ -43,6 +43,7 @@ import {
   CLI_SIGN_IN,
   CLI_STATE_LABEL,
   cliStatusState,
+  cliUnsupportedDetail,
   machinesOfBody,
   type CliMachineSnapshot,
   type CliState,
@@ -55,6 +56,8 @@ type CliInfo = {
   install_hint_url: string;
   /** Whether the computer's checks finished (lib/bridge-cli-status.ts). */
   checked?: boolean;
+  /** The vendor refuses this sign-in (probe "unsupported"). */
+  unsupported?: boolean;
 };
 
 type CliStatusResponse = {
@@ -136,13 +139,14 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
 
 /** The computer's report in lib/bridge-cli-status.ts's words: a check that did not finish is never "Needs sign-in". */
 function cliState(info: CliInfo): CliState {
-  return cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true });
+  return cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true, unsupported: info.unsupported === true });
 }
 
 function statusFor(info: CliInfo): { label: string; tone: "engaged" | "warm" | "neutral"; icon: React.ReactNode } {
   const s = cliState(info);
   if (s === "ready") return { label: CLI_STATE_LABEL[s], tone: "engaged", icon: <CheckCircle2 className="w-3.5 h-3.5" /> };
   if (s === "needs_sign_in") return { label: CLI_STATE_LABEL[s], tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
+  if (s === "unsupported") return { label: CLI_STATE_LABEL[s], tone: "warm", icon: <AlertCircle className="w-3.5 h-3.5" /> };
   if (s === "unknown") return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <AlertCircle className="w-3.5 h-3.5" /> };
   return { label: CLI_STATE_LABEL[s], tone: "neutral", icon: <Terminal className="w-3.5 h-3.5" /> };
 }
@@ -472,6 +476,11 @@ export function LocalCliProvidersCard({
                     {info.version}
                   </div>
                 )}
+                {cs === "unsupported" && (
+                  <p className="text-[11px] text-fg-muted leading-relaxed" data-testid={`cli-unsupported-${card.key}`}>
+                    {cliUnsupportedDetail(card.key)}
+                  </p>
+                )}
                 {cs === "unknown" && (
                   <p className="text-[11px] text-fg-muted leading-relaxed">
                     It is installed, but the computer&apos;s sign-in check did not finish, so it isn&apos;t
@@ -482,7 +491,7 @@ export function LocalCliProvidersCard({
                     sign-in on the paired computer, which opens the vendor's
                     page there. Every not-ready card has it, with the exact
                     command for when it can't be started remotely. */}
-                {cs !== "ready" && (
+                {cs !== "ready" && cs !== "unsupported" && (
                   <div className="space-y-1.5" data-testid={`cli-connect-${card.key}`}>
                     <button
                       type="button"

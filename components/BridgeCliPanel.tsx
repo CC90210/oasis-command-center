@@ -26,12 +26,12 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
 import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
-import { AGENTS_RUN_ON_UNKNOWN_NOTE, CLI_STATE_LABEL, cliStatusState, machinesOfBody, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
+import { AGENTS_RUN_ON_UNKNOWN_NOTE, CLI_STATE_LABEL, cliStatusState, cliUnsupportedDetail, machinesOfBody, type CliMachineSnapshot } from "@/lib/bridge-cli-status";
 
 const POLL_MS = 30_000;
 export const CLI_STATUS_ROUTE = "/api/bridge/cli-status";
 
-type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string; checked?: boolean };
+type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string; checked?: boolean; unsupported?: boolean };
 type CliSnapshotBody =
   | { ok: true; machines?: CliMachineSnapshot[]; data?: Record<"claude" | "codex" | "gemini", CliInfo> }
   | { ok: false; reason: string };
@@ -195,7 +195,7 @@ function CliRow({ name, info }: { name: string; info: CliInfo }) {
   const label = name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : "Gemini";
   // The words Settings > AI brain uses too (lib/bridge-cli-status.ts): a check
   // that did not finish is "not confirmed", never "not signed in".
-  const cli = cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true });
+  const cli = cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true, unsupported: info.unsupported === true });
   const state = CLI_STATE_LABEL[cli];
   const good = cli === "ready";
   return (
@@ -215,6 +215,7 @@ function CliRow({ name, info }: { name: string; info: CliInfo }) {
           <span className={`text-xs ${good ? "text-status-engaged" : "text-fg-muted"}`}>{state}</span>
         </div>
         {info.version && <div className="mt-0.5 text-xs text-fg-dim font-mono break-all">{info.version}</div>}
+        {cli === "unsupported" && <div className="mt-0.5 text-xs text-fg-muted">{cliUnsupportedDetail(name === "claude" || name === "codex" ? name : "gemini")}</div>}
         {!info.installed && (
           <a href={info.install_hint_url} target="_blank" rel="noopener noreferrer" className="mt-1 inline-block text-xs text-accent hover:underline">
             How to install {label}

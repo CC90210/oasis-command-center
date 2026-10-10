@@ -78,8 +78,12 @@ export async function POST(req: NextRequest) {
 
   let account: WorkspaceAiAccount | null;
   let saved: Awaited<ReturnType<typeof readSavedKey>>;
+  // The account as it stands NOW. The commit below is guarded on this stamp, not on one read
+  // after the (up to a minute) test, so a switch that finishes late, or after the person moved
+  // on, cannot overwrite what was chosen meanwhile (409).
+  let stamp: Awaited<ReturnType<typeof readAccountStamp>>;
   try {
-    [account, saved] = await Promise.all([readWorkspaceAiAccount(tenantId), readSavedKey(tenantId, provider)]);
+    [account, saved, stamp] = await Promise.all([readWorkspaceAiAccount(tenantId), readSavedKey(tenantId, provider), readAccountStamp(tenantId)]);
   } catch (err) {
     console.error("[workspace-provider.read]", { tenantId, error: errText(err) });
     return fail(503, "config_unavailable", "We could not read this workspace's AI keys just now. Nothing was changed.");
@@ -112,6 +116,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Cancelled while the test ran: change nothing for a request nobody is waiting on.
+  if (req.signal.aborted) return fail(409, "cancelled", "Stopped before the switch finished. Nothing was changed.");
+
   try {
     // Keep the outgoing key, so switching back needs no paste.
     if (hasUsableKey(account) && SWITCHABLE_PROVIDERS.includes(account.provider)) {
@@ -126,7 +133,6 @@ export async function POST(req: NextRequest) {
 
   let committed = false;
   try {
-    const stamp = await readAccountStamp(tenantId);
     const outcome = await connectWorkspaceAccountInOneStep({
       tenantId,
       stamp,

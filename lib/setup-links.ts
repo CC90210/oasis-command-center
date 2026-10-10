@@ -84,7 +84,7 @@ const TARGETS: Record<Exclude<SetupNeed, `connector:${string}`>, SetupTarget> = 
     ask: "Ask your workspace owner to choose what powers your agents.",
     anchorIn: SETTINGS_CONTENT,
   },
-  // Settings > AI brain > "AI setup" (id="providers"): where a key is saved.
+  // Settings > AI brain > "What powers your agents" > "Your AI account" (id="providers"): where a key is saved.
   ai_account: {
     href: "/settings/ai#providers",
     audience: "manage",
