@@ -25,8 +25,6 @@
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import {
   CLIENT_A,
@@ -49,19 +47,21 @@ import type { PageAnswer } from "../lib/tools/worker/learn-from-link";
 
 const ACCOUNT: WorkspaceAiAccount = { source: "workspace", provider: "google", model: "gemini-test", encryptedApiKey: "enc", enabled: true };
 
-type Fixture = { hook: string; caption?: string; expected: Record<string, unknown> };
-
 async function main() {
   console.log("tools worker:");
   const db = await setupToolsDatabase();
   const { handleToolRun, handleToolJobs } = await import("../lib/tools/session-handlers");
+  const { modelBudgetMs } = await import("../lib/tools/worker/ai");
   const { resolveToolsViewer } = await import("../lib/tools/access");
-  const { scoreHook } = await import("../lib/tools/worker/score-hook");
   const { fetchFollowing, htmlToText } = await import("../lib/tools/worker/learn-from-link");
   const { INJECTION_GUARD } = await import("../lib/llm-input-boundary");
 
   /** A fake model on a fake account. It meters the call through the real ledger, as lib/providers.ts does. */
-  function fakeAi(reply: string | ((req: ChatRequest) => Promise<string> | string), account: WorkspaceAiAccount | null | Error = ACCOUNT) {
+  function fakeAi(
+    reply: string | ((req: ChatRequest) => Promise<string> | string),
+    account: WorkspaceAiAccount | null | Error = ACCOUNT,
+    timeoutMs?: number,
+  ) {
     const seen = { tenants: [] as string[], calls: [] as ChatRequest[] };
     const deps = {
       readAccount: async (tenantId: string) => {
@@ -82,8 +82,39 @@ async function main() {
         yield { type: "done", inputTokens: 10, outputTokens: 20 };
       },
       usageDb: db,
+      timeoutMs,
     };
     return { deps, seen };
+  }
+
+  /** A model account that never answers: its stream hangs before its first yield, forever. Proves the bound (lib/tools/worker/ai.ts TOOL_MODEL_TIMEOUT_MS), not a slow-but-real reply. */
+  function hungAi(timeoutMs: number) {
+    const deps = {
+      readAccount: async () => ACCOUNT,
+      decrypt: () => "test-key",
+      stream: async function* (): AsyncGenerator<StreamEvent> {
+        await new Promise<never>(() => {
+          /* never resolves: the call under test must time out, not this promise */
+        });
+      },
+      usageDb: db,
+      timeoutMs,
+    };
+    return deps;
+  }
+
+  /**
+   * A real (short) account-read delay layered onto a normal successful
+   * `fakeAi`: proves the budget is recomputed AFTER the account/budget
+   * reads, not only once at the top (Codex review round 4, P2). The delay
+   * is real wall-clock time (setTimeout), not a backdated clock, because
+   * that is exactly what the production bug missed - time actually spent
+   * reading the account, between the first budget check and the second.
+   */
+  function slowAccountAi(delayMs: number) {
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }));
+    const readAccount = ai.deps.readAccount;
+    return { deps: { ...ai.deps, readAccount: async (tenantId: string) => { await new Promise((r) => setTimeout(r, delayMs)); return readAccount(tenantId); } }, seen: ai.seen };
   }
 
   type Page = Partial<PageAnswer> & { status: number };
@@ -98,12 +129,29 @@ async function main() {
     return { fetchPage, asked };
   }
 
-  const deps = (ai = fakeAi("{}").deps, fetchPage?: (u: URL) => Promise<PageAnswer>, d: Client = db) => ({
+  const deps = (ai = fakeAi("{}").deps, fetchPage?: (u: URL) => Promise<PageAnswer>, d: Client = db, now: () => Date = () => new Date()) => ({
     db: d,
-    now: () => new Date(),
+    now,
     viewer: resolveToolsViewer,
     worker: { ai, fetchPage },
   });
+
+  /**
+   * A `now()` whose FIRST call (requestStartedAt, captured once at the top of
+   * handleToolRun) is already `secondsAgo` in the past; every later call
+   * (job timestamps) is the real clock. Simulates a slow pre-model phase
+   * without the test actually waiting that long.
+   */
+  function backdatedNow(secondsAgo: number): () => Date {
+    let first = true;
+    return () => {
+      if (first) {
+        first = false;
+        return new Date(Date.now() - secondsAgo * 1000);
+      }
+      return new Date();
+    };
+  }
   const runReq = (tool: string, input: unknown, key: string = randomUUID()) =>
     new Request("https://oasisai.work/api/tools/run", {
       method: "POST",
@@ -115,34 +163,7 @@ async function main() {
   const run = async (tool: string, input: unknown, d = deps(), key?: string) => answerOf(await handleToolRun(runReq(tool, input, key), d));
   const jobOf = (a: { body: Record<string, unknown> }) => a.body.job as Job;
 
-  // -- Score a hook ------------------------------------------------------------
-  await check("Score a hook equals the Python scorer on every recorded fixture (score, max, pct, verdicts, type, suggestions)", () => {
-    const fx = JSON.parse(readFileSync(join(__dirname, "fixtures", "tools", "hook-scorer-parity.json"), "utf8")) as { scorer_version: string; cases: Fixture[] };
-    assert.equal(fx.scorer_version, "1.0.0");
-    assert.ok(fx.cases.length >= 10, "at least ten recorded hooks");
-    for (const c of fx.cases) {
-      const got = scoreHook(c.hook, c.caption ?? "");
-      const e = c.expected;
-      assert.equal(got.score.toFixed(3), Number(e.score).toFixed(3), `score: ${c.hook}`);
-      assert.equal(got.max_score.toFixed(3), Number(e.max_score).toFixed(3), `max_score: ${c.hook}`);
-      assert.ok(Math.abs(got.score_pct - Number(e.score_pct)) <= 0.1, `score_pct ${got.score_pct} vs ${e.score_pct}: ${c.hook}`);
-      assert.equal(got.passed, e.passed, `passed: ${c.hook}`);
-      assert.deepEqual(got.hard_fails, e.hard_fails, `hard_fails: ${c.hook}`);
-      assert.deepEqual(got.warns, e.warns, `warns: ${c.hook}`);
-      assert.equal(got.hook_type, e.hook_type, `hook_type: ${c.hook}`);
-      assert.deepEqual(got.suggestions, e.suggestions, `suggestions: ${c.hook}`);
-    }
-  });
-
   await login(USERS.cc);
-  await check("Score a hook through the route: done in the same request, the score in the run", async () => {
-    const a = await run("score_hook", { hook: "If you run a clinic, stop answering the phone at 9pm", caption: "" });
-    assert.equal(a.status, 200);
-    const j = jobOf(a);
-    assert.equal(j.status, "done");
-    assert.equal(j.result?.score_pct, 92.6);
-    assert.equal(j.result?.scorer, "hook_scorer 1.0.0 text-mode port");
-  });
 
   // -- Repurpose a post --------------------------------------------------------------
   const POST = "We answered every lead within a minute for 30 days. Bookings went up, and nobody worked late.";
@@ -251,12 +272,90 @@ async function main() {
     assert.deepEqual([j.status, j.error_code, j.error_message], ["failed", "ai_failed", "The AI account didn't answer. Try again."]);
   });
 
+  await check("a model call that never answers times out at the bound: honest message, nothing saved, no ai_failed", async () => {
+    const quiet = console.error;
+    console.error = () => undefined;
+    let j: Job;
+    try {
+      j = jobOf(await run("repurpose_post", { post: POST }, deps(hungAi(30))));
+    } finally {
+      console.error = quiet;
+    }
+    assert.deepEqual(
+      [j.status, j.error_code, j.error_message],
+      ["failed", "ai_timeout", "The AI account took too long to answer; nothing was saved. Try again."],
+    );
+    assert.notEqual(j.error_code, "ai_failed", "a timeout is never reported as the generic ai_failed");
+  });
+
+  await check("a fast model call, well inside the same bound, still succeeds", async () => {
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }));
+    (ai.deps as { timeoutMs?: number }).timeoutMs = 200;
+    const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));
+    assert.equal(j.status, "done", JSON.stringify(j));
+  });
+
+  await check("modelBudgetMs: never more than the model's own cap, shrinks with elapsed time, floors at 0 (pure)", () => {
+    const start = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000);
+    assert.equal(modelBudgetMs(start(0)), 55_000, "nothing elapsed: the full 55 s cap");
+    assert.equal(modelBudgetMs(start(10)), 45_000, "10 s already spent: 60 - 10 - 5 reserve");
+    assert.equal(modelBudgetMs(start(56)), 0, "almost the whole 60 s request budget already spent: no time left");
+    assert.equal(modelBudgetMs(start(999)), 0, "floors at 0, never negative");
+  });
+
+  await check(
+    "a slow pre-model phase shrinks the model's own budget against the WHOLE request: too little left, and the run fails fast with request_timeout - NEVER ai_timeout, since the AI account is never contacted on this path",
+    async () => {
+      const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" })); // would succeed, given the time
+      const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps, undefined, db, backdatedNow(56))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
+      );
+      assert.equal(ai.seen.calls.length, 0, "no model call was even attempted: no time left to answer AND still record the failure");
+    },
+  );
+
+  await check(
+    "a slow ACCOUNT READ shrinks the budget too, even when the budget was fine when the request started: recomputed right before the stream, never the stale value from before the account/budget reads (Codex review round 4, P2)",
+    async () => {
+      // The budget is fine at the start (150 ms to spare) - the FIRST check
+      // (lib/tools/worker/ai.ts, before readAccount) lets this through. The
+      // account read then really does take 500 ms of wall-clock time, which
+      // a stale timeout computed before it would never see.
+      const slow = slowAccountAi(500);
+      const j = jobOf(await run("repurpose_post", { post: POST }, deps(slow.deps, undefined, db, backdatedNow(54.85))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
+        "recorded as a failure, never left running, and never blames the AI account it was never asked",
+      );
+      assert.equal(slow.seen.calls.length, 0, "the model itself was still never called: the recheck caught it before streaming started");
+    },
+  );
+
   // -- Learn from a link ----------------------------------------------------------------
   const ARTICLE_HTML = (title: string) =>
     `<html><head><title>${title}</title><script>var x = "<p>not text</p>";</script><style>p{}</style></head>` +
     `<body><nav>Menu</nav><h1>Why reply speed wins</h1><p>${"Most clinics reply to a new lead the next morning. ".repeat(6)}</p>` +
     `<p>Here &amp; now: answer in one minute.</p></body></html>`;
   const ANALYSIS = { hook: "Most clinics reply the next morning.", pacing: "Short claims, then one example.", tone: "Plain and direct.", structure: ["claim", "proof", "ask"], steal: "Open with the reader's own habit.", avoid: "The clinic statistics." };
+
+  await check(
+    "Learn from a link hits the same request_timeout after a slow pre-model phase (here, the page fetch) - tool-neutral wording, never 'a shorter post' on a tool whose input is a link",
+    async () => {
+      const url = "https://example.com/slow-fetch-no-time-left";
+      const web = fakeWeb({ [url]: { status: 200, body: ARTICLE_HTML("slow") } });
+      const ai = fakeAi(JSON.stringify(ANALYSIS)); // would succeed, given the time
+      const j = jobOf(await run("learn_from_link", { url }, deps(ai.deps, web.fetchPage, db, backdatedNow(56))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
+      );
+      assert.doesNotMatch(j.error_message ?? "", /post|AI account/i, "never a post-specific or AI-account-blaming line on this path");
+      assert.equal(ai.seen.calls.length, 0, "the AI account was never contacted");
+    },
+  );
 
   await check("Learn writes ONE indexed training note for the session's workspace, in the background reader's shape", async () => {
     const url = "https://example.com/blog/reply-speed";
@@ -369,33 +468,92 @@ async function main() {
   });
 
   // -- the session routes ----------------------------------------------------------------
-  await check("one workspace never sees another's runs or notes", async () => {
+  await check("one workspace never sees another's runs", async () => {
     await login(USERS.clientA);
-    const theirs = jobOf(await run("score_hook", { hook: "Clinic owners: your phone is ringing" }));
-    const url = "https://example.com/shared-article";
-    const web = fakeWeb({ [url]: { status: 200, body: ARTICLE_HTML("shared") } });
-    const theirNote = jobOf(await run("learn_from_link", { url }, deps(fakeAi(JSON.stringify(ANALYSIS)).deps, web.fetchPage)));
-    assert.equal(theirNote.status, "done");
+    const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" }));
+    const theirs = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps)));
+    assert.equal(theirs.status, "done");
     await login(USERS.cc);
-    const list = await answerOf(await handleToolJobs(jobsReq("tool=score_hook&limit=20"), deps()));
+    const list = await answerOf(await handleToolJobs(jobsReq("tool=repurpose_post&limit=20"), deps()));
     assert.ok(!(list.body.jobs as Job[]).some((j) => j.id === theirs.id), "OASIS's list does not hold the client's run");
     const one = await answerOf(await handleToolJobs(jobsReq(`id=${theirs.id}`), deps()));
     assert.deepEqual([one.status, one.body.error], [404, "not_found"]);
-    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_corpus WHERE source_url = ? AND tenant_id = ?", [url, OASIS])), 0);
-    // OASIS learning the same link makes its OWN note, never touching the client's.
-    const ours = jobOf(await run("learn_from_link", { url }, deps(fakeAi(JSON.stringify(ANALYSIS)).deps, web.fetchPage)));
-    assert.equal(ours.status, "done");
-    const tenants = (await db.execute({ sql: "SELECT tenant_id FROM marketing_corpus WHERE source_url = ? ORDER BY tenant_id", args: [url] })).rows.map((r) => r.tenant_id);
-    assert.deepEqual(tenants, [CLIENT_A, OASIS].sort());
   });
+
+  await check("Learn from a link is operator-only: a founder of another workspace is refused on run AND jobs; the platform operator is allowed", async () => {
+    await login(USERS.clientA);
+    const refusedRun = await answerOf(await handleToolRun(runReq("learn_from_link", { url: "https://example.com/op-only" }), deps()));
+    assert.deepEqual([refusedRun.status, refusedRun.body.error], [404, "not_found"], "a founder who is not a platform operator may not start it");
+    const refusedJobs = await answerOf(await handleToolJobs(jobsReq("tool=learn_from_link"), deps()));
+    assert.deepEqual([refusedJobs.status, refusedJobs.body.error], [404, "not_found"], "nor read its run history");
+
+    await login(USERS.cc);
+    const url = "https://example.com/op-only-ok";
+    const web = fakeWeb({ [url]: { status: 200, body: ARTICLE_HTML("operator ok") } });
+    const ai = fakeAi(JSON.stringify(ANALYSIS));
+    const j = jobOf(await run("learn_from_link", { url }, deps(ai.deps, web.fetchPage)));
+    assert.equal(j.status, "done", JSON.stringify(j));
+    const okJobs = await answerOf(await handleToolJobs(jobsReq(`id=${j.id}`), deps()));
+    assert.equal(okJobs.status, 200, "a platform operator reads it back by id");
+    const okList = await answerOf(await handleToolJobs(jobsReq("tool=learn_from_link"), deps()));
+    assert.equal(okList.status, 200, "and by its run history");
+
+    // The gate stands even with the job id known (never 403, which would
+    // confirm it exists; the same "not_found" the viewer gate itself answers).
+    await login(USERS.clientA);
+    const stillRefused = await answerOf(await handleToolJobs(jobsReq(`id=${j.id}`), deps()));
+    assert.deepEqual([stillRefused.status, stillRefused.body.error], [404, "not_found"]);
+    await login(USERS.cc);
+  });
+
+  await check(
+    "the operator check reads the SESSION's own email, never user_profiles.email: a profile whose stored email is the alias, with no platform_operators row, is still refused",
+    async () => {
+      // The squat lib/platform-operator.ts's own doc comment names: an OASIS
+      // owner row whose user_profiles.email COLUMN happens to be the alias
+      // string, but whose real authenticated session is someone else
+      // entirely (not an alias, not on the operator domain, no
+      // platform_operators row). The founders gate still admits them (an
+      // OASIS owner is a founder); the operator gate must not.
+      const squatterAuthId = "0e000000-0000-4000-8000-00000000a11a";
+      const stamp = new Date().toISOString();
+      // The REAL auth identity (what verifySessionAgainstDb actually trusts,
+      // lib/turso-auth.ts: it reads _supabase_auth_users.email, never the
+      // signed cookie's own email field) is the attacker's own address.
+      await db.execute({
+        sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`,
+        args: [squatterAuthId, "squatter@attacker.test"],
+      });
+      // The SPOOFED column: an OASIS owner profile whose user_profiles.email
+      // the squatter set to the alias string - the exact squat
+      // lib/platform-operator.ts's own doc comment names.
+      await db.execute({
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, joined_at, updated_at)
+              VALUES ('p-squatter-alias-email', ?, ?, ?, 'owner', 1, ?, ?, ?)`,
+        args: [squatterAuthId, "conaugh@oasisai.work", OASIS, stamp, stamp, stamp],
+      });
+      await login({ id: squatterAuthId, email: "squatter@attacker.test" });
+      // Prove the founders/viewer gate ADMITS this session (an OASIS owner
+      // row) before proving the operator check refuses it specifically - a
+      // tool with no operatorOnly flag must still work for them.
+      const passesFoundersGate = jobOf(await run("repurpose_post", { post: POST }, deps()));
+      assert.equal(passesFoundersGate.status, "failed", "reaches the run (a non-operator tool is not refused outright)");
+      assert.notEqual(passesFoundersGate.error_code, "not_found" as unknown, "sanity: this is a job outcome, not a gate refusal");
+      const refusedRun = await answerOf(await handleToolRun(runReq("learn_from_link", { url: "https://example.com/squat-attempt" }), deps()));
+      assert.deepEqual([refusedRun.status, refusedRun.body.error], [404, "not_found"], "a spoofed profile email never passes the operator check");
+      const refusedJobs = await answerOf(await handleToolJobs(jobsReq("tool=learn_from_link"), deps()));
+      assert.deepEqual([refusedJobs.status, refusedJobs.body.error], [404, "not_found"]);
+      await login(USERS.cc);
+    },
+  );
 
   await check("outside the gate (a sales rep, signed out): 404 not_found on run and jobs, nothing written", async () => {
     const before = Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs"));
     for (const who of [USERS.rep, null]) {
       await login(who);
-      const r = await answerOf(await handleToolRun(runReq("score_hook", { hook: "x" }), deps()));
+      const r = await answerOf(await handleToolRun(runReq("repurpose_post", { post: POST }), deps()));
       assert.deepEqual([r.status, r.body.error], [404, "not_found"]);
-      const l = await answerOf(await handleToolJobs(jobsReq("tool=score_hook"), deps()));
+      const l = await answerOf(await handleToolJobs(jobsReq("tool=repurpose_post"), deps()));
       assert.deepEqual([l.status, l.body.error], [404, "not_found"]);
     }
     assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs")), before);
@@ -404,13 +562,13 @@ async function main() {
 
   await check("the same click is one run; the same key for another input is refused", async () => {
     const key = randomUUID();
-    const a = jobOf(await run("score_hook", { hook: "Stop losing leads after 5pm" }, deps(), key));
-    const b = jobOf(await run("score_hook", { hook: "Stop losing leads after 5pm" }, deps(), key));
+    const a = jobOf(await run("repurpose_post", { post: POST }, deps(), key));
+    const b = jobOf(await run("repurpose_post", { post: POST }, deps(), key));
     assert.equal(a.id, b.id);
     assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM tool_jobs WHERE idempotency_key = ?", [key])), 1);
-    const c = await run("score_hook", { hook: "Something else" }, deps(), key);
+    const c = await run("repurpose_post", { post: "A different long enough post to repurpose into other things." }, deps(), key);
     assert.deepEqual([c.status, c.body.error], [409, "idempotency_key_reused"]);
-    const notUuid = await run("score_hook", { hook: "x" }, deps(), "not-a-uuid");
+    const notUuid = await run("repurpose_post", { post: POST }, deps(), "not-a-uuid");
     assert.deepEqual([notUuid.status, notUuid.body.field], [422, "idempotency_key"]);
   });
 
@@ -446,25 +604,26 @@ async function main() {
     assert.deepEqual([sixth.status, sixth.body.error, sixth.body.message], [429, "too_many_in_flight", "Five downloads are already in progress."]);
   });
 
-  await check("the catalog: Score always; Repurpose and Learn by the account's state; Download ONLY while a live runner lists it", async () => {
+  await check("the catalog: Repurpose by the account's state; Download ONLY while a live runner lists it; Learn from a link only in the operator audience", async () => {
     const { getToolCatalog } = await import("../lib/tools/catalog");
     const now = new Date();
     const keys = (c: Awaited<ReturnType<typeof getToolCatalog>>) => (c.installed ? c.tools.map((t) => `${t.key}:${t.state}`) : ["not installed"]);
-    // No runner seen for CLIENT_A, ever: no Download card.
+    // No runner seen for CLIENT_A, ever: no Download card. The default
+    // ("client") audience never carries learn_from_link: it is operatorOnly.
     const client = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => null });
-    assert.deepEqual(keys(client), ["score_hook:ready", "repurpose_post:needs_ai_account", "learn_from_link:needs_ai_account"]);
+    assert.deepEqual(keys(client), ["repurpose_post:needs_ai_account"]);
     const local = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => ({ ...ACCOUNT, provider: "ollama" }) });
-    assert.deepEqual(keys(local), ["score_hook:ready", "repurpose_post:needs_ai_account", "learn_from_link:needs_ai_account"], "a local model is no account here");
+    assert.deepEqual(keys(local), ["repurpose_post:needs_ai_account"], "a local model is no account here");
     const quiet = console.error;
     console.error = () => undefined;
     const broken = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => { throw new Error("read failed"); } }).finally(() => {
       console.error = quiet;
     });
-    assert.deepEqual(keys(broken), ["score_hook:ready", "repurpose_post:ai_account_unreadable", "learn_from_link:ai_account_unreadable"]);
+    assert.deepEqual(keys(broken), ["repurpose_post:ai_account_unreadable"]);
     // OASIS with a runner seen 4 minutes ago: the Download card, naming the runner.
     await seedRunner(db, later(now, -minutes(4)));
     const live = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.deepEqual(keys(live), ["score_hook:ready", "repurpose_post:ready", "learn_from_link:ready", "video_download:ready"]);
+    assert.deepEqual(keys(live), ["repurpose_post:ready", "video_download:ready"]);
     const dl = live.installed ? live.tools.find((t) => t.key === "video_download") : undefined;
     // The catalog hands the grid the check-in time itself; the grid counts the minutes on the viewer's clock.
     assert.equal(dl?.runner?.label, "CC's PC");
@@ -474,13 +633,22 @@ async function main() {
     const stale = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
     assert.ok(!keys(stale).some((k) => k.startsWith("video_download")));
     assert.deepEqual(await getToolCatalog({ tenantId: OASIS }, { db: emptyDatabase(), now, readAccount: async () => ACCOUNT }), { installed: false });
+
+    // The "operator" audience (Admin > Agent training): ONLY the operatorOnly
+    // tool, whichever tenant asks - getToolCatalog itself does not know who
+    // is an operator, it only picks WHICH tools; lib/tools/session-handlers.ts
+    // is what actually refuses a non-operator (proved above).
+    const operatorView = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT }, { audience: "operator" });
+    assert.deepEqual(keys(operatorView), ["learn_from_link:ready"]);
+    const operatorNeedsAccount = await getToolCatalog({ tenantId: CLIENT_A }, { db, now, readAccount: async () => null }, { audience: "operator" });
+    assert.deepEqual(keys(operatorNeedsAccount), ["learn_from_link:needs_ai_account"]);
   });
 
   await check("tables not installed: run and jobs answer 503 not_set_up with the plain line", async () => {
     const empty = emptyDatabase();
-    const r = await answerOf(await handleToolRun(runReq("score_hook", { hook: "x" }), deps(undefined, undefined, empty)));
+    const r = await answerOf(await handleToolRun(runReq("repurpose_post", { post: POST }), deps(undefined, undefined, empty)));
     assert.deepEqual([r.status, r.body.error, r.body.message], [503, "not_set_up", "Tools are not set up yet."]);
-    const l = await answerOf(await handleToolJobs(jobsReq("tool=score_hook"), deps(undefined, undefined, empty)));
+    const l = await answerOf(await handleToolJobs(jobsReq("tool=repurpose_post"), deps(undefined, undefined, empty)));
     assert.deepEqual([l.status, l.body.error], [503, "not_set_up"]);
   });
 

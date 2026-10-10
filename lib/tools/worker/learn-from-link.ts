@@ -313,6 +313,8 @@ export type LearnContext = {
   jobId: string;
   contributedBy: string;
   now: () => Date;
+  /** When THIS REQUEST started: lib/tools/worker/ai.ts modelBudgetMs budgets the model call against what is left of the request, not a flat timer of its own. */
+  requestStartedAt: Date;
   ai?: ToolModelDeps;
   fetchPage?: PageFetch;
 };
@@ -352,6 +354,7 @@ export async function runLearnFromLink(
       system: ANALYSIS_SYSTEM,
       prompt: ANALYSIS_PROMPT + wrapUntrusted(page.text.slice(0, MODEL_TEXT_CHARS), { label: "page", maxLen: MODEL_TEXT_CHARS }),
       maxTokens: 1200,
+      requestStartedAt: ctx.requestStartedAt,
     },
     ctx.ai,
   );
