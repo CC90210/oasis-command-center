@@ -16,7 +16,7 @@
  */
 
 import { PageHeader } from "@/components/Card";
-import { getBridgeOnline } from "@/lib/queries";
+import { getOnlineBridgeComputerLabels } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { safe, isMissingTableError } from "@/lib/api-helpers";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
@@ -97,10 +97,13 @@ export default async function SequencesPage() {
   // It is not a timeout: Promise.all still waits for the slowest read, so a slow
   // activity query does hold the whole page. Saying "cannot take the page down"
   // would be claiming a protection that is not here.
-  const [result, bridgeOnline, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes, scoreboardRes] = await Promise.all([
+  const [result, onlineLabels, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes, scoreboardRes] = await Promise.all([
     loadSequences(viewer.surface.tenantId),
     // null = the heartbeat could not be read: "Couldn't check", not "not connected".
-    safe("sequences.bridge_online", getBridgeOnline(tenantId), null),
+    // Named labels, not a boolean (2026-10-10) — mirrors the Automations banner's
+    // fix: "Your computer is connected" was true only for CC's paired PC, which
+    // this page also told Adon about his own, falsely. See lib/bridge-online-copy.ts.
+    safe("sequences.bridge_online", getOnlineBridgeComputerLabels(tenantId), null),
     // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
     // swallows the rejection and hands back [], which DripActivityView would
     // render as "no drip steps in this window - that is a finding, not a
@@ -169,6 +172,7 @@ export default async function SequencesPage() {
       { scores: [], days: 7, truncated: false, error: "could not read per-sequence outcomes" },
     ),
   ]);
+  const bridgeOnline = onlineLabels === null ? null : onlineLabels.length > 0;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -186,6 +190,7 @@ export default async function SequencesPage() {
       <BridgeStatusBanner
         bridgeOnline={bridgeOnline}
         canInstallBridge={isOperator}
+        onlineLabels={onlineLabels}
         online="Sequences fire automatically when a lead or application hits the trigger stage. Edits take effect within a minute. Toggle one off to pause without losing the spec."
         offline="Sequences you create here are saved, but the sequence-runner daemon needs a paired machine to actually send the SMS / email steps."
         operatorHint="Pair a device and they'll start firing within a minute."

@@ -18,14 +18,24 @@
  * Save flow:
  *   - POST /api/automations/save-draft → returns {cron_id, script_path,
  *     script_content}
- *   - Then client POSTs to localhost:9100/exec-tool with write_file to
- *     persist the script to disk. Vercel can't write to the operator's
- *     disk; the bridge can.
+ *   - Then client POSTs to the same-origin, authenticated
+ *     /api/bridge/exec-tool proxy (app/api/bridge/exec-tool/route.ts) with
+ *     write_file to persist the script to disk. The proxy holds the bridge
+ *     bearer server-side and reaches the paired machine for the viewer's
+ *     tenant.
+ *
+ *     BUG (2026-10-10): this used to POST straight from the BROWSER to the
+ *     local bridge's default loopback address — i.e. whatever computer the
+ *     VIEWER's browser happens to be running on. Only CC's PC runs that
+ *     local bridge, so for Adon (or anyone else on the shared OASIS
+ *     workspace) the save half-failed every time, with no way to fix it
+ *     from their own machine. Routing through the proxy means the SERVER
+ *     reaches the paired machine, so it works the same way for every
+ *     signed-in owner, not just whoever is sitting at it.
  */
 
 import { useState } from "react";
 import { Sparkles, Loader2, AlertCircle, Save, RotateCcw, X, CheckCircle2 } from "lucide-react";
-import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 
 type Draft = {
   suggested_name: string;
@@ -51,6 +61,45 @@ const EXAMPLES = [
   "Daily at noon, check my Calendly for tomorrow's bookings and Telegram me the list so I can prep.",
   "Every Friday at 4pm, run our lead scorer over any leads created in the last 7 days and email me the top 5.",
 ];
+
+/**
+ * Plain-English reason the /api/bridge/exec-tool write failed, keyed on the
+ * proxy's own error code (app/api/bridge/exec-tool/route.ts). Named after
+ * the pattern in lib/automations/worker-control.ts:describeControlError —
+ * same idea, different route, so the two bridge-write surfaces on this page
+ * both name which computer/bridge the trouble is, in words, instead of a
+ * bare error code.
+ */
+export function describeBridgeWriteError(
+  error: string | undefined,
+  status: number,
+  output?: string,
+): string {
+  switch (error) {
+    case "bridge_unreachable":
+      return "the paired computer's bridge could not be reached";
+    case "bridge_not_configured":
+      return "no computer bridge is set up for this workspace yet";
+    case "tool_disallowed_for_role":
+      return "your account role can't write automation files";
+    case "rate_limited":
+      return "too many requests just now — wait a few seconds and retry";
+    case "unauthenticated":
+    case "no_profile":
+    case "no_tenant":
+    case "profile_lookup_failed":
+    case "tenant_lookup_failed":
+    case "bridge_not_enabled_for_tenant":
+      return "you're signed out or not set up for this workspace — sign in and try again";
+    case "payload_too_large":
+      return "the generated script is too large to save this way";
+    case undefined:
+    case "":
+      return output || `the bridge write failed (HTTP ${status})`;
+    default:
+      return error;
+  }
+}
 
 export function DescribeAutomationFlow() {
   const [state, setState] = useState<State>({ kind: "input", description: "" });
@@ -108,10 +157,11 @@ export function DescribeAutomationFlow() {
       return;
     }
 
-    // Step 2: write the actual Python file to the operator's disk via
-    // the local bridge. Vercel can't reach the disk; the bridge can.
+    // Step 2: write the actual Python file to the operator's disk via the
+    // same-origin, authenticated bridge proxy. The proxy (not the browser)
+    // reaches the paired machine, so this works the same for every owner.
     try {
-      const bridgeRes = await fetch(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+      const bridgeRes = await fetch("/api/bridge/exec-tool", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -119,11 +169,19 @@ export function DescribeAutomationFlow() {
           input: { path: json.script_path, content: json.script_content },
         }),
       });
-      const bridgeJson = (await bridgeRes.json()) as { ok?: boolean; output?: string; is_error?: boolean };
+      // A non-JSON answer (a gateway error page) must still reach
+      // describeBridgeWriteError with its HTTP status, not read as "unreachable".
+      const bridgeJson = (await bridgeRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        output?: string;
+        is_error?: boolean;
+        error?: string;
+      };
       if (!bridgeJson.ok || bridgeJson.is_error) {
+        const reason = describeBridgeWriteError(bridgeJson.error, bridgeRes.status, bridgeJson.output);
         setState({
           kind: "error",
-          message: `Cron row created but script file write failed: ${bridgeJson.output || "bridge offline"}. Edit ${json.script_path} manually before enabling.`,
+          message: `Cron row created but the script file write failed: ${reason}. Edit ${json.script_path} manually before enabling.`,
           description,
         });
         return;
@@ -131,7 +189,7 @@ export function DescribeAutomationFlow() {
     } catch (err) {
       setState({
         kind: "error",
-        message: `Cron row created but bridge unreachable. Save ${json.script_path} manually before enabling. ${(err as Error).message}`,
+        message: `Cron row created but the Command Center couldn't reach the paired computer's bridge. Save ${json.script_path} manually before enabling. ${(err as Error).message}`,
         description,
       });
       return;
