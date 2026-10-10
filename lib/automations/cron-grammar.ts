@@ -37,6 +37,14 @@ export const CRON_FIELD_BOUNDS: ReadonlyArray<readonly [number, number]> = [
   [0, 7],
 ];
 
+/**
+ * The grammar in one plain sentence, for the refusals a person reads
+ * (app/api/automations/draft and save-draft). One copy, beside the rules it
+ * describes, so the two refusals cannot drift from each other or from them.
+ */
+export const CRON_RULE_SENTENCE =
+  "The automation runner reads a schedule as five numeric fields, like 0 9 * * 1-5 for weekdays at 9:00, and cannot read day or month names such as MON-FRI or JAN.";
+
 /** True when `expr` is a five-field cron every reader of tenant_cron_jobs runs identically. */
 export function isValidCronExpr(expr: unknown): boolean {
   if (typeof expr !== "string") return false;

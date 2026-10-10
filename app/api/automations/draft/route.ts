@@ -13,7 +13,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { draftAutomation } from "@/lib/ai-automation-drafter";
+import { CRON_RULE_SENTENCE } from "@/lib/automations/cron-grammar";
 import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
+
+const BAD_SCHEDULE = "automation_draft_bad_schedule";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,6 +59,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { ok: false, error: "ai_unavailable", message: "BRAVO_ANTHROPIC_API_KEY not set on the dashboard" },
         { status: 503 },
+      );
+    }
+    // A schedule the runner cannot run is refused here, before review, where it
+    // is read-only text beside a Save that would refuse it. The sentence names
+    // what the AI wrote and the way forward (the UI shows `message` first).
+    if (message.startsWith(BAD_SCHEDULE)) {
+      const written = message.slice(BAD_SCHEDULE.length).replace(/^:\s*/, "");
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "draft_invalid",
+          message: `The AI wrote a schedule that can't run ("${written}"). ${CRON_RULE_SENTENCE} Click Draft with AI to write it again.`,
+        },
+        { status: 502 },
       );
     }
     if (message.startsWith("automation_draft_parse_failed") || message.startsWith("automation_draft_missing_field") || message.startsWith("automation_draft_bad_filename")) {

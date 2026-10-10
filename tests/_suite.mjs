@@ -270,6 +270,10 @@ const TESTS = [
   "tests/cron-jobs-refuse-department-task.test.ts",
   "tests/script-automations-operator-only.test.ts",
   "tests/automation-schedule-plan.test.ts",
+  // A drafted schedule the runner cannot run (day names like MON-FRI) is
+  // refused at the draft step in a sentence, save-draft's refusal is a
+  // sentence, and Draft with AI works straight from the error.
+  "tests/automation-draft-schedule.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",

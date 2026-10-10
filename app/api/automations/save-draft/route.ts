@@ -25,7 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { AutomationDraft } from "@/lib/ai-automation-drafter";
-import { isValidCronExpr } from "@/lib/automations/cron-grammar";
+import { CRON_RULE_SENTENCE, isValidCronExpr } from "@/lib/automations/cron-grammar";
 import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
 
 export const runtime = "nodejs";
@@ -36,6 +36,29 @@ const FILENAME_RE = /^[a-z][a-z0-9_]*\.py$/;
 // The schedule goes through the one shared grammar (lib/automations/
 // cron-grammar.ts). This route used to accept day names (MON-FRI), which the
 // bridge's cron_runner.py cannot parse, so such a job was saved and never fired.
+
+/** Plain words for each draft field a refusal can name. */
+const FIELD_WORDS: Record<string, string> = {
+  suggested_name: "name",
+  script_filename: "script file name",
+  script_content: "script",
+  schedule: "schedule",
+  agent_key: "agent",
+};
+
+/**
+ * The refusal a person reads (the page shows `message` before `error`): which
+ * fields, why a schedule fails, and the way forward. The review step is
+ * read-only, so drafting again is the fix for every field.
+ */
+function invalidDraftMessage(fields: string[]): string {
+  const words = fields.map((f) => FIELD_WORDS[f] ?? f);
+  const list = words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}` : words[0];
+  const parts = [`This draft can't be saved: its ${list} ${words.length > 1 ? "are" : "is"} missing or not valid.`];
+  if (fields.includes("schedule")) parts.push(CRON_RULE_SENTENCE);
+  parts.push("Click Draft with AI to write a new one.");
+  return parts.join(" ");
+}
 
 export async function POST(req: NextRequest) {
   // Persists a tenant_cron_jobs row (a scheduled script_run): the create gate,
@@ -64,7 +87,7 @@ export async function POST(req: NextRequest) {
   if (!draft.agent_key) errors.push("agent_key");
   if (errors.length) {
     return NextResponse.json(
-      { ok: false, error: "draft_invalid", missing_or_invalid: errors },
+      { ok: false, error: "draft_invalid", missing_or_invalid: errors, message: invalidDraftMessage(errors) },
       { status: 400 },
     );
   }
