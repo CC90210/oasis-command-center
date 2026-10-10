@@ -130,7 +130,6 @@ async function main() {
   const reduce = await import("../lib/os/runs/reduce");
   const types = await import("../lib/os/runs/types");
   const activity = await import("../lib/os/runs/activity");
-  const producer = await import("../lib/os/runs/producer");
   const auth = await import("../lib/os/runs/producer-auth");
   const transcript = await import("../lib/os/runs/transcript");
   const usage = await import("../lib/ai/usage");
@@ -513,7 +512,8 @@ async function main() {
     assert.equal(activity.producerToolLabel("mcp__oasis__leads_search"), "Looking up Leads");
     assert.equal(activity.producerToolLabel("Read"), "Checking the playbook");
     assert.equal(activity.producerToolLabel("Grep"), "Checking the playbook");
-    assert.equal(activity.producerToolLabel("Bash"), "Working on it");
+    assert.equal(activity.producerToolLabel("Bash"), "Running a check", "the kind, never the command");
+    assert.equal(activity.producerToolLabel("SomethingNew"), "Working on it");
     assert.ok(!identity.namesPersona(activity.producerToolLabel("mcp__oasis__bravo_secret")));
   });
 
