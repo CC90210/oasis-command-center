@@ -526,6 +526,8 @@ export async function* meteredBridgeTurn(
   engine: BridgeEngine,
   inner: AsyncGenerator<StreamEvent>,
   size: { maxOutputTokens: number; promptBytes: number },
+  /** The person pressed Stop: the request to the computer was ended, which the bridge reports as an error; that is a cancel, not a failure. */
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   const call = await meter.begin({
     provider: "bridge",
@@ -550,7 +552,9 @@ export async function* meteredBridgeTurn(
         reportedIn = ev.inputTokens;
         reportedOut = ev.outputTokens;
       } else if (ev.type === "error") {
-        end = { outcome: "error", errorCode: bridgeErrorCode(ev.message), usage: null, notBilled: true };
+        end = signal?.aborted
+          ? { outcome: "cancelled", usage: null, notBilled: true }
+          : { outcome: "error", errorCode: bridgeErrorCode(ev.message), usage: null, notBilled: true };
       }
       yield ev;
     }
@@ -580,6 +584,8 @@ export function streamAgentTurn(
   turn: PreparedTurn,
   messages: readonly ChatMessage[],
   maxTokens = DEPARTMENT_REPLY_MAX_TOKENS,
+  /** Stop: ends a turn on the paired computer. A hosted provider stream ends at its next event. */
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   // The paired computer (lib/ai/bridge-turn.ts): the same SSE shape, no key.
   // No hosted model is called, but the turn still leaves its one ledger row,
@@ -598,8 +604,10 @@ export function streamAgentTurn(
         messages,
         maxTokens,
         harness: { agent: turn.engine.harness.agent, department: turn.engine.harness.department },
+        signal,
       }),
       { maxOutputTokens: maxTokens, promptBytes: utf8Length(JSON.stringify({ system: turn.system, messages })) },
+      signal,
     );
   }
   const isOllama = turn.provider === "ollama";

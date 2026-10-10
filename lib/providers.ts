@@ -56,6 +56,14 @@ export type ChatRequest = {
 
 export type StreamEvent =
   | { type: "delta"; text: string }
+  /**
+   * The model's own reasoning, when its provider shows it (Gemini thought
+   * summaries, a thinking block from an AI app on the paired computer). Never
+   * part of the reply: the channel shows it in the activity trail.
+   */
+  | { type: "thinking"; text: string }
+  /** A lookup the turn made, by its plain label (never its input); `detail` and `size` describe a result that came back. */
+  | { type: "tool"; phase: "start" | "done"; label: string; ok: boolean | null; detail?: string | null; size?: number | null }
   | { type: "done"; inputTokens: number; outputTokens: number }
   | { type: "error"; message: string };
 

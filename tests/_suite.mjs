@@ -100,6 +100,12 @@ const TESTS = [
   "tests/conversations-grouping.test.ts",
   "tests/dashboard-send-mode.test.ts",
   "tests/bridge-exec-tool-role-gate.test.ts",
+  // "Draft with AI" used to write its generated script by POSTing from the
+  // BROWSER to the operator's local bridge — only CC's PC runs that bridge,
+  // so the save silently failed for any other owner. Pins the fix (route
+  // through the authed server proxy) and that write_file through it stays
+  // admin+ only. Unlisted, this proves nothing.
+  "tests/describe-automation-flow-bridge-proxy.test.ts",
   "tests/settings-agent-roster.test.ts",
   "tests/settings-persona-scope.test.ts",
   "tests/sales-team-performance.test.ts",
@@ -226,6 +232,17 @@ const TESTS = [
   // that must NOT be driven can't be armed from the dashboard.
   "tests/daemon-backed-crons.test.ts",
   "tests/automation-inventory-contract.test.ts",
+  // The Automations (and /sequences) banner said "Your computer is
+  // connected" off an ANY-pairing rule, which in the shared OASIS
+  // workspace is always CC's PC — Adon read a false claim about his own
+  // machine. Pins the named-pairing query, the wording function, and that
+  // the lie is gone from both surfaces. Unlisted, this proves nothing.
+  "tests/automation-bridge-online-labels.test.ts",
+  "tests/bridge-online-copy.test.ts",
+  // The drafting prompt told the model the stack uses Supabase, which is
+  // retired estate-wide; a drafted script would target a database that no
+  // longer exists. Pins the lie is gone and the real backend is named.
+  "tests/ai-automation-drafter-prompt.test.ts",
   // The three reliability gates for that tab, each pinning a way it reported
   // health it could not see: an Empire lane omitted without saying so, a
   // failure shape the Python watchdog flags and the tab drew green, and a
