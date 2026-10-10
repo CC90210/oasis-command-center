@@ -210,27 +210,31 @@ async function main() {
   // -- 1. Not built: a reason, and a request the OASIS team sees -------------------
 
   const notBuilt = connectors.CONNECTOR_CATALOG.filter((d) => !d.live);
-  await check("every app with nothing behind it says why, in words that promise no date and claim nothing about OASIS's own accounts", () => {
+  await check("every app a client cannot connect today says why in one line: OASIS is registering with the vendor, no date, no app for the client to build", () => {
     assert.deepEqual(
       notBuilt.map((d) => d.slug).sort(),
       // 2026-10-09: Calendly, Cal.com, Fathom, Fireflies, GoHighLevel and Zernio
       // connect with a key from the client's own account (tests/connectors-by-key.test.ts).
       ["discord", "meta", "microsoft-teams", "plaid", "quickbooks", "whatsapp", "xero", "zoom"],
-      "the not-built list changed: update the PR's list and this one together",
+      "the not-connectable list changed: update the PR's list and this one together",
     );
     for (const def of notBuilt) {
       const reason = def.pendingNote ?? "";
       assert.ok(reason.trim().length > 20, `${def.slug}: no reason`);
       assert.doesNotMatch(reason, /phase \d|next release|later release|coming soon|soon|Q[1-4]|20\d\d/i, `${def.slug}: a date or era`);
-      // W10a R4: what the code supports (nothing connects yet), never a claim
-      // about OASIS's own vendor accounts, apps or approvals.
-      assert.match(reason, /^Nothing in OASIS /, `${def.slug}: ${reason}`);
-      assert.doesNotMatch(reason, /OASIS's own|OASIS's (Intuit|Xero|Plaid|Zoom|Meta|GoHighLevel)|partner access/i, `${def.slug}: ${reason}`);
+      // CC, 2026-10-09 (replacing W10a R4's "Nothing in OASIS connects ..."):
+      // each of these is the vendor's standard one-click connect, which waits
+      // on OASIS's OWN app with that vendor; the card says exactly that, and
+      // never asks the client to create a developer app.
+      const vendor = def.registration?.vendor;
+      assert.ok(vendor, `${def.slug}: names the vendor OASIS is registering with`);
+      assert.ok(reason.startsWith(`OASIS is registering with ${vendor}; you'll `), `${def.slug}: ${reason}`);
+      assert.match(reason, /one click once approved\. You never create an app yourself\./, `${def.slug}: ${reason}`);
       const status = connectors.resolveConnectorStatus(def, { keyRows: [], personalGoogle: null, connections: [] }, Date.now());
-      assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", "Not built yet", reason]);
+      assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", `OASIS is registering with ${vendor}`, reason]);
     }
     assert.equal("plannedFor" in (notBuilt[0] as object), false, "the era label is gone from the catalog");
-    console.log(notBuilt.map((d) => `        ${d.slug}: Not built yet - ${d.pendingNote}`).join("\n"));
+    console.log(notBuilt.map((d) => `        ${d.slug}: ${d.pendingNote}`).join("\n"));
   });
 
   await check("a not-built app's drawer draws the request button and no connect button; the hub lists every not-built app as one row of buttons", async () => {
@@ -247,11 +251,24 @@ async function main() {
     assert.ok(zoom.includes(connectors.connectorBySlug("zoom")!.pendingNote!), "it says why");
     assert.doesNotMatch(zoom, /Tell OASIS|Set up in|Connect Zoom/, "no dead link and no connect button");
     const hub = markup.hub;
-    const start = hub.indexOf('<section aria-labelledby="later-heading"');
-    assert.ok(start >= 0, "the hub draws a not-built row");
+    // Every app that waits on OASIS's own vendor app is one row of buttons
+    // under "One click, once approved"; nothing is left under "Not built yet".
+    assert.equal(hub.indexOf('<section aria-labelledby="later-heading"'), -1, "no app is 'Not built yet' any more");
+    const start = hub.indexOf('<section aria-labelledby="one-click-heading"');
+    assert.ok(start >= 0, "the hub draws the one-click row");
     const laterRow = hub.slice(start, hub.indexOf("</section>", start));
-    assert.match(text(laterRow), /^ ?Not built yet Not connectable today\./);
-    for (const def of notBuilt) assert.ok(laterRow.includes(`>${def.name.replace(/&/g, "&amp;")}</button>`), `${def.slug}: a button in the not-built row`);
+    assert.match(text(laterRow), /^ ?One click, once approved OASIS is registering its own app with each of these\./);
+    for (const def of notBuilt) assert.ok(laterRow.includes(`>${def.name.replace(/&/g, "&amp;")}</button>`), `${def.slug}: a button in the one-click row`);
+    // A client's Slack and Constant Contact wait on the same thing: they sit in
+    // that row too, never under "Connect today" with a button that fails.
+    for (const name of ["Slack", "Constant Contact"]) assert.ok(laterRow.includes(`>${name}</button>`), `${name}: in the one-click row for a client`);
+    const todayStart = hub.indexOf('<section aria-labelledby="set-up-heading"');
+    assert.ok(todayStart >= 0, "the hub draws Connect today");
+    const today = hub.slice(todayStart, hub.indexOf("</section>", todayStart));
+    for (const name of ["Slack", "Constant Contact", ...notBuilt.map((d) => d.name)]) {
+      assert.ok(!today.includes(`>${name.replace(/&/g, "&amp;")}</div>`), `${name}: never offered under Connect today while it cannot connect`);
+    }
+    assert.ok(today.includes(">Calendly</div>"), "a key app a client can connect today is under Connect today");
     assert.equal(CONNECTOR_REQUEST_ENDPOINT, "/api/tickets", "the request rides the desk's own ticket API");
   });
 
@@ -260,7 +277,7 @@ async function main() {
   let clientTicketId = "";
   await check("a client owner asks for Zoom: a ticket lands on OASIS's desk for that client, in words the client may read", async () => {
     assert.deepEqual([body.title, body.category, body.severity], ["Connection request: Zoom", "change_request", "low"]);
-    assert.match(body.description, /^Requested from Settings > Connections: please make Zoom connectable for this workspace\.\nWhy it is not available today: Nothing in OASIS connects to Zoom yet\./);
+    assert.match(body.description, /^Requested from Settings > Connections: please make Zoom connectable for this workspace\.\nWhy it is not available today: OASIS is registering with Zoom; you'll connect Zoom with one click once approved\./);
     await login(USERS.clientA);
     const r = await call(tickets.POST(req("POST", CONNECTOR_REQUEST_ENDPOINT, body)));
     assert.equal(r.status, 201, JSON.stringify(r.body));
@@ -304,14 +321,14 @@ async function main() {
     for (const c of chips) {
       const def = connectors.connectorBySlug(String(c.slug))!;
       const status = c.status as Status;
-      assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", "Not built yet", def.pendingNote], def.slug);
+      assert.deepEqual([status.kind, status.label, status.detail], ["coming_soon", `OASIS is registering with ${def.registration!.vendor}`, def.pendingNote], def.slug);
       assert.equal(c.requestFrom, "Settings > Chat apps");
     }
+    // A client no longer has a Slack path of its own to request: it installs
+    // the OASIS app like every workspace (CC, 2026-10-02).
     const asks = elementsOf(page, RequestConnector).map((p) => [p.name, p.from]);
-    assert.deepEqual(asks, [
-      ["Slack (Your own Slack app)", "Settings > Chat apps"],
-      ["AI teammates in Telegram", "Settings > Chat apps"],
-    ]);
+    assert.deepEqual(asks, [["AI teammates in Telegram", "Settings > Chat apps"]]);
+    assert.ok(textOf(page).includes(connectors.connectorBySlug("slack")!.pendingNote!), "the Slack card says OASIS is registering with Slack");
     // OASIS's own workspace: its Slack path is the OASIS app, so no request for it.
     await login(USERS.cc);
     const oasisPage = await ChatAppsPage({ searchParams: Promise.resolve({}) });
@@ -370,7 +387,7 @@ async function main() {
     assert.deepEqual(shape(fromWizard!), shape(fromSettings));
     assert.equal(fromWizard!.twilio.kind, "connected", JSON.stringify(fromWizard!.twilio));
     assert.match(fromWizard!.twilio.label, /^Connected · verified /);
-    assert.equal(fromWizard!.zoom.label, "Not built yet");
+    assert.equal(fromWizard!.zoom.label, "OASIS is registering with Zoom");
     // And it is not another workspace's: Client A has nothing saved.
     assert.equal((await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).twilio.kind, "not_connected");
   });
@@ -427,37 +444,47 @@ async function main() {
 
   // -- 3. Slack: each workspace is shown its own path (W10a R1) ---------------------
 
-  await check("Slack, per CC: a client is shown its own Slack app (not built yet, with the request); OASIS the OASIS app, whose state follows this deployment", async () => {
+  // CC, 2026-10-02 / 2026-10-09: one standard Connect Slack for every
+  // workspace; a client never creates a Slack app (the own-app path is gone).
+  await check("Slack, per CC: every workspace installs the one OASIS Slack app; until OASIS's app is set up the card says OASIS is registering with Slack", async () => {
+    const slackDef = connectors.connectorBySlug("slack")!;
     const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id })).slack;
-    assert.deepEqual([client.kind, client.label, client.detail], ["coming_soon", "Not built yet", "Connecting Slack with your own Slack app is not built yet."]);
-    assert.deepEqual(client.paths?.map((p) => [p.title, p.state, p.requestable]), [["Your own Slack app", "Not built yet", true]]);
-    assert.match(client.paths![0].body, /client ID, client secret and signing secret/);
-    // Without OASIS's Slack app on the deployment, OASIS's path is not "Available".
+    assert.deepEqual([client.kind, client.label, client.detail], ["coming_soon", "OASIS is registering with Slack", slackDef.pendingNote]);
+    assert.deepEqual(client.paths?.map((p) => [p.title, p.state, p.requestable]), [["The OASIS Slack app", "Not set up on this deployment", false]]);
+    assert.match(client.paths![0].body, /You never create a Slack app yourself/);
+    assert.doesNotMatch(client.paths![0].body, /client ID|client secret|signing secret/);
     const oasisOff = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).slack;
-    assert.deepEqual([oasisOff.kind, oasisOff.label], ["coming_soon", "Slack app not configured yet"]);
+    assert.deepEqual([oasisOff.kind, oasisOff.label], ["coming_soon", "OASIS is registering with Slack"]);
     assert.deepEqual(oasisOff.paths?.map((p) => [p.title, p.state, p.requestable]), [["The OASIS Slack app", "Not set up on this deployment", false]]);
     const oasisOn = (await withSlackApp(() => loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id }))).slack;
     assert.deepEqual([oasisOn.kind, oasisOn.paths?.[0].state], ["not_connected", "Available"]);
-    // A client's own path does not change with OASIS's app.
+    // With OASIS's Slack app set up, a client can install it too.
     const clientOn = (await withSlackApp(() => loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id }))).slack;
-    assert.deepEqual([clientOn.kind, clientOn.label], ["coming_soon", "Not built yet"]);
+    assert.deepEqual([clientOn.kind, clientOn.paths?.[0].state], ["not_connected", "Available"]);
 
     const { markup } = renderClient({
       cases: [
         { id: "client", kind: "drawer", slug: "slack", status: client },
-        { id: "oasisOff", kind: "drawer", slug: "slack", status: oasisOff },
+        { id: "clientOn", kind: "drawer", slug: "slack", status: clientOn },
         { id: "oasisOn", kind: "drawer", slug: "slack", status: oasisOn },
       ],
       clicks: [],
     });
     const c = text(markup.client);
-    assert.match(c, /How your workspace connects Slack Your own Slack app Not built yet/);
-    assert.match(c, /Ask OASIS for Slack \(Your own Slack app\)/);
-    assert.doesNotMatch(c, /The OASIS Slack app|OASIS's own workspace|Available|Set up in Chat apps/, "a client is never told OASIS's model, or offered a dead connect");
-    const off = text(markup.oasisOff);
-    assert.match(off, /The OASIS Slack app Not set up on this deployment/);
-    assert.doesNotMatch(off, /Available|Your own Slack app|Ask OASIS for Slack/);
+    assert.match(c, /OASIS is registering with Slack; you'll connect Slack with one click once approved/);
+    assert.match(c, /How your workspace connects Slack The OASIS Slack app Not set up on this deployment/);
+    assert.doesNotMatch(c, /Your own Slack app|Ask OASIS for Slack|Set up in Chat apps/, "no own-app path, and no connect button while it cannot work");
+    assert.match(text(markup.clientOn), /The OASIS Slack app Available/);
     assert.match(text(markup.oasisOn), /The OASIS Slack app Available/);
+  });
+
+  await check("Constant Contact: a client that has not connected is told OASIS is registering with Constant Contact; OASIS's own workspace keeps its Connect", async () => {
+    const client = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id }))["constant-contact"];
+    assert.deepEqual([client.kind, client.label], ["coming_soon", "OASIS is registering with Constant Contact"]);
+    const oasis = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id }))["constant-contact"];
+    assert.notEqual(oasis.kind, "coming_soon", "OASIS's own login can authorize OASIS's private app");
+    // The hub never opens a popup for a card that cannot connect here.
+    assert.match(read("components/os/connections/ConnectionsHub.tsx"), /if \(next === "drawer" \|\| !action \|\| statuses\[def\.slug\]\?\.kind === "coming_soon"\) return openDrawer\(def\.slug\);/);
   });
 
   // -- 4. Every live app's drawer links its provider's own docs ---------------------

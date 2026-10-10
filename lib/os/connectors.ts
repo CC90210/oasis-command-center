@@ -155,6 +155,15 @@ export type ConnectorDef = {
   /** Why it is not live (yet, or on this deployment), in plain English. Every not-built app has one. */
   pendingNote?: string;
   /**
+   * The vendor's standard one-click connect needs OASIS's OWN app registered
+   * with that vendor (CC, 2026-10-02: clients never create a developer app).
+   * While it is not, the card says so in one sentence (registrationStatus):
+   * "OASIS is registering with <vendor>; you'll connect with one click once
+   * approved", never "Not built yet". `clientsOnly`: OASIS's own workspace can
+   * already connect (Constant Contact's app is private to OASIS's login).
+   */
+  registration?: { vendor: string; clientsOnly?: boolean };
+  /**
    * A connection tied to each person's own login, shown in the drawer under
    * the workspace's (Google: your own Gmail and Calendar).
    */
@@ -397,7 +406,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "intuit", "qbo", "bookkeeping"],
     live: null,
-    pendingNote: "Nothing in OASIS connects to QuickBooks yet. Live books need an app that has passed Intuit's app assessment.",
+    pendingNote:
+      "OASIS is registering with Intuit; you'll connect QuickBooks with one click once approved. You never create an app yourself. Intuit reviews OASIS's app before other businesses can connect their books.",
+    registration: { vendor: "Intuit" },
   },
   {
     slug: "xero",
@@ -411,7 +422,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
     keywords: ["accounting", "bookkeeping"],
     live: null,
-    pendingNote: "Nothing in OASIS connects to Xero yet.",
+    pendingNote:
+      "OASIS is registering with Xero; you'll connect Xero with one click once approved. You never create an app yourself.",
+    registration: { vendor: "Xero" },
   },
   {
     slug: "plaid",
@@ -425,7 +438,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Shows cash on hand and runway in Finance", "Read-only: OASIS never moves money"],
     keywords: ["bank", "banking", "cash", "transactions"],
     live: null,
-    pendingNote: "Nothing in OASIS connects to Plaid yet. Linking real bank accounts needs Plaid's production approval.",
+    pendingNote:
+      "OASIS is registering with Plaid; you'll connect your bank through Plaid with one click once approved. You never create an app yourself. Plaid approves OASIS for real bank accounts first.",
+    registration: { vendor: "Plaid" },
   },
 
   // Calendar & email
@@ -558,7 +573,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Writes call notes and follow-ups for Sales and Client Success"],
     keywords: ["video", "calls", "recording", "transcript"],
     live: null,
-    pendingNote: "Nothing in OASIS connects to Zoom yet. An app other Zoom accounts can install needs Zoom Marketplace review.",
+    pendingNote:
+      "OASIS is registering with Zoom; you'll connect Zoom with one click once approved. You never create an app yourself. Zoom reviews OASIS's app in its Marketplace before other Zoom accounts can install it.",
+    registration: { vendor: "Zoom" },
   },
   {
     slug: "fathom",
@@ -639,11 +656,15 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       source: { kind: "tenant_connection", provider: "slack" },
       connect: { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" },
     },
-    pendingNote: "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here.",
+    pendingNote:
+      "OASIS is registering with Slack; you'll connect Slack with one click once approved. You never create an app yourself. Nothing is broken on your side.",
+    registration: { vendor: "Slack" },
     seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
-    // CC, 2026-10-01: a client brings its own Slack app ("the client is
-    // responsible for obtaining the API key"); OASIS's own workspace uses the
-    // OASIS app, which OASIS sets up. Each viewer is shown only its own path.
+    // CC, 2026-10-02: every workspace connects through the vendor's standard
+    // Connect, and clients never create a developer app. So a client uses the
+    // same OASIS Slack app as OASIS's own workspace (Add to Slack, approve in
+    // Slack). Slack's terms also make its Marketplace the channel for apps a
+    // company distributes to customers, which rules out a per-client app.
     paths: [
       {
         audience: "oasis",
@@ -654,10 +675,10 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       },
       {
         audience: "client",
-        title: "Your own Slack app",
-        body: "Your Slack admin creates a Slack app in your Slack and gives OASIS its client ID, client secret and signing secret.",
-        built: false,
-        needsOasisApp: false,
+        title: "The OASIS Slack app",
+        body: "An owner or admin presses Add to Slack under Chat apps and approves the OASIS app in your Slack. You never create a Slack app yourself. Disconnect deletes the token OASIS holds.",
+        built: true,
+        needsOasisApp: true,
       },
     ],
   },
@@ -733,7 +754,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Drafts replies for your approval"],
     keywords: ["chat", "messages"],
     live: null,
-    pendingNote: "Nothing in OASIS sends or reads WhatsApp messages yet.",
+    pendingNote:
+      "OASIS is registering with Meta; you'll connect WhatsApp with one click once approved. You never create an app yourself. Meta verifies OASIS as a WhatsApp provider first.",
+    registration: { vendor: "Meta" },
   },
   {
     slug: "discord",
@@ -747,7 +770,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Your department agents reply in those channels"],
     keywords: ["chat", "community"],
     live: null,
-    pendingNote: "Nothing in OASIS reads or posts in Discord yet.",
+    pendingNote:
+      "OASIS is registering with Discord; you'll add OASIS to your Discord server with one click once approved. You never create an app yourself.",
+    registration: { vendor: "Discord" },
   },
   {
     slug: "microsoft-teams",
@@ -761,7 +786,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     does: ["Your department agents reply in those channels"],
     keywords: ["chat", "microsoft", "teams"],
     live: null,
-    pendingNote: "Nothing in OASIS reads or posts in Microsoft Teams yet.",
+    pendingNote:
+      "OASIS is registering with Microsoft; you'll connect Microsoft Teams with one click once approved. You never create an app yourself. Microsoft validates OASIS's Teams app first, and your Teams admin approves it once.",
+    registration: { vendor: "Microsoft" },
   },
 
   // Ads & social
@@ -784,7 +811,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     keywords: ["facebook", "instagram", "ads", "lead ads", "advertising"],
     live: null,
-    pendingNote: "Nothing in OASIS connects to Meta yet. An app that manages other businesses' ads needs Meta's App Review.",
+    pendingNote:
+      "OASIS is registering with Meta; you'll connect Meta with one click once approved. You never create an app yourself. Meta's App Review approves OASIS's app before it can read other businesses' ads and leads.",
+    registration: { vendor: "Meta" },
   },
   {
     slug: "zernio",
@@ -831,6 +860,13 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
         messageSource: "cc_oauth",
       },
     },
+    // OASIS's Constant Contact app is private to the login that created it
+    // until Constant Contact's support approves it for all users, and the
+    // authorize route answers a client workspace "not configured": a client
+    // card says it waits on that approval instead of offering a dead button.
+    pendingNote:
+      "OASIS is registering with Constant Contact; you'll connect Constant Contact with one click once approved. You never create an app yourself.",
+    registration: { vendor: "Constant Contact", clientsOnly: true },
   },
 
   // CRM import
@@ -1404,6 +1440,20 @@ function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathSt
  * The status a card shows. Pure: the same facts and `nowMs` always give the
  * same words, which is what lets the test feed it hostile inputs.
  */
+/**
+ * A card whose one-click connect waits on OASIS's own app with the vendor
+ * (ConnectorDef.registration): the state in CC's words, never "Not built yet"
+ * and never a date. The drawer's detail is the card's pendingNote.
+ */
+export function registrationStatus(def: ConnectorDef): ConnectorStatus {
+  const vendor = def.registration?.vendor ?? def.name;
+  return {
+    kind: "coming_soon",
+    label: `OASIS is registering with ${vendor}`,
+    detail: def.pendingNote ?? `OASIS is registering with ${vendor}; you'll connect with one click once approved.`,
+  };
+}
+
 export function resolveConnectorStatus(
   def: ConnectorDef,
   facts: ConnectorFacts,
@@ -1413,7 +1463,9 @@ export function resolveConnectorStatus(
   // The label is the state, never an era or a promise: Chat apps and the
   // drawer say "not built yet" for the same apps, and "Coming soon" /
   // "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
+  // An app that waits on OASIS's own vendor app says that instead.
   if (!def.live) {
+    if (def.registration) return registrationStatus(def);
     return {
       kind: "coming_soon",
       label: "Not built yet",
@@ -1432,24 +1484,45 @@ export function resolveConnectorStatus(
     // An app OASIS itself has not been given on this deployment cannot be
     // connected, whatever the facts say: say so rather than offer a dead button.
     // A workspace whose own way in does not need OASIS's app is not held to it.
-    if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {
+    // A workspace that already connected is never told it waits on
+    // registration: its connection is real, it needs to see it and keep its
+    // Disconnect, and the missing app is an attention state, not "registering".
+    const alreadyConnected = !!facts.connections?.some((c) => c.provider === source.provider && c.status !== "revoked");
+    if (oasisAppMissing && alreadyConnected) {
       return withPaths({
-        kind: "coming_soon",
-        label: `${def.name} app not configured yet`,
-        detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
+        kind: "attention",
+        label: "Connected · needs attention",
+        detail: `This workspace is connected to ${def.name}, but OASIS's ${def.name} app is not set up on this deployment, so messages may not arrive. You can still disconnect.`,
       });
+    }
+    if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {
+      return withPaths(
+        def.registration
+          ? registrationStatus(def)
+          : {
+              kind: "coming_soon",
+              label: `${def.name} app not configured yet`,
+              detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
+            },
+      );
     }
     if (!facts.connections) return withPaths(UNKNOWN);
     // A workspace whose every way in is not built yet cannot connect, unless it
     // already is: the state, with the request in the drawer, never "Not connected".
-    const connected = facts.connections.some((c) => c.provider === source.provider && c.status !== "revoked");
-    if (!connected && mine.length > 0 && mine.every((p) => !p.built)) {
+    if (!alreadyConnected && mine.length > 0 && mine.every((p) => !p.built)) {
       const how = mine[0].title.charAt(0).toLowerCase() + mine[0].title.slice(1);
       return withPaths({ kind: "coming_soon", label: "Not built yet", detail: `Connecting ${def.name} with ${how} is not built yet.` });
     }
     return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }
   if (!facts.keyRows) return UNKNOWN;
+  // OASIS's app is approved for OASIS's own login only (Constant Contact): a
+  // client workspace that has not connected is told it waits on the vendor,
+  // instead of a Connect button that answers "not enabled for your workspace".
+  if (def.registration?.clientsOnly && facts.oasisWorkspace === false) {
+    const own = keyedStatus(source, facts.keyRows, [], nowMs, def.name);
+    if (own.kind === "not_connected") return registrationStatus(def);
+  }
   const workspace = keyedStatus(source, facts.keyRows, facts.serverChecks === undefined ? [] : facts.serverChecks, nowMs, def.name);
   if (def.yourAccount !== "google" || facts.personalGoogle === undefined) return workspace;
   // Google also has a per-person connection. The card is the WORKSPACE's
