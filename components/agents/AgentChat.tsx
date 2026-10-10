@@ -2,40 +2,28 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
-import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
+import { AlertCircle, Loader2, Send } from "lucide-react";
+import { parseInput } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
 import { failureCopy, isTurnFailureCode, type FailureModel } from "@/lib/os/channel/outcome";
 import { announceTurn } from "@/components/os/department/turn-event";
 import { deskToolsNote } from "@/lib/os/desk/catalog";
-import { ENGINE_SETTINGS_HREF, isEngineSpend, spendTag, type EngineLabel } from "@/lib/ai/agent-engine";
+import type { EngineLabel } from "@/lib/ai/agent-engine";
 import { CHAT_LIST_CLASS, CHAT_VIA_CLASS, chatBubbleClass, chatRowClass } from "./chat-layout";
+import {
+  PLAN_MODE_STORAGE_KEY,
+  asFailureModel,
+  chatCommands,
+  chatHelp,
+  unavailableCommandCopy,
+  viaLine,
+} from "./chat-shared";
+import { ChannelHeader } from "./ChannelHeader";
+import { DepartmentChat } from "./DepartmentChat";
 
-/** The "via" footer of an answer, from the route's `agent` event: what ran it and whose credits it spent. */
-export function viaLine(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const p = payload as { runs_on?: unknown; spend?: unknown; model?: unknown; fell_back_from?: unknown; engine_not_used?: unknown };
-  const what = typeof p.runs_on === "string" && p.runs_on.trim() ? p.runs_on.trim() : typeof p.model === "string" && p.model ? p.model : null;
-  if (!what) return null;
-  const parts = [what];
-  if (isEngineSpend(p.spend)) parts.push(spendTag(p.spend));
-  if (typeof p.fell_back_from === "string" && p.fell_back_from) parts.push(`${p.fell_back_from} could not be reached`);
-  // The API account answers by design here: say so, never "could not be reached".
-  else if (typeof p.engine_not_used === "string" && p.engine_not_used) parts.push(`${p.engine_not_used} is not used for this chat`);
-  return parts.join(" - ");
-}
-
-/** The `model` of a route error event (app/api/agents/chat), when it is well formed. */
-function asFailureModel(raw: unknown): FailureModel | null {
-  if (!raw || typeof raw !== "object") return null;
-  const m = raw as Record<string, unknown>;
-  if (typeof m.label !== "string" || !m.label.trim()) return null;
-  return {
-    label: m.label,
-    vendor: typeof m.vendor === "string" ? m.vendor : null,
-    suggestion: typeof m.suggestion === "string" ? m.suggestion : null,
-  };
-}
+// These lived here before the department channel moved to DepartmentChat; the
+// tests and any other import keep resolving them from this file.
+export { chatCommands, chatHelp, unavailableCommandCopy, viaLine };
 
 type ChatTurn = {
   role: "user" | "assistant" | "system";
@@ -48,7 +36,7 @@ type ChatTurn = {
   runtime?: string;
 };
 
-type Props = {
+export type ChannelProps = {
   /** A workspace slug the viewer owns (the /t/<slug> preview). Omitted by a
    *  department channel: the route takes the workspace from the session. */
   tenantSlug?: string;
@@ -74,37 +62,17 @@ type Props = {
   poweredBy?: EngineLabel | null;
 };
 
-// sessionStorage key for plan mode. Per-tab so a tenant-preview reload
-// doesn't drop the operator back into build mode mid-investigation.
-// Distinct from ChatWidget's key — separate surfaces, separate state.
-const PLAN_MODE_STORAGE_KEY = "oasis.tenant-chat.planMode.v1";
-
 /**
- * The commands that work in this chat. /agent and /model belong to the
- * operator chat: a channel's agent is fixed, and its model is a setting.
- * /compact summarises through /api/chat/compact, which answers on the caller's
- * OWN config for the agent key (a teammate's personal key first) and has no row
- * for most department agents, so in a department channel it would fail, or
- * send the shared channel's transcript to one person's key. A department
- * channel does not offer it.
+ * A department channel (a `department` is set) is DepartmentChat: its messages
+ * are saved runs that outlive the page. Anything else (the /t/<slug> agent
+ * preview, the /agents page) is a direct agent chat that streams the reply to
+ * this page, below.
  */
-export function chatCommands(department: string | undefined): SlashCommandName[] {
-  return department ? ["clear", "plan", "build", "help"] : ["clear", "compact", "plan", "build", "help"];
+export function AgentChat(props: ChannelProps) {
+  return props.department ? <DepartmentChat {...props} department={props.department} /> : <DirectAgentChat {...props} />;
 }
 
-export function chatHelp(department: string | undefined): string {
-  return ["Slash commands:", ...chatCommands(department).map((c) => `  ${COMMAND_DESCRIPTIONS[c]}`)].join("\n");
-}
-
-/** What a command this chat does not offer answers with, instead of running. */
-export function unavailableCommandCopy(name: SlashCommandName): string {
-  if (name === "agent") return "/agent isn't available here. Each department has its own channel.";
-  if (name === "model") return "/model isn't available here. The AI model is chosen in Settings > AI brain.";
-  if (name === "compact") return "/compact isn't available in a department channel. Use /clear to start a fresh conversation.";
-  return `/${name} isn't available here.`;
-}
-
-export function AgentChat({
+function DirectAgentChat({
   tenantSlug,
   agentSlug,
   agentName,
@@ -114,7 +82,7 @@ export function AgentChat({
   canManageAi = false,
   initialFailure = null,
   poweredBy = null,
-}: Props) {
+}: ChannelProps) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -414,74 +382,21 @@ export function AgentChat({
   // mobile, the original fixed floor on desktop.
   return (
     <div className="flex flex-col rounded-2xl border border-bg-border bg-bg-elev/40 backdrop-blur-sm min-h-[calc(100dvh-14rem)] md:min-h-[640px]">
-      <div className="border-b border-bg-border px-5 py-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-accent/30 bg-accent/10 text-accent">
-            <Sparkles className="h-4 w-4" />
-          </div>
-          <div className="leading-tight">
-            <div className="font-bold text-sm text-fg">{agentName}</div>
-            {agentSubtitle && (
-              <div className="text-[10px] uppercase tracking-[0.16em] text-fg-dim">
-                {agentSubtitle}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {planMode === "plan" && (
-            // Plan-mode badge — click to /build. Mirrors ChatWidget's
-            // badge in shape + behavior so the operator's muscle memory
-            // from the /agents page transfers to the tenant preview.
-            <button
-              type="button"
-              onClick={() => {
-                setPlanMode("build");
-                setTurns((prev) => [
-                  ...prev,
-                  { role: "system", content: "Execute mode active — full agent capabilities restored." },
-                ]);
-              }}
-              className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md border border-status-warm/40 bg-status-warm/10 text-status-warm hover:bg-status-warm/20 transition-colors"
-              title="Plan mode active — agent restricted to read/research. Click to exit (same as /build)."
-            >
-              ● PLAN MODE
-            </button>
-          )}
-          {poweredBy ? (
-            // The one source: what powers your agents, as AI brain shows and
-            // switches it. A click opens that choice (Settings > AI brain).
-            <Link
-              href={ENGINE_SETTINGS_HREF}
-              prefetch={false}
-              data-testid="channel-engine"
-              title={`${poweredBy.note ? `${poweredBy.note} ` : ""}Change what powers your agents in Settings > AI brain.`}
-              className="min-w-0 max-w-[16rem] sm:max-w-[22rem] truncate text-right text-[11px] leading-tight text-fg-dim hover:text-fg underline-offset-2 hover:underline"
-            >
-              {poweredBy.line}
-              <span className="block text-[10px] text-fg-dim/80">
-                {poweredBy.note ? "Fallback in use" : spendTag(poweredBy.spend)}
-              </span>
-            </Link>
-          ) : (
-            modelLabel &&
-            // The engine choice is an owner's or admin's (Settings > AI brain
-            // answers anyone else with a 404), so a member sees the label only.
-            (canManageAi ? (
-              <Link
-                href={ENGINE_SETTINGS_HREF}
-                prefetch={false}
-                title="Change what powers your agents in Settings > AI brain"
-                className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono hover:text-fg"
-              >
-                {modelLabel}
-              </Link>
-            ) : (
-              <span className="text-[10px] uppercase tracking-[0.16em] text-fg-dim font-mono">{modelLabel}</span>
-            ))
-          )}
-        </div>
-      </div>
+      <ChannelHeader
+        agentName={agentName}
+        agentSubtitle={agentSubtitle}
+        planMode={planMode}
+        onExitPlan={() => {
+          setPlanMode("build");
+          setTurns((prev) => [
+            ...prev,
+            { role: "system", content: "Execute mode active — full agent capabilities restored." },
+          ]);
+        }}
+        poweredBy={poweredBy}
+        modelLabel={modelLabel}
+        canManageAi={canManageAi}
+      />
 
       {toolsNote && (
         <div className="border-b border-bg-border px-5 py-2 text-[11px] text-fg-dim">{toolsNote}</div>
