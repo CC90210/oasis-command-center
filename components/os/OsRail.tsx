@@ -6,7 +6,7 @@
  *   ┌ Workspace name                      [collapse]
  *   │ Team · Growth · Clients · Money        ← ModeTabs (only the modes you have)
  *   │ rows for the active mode, in sentence-case collapsible groups
- *   └ you · sign out / Settings · Connections · [notifications] · [Admin shield]
+ *   └ you · sign out / Settings (person icon) · [notifications] · [AI door (Bot icon)]
  *
  * The content is DATA computed on the server by lib/os/nav.ts buildOsNav — this
  * component decides nothing about who may see what. It decides only which of
@@ -55,6 +55,8 @@ export type OsRailProps = {
   badges?: Record<string, number>;
   showConnections: boolean;
   connectionsStatus?: ConnectionsStatus | null;
+  /** maySeeSettingsSection(access, "ai"): the footer's AI door for a non-operator. */
+  mayOpenAiSettings?: boolean;
   notifications?: ReactNode;
   /** Extra data warm for a row's hover/focus (e.g. the Prospects list). */
   intentFor?: (href: string) => (() => void) | undefined;
@@ -79,6 +81,7 @@ export function OsRail({
   badges,
   showConnections,
   connectionsStatus = null,
+  mayOpenAiSettings = false,
   notifications,
   intentFor,
   isMobileOpen = false,
@@ -230,6 +233,7 @@ export function OsRail({
         operatorEmail={operatorEmail}
         showConnections={showConnections}
         connectionsStatus={connectionsStatus}
+        mayOpenAiSettings={mayOpenAiSettings}
         notifications={notifications}
         isOperator={isOperator && sections.some((s) => s.key === "admin")}
         adminActive={adminView}

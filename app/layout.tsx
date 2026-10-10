@@ -44,6 +44,7 @@ import {
   resolveViewerSurface,
   type ViewerSurface,
 } from "@/lib/role-surfaces-session";
+import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { askHrefFor, buildOsNav, osNavRows } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
@@ -444,6 +445,14 @@ export default async function RootLayout({
   const provisioned = !!manifest && !isUnprovisionedManifest(manifest);
   // Connections are workspace configuration: owners/admins only.
   const showConnections = osShell && provisioned && navPersona === "founder";
+  // The rail's AI door, gated by the SAME predicate /settings/ai itself uses
+  // (requireSettingsSection("ai") -> maySeeSettingsSection, audience "manage"):
+  // canManageWorkspaceSettings is that function's own canManage computation,
+  // called here with data this layout already loaded (profile, viewerSurface)
+  // so the door and the page can never disagree. Fails closed (false, not the
+  // function's own ?? true default) when the session surface did not resolve.
+  const mayOpenAiSettings =
+    osShell && canManageWorkspaceSettings(profile, viewerSurface?.ok ? viewerSurface.capabilities.canSeeSystemSurfaces : false);
   const osSections: OsNavSection[] | null = osShell
     ? buildOsNav({
         persona: navPersona,
@@ -556,6 +565,7 @@ export default async function RootLayout({
               isOperator={isOperator}
               showConnections={showConnections}
               connectionsStatus={showConnections ? connectionsMeasured : null}
+              mayOpenAiSettings={mayOpenAiSettings}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"
