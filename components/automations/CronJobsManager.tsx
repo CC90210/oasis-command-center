@@ -59,7 +59,13 @@ function isRunning(job: CronJob): boolean {
   return job.daemon ? job.daemon.state === "running" : job.enabled;
 }
 
-type Props = { agentKeys: string[] };
+type Props = {
+  agentKeys: string[];
+  /** Verified platform operators only (lib/automations/script-access.ts): the
+   *  create routes refuse everyone else, so nobody else gets the button. Rows
+   *  keep their toggle and edit controls either way. Defaults closed. */
+  canCreateScripts?: boolean;
+};
 
 const DAEMON_CONFIRM_TIMEOUT_MS = 75_000;
 const DAEMON_CONFIRM_POLL_MS = 4_000;
@@ -229,7 +235,7 @@ function relativeTimeShort(iso: string | null | undefined): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-export function CronJobsManager({ agentKeys }: Props) {
+export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
   // Kept, not discarded, because the receipt answers a question the rows cannot:
   // whether the Empire lane was left out on purpose. See the empire_included
@@ -631,19 +637,21 @@ export function CronJobsManager({ agentKeys }: Props) {
             </div>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => setCreating(true)}
-          className="btn-primary inline-flex items-center gap-1.5 text-xs"
-          disabled={creating || agentKeys.length === 0}
-          title={agentKeys.length === 0 ? "No agents are enabled for this tenant yet." : undefined}
-        >
-          <Plus className="w-3.5 h-3.5" />
-          New automation
-        </button>
+        {canCreateScripts && (
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="btn-primary inline-flex items-center gap-1.5 text-xs"
+            disabled={creating || agentKeys.length === 0}
+            title={agentKeys.length === 0 ? "No agents are enabled for this tenant yet." : undefined}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            New automation
+          </button>
+        )}
       </div>
 
-      {creating && (
+      {creating && canCreateScripts && (
         <JobEditor
           mode="create"
           agentKeys={agentKeys}

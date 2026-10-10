@@ -24,34 +24,26 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getSessionContext, canManageTeam } from "@/lib/team";
 import type { AutomationDraft } from "@/lib/ai-automation-drafter";
+import { isValidCronExpr } from "@/lib/automations/cron-grammar";
+import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const FILENAME_RE = /^[a-z][a-z0-9_]*\.py$/;
-const CRON_RE = /^(\*|\d+|\*\/\d+|\d+(-\d+)?(\/\d+)?(,\d+(-\d+)?(\/\d+)?)*)(\s+(\*|\d+|\*\/\d+|\d+(-\d+)?(\/\d+)?(,\d+(-\d+)?(\/\d+)?)*|MON|TUE|WED|THU|FRI|SAT|SUN|MON-FRI)){4}$/i;
 
-function isValidCron(expr: string): boolean {
-  const trimmed = (expr || "").trim();
-  if (!trimmed) return false;
-  if (trimmed.split(/\s+/).length !== 5) return false;
-  return CRON_RE.test(trimmed);
-}
+// The schedule goes through the one shared grammar (lib/automations/
+// cron-grammar.ts). This route used to accept day names (MON-FRI), which the
+// bridge's cron_runner.py cannot parse, so such a job was saved and never fired.
 
 export async function POST(req: NextRequest) {
-  // Admin-only: persists a tenant_cron_jobs row (a scheduled script_run).
-  const ctx = await getSessionContext();
-  if (!ctx) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only owners/admins can save automations." },
-      { status: 403 },
-    );
-  }
+  // Persists a tenant_cron_jobs row (a scheduled script_run): the create gate,
+  // a verified platform operator who manages this workspace
+  // (lib/automations/script-access.ts).
+  const gate = await gateScriptAutomationCreate("Only owners/admins can save automations.");
+  if (!gate.ok) return gate.response;
+  const ctx = gate.ctx;
 
   let body: { draft?: Partial<AutomationDraft>; confirmed?: boolean };
   try {
@@ -68,7 +60,7 @@ export async function POST(req: NextRequest) {
   if (!draft.suggested_name || draft.suggested_name.length > 80) errors.push("suggested_name");
   if (!draft.script_filename || !FILENAME_RE.test(draft.script_filename)) errors.push("script_filename");
   if (!draft.script_content || draft.script_content.length > 100_000) errors.push("script_content");
-  if (!draft.schedule || !isValidCron(draft.schedule)) errors.push("schedule");
+  if (!draft.schedule || !isValidCronExpr(draft.schedule)) errors.push("schedule");
   if (!draft.agent_key) errors.push("agent_key");
   if (errors.length) {
     return NextResponse.json(

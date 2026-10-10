@@ -12,25 +12,20 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionContext, canManageTeam } from "@/lib/team";
 import { draftAutomation } from "@/lib/ai-automation-drafter";
+import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  // Admin-only: drafting an automation is the first step of creating a
-  // scheduled job (script_run etc.). Gate it like the save step.
-  const ctx = await getSessionContext();
-  if (!ctx) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
-      { status: 403 },
-    );
-  }
+  // Drafting a script automation is the first step of creating one, so it has
+  // the create gate: a verified platform operator who manages this workspace
+  // (lib/automations/script-access.ts). Checked before the body is read, so a
+  // refused caller never reaches the model.
+  const gate = await gateScriptAutomationCreate("Only owners/admins can create automations.");
+  if (!gate.ok) return gate.response;
+  const ctx = gate.ctx;
 
   let body: { description?: unknown };
   try {

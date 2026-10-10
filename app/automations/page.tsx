@@ -20,5 +20,8 @@ export default async function AutomationsPage() {
   // /t/<slug>/automations, which serves each workspace's own routines, is left
   // exactly as it is.
   await requireOperator();
-  return <AutomationsContent />;
+  // requireOperator() above 404s everyone but a verified platform operator, the
+  // same check the script-automation create routes enforce
+  // (lib/automations/script-access.ts), so the create controls are offered.
+  return <AutomationsContent scriptAccess="allowed" />;
 }
