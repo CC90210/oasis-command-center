@@ -121,6 +121,12 @@ const FORBIDDEN_TABLES = new Set([
   "cold_sending_mailboxes",        // app_password_enc
   "personalized_form_links",       // token
 
+  // Round 3, 2026-10-10. platform_operators (bravo__208) lists who holds
+  // operator power, by auth user id. A bearer that could write it could finish
+  // its own operator grant without ever touching the alias secret, and nothing
+  // legitimate on this data plane reads or writes it (rows are added by hand).
+  "platform_operators",
+
   // DELIBERATELY NOT DENIED: merchant_background_checks. It carries ein_last4
   // and ssn_last4, but those are tokenised at ingest (last4 + salted hash, never
   // the full number) and the LIVE apex-bg-check worker reads and writes this
