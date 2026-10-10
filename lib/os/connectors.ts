@@ -1509,8 +1509,7 @@ export function resolveConnectorStatus(
     if (!facts.connections) return withPaths(UNKNOWN);
     // A workspace whose every way in is not built yet cannot connect, unless it
     // already is: the state, with the request in the drawer, never "Not connected".
-    const connected = facts.connections.some((c) => c.provider === source.provider && c.status !== "revoked");
-    if (!connected && mine.length > 0 && mine.every((p) => !p.built)) {
+    if (!alreadyConnected && mine.length > 0 && mine.every((p) => !p.built)) {
       const how = mine[0].title.charAt(0).toLowerCase() + mine[0].title.slice(1);
       return withPaths({ kind: "coming_soon", label: "Not built yet", detail: `Connecting ${def.name} with ${how} is not built yet.` });
     }
