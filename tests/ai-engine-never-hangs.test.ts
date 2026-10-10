@@ -257,7 +257,14 @@ async function main() {
     stillDisabled?: string[];
     signalAborted?: boolean | null;
   };
-  const run = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-engine-never-hangs.render.ts"], { cwd: ROOT, encoding: "utf8", timeout: 120_000 });
+  // The render needs whole React: drop the suite's react-server condition (CI sets it in NODE_OPTIONS, which children inherit).
+  const nodeOptions = (process.env.NODE_OPTIONS || "")
+    .split(/\s+/)
+    .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+    .join(" ");
+  const childEnv: NodeJS.ProcessEnv = Object.assign({}, process.env, { NODE_OPTIONS: nodeOptions });
+  if (!nodeOptions) delete childEnv.NODE_OPTIONS;
+  const run = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-engine-never-hangs.render.ts"], { cwd: ROOT, encoding: "utf8", env: childEnv, timeout: 120_000 });
   let sc: Record<string, Scenario> = {};
   try {
     sc = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}") as Record<string, Scenario>;
