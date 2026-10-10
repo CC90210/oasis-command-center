@@ -15,7 +15,8 @@ import {
   deleteTenantIntegrationService,
   setTenantIntegrationValue,
 } from "@/lib/tenant-integration-store";
-import { providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { isGenericOAuthProvider, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { revokeAtVendor } from "@/lib/connections/oauth-live";
 import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
 import {
   claimConnection,
@@ -337,6 +338,13 @@ export async function disconnectConnection(
   // deleted, and deleted in the revoke's own batch.
   const alsoDelete = provider.id === "slack" ? await slackDisconnectStatements(deps.db, actor.tenantId, row.external_account_id) : [];
 
+  // A sign-in made at the vendor's own page (QuickBooks, Xero, Zoom, WhatsApp):
+  // the vendor is told to forget the grant BEFORE OASIS's copy of the tokens is
+  // deleted (they are what proves the request). A vendor that cannot be asked
+  // never blocks the disconnect: OASIS's copy still goes, and the answer says
+  // the owner should also remove OASIS in the vendor's own settings.
+  const vendorRevoked = isGenericOAuthProvider(provider) ? await revokeAtVendor(deps, row) : null;
+
   const removed = await deleteTenantIntegrationService({ tenantId: actor.tenantId, service: credentialServiceFor(row.id) });
   if (!removed.ok) {
     console.error("[connections.disconnect] credential delete failed", {
@@ -363,9 +371,22 @@ export async function disconnectConnection(
     actor: { userId: actor.userId, email: actor.email },
     action: "connection.revoked",
     connectionId: row.id,
-    after: { provider: provider.id, account_id: row.external_account_id, credentials_deleted: removed.deleted },
+    after: {
+      provider: provider.id,
+      account_id: row.external_account_id,
+      credentials_deleted: removed.deleted,
+      ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+    },
   });
-  return { status: 200, body: { ok: true, disconnected: true, credentials_deleted: removed.deleted } };
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      disconnected: true,
+      credentials_deleted: removed.deleted,
+      ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+    },
+  };
 }
 
 // ── Status ────────────────────────────────────────────────────────────────

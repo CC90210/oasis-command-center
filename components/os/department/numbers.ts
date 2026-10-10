@@ -74,13 +74,11 @@ import {
 import { loadEmpireRoutines, type Read } from "./routines";
 import type { OsViewer } from "./viewer";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import { connectionsHealth, connectorBySlug, registrationStatus, type ConnectionsHealth } from "@/lib/os/connectors";
+import { connectionsHealth, connectorBySlug, type ConnectionsHealth } from "@/lib/os/connectors";
 
 /** The Meta ad-spend tile in the card's own words. */
 export function metaTileText(): string {
-  const meta = connectorBySlug("meta");
-  if (meta?.live) return "Not read here yet";
-  return meta?.registration ? registrationStatus(meta).label : "Not built yet";
+  return connectorBySlug("meta")?.live ? "Not read here yet" : "Not built yet";
 }
 
 export type AttentionItem = {
@@ -432,10 +430,9 @@ async function marketingNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
             status: "live",
             hint: sends === null ? undefined : `${n(sends)} platform send${sends === 1 ? "" : "s"}`,
           },
-      // Ad spend would come from Meta. The tile says exactly what Meta's
-      // Connections card says (registrationStatus: "OASIS is registering with
-      // Meta"), never a Connect link to a card that cannot connect, and no
-      // spend is read here until it is built.
+      // Ad spend would come from Meta. Meta's Connections card connects with a
+      // token and tests it, but no spend is read from it yet, so the tile says
+      // so (metaTileText) and never a Connect link or a number.
       {
         label: "Ad spend 7d",
         value: null,

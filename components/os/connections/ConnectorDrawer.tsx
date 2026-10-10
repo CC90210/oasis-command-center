@@ -11,9 +11,11 @@
  * key (Stripe, Jev) in KeyConnectionPanel, the app's saved keys (Google's
  * sender, Twilio, the Telegram team bot) in ServiceKeysForm (Twilio adds its
  * webhook addresses, TwilioWebhooksPanel), and your own Google login in the
- * personal panel, with the provider's own docs linked. Only an OAuth app
- * (Constant Contact) keeps its connect button at the bottom, because that flow
- * runs in a popup.
+ * personal panel, with the provider's own docs linked. An app signed in at the
+ * vendor's own page (Constant Contact, QuickBooks, Xero, Zoom, WhatsApp) keeps
+ * its connect button at the bottom, because that flow runs in a popup; the
+ * ones OASIS holds tokens for add Test again and Disconnect above it
+ * (OAuthConnectionPanel).
  *
  * ONE DRAWER, THREE ENTRY POINTS: Settings > Connections (ConnectionsHub), the
  * workspace setup's connections step (ConnectionsHub, `embedded`) and AI brain
@@ -32,6 +34,7 @@ import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 
 import { X } from "lucide-react";
 import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/ConnectorIcon";
 import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
+import { OAuthConnectionPanel } from "@/components/os/connections/OAuthConnectionPanel";
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
 import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
 import { RequestConnector } from "@/components/os/connections/RequestConnector";
@@ -185,6 +188,9 @@ export function ConnectorDrawer({
   const keyForm = live?.connect.kind === "key_form" ? live.connect : null;
   const keyConfig = keyForm ? providerById(keyForm.provider)?.restrictedKey ?? null : null;
   const savedKeys = live?.connect.kind === "keys" ? live.connect : null;
+  // Signed in at the vendor's own page: Test again and Disconnect sit in the
+  // body once connected; the footer button connects or reconnects.
+  const signIn = live?.connect.kind === "oauth" ? live.connect : null;
   const setUpHere = !!keyForm || !!savedKeys;
   const elsewhere = embedded && live?.connect.kind === "link";
   // Bumped by every saved or removed key, so the Twilio panel re-reads the
@@ -215,7 +221,9 @@ export function ConnectorDrawer({
           ) : (
             <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">
               {status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention"
-                ? `Manage ${def.name}`
+                ? signIn
+                  ? `Reconnect ${def.name}`
+                  : `Manage ${def.name}`
                 : live.connect.label}
             </button>
           )
@@ -239,18 +247,12 @@ export function ConnectorDrawer({
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Status</h3>
               <StatusLine status={status} />
               {status.detail && <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">{status.detail}</p>}
-              {!live && !def.registration && (
+              {!live && (
                 // The state, not a release promise: "scheduled for the next
                 // release" was a date nobody had set. The button below asks.
                 <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
                   Nothing is built for it yet, so it cannot be connected. Ask OASIS for it below and the request lands
                   on the OASIS team&apos;s desk.
-                </p>
-              )}
-              {!live && def.registration && (
-                <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
-                  There is nothing for you to set up until then. Ask OASIS for it below if you want it sooner, and the
-                  request lands on the OASIS team&apos;s desk.
                 </p>
               )}
             </section>
@@ -266,6 +268,10 @@ export function ConnectorDrawer({
               status={status}
               onChanged={onChanged}
             />
+          )}
+
+          {signIn && (
+            <OAuthConnectionPanel key={def.slug} providerId={signIn.provider} providerName={def.name} status={status} onChanged={onChanged} />
           )}
 
           {savedKeys && (

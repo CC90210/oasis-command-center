@@ -50,7 +50,9 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
   const statuses = await loadConnectorStatuses({ tenantId: viewer.tenantId, userId: viewer.userId });
   const sp = await searchParams;
   // Google's sign-in returns here with ?gmail_oauth=…; its drawer shows the result.
-  const initialApp = one(sp.app) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);
+  // A sign-in popup that had to fall back to a full-window navigation (popup
+  // blocked) returns with ?connection=<slug>&status=...: that app's drawer opens.
+  const initialApp = one(sp.app) ?? one(sp.connection) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);
 
   return (
     <PageFrame

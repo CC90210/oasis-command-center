@@ -12,7 +12,7 @@
 import { useCallback, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ConnectorDrawer } from "@/components/os/connections/ConnectorDrawer";
-import { connectorBySlug, type ConnectorStatus } from "@/lib/os/connectors";
+import { connectorBySlug, oauthStartHref, type ConnectorDef, type ConnectorStatus } from "@/lib/os/connectors";
 
 export function ConnectorDrawerButton({
   slug,
@@ -36,7 +36,15 @@ export function ConnectorDrawerButton({
   const [open, setOpen] = useState(false);
   // Stable: the sheet's focus and key handling re-run when these change.
   const close = useCallback(() => setOpen(false), []);
-  const reopen = useCallback(() => setOpen(true), []);
+  // The drawer's footer button. An app signed in at the vendor's own page has
+  // no popup watcher here, so it goes there in this window and comes back to
+  // the Connections page with the result; every other app is set up in the
+  // drawer itself.
+  const reopen = useCallback((d: ConnectorDef) => {
+    const action = d.live?.connect;
+    if (action?.kind === "oauth") window.location.href = oauthStartHref(action.provider);
+    else setOpen(true);
+  }, []);
   const refresh = useCallback(() => router.refresh(), [router]);
   const def = connectorBySlug(slug);
   if (!def) return null;

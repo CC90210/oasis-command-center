@@ -12,9 +12,10 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
+import { OAUTH_POPUP_SOURCE } from "@/lib/os/connectors";
 
 /** The `source` the hub listens for (components/os/connections/ConnectionsHub.tsx). */
-export const CONNECTION_POPUP_SOURCE = "oasis_connection";
+export const CONNECTION_POPUP_SOURCE = OAUTH_POPUP_SOURCE;
 
 export type ConnectionPopupStatus = "connected" | "denied" | "error";
 

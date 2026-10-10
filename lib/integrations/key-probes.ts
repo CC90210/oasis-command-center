@@ -1,8 +1,8 @@
 /**
  * lib/integrations/key-probes.ts -- the live Test for each app that connects
  * with a key the owner pastes in Settings > Connections (Calendly, Cal.com,
- * Fathom, Fireflies, Zernio, GoHighLevel, and the workspace's own mail server
- * over SMTP).
+ * Fathom, Fireflies, Zernio, GoHighLevel, the workspace's own mail server
+ * over SMTP, Plaid, a Discord or Teams channel webhook, and Meta Ads).
  *
  * ONE READ, NO SIDE EFFECT. Each Test makes the cheapest read the vendor
  * documents for "whose key is this" (or lists one item) and changes nothing in
@@ -43,10 +43,14 @@
 
 import "server-only";
 import {
+  PLAID_HOSTS,
   SMTP_PORTS,
   findIntegrationSchema,
   isPublicHostname,
+  parseDiscordWebhookUrl,
+  parseTeamsWebhookUrl,
   requiredIntegrationFieldKeys,
+  type PlaidEnvironment,
 } from "@/lib/tenant-integration-schemas";
 import { checkPublicHost, connectPlan, dohResolver, type Resolver } from "@/lib/integrations/host-safety";
 
@@ -82,7 +86,19 @@ export type KeyProbeDeps = {
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** The services this module tests. The Test route asks here first. */
-export const KEY_PROBE_SERVICES = ["calendly", "cal_com", "fathom", "fireflies", "late", "gohighlevel", "smtp"] as const;
+export const KEY_PROBE_SERVICES = [
+  "calendly",
+  "cal_com",
+  "fathom",
+  "fireflies",
+  "late",
+  "gohighlevel",
+  "smtp",
+  "plaid",
+  "discord",
+  "microsoft_teams",
+  "meta_ads",
+] as const;
 
 export function hasKeyProbe(service: string): boolean {
   return (KEY_PROBE_SERVICES as readonly string[]).includes(service);
@@ -273,6 +289,140 @@ async function probeGoHighLevel(bundle: Record<string, string>, deps: KeyProbeDe
 }
 
 /**
+ * Plaid: POST /institutions/get for ONE bank in the environment the secret is
+ * for. It sends no customer data and reads no account, and it needs only the
+ * client id and secret, which travel in Plaid's own headers. The host comes
+ * from the environment word and nowhere else (PLAID_HOSTS), so a saved secret
+ * can only ever reach sandbox.plaid.com or production.plaid.com.
+ */
+const PLAID_KEY_ERRORS: ReadonlySet<string> = new Set(["INVALID_API_KEYS", "INVALID_CLIENT_ID", "INVALID_SECRET"]);
+const PLAID_ACCESS_ERRORS: ReadonlySet<string> = new Set([
+  "UNAUTHORIZED_ENVIRONMENT",
+  "PRODUCT_NOT_ENABLED",
+  "INVALID_PRODUCT",
+  "ADDITIONAL_CONSENT_REQUIRED",
+]);
+
+async function probePlaid(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
+  const plaidEnvironment = bundle.environment.trim() as PlaidEnvironment;
+  const base = Object.prototype.hasOwnProperty.call(PLAID_HOSTS, plaidEnvironment) ? PLAID_HOSTS[plaidEnvironment] : null;
+  if (!base) return { ok: false, error: "provider_error: unknown environment" };
+  const r = await call(deps, `${base}/institutions/get`, {
+    method: "POST",
+    headers: {
+      "PLAID-CLIENT-ID": bundle.client_id.trim(),
+      "PLAID-SECRET": bundle.secret.trim(),
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ count: 1, offset: 0, country_codes: ["US"] }),
+  });
+  if (!r.ok) return r.result;
+  const body = await jsonOf(r.res);
+  if (r.res.status === 200) {
+    return Array.isArray(body?.institutions)
+      ? { ok: true, detail: `Plaid accepted the credentials (${plaidEnvironment})` }
+      : { ok: false, error: "provider_error: no institution list in the answer" };
+  }
+  const code = typeof body?.error_code === "string" ? body.error_code : "";
+  if (PLAID_KEY_ERRORS.has(code) || r.res.status === 401) return { ok: false, error: "key_rejected" };
+  if (PLAID_ACCESS_ERRORS.has(code) || r.res.status === 403) return { ok: false, error: "missing_permission" };
+  if (code === "RATE_LIMIT_EXCEEDED" || r.res.status === 429) return { ok: false, error: "rate_limited" };
+  return { ok: false, error: `provider_error: http ${r.res.status}` };
+}
+
+/**
+ * Discord: GET the webhook URL itself. Discord documents it as the call that
+ * returns the webhook without posting anything, and it needs no other
+ * authentication (the token is in the address). The address is parsed again
+ * here, whatever the save said, so a value stored before the rule, or set some
+ * other way, still cannot aim the Test (and the secret in the URL) anywhere
+ * but Discord.
+ */
+async function probeDiscord(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
+  const url = parseDiscordWebhookUrl(bundle.webhook_url);
+  if (!url) return { ok: false, error: "blocked_host" };
+  const r = await call(deps, url.toString(), { method: "GET", headers: { Accept: "application/json" } });
+  if (!r.ok) return r.result;
+  if (r.res.status === 401 || r.res.status === 404) return { ok: false, error: "key_rejected" };
+  if (r.res.status !== 200) return { ok: false, error: httpFailureCode(r.res.status) };
+  const body = await jsonOf(r.res);
+  if (!body || typeof body.id !== "string") return { ok: false, error: "provider_error: no webhook in the answer" };
+  const name = str(body.name);
+  return { ok: true, detail: name ? `Discord webhook: ${name}` : "Discord accepted the webhook" };
+}
+
+/**
+ * Microsoft Teams: a Workflows webhook accepts POST only, so Test posts one
+ * short Adaptive Card that says OASIS connected. That is the one visible side
+ * effect of any Test here, and the card's description says so before it is
+ * pressed. The address is re-checked here exactly as Discord's is.
+ */
+async function probeTeams(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
+  const url = parseTeamsWebhookUrl(bundle.webhook_url);
+  if (!url) return { ok: false, error: "blocked_host" };
+  const card = {
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.2",
+          body: [{ type: "TextBlock", wrap: true, text: "OASIS is connected to this channel. This is the one test message OASIS sends." }],
+        },
+      },
+    ],
+  };
+  const r = await call(deps, url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(card),
+  });
+  if (!r.ok) return r.result;
+  if (r.res.status === 200 || r.res.status === 202) return { ok: true, detail: "Posted one test message to the Teams channel" };
+  if (r.res.status === 404) return { ok: false, error: "key_rejected" };
+  return { ok: false, error: httpFailureCode(r.res.status) };
+}
+
+/** The Graph API version the Meta Test calls. Meta keeps each one for about two years. */
+export const META_GRAPH_VERSION = "v23.0";
+
+const META_KEY_ERRORS: ReadonlySet<number> = new Set([102, 190]);
+const META_ACCESS_ERRORS: ReadonlySet<number> = new Set([3, 10, 200, 299]);
+const META_RATE_ERRORS: ReadonlySet<number> = new Set([4, 17, 32, 613]);
+
+/**
+ * Meta Ads: GET /act_{id} with the system user's token as a Bearer header
+ * (never in the address, so it cannot land in a log). Meta answers errors as
+ * JSON with a numeric code, often on HTTP 400.
+ */
+async function probeMetaAds(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
+  const digits = bundle.ad_account_id.trim().replace(/^act_/, "");
+  if (!/^\d{5,20}$/.test(digits)) return { ok: false, error: "not_found" };
+  const r = await call(deps, `https://graph.facebook.com/${META_GRAPH_VERSION}/act_${digits}?fields=name,account_status`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${bundle.access_token.trim()}`, Accept: "application/json" },
+  });
+  if (!r.ok) return r.result;
+  const body = await jsonOf(r.res);
+  if (r.res.status === 200) {
+    if (!body || typeof body.id !== "string") return { ok: false, error: "provider_error: no ad account in the answer" };
+    const name = str(body.name);
+    const active = body.account_status === 1;
+    return { ok: true, detail: `Meta ad account: ${name ?? `act_${digits}`}${active ? "" : " (not active in Meta)"}` };
+  }
+  const code = Number((body?.error as Record<string, unknown> | undefined)?.code);
+  if (META_KEY_ERRORS.has(code) || r.res.status === 401) return { ok: false, error: "key_rejected" };
+  if (META_ACCESS_ERRORS.has(code) || r.res.status === 403) return { ok: false, error: "missing_permission" };
+  if (META_RATE_ERRORS.has(code) || r.res.status === 429) return { ok: false, error: "rate_limited" };
+  if (code === 100 || r.res.status === 404) return { ok: false, error: "not_found" };
+  return { ok: false, error: `provider_error: http ${r.res.status}` };
+}
+
+/**
  * Resolve and check an owner-typed host, then decide how to reach it
  * (lib/integrations/host-safety.ts): a refusal result, or the address to use.
  * One lookup per Test: the connection never asks DNS again, so the answer
@@ -353,6 +503,10 @@ const PROBES: Readonly<Record<(typeof KEY_PROBE_SERVICES)[number], (b: Record<st
   late: probeZernio,
   gohighlevel: probeGoHighLevel,
   smtp: probeSmtp,
+  plaid: probePlaid,
+  discord: probeDiscord,
+  microsoft_teams: probeTeams,
+  meta_ads: probeMetaAds,
 };
 
 /**
