@@ -45,7 +45,7 @@ import {
 import { resolveCall } from "@/lib/ai/model-registry";
 import { redactAll } from "@/lib/secret-redaction";
 
-export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post";
+export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post" | "automations.draft";
 
 export type ToolModelDeps = {
   readAccount: (tenantId: string) => Promise<WorkspaceAiAccount | null>;
@@ -67,6 +67,13 @@ export type ToolModelCall = {
   system: string;
   prompt: string;
   maxTokens: number;
+  /**
+   * The longest the call may take, from the first request. Past it the answer
+   * is `ai_timeout` at once, and the stream is closed (its row says
+   * cancelled once the provider's stream unwinds; a stream that never yields
+   * again is settled by the ledger's reservation sweep). Absent: no limit.
+   */
+  deadlineMs?: number;
 };
 
 export type ToolModelResult = { ok: true; text: string; provider: string; model: string } | { ok: false; code: string };
@@ -115,16 +122,43 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
   );
 
   let text = "";
+  const it = deps.stream({
+    provider: account.provider,
+    model: picked.model,
+    apiKey,
+    system: call.system,
+    messages: [{ role: "user", content: call.prompt }],
+    maxTokens: call.maxTokens,
+    meter: picked.meter,
+  });
+  const limited = typeof call.deadlineMs === "number" && Number.isFinite(call.deadlineMs) && call.deadlineMs > 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timedOut = limited
+    ? new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), call.deadlineMs);
+      })
+    : null;
+  // The stream ended by itself, or was let go at the deadline: either way it
+  // is not closed again below. Any other way out closes it, as for-await did.
+  let settled = false;
   try {
-    for await (const ev of deps.stream({
-      provider: account.provider,
-      model: picked.model,
-      apiKey,
-      system: call.system,
-      messages: [{ role: "user", content: call.prompt }],
-      maxTokens: call.maxTokens,
-      meter: picked.meter,
-    })) {
+    for (;;) {
+      const pending = it.next();
+      pending.catch(() => undefined);
+      const got = timedOut ? await Promise.race([pending, timedOut]) : await pending;
+      if (got === "timeout") {
+        // Close the stream (its call records cancelled as it unwinds) without
+        // waiting for a provider that may never answer again.
+        settled = true;
+        void it.return(undefined).catch(() => undefined);
+        console.error("[tools.ai.stream]", { tenantId: call.tenantId, surface: call.surface, error: "deadline", deadlineMs: call.deadlineMs });
+        return { ok: false, code: "ai_timeout" };
+      }
+      if (got.done) {
+        settled = true;
+        break;
+      }
+      const ev = got.value;
       if (ev.type === "delta") text += ev.text;
       else if (ev.type === "error") {
         if (isAiBudgetCode(ev.message) || ev.message === AI_USAGE_UNAVAILABLE) return { ok: false, code: ev.message };
@@ -133,9 +167,13 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
       }
     }
   } catch (err) {
+    settled = true; // a stream that threw is over
     const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
     console.error("[tools.ai.stream]", { tenantId: call.tenantId, surface: call.surface, error: redactAll(detail).slice(0, 500) });
     return { ok: false, code: "ai_failed" };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!settled) await it.return(undefined).then(() => undefined, () => undefined);
   }
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, code: "ai_failed" };

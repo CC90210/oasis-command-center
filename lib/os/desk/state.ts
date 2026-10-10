@@ -40,7 +40,15 @@ import { listTickets } from "@/lib/delivery/store";
 import { slaStatus } from "@/lib/delivery/rules";
 import { withDeadline } from "@/lib/os/deadline";
 import { deskRead, followUpsFrom, readPipeline } from "./reads";
-import type { DeskConnection, DeskStateFacts } from "./state-render";
+import {
+  STATE_SECTIONS,
+  departmentHasSection,
+  restrictDepartmentState,
+  type DeskConnection,
+  type DeskStateFacts,
+  type StateSection,
+} from "./state-render";
+import type { DeskToolName } from "./catalog";
 
 export const DESK_READ_DEADLINE_MS = 8_000;
 
@@ -116,16 +124,30 @@ function routineLines(rows: readonly RoutineRow[]) {
   return rows.map((r) => ({ name: r.name, enabled: r.enabled, schedule: r.schedule, lastRunStatus: r.lastRunStatus, lastRunAt: r.lastRunAt }));
 }
 
-export async function loadDepartmentState(viewer: OsViewer, dept: OsDepartment, nowMs = Date.now()): Promise<DeskStateFacts> {
+/**
+ * `opts.allow` is an automation's allowlist: a section whose lookup it may not
+ * use (state-render.ts STATE_SECTIONS) is not read at all, and the facts are
+ * restricted (restrictDepartmentState) before they are returned.
+ */
+export async function loadDepartmentState(
+  viewer: OsViewer,
+  dept: OsDepartment,
+  nowMs = Date.now(),
+  opts: { allow?: readonly DeskToolName[] } = {},
+): Promise<DeskStateFacts> {
+  const allow = opts.allow;
+  // A section is read only when the page has it and the run may read it.
+  const wants = (section: StateSection) =>
+    departmentHasSection(dept.key, section) && (!allow || allow.includes(STATE_SECTIONS.find((s) => s.section === section)!.tool));
   const routinesRead: Promise<Read<RoutineRow[]>> = loadTenantRoutines(viewer.surface.tenantId);
-  const wantsPipeline = dept.key === "sales" || dept.key === "chief_of_staff";
+  const wantsPipeline = wants("pipeline");
   const [numbers, approvals, pipeline, tickets, routines, connections] = await Promise.all([
     timed("numbers", async () => loadDepartmentNumbers(dept, viewer, await routinesRead)),
     // An owner or admin: Needs you's cards; anyone else: their own drafts (./proposals.ts).
-    timed("approvals", () => deskApprovals(viewer, dept.key === "chief_of_staff" ? null : dept.key, 5)),
+    wants("approvals") ? timed("approvals", () => deskApprovals(viewer, dept.key === "chief_of_staff" ? null : dept.key, 5)) : Promise.resolve(null),
     wantsPipeline ? timed("pipeline", async () => readPipeline(viewer)) : Promise.resolve(null),
-    dept.key === "client_success" ? timed("tickets", () => loadOpenTickets(viewer, nowMs)) : Promise.resolve(null),
-    dept.key === "operations"
+    wants("tickets") ? timed("tickets", () => loadOpenTickets(viewer, nowMs)) : Promise.resolve(null),
+    wants("routines")
       ? timed("routines", async () => {
           const r = await routinesRead;
           if (!r.ok) throw new Error("routines read failed");
@@ -147,11 +169,13 @@ export async function loadDepartmentState(viewer: OsViewer, dept: OsDepartment, 
     readAt: new Date(nowMs).toISOString(),
     tiles: numbers.ok ? numbers.value.tiles : null,
     attention: numbers.ok ? numbers.value.attention.map((a) => ({ label: a.label, count: a.count })) : null,
-    approvals: approvals.ok
-      ? { total: approvals.value.total, own: approvals.value.own, items: approvals.value.items.map((a) => ({ title: a.title, department: a.department })) }
-      : null,
     connections: connections.ok ? connections.value : null,
   };
+  if (approvals) {
+    facts.approvals = approvals.ok
+      ? { total: approvals.value.total, own: approvals.value.own, items: approvals.value.items.map((a) => ({ title: a.title, department: a.department })) }
+      : null;
+  }
   if (wantsPipeline && pipeline) {
     if (!pipeline.ok) facts.pipeline = null;
     else if (pipeline.value === null) facts.pipeline = "no_scope";
@@ -164,5 +188,5 @@ export async function loadDepartmentState(viewer: OsViewer, dept: OsDepartment, 
   }
   if (dept.key === "client_success" && tickets) facts.tickets = tickets.ok ? tickets.value : null;
   if (dept.key === "operations" && routines) facts.routines = routines.ok ? routineLines(routines.value) : null;
-  return facts;
+  return allow ? restrictDepartmentState(facts, allow) : facts;
 }

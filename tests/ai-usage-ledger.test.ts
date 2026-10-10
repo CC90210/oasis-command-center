@@ -296,6 +296,9 @@ async function main() {
     assert.equal(usage.RESERVATION_TTL_MS, 30 * 60_000);
     assert.equal(outcome.failureCopy("ai_usage_unavailable", { canManageAi: true }).sentence, codes.AI_USAGE_UNAVAILABLE_SENTENCE);
     assert.ok(usage.isUsageSurface("infer:lead-scoring") && !usage.isUsageSurface("infer:") && !usage.isUsageSurface("chat"));
+    // A department task's runs and its drafter are metered under their own surfaces.
+    for (const s of ["automations.run", "automations.draft"]) assert.ok((usage.USAGE_SURFACES as readonly string[]).includes(s), `${s} is not a usage surface`);
+    assert.ok(!usage.isUsageSurface("automations") && !usage.isUsageSurface("automation.run"));
     for (const code of codes.AI_BUDGET_CODES) {
       assert.ok(outcome.isTurnFailureCode(code), `${code} is not a channel failure code`);
       assert.equal(outcome.failureCopy(code, { canManageAi: true }).sentence, codes.AI_BUDGET_SENTENCES[code]);
@@ -1115,6 +1118,31 @@ async function main() {
     assert.throws(() => usage.modelCallInsert({ tenantId: CLIENT, surface: "probe", authKind: "api_key", billingMode: "byo_key", occurredAt: new Date(), provider: "p", model: "m", costMicroUsd: null, costSource: null, latencyMs: 1, outcome: "error", errorCode: "Your credit balance is too low" }), /code/);
   });
 
+  await check("an automation's model calls land under automations.run / automations.draft with their job id and tenant", async () => {
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      for (const [surface, job] of [
+        ["automations.run", "auto-run-0001"],
+        ["automations.draft", "auto-draft-0001"],
+      ] as const) {
+        const meter = usage.modelCallMeter({ tenantId: CLIENT, surface, authKind: "api_key", billingMode: "byo_key", departmentKey: "sales", userId: USER, jobId: job }, { db });
+        const call = await meter.begin({ provider: "anthropic", model: "claude-sonnet-4-6", maxOutputTokens: 100, promptBytes: 10 });
+        await call.finish({ outcome: "ok", usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+      }
+    } finally {
+      console.error = quiet;
+    }
+    const rows = (await db.execute({ sql: "SELECT tenant_id, surface, job_id, user_id, department_key, outcome FROM ai_usage_events WHERE job_id IN ('auto-run-0001', 'auto-draft-0001') ORDER BY surface DESC", args: [] })).rows;
+    assert.deepEqual(
+      rows.map((r) => [r.tenant_id, r.surface, r.job_id, r.user_id, r.department_key, r.outcome]),
+      [
+        [CLIENT, "automations.run", "auto-run-0001", USER, "sales", "ok"],
+        [CLIENT, "automations.draft", "auto-draft-0001", USER, "sales", "ok"],
+      ],
+    );
+  });
+
   await check("a row that cannot be written is logged loudly and never breaks the caller", async () => {
     const broken = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "ai-usage-broken-")), "b.db")}` });
     const logged: unknown[][] = [];
@@ -1142,7 +1170,8 @@ async function main() {
       // The department turn is shared with Slack mentions (lib/os/department-agent.ts);
       // the route maps its budget refusal to 402.
       ["app/api/agents/chat/route.ts", [/prepareAgentTurn\(/, /refuse\(ctx, 402, exhausted/]],
-      ["lib/os/department-agent.ts", [/surface: "agents\.chat"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /status: 402, error: exhausted/]],
+      // A department turn's surface: the chat's, or an automation's run (AgentTurnRequest.surface), on every row it writes.
+      ["lib/os/department-agent.ts", [/surface: req\.surface \?\? "agents\.chat"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /status: 402, error: exhausted/]],
       ["app/api/agents/generate/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "agents\.generate"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/manifest/chat/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "manifest\.chat"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/gmail-templates/[id]/solara/route.ts", [/tenantId: sess\.tenantId,\s+surface: "gmail_templates\.solara"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],

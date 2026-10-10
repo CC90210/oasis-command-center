@@ -94,8 +94,15 @@ export type AgentTurnRequest = {
   revealModel: boolean;
   /** The signed-in person the turn served, when there is one. */
   userId: string | null;
-  /** The job the turn belongs to (a Slack event), for the usage ledger. */
+  /** The job the turn belongs to (a Slack event, an automation's run), for the usage ledger. */
   jobId?: string | null;
+  /**
+   * The ledger surface every row of this turn is filed under: a chat (the
+   * default, "agents.chat") or a department task's run ("automations.run"),
+   * so an automation's spend is counted apart and never pages the chat's
+   * health check.
+   */
+  surface?: "agents.chat" | "automations.run";
   chatMode?: "plan" | "build";
   /**
    * The caller verified the person is the platform operator: a workspace
@@ -400,7 +407,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   // built, so the turn names the model it really sends.
   const meter = modelCallMeter({
     tenantId,
-    surface: "agents.chat",
+    surface: req.surface ?? "agents.chat",
     ...billing,
     departmentKey: dept?.key ?? null,
     teammateId: agent.slug,
@@ -475,7 +482,7 @@ async function recordRefusedTurn(
   if (!req.department) return;
   await recordModelCall({
     tenantId: req.tenantId,
-    surface: "agents.chat",
+    surface: req.surface ?? "agents.chat",
     authKind: what.authKind,
     billingMode: what.billingMode,
     departmentKey: req.department.key,

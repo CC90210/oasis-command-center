@@ -11,7 +11,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { conversationActivity, createConversation, enqueueRun, getConversation, type Conversation } from "./store";
+import { conversationActivity, createConversation, enqueueRun, getConversation, hasAutomationRun, type Conversation, type RunScope } from "./store";
 import { driveConversation, type ExecutorDeps } from "./executor";
 import { followRun, headOf } from "./follow";
 import { sseResponse } from "./sse";
@@ -20,6 +20,39 @@ import { json } from "./scope";
 
 /** The longest one request follows (and so holds a driver's connection). Past it the browser re-attaches. */
 export const MAX_FOLLOW_MS = 14 * 60_000;
+
+/**
+ * The response that follows a run its caller is driving: `prelude` (the
+ * caller's own first event), then run / ev / end frames (./sse.ts) from the
+ * database. Following only: it starts no driver (no needDriver), and the
+ * browser leaving ends only the following. Shared by sending a message and by
+ * an automation's "Test run now".
+ */
+export function followRunResponse(args: {
+  db: Client;
+  scope: RunScope;
+  runId: string;
+  /** Follow the runs queued behind it too (a chat's queue). */
+  queue?: boolean;
+  windowMs?: number;
+  prelude?: string;
+  now?: () => Date;
+  pollMs?: (elapsedMs: number) => number;
+}): Response {
+  let gone = false;
+  const frames = followRun({
+    db: args.db,
+    scope: args.scope,
+    runId: args.runId,
+    afterSeq: 0,
+    queue: args.queue ?? false,
+    windowMs: args.windowMs ?? MAX_FOLLOW_MS,
+    gone: () => gone,
+    now: args.now,
+    pollMs: args.pollMs,
+  });
+  return sseResponse(frames, { prelude: args.prelude, onGone: () => (gone = true) });
+}
 
 export type SendInput = {
   department: string;
@@ -49,6 +82,9 @@ export async function sendMessage(args: {
   if (input.conversationId) {
     conversation = await getConversation(db, scope, input.conversationId);
     if (!conversation || conversation.department !== input.department) return json(404, { ok: false, error: "conversation_not_found" });
+    // An automation's conversation is its record: a chat message there would
+    // run with the chat's rights next to the automation's runs.
+    if (await hasAutomationRun(db, scope, conversation.id)) return json(409, { ok: false, error: "automation_conversation" });
   } else {
     conversation = await createConversation(db, scope, { department: input.department, agentSlug: input.agentSlug, now: now() });
   }
@@ -75,18 +111,6 @@ export async function sendMessage(args: {
   const driving = driveConversation(deps, conversation.id);
   await keep(driving, `drive:${conversation.id}`);
 
-  let gone = false;
-  const frames = followRun({
-    db,
-    scope,
-    runId: run.id,
-    afterSeq: 0,
-    queue: true,
-    windowMs: MAX_FOLLOW_MS,
-    gone: () => gone,
-    now,
-    pollMs: args.pollMs,
-  });
   const prelude = `event: conversation\ndata: ${JSON.stringify({ id: conversation.id, title: conversation.title || run.userText.slice(0, 80) })}\n\n`;
-  return sseResponse(frames, { prelude, onGone: () => (gone = true) });
+  return followRunResponse({ db, scope, runId: run.id, queue: true, windowMs: MAX_FOLLOW_MS, prelude, now, pollMs: args.pollMs });
 }
