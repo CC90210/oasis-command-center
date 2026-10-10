@@ -18,6 +18,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -394,6 +395,84 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   assert.equal(row.href, "/forms", "the Offers row must keep /forms; /offers is a retired route");
   assert.equal(row.group, "Marketing");
   assert.ok(!OS_NAV_CATALOG.some((r) => r.href === "/offers" || r.href.startsWith("/offers/")), "a rail row links the retired /offers");
+}
+
+// -- 13. RailFooter: one Settings door carries the Connections signal --------
+// The plug door (Settings > Connections) was a second door into Settings;
+// removed per the owners' request (2026-10-10). The gear now carries
+// whatever the plug used to show: active on /settings/connections too, and
+// the attention dot + accessible name when a connection needs the owner.
+// Rendering happens in a spawned process (tests/rail-footer.render.ts):
+// RailFooter is a client component and this file runs under
+// --conditions=react-server, where react-dom/server does not resolve.
+{
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, TSX_TSCONFIG_PATH: "tests/tsconfig.render.json" };
+  const tokens = (process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t.length > 0);
+  const kept: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === "--conditions" || tokens[i] === "-C") {
+      i += 1;
+      continue;
+    }
+    if (/^(--conditions=|-C=)/.test(tokens[i])) continue;
+    kept.push(tokens[i]);
+  }
+  if (kept.length) childEnv.NODE_OPTIONS = kept.join(" ");
+  else delete childEnv.NODE_OPTIONS;
+
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/rail-footer.render.ts"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: childEnv,
+  });
+  assert.equal(r.status, 0, `tests/rail-footer.render.ts failed:\n${r.stderr}`);
+  const { markup } = JSON.parse(r.stdout) as { markup: Record<string, string> };
+
+  // No plug door, anywhere, under any props — and the render actually reached the footer.
+  for (const [id, html] of Object.entries(markup)) {
+    assert.match(html, /aria-label="Sign out"/, `${id}: the render did not reach RailFooter`);
+    assert.doesNotMatch(html, /Connections/, `${id}: a Connections door or label still renders`);
+    assert.doesNotMatch(html, /href="\/settings\/connections"/, `${id}: the plug's href still renders`);
+    const settingsDoors = html.match(/<a\b[^>]*href="\/settings"/g) ?? [];
+    assert.equal(settingsDoors.length, 1, `${id}: expected exactly one Settings door, found ${settingsDoors.length}`);
+  }
+
+  // The gear is active on /settings AND on /settings/connections — the plug's
+  // old territory now belongs to it.
+  assert.match(markup.settingsActive, /href="\/settings"[^>]*aria-current="page"/, "the gear must be active on /settings");
+  assert.match(
+    markup.connectionsPathActive,
+    /href="\/settings"[^>]*aria-current="page"/,
+    "the gear must be active on /settings/connections too",
+  );
+
+  // Attention: the dot and its accessible name move to the gear.
+  assert.match(
+    markup.attention,
+    /aria-label="Settings: a connection needs attention"/,
+    "attention must be named on the gear, not silent",
+  );
+  assert.match(markup.attention, /bg-status-warm/, "attention must still draw a dot");
+
+  // ok and not-measured both mean: no dot, plain label. There is no green
+  // "all healthy" dot on the gear either — a reachable Settings needs no badge.
+  for (const id of ["ok", "notMeasured"] as const) {
+    assert.match(markup[id], /aria-label="Settings"/, `${id}: the label must be plain`);
+    assert.doesNotMatch(markup[id], /aria-label="Settings:/, `${id}: the label must not mention a connection`);
+    assert.doesNotMatch(markup[id], /bg-status-warm|bg-status-engaged/, `${id}: no dot of either colour`);
+  }
+
+  // The signal is gated by showConnections, exactly as the door used to be:
+  // a viewer who could never open Connections must not see its attention
+  // state leak onto their gear either.
+  assert.match(markup.hiddenAttention, /aria-label="Settings"/, "a viewer who never sees Connections keeps a plain label");
+  assert.doesNotMatch(markup.hiddenAttention, /bg-status-warm/, "no dot leaks to a viewer who cannot act on it");
+
+  // The Admin shield is unaffected: still operator-only.
+  assert.match(markup.operator, /aria-label="Admin"/, "the shield must still render for an operator");
+  for (const id of ["settingsActive", "connectionsPathActive", "attention", "ok", "notMeasured", "hiddenAttention"] as const) {
+    assert.doesNotMatch(markup[id], /aria-label="Admin"|aria-label="Leave Admin"/, `${id}: the shield must not render for a non-operator`);
+  }
 }
 
 console.log(
