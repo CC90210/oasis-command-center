@@ -404,8 +404,18 @@ async function metaTokenCall(
     return { token, expiresInSec: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : META_DEFAULT_TOKEN_SEC };
   }
   if (mode === "refresh") {
-    if (r.status === 400 || r.status === 401) throw new RefreshRefusedError({ oauthError: text(asObj(o?.error)?.type), httpStatus: r.status });
-    throw new Error(`WhatsApp token refresh could not be completed (HTTP ${r.status})`);
+    // Meta answers HTTP 400 for rate limits too (OAuthException codes 4, 17, 32,
+    // 613), so the status alone says nothing about the grant. Only a code that
+    // means "this token is no longer valid" is a confirmed refusal (190 invalid
+    // or expired token, 102 session invalid, subcodes 463 expired / 467
+    // invalid); anything else is "could not refresh now" and never expires it.
+    const err = asObj(o?.error);
+    const code = Number(err?.code);
+    const sub = Number(err?.error_subcode);
+    if ((r.status === 400 || r.status === 401) && (code === 190 || code === 102 || sub === 463 || sub === 467)) {
+      throw new RefreshRefusedError({ oauthError: "invalid_grant", httpStatus: r.status });
+    }
+    throw new Error(`WhatsApp token refresh could not be completed (HTTP ${r.status}${Number.isFinite(code) ? `, code ${code}` : ""})`);
   }
   throw new OAuthExchangeError("exchange_failed", `Meta refused the sign-in code (HTTP ${r.status})`);
 }

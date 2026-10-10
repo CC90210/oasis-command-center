@@ -61,6 +61,8 @@ export type OAuthTokens = {
 
 /** A refresh call must finish well inside the lease. */
 export const REFRESH_TIMEOUT_MS = 30_000;
+/** Extra time a losing refresher waits beyond the winner's refresh deadline, for the winner's save. */
+export const LOSER_WAIT_MARGIN_MS = 5_000;
 /**
  * How long a holder WAITS for its token save. Refresh plus this stay well
  * inside REFRESH_LEASE_MS (tests/os-connections.test.ts holds the sum under
@@ -258,7 +260,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function getAccessToken(db: Client, input: GetAccessTokenInput): Promise<string> {
   const now = input.now ?? (() => new Date());
-  const waitMs = input.waitMs ?? 10_000;
+  // A loser must outwait the winner's refresh (aborted at REFRESH_TIMEOUT_MS), or a
+  // slow vendor makes it give up with refresh_busy instead of re-reading the
+  // tokens the winner saved.
+  const waitMs = input.waitMs ?? REFRESH_TIMEOUT_MS + LOSER_WAIT_MARGIN_MS;
   const pollMs = input.pollMs ?? 150;
 
   const conn = await getConnection(db, input.tenantId, input.connectionId);

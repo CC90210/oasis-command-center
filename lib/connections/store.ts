@@ -339,6 +339,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
                 revoked_at = NULL,
                 revoked_by = NULL,
                 refresh_lease_until = NULL,
+                token_version = token_version + 1,
                 auth_kind = ?,
                 external_account_label = ?,
                 environment = ?,

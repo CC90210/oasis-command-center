@@ -122,8 +122,8 @@ const calls: Call[] = [];
 /** Every secret value that ever crossed the mocked wire or was typed in: none may appear in a log or an answer. */
 const SENSITIVE = new Set<string>();
 
-type TokenMode = { refuse: boolean; revokeFails: boolean };
-const mode: TokenMode = { refuse: false, revokeFails: false };
+type TokenMode = { refuse: boolean; revokeFails: boolean; metaRefreshCode: number | null };
+const mode: TokenMode = { refuse: false, revokeFails: false, metaRefreshCode: null };
 
 /** What each OAuth vendor last issued; a token that is not the latest is rejected, as the rotating vendors do. */
 const issued: Record<string, { n: number; access: string; refresh: string; revoked: boolean }> = {};
@@ -245,6 +245,9 @@ function oauthVendor(url: URL, init: RequestInit | undefined, call: Call): Respo
       assert.equal(call.query.get("client_secret"), app("whatsapp").env.META_APP_SECRET);
       if (call.query.get("grant_type") === "fb_exchange_token") {
         const asked = call.query.get("fb_exchange_token");
+        if (mode.metaRefreshCode !== null && asked !== "meta-short-lived-token") {
+          return json(400, { error: { type: "OAuthException", code: mode.metaRefreshCode, message: "Meta says no" } });
+        }
         const ok = asked === "meta-short-lived-token" || (!mode.refuse && asked === live("whatsapp").refresh);
         if (!ok) return json(400, { error: { type: "OAuthException", code: 190, message: "Error validating access token" } });
         const t = issue("whatsapp");
@@ -1176,6 +1179,79 @@ async function main() {
       assert.match(read("components/os/connections/OAuthConnectionPanel.tsx"), /Remove OASIS from \$\{providerName\}'s connected apps too/);
     });
   }
+
+  await check("WhatsApp: Meta's HTTP 400 for a rate limit (code 4) never expires the connection; only a dead-token code (190) does", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "whatsapp")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+    const expire = async () => {
+      const b = await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false });
+      await tokenStore.saveConnectionTokens(ALPHA, String(row.id), { access_token: b.access_token, refresh_token: b.refresh_token, expires_at: Date.now() - 60_000 });
+    };
+    for (const code of [4, 17, 32, 613]) {
+      await expire();
+      mode.metaRefreshCode = code;
+      await assert.rejects(live_.getProviderAccessToken(deps(), { tenantId: ALPHA, providerId: "whatsapp" }), (e: unknown) => (e as { code?: string }).code === "refresh_unavailable", `code ${code}`);
+      mode.metaRefreshCode = null;
+      assert.equal((await store.getConnection(db, ALPHA, String(row.id)))!.status, "connected", `a transient Meta error (code ${code}) expired WhatsApp`);
+    }
+    await expire();
+    mode.metaRefreshCode = 190;
+    await assert.rejects(live_.getProviderAccessToken(deps(), { tenantId: ALPHA, providerId: "whatsapp" }), (e: unknown) => (e as { code?: string }).code === "refresh_failed");
+    mode.metaRefreshCode = null;
+    assert.equal((await store.getConnection(db, ALPHA, String(row.id)))!.status, "expired");
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp"));
+  });
+
+  await check("a refresh in flight during a reconnect cannot overwrite the fresh tokens (the reconnect bumps token_version)", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "zoom")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+    const held = (await store.getConnection(db, ALPHA, String(row.id)))!.token_version;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    assert.ok((await store.getConnection(db, ALPHA, String(row.id)))!.token_version > held, "the reconnect did not bump token_version");
+    const fresh = await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false });
+    const landed = await tokenStore.saveConnectionTokensFenced(db, {
+      tenantId: ALPHA, connectionId: String(row.id), version: held,
+      tokens: { access_token: "stale-in-flight-access", refresh_token: "stale-in-flight-refresh", expires_at: Date.now() + 1000 }, now: new Date(),
+    });
+    assert.equal(landed, false);
+    assert.equal((await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false })).access_token, fresh.access_token);
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom"));
+  });
+
+  await check("a refresh that takes longer than 10 s: the losing caller waits for the winner's tokens instead of failing with refresh_busy", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const row = await connectedRow(ALPHA, app);
+    const b = await getTenantIntegrationBundle(ALPHA, `connection:${row.id}`, { allowEnvFallback: false });
+    await tokenStore.saveConnectionTokens(ALPHA, String(row.id), { access_token: b.access_token, refresh_token: b.refresh_token, expires_at: Date.now() - 60_000 });
+    assert.ok(tokenStore.REFRESH_TIMEOUT_MS + tokenStore.LOSER_WAIT_MARGIN_MS > 10_000, "a loser's wait covers the refresh deadline");
+    let refreshes = 0;
+    const slow = (callerLabel: string) =>
+      tokenStore.getAccessToken(db, {
+        tenantId: ALPHA,
+        connectionId: String(row.id),
+        refresh: async () => {
+          refreshes += 1;
+          SENSITIVE.add(`slow-access-${callerLabel}-${"S".repeat(12)}`);
+          await new Promise((r) => setTimeout(r, 11_000));
+          return { access_token: `slow-access-${callerLabel}-${"S".repeat(12)}`, refresh_token: `slow-refresh-${"S".repeat(12)}`, expires_at: Date.now() + 3_600_000 };
+        },
+      });
+    const results = await Promise.allSettled([slow("one"), slow("two"), slow("three")]);
+    assert.equal(refreshes, 1, "only one caller refreshes");
+    assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled"], JSON.stringify(results.map((r) => (r as PromiseRejectedResult).reason?.message)));
+    const tokens = new Set(results.map((r) => (r as PromiseFulfilledResult<string>).value));
+    assert.equal(tokens.size, 1, "the losers got the winner's token");
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+  });
 
   await check("an account that is exclusive to one workspace cannot be connected to a second (QuickBooks, Xero); the second owner is told", async () => {
     setOAuthEnv(true);
