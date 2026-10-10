@@ -29,7 +29,7 @@ import { providerById } from "@/lib/connections/registry";
 import { claimConnection, getConnection, recordHealthCheck, type ConnectionRow } from "@/lib/connections/store";
 import { auditConnection, type ConnectionsDeps } from "@/lib/connections/health";
 import { undoUnsavedClaim } from "@/lib/connections/service";
-import { saveConnectionTokens } from "@/lib/connections/token-store";
+import { saveConnectionTokensFenced } from "@/lib/connections/token-store";
 import { OAuthExchangeError, oauthAdapterFor } from "@/lib/connections/oauth-adapters";
 import { adapterDeps, grantToTokens, oauthClientFor } from "@/lib/connections/oauth-live";
 
@@ -130,8 +130,22 @@ export async function completeOAuthConnect(
   }
   const conn = claim.connection;
 
+  // FENCED on the version THIS claim holds (and on the row still being
+  // unrevoked), the same pattern the refresher already uses
+  // (saveConnectionTokensFenced): if this callback paused here and a
+  // Disconnect or a newer reconnect finished first, the row has moved past
+  // conn.token_version, and the save lands nothing rather than overwrite or
+  // resurrect a state that is no longer this callback's to write (Codex
+  // review, PR #574).
+  let saved: boolean;
   try {
-    await saveConnectionTokens(tenantId, conn.id, grantToTokens(grant, now));
+    saved = await saveConnectionTokensFenced(deps.db, {
+      tenantId,
+      connectionId: conn.id,
+      version: conn.token_version,
+      tokens: grantToTokens(grant, now),
+      now,
+    });
   } catch (err) {
     console.error("[connections.oauth] token save failed", {
       provider: provider.id,
@@ -143,6 +157,18 @@ export async function completeOAuthConnect(
     // Same reasoning as the claim refusal above: this can be a reconnect of
     // an account that already has a live grant (its own, or another
     // workspace's survived a race); not revoking never risks disconnecting it.
+    return { ok: false, failure: "token_save_failed" };
+  }
+  if (!saved) {
+    // Fenced out: never undo this claim here. The row already belongs to
+    // whatever finished the race (a Disconnect revoked it, or a newer
+    // reconnect holds a newer version with its own tokens) — undoing based
+    // on THIS callback's stale claim could revert that newer, real state.
+    console.error("[connections.oauth] token save fenced out by a newer claim or a disconnect", {
+      provider: provider.id,
+      tenantId,
+      connectionId: conn.id,
+    });
     return { ok: false, failure: "token_save_failed" };
   }
 

@@ -291,6 +291,8 @@ export function xeroAuthEventId(accessToken: string): string | null {
   }
 }
 
+export type XeroOrgResolution = { ok: true; org: XeroOrg } | { ok: false; reason: "none" | "several" };
+
 /**
  * Which organisation THIS consent approved. `GET /connections` can list every
  * organisation the signed-in Xero user has EVER approved for OASIS's app, not
@@ -300,13 +302,23 @@ export function xeroAuthEventId(accessToken: string): string | null {
  * the newest `createdDateUtc` can both pin the wrong organisation. Xero's own
  * answer is `authEventId`: every connection row carries the auth event that
  * authorised it, and the access token carries the auth event THIS consent
- * just ran. One organisation is unambiguous either way; more than one needs a
- * match, or this refuses rather than guess (never silently pick an arbitrary one).
+ * just ran.
+ *
+ * One organisation is unambiguous either way. More than one needs a match —
+ * but a single Xero consent can itself approve SEVERAL organisations at once
+ * (Codex review, PR #574): they all carry the SAME authEventId, so `.find()`
+ * would silently pick whichever sorted first. OASIS connects one organisation
+ * per workspace, so more than one match refuses with its own reason, in the
+ * SAME order regardless of which row the vendor lists first — never a guess.
  */
-export function xeroCurrentOrg(orgs: readonly XeroOrg[], authEventId: string | null): XeroOrg | null {
-  if (orgs.length === 1) return orgs[0];
-  if (orgs.length === 0 || !authEventId) return null;
-  return orgs.find((o) => o.authEventId === authEventId) ?? null;
+export function xeroCurrentOrg(orgs: readonly XeroOrg[], authEventId: string | null): XeroOrgResolution {
+  if (orgs.length === 0) return { ok: false, reason: "none" };
+  if (orgs.length === 1) return { ok: true, org: orgs[0] };
+  if (!authEventId) return { ok: false, reason: "none" };
+  const matches = orgs.filter((o) => o.authEventId === authEventId);
+  if (matches.length === 0) return { ok: false, reason: "none" };
+  if (matches.length > 1) return { ok: false, reason: "several" };
+  return { ok: true, org: matches[0] };
 }
 
 const xero: OAuthAdapter = {
@@ -326,10 +338,18 @@ const xero: OAuthAdapter = {
     const orgs = xeroOrgs(r.body);
     if (r.status !== 200) throw new OAuthExchangeError("exchange_failed", `Xero would not list the organisation (HTTP ${r.status})`);
     // One OASIS workspace connects one Xero organisation: the one THIS consent
-    // approved (xeroCurrentOrg), never an arbitrary pick off someone's whole history.
-    const org = xeroCurrentOrg(orgs, authEventId);
-    if (!org) throw new OAuthExchangeError("account_unidentified", "Xero did not say which organisation was connected");
-    return { accountId: org.tenantId, accountLabel: org.tenantName, environment: null };
+    // approved (xeroCurrentOrg), never an arbitrary pick off someone's whole
+    // history, and never an arbitrary pick among several this ONE consent approved.
+    const resolved = xeroCurrentOrg(orgs, authEventId);
+    if (!resolved.ok) {
+      throw new OAuthExchangeError(
+        "account_unidentified",
+        resolved.reason === "several"
+          ? "This Xero sign-in covers several organisations; connect one organisation at a time"
+          : "Xero did not say which organisation was connected",
+      );
+    }
+    return { accountId: resolved.org.tenantId, accountLabel: resolved.org.tenantName, environment: null };
   },
   async probe(accessToken, accountId, deps) {
     const started = Date.now();

@@ -88,10 +88,12 @@ export function OAuthConnectionPanel({
         setNotice({ tone: "err", text: serverMessage(r, `${providerName} could not be disconnected`) });
         return;
       }
+      const sharedElsewhere = r.data?.vendor_revoke_skipped_reason === "shared_with_another_workspace";
       setNotice({
-        tone: r.data?.vendor_revoked === false ? "err" : "ok",
-        text:
-          r.data?.vendor_revoked === false
+        tone: r.data?.vendor_revoked === false && !sharedElsewhere ? "err" : "ok",
+        text: sharedElsewhere
+          ? `${providerName} disconnected here and OASIS deleted its copy. ${providerName} was not told to forget OASIS, because another OASIS workspace is still using that same account.`
+          : r.data?.vendor_revoked === false
             ? `${providerName} disconnected and OASIS deleted its copy of the sign-in, but ${providerName} could not be told to forget OASIS. Remove OASIS from ${providerName}'s connected apps too.`
             : `${providerName} disconnected. ${providerName} was told to forget OASIS and the stored sign-in was deleted.`,
       });

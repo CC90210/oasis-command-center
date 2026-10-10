@@ -15,13 +15,14 @@ import {
   deleteTenantIntegrationService,
   setTenantIntegrationValue,
 } from "@/lib/tenant-integration-store";
-import { isGenericOAuthProvider, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { isGenericOAuthProvider, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
 import { revokeAtVendor } from "@/lib/connections/oauth-live";
 import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
 import {
   claimConnection,
   deleteUnprovenClaim,
   findActiveConnection,
+  isAccountHeldByAnotherTenant,
   listRecentHealthChecks,
   markConnectionError,
   recordHealthCheck,
@@ -77,6 +78,24 @@ export function resolveProvider(
       ),
     };
   }
+  return { ok: true, provider };
+}
+
+/**
+ * Resolve a [provider] segment for Disconnect only: unknown → 404, but NOT
+ * gated on whether OASIS's app for it is configured on THIS deployment.
+ * Disconnect's job is removing OASIS's own copy of an EXISTING connection
+ * (made when the app was configured here, or made on a deployment that still
+ * has it) — a workspace must always be able to do that, even from a
+ * deployment missing the vendor's Worker secrets or CONNECTIONS_OAUTH_STATE_SECRET
+ * (Codex review, PR #574: Disconnect was answering 409 coming_soon for an
+ * owner trying to remove a connection that already existed). The vendor
+ * revoke that follows is already best-effort (revokeAtVendor returns false,
+ * never throws, when the app has no client configured here).
+ */
+export function resolveProviderForDisconnect(id: string): { ok: true; provider: ProviderDef } | { ok: false; result: ServiceResult } {
+  const provider = providerById(id);
+  if (!provider) return { ok: false, result: fail(404, "unknown_provider", "OASIS has no connection called that.") };
   return { ok: true, provider };
 }
 
@@ -343,7 +362,27 @@ export async function disconnectConnection(
   // deleted (they are what proves the request). A vendor that cannot be asked
   // never blocks the disconnect: OASIS's copy still goes, and the answer says
   // the owner should also remove OASIS in the vendor's own settings.
-  const vendorRevoked = isGenericOAuthProvider(provider) ? await revokeAtVendor(deps, row) : null;
+  //
+  // UNLESS another workspace's live connection holds this exact vendor
+  // account for this provider (Zoom and WhatsApp are not exclusive — the
+  // same account can be connected to more than one OASIS workspace at once).
+  // Zoom's revoke deauthorizes the whole account, Intuit's disconnects the
+  // app from the whole company, and Meta's removes the app for that whole
+  // user: none are scoped to just this one grant, so revoking here would
+  // silently break the OTHER workspace's working connection too (Codex
+  // review, PR #574). This workspace's own copy is always deleted either
+  // way; the vendor is just never told to forget an account someone else
+  // is still relying on.
+  let vendorRevoked: boolean | null = null;
+  let vendorRevokeSkippedReason: "shared_with_another_workspace" | null = null;
+  if (isGenericOAuthProvider(provider)) {
+    const shared = !!row.external_account_id && (await isAccountHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.external_account_id));
+    if (shared) {
+      vendorRevokeSkippedReason = "shared_with_another_workspace";
+    } else {
+      vendorRevoked = await revokeAtVendor(deps, row);
+    }
+  }
 
   const removed = await deleteTenantIntegrationService({ tenantId: actor.tenantId, service: credentialServiceFor(row.id) });
   if (!removed.ok) {
@@ -376,6 +415,8 @@ export async function disconnectConnection(
       account_id: row.external_account_id,
       credentials_deleted: removed.deleted,
       ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+      // Never names the other workspace — just that this one was not alone.
+      ...(vendorRevokeSkippedReason ? { vendor_revoked: false, vendor_revoke_skipped_reason: vendorRevokeSkippedReason } : {}),
     },
   });
   return {
@@ -385,6 +426,7 @@ export async function disconnectConnection(
       disconnected: true,
       credentials_deleted: removed.deleted,
       ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+      ...(vendorRevokeSkippedReason ? { vendor_revoked: false, vendor_revoke_skipped_reason: vendorRevokeSkippedReason } : {}),
     },
   };
 }

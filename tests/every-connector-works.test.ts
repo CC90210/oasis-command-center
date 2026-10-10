@@ -1224,23 +1224,49 @@ async function main() {
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("whatsapp"));
   });
 
-  await check("Xero's own authEventId claim, not array order or createdDateUtc, picks which organisation a consent approved", () => {
+  await check("Xero's own authEventId claim, not array order or createdDateUtc, picks which organisation a consent approved; several matching rows refuse rather than pick the first", () => {
     const org = (tenantId: string, authEventId: string | null) => ({ tenantId, tenantName: `${tenantId} name`, authEventId });
     // One organisation is unambiguous either way, even with no claim at all.
-    assert.deepEqual(adapters.xeroCurrentOrg([org("t1", null)], null), org("t1", null));
+    assert.deepEqual(adapters.xeroCurrentOrg([org("t1", null)], null), { ok: true, org: org("t1", null) });
     // The match wins even though it sorts second and is not index 0.
-    assert.deepEqual(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("real", "evt-now")], "evt-now"), org("real", "evt-now"));
+    assert.deepEqual(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("real", "evt-now")], "evt-now"), { ok: true, org: org("real", "evt-now") });
     // No row matches this consent: refuse rather than guess (never orgs[0]).
-    assert.equal(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("other", "evt-older")], "evt-now"), null);
+    assert.deepEqual(adapters.xeroCurrentOrg([org("decoy", "evt-old"), org("other", "evt-older")], "evt-now"), { ok: false, reason: "none" });
     // No claim to go on, and more than one organisation: also refuse.
-    assert.equal(adapters.xeroCurrentOrg([org("a", "evt-1"), org("b", "evt-2")], null), null);
-    assert.equal(adapters.xeroCurrentOrg([], "evt-now"), null);
+    assert.deepEqual(adapters.xeroCurrentOrg([org("a", "evt-1"), org("b", "evt-2")], null), { ok: false, reason: "none" });
+    assert.deepEqual(adapters.xeroCurrentOrg([], "evt-now"), { ok: false, reason: "none" });
+    // ONE consent can itself approve several organisations (they share the
+    // SAME authEventId): refuses as "several", in the SAME order either way
+    // — never a silent pick of whichever the vendor happened to list first.
+    assert.deepEqual(adapters.xeroCurrentOrg([org("a", "evt-multi"), org("b", "evt-multi")], "evt-multi"), { ok: false, reason: "several" });
+    assert.deepEqual(adapters.xeroCurrentOrg([org("b", "evt-multi"), org("a", "evt-multi")], "evt-multi"), { ok: false, reason: "several" });
 
     // The claim is read from the token's own JWT payload, never guessed.
     assert.equal(adapters.xeroAuthEventId(xeroJwt("evt-abc")), "evt-abc");
     assert.equal(adapters.xeroAuthEventId("xero-access-token-1-AAAAAAAAAAAAAAAAAAAA"), null, "a non-JWT token (today's mock shape) is an honest miss, not a crash");
     assert.equal(adapters.xeroAuthEventId("a.b"), null, "two segments is not a JWT");
     assert.equal(adapters.xeroAuthEventId(`${Buffer.from("{}").toString("base64url")}.not-json.sig`), null, "unparseable payload is an honest miss");
+  });
+
+  await check("Xero: one consent that approved SEVERAL organisations is refused with a plain-English reason, not a silent pick of whichever sorts first", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+    try {
+      mode.xeroAuthEventId = "evt-several";
+      const before = (await connectionRows(ALPHA, "xero")).length;
+      mode.xeroOrgs = [
+        { id: "conn-a", tenantId: "xero-tenant-a", tenantType: "ORGANISATION", tenantName: "Org A", authEventId: "evt-several" },
+        { id: "conn-b", tenantId: "xero-tenant-b", tenantType: "ORGANISATION", tenantName: "Org B", authEventId: "evt-several" },
+      ];
+      const refused = popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html);
+      assert.equal(refused.status, "error");
+      assert.equal(refused.reason, "account_unidentified");
+      assert.equal((await connectionRows(ALPHA, "xero")).length, before, "neither organisation was connected");
+    } finally {
+      mode.xeroAuthEventId = null;
+      mode.xeroOrgs = null;
+    }
   });
 
   await check("Xero: more than one organisation comes back, and the access token says which consent this is: the match connects even though it is not index 0 or the newest createdDateUtc, and no match refuses rather than guess", async () => {
@@ -1335,6 +1361,133 @@ async function main() {
       mode.zoomAccountOverride = null;
     }
     await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom"));
+  });
+
+  await check("two workspaces sharing one Zoom account (not exclusive): disconnecting the first skips the vendor revoke and says why, without naming the other workspace; the second workspace's grant still works; disconnecting the LAST one does revoke it", async () => {
+    setOAuthEnv(true);
+    const app = OAUTH_APPS.find((a) => a.id === "zoom")!;
+    await login(USERS.ownerA);
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    await login(USERS.ownerB);
+    assert.equal(
+      popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status,
+      "connected",
+      "Zoom is not exclusive: a second workspace may hold the same account",
+    );
+    assert.equal((await connectedRow(BRAVO_CO, app)).external_account_id, app.account);
+
+    await login(USERS.ownerA);
+    live(app.id).revoked = false;
+    const first = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom")));
+    assert.equal(first.body.vendor_revoked, false, "the shared account's vendor grant is not revoked just because ONE workspace disconnected");
+    assert.equal(first.body.vendor_revoke_skipped_reason, "shared_with_another_workspace");
+    assert.doesNotMatch(JSON.stringify(first.body), /bravo/i, "the other workspace is never named");
+    assert.equal(live(app.id).revoked, false, "Zoom's revoke endpoint was never called");
+    assert.equal(await store.findActiveConnection(db, ALPHA, "zoom"), null, "ALPHA's own connection is gone");
+    assert.equal(
+      (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [ALPHA] })).rows[0].n,
+      0,
+      "ALPHA's credentials are deleted regardless",
+    );
+    // Bravo's connection is untouched by Alpha's disconnect.
+    assert.equal((await connectedRow(BRAVO_CO, app)).external_account_id, app.account);
+
+    await login(USERS.ownerB);
+    const second = await toRes(await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("zoom")));
+    assert.equal(live(app.id).revoked, true, "no workspace shares the account any more: disconnecting the LAST one does revoke it");
+    assert.equal(second.body.vendor_revoked, true);
+    assert.equal(second.body.vendor_revoke_skipped_reason, undefined);
+
+    // The panel tells the two cases apart: "shared, left alone on purpose"
+    // must never read as the existing "vendor refused/unreachable" failure.
+    const panelSrc = read("components/os/connections/OAuthConnectionPanel.tsx");
+    assert.match(panelSrc, /vendor_revoke_skipped_reason === "shared_with_another_workspace"/);
+    assert.match(panelSrc, /another OASIS workspace is still using that same/);
+  });
+
+  await check("the callback's token save is fenced on the version it claimed, deterministically (no sleeps): a stale save after a Disconnect or a newer reconnect lands nothing", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "xero")!;
+
+    // The callback's own wiring: completeOAuthConnect must fence the save on
+    // conn.token_version, the SAME pattern the refresher already proved safe.
+    assert.match(
+      read("lib/connections/oauth-connect.ts"),
+      /saved = await saveConnectionTokensFenced\(deps\.db, \{\s*tenantId,\s*connectionId: conn\.id,\s*version: conn\.token_version,/,
+      "the callback's save is fenced on the version it claimed",
+    );
+
+    // Case A: a Disconnect finishes first. The claim this callback would have
+    // used is now revoked; a stale, fenced save with that OLD version must
+    // land nothing — never resurrect a connection the owner just removed.
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const rowA = await connectedRow(ALPHA, app);
+    const staleVersionA = rowA.token_version;
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+    assert.equal((await store.getConnection(db, ALPHA, String(rowA.id)))!.revoked_at !== null, true, "disconnect revoked the row");
+    const staleLandedA = await tokenStore.saveConnectionTokensFenced(db, {
+      tenantId: ALPHA,
+      connectionId: String(rowA.id),
+      version: staleVersionA,
+      tokens: { access_token: "stale-paused-callback-access", refresh_token: "stale-paused-callback-refresh", expires_at: Date.now() + 3_600_000 },
+      now: new Date(),
+    });
+    assert.equal(staleLandedA, false, "a stale save must not land after the row was disconnected");
+    assert.equal(
+      (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [ALPHA] })).rows[0].n,
+      0,
+      "the disconnected row must stay with no credentials",
+    );
+
+    // Case B: a NEWER reconnect finishes first (token_version bumped). A
+    // stale save using the OLD version must not overwrite the newer tokens.
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    const rowB1 = await connectedRow(ALPHA, app);
+    const staleVersionB = rowB1.token_version;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected", "a reconnect while already connected still succeeds");
+    const rowB2 = await connectedRow(ALPHA, app);
+    assert.ok(rowB2.token_version > staleVersionB, "the reconnect bumped the version past the stale callback's claim");
+    const freshBundle = await getTenantIntegrationBundle(ALPHA, `connection:${rowB2.id}`, { allowEnvFallback: false });
+    const staleLandedB = await tokenStore.saveConnectionTokensFenced(db, {
+      tenantId: ALPHA,
+      connectionId: String(rowB2.id),
+      version: staleVersionB,
+      tokens: { access_token: "stale-paused-callback-access-2", refresh_token: "stale-paused-callback-refresh-2", expires_at: Date.now() + 3_600_000 },
+      now: new Date(),
+    });
+    assert.equal(staleLandedB, false, "a stale save using the OLD version must be fenced out by the newer reconnect");
+    const afterBundle = await getTenantIntegrationBundle(ALPHA, `connection:${rowB2.id}`, { allowEnvFallback: false });
+    assert.equal(afterBundle.access_token, freshBundle.access_token, "the newer reconnect's own tokens must survive untouched");
+    await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("xero"));
+  });
+
+  await check("Disconnect works even when OASIS's app for this provider (or CONNECTIONS_OAUTH_STATE_SECRET) is unconfigured on THIS deployment: an existing connection is always removable, never a 409 coming_soon", async () => {
+    setOAuthEnv(true);
+    await login(USERS.ownerA);
+    const app = OAUTH_APPS.find((a) => a.id === "quickbooks")!;
+    assert.equal(popupOutcome((await finishSignIn(app, (await startSignIn(app)).searchParams.get("state")!)).html).status, "connected");
+    try {
+      // The app's Worker secrets AND the shared state secret both vanish, as
+      // they would on a deployment that never configured this provider, or
+      // lost the secret after the connection was made elsewhere (Codex
+      // review, PR #574: Disconnect answered 409 coming_soon here).
+      setOAuthEnv(false);
+      const res = await disconnectRoute.POST(new Request("https://oasisai.work/x", { method: "POST" }), ctx("quickbooks"));
+      assert.equal(res.status, 200, "Disconnect must not gate on whether this provider is configured HERE");
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.equal(body.ok, true);
+      assert.equal(body.disconnected, true);
+      assert.equal(body.vendor_revoked, false, "with no app client configured, the vendor cannot be asked — best effort, reported honestly, never a thrown error");
+      assert.equal(await store.findActiveConnection(db, ALPHA, "quickbooks"), null, "the connection is gone");
+      assert.equal(
+        (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ? AND service LIKE 'connection:%'", args: [ALPHA] })).rows[0].n,
+        0,
+        "the stored credentials are deleted regardless",
+      );
+    } finally {
+      setOAuthEnv(true);
+    }
   });
 
   await check("a refresh in flight during a reconnect cannot overwrite the fresh tokens (the reconnect bumps token_version)", async () => {
