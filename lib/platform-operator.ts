@@ -37,6 +37,44 @@ import { getServiceSupabase } from "@/lib/supabase-server";
  */
 export const OASIS_OPERATOR_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
+/**
+ * The durable P0-7 half (2026-10-10): a founder whose email is not an alias is
+ * an operator when his AUTH USER ID is listed in platform_operators
+ * (database/turso/bravo__208_platform_operators.sql) and not revoked. Adon, an
+ * equal owner of OASIS, held an admin seat but no alias, so he had no operator
+ * console at all; adding him to a Worker secret meant a deploy-side change for
+ * every new founder, and an email list is the squattable shape this module
+ * exists to retire.
+ *
+ * Only an account on this domain is ever looked up. That is a COST rule, not a
+ * trust rule: the root layout asks this question on every page, and every
+ * client member must keep paying zero reads for it. Anyone can register an
+ * address here, so the grant itself still needs the listed auth id AND the
+ * founder seat below; a stranger on this domain costs one read and gets no.
+ */
+const LISTED_OPERATOR_EMAIL_DOMAIN = "@oasisai.work";
+
+function mayBeListedOperator(email: string | null | undefined): boolean {
+  return String(email || "").trim().toLowerCase().endsWith(LISTED_OPERATOR_EMAIL_DOMAIN);
+}
+
+/** Is this auth user listed (and not revoked) in platform_operators? Fails CLOSED. */
+async function readListedOperator(authUserId: string): Promise<boolean | "error"> {
+  try {
+    const { data, error } = await getServiceSupabase()
+      .from("platform_operators")
+      .select("auth_user_id, revoked_at")
+      .eq("auth_user_id", authUserId)
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const row = ((data || []) as Array<{ auth_user_id?: string | null; revoked_at?: string | null }>)[0];
+    return Boolean(row && row.auth_user_id === authUserId && !row.revoked_at);
+  } catch (err) {
+    console.error("[role-surfaces.platform_operator.listed]", err);
+    return "error";
+  }
+}
+
 export type PlatformOperatorCheck =
   | { operator: true; userId: string }
   | {
@@ -57,7 +95,9 @@ type OperatorProfileRow = ActiveUserProfile & { deactivated_at?: string | null }
  * is the same squat as registering one.
  *
  * Both must hold:
- *   1. the email is an operator alias (isOperatorEmail), and
+ *   1. the email is an operator alias (isOperatorEmail), OR that auth user id
+ *      is listed, unrevoked, in platform_operators (read only for an account on
+ *      LISTED_OPERATOR_EMAIL_DOMAIN, and only after 2 holds), and
  *   2. that auth user id is an active owner/admin member of the OASIS tenant.
  *
  * A stranger who registers an alias gets their OWN new tenant, never an
@@ -83,9 +123,14 @@ export async function resolvePlatformOperatorForAuthUser(
   email: string | null | undefined,
 ): Promise<PlatformOperatorCheck> {
   if (!authUserId) return { operator: false, reason: "no_session" };
-  // Cheap check first: a session that is not on the alias list never costs a
-  // database read, which is every client member on every gated request.
-  if (!isOperatorEmail(email)) return { operator: false, reason: "not_operator_email" };
+  // Cheap check first: a session that is neither an alias nor on the listed
+  // operators' domain never costs a database read, which is every client
+  // member on every gated request.
+  const alias = isOperatorEmail(email);
+  if (!alias && !mayBeListedOperator(email)) return { operator: false, reason: "not_operator_email" };
+  // A non-alias is refused for the same reason whatever stops it below: it was
+  // never on the list, and a founder seat alone confers nothing.
+  const notFounder = alias ? "not_oasis_founder" : "not_operator_email";
 
   let rows: OperatorProfileRow[];
   try {
@@ -101,7 +146,7 @@ export async function resolvePlatformOperatorForAuthUser(
     console.error("[role-surfaces.platform_operator.membership]", err);
     return { operator: false, reason: "lookup_failed" };
   }
-  if (rows.length === 0) return { operator: false, reason: "not_oasis_founder" };
+  if (rows.length === 0) return { operator: false, reason: notFounder };
 
   const profile = chooseActiveProfile(rows, email) as OperatorProfileRow;
   const founder =
@@ -112,9 +157,15 @@ export async function resolvePlatformOperatorForAuthUser(
       isTrueAdmin: dbBool(profile.is_owner),
       adminAccess: false,
     }) === "founder";
-  return founder
+  if (!founder) return { operator: false, reason: notFounder };
+  if (alias) return { operator: true, userId: authUserId };
+
+  // A founder without an alias: listed by auth id, never by email.
+  const listed = await readListedOperator(authUserId);
+  if (listed === "error") return { operator: false, reason: "lookup_failed" };
+  return listed
     ? { operator: true, userId: authUserId }
-    : { operator: false, reason: "not_oasis_founder" };
+    : { operator: false, reason: "not_operator_email" };
 }
 
 /** Boolean form of resolvePlatformOperatorForAuthUser, for callers that only branch. */
