@@ -144,6 +144,8 @@ const openrouterOk = (text: string) =>
     [null, "[DONE]"],
   ]);
 /** The bridge's /chat answering as Claude Code does (bravo_cli/bridge_chat_server.py emit names). */
+/** The bridge's "tool" event, as the channel receives it: the kind of step in plain words, never its path or command. */
+const STEP = { type: "tool", phase: "start", label: "Reading a file", ok: null };
 const bridgeOk = (text: string) => sse([["session", { session_id: "s1" }], ["tool", { name: "Read" }], ["delta", { text }], ["done", { input_tokens: 0, output_tokens: 0 }]]);
 const keyOf = (s: Sent) => s.headers["x-api-key"] ?? s.headers["authorization"]?.replace(/^Bearer /, "") ?? null;
 
@@ -495,7 +497,7 @@ async function main() {
     answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
     const events = [];
     for await (const ev of streamAgentTurn(prepared.turn, [{ role: "user", content: "earlier" }, { role: "assistant", content: "ok" }, { role: "user", content: "How is the pipeline?" }])) events.push(ev);
-    assert.deepEqual(events, [{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }]);
+    assert.deepEqual(events, [STEP, { type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }]);
     assert.equal(sent.length, 1, "only the bridge was called: no AI provider");
     assert.equal(sent[0].body?.agent, "bravo", "Sales runs in the Chief of Staff's harness (its CLAUDE.md and skills route it)");
     assert.equal(sent[0].body?.cli_provider, "codex");
@@ -788,7 +790,7 @@ async function main() {
     const turn = await bridgeTurnFor();
     answer = (s) => (s.url === `${BRIDGE}/chat` ? bridgeOk("Pipeline is healthy.") : new Response("no provider call expected", { status: 599 }));
     const events = await drainTurn(turn);
-    assert.deepEqual(events, [{ type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }], "the turn's events are unchanged");
+    assert.deepEqual(events, [STEP, { type: "delta", text: "Pipeline is healthy." }, { type: "done", inputTokens: 0, outputTokens: 0 }], "the turn's events: the app's step (by kind, never its path), the answer, the end");
     const rows = await usageRows();
     assert.equal(rows.length, 1, "one row per bridge turn");
     const r = rows[0];
@@ -853,7 +855,8 @@ async function main() {
       const turn = await bridgeTurnFor();
       answer = () => bridgeOk("Still answering.");
       const events = await drainTurn(turn);
-      assert.equal(events[0].type, "delta");
+      assert.deepEqual(events[0], STEP);
+      assert.equal(events[1].type, "delta");
       const rows = await usageRows();
       assert.deepEqual(rows.map((r) => [r.outcome, r.reserved_micro_usd]), [["ok", null]]);
       assert.equal(rows.filter((r) => r.outcome === "pending").length, 0);
