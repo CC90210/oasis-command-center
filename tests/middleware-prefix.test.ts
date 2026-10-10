@@ -276,6 +276,10 @@ async function throughMiddleware(): Promise<void> {
   assert.equal(res.headers.get("location"), null, "no redirect, so no 'Sign in to Command Center'");
   assert.equal(res.headers.get("x-middleware-next"), "1", "middleware passes the request through to the page");
 
+  const mcp = await anonymously("/api/mcp");
+  assert.equal(mcp.headers.get("location"), null, "a CLI reaches /api/mcp without a login redirect");
+  assert.equal(mcp.headers.get("x-middleware-next"), "1", "middleware passes /api/mcp through to the route, which checks the bearer");
+
   for (const old of [
     "/t/acme-roofing/marketplace/new",
     "/t/acme-roofing/marketplace/new?template=setter",
@@ -300,3 +304,12 @@ throughMiddleware().then(
     process.exit(1);
   },
 );
+
+// The OASIS MCP server (lib/mcp/server.ts). A department agent running as a CLI
+// on the operator's PC has a signed bearer, not a session cookie; the route
+// verifies the bearer and refuses browser Origins INSIDE. Left off the
+// allowlist every CLI call would meet a login redirect before the bearer is read.
+assert.equal(isPublic("/api/mcp"), true, "/api/mcp is bearer-gated inside its route and MUST bypass session middleware");
+for (const notPublic of ["/api/mcp-admin", "/api/mcpx", "/api/mc"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated - only /api/mcp is public`);
+}
