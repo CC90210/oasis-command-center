@@ -169,7 +169,9 @@ export function DescribeAutomationFlow() {
           input: { path: json.script_path, content: json.script_content },
         }),
       });
-      const bridgeJson = (await bridgeRes.json()) as {
+      // A non-JSON answer (a gateway error page) must still reach
+      // describeBridgeWriteError with its HTTP status, not read as "unreachable".
+      const bridgeJson = (await bridgeRes.json().catch(() => ({}))) as {
         ok?: boolean;
         output?: string;
         is_error?: boolean;

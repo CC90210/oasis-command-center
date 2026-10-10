@@ -42,6 +42,11 @@ assert.ok(
   "DescribeAutomationFlow must POST the authenticated same-origin bridge proxy",
 );
 assert.ok(
+  /await bridgeRes\.json\(\)\.catch\(\(\) => \(\{\}\)\)/.test(src),
+  "a non-JSON proxy answer (e.g. a gateway error page) must not throw into the 'unreachable' branch; " +
+    "the body is read defensively so the HTTP status reaches describeBridgeWriteError",
+);
+assert.ok(
   !/\bBRIDGE_CHAT_BASE\b/.test(src),
   "DescribeAutomationFlow must not import or read BRIDGE_CHAT_BASE — that resolves to whichever " +
     "computer the VIEWER's browser is running on, not the paired machine",
