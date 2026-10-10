@@ -1436,7 +1436,9 @@ function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathSt
   const state = !p.built ? "Not built yet" : waiting ? "Not set up on this deployment" : "Available";
   // While OASIS's app is missing the drawer hides the button the body names,
   // so the body says it describes how it WILL work, not a button to press now.
-  const body = waiting ? `Once OASIS's app is set up here: ${p.body.charAt(0).toLowerCase()}${p.body.slice(1)}` : p.body;
+  // A leading sentence, never a re-cased splice ("oASIS's" when a body opens
+  // with a proper noun).
+  const body = waiting ? `Available once OASIS's app is set up here. ${p.body}` : p.body;
   return { title: p.title, body, state, requestable: !p.built };
 }
 
