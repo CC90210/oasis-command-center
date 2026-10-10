@@ -4,8 +4,10 @@
  *
  * Honest about what exists today:
  *   - Slack: built (lib/slack/*). It works on a deployment that holds OASIS's
- *     Slack app (the Worker secrets); where it does not, the card says "Slack
- *     app not configured yet" and offers no button. Owners and admins install
+ *     Slack app (the Worker secrets); where it does not, a workspace that has
+ *     not connected is told OASIS is registering with Slack (no button), and
+ *     one that already connected keeps its connection and Disconnect with the
+ *     problem stated. Owners and admins install
  *     it, see the connected workspace, and map each channel to a department
  *     and, optionally, a client. @mentions get a department's draft that waits
  *     for approval; mapped channels show on the client's Conversations tab.
@@ -142,7 +144,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </div>
                 ))}
               </div>
-            ) : !slackSettings.appConfigured ? (
+            ) : !conn && !slackSettings.appConfigured ? (
               <div className="space-y-1.5">
                 <p className="text-[13px] leading-5 text-fg-muted">
                   {slackCardStatus?.detail ??
@@ -185,6 +187,15 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </div>
                   {viewer.access.canManage && <SlackDisconnect teamName={conn.account_label} retentionDays={SLACK_RETENTION_DAYS} />}
                 </div>
+                {/* Connected, but this deployment lacks OASIS's Slack app: the
+                    connection and its Disconnect stay visible, with the problem
+                    said plainly (the Connections card says the same). */}
+                {!slackSettings.appConfigured && (
+                  <p className="text-[13px] leading-5 text-status-warm">
+                    OASIS&apos;s Slack app is not set up on this deployment, so messages from Slack may not arrive. You can
+                    still disconnect.
+                  </p>
+                )}
                 {slackSettings.routesNotInstalled ? (
                   <p className="text-[13px] leading-5 text-status-warm">
                     The channel map is not available on this deployment yet (its database tables are not installed), so

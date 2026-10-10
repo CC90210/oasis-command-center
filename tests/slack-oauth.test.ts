@@ -282,6 +282,29 @@ async function main() {
     assert.deepEqual(appNotConfiguredProviders(SLACK_ENV), []);
   });
 
+  await check("an ALREADY-connected workspace with the secrets absent is never told 'registering': it sees its connection needs attention", () => {
+    const status = connectors.resolveConnectorStatus(
+      connectors.connectorBySlug("slack")!,
+      {
+        keyRows: [],
+        personalGoogle: null,
+        connections: [{ provider: "slack", status: "active" } as never],
+        appNotConfigured: appNotConfiguredProviders({}),
+      },
+      Date.now(),
+    );
+    assert.equal(status.kind, "attention");
+    assert.match(status.label, /Connected/);
+    assert.doesNotMatch(status.label, /registering/i);
+    // A revoked connection is not "connected": the registering state stands.
+    const revoked = connectors.resolveConnectorStatus(
+      connectors.connectorBySlug("slack")!,
+      { keyRows: [], personalGoogle: null, connections: [{ provider: "slack", status: "revoked" } as never], appNotConfigured: appNotConfiguredProviders({}) },
+      Date.now(),
+    );
+    assert.equal(revoked.label, "OASIS is registering with Slack");
+  });
+
   await check("authorize refuses when the app is not configured: nothing is written, the browser is told why", async () => {
     await login(USERS.ownerA);
     const res = await authorize();

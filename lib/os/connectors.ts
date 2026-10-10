@@ -1484,6 +1484,17 @@ export function resolveConnectorStatus(
     // An app OASIS itself has not been given on this deployment cannot be
     // connected, whatever the facts say: say so rather than offer a dead button.
     // A workspace whose own way in does not need OASIS's app is not held to it.
+    // A workspace that already connected is never told it waits on
+    // registration: its connection is real, it needs to see it and keep its
+    // Disconnect, and the missing app is an attention state, not "registering".
+    const alreadyConnected = !!facts.connections?.some((c) => c.provider === source.provider && c.status !== "revoked");
+    if (oasisAppMissing && alreadyConnected) {
+      return withPaths({
+        kind: "attention",
+        label: "Connected · needs attention",
+        detail: `This workspace is connected to ${def.name}, but OASIS's ${def.name} app is not set up on this deployment, so messages may not arrive. You can still disconnect.`,
+      });
+    }
     if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {
       return withPaths(
         def.registration
