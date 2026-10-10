@@ -249,11 +249,20 @@ for (const def of CONNECTOR_CATALOG) {
     assert.doesNotMatch(s.label, /connected/i);
     // The state, in the same words Chat apps uses for the same apps; "Coming
     // soon" / "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
-    assert.equal(s.label, "Not built yet", `${def.slug}: a card with nothing behind it says so`);
-    assert.equal(s.detail, def.pendingNote, `${def.slug}: the drawer says why it is not built`);
+    // An app whose one-click connect waits on OASIS's own vendor app says that
+    // instead (CC, 2026-10-09): never "Not built yet" for something a vendor
+    // approval stands between.
+    assert.equal(
+      s.label,
+      def.registration ? `OASIS is registering with ${def.registration.vendor}` : "Not built yet",
+      `${def.slug}: a card with nothing to connect today says why in one line`,
+    );
+    assert.equal(s.detail, def.pendingNote, `${def.slug}: the drawer says why it is not connectable`);
   }
 }
-assert.match(read("app/settings/chat-apps/page.tsx"), /label: "Not built yet"/, "Chat apps and Connections say it the same way");
+// Chat apps reads each card's status from the same resolver, never a label of its own.
+assert.match(read("app/settings/chat-apps/page.tsx"), /const status = resolveConnectorStatus\(d, facts, nowMs\);/, "Chat apps and Connections say it the same way");
+assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /label: "Not built yet"/);
 // No card's copy promises a release: the Stripe card said the Finance sync
 // "ships (next release)".
 for (const def of CONNECTOR_CATALOG) {
@@ -611,15 +620,23 @@ assert.match(hub, /status \?\? \{ kind: "unknown"/, "the hub must read a missing
 assert.match(read("app/settings/connections/page.tsx"), /loadConnectorStatuses\(/);
 assert.match(read("components/os/connections/connector-facts.ts"), /resolveConnectorStatus\(def, facts, now\)/);
 assert.match(read("app/settings/chat-apps/page.tsx"), /resolveConnectorStatus\(telegram/);
-// Slack is a Connections-framework card set up under Chat apps, and it says
-// "app not configured yet" wherever OASIS's Slack app is not on the deployment.
+// Slack is a Connections-framework card set up under Chat apps, and wherever
+// OASIS's Slack app is not on the deployment it says OASIS is registering with
+// Slack (CC, 2026-10-09), for a client and for OASIS alike.
 const slackDef = connectorBySlug("slack")!;
 assert.deepEqual(slackDef.live?.source, { kind: "tenant_connection", provider: "slack" });
 assert.deepEqual(slackDef.live?.connect, { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" });
-assert.equal(
-  resolveConnectorStatus(slackDef, { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: ["slack"] }, Date.now()).label,
-  "Slack app not configured yet",
-);
+for (const oasisWorkspace of [true, false, undefined]) {
+  assert.equal(
+    resolveConnectorStatus(slackDef, { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: ["slack"], oasisWorkspace }, Date.now()).label,
+    "OASIS is registering with Slack",
+  );
+}
+// Every workspace has one way into Slack, the OASIS app: no client builds one.
+assert.deepEqual(slackDef.paths?.map((p) => [p.audience, p.title, p.built, p.needsOasisApp]), [
+  ["oasis", "The OASIS Slack app", true, true],
+  ["client", "The OASIS Slack app", true, true],
+]);
 assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
 // Telegram teammates are a state ("not built yet"), never an era word or a
 // release promise (S2-11, S4-12, S5-F07's register).
@@ -876,7 +893,8 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // What a click does is connectorClickAction (keys open the drawer), proven by
   // render in tests/connections-everywhere.test.ts; the hub acts on it.
   assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return "drawer"/);
-  assert.match(hub, /const next = connectorClickAction\(def, embedded\);\s*if \(next === "drawer" \|\| !action\) return openDrawer\(def\.slug\);/);
+  // A card this workspace cannot connect yet (coming_soon) also opens the drawer.
+  assert.match(hub, /const next = connectorClickAction\(def, embedded\);[\s\S]{0,300}if \(next === "drawer" \|\| !action \|\| statuses\[def\.slug\]\?\.kind === "coming_soon"\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
   // Google's sign-in comes back to its drawer, not to a removed anchor.
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
@@ -895,8 +913,12 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
 
   // Apps that are not built are one compact row, never full cards that do nothing.
-  assert.match(hub, /const later = visible\.filter\(\(def\) => !def\.live\)/);
-  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool/);
+  // Apps that wait on OASIS's own vendor app (registration) are their own row,
+  // and an app this workspace cannot connect yet is never under "Connect today".
+  assert.match(hub, /const waiting = \(def: ConnectorDef\) => !def\.live \|\| statuses\[def\.slug\]\?\.kind === "coming_soon";/);
+  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool\(def, statuses\[def\.slug\]\) && !waiting\(def\)\);/);
+  assert.match(hub, /const oneClick = pending\.filter\(\(def\) => def\.registration\);/);
+  assert.match(hub, /const later = pending\.filter\(\(def\) => !def\.registration\);/);
   assert.doesNotMatch(hub, /rest\.filter\(\(d\) => d\.category === cat\.key\)/, "coming-soon apps no longer fill the category grids");
 }
 

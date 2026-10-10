@@ -239,12 +239,18 @@ export function ConnectorDrawer({
               <h3 className="mb-1.5 text-xs font-medium text-fg-dim">Status</h3>
               <StatusLine status={status} />
               {status.detail && <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">{status.detail}</p>}
-              {!live && (
+              {!live && !def.registration && (
                 // The state, not a release promise: "scheduled for the next
                 // release" was a date nobody had set. The button below asks.
                 <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
                   Nothing is built for it yet, so it cannot be connected. Ask OASIS for it below and the request lands
                   on the OASIS team&apos;s desk.
+                </p>
+              )}
+              {!live && def.registration && (
+                <p className="mt-1.5 text-[13px] leading-5 text-fg-muted">
+                  There is nothing for you to set up until then. Ask OASIS for it below if you want it sooner, and the
+                  request lands on the OASIS team&apos;s desk.
                 </p>
               )}
             </section>
