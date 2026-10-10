@@ -148,3 +148,59 @@ export async function resolveMemberNavInput(
     return { ok: false };
   }
 }
+
+/**
+ * The same viewer resolveOsViewer builds from a cookie, for a caller that holds
+ * no cookie but a verified (workspace, member) pair: the OASIS MCP server
+ * (lib/mcp/*), whose bearer token names the workspace and the auth user.
+ *
+ * The token is only a claim. Every call re-reads the member's seat here, so a
+ * removed seat or a downgraded role takes effect on the NEXT call, not when the
+ * token expires. Same rules as the session path:
+ *   - the profile is chosen across ALL the user's rows as
+ *     resolveActiveProfileForUser chooses it, and must belong to the token's
+ *     workspace (a member active in another workspace is not in this one);
+ *   - role, admin and persona derive as resolveSessionContext (lib/api-auth.ts)
+ *     and resolveViewerSurface derive them: no role is read-only, both admin
+ *     flags go through dbBool;
+ *   - an unreadable seat or workspace is "degraded", never a guess.
+ * The caller still runs departmentGate on the result, as a page does.
+ */
+export async function resolveOsViewerFor(tenantId: string, authUserId: string): Promise<OsViewerResult> {
+  if (!tenantId || !authUserId) return { ok: false, reason: "signed_out" };
+  try {
+    const found = await getServiceSupabase().from("user_profiles").select("*").eq("auth_user_id", authUserId).limit(20);
+    if (found.error) throw new Error(found.error.message);
+    const rows = (found.data || []) as ActiveUserProfile[];
+    if (rows.length === 0) return { ok: false, reason: "signed_out" };
+    const profile = chooseActiveProfile(rows, null);
+    if (!profile.tenant_id || profile.tenant_id !== tenantId) return { ok: false, reason: "signed_out" };
+
+    const tenant = await getTenant(tenantId);
+    const tenantSlug = tenant?.slug?.trim().toLowerCase() || null;
+    if (!tenant || !tenantSlug) return { ok: false, reason: "degraded" };
+
+    const teamRole = profile.team_role || "read_only";
+    const persona = resolvePersona({
+      teamRole,
+      isTrueAdmin: dbBool(profile.is_owner) || teamRole === "admin" || teamRole === "owner",
+      adminAccess: dbBool(profile.admin_access),
+    });
+    const capabilities = capabilitiesFor(persona, tenantSlug);
+    const manifest = await getManifest(resolveClientProfileSlug(tenant), tenantId);
+    const provisioned = !isUnprovisionedManifest(manifest);
+    return {
+      ok: true,
+      surface: { ok: true, persona, capabilities, userId: authUserId, tenantId, tenantSlug, teamRole, degraded: false },
+      oasis: isOasisSurfaceTenant(tenantSlug),
+      provisioned,
+      manifest,
+      email: profile.email ?? null,
+      authUserId,
+      navInput: navInputFor(persona, capabilities, tenantSlug, provisioned),
+    };
+  } catch (err) {
+    console.error("[os.viewer.for]", err instanceof Error ? err.message : String(err));
+    return { ok: false, reason: "degraded" };
+  }
+}
