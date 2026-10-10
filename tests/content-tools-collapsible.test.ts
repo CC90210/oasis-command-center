@@ -86,10 +86,32 @@ async function main() {
     assert.doesNotMatch(m.openKept, /\bhidden=""/, "open, keepMounted: not hidden");
   });
 
-  await check("the Content Tools page wires Tools and Whiteboard as two independent, open-by-default disclosures", async () => {
+  await check(
+    "CollapsibleSection: the heading wraps the button (not the other way round), aria-controls points at the real panel, and the section names itself (Codex review round 3, LOW)",
+    () => {
+      const m = renderMarkup([{ id: "open", defaultCollapsed: false }]);
+      const html = m.open;
+      // <h2 id="X">...<button ... aria-controls="Y">...</button></h2>, in that
+      // nesting order - a heading INSIDE a button is presentational to
+      // assistive tech and never reaches heading navigation; the button must
+      // be the one nested inside the heading.
+      const h2 = /<h2 id="([^"]+)"[^>]*>[\s\S]*?<button type="button"[^>]*aria-controls="([^"]+)"[^>]*>[\s\S]*?<\/button>[\s\S]*?<\/h2>/.exec(html);
+      assert.ok(h2, "an <h2> wraps the toggle <button>, carrying the real heading text");
+      assert.match(html, /<section aria-labelledby="[^"]+"/, "the section names itself from that same heading - the Whiteboard region had lost this entirely");
+      const section = /<section aria-labelledby="([^"]+)"/.exec(html)!;
+      assert.equal(section[1], h2![1], "the section's aria-labelledby is the heading's own id, not a different one");
+      // aria-controls points at a panel that actually exists with that id.
+      assert.match(html, new RegExp(`<div id="${h2![2]}"`), "aria-controls names the real panel, not a placeholder");
+      // No old plain <h2>{title}</h2> left floating inside the button.
+      assert.doesNotMatch(html, /<button[^>]*>[\s\S]{0,400}?<h2[^>]*>/, "no heading left nested INSIDE the button");
+    },
+  );
+
+  await check("the Content Tools page wires Tools and Whiteboard as two independent, open-by-default disclosures, with a gap between the two cards", async () => {
     await setupToolsDatabase();
     await login(USERS.cc);
     const { CollapsibleSection } = await import("../components/leads/CollapsibleSection");
+    const { PageFrame } = await import("../components/os/PageFrame");
     const Page = (await import("../app/founders/marketing/tools/page")).default;
     const tree = await Page();
     const sections = nodes(tree).filter((n) => n.type === CollapsibleSection);
@@ -101,6 +123,11 @@ async function main() {
       ],
       "two sections, each its own storage key, both open by default, both keepMounted (neither's state may be destroyed by a collapse)",
     );
+    // Codex review round 3, LOW: PageFrame adds no spacing of its own and
+    // CollapsibleSection's <section> carries no outer margin, so the two
+    // bordered, shadowed cards rendered flush against each other.
+    const frame = nodes(tree).find((n) => n.type === PageFrame)!;
+    assert.match(String(frame.props.className ?? ""), /\bspace-y-\d/, "PageFrame's own className gives the two cards a gap");
   });
 
   finish("content-tools-collapsible");

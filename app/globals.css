@@ -96,6 +96,18 @@ body {
   }
 }
 
+/* PRESENT (2026-10-10, Codex review round 3, HIGH): while a board's Present
+   mode shows its CSS-only "maximized" fallback (no Fullscreen API, or the
+   browser refused it), <main> must rise above the app shell's own mobile
+   top bar (z-30, components/SidebarShell.tsx) and desktop side rail
+   (z-30/z-20, components/Sidebar.tsx) - otherwise its Exit control sits
+   underneath both and, on a phone with no Escape key, is unreachable.
+   components/founders/OasisWhiteboard.tsx sets this flag on <html> only
+   while presenting in that fallback, and clears it on exit and on unmount. */
+html[data-board-presenting] .os-canvas-main {
+  z-index: 60;
+}
+
 /* The collapsed desktop rail, and the button that reopens it, follow
    html[data-sidebar] (set by the boot script before first paint), not React
    state. React reads the stored choice only after hydrating, because a first

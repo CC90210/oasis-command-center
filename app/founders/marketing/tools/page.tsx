@@ -53,7 +53,7 @@ export default async function ContentToolsPage() {
   if (!founder) notFound();
 
   return (
-    <PageFrame title="Content Tools">
+    <PageFrame title="Content Tools" className="space-y-6">
       <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false} keepMounted>
         <ToolsSection tenantId={founder.tenantId} showCodes showHeading={false} className="" />
       </CollapsibleSection>

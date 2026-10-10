@@ -56,6 +56,31 @@ export function modeAfterRequest(apiAvailable: boolean, granted: boolean): Prese
  */
 export function boardContainerClasses(mode: PresentMode): string {
   const shared = "w-full overflow-hidden bg-bg-deep border-bg-border";
-  if (mode === "maximized") return `fixed inset-0 z-50 h-screen w-screen rounded-none border-0 ${shared}`;
+  // h-[100dvh], not h-screen (100vh): on iOS Safari, 100vh is measured
+  // against the layout viewport, which sits UNDER the browser's own
+  // collapsing bottom bar - the dynamic viewport unit tracks the bar and
+  // keeps the board (and the hint pill pinned to its bottom edge) on screen.
+  if (mode === "maximized") return `fixed inset-0 z-50 h-[100dvh] w-full rounded-none border-0 ${shared}`;
   return `relative h-[70vh] min-h-[420px] rounded-2xl border ${shared}`;
 }
+
+/**
+ * Whether the "maximized" CSS-only fallback needs to raise <main> above the
+ * app shell's own top bar and side rail (Codex review round 3, 2026-10-10,
+ * HIGH: on an iPhone, that fallback sat BELOW the shell's fixed top bar
+ * [z-30] and side rail [z-40/z-20], because <main> is its own stacking
+ * context at z-10 [components/MainShell.tsx] - the floating Exit button was
+ * genuinely unreachable, and a phone has no Escape key).
+ *
+ * `BOARD_PRESENTING_ATTR` on `<html>` while this is true; app/globals.css's
+ * `html[data-board-presenting] .os-canvas-main` rule raises <main> past
+ * both. Native full screen ("fullscreen") never needs this: the browser's
+ * own `:fullscreen` UA rule already stacks it above everything with no CSS
+ * of ours.
+ */
+export function needsShellRaise(mode: PresentMode): boolean {
+  return mode === "maximized";
+}
+
+/** The attribute `<html>` carries while needsShellRaise is true. One name, read by both the effect and app/globals.css. */
+export const BOARD_PRESENTING_ATTR = "boardPresenting";

@@ -332,6 +332,12 @@ export function mountWhiteboard(
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    // The board is collapsed (keepMounted, app/founders/marketing/tools/page.tsx)
+    // but its listener is still attached (dispose() only runs on unmount): a
+    // `hidden` ancestor gives the container zero client rects, so a shortcut
+    // reaching a focused button elsewhere on the page never silently
+    // changes a board nobody can see (Codex review round 3, MEDIUM).
+    if (container.getClientRects().length === 0) return;
     if (typingIn(e.target)) return;
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;

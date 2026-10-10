@@ -22,9 +22,19 @@
  * (app/founders/marketing/tools/page.tsx) - passes `keepMounted` instead:
  * `children` stay in the tree always, hidden with the `hidden` attribute
  * (display:none), so React never unmounts them on a collapse/reopen.
+ *
+ * HEADING STRUCTURE (Codex review round 3, 2026-10-10, LOW): the toggle is
+ * now `<h2><button aria-expanded aria-controls>` - the standard WAI-ARIA
+ * disclosure pattern - not `<button><h2>`. A heading INSIDE a button is
+ * presentational to assistive tech (a button may only contain phrasing
+ * content), so it never reaches heading navigation; wrapping the button in
+ * the heading instead means the heading is real. The outer `<h2>` carries
+ * `display: contents` so it adds no box of its own, and the section itself
+ * is `aria-labelledby` that same heading, so a screen reader also names the
+ * region (which the Whiteboard section on Content Tools had lost entirely).
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 export function CollapsibleSection({
@@ -44,6 +54,9 @@ export function CollapsibleSection({
   keepMounted?: boolean;
   children: ReactNode;
 }) {
+  const reactId = useId();
+  const headingId = `${reactId}-heading`;
+  const panelId = `${reactId}-panel`;
   const [collapsed, setCollapsed] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -76,40 +89,47 @@ export function CollapsibleSection({
   }
 
   return (
-    <section className="rounded-xl border border-bg-border bg-bg-panel shadow-card transition-all">
-      <button
-        type="button"
-        onClick={toggle}
-        className="w-full flex items-center justify-between gap-4 px-5 py-3 text-left hover:bg-bg-elev/40 transition-colors"
-        aria-expanded={!isCollapsed}
-      >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            {isCollapsed ? (
-              <ChevronRight className="w-4 h-4 text-fg-dim flex-shrink-0" />
-            ) : (
-              <ChevronDown className="w-4 h-4 text-fg-dim flex-shrink-0" />
-            )}
-            <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-fg">
-              {title}
-            </h2>
-          </div>
-          {subtitle && (
-            <div className="text-xs text-fg-muted mt-1 ml-6">{subtitle}</div>
-          )}
-          {isCollapsed && collapsedPreview && (
-            <div className="text-sm text-fg-muted mt-1.5 ml-6 truncate">
-              {collapsedPreview}
+    <section aria-labelledby={headingId} className="rounded-xl border border-bg-border bg-bg-panel shadow-card transition-all">
+      <h2 id={headingId} className="contents">
+        <button
+          type="button"
+          onClick={toggle}
+          className="w-full flex items-center justify-between gap-4 px-5 py-3 text-left hover:bg-bg-elev/40 transition-colors"
+          aria-expanded={!isCollapsed}
+          aria-controls={panelId}
+        >
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              {isCollapsed ? (
+                <ChevronRight className="w-4 h-4 text-fg-dim flex-shrink-0" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-fg-dim flex-shrink-0" />
+              )}
+              <span className="text-xs font-bold uppercase tracking-[0.14em] text-fg">
+                {title}
+              </span>
             </div>
-          )}
-        </div>
-      </button>
+            {subtitle && (
+              <div className="text-xs text-fg-muted mt-1 ml-6">{subtitle}</div>
+            )}
+            {isCollapsed && collapsedPreview && (
+              <div className="text-sm text-fg-muted mt-1.5 ml-6 truncate">
+                {collapsedPreview}
+              </div>
+            )}
+          </div>
+        </button>
+      </h2>
       {keepMounted ? (
-        <div className="border-t border-bg-border p-5" hidden={isCollapsed}>
+        <div id={panelId} className="border-t border-bg-border p-5" hidden={isCollapsed}>
           {children}
         </div>
       ) : (
-        !isCollapsed && <div className="border-t border-bg-border p-5">{children}</div>
+        !isCollapsed && (
+          <div id={panelId} className="border-t border-bg-border p-5">
+            {children}
+          </div>
+        )
       )}
     </section>
   );

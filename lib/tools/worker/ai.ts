@@ -49,7 +49,10 @@
  * set once in lib/tools/session-handlers.ts) and a FINISH_RESERVE_MS slice for
  * writing that failure, so the model is never given more time than the
  * request plausibly has left. Too little left (<=0): the model is never
- * called at all - the run fails fast with the same honest `ai_timeout`.
+ * called at all - the run fails fast with `request_timeout`, a distinct code
+ * from `ai_timeout` (the AI account itself was asked and did not answer in
+ * time): the account was never contacted on this path, so the card must
+ * never say it "took too long to answer" (Codex review round 3, LOW).
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -159,9 +162,12 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
     // for Learn from a link the page fetch) already spent the whole budget:
     // calling the model now could not answer AND leave time to record the
     // failure before the route's own maxDuration kills the request. Fail
-    // fast and honestly instead of starting a call nobody will see finish.
+    // fast and honestly instead of starting a call nobody will see finish -
+    // request_timeout, NEVER ai_timeout (Codex review round 3, LOW): the AI
+    // account is never contacted on this path, so the card must not say it
+    // "took too long to answer".
     console.error("[tools.ai.timeout]", { tenantId: call.tenantId, surface: call.surface, reason: "no_budget_left_before_model_call" });
-    return { ok: false, code: "ai_timeout" };
+    return { ok: false, code: "request_timeout" };
   }
   let account: WorkspaceAiAccount | null;
   try {

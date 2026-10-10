@@ -190,6 +190,12 @@ async function main() {
     assert.equal(toolByKey("repurpose_post")!.operatorOnly, undefined, "repurpose_post is not operator-only");
   });
 
+  await check("Repurpose a post's card names the engine in plain words, with no internal jargon (Codex review round 3, LOW)", () => {
+    const description = toolByKey("repurpose_post")!.description;
+    assert.doesNotMatch(description, /coding engine|coding harness/i, "every viewer sees this card, including non-technical staff who have never heard either term");
+    assert.match(description, /your workspace's AI account/i, "still says plainly which account answers");
+  });
+
   finish("tools registry");
 }
 

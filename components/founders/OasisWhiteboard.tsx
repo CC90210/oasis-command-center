@@ -33,9 +33,17 @@
  * its own Escape listener only while that fallback is showing.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { MAX_SIZE, MIN_SIZE, PALETTE } from "@/components/founders/whiteboard-model";
-import { boardContainerClasses, isPresenting, modeAfterRequest, presentButtonLabel, type PresentMode } from "@/components/founders/whiteboard-present";
+import {
+  BOARD_PRESENTING_ATTR,
+  boardContainerClasses,
+  isPresenting,
+  modeAfterRequest,
+  needsShellRaise,
+  presentButtonLabel,
+  type PresentMode,
+} from "@/components/founders/whiteboard-present";
 import {
   INITIAL_STATE,
   mountWhiteboard,
@@ -60,6 +68,16 @@ const FOCUS =
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70";
 const TOOL_BUTTON = `${TAP_TARGET} ${FOCUS} inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-white/10 bg-white/5 px-3 text-[0.85rem] font-medium text-fg transition-all duration-200 hover:-translate-y-0.5 hover:bg-white/10 hover:shadow-[0_6px_16px_rgba(0,0,0,0.3)] active:translate-y-0 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40`;
 const TOOL_ON = "border-sky-400/50 bg-sky-400/[0.18] text-sky-400";
+/**
+ * The floating controls painted inside the board's own container while
+ * presenting (both Exit buttons, and the touch Undo/Eraser cluster) - no
+ * `absolute` here, so a positioning class is never doubled up the way
+ * `relative`+`fixed` was (whiteboard-present.ts boardContainerClasses):
+ * callers that need `absolute` add it themselves; the cluster's own
+ * children do not, since their flex parent already positions them.
+ */
+const FLOATING_BUTTON =
+  "z-10 inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-white/10 bg-bg-panel/85 px-3 text-[0.85rem] font-medium text-fg backdrop-blur-md hover:bg-bg-panel focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70";
 const ICON = {
   width: 15,
   height: 15,
@@ -76,10 +94,13 @@ export function WhiteboardToolbar({
   ui,
   actions,
   presentMode = "idle",
+  presentButtonRef,
 }: {
   ui: WhiteboardState;
   actions: ToolbarActions;
   presentMode?: PresentMode;
+  /** Focused back on exiting Present, so a keyboard user lands where they started (Codex review round 3). */
+  presentButtonRef?: RefObject<HTMLButtonElement | null>;
 }) {
   const customOn = !ui.erasing && !PALETTE.some((s) => s.color === ui.color);
   return (
@@ -199,10 +220,10 @@ export function WhiteboardToolbar({
           <span className="hidden sm:inline">Download</span>
         </button>
         <button
+          ref={presentButtonRef}
           type="button"
           title={presentMode === "idle" ? "Full screen, for a Google Meet call" : "Back to the normal page"}
           aria-label={presentButtonLabel(presentMode)}
-          aria-pressed={isPresenting(presentMode)}
           onClick={actions.present}
           className={`${TOOL_BUTTON} ${isPresenting(presentMode) ? TOOL_ON : ""}`}
         >
@@ -228,6 +249,95 @@ export function WhiteboardToolbar({
   );
 }
 
+/**
+ * The controls painted inside the board's own container while presenting:
+ * two independent Exit buttons (so one is always reachable regardless of
+ * where the app shell's chrome sits) and the one touch path to Undo or the
+ * eraser (the toolbar above is covered by native full screen, or hidden
+ * under the CSS-only "maximized" fallback; keyboard users still have
+ * Ctrl/Cmd+Z and E). A function on its own, not inlined, so
+ * tests/oasis-whiteboard.test.ts can render it directly with an explicit
+ * `presentMode`, the same way it already tests WhiteboardToolbar - the
+ * host component's internal state has no server-renderable way to reach
+ * "presenting" on its own.
+ */
+export function PresentingOverlay({
+  presentMode,
+  ui,
+  actions,
+  exitButtonRef,
+}: {
+  presentMode: PresentMode;
+  ui: Pick<WhiteboardState, "erasing" | "canUndo">;
+  actions: Pick<ToolbarActions, "present" | "toggleEraser" | "undo">;
+  /** Focused on entering Present; read by OasisWhiteboard's own effect, not by this component. */
+  exitButtonRef?: RefObject<HTMLButtonElement | null>;
+}) {
+  const label = presentButtonLabel(presentMode);
+  return (
+    <>
+      {/* Top: offset by the device's own safe area (notch, Dynamic Island), never a bare fixed inset - the same control is also focused on entering Present. */}
+      <button
+        ref={exitButtonRef}
+        type="button"
+        onClick={actions.present}
+        aria-label={label}
+        className={`absolute ${FLOATING_BUTTON} right-[max(0.75rem,env(safe-area-inset-right))] top-[max(0.75rem,env(safe-area-inset-top))]`}
+      >
+        <svg {...ICON}>
+          <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+          <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+          <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+          <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+        </svg>
+        <span>{label}</span>
+      </button>
+      {/* Bottom: a second, independent way out - away from any app chrome and reachable with a thumb while sharing from a phone held in one hand. */}
+      <button
+        type="button"
+        onClick={actions.present}
+        aria-label={label}
+        className={`absolute ${FLOATING_BUTTON} right-[max(0.75rem,env(safe-area-inset-right))] bottom-[max(0.75rem,env(safe-area-inset-bottom))]`}
+      >
+        <svg {...ICON}>
+          <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+          <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+          <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+          <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+        </svg>
+        <span>{label}</span>
+      </button>
+      <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-[max(0.75rem,env(safe-area-inset-left))] z-10 flex items-center gap-1.5">
+        <button
+          type="button"
+          aria-label="Eraser"
+          aria-pressed={ui.erasing}
+          onClick={actions.toggleEraser}
+          className={`${FLOATING_BUTTON} ${ui.erasing ? TOOL_ON : ""}`}
+        >
+          <svg {...ICON}>
+            <path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" />
+            <path d="M22 21H7" />
+            <path d="m5 11 9 9" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label="Undo"
+          disabled={!ui.canUndo}
+          onClick={actions.undo}
+          className={`${FLOATING_BUTTON} disabled:pointer-events-none disabled:opacity-40`}
+        >
+          <svg {...ICON}>
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+          </svg>
+        </button>
+      </div>
+    </>
+  );
+}
+
 /** What the line at the foot of the board says: what just happened, or how to start. */
 export function boardHint(ui: WhiteboardState): { text: string | null; visible: boolean } {
   if (ui.notice === "cleared") return { text: "Board cleared. Undo brings it back.", visible: true };
@@ -247,6 +357,9 @@ export function OasisWhiteboard() {
   /** Read inside the mount-only effect below without making it re-run per toggle. */
   const presentModeRef = useRef<PresentMode>("idle");
   presentModeRef.current = presentMode;
+  const presentButtonRef = useRef<HTMLButtonElement>(null);
+  const exitButtonRef = useRef<HTMLButtonElement>(null);
+  const presentModeDidMount = useRef(false);
 
   async function present(): Promise<void> {
     if (presentMode !== "idle") {
@@ -311,6 +424,32 @@ export function OasisWhiteboard() {
     };
   }, []);
 
+  // Raises <main> above the app shell's own top bar and side rail (Codex
+  // review round 3, HIGH) only while the CSS-only "maximized" fallback is
+  // showing - app/globals.css's html[data-board-presenting] rule reads this
+  // same flag. Removed on exit AND on unmount, so a navigation away while
+  // presenting never leaves the rest of the app stuck under a raised <main>.
+  useEffect(() => {
+    if (!needsShellRaise(presentMode)) return;
+    document.documentElement.dataset[BOARD_PRESENTING_ATTR] = "1";
+    return () => {
+      delete document.documentElement.dataset[BOARD_PRESENTING_ATTR];
+    };
+  }, [presentMode]);
+
+  // Moves focus WITH the mode, never on first mount (Codex review round 3):
+  // into the in-board Exit control on entering (so a keyboard user is never
+  // left focused on a button the presentation just covered), and back onto
+  // the toolbar's own Present button on exiting.
+  useEffect(() => {
+    if (!presentModeDidMount.current) {
+      presentModeDidMount.current = true;
+      return;
+    }
+    if (presentMode !== "idle") exitButtonRef.current?.focus();
+    else presentButtonRef.current?.focus();
+  }, [presentMode]);
+
   const actions: ToolbarActions = {
     setColor: (hex) => handleRef.current?.setColor(hex),
     setSize: (size) => handleRef.current?.setSize(size),
@@ -326,7 +465,7 @@ export function OasisWhiteboard() {
 
   return (
     <div className="flex flex-col gap-3">
-      <WhiteboardToolbar ui={ui} actions={actions} presentMode={presentMode} />
+      <WhiteboardToolbar ui={ui} actions={actions} presentMode={presentMode} presentButtonRef={presentButtonRef} />
       <div ref={containerRef} className={boardContainerClasses(presentMode)}>
         <canvas
           ref={canvasRef}
@@ -341,22 +480,7 @@ export function OasisWhiteboard() {
             This browser can&apos;t draw here. Open the page in Chrome, Safari or Edge.
           </p>
         ) : null}
-        {presenting && (
-          <button
-            type="button"
-            onClick={actions.present}
-            aria-label={presentButtonLabel(presentMode)}
-            className="absolute right-3 top-3 z-10 inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full border border-white/10 bg-bg-panel/85 px-3 text-[0.85rem] font-medium text-fg backdrop-blur-md hover:bg-bg-panel focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/70"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M8 3v3a2 2 0 0 1-2 2H3" />
-              <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
-              <path d="M3 16h3a2 2 0 0 1 2 2v3" />
-              <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
-            </svg>
-            <span>{presentButtonLabel(presentMode)}</span>
-          </button>
-        )}
+        {presenting && <PresentingOverlay presentMode={presentMode} ui={ui} actions={actions} exitButtonRef={exitButtonRef} />}
         <p
           aria-live="polite"
           className={`pointer-events-none absolute bottom-6 left-1/2 max-w-[90%] -translate-x-1/2 rounded-full border border-white/10 bg-bg-panel/70 px-[18px] py-2 text-center text-[0.78rem] text-fg-muted backdrop-blur-md transition-opacity duration-500 ${

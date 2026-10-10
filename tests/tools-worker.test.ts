@@ -232,7 +232,7 @@ async function main() {
     }
     assert.deepEqual(
       [j.status, j.error_code, j.error_message],
-      ["failed", "ai_timeout", "The AI account took too long to answer; nothing was saved. Try a shorter post or try again."],
+      ["failed", "ai_timeout", "The AI account took too long to answer; nothing was saved. Try again."],
     );
     assert.notEqual(j.error_code, "ai_failed", "a timeout is never reported as the generic ai_failed");
   });
@@ -253,13 +253,13 @@ async function main() {
   });
 
   await check(
-    "a slow pre-model phase shrinks the model's own budget against the WHOLE request: too little left, and the run fails fast with the honest timeout, never stuck running",
+    "a slow pre-model phase shrinks the model's own budget against the WHOLE request: too little left, and the run fails fast with request_timeout - NEVER ai_timeout, since the AI account is never contacted on this path",
     async () => {
       const ai = fakeAi(JSON.stringify({ linkedin: "a", instagram: "b", threads: "c" })); // would succeed, given the time
       const j = jobOf(await run("repurpose_post", { post: POST }, deps(ai.deps, undefined, db, backdatedNow(56))));
       assert.deepEqual(
         [j.status, j.error_code, j.error_message],
-        ["failed", "ai_timeout", "The AI account took too long to answer; nothing was saved. Try a shorter post or try again."],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
       );
       assert.equal(ai.seen.calls.length, 0, "no model call was even attempted: no time left to answer AND still record the failure");
     },
@@ -271,6 +271,22 @@ async function main() {
     `<body><nav>Menu</nav><h1>Why reply speed wins</h1><p>${"Most clinics reply to a new lead the next morning. ".repeat(6)}</p>` +
     `<p>Here &amp; now: answer in one minute.</p></body></html>`;
   const ANALYSIS = { hook: "Most clinics reply the next morning.", pacing: "Short claims, then one example.", tone: "Plain and direct.", structure: ["claim", "proof", "ask"], steal: "Open with the reader's own habit.", avoid: "The clinic statistics." };
+
+  await check(
+    "Learn from a link hits the same request_timeout after a slow pre-model phase (here, the page fetch) - tool-neutral wording, never 'a shorter post' on a tool whose input is a link",
+    async () => {
+      const url = "https://example.com/slow-fetch-no-time-left";
+      const web = fakeWeb({ [url]: { status: 200, body: ARTICLE_HTML("slow") } });
+      const ai = fakeAi(JSON.stringify(ANALYSIS)); // would succeed, given the time
+      const j = jobOf(await run("learn_from_link", { url }, deps(ai.deps, web.fetchPage, db, backdatedNow(56))));
+      assert.deepEqual(
+        [j.status, j.error_code, j.error_message],
+        ["failed", "request_timeout", "This took too long and was stopped; nothing was saved. Try again."],
+      );
+      assert.doesNotMatch(j.error_message ?? "", /post|AI account/i, "never a post-specific or AI-account-blaming line on this path");
+      assert.equal(ai.seen.calls.length, 0, "the AI account was never contacted");
+    },
+  );
 
   await check("Learn writes ONE indexed training note for the session's workspace, in the background reader's shape", async () => {
     const url = "https://example.com/blog/reply-speed";

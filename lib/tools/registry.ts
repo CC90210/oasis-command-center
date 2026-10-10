@@ -219,8 +219,11 @@ const learnFromLink: ToolDef = {
 const repurposePost: ToolDef = {
   key: "repurpose_post",
   title: "Repurpose a post",
-  description:
-    "Turns one post into versions for LinkedIn, Instagram and Threads. Runs on the workspace's own AI account (Settings > AI brain), not OASIS's coding engine.",
+  // "not OASIS's coding engine" (the contrast a founder would need to know
+  // "Coding harness" to understand) dropped: Codex review round 3, LOW -
+  // every Content Tools viewer sees this line, including non-technical
+  // staff, and the phrase names nothing in the product's own vocabulary.
+  description: "Turns one post into versions for LinkedIn, Instagram and Threads, using your workspace's AI account (Settings > AI brain).",
   runLabel: "Repurpose",
   runsOn: "worker",
   needsAiAccount: true,

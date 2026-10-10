@@ -73,6 +73,18 @@ async function main() {
     assert.equal(first, "await requireOperator();");
   });
 
+  await check(
+    "the subtitle says only what is true: the gate on THIS page, not a claim that the corpus itself is operator-only (Codex review round 3, MEDIUM + LOW)",
+    async () => {
+      await login(USERS.cc);
+      const tree = (await Page()) as { props: { subtitle: unknown } };
+      const subtitle = String(tree.props.subtitle);
+      assert.doesNotMatch(subtitle, /never see this page or its results/i, "the old claim: Training and the ingest route already let other founders see and add to the same material");
+      assert.match(subtitle, /operators only can run this here/i, "says what IS true: starting the tool is operator-only");
+      assert.match(subtitle, /training material/i, "and names where the note actually lands");
+    },
+  );
+
   await check("the admin hub lists it, and the row names a real, gated href", async () => {
     const { OS_NAV_CATALOG } = await import("../lib/os/nav");
     const row = OS_NAV_CATALOG.find((e) => e.id === "admin-agent-training");

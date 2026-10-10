@@ -68,11 +68,13 @@ import {
 } from "../components/founders/whiteboard-model";
 import { mountWhiteboard, type SurfaceEnv, type WhiteboardHandle, type WhiteboardState } from "../components/founders/whiteboard-surface";
 import {
+  BOARD_PRESENTING_ATTR,
   EXIT_PRESENTING_LABEL,
   PRESENT_LABEL,
   boardContainerClasses,
   isPresenting,
   modeAfterRequest,
+  needsShellRaise,
   presentButtonLabel,
 } from "../components/founders/whiteboard-present";
 
@@ -438,7 +440,9 @@ class FakeDocument {
   }
 }
 
-type FakeContainer = { clientWidth: number; clientHeight: number };
+type FakeContainer = { clientWidth: number; clientHeight: number; getClientRects: () => unknown[] };
+/** Visible by default (one non-empty rect); a `hidden` ancestor gives zero in a real browser. */
+const visible = () => [{}];
 
 function resize(container: FakeContainer, width: number, height: number) {
   container.clientWidth = width;
@@ -535,7 +539,7 @@ function rig(width = 400, height = 300, dpr = 1): Rig {
   const canvas = new RasterCanvas();
   // The canvas sits below the page header and the toolbar, not at the window's corner.
   canvas.rect = { left: 120, top: 310 };
-  const container: FakeContainer = { clientWidth: width, clientHeight: height };
+  const container: FakeContainer = { clientWidth: width, clientHeight: height, getClientRects: visible };
   // It fills its container (absolute inset-0).
   canvas.cssBox = () => ({ width: container.clientWidth, height: container.clientHeight });
   const states: WhiteboardState[] = [];
@@ -1193,6 +1197,25 @@ async function main() {
     assert.equal(r.at(80, 50), SKY, "Ctrl+Z in a text box is that box's undo");
   });
 
+  await check(
+    "a collapsed (hidden) board ignores E, Ctrl/Cmd+Z and Ctrl+Y: its listener stays live (keepMounted) but a 0-rect container means nobody can see it (Codex review round 3, MEDIUM)",
+    () => {
+      const r = rig(400, 300);
+      r.stroke(line(40, 120, 50));
+      // Collapse it: a `hidden` ancestor gives zero client rects in a real browser.
+      r.container.getClientRects = () => [];
+      keydown(r.win, "E");
+      assert.equal(r.last().erasing, false, "E does nothing while hidden");
+      const z = keydown(r.win, "z", { ctrl: true });
+      assert.equal(z.defaultPrevented, false, "the key is not even claimed, so a page shortcut still works");
+      assert.equal(r.at(80, 50), SKY, "Ctrl+Z did not undo the stroke");
+      // Reopen it: the SAME listener (never re-attached) now acts again.
+      r.container.getClientRects = visible;
+      keydown(r.win, "z", { ctrl: true });
+      assert.equal(r.at(80, 50), null, "Ctrl+Z undoes once the board is visible again");
+    },
+  );
+
   await check("keys still work while the Brush size slider or the colour picker has focus (review round 3), and never while typing in a text field", () => {
     const r = rig(400, 300);
     r.stroke(line(40, 120, 50));
@@ -1341,6 +1364,40 @@ async function main() {
     assert.equal(modeAfterRequest(true, false), "maximized");
   });
 
+  await check(
+    "needsShellRaise is true ONLY for the CSS-only fallback, matching the html[data-board-presenting] rule app/globals.css actually carries (Codex review round 3, HIGH)",
+    () => {
+      assert.deepEqual(["idle", "fullscreen", "maximized"].map(needsShellRaise), [false, false, true]);
+      assert.equal(BOARD_PRESENTING_ATTR, "boardPresenting", "the dataset property name OasisWhiteboard.tsx and globals.css must agree on");
+
+      const css = readFileSync(join(root, "app/globals.css"), "utf8");
+      assert.match(
+        css,
+        /html\[data-board-presenting\]\s*\.os-canvas-main\s*\{[^}]*z-index:\s*60/,
+        "globals.css raises <main> (z-index 60) above the shell's own top bar (z-30) and side rail (z-40/z-20) while the flag is set",
+      );
+
+      const src = readFileSync(join(root, "components/founders/OasisWhiteboard.tsx"), "utf8");
+      assert.match(src, /needsShellRaise\(presentMode\)/, "the effect gates on the same pure decision the test above pins");
+      assert.match(src, /document\.documentElement\.dataset\[BOARD_PRESENTING_ATTR\]\s*=\s*"1"/, "sets the flag");
+      assert.match(src, /delete document\.documentElement\.dataset\[BOARD_PRESENTING_ATTR\]/, "and clears it, in the effect's own cleanup (exit AND unmount)");
+    },
+  );
+
+  await check(
+    "Present moves focus: into the in-board Exit control on entering, back to the toolbar's own Present button on exiting, never on first mount (Codex review round 3, LOW - real focus movement needs a real browser, not run here)",
+    () => {
+      const src = readFileSync(join(root, "components/founders/OasisWhiteboard.tsx"), "utf8");
+      assert.match(src, /presentModeDidMount/, "skips the very first render, so mounting the page never steals focus");
+      assert.match(src, /exitButtonRef\.current\?\.focus\(\)/, "focuses the in-board Exit control on entering");
+      assert.match(src, /presentButtonRef\.current\?\.focus\(\)/, "and returns focus to the toolbar's Present button on exiting");
+      // The refs really do reach the two buttons they are meant to move focus to or from.
+      assert.match(src, /<WhiteboardToolbar ui=\{ui\} actions=\{actions\} presentMode=\{presentMode\} presentButtonRef=\{presentButtonRef\} \/>/);
+      assert.match(src, /ref=\{presentButtonRef\}/, "WhiteboardToolbar attaches it to the real Present button");
+      assert.match(src, /exitButtonRef\?: RefObject<HTMLButtonElement \| null>/, "PresentingOverlay accepts the same ref for its top Exit button");
+    },
+  );
+
   await check("boardContainerClasses: relative and fixed are mutually exclusive, by mode (Codex review round 2 - both on the same element meant .relative always won)", () => {
     const classesOf = (s: string) => new Set(s.split(/\s+/).filter(Boolean));
     for (const mode of ["idle", "fullscreen", "maximized"] as const) {
@@ -1357,6 +1414,33 @@ async function main() {
     assert.ok(maximized.has("fixed") && maximized.has("inset-0") && !maximized.has("h-[70vh]"), "maximized: the CSS-only fallback actually covers the viewport");
     for (const classes of [idle, maximized]) assert.ok(classes.has("bg-bg-deep"), "the board colour is never lost either way");
   });
+
+  await check(
+    "PresentingOverlay: two independent Exit buttons, both safe-area offset, plus a touch Undo/Eraser cluster (Codex review round 3: HIGH stacking fix's second exit, and the touch-controls LOW)",
+    () => {
+      const m = renderMarkup([
+        { id: "maximized", kind: "overlay", presentMode: "maximized", ui: { canUndo: true } },
+        { id: "noUndo", kind: "overlay", presentMode: "maximized", ui: { canUndo: false } },
+        { id: "erasingOverlay", kind: "overlay", presentMode: "maximized", ui: { erasing: true } },
+      ]);
+      const tags = tagsOf(m.maximized);
+      const exits = tags.filter((t) => t.name === "button" && t.attrs["aria-label"] === "Exit presentation");
+      assert.equal(exits.length, 2, "two independent Exit controls");
+      assert.ok(exits[0].attrs.class.includes("env(safe-area-inset-top)"), "the top one clears the device's own safe area, not a bare inset");
+      assert.ok(exits[1].attrs.class.includes("env(safe-area-inset-bottom)"), "the bottom one too");
+      const eraser = tags.find((t) => t.name === "button" && t.attrs["aria-label"] === "Eraser")!;
+      const undo = tags.find((t) => t.name === "button" && t.attrs["aria-label"] === "Undo")!;
+      assert.ok(eraser && undo, "a touch path to Undo and the eraser while presenting");
+      assert.equal(eraser.attrs["aria-pressed"], "false");
+      assert.equal(undo.attrs.disabled, undefined, "canUndo true: Undo is not disabled");
+      const noUndoBtn = tagsOf(m.noUndo).find((t) => t.name === "button" && t.attrs["aria-label"] === "Undo")!;
+      assert.equal(noUndoBtn.attrs.disabled, "", "canUndo false: Undo is disabled");
+      assert.equal(tagsOf(m.erasingOverlay).find((t) => t.name === "button" && t.attrs["aria-label"] === "Eraser")!.attrs["aria-pressed"], "true");
+      for (const t of [...exits, eraser, undo]) {
+        assert.ok(minSide(classesOf(t), "h", "") >= 44 && minSide(classesOf(t), "w", "") >= 44, `${t.attrs["aria-label"]} is a 44 px target`);
+      }
+    },
+  );
 
   // -- the component itself ------------------------------------------------
   await check("OasisWhiteboard mounts the board on its own canvas, its buttons drive it, and unmounting leaves nothing attached", async () => {
@@ -1380,16 +1464,18 @@ async function main() {
       const containerEl = nodes(tree).find((n) => n.type === "div" && n.props.ref && nodes(n.props.children).includes(canvasEl!));
       assert.ok(canvasEl && containerEl, "a canvas inside a sized container");
       const canvas = new RasterCanvas();
-      const container: FakeContainer = { clientWidth: 400, clientHeight: 300 };
+      const container: FakeContainer = { clientWidth: 400, clientHeight: 300, getClientRects: visible };
       (canvasEl!.props.ref as { current: unknown }).current = canvas;
       (containerEl!.props.ref as { current: unknown }).current = container;
-      // Two mount-only effects: the board itself (pendingEffects[0], driven
-      // below) and Present's fullscreenchange/Escape listeners
-      // (pendingEffects[1]) - real fullscreen entry/exit needs a real
-      // browser (not run here); this file proves the Present button exists
-      // and is wired, and whiteboard-present.ts (pure, tested above) proves
-      // the label and fallback decision.
-      assert.equal(pendingEffects.length, 2, "the board's mount effect, and Present's");
+      // Four mount-only effects: the board itself (pendingEffects[0], driven
+      // below), Present's fullscreenchange/Escape listeners, the
+      // html[data-board-presenting] flag (Codex review round 3), and the
+      // enter/exit focus move - real fullscreen entry/exit, the resulting
+      // CSS stacking, and real focus movement all need a real browser (not
+      // run here); this file proves the Present button exists and is
+      // wired, and whiteboard-present.ts (pure, tested above) proves the
+      // label and fallback decision.
+      assert.equal(pendingEffects.length, 4, "the board's mount effect, Present's listeners, the shell-raise flag, and the focus move");
       const cleanup = pendingEffects[0]();
       assert.equal(typeof cleanup, "function", "the effect returns its cleanup");
       assert.equal(canvas.width, 400, "the effect sized the canvas to its container");
@@ -1422,7 +1508,6 @@ async function main() {
       tree = render();
       assert.equal(button(tree, "Eraser").props["aria-pressed"], true, "the Eraser button shows it is on");
       assert.equal(button(tree, "Draw in Sky").props["aria-pressed"], false);
-      assert.equal(button(tree, "Present").props["aria-pressed"], false, "not presenting yet");
       assert.equal(typeof button(tree, "Present").props.onClick, "function", "the Present button is wired");
 
       (cleanup as () => void)();
@@ -1480,8 +1565,17 @@ async function main() {
     assert.deepEqual(pressed(m.start), ["Draw in Sky"], "at the start: the Sky pen");
     assert.deepEqual(pressed(m.erasing), ["Eraser"], "erasing: no colour is on");
     assert.deepEqual(pressed(m.custom), [], "a colour from the picker: no swatch claims it");
-    assert.deepEqual(pressed(m.presenting), ["Draw in Sky", "Exit presentation"], "presenting: the button says so, by name and by aria-pressed");
-    for (const b of buttons) assert.ok(b.attrs["aria-pressed"] !== undefined || ["Undo", "Redo", "Clear", "Download"].includes(b.attrs["aria-label"]), `${b.attrs["aria-label"]} says whether it is on`);
+    // Present/Exit carries no aria-pressed (Codex review round 3, LOW): a
+    // toggle button's accessible NAME must not change at the same time as
+    // its state, per the WAI-ARIA button pattern. It keeps the changing
+    // label instead, the same choice the in-board Exit button already made.
+    assert.deepEqual(pressed(m.presenting), ["Draw in Sky"], "presenting: only the pen colour carries aria-pressed here");
+    for (const b of buttons) {
+      assert.ok(
+        b.attrs["aria-pressed"] !== undefined || ["Undo", "Redo", "Clear", "Download", "Present", "Exit presentation"].includes(b.attrs["aria-label"]),
+        `${b.attrs["aria-label"]} says whether it is on`,
+      );
+    }
 
     const disabled = (html: string) =>
       tagsOf(html)
