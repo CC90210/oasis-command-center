@@ -69,7 +69,7 @@ async function main() {
   await check("a 422 with JSON hands back the server's own sentence (Save and Test)", async () => {
     const sentence = "It did not pass the test, so nothing was changed. Google no longer lets Gemini CLI run on a personal Google sign-in.";
     const fetch422 = async () => json(422, { ok: false, error: "engine_test_failed", message: sentence });
-    assert.deepEqual(await client.saveEngine(GEMINI, fetch422), { ok: false, message: sentence });
+    assert.deepEqual(await client.saveEngine(GEMINI, null, fetch422), { ok: false, message: sentence });
     assert.deepEqual(await client.testEngine(GEMINI, fetch422), { ok: false, message: sentence });
   });
   await check("a 500, a non-JSON 502 and a 504 each end in a plain sentence, never a status code or HTML", async () => {
@@ -80,7 +80,7 @@ async function main() {
       [524, "error code: 524"],
     ] as const) {
       const f = async () => new Response(raw, { status });
-      for (const r of [await client.saveEngine(GEMINI, f), await client.testEngine(GEMINI, f)]) {
+      for (const r of [await client.saveEngine(GEMINI, null, f), await client.testEngine(GEMINI, f)]) {
         assert.equal(r.ok, false);
         const message = (r as { message: string }).message;
         assert.match(message, /^[A-Z][^<>]*[.]$/, `${status}: ${message}`);
@@ -93,7 +93,7 @@ async function main() {
     const f = async () => {
       throw new TypeError("Failed to fetch");
     };
-    const r = await client.saveEngine(GEMINI, f);
+    const r = await client.saveEngine(GEMINI, null, f);
     assert.deepEqual(r, { ok: false, message: "We couldn't reach OASIS just now. Check your connection, then try again. Nothing was changed." });
   });
   await check("a connection that never answers ends at the deadline, even when fetch ignores its signal", async () => {
@@ -103,8 +103,9 @@ async function main() {
     assert.ok(Date.now() - started < 1000, "the call must end at its own deadline");
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /didn't answer in time\. Try again, or pick another app\./);
-    const s = await client.saveEngine(GEMINI, never, { deadlineMs: 40 });
-    assert.match((s as { message: string }).message, /may have been saved/, "a save that timed out says it may have landed");
+    const s = await client.saveEngine(GEMINI, null, never, { deadlineMs: 40 });
+    assert.match((s as { message: string }).message, /In use/, "a save that timed out points at the page's own truth");
+    assert.equal((s as { stopped?: boolean }).stopped, true, "and says it was stopped, so the panel re-reads");
   });
   await check("a body that never arrives also ends at the deadline", async () => {
     const stuck = async () => ({ ok: true, status: 200, json: () => new Promise(() => undefined) }) as unknown as Response;
@@ -128,6 +129,26 @@ async function main() {
     const already = new AbortController();
     already.abort();
     assert.equal((await client.testEngine(GEMINI, waits, { signal: already.signal })).ok, false, "an already-cancelled call ends at once");
+  });
+  await check("a stopped call says the right thing for what it was doing (save, provider switch, key removal, test)", async () => {
+    const never = () => new Promise<Response>(() => undefined);
+    const save = await client.saveEngine(GEMINI, null, never, { deadlineMs: 30 });
+    assert.match((save as { message: string }).message, /"In use" above shows what your agents really run on/);
+    const sw = await client.switchProvider("openai", never, { deadlineMs: 30 });
+    assert.match((sw as { message: string }).message, /provider didn't answer in time\. The AI account shown is what your agents really use/);
+    assert.doesNotMatch((sw as { message: string }).message, /app on your paired computer|In use/);
+    const rm = await client.removeSavedKey("openai", never, { deadlineMs: 30 });
+    assert.match((rm as { message: string }).message, /key couldn't be removed in time\. The saved keys listed show whether it was/);
+    const ctl = new AbortController();
+    const pend = client.removeSavedKey("openai", never, { signal: ctl.signal });
+    ctl.abort();
+    assert.match(((await pend) as { message: string }).message, /^Stopped waiting\. The saved keys listed/);
+    const sendsVersion: string[] = [];
+    await client.saveEngine(GEMINI, "v-7", async (_u: string, init: RequestInit) => {
+      sendsVersion.push(String(init.body));
+      return json(200, { ok: true });
+    });
+    assert.deepEqual(JSON.parse(sendsVersion[0]), { engine: GEMINI, expected_version: "v-7" }, "a save hands back the version the page read");
   });
   await check("the browser waits a little longer than the server's one-short-answer probe, which is 75 s", () => {
     assert.equal(bridge.BRIDGE_TEST_TIMEOUT_MS, 75_000);
@@ -320,6 +341,16 @@ async function main() {
     assert.match(sc["elapsed counter"].mid?.elapsed ?? "", /^Testing\.\.\. [1-9]\d* s\./, "the counter counts seconds");
     assert.equal(sc["elapsed counter"].note, 'Gemini CLI answered in 2.2 s: "Hi"');
   });
+  await check("cancel a save and the page reads the truth at once and again after the server's window: 'In use' is never wrong", () => {
+    const s = sc["cancel save: truth is re-read twice"];
+    assert.ok(s?.started);
+    assert.equal(s.puts?.length, 1);
+    assert.deepEqual(s.puts?.[0], { engine: { kind: "cli", cli: "gemini" }, expected_version: "v-1" }, "the save carried the version the page had read");
+    assert.equal(s.gets, 3, "the first read, one at once after the stop, one after the server window");
+    assert.deepEqual(s.inUse?.length, 1);
+    assert.match(s.inUse?.[0] ?? "", /^An app on your paired computer/, "the late commit shows as in use");
+    assert.match(s.note ?? "", /^Stopped waiting\. "In use" above shows what your agents really run on\.$/);
+  });
   await check("success names the app that answered, and ends the busy state", () => {
     assert.equal(sc["ok"].note, 'Gemini CLI answered in 4.2 s: "Hello"');
     assert.equal(sc["ok"].noteRole, "status");
@@ -344,6 +375,65 @@ async function main() {
     assert.doesNotMatch(src, /pointer-events-none|\binert\b/);
     const radio = /type="radio"[\s\S]*?disabled=\{([^}]*)\}/.exec(src)?.[1] ?? "";
     assert.equal(radio.trim(), "!canManage", "the engine radios must only be gated by who may manage");
+  });
+
+  console.log("5b. a link to #providers opens and scrolls to the card even when it draws late");
+  const hashMod = await import("../components/settings/OpenSectionOnHash");
+  await check("a #providers that mounts AFTER the first look is found, its section opened, and scrolled to", async () => {
+    type Fake = { tagName: string; open?: boolean; parent?: Fake; closest: (s: string) => Fake | null; scrollIntoView: () => void; scrolled: number };
+    const mk = (tagName: string, parent?: Fake): Fake => {
+      const el: Fake = {
+        tagName,
+        open: false,
+        parent,
+        scrolled: 0,
+        closest: (sel) => (sel === "details" ? (el.tagName === "DETAILS" ? el : el.parent?.closest(sel) ?? null) : null),
+        scrollIntoView: () => {
+          el.scrolled++;
+        },
+      };
+      return el;
+    };
+    const details = mk("DETAILS");
+    const card = mk("DIV", details);
+    let mounted = false;
+    let notify: (() => void) | null = null;
+    let timers = 0;
+    const env = {
+      hash: () => "#providers",
+      find: (sel: string) => (sel === "#providers" && mounted ? card : null),
+      watch: (cb: () => void) => {
+        notify = cb;
+        return () => {
+          notify = null;
+        };
+      },
+      afterLayout: (run: () => void) => run(),
+      setTimeout: () => ++timers,
+      clearTimeout: () => undefined,
+    };
+    const stop = hashMod.openHashTarget(env as never);
+    assert.equal(details.open, false, "nothing to open yet");
+    assert.ok(notify, "it waits for the page to change instead of giving up");
+    mounted = true; // the panel's fetch finished and drew the card
+    notify!();
+    assert.equal(details.open, true, "the section that holds it opened");
+    assert.equal(card.scrolled, 1, "and the card was scrolled to");
+    assert.equal(notify, null, "it stopped watching");
+    stop();
+    // Already there on first look: opened at once, no watching.
+    const there = { ...env, find: () => card, watch: () => { throw new Error("must not watch"); } };
+    details.open = false;
+    hashMod.openHashTarget(there as never);
+    assert.equal(details.open, true);
+    // A malformed fragment is not a crash; a target that never comes stops waiting.
+    hashMod.openHashTarget({ ...env, hash: () => "#a[", find: () => { throw new SyntaxError("bad"); } } as never);
+    mounted = false;
+    let gaveUp: (() => void) | null = null;
+    const waiting = hashMod.openHashTarget({ ...env, setTimeout: (run: () => void) => ((gaveUp = run), 1) } as never);
+    gaveUp!();
+    assert.equal(notify, null, "after the wait limit it stops watching");
+    waiting();
   });
 
   console.log("6. the 'AI setup' section is gone and nothing it did is lost");

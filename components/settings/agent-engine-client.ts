@@ -20,6 +20,8 @@ export type EngineState = {
   canManage: boolean;
   /** OASIS's own workspace: its agents run in their harnesses through the bridge; API keys are the fallback. */
   oasis: boolean;
+  /** The saved choice's version (null = none saved); handed back on a save so only the latest choice wins. */
+  engineVersion: string | null;
 };
 
 const READ_FAILED = "We could not read what powers your agents just now. Refresh to try again.";
@@ -28,11 +30,25 @@ const TEST_FAILED = "The test couldn't run just now. Try again in a moment.";
 const NO_CONNECTION = "We couldn't reach OASIS just now. Check your connection, then try again. Nothing was changed.";
 const SERVER_PROBLEM = "OASIS had a problem answering just now. Nothing was changed. Try again in a moment.";
 const TOO_SLOW = "OASIS took too long to answer. Try again, or pick another app. Nothing was changed.";
-const CANCELLED_TEST = "Stopped waiting for the test. Nothing was changed.";
-const CANCELLED_SAVE = "Stopped waiting. If the check had already passed, the change may have been saved: look at \"In use\" above.";
-const DEADLINE_PASSED_TEST = "The app on your paired computer didn't answer in time. Try again, or pick another app.";
-const DEADLINE_PASSED_SAVE =
-  "The app on your paired computer didn't answer in time. Try again, or pick another app. If the check had already passed, the change may have been saved: look at \"In use\" above.";
+/** What a stopped call says, by what it was doing. Every one points at the page, which is re-read, as the truth. */
+const STOPPED: Record<CallAction, { cancelled: string; deadline: string }> = {
+  test: {
+    cancelled: "Stopped waiting for the test. Nothing was changed.",
+    deadline: "The app on your paired computer didn't answer in time. Try again, or pick another app.",
+  },
+  save: {
+    cancelled: "Stopped waiting. \"In use\" above shows what your agents really run on.",
+    deadline: "The app on your paired computer didn't answer in time. Try again, or pick another app. \"In use\" above shows what your agents really run on.",
+  },
+  switch: {
+    cancelled: "Stopped waiting for the provider switch. The AI account shown is what your agents really use.",
+    deadline: "The provider didn't answer in time. The AI account shown is what your agents really use. Try again in a moment.",
+  },
+  remove: {
+    cancelled: "Stopped waiting. The saved keys listed show whether it was removed.",
+    deadline: "The key couldn't be removed in time. The saved keys listed show whether it was. Try again in a moment.",
+  },
+};
 
 /**
  * How long the browser waits for the app test (Test or Use this): a little
@@ -43,6 +59,12 @@ const DEADLINE_PASSED_SAVE =
  * "Testing a short answer..." after the server had already answered 422).
  */
 export const ENGINE_CLIENT_DEADLINE_MS = 85_000;
+/**
+ * After a save the browser stopped waiting for (Cancel or the deadline), the
+ * server may still be finishing its own test (up to 75 s). The panel reads what
+ * is in use once at once and once more after this, so "In use" is never stale.
+ */
+export const ENGINE_SERVER_WINDOW_MS = 80_000;
 /** Reads and quick changes (switch provider, remove a key): nothing on them is slow. */
 const QUICK_DEADLINE_MS = 30_000;
 
@@ -52,6 +74,9 @@ export type EngineCallOptions = {
   /** Overrides the default deadline; for the app test, ENGINE_CLIENT_DEADLINE_MS. */
   deadlineMs?: number;
 };
+
+/** What a call is for, so a stopped one says the right thing. */
+type CallAction = "test" | "save" | "switch" | "remove";
 
 type CallResult = { ok: boolean; status: number; body: Record<string, unknown> };
 
@@ -122,11 +147,8 @@ function failureSentence(r: CallResult, fallback: string): string {
 }
 
 /** What a call that threw means, in one plain sentence. */
-function stoppedSentence(err: unknown, fallback: string, saves: boolean): string {
-  if (err instanceof CallStopped) {
-    if (saves) return err.why === "cancelled" ? CANCELLED_SAVE : DEADLINE_PASSED_SAVE;
-    return err.why === "cancelled" ? CANCELLED_TEST : DEADLINE_PASSED_TEST;
-  }
+function stoppedSentence(err: unknown, fallback: string, action: CallAction): string {
+  if (err instanceof CallStopped) return err.why === "cancelled" ? STOPPED[action].cancelled : STOPPED[action].deadline;
   // fetch itself rejected (offline, dropped connection, blocked): not a server answer.
   return err instanceof TypeError ? NO_CONNECTION : fallback;
 }
@@ -149,6 +171,7 @@ export async function readEngine(
         bridgeReachable: bridge?.reachable === true,
         canManage: r.body.canManage === true,
         oasis: r.body.workspace === "oasis",
+        engineVersion: typeof r.body.engineVersion === "string" ? r.body.engineVersion : null,
       },
     };
   } catch {
@@ -175,16 +198,17 @@ export async function readUnsupportedApps(fetchImpl: FetchLike = defaultFetch, o
 /** Save the choice. An app or local model is tested by the route first. */
 export async function saveEngine(
   engine: AgentEngineChoice,
+  expectedVersion: string | null,
   fetchImpl: FetchLike = defaultFetch,
   opts: EngineCallOptions = {},
-): Promise<{ ok: true; latencyMs: number | null } | { ok: false; message: string }> {
+): Promise<{ ok: true; latencyMs: number | null } | { ok: false; message: string; stopped?: boolean }> {
   try {
-    const r = await call(fetchImpl, "/api/ai/engine", "PUT", { engine }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
+    const r = await call(fetchImpl, "/api/ai/engine", "PUT", { engine, expected_version: expectedVersion }, { deadlineMs: ENGINE_CLIENT_DEADLINE_MS, ...opts });
     if (!r.ok) return { ok: false, message: failureSentence(r, CHANGE_FAILED) };
     const test = r.body.test as { latency_ms?: unknown } | undefined;
     return { ok: true, latencyMs: typeof test?.latency_ms === "number" ? test.latency_ms : null };
   } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, true) };
+    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "save"), ...(err instanceof CallStopped ? { stopped: true } : {}) };
   }
 }
 
@@ -199,7 +223,7 @@ export async function testEngine(
     if (!r.ok || typeof r.body.latency_ms !== "number") return { ok: false, message: failureSentence(r, TEST_FAILED) };
     return { ok: true, latencyMs: r.body.latency_ms, reply: typeof r.body.reply === "string" ? r.body.reply : "" };
   } catch (err) {
-    return { ok: false, message: stoppedSentence(err, TEST_FAILED, false) };
+    return { ok: false, message: stoppedSentence(err, TEST_FAILED, "test") };
   }
 }
 
@@ -217,7 +241,7 @@ export async function removeSavedKey(
     const r = await call(fetchImpl, `/api/agent-config/bulk-provider?provider=${encodeURIComponent(provider)}`, "DELETE", undefined, opts);
     return r.ok ? { ok: true } : { ok: false, message: failureSentence(r, CHANGE_FAILED) };
   } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, true) };
+    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "remove") };
   }
 }
 
@@ -232,6 +256,6 @@ export async function switchProvider(
     if (!r.ok) return { ok: false, message: failureSentence(r, CHANGE_FAILED) };
     return { ok: true, label: typeof r.body.label === "string" ? r.body.label : provider };
   } catch (err) {
-    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, true) };
+    return { ok: false, message: stoppedSentence(err, CHANGE_FAILED, "switch") };
   }
 }

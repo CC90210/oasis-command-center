@@ -35,7 +35,7 @@ import {
   type AgentEngineChoice,
   type CliEngine,
 } from "@/lib/ai/agent-engine";
-import { readEngine, readUnsupportedApps, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
+import { ENGINE_SERVER_WINDOW_MS, readEngine, readUnsupportedApps, removeSavedKey, saveEngine, switchProvider, testEngine, type EngineState } from "@/components/settings/agent-engine-client";
 
 const PROVIDERS: Provider[] = ["anthropic", "openai", "google", "openrouter"];
 
@@ -84,8 +84,9 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const [note, setNote] = useState<Note>(null);
   const [unsupported, setUnsupported] = useState<CliEngine[]>([]);
   const stopCheck = useRef<AbortController | null>(null);
+  const lateRead = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  async function load(opts: { keepDraft?: boolean } = {}) {
+  async function load(opts: { keepDraft?: boolean; syncProvider?: boolean } = {}) {
     const [r, refused] = await Promise.all([readEngine(), readUnsupportedApps()]);
     setUnsupported(refused);
     if (!r.ok) {
@@ -95,6 +96,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     }
     setReadError(null);
     setState(r.state);
+    if (opts.syncProvider) setProvider(r.state.account?.provider ?? "");
     if (opts.keepDraft) return;
     setKind(r.state.engine.kind);
     if (r.state.engine.kind === "cli") setCli(r.state.engine.cli);
@@ -105,7 +107,10 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   useEffect(() => {
     void load();
     // Leaving the page stops a check that is still waiting.
-    return () => stopCheck.current?.abort();
+    return () => {
+      stopCheck.current?.abort();
+      if (lateRead.current) clearTimeout(lateRead.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -166,11 +171,16 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     if (!draft) return;
     const chosen = draft;
     await runCheck("save", async (signal) => {
-      const r = await saveEngine(chosen, undefined, { signal });
+      const r = await saveEngine(chosen, state?.engineVersion ?? null, undefined, { signal });
       if (!r.ok) {
         setNote({ ok: false, text: r.message });
         // A save whose answer never came may have landed: read what is in use, keeping the pick on screen.
         await load({ keepDraft: true });
+        // The server may still be finishing its own test: read once more after its window.
+        if (r.stopped) {
+          if (lateRead.current) clearTimeout(lateRead.current);
+          lateRead.current = setTimeout(() => void load({ keepDraft: true }), ENGINE_SERVER_WINDOW_MS);
+        }
         return;
       }
       // The coding harness reads this same setting (lib/ai/agent-engine.ts harnessRouteFor).
@@ -210,6 +220,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
       if (!r.ok) {
         setNote({ ok: false, text: r.message });
         setProvider(state?.account?.provider ?? "");
+        await load({ keepDraft: true, syncProvider: true });
         return;
       }
       setNote({ ok: true, text: `Your AI account is now ${PROVIDER_LABEL[next]}, ${r.label}.` });
@@ -227,7 +238,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     try {
       const r = await removeSavedKey(p);
       setNote(r.ok ? { ok: true, text: `The saved ${PROVIDER_LABEL[p]} key was removed.` } : { ok: false, text: r.message });
-      await load();
+      await load(r.ok ? {} : { keepDraft: true, syncProvider: true });
       router.refresh();
     } finally {
       setProviderBusy(false);

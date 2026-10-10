@@ -121,6 +121,7 @@ const STATE = {
   bridge: { reachable: true },
   workspace: "oasis",
   canManage: true,
+  engineVersion: "v-1",
 };
 const machine = (gemini: Record<string, unknown>) => ({
   id: "m1",
@@ -150,15 +151,23 @@ async function main() {
 
   const out: Record<string, unknown> = {};
 
-  async function scenario(name: string, opts: { reply: Reply; press: "test" | "save"; gemini?: Record<string, unknown>; cancel?: boolean; waitMs?: number; realDeadline?: boolean; app?: "Gemini CLI" | "Claude Code" }) {
+  async function scenario(name: string, opts: { reply: Reply; press: "test" | "save"; gemini?: Record<string, unknown>; cancel?: boolean; waitMs?: number; realDeadline?: boolean; truth?: Array<Record<string, unknown>>; app?: "Gemini CLI" | "Claude Code" }) {
     scaleDeadline = !opts.realDeadline;
     const stubbed: Stub = { reply: opts.reply };
     const methodsSeen: string[] = [];
+    const putBodies: unknown[] = [];
+    let gets = 0;
+    let afterPut = 0;
     globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
       const method = init?.method ?? "GET";
       methodsSeen.push(`${method} ${u}`);
-      if (u === "/api/ai/engine" && method === "GET") return new Response(JSON.stringify(STATE), { status: 200 });
+      if (u === "/api/ai/engine" && method === "GET") {
+        gets++;
+        // After a save was sent, the server's truth may differ from what the page last saw (a late commit).
+        const engine = putBodies.length > 0 && opts.truth ? opts.truth[Math.min(afterPut++, opts.truth.length - 1)] : STATE.engine;
+        return new Response(JSON.stringify({ ...STATE, engine }), { status: 200 });
+      }
       if (u === "/api/bridge/cli-status") {
         return new Response(
           JSON.stringify({ ok: true, machines: [machine(opts.gemini ?? { installed: true, authenticated: true, version: "0.63", checked: true })], agents_run_on: null }),
@@ -167,6 +176,7 @@ async function main() {
       }
       if (u === "/api/ai/engine") {
         stubbed.seenSignal = init?.signal ?? undefined;
+        if (method === "PUT") putBodies.push(JSON.parse(String(init?.body ?? "{}")));
         const r = stubbed.reply;
         if (r === "network") throw new TypeError("Failed to fetch");
         if (r === "slow") {
@@ -238,6 +248,10 @@ async function main() {
       tree = frames({ children: Account });
       ended = !all(tree).some((e) => e.props["data-testid"] === "engine-cancel");
     }
+    if (opts.truth) {
+      await tick(150); // the second re-read, after the (shortened) server window
+      tree = frames({ children: Account });
+    }
     const after = all(tree);
     const note = after.find((e) => e.props.role === "alert" || e.props.role === "status");
     out[name] = {
@@ -250,6 +264,9 @@ async function main() {
       noteRole: note ? note.props.role : null,
       stillDisabled: after.filter((e) => e.props.disabled === true).map((e) => textOf(e).trim() || String(e.props.value)),
       signalAborted: stubbed.seenSignal ? stubbed.seenSignal.aborted : null,
+      puts: putBodies,
+      gets,
+      inUse: after.filter((e) => e.type === "label" && textOf(e).includes("In use")).map((e) => textOf(e).replace(/\s+/g, " ").trim().slice(0, 40)),
     };
     frames.unmount();
   }
@@ -264,6 +281,8 @@ async function main() {
   await scenario("client timeout on test", { press: "test", reply: "hang", waitMs: 20 });
   await scenario("cancel", { press: "test", reply: "hang", cancel: true, waitMs: 20 });
   await scenario("elapsed counter", { press: "test", reply: "slow", realDeadline: true, waitMs: 1500 });
+  // Cancel a save; the server went on and committed Codex. The page reads the truth at once and once more after the server's window.
+  await scenario("cancel save: truth is re-read twice", { press: "save", reply: "hang", cancel: true, waitMs: 20, truth: [{ kind: "api" }, { kind: "cli", cli: "gemini" }] });
   await scenario("ok", { press: "test", reply: { status: 200, body: { ok: true, latency_ms: 4200, reply: "Hello" } } });
   await scenario("unsupported gemini", { press: "test", gemini: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });
   await scenario("unsupported gemini save", { press: "save", gemini: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });

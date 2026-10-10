@@ -2,8 +2,10 @@
  * /api/ai/engine - WHAT POWERS YOUR AGENTS (lib/ai/agent-engine.ts), read and
  * switched from Settings > AI brain (components/settings/AgentEnginePanel.tsx).
  *
- *   GET  -> { ok, engine, account, savedProviders, bridge: { reachable } }
+ *   GET  -> { ok, engine, engineVersion, account, savedProviders, bridge: { reachable } }
  *        engine          the workspace's choice (api / cli / local)
+ *        engineVersion   the choice row's version (null = none saved yet); a PUT hands
+ *                        it back as expected_version
  *        account         the AI account the departments use on "api", and as
  *                        the fallback: { provider, providerLabel, model, modelLabel } or null
  *        savedProviders  cloud providers with a saved team key (switchable
@@ -11,13 +13,19 @@
  *        bridge.reachable whether the paired computer can be reached for THIS
  *                        person, by the coding harness's own gate
  *
- *   PUT  { engine } -> { ok, engine, test? }
+ *   PUT  { engine, expected_version } -> { ok, engine, test? }
  *        Owners and admins only (403). Before an engine on the paired computer
  *        is saved, it answers ONE short department reply through the road a
  *        department turn takes (lib/ai/bridge-turn.ts testBridgeEngine); if it
  *        fails, nothing is changed (422, the test's own sentence). "api" needs a
  *        usable AI account (409 otherwise); its key is tested by the account's
  *        own Test and by every model or provider switch.
+ *        ONLY THE LATEST CHOICE WINS. The save commits only while the choice is
+ *        still the version the page read (expected_version, from GET): a test
+ *        that finishes late, after the person cancelled and chose something
+ *        else, is refused with 409 stale_choice instead of overwriting the
+ *        newer choice. A request the person cancelled (req.signal) stops the
+ *        test and commits nothing.
  *
  *   POST { engine } -> { ok, latency_ms, reply } | { ok:false, message }
  *        "Test": one short department answer on an engine on the paired
@@ -31,9 +39,9 @@ import { canManageTeam, getSessionContext } from "@/lib/team";
 import { getTenant } from "@/lib/queries";
 import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentBrain } from "@/lib/ai/department-brain";
-import { isOasisWorkspace, readAgentEngine, readSavedProviders, saveAgentEngine } from "@/lib/ai/agent-engine-store";
+import { isOasisWorkspace, readAgentEngine, readAgentEngineVersion, readSavedProviders, saveAgentEngineIfCurrent } from "@/lib/ai/agent-engine-store";
 import { parseEngineChoice, type AgentEngineChoice } from "@/lib/ai/agent-engine";
-import { bridgeCallerForSession, testBridgeEngine } from "@/lib/ai/bridge-turn";
+import { BRIDGE_TEST_CANCELLED, bridgeCallerForSession, testBridgeEngine } from "@/lib/ai/bridge-turn";
 import { DEPARTMENT_REPLY_MAX_TOKENS, DEPARTMENT_TEST_ASK, DEPARTMENT_TEST_SYSTEM } from "@/lib/os/channel/reply-budget";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { harnessForDepartment } from "@/lib/admin/harness-targets";
@@ -44,6 +52,8 @@ export const maxDuration = 300;
 
 const SIGNED_OUT = "Your session ended. Sign in again, then try again.";
 const fail = (status: number, error: string, message: string) => NextResponse.json({ ok: false, error, message }, { status });
+const STALE_CHOICE = "A newer choice was saved, so this one was not applied. Check what is in use above, then try again.";
+const CANCELLED = "Stopped before the check finished. Nothing was changed.";
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** OASIS: the Test answers in the Chief of Staff's harness, the road a real department turn takes. */
@@ -57,8 +67,9 @@ export async function GET() {
   if (!ctx?.tenantId) return fail(401, "unauthorized", SIGNED_OUT);
   const tenantId = ctx.tenantId;
   try {
-    const [engine, account, savedProviders, caller, oasis] = await Promise.all([
+    const [engine, engineVersion, account, savedProviders, caller, oasis] = await Promise.all([
       readAgentEngine(tenantId),
+      readAgentEngineVersion(tenantId),
       readWorkspaceAiAccount(tenantId),
       readSavedProviders(tenantId),
       bridgeCallerForSession(tenantId),
@@ -69,6 +80,7 @@ export async function GET() {
       {
         ok: true,
         engine,
+        engineVersion,
         account: brain
           ? { provider: brain.provider, providerLabel: brain.providerLabel, model: brain.savedModel ?? brain.model, modelLabel: brain.modelLabel }
           : null,
@@ -116,6 +128,7 @@ export async function POST(req: NextRequest) {
     system: DEPARTMENT_TEST_SYSTEM,
     ask: DEPARTMENT_TEST_ASK,
     maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
+    signal: req.signal,
   });
   if (!tested.ok) return NextResponse.json({ ok: false, error: "engine_test_failed", code: tested.code, message: tested.message }, { status: 422 });
   return NextResponse.json({ ok: true, latency_ms: tested.latency_ms, reply: tested.reply });
@@ -128,14 +141,19 @@ export async function PUT(req: NextRequest) {
     return fail(403, "admin_required", "Only an owner or admin can change what powers your agents.");
   }
   const tenantId = ctx.tenantId;
-  let raw: { engine?: unknown };
+  let raw: { engine?: unknown; expected_version?: unknown };
   try {
-    raw = (await req.json()) as { engine?: unknown };
+    raw = (await req.json()) as { engine?: unknown; expected_version?: unknown };
   } catch {
     return fail(400, "invalid_json", "That request could not be read. Try again.");
   }
   const choice: AgentEngineChoice | null = parseEngineChoice(raw.engine);
   if (!choice) return fail(400, "invalid_engine", "Pick an AI account, an app on your paired computer, or a local model.");
+  // The version of the choice the page read (null = none saved): the save is refused if it moved.
+  const expected = raw.expected_version;
+  if (expected !== null && typeof expected !== "string") {
+    return fail(400, "invalid_version", "That request could not be read. Refresh the page, then try again.");
+  }
 
   let test: { latency_ms: number; reply: string } | null = null;
   if (choice.kind === "api") {
@@ -167,7 +185,9 @@ export async function PUT(req: NextRequest) {
       system: DEPARTMENT_TEST_SYSTEM,
       ask: DEPARTMENT_TEST_ASK,
       maxTokens: DEPARTMENT_REPLY_MAX_TOKENS,
+      signal: req.signal,
     });
+    if (!tested.ok && tested.code === BRIDGE_TEST_CANCELLED) return fail(409, "cancelled", CANCELLED);
     if (!tested.ok) {
       return NextResponse.json(
         { ok: false, error: "engine_test_failed", code: tested.code, message: `It did not pass the test, so nothing was changed. ${tested.message}` },
@@ -177,8 +197,11 @@ export async function PUT(req: NextRequest) {
     test = { latency_ms: tested.latency_ms, reply: tested.reply };
   }
 
+  // The person may have cancelled while the test finished: commit nothing for a request nobody is waiting on.
+  if (req.signal.aborted) return fail(409, "cancelled", CANCELLED);
   try {
-    await saveAgentEngine(tenantId, choice);
+    const committed = await saveAgentEngineIfCurrent(tenantId, choice, expected);
+    if (!committed) return fail(409, "stale_choice", STALE_CHOICE);
   } catch (err) {
     console.error("[ai.engine.write]", { tenantId, error: errText(err) });
     return fail(500, "save_failed", "The choice couldn't be saved just now. Nothing was changed. Try again in a moment.");
