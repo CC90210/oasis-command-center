@@ -17,6 +17,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { Cloud, Cpu, Download } from "lucide-react";
+import { bridgeConnectionHeadline } from "@/lib/bridge-online-copy";
 
 export const BRIDGE_INSTALL_PATH = "/settings/devices/install";
 
@@ -47,9 +48,18 @@ export function BridgeInstallLink({
  * `bridgeOnline` is null when the heartbeat could not be read (getBridgeOnline
  * throws, 2026-09-29): "Couldn't check your computer", with no install button,
  * never "Computer not connected yet".
+ *
+ * `onlineLabels` (2026-10-10): the NAMED online pairings (lib/queries.ts
+ * getOnlineBridgeComputerLabels), so the online headline can say which
+ * computer(s) are actually paired instead of asserting singular ownership
+ * of "your" one — true only for whoever's machine is actually paired,
+ * false for every other owner in a shared workspace. Optional for backward
+ * compatibility: a caller that has not been migrated still gets an honest,
+ * ownership-free headline off `bridgeOnline` alone.
  */
 export function BridgeStatusBanner({
   bridgeOnline,
+  onlineLabels,
   canInstallBridge,
   online,
   offline,
@@ -57,8 +67,10 @@ export function BridgeStatusBanner({
   clientHint,
 }: {
   bridgeOnline: boolean | null;
+  /** The named online pairings. Omit only from an unmigrated caller. */
+  onlineLabels?: string[] | null;
   canInstallBridge: boolean;
-  /** After "Your computer is connected." */
+  /** After the connection headline, when online. */
   online: ReactNode;
   /** After "Computer not connected yet." — true for everyone. */
   offline: ReactNode;
@@ -69,6 +81,17 @@ export function BridgeStatusBanner({
 }) {
   const operator = canInstallBridge === true;
   const hint = operator ? operatorHint : clientHint;
+  // Full naming once the caller passes labels; otherwise an honest fallback
+  // that never claims "your" computer (/sequences passes labels — see
+  // app/sequences/page.tsx).
+  const headline =
+    onlineLabels !== undefined
+      ? bridgeConnectionHeadline(onlineLabels)
+      : bridgeOnline === null
+        ? "Couldn't check your computer."
+        : bridgeOnline
+          ? "A computer is connected."
+          : "Computer not connected yet.";
   return (
     <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">
       {bridgeOnline ? (
@@ -79,16 +102,16 @@ export function BridgeStatusBanner({
       <div className="flex-1 text-xs leading-relaxed">
         {bridgeOnline === null ? (
           <>
-            <span className="text-fg-muted font-bold">Couldn&apos;t check your computer.</span> The connection could
+            <span className="text-fg-muted font-bold">{headline}</span> The connection could
             not be read just now, so this is not saying it is disconnected. Reload in a minute.
           </>
         ) : bridgeOnline ? (
           <>
-            <span className="text-status-engaged font-bold">Your computer is connected.</span> {online}
+            <span className="text-status-engaged font-bold">{headline}</span> {online}
           </>
         ) : (
           <>
-            <span className="text-fg-muted font-bold">Computer not connected yet.</span> {offline}
+            <span className="text-fg-muted font-bold">{headline}</span> {offline}
             {hint ? <> {hint}</> : null}
           </>
         )}
