@@ -1432,8 +1432,12 @@ function viewerPaths(def: ConnectorDef, facts: ConnectorFacts): readonly Connect
  * not set up, is not "Available".
  */
 function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathStatus {
-  const state = !p.built ? "Not built yet" : p.needsOasisApp && oasisAppMissing ? "Not set up on this deployment" : "Available";
-  return { title: p.title, body: p.body, state, requestable: !p.built };
+  const waiting = p.built && p.needsOasisApp && oasisAppMissing;
+  const state = !p.built ? "Not built yet" : waiting ? "Not set up on this deployment" : "Available";
+  // While OASIS's app is missing the drawer hides the button the body names,
+  // so the body says it describes how it WILL work, not a button to press now.
+  const body = waiting ? `Once OASIS's app is set up here: ${p.body.charAt(0).toLowerCase()}${p.body.slice(1)}` : p.body;
+  return { title: p.title, body, state, requestable: !p.built };
 }
 
 /**
