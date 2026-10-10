@@ -189,6 +189,27 @@ check("an unknown zone or a refused cron gives no runs, never a guess", () => {
   assert.equal(minGapOver7Days("0 9 * * *", "Nowhere/Zone", new Date()), null);
 });
 
+check("a sparse schedule (leap day) keeps finding runs across multiple leap years, not just the nearest one", () => {
+  // Feb 29 recurs roughly every 4 years; with count=3 from 2026 the 3rd run is
+  // 10+ years out (2036). A horizon sized for the WHOLE collection cuts this
+  // off after the first hit; the search must extend as each run is found.
+  const after = new Date("2026-01-01T00:00:00Z");
+  const runsUtc = nextRuns("0 9 29 2 *", "UTC", after, 3);
+  assert.deepEqual(isoList(runsUtc), ["2028-02-29T09:00:00.000Z", "2032-02-29T09:00:00.000Z", "2036-02-29T09:00:00.000Z"]);
+  // Same cron, Toronto wall clock: Feb is always EST (DST starts in March), so
+  // every occurrence is a fixed 5-hour offset from UTC.
+  const runsTor = nextRuns("0 9 29 2 *", TOR, after, 3);
+  assert.deepEqual(isoList(runsTor), ["2028-02-29T14:00:00.000Z", "2032-02-29T14:00:00.000Z", "2036-02-29T14:00:00.000Z"]);
+});
+
+check("an impossible schedule (Feb 30) returns no runs, and terminates quickly rather than scanning forever", () => {
+  const startedMs = Date.now();
+  const runs = nextRuns("0 9 30 2 *", TOR, new Date("2026-01-01T00:00:00Z"), 3);
+  const elapsedMs = Date.now() - startedMs;
+  assert.deepEqual(runs, []);
+  assert.ok(elapsedMs < 2000, `Feb 30 search took ${elapsedMs}ms; the bounded search should return quickly`);
+});
+
 check("the minimum gap is measured across seven days, not one", () => {
   const tuesday = new Date("2026-10-13T12:00:00Z");
   // Two runs 30 minutes apart, Mondays only: invisible to a one-day look ahead.

@@ -44,8 +44,18 @@ import { dayNumber, fromDayNumber, isTimeZone, wallParts } from "@/lib/calendar/
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
 const DAY_MS = 24 * HOUR_MS;
-/** Far enough for a leap-day cron (every 4 years) to find its next run. */
-const HORIZON_DAYS = 5 * 366;
+/**
+ * Longest run of calendar days collectRuns will scan without turning up a NEW
+ * occurrence before it gives up on finding another. This resets every time a
+ * run is found, so it bounds each STEP of the search, not the whole
+ * collection: a sparse-but-real schedule (every 4 years, Feb 29) keeps
+ * finding runs for as many as were asked for, instead of being truncated by
+ * a horizon measured from the first occurrence. 8 years covers the worst
+ * real gap between leap days (a skipped century, e.g. 2096 -> 2104). A
+ * schedule that never fires at all (Feb 30) burns this budget once, from the
+ * start, and correctly returns what exists: nothing.
+ */
+const HORIZON_DAYS = 8 * 366;
 
 export const SCHEDULE_MODES = [
   "daily",
@@ -431,15 +441,22 @@ function collectRuns(c: CompiledCron, tz: string, afterMs: number, untilMs: numb
   // day's first run, so once enough are found, one more day is read before
   // sorting and cutting.
   let stopAfterDay: number | null = null;
-  for (let day = firstDay; day <= firstDay + HORIZON_DAYS; day += 1) {
+  // The horizon is PER occurrence, not for the whole collection: it resets to
+  // the day a run was last found, so a sparse schedule can keep going past it
+  // to fill `max`, while a schedule that never matches still terminates after
+  // one HORIZON_DAYS-long scan from the start.
+  let lastProgressDay = firstDay - 1;
+  for (let day = firstDay; day - lastProgressDay <= HORIZON_DAYS; day += 1) {
     if (stopAfterDay !== null && day > stopAfterDay) break;
     const { y, m, d, weekday } = fromDayNumber(day);
     const base = Date.UTC(y, m, d);
     if (base - 14 * HOUR_MS > untilMs) break;
     if (!c.months.has(m + 1) || !dayMatches(c, d, weekday)) continue;
+    const before = found.size;
     for (const t of dayInstants(c, tz, base)) {
       if (t > afterMs && t <= untilMs) found.add(t);
     }
+    if (found.size > before) lastProgressDay = day;
     if (stopAfterDay === null && found.size >= max) stopAfterDay = day + 1;
   }
   return [...found].sort((a, b) => a - b).slice(0, max);
