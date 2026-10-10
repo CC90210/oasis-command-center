@@ -18,6 +18,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -394,6 +395,131 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   assert.equal(row.href, "/forms", "the Offers row must keep /forms; /offers is a retired route");
   assert.equal(row.group, "Marketing");
   assert.ok(!OS_NAV_CATALOG.some((r) => r.href === "/offers" || r.href.startsWith("/offers/")), "a rail row links the retired /offers");
+}
+
+// -- 13. RailFooter: a person door for Settings, an AI door for AI settings --
+// Two plainly different doors so clients are never confused about which
+// "settings" they are opening (2026-10-10). The plug door (Settings >
+// Connections) stays removed: the person door carries its attention dot.
+// The Admin shield is gone too: a Bot door replaces it — a console TOGGLE
+// for a platform operator, or a plain link to /settings/ai for anyone else
+// who may open it (maySeeSettingsSection(access, "ai")), and no door at all
+// for anyone who may not. Rendering happens in a spawned process
+// (tests/rail-footer.render.ts): RailFooter is a client component and this
+// file runs under --conditions=react-server, where react-dom/server does
+// not resolve.
+{
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, TSX_TSCONFIG_PATH: "tests/tsconfig.render.json" };
+  const tokens = (process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t.length > 0);
+  const kept: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === "--conditions" || tokens[i] === "-C") {
+      i += 1;
+      continue;
+    }
+    if (/^(--conditions=|-C=)/.test(tokens[i])) continue;
+    kept.push(tokens[i]);
+  }
+  if (kept.length) childEnv.NODE_OPTIONS = kept.join(" ");
+  else delete childEnv.NODE_OPTIONS;
+
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/rail-footer.render.ts"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: childEnv,
+  });
+  assert.equal(r.status, 0, `tests/rail-footer.render.ts failed:\n${r.stderr}`);
+  const { markup } = JSON.parse(r.stdout) as { markup: Record<string, string> };
+
+  // No plug, no shield, anywhere, under any props — and the render actually
+  // reached the footer. The person door always renders with the person icon,
+  // never the old gear.
+  for (const [id, html] of Object.entries(markup)) {
+    assert.match(html, /aria-label="Sign out"/, `${id}: the render did not reach RailFooter`);
+    assert.doesNotMatch(html, /Connections/, `${id}: a Connections door or label still renders`);
+    assert.doesNotMatch(html, /href="\/settings\/connections"/, `${id}: the plug's href still renders`);
+    assert.doesNotMatch(html, /lucide-shield\b/, `${id}: the old Admin shield icon still renders`);
+    assert.doesNotMatch(html, /lucide-plug\b/, `${id}: the old Connections plug icon still renders`);
+    assert.doesNotMatch(html, /lucide-settings\b/, `${id}: the old gear icon still renders — the Settings door must use the person icon`);
+    const settingsDoors = html.match(/<a\b[^>]*href="\/settings"/g) ?? [];
+    assert.equal(settingsDoors.length, 1, `${id}: expected exactly one Settings door, found ${settingsDoors.length}`);
+    assert.match(html, /lucide-user-round\b/, `${id}: the Settings door must draw the person icon (UserRound)`);
+  }
+
+  // The person door is active on /settings AND on /settings/connections —
+  // the plug's old territory still belongs to it.
+  assert.match(markup.settingsActive, /href="\/settings"[^>]*aria-current="page"/, "the person door must be active on /settings");
+  assert.match(
+    markup.connectionsPathActive,
+    /href="\/settings"[^>]*aria-current="page"/,
+    "the person door must be active on /settings/connections too",
+  );
+  // Exactly one active door on each of those paths — no double-active, and
+  // no AI door rendered at all here (mayOpenAiSettings is false, isOperator
+  // is false in both cases).
+  for (const id of ["settingsActive", "connectionsPathActive"] as const) {
+    assert.equal((markup[id].match(/aria-current="page"/g) ?? []).length, 1, `${id}: expected exactly one active door`);
+    assert.doesNotMatch(markup[id], /lucide-bot\b/, `${id}: no AI door for a non-operator who may not open it`);
+  }
+
+  // Attention: the dot and its accessible name move to the person door.
+  assert.match(
+    markup.attention,
+    /aria-label="Settings: a connection needs attention"/,
+    "attention must be named on the person door, not silent",
+  );
+  assert.match(markup.attention, /bg-status-warm/, "attention must still draw a dot");
+
+  // ok and not-measured both mean: no dot, plain label. There is no green
+  // "all healthy" dot either — a reachable Settings needs no badge.
+  for (const id of ["ok", "notMeasured"] as const) {
+    assert.match(markup[id], /aria-label="Settings"/, `${id}: the label must be plain`);
+    assert.doesNotMatch(markup[id], /aria-label="Settings:/, `${id}: the label must not mention a connection`);
+    assert.doesNotMatch(markup[id], /bg-status-warm|bg-status-engaged/, `${id}: no dot of either colour`);
+  }
+
+  // The signal is gated by showConnections, exactly as the door used to be:
+  // a viewer who could never open Connections must not see its attention
+  // state leak onto their person door either.
+  assert.match(markup.hiddenAttention, /aria-label="Settings"/, "a viewer who never sees Connections keeps a plain label");
+  assert.doesNotMatch(markup.hiddenAttention, /bg-status-warm/, "no dot leaks to a viewer who cannot act on it");
+
+  // The AI door, for a platform operator: a console TOGGLE (aria-pressed),
+  // never a link — not even to /settings/ai, regardless of mayOpenAiSettings.
+  for (const id of ["operatorInactive", "operatorActive"] as const) {
+    assert.match(markup[id], /lucide-bot\b/, `${id}: the AI door must draw the Bot icon`);
+    assert.doesNotMatch(markup[id], /<a\b[^>]*href="\/settings\/ai"/, `${id}: an operator's AI door must be a toggle, not a link`);
+  }
+  assert.match(markup.operatorInactive, /aria-pressed="false"[^>]*aria-label="AI console"/, "inactive: labelled, not pressed");
+  assert.match(markup.operatorInactive, /title="AI console \(OASIS operators\)"/, "inactive: the operator-only tooltip");
+  assert.match(markup.operatorActive, /aria-pressed="true"[^>]*aria-label="Leave AI console"/, "active: labelled, pressed");
+  assert.match(markup.operatorActive, /title="Back to the workspace"/, "active: the same return tooltip as before");
+
+  // The AI door, for a non-operator who may open /settings/ai: a real link,
+  // active only there, and the person door gives up "active" on that path —
+  // exactly one active door.
+  assert.match(markup.aiAllowed, /<a\b[^>]*href="\/settings\/ai"[^>]*aria-label="AI settings"/, "a plain link, not a console toggle");
+  assert.doesNotMatch(markup.aiAllowed, /href="\/settings\/ai"[^>]*aria-current="page"/, "not active off /settings/ai");
+  assert.match(
+    markup.aiAllowedActive,
+    /href="\/settings\/ai"[^>]*aria-current="page"/,
+    "the AI door must be active on /settings/ai",
+  );
+  assert.doesNotMatch(
+    markup.aiAllowedActive,
+    /href="\/settings"[^>]*aria-current="page"/,
+    "the person door must give up active on /settings/ai — only one active door",
+  );
+  assert.equal(
+    (markup.aiAllowedActive.match(/aria-current="page"/g) ?? []).length,
+    1,
+    "exactly one active door on /settings/ai",
+  );
+
+  // A non-operator who may NOT open /settings/ai gets no AI door at all —
+  // never a button that leads to a refusal.
+  assert.doesNotMatch(markup.aiNotAllowed, /lucide-bot\b/, "no AI door for someone who cannot open AI settings");
+  assert.doesNotMatch(markup.aiNotAllowed, /href="\/settings\/ai"/, "no link to a page that would refuse them");
 }
 
 console.log(
