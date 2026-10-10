@@ -127,6 +127,10 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   // the operator's computer. Everyday questions go to Chief of Staff.
   { id: "admin-agent", href: "/agent", label: "Coding harness", icon: "SquareTerminal", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-fleet", href: "/admin/agents", label: "Fleet", icon: "Cpu", section: "admin", audience: "operator", oasisOnly: true },
+  // Agent-harness training material ("Learn from a link"), moved off Content
+  // Tools (2026-10-10): it shapes how OASIS's own agents write, not a
+  // workspace content tool, so it is an Admin door, not a Content one.
+  { id: "admin-agent-training", href: "/admin/agent-training", label: "Agent training", icon: "GraduationCap", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-runs", href: "/runs", label: "Runs", icon: "History", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-inbox", href: "/inbox", label: "Inbox", icon: "Inbox", section: "admin", audience: "operator", oasisOnly: true },
 ];

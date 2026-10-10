@@ -25,12 +25,10 @@ import {
   NOT_SET_UP,
   RUN_STOPPED,
   charsText,
-  hardFailLine,
   isInFlight,
   refusalLine,
   runTime,
   runsOnText,
-  scoreText,
   seenText,
   statusLabel,
   urlFieldLine,
@@ -90,16 +88,13 @@ async function main() {
     assert.deepEqual(["queued", "claimed", "running", "done", "failed"].map((x) => isInFlight({ status: x as never })), [true, true, true, false, false]);
   });
 
-  await check("numbers and lines: score, characters, over the limit, the runner, hard fails", () => {
-    assert.equal(scoreText(92.6), "Score 92.6%");
+  await check("numbers and lines: characters, over the limit, the runner, seen", () => {
     assert.equal(charsText(600, 500), "600 of 500 characters");
     assert.deepEqual(variantLines({ chars: 600, max_chars: 500, over_limit: true }), ["600 of 500 characters", "Over the limit"]);
     assert.deepEqual(variantLines({ chars: 10, max_chars: 500, over_limit: false }), ["10 of 500 characters"]);
     assert.equal(runsOnText("CC's PC"), "Runs on CC's PC");
     assert.equal(seenText(3.7), "seen 3 min ago");
     assert.equal(seenText(-2), "seen 0 min ago");
-    assert.equal(hardFailLine("preamble"), "Opens with a greeting or preamble.");
-    assert.equal(hardFailLine("hashtags"), "More than 5 hashtags.");
   });
 
   await check("a run's time is the viewer's own clock, formatted on the client", () => {
@@ -123,10 +118,10 @@ async function main() {
 
   const full: ToolCatalog = {
     installed: true,
-    tools: [card("score_hook"), card("repurpose_post"), card("learn_from_link"), card("video_download", "ready", { label: "CC's PC", lastSeenAt: "2026-10-09T01:00:00.000Z" })],
+    tools: [card("repurpose_post"), card("learn_from_link"), card("video_download", "ready", { label: "CC's PC", lastSeenAt: "2026-10-09T01:00:00.000Z" })],
   };
-  const noAi: ToolCatalog = { installed: true, tools: [card("score_hook"), card("repurpose_post", "needs_ai_account"), card("learn_from_link", "needs_ai_account")] };
-  const unreadable: ToolCatalog = { installed: true, tools: [card("score_hook"), card("repurpose_post", "ai_account_unreadable"), card("learn_from_link", "ai_account_unreadable")] };
+  const noAi: ToolCatalog = { installed: true, tools: [card("repurpose_post", "needs_ai_account"), card("learn_from_link", "needs_ai_account")] };
+  const unreadable: ToolCatalog = { installed: true, tools: [card("repurpose_post", "ai_account_unreadable"), card("learn_from_link", "ai_account_unreadable")] };
   const markup = renderMarkup([
     { id: "full", catalog: full },
     { id: "noAi", catalog: noAi },
@@ -136,8 +131,8 @@ async function main() {
 
   await check("every catalog card is drawn, each with its Run button, and nothing else", () => {
     const html = markup.full;
-    assert.equal(articles(html), 4);
-    assert.deepEqual(buttons(html), ["Score", "Repurpose", "Learn", "Download"]);
+    assert.equal(articles(html), 3);
+    assert.deepEqual(buttons(html), ["Repurpose", "Learn", "Download"]);
     for (const t of full.installed ? full.tools : []) assert.ok(decode(html).includes(t.title), t.title);
     assert.ok(decode(html).includes("Runs on CC's PC"), "the runner is named");
     assert.ok(html.includes(">Tools<"), "the section heading");
@@ -145,14 +140,14 @@ async function main() {
 
   await check("needs an AI account: the connect line and Open Settings, NO fields and NO Run button; no Download card without a runner", () => {
     const html = decode(markup.noAi);
-    assert.equal(articles(markup.noAi), 3);
-    assert.deepEqual(buttons(markup.noAi), ["Score"], "only the tool that can run has a button");
+    assert.equal(articles(markup.noAi), 2);
+    assert.deepEqual(buttons(markup.noAi), [], "no tool here can run without an account");
     assert.equal(html.split(CONNECT_AI).length - 1, 2);
     assert.equal((markup.noAi.match(/href="\/settings\/ai#providers"/g) ?? []).length, 2);
     assert.ok(!html.includes("Download a video"));
     assert.ok(!/<textarea[^>]*id="tool-repurpose_post-post"/.test(markup.noAi), "no field for a tool that cannot run");
     const u = decode(markup.unreadable);
-    assert.deepEqual(buttons(markup.unreadable), ["Score"]);
+    assert.deepEqual(buttons(markup.unreadable), []);
     assert.equal(u.split(AI_UNREADABLE).length - 1, 2);
     assert.ok(!u.includes("Open Settings"), "an unreadable account is not a missing one");
   });

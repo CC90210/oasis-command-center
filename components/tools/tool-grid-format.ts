@@ -101,16 +101,8 @@ export function seenLine(lastSeenAt: string, nowMs: number): string | null {
   const seen = Date.parse(lastSeenAt);
   return Number.isFinite(seen) ? seenText((nowMs - seen) / 60_000) : null;
 }
-export const scoreText = (pct: number) => `Score ${pct}%`;
 export const charsText = (n: number, max: number) => `${n} of ${max} characters`;
 export const OVER_LIMIT = "Over the limit";
-
-/** The scorer's hard-fail codes in words. */
-export function hardFailLine(code: string): string {
-  if (code === "preamble") return "Opens with a greeting or preamble.";
-  if (code === "hashtags") return "More than 5 hashtags.";
-  return code;
-}
 
 /** The line for a URL field the validator refused, by tool, or null for no line. */
 export function urlFieldLine(toolKey: string, code: string): string | null {

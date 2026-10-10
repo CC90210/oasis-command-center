@@ -29,14 +29,12 @@ import {
   RUN_STOPPED,
   SAVED_TO_TRAINING,
   SEEN_REFRESH_MS,
-  hardFailLine,
   isInFlight,
   nextPollIn,
   refusalLine,
   runInput,
   runTime,
   runsOnText,
-  scoreText,
   seenLine,
   statusLabel,
   urlFieldLine,
@@ -55,6 +53,8 @@ export type ToolGridProps = {
   showCodes?: boolean;
   /** Spacing around the section, set by the page that places it. */
   className?: string;
+  /** False when a caller already supplies the "Tools" heading (a disclosure it is nested in). */
+  showHeading?: boolean;
 };
 
 const HEADING = "px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted";
@@ -68,12 +68,15 @@ export function ToolGrid({
   settingsAiHref = setupHref("ai_account"),
   showCodes = false,
   className = "",
+  showHeading = true,
 }: ToolGridProps) {
   return (
-    <section aria-labelledby="tools-heading" className={`space-y-3 ${className}`.trim()}>
-      <h2 id="tools-heading" className={HEADING}>
-        Tools
-      </h2>
+    <section aria-labelledby={showHeading ? "tools-heading" : undefined} aria-label={showHeading ? undefined : "Tools"} className={`space-y-3 ${className}`.trim()}>
+      {showHeading && (
+        <h2 id="tools-heading" className={HEADING}>
+          Tools
+        </h2>
+      )}
       {!catalog.installed ? (
         <p className="px-1 text-sm text-fg-muted">{NOT_SET_UP}</p>
       ) : (
@@ -95,7 +98,7 @@ export function ToolGrid({
   );
 }
 
-type CardProps = Required<Omit<ToolGridProps, "catalog" | "className">> & { tool: CatalogTool };
+type CardProps = Required<Omit<ToolGridProps, "catalog" | "className" | "showHeading">> & { tool: CatalogTool };
 
 function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAiHref, showCodes }: CardProps) {
   const def = toolByKey(tool.key);
@@ -340,8 +343,6 @@ export function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobV
   const r = job.result as Record<string, unknown> | null;
   if (!r) return <p className="text-xs font-medium text-fg-muted">{statusLabel(job, tool.runsOn)}</p>;
   switch (tool.key) {
-    case "score_hook":
-      return <ScoreResult r={r} />;
     case "repurpose_post":
       return <RepurposeResult r={r} />;
     case "learn_from_link":
@@ -363,27 +364,6 @@ export function LatestRun({ job, tool, assetHrefPrefix, showCodes }: { job: JobV
 }
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-
-function ScoreResult({ r }: { r: Record<string, unknown> }) {
-  const pct = typeof r.score_pct === "number" ? r.score_pct : 0;
-  return (
-    <div className="space-y-1.5">
-      <p className="text-sm font-semibold text-fg">{scoreText(pct)}</p>
-      {strings(r.hard_fails).map((c) => (
-        <p key={c} className="text-xs text-status-hot">
-          {hardFailLine(c)}
-        </p>
-      ))}
-      {strings(r.suggestions).length > 0 && (
-        <ul className="list-disc space-y-1 pl-4 text-xs text-fg-muted">
-          {strings(r.suggestions).map((s) => (
-            <li key={s}>{s}</li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
 
 const PLATFORM_NAMES: Array<[string, string]> = [
   ["linkedin", "LinkedIn"],

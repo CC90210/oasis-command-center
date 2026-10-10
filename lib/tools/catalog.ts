@@ -2,10 +2,12 @@
  * lib/tools/catalog.ts - which tool cards a workspace sees, and in what state.
  * The page passes this to the grid; there is no separate route.
  *
- *   score_hook        always ready (no AI, no network)
- *   repurpose_post,   ready on a usable workspace AI account (switched on, a
- *   learn_from_link   key, not a local model server); otherwise the card says
+ *   repurpose_post    ready on a usable workspace AI account (switched on, a
+ *                     key, not a local model server); otherwise the card says
  *                     to connect one, or that the account could not be read
+ *   learn_from_link   the same account rule, but OASIS-operators-only: it never
+ *                     appears in the default ("client") audience below, only
+ *                     in the "operator" one (Admin > Agent training)
  *   video_download    ONLY while a runner that serves this workspace and lists
  *                     the tool was seen in the last 10 minutes; otherwise no
  *                     card at all (no button that cannot work)
@@ -30,13 +32,32 @@ export type CatalogDeps = {
   readAccount?: (tenantId: string) => Promise<WorkspaceAiAccount | null>;
 };
 
-export async function getToolCatalog(viewer: { tenantId: string }, deps: CatalogDeps = {}): Promise<ToolCatalog> {
+export type CatalogOptions = {
+  /**
+   * "client" (default): every tool EXCEPT an operatorOnly one - what the
+   * Content Tools page shows a workspace founder. "operator": ONLY the
+   * operatorOnly tools - what Admin > Agent training shows a platform
+   * operator. The audience decides which cards exist; it enforces nothing by
+   * itself (lib/tools/session-handlers.ts refuses the run and jobs routes for
+   * an operatorOnly tool to anyone who is not a platform operator, whichever
+   * audience asked for the catalog).
+   */
+  audience?: "client" | "operator";
+};
+
+export async function getToolCatalog(
+  viewer: { tenantId: string },
+  deps: CatalogDeps = {},
+  opts: CatalogOptions = {},
+): Promise<ToolCatalog> {
   if (!deps.db && !tursoConfigured()) return { installed: false };
   const db = deps.db ?? getTursoClient();
   const now = deps.now ?? new Date();
   if (!(await toolTablesInstalled(db))) return { installed: false };
 
-  const needsAccount = TOOL_REGISTRY.some((t) => t.needsAiAccount);
+  const audience = opts.audience ?? "client";
+  const registry = TOOL_REGISTRY.filter((t) => (audience === "operator" ? t.operatorOnly === true : !t.operatorOnly));
+  const needsAccount = registry.some((t) => t.needsAiAccount);
   const readAccount = deps.readAccount ?? readWorkspaceAiAccount;
   const [aiState, runners] = await Promise.all([
     needsAccount
@@ -52,7 +73,7 @@ export async function getToolCatalog(viewer: { tenantId: string }, deps: Catalog
   ]);
 
   const tools: CatalogTool[] = [];
-  for (const t of TOOL_REGISTRY) {
+  for (const t of registry) {
     const base = { key: t.key, title: t.title, description: t.description, runLabel: t.runLabel, runsOn: t.runsOn, fields: t.fields };
     if (t.runsOn === "runner") {
       const runner = runners.find((r) => r.tools.includes(t.key));
