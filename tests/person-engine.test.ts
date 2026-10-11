@@ -331,6 +331,12 @@ async function main() {
     assert.doesNotMatch(r, /effective\.source === "workspace" \? effective\.engine : null/);
   });
 
+  await check("/health always scopes to a viewer and fails closed: no unscoped fallback, and a failed owner read is not the owner", () => {
+    const h = src("app/health/page.tsx");
+    assert.doesNotMatch(h, /AttentionViewer \| undefined/, "the page never passes an omitted (unscoped) viewer");
+    assert.match(h, /safe\("health\.agents_owner", isAgentsOwner\(tenantId, viewerAuthId\), false\)/);
+  });
+
   await check("P2: a failed first load of Your computers shows the error and a retry, never an endless spinner", () => {
     const c = src("components/settings/YourComputersCard.tsx");
     const errorBranch = c.indexOf("if (devices === null && error)");

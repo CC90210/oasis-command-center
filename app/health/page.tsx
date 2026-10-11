@@ -83,9 +83,16 @@ export default async function HealthPage() {
   // O3b: who is looking, so the machine card/verdict describe THEIR OWN
   // computer (never whichever pairing is newest workspace-wide), and the
   // fleet reporter + background workers stay the agents owner's alone.
+  // Fail closed (CodeRabbit, PR #588): a viewer we cannot identify sees what a
+  // non-owner with no computers sees, never the unscoped view of everyone's
+  // computers and the owner's workers; and an owner read that throws is "not
+  // the owner", never a crashed page.
   const profile = await safe("health.profile", getActiveProfile(), null);
-  const viewer: AttentionViewer | undefined =
-    profile?.auth_user_id ? { authUserId: profile.auth_user_id, isAgentsOwner: await isAgentsOwner(tenantId, profile.auth_user_id) } : undefined;
+  const viewerAuthId = profile?.auth_user_id ?? "";
+  const viewer: AttentionViewer = {
+    authUserId: viewerAuthId,
+    isAgentsOwner: viewerAuthId ? await safe("health.agents_owner", isAgentsOwner(tenantId, viewerAuthId), false) : false,
+  };
 
   const [system, enabledAgents, tenant] = await Promise.all([
     loadSystemHealth(tenantId, { now, viewer }),
