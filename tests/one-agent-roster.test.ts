@@ -812,6 +812,7 @@ async function main() {
   // mention was told "<Department> is not set up", and a channel mapping was
   // refused "no AI teammate", for departments that have one.
   await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__187_os_connections.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__209_connection_vendor_principal.sql"), "utf8"));
   await db.executeMultiple(`
     CREATE TABLE approvals (id TEXT PRIMARY KEY, tenant_id TEXT, idempotency_key TEXT);
     CREATE TABLE "tenant_integration_credentials" (

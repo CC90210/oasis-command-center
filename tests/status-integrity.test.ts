@@ -180,6 +180,7 @@ async function main() {
     CREATE TABLE tenant_manifests (tenant_id TEXT, slug TEXT, manifest TEXT, updated_at TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
 
   const connectors = await import("../lib/os/connectors");

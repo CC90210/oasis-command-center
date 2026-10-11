@@ -15,12 +15,16 @@ import {
   deleteTenantIntegrationService,
   setTenantIntegrationValue,
 } from "@/lib/tenant-integration-store";
-import { providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { isGenericOAuthProvider, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { revokeAtVendor } from "@/lib/connections/oauth-live";
 import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
 import {
   claimConnection,
   deleteUnprovenClaim,
+  fenceConnectionForDisconnect,
   findActiveConnection,
+  isAccountHeldByAnotherTenant,
+  isPrincipalHeldByAnotherTenant,
   listRecentHealthChecks,
   markConnectionError,
   recordHealthCheck,
@@ -76,6 +80,24 @@ export function resolveProvider(
       ),
     };
   }
+  return { ok: true, provider };
+}
+
+/**
+ * Resolve a [provider] segment for Disconnect only: unknown → 404, but NOT
+ * gated on whether OASIS's app for it is configured on THIS deployment.
+ * Disconnect's job is removing OASIS's own copy of an EXISTING connection
+ * (made when the app was configured here, or made on a deployment that still
+ * has it) — a workspace must always be able to do that, even from a
+ * deployment missing the vendor's Worker secrets or CONNECTIONS_OAUTH_STATE_SECRET
+ * (Codex review, PR #574: Disconnect was answering 409 coming_soon for an
+ * owner trying to remove a connection that already existed). The vendor
+ * revoke that follows is already best-effort (revokeAtVendor returns false,
+ * never throws, when the app has no client configured here).
+ */
+export function resolveProviderForDisconnect(id: string): { ok: true; provider: ProviderDef } | { ok: false; result: ServiceResult } {
+  const provider = providerById(id);
+  if (!provider) return { ok: false, result: fail(404, "unknown_provider", "OASIS has no connection called that.") };
   return { ok: true, provider };
 }
 
@@ -292,13 +314,32 @@ export async function undoUnsavedClaim(
     if (undone) return;
     console.error("[connections.connect] claim could not be undone; marking it error", { tenantId, connectionId });
   }
-  await markConnectionError(deps.db, {
+  const errored = await markConnectionError(deps.db, {
     tenantId,
     connectionId,
     code: "credential_missing",
     detail: "OASIS could not save the new key. Paste it again.",
     now: deps.now(),
+    // Fenced on THIS claim's own version: if this cleanup runs late (after a
+    // completely different, later reconnect has already claimed AND saved),
+    // the row has moved past this version and the error-mark (and any
+    // principal restore) must not land on top of that newer, consistent
+    // state (Codex review, PR #574).
+    expectedTokenVersion: claim.connection.token_version,
+    // A reconnect (same account, possibly a DIFFERENT vendor user) already
+    // overwrote vendor_principal_id before this token save failed; the row's
+    // STORED tokens are still the ones from claim.previous's owner, so the
+    // principal must go back to matching them (security review, PR #574).
+    // A brand-new claim has no previous principal to restore — its own id
+    // was never wrong, so the key is omitted rather than passed as null.
+    ...(claim.previous ? { restorePreviousVendorPrincipalId: { value: claim.previous.vendor_principal_id } } : {}),
   });
+  if (!errored) {
+    // Fenced out, not failed: a newer write (a completed reconnect, or a
+    // Disconnect) already moved this row past this claim's version. That
+    // newer state is the real one — leave it alone, log once, never retry.
+    console.error("[connections.connect] claim's error-mark was fenced out by a newer write; leaving the newer row alone", { tenantId, connectionId });
+  }
 }
 
 // ── Test again ────────────────────────────────────────────────────────────
@@ -332,10 +373,49 @@ export async function disconnectConnection(
   const row = await findActiveConnection(deps.db, actor.tenantId, provider.id);
   if (!row) return { status: 200, body: { ok: true, already_disconnected: true } };
 
+  // FENCE first, before anything slow starts (the vendor revoke below can
+  // take up to ~10 s): a save already in flight for the version this row held
+  // a moment ago — the OAuth callback's fenced save, or a refresher's — now
+  // lands nothing once it finally runs, instead of racing the delete and the
+  // revoke that follow (Codex review, PR #574).
+  await fenceConnectionForDisconnect(deps.db, { tenantId: actor.tenantId, connectionId: row.id });
+
   // What the provider kept that must go with the connection (Slack: the
   // channel map and the people it looked up). Worked out before anything is
   // deleted, and deleted in the revoke's own batch.
   const alsoDelete = provider.id === "slack" ? await slackDisconnectStatements(deps.db, actor.tenantId, row.external_account_id) : [];
+
+  // A sign-in made at the vendor's own page (QuickBooks, Xero, Zoom, WhatsApp):
+  // the vendor is told to forget the grant BEFORE OASIS's copy of the tokens is
+  // deleted (they are what proves the request). A vendor that cannot be asked
+  // never blocks the disconnect: OASIS's copy still goes, and the answer says
+  // the owner should also remove OASIS in the vendor's own settings.
+  //
+  // UNLESS another workspace's live connection shares the same vendor-side
+  // ACCOUNT, or (for a provider whose revoke acts on the whole vendor USER,
+  // not the account — WhatsApp's DELETE /me/permissions de-authorizes every
+  // WhatsApp Business Account that Facebook user ever approved, for ANY
+  // workspace) the same vendor PRINCIPAL. Zoom's revoke deauthorizes the
+  // whole account and Intuit's the whole company — for them the account IS
+  // the right boundary, already covered by the account check. For WhatsApp,
+  // if the principal could not even be read at connect time, OASIS has no
+  // way to rule out another workspace sharing it, so it is not asked either
+  // (security review, PR #574). This workspace's own copy is always deleted
+  // either way; the vendor is just never told to forget access someone else
+  // is still relying on.
+  let vendorRevoked: boolean | null = null;
+  let vendorRevokeSkippedReason: "shared_with_another_workspace" | "vendor_principal_unknown" | null = null;
+  if (isGenericOAuthProvider(provider)) {
+    const accountShared = !!row.external_account_id && (await isAccountHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.external_account_id));
+    const principalShared = !!row.vendor_principal_id && (await isPrincipalHeldByAnotherTenant(deps.db, actor.tenantId, provider.id, row.vendor_principal_id));
+    if (accountShared || principalShared) {
+      vendorRevokeSkippedReason = "shared_with_another_workspace";
+    } else if (provider.id === "whatsapp" && !row.vendor_principal_id) {
+      vendorRevokeSkippedReason = "vendor_principal_unknown";
+    } else {
+      vendorRevoked = await revokeAtVendor(deps, row);
+    }
+  }
 
   const removed = await deleteTenantIntegrationService({ tenantId: actor.tenantId, service: credentialServiceFor(row.id) });
   if (!removed.ok) {
@@ -363,9 +443,25 @@ export async function disconnectConnection(
     actor: { userId: actor.userId, email: actor.email },
     action: "connection.revoked",
     connectionId: row.id,
-    after: { provider: provider.id, account_id: row.external_account_id, credentials_deleted: removed.deleted },
+    after: {
+      provider: provider.id,
+      account_id: row.external_account_id,
+      credentials_deleted: removed.deleted,
+      ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+      // Never names the other workspace — just that this one was not alone.
+      ...(vendorRevokeSkippedReason ? { vendor_revoked: false, vendor_revoke_skipped_reason: vendorRevokeSkippedReason } : {}),
+    },
   });
-  return { status: 200, body: { ok: true, disconnected: true, credentials_deleted: removed.deleted } };
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      disconnected: true,
+      credentials_deleted: removed.deleted,
+      ...(vendorRevoked === null ? {} : { vendor_revoked: vendorRevoked }),
+      ...(vendorRevokeSkippedReason ? { vendor_revoked: false, vendor_revoke_skipped_reason: vendorRevokeSkippedReason } : {}),
+    },
+  };
 }
 
 // ── Status ────────────────────────────────────────────────────────────────

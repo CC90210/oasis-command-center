@@ -334,6 +334,13 @@ const EXEMPT_HOSTS: Record<string, string> = {
   "api.cal.com": "client's own Cal.com: key Test only (GET /v2/me), sends no personal information, stores nothing returned",
   "api.fathom.ai": "client's own Fathom: key Test only (list meetings, discarded), sends no personal information, stores nothing returned",
   "api.fireflies.ai": "client's own Fireflies: key Test only (user query), sends no personal information, stores nothing returned",
+  // The client's OWN Xero and Zoom, signed in at the vendor's own page
+  // (lib/connections/oauth-adapters.ts). Only the sign-in, the hourly check and
+  // Disconnect run: each sends nothing but the client's own access token, and
+  // the only thing kept from an answer is the account's name, shown on its card.
+  // A sync that reads the client's books or calls moves the vendor to SUBPROCESSORS.
+  "api.xero.com": "client's own Xero: sign-in and hourly check only (list connected organisations), sends no personal information, keeps only the organisation's name",
+  "api.zoom.us": "client's own Zoom: sign-in and hourly check only (GET /users/me), sends no personal information, keeps only the account's email as the card's label",
 };
 // Those exemptions are true only while the probes are the only callers.
 {
@@ -341,7 +348,7 @@ const EXEMPT_HOSTS: Record<string, string> = {
   for (const dir of ["app", "lib", "components"]) {
     for (const file of walk(dir)) {
       const src = readFileSync(file, "utf8");
-      for (const host of ["api.calendly.com", "api.cal.com", "api.fathom.ai", "api.fireflies.ai"]) {
+      for (const host of ["api.calendly.com", "api.cal.com", "api.fathom.ai", "api.fireflies.ai", "api.xero.com", "api.zoom.us"]) {
         if (src.includes(`https://${host}`)) callers.set(host, [...(callers.get(host) ?? []), file.slice(root.length + 1).replace(/\\/g, "/")]);
       }
     }
@@ -349,8 +356,8 @@ const EXEMPT_HOSTS: Record<string, string> = {
   for (const [host, files] of callers) {
     for (const f of files) {
       assert.ok(
-        f === "lib/integrations/key-probes.ts" || f === "lib/tenant-integration-schemas.ts",
-        `${f} calls ${host}: the exemption covers only the key Test. A sync that reads client data must list the vendor on /privacy.`,
+        f === "lib/integrations/key-probes.ts" || f === "lib/tenant-integration-schemas.ts" || f === "lib/connections/oauth-adapters.ts",
+        `${f} calls ${host}: the exemption covers only the key Test and the sign-in check. A sync that reads client data must list the vendor on /privacy.`,
       );
     }
   }

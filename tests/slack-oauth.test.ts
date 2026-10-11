@@ -194,6 +194,7 @@ async function main() {
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
   const stamp = "2026-09-01T00:00:00Z";
   // Each client workspace as OASIS provisions it: its manifest is the roster
@@ -261,28 +262,32 @@ async function main() {
     }
     assert.equal(registry.providerAvailability(slack, SLACK_ENV), "live");
     assert.deepEqual(registry.missingProviderEnv(slack, { SLACK_CLIENT_ID: "x" }), ["SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"]);
-    // Every other coming-soon OAuth provider stays coming soon whatever the env holds.
-    for (const id of ["quickbooks", "xero", "gohighlevel", "meta", "zoom", "plaid"]) {
-      assert.equal(registry.providerAvailability(registry.providerById(id)!, { ...SLACK_ENV, INTUIT_CLIENT_ID: "x", INTUIT_CLIENT_SECRET: "y" }), "coming_soon", id);
+    // Slack's secrets switch on Slack and nothing else: every other provider
+    // needs its own app's secrets (QuickBooks, Xero, Zoom, WhatsApp), or is not an
+    // OAuth app of OASIS's at all (GoHighLevel, Meta Ads and Plaid connect with keys).
+    for (const id of ["quickbooks", "xero", "gohighlevel", "meta", "zoom", "plaid", "whatsapp"]) {
+      assert.equal(registry.providerAvailability(registry.providerById(id)!, SLACK_ENV), "coming_soon", id);
     }
+    assert.equal(registry.providerAvailability(registry.providerById("quickbooks")!, { ...SLACK_ENV, INTUIT_CLIENT_ID: "x", INTUIT_CLIENT_SECRET: "y" }), "live");
+    assert.equal(registry.providerAvailability(registry.providerById("gohighlevel")!, { ...SLACK_ENV, GHL_CLIENT_ID: "x", GHL_CLIENT_SECRET: "y" }), "coming_soon", "GoHighLevel connects with a token, not OASIS's app");
     assert.deepEqual([...registry.providerById("slack")!.scopes.base].sort(), [
       "app_mentions:read", "channels:history", "channels:read", "chat:write", "commands", "team:read", "users:read", "users:read.email",
     ]);
   });
 
-  await check("with the secrets absent, the Slack card says OASIS is registering with Slack and offers no connect", () => {
-    assert.deepEqual(appNotConfiguredProviders({}), ["slack"]);
+  await check("with the secrets absent, the Slack card says it is not available on this workspace yet and offers no connect", () => {
+    assert.ok(appNotConfiguredProviders({}).includes("slack"));
     const status = connectors.resolveConnectorStatus(
       connectors.connectorBySlug("slack")!,
       { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: appNotConfiguredProviders({}) },
       Date.now(),
     );
     assert.equal(status.kind, "coming_soon");
-    assert.equal(status.label, "OASIS is registering with Slack");
-    assert.deepEqual(appNotConfiguredProviders(SLACK_ENV), []);
+    assert.equal(status.label, "Not available on this workspace yet");
+    assert.ok(!appNotConfiguredProviders(SLACK_ENV).includes("slack"), "Slack's secrets set: Slack is configured");
   });
 
-  await check("an ALREADY-connected workspace with the secrets absent is never told 'registering': it sees its connection needs attention", () => {
+  await check("an ALREADY-connected workspace with the secrets absent is never told the app is unavailable: it sees its connection needs attention", () => {
     const status = connectors.resolveConnectorStatus(
       connectors.connectorBySlug("slack")!,
       {
@@ -295,14 +300,14 @@ async function main() {
     );
     assert.equal(status.kind, "attention");
     assert.match(status.label, /Connected/);
-    assert.doesNotMatch(status.label, /registering/i);
-    // A revoked connection is not "connected": the registering state stands.
+    assert.doesNotMatch(status.label, /registering|Not available/i);
+    // A revoked connection is not "connected": the unavailable state stands.
     const revoked = connectors.resolveConnectorStatus(
       connectors.connectorBySlug("slack")!,
       { keyRows: [], personalGoogle: null, connections: [{ provider: "slack", status: "revoked" } as never], appNotConfigured: appNotConfiguredProviders({}) },
       Date.now(),
     );
-    assert.equal(revoked.label, "OASIS is registering with Slack");
+    assert.equal(revoked.label, "Not available on this workspace yet");
   });
 
   await check("authorize refuses when the app is not configured: nothing is written, the browser is told why", async () => {

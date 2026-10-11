@@ -330,6 +330,7 @@ async function main() {
     CREATE TABLE sunbiz_phone_suppressions (tenant_id TEXT, phone_last10 TEXT);
   `);
   await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__209_connection_vendor_principal.sql"));
   // The webhook routing table and its indexes (W10a R6). The code is also
   // proven to route before bravo__201 exists (section 7).
   await db.executeMultiple(CHANNEL_ACCOUNTS_DDL);
