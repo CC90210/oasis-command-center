@@ -2825,6 +2825,44 @@ export async function record_tenant_cron_run(client: Client, args: Record<string
 
   return { ok: true, run_count: Number(newCount) };
 }
+/**
+ * Redeem a pair code and mint/rotate its bridge_pairings row, ALL inside one
+ * client.batch('write') — one libSQL transaction, the same primitive this
+ * file already uses for record_lead_touch, force_materialize_today_plan and
+ * the partial-unique-index upsert in consume_texttorrent_rate_token.
+ *
+ * O0 security review (atomicity / fail-open state drift). The first fix for
+ * "redeem_pair_code only ever INSERTed" (O0 correctness review, MEDIUM) read
+ * the conflicting row with a plain client.execute() BEFORE a separate
+ * client.batch() — a TOCTOU window between the read and the write. An
+ * interactive client.transaction('write') (the primitive transition_pipeline_
+ * lead uses) closes that window but hits a native-binding fault specific to
+ * this project's local-file @libsql/client test driver on a rollback taken
+ * from inside a catch block (`Cannot read private member #database`) — a
+ * driver-level fragility, not a reason to accept a wider TOCTOU.
+ *
+ * Instead, BOTH statements are self-contained (each derives tenant_id /
+ * auth_user_id from the code row by `code`, never from a value read outside
+ * this one batch) and share ONE conflict signal:
+ *   Stmt A — the pairing upsert. A fresh fingerprint INSERTs. A fingerprint
+ *     already live under the SAME auth_user_id hits the partial-unique-index
+ *     ON CONFLICT and rotates that row in place (same id, new token) via the
+ *     DO UPDATE ... WHERE gate. A fingerprint live under ANYONE ELSE (or a
+ *     legacy row with no recorded owner) fails that WHERE gate, leaves the
+ *     existing row untouched, and contributes 0 to rowsAffected — the gate
+ *     IS the conflict refusal, not a separate check that can go stale.
+ *   Stmt B — the code consume: `WHERE consumed_at IS NULL AND expires_at >=
+ *     now`, the review's required authoritative gate, checked by
+ *     rowsAffected, AND an EXISTS clause requiring a live row for this
+ *     fingerprint under MY OWN auth_user_id — true if and only if Stmt A
+ *     just succeeded for me. If Stmt A left someone else's row untouched,
+ *     this EXISTS is false and Stmt B also affects 0 rows: the code is never
+ *     marked used over a pairing write that was refused.
+ * A batch is one transaction: any thrown driver error — not a 0-row gate,
+ * but a genuine fault — rolls back EVERYTHING in it, Stmt A's write included.
+ * Two concurrent redeems of the same code serialize on 'write' mode; the
+ * loser's own Stmt A/B see the code already consumed and affect 0 rows.
+ */
 export async function redeem_pair_code(client: Client, args: Record<string, unknown>): Promise<unknown> {
   const p_code = (args.p_code ?? null) as string | null;
   const p_token_hash = (args.p_token_hash ?? null) as string | null;
@@ -2832,6 +2870,8 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
   const p_fingerprint = (args.p_fingerprint ?? null) as string | null;
 
   const nowIso = new Date().toISOString();
+  const label = p_label ?? 'Local install'; // COALESCE: only NULL falls back, '' does not
+  const freshPairingId = crypto.randomUUID();
 
   // Mirrors the PL/pgSQL error precedence: NOT_FOUND -> CONSUMED -> EXPIRED.
   const assertRedeemable = (row: Record<string, unknown> | undefined): void => {
@@ -2840,63 +2880,86 @@ export async function redeem_pair_code(client: Client, args: Record<string, unkn
     if (typeof row.expires_at === 'string' && row.expires_at < nowIso) throw new Error('PCODE_EXPIRED');
   };
 
-  // Pre-flight read (stands in for SELECT ... FOR UPDATE; the batch below
-  // re-validates every predicate atomically inside the write transaction).
-  const pre = await client.execute({
-    sql: 'SELECT id, tenant_id, auth_user_id, expires_at, consumed_at FROM bridge_pair_codes WHERE code = ? LIMIT 1',
-    args: [p_code],
-  });
-  const codeRow = pre.rows[0] as unknown as Record<string, unknown> | undefined;
-  assertRedeemable(codeRow);
-
-  const codeId = String((codeRow as Record<string, unknown>).id);
-  const tenantId = (codeRow as Record<string, unknown>).tenant_id as string;
-  const authUserId = (codeRow as Record<string, unknown>).auth_user_id as string;
-
-  const pairingId = crypto.randomUUID();
-  const label = p_label ?? 'Local install'; // COALESCE: only NULL falls back, '' does not
-
-  // Atomic compare-and-swap replacing FOR UPDATE + same-transaction INSERT/UPDATE.
-  // libsql batch('write') is a single transaction: the INSERT fires only if the
-  // code row is still unconsumed and unexpired AT TRANSACTION TIME; the UPDATE
-  // consumes the code only if the INSERT fired. The client therefore sees one of:
-  //   * success: code consumed AND pairing exists
-  //   * failure: code untouched AND no pairing
-  // INSERT precedes UPDATE so the consumed_by_pairing_id FK is satisfiable.
-  const results = await client.batch(
-    [
-      {
+  const pairStmt = p_fingerprint
+    ? {
         sql:
           'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
           'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, ?, ? ' +
-          'FROM bridge_pair_codes bpc ' +
-          'WHERE bpc.id = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
-        args: [pairingId, label, p_token_hash, p_fingerprint, nowIso, codeId, nowIso],
-      },
-      {
+          'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ? ' +
+          'ON CONFLICT (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL DO UPDATE SET ' +
+          'bridge_token_hash = excluded.bridge_token_hash, label = excluded.label, last_seen_at = excluded.last_seen_at ' +
+          'WHERE bridge_pairings.user_id = excluded.user_id',
+        args: [freshPairingId, label, p_token_hash, p_fingerprint, nowIso, p_code, nowIso],
+      }
+    : {
+        // No fingerprint, no uniqueness concept (NULL never collides in the
+        // partial index) — a plain insert, same as before this fix.
         sql:
-          'UPDATE bridge_pair_codes ' +
-          'SET consumed_at = ?, consumed_by_pairing_id = ? ' +
-          'WHERE id = ? AND consumed_at IS NULL ' +
+          'INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at) ' +
+          'SELECT ?, bpc.tenant_id, bpc.auth_user_id, ?, ?, NULL, ? ' +
+          'FROM bridge_pair_codes bpc WHERE bpc.code = ? AND bpc.consumed_at IS NULL AND bpc.expires_at >= ?',
+        args: [freshPairingId, label, p_token_hash, nowIso, p_code, nowIso],
+      };
+
+  const consumeStmt = p_fingerprint
+    ? {
+        sql:
+          'UPDATE bridge_pair_codes SET consumed_at = ?, consumed_by_pairing_id = (' +
+          'SELECT bp.id FROM bridge_pairings bp ' +
+          'WHERE bp.tenant_id = (SELECT tenant_id FROM bridge_pair_codes WHERE code = ?) ' +
+          'AND bp.machine_fingerprint = ? AND bp.revoked_at IS NULL ' +
+          'AND bp.user_id = (SELECT auth_user_id FROM bridge_pair_codes WHERE code = ?) LIMIT 1) ' +
+          'WHERE code = ? AND consumed_at IS NULL AND expires_at >= ? AND EXISTS (' +
+          'SELECT 1 FROM bridge_pairings bp ' +
+          'WHERE bp.tenant_id = (SELECT tenant_id FROM bridge_pair_codes WHERE code = ?) ' +
+          'AND bp.machine_fingerprint = ? AND bp.revoked_at IS NULL ' +
+          'AND bp.user_id = (SELECT auth_user_id FROM bridge_pair_codes WHERE code = ?))',
+        args: [nowIso, p_code, p_fingerprint, p_code, p_code, nowIso, p_code, p_fingerprint, p_code],
+      }
+    : {
+        sql:
+          'UPDATE bridge_pair_codes SET consumed_at = ?, consumed_by_pairing_id = ? ' +
+          'WHERE code = ? AND consumed_at IS NULL AND expires_at >= ? ' +
           'AND EXISTS (SELECT 1 FROM bridge_pairings WHERE id = ?)',
-        args: [nowIso, pairingId, codeId, pairingId],
-      },
-    ],
-    'write'
-  );
+        args: [nowIso, freshPairingId, p_code, nowIso, freshPairingId],
+      };
+
+  let results: Awaited<ReturnType<typeof client.batch>>;
+  try {
+    results = await client.batch([pairStmt, consumeStmt], 'write');
+  } catch (e) {
+    // A genuine driver fault (not a 0-row gate) rolled back the whole batch
+    // — Stmt A's write, if it ran, is undone along with everything else.
+    throw dbError('redeem_pair_code', driverError(e));
+  }
 
   if ((results[1]?.rowsAffected ?? 0) !== 1) {
-    // Lost a race between the pre-flight read and the batch (a concurrent
-    // redeemer consumed the code, or it expired in the gap). Re-read committed
-    // state and raise the same error the Postgres FOR UPDATE path would raise.
+    // Nothing was consumed. Re-read the code's committed state to report the
+    // precise reason: if it is still genuinely redeemable, the only
+    // remaining explanation is the fingerprint-conflict gate in Stmt A/B.
     const post = await client.execute({
-      sql: 'SELECT id, consumed_at, expires_at FROM bridge_pair_codes WHERE id = ? LIMIT 1',
-      args: [codeId],
+      sql: 'SELECT id, consumed_at, expires_at FROM bridge_pair_codes WHERE code = ? LIMIT 1',
+      args: [p_code],
     });
     assertRedeemable(post.rows[0] as unknown as Record<string, unknown> | undefined);
-    // Unreachable unless the row mutated in a way the CAS predicates exclude.
-    throw new Error('redeem_pair_code: conditional consume failed');
+    // Defensive invariant: Stmt A and Stmt B are gated on the exact same
+    // fact (a live row under MY auth_user_id), so Stmt A succeeding while
+    // Stmt B does not should be unreachable. Never report a refusal that
+    // leaves a pairing write unaccounted for — surface it loudly instead.
+    if ((results[0]?.rowsAffected ?? 0) === 1) {
+      throw new Error('redeem_pair_code: invariant_violation_pairing_written_without_consume');
+    }
+    throw new Error('PCODE_MACHINE_CONFLICT');
   }
+
+  const final = await client.execute({
+    sql: 'SELECT tenant_id, auth_user_id, consumed_by_pairing_id FROM bridge_pair_codes WHERE code = ? LIMIT 1',
+    args: [p_code],
+  });
+  const row = final.rows[0] as unknown as Record<string, unknown> | undefined;
+  const tenantId = String(row?.tenant_id ?? '');
+  const authUserId = String(row?.auth_user_id ?? '');
+  const pairingId = String(row?.consumed_by_pairing_id ?? '');
 
   // Resolve profile_id for response shape parity with /api/auth/pair.
   const prof = await client.execute({
