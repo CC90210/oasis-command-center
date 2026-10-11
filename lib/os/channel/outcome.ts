@@ -219,6 +219,8 @@ const ROUTE_ERRORS = {
   // channel's last turn (see department-agent.ts's PAUSE_HINT for the
   // per-reason wording this generic sentence stands in for here).
   computer_not_yours: "Department chats in this workspace run on each person's own computer, and yours isn't connected yet. Nothing was sent.",
+  computer_owner_not_set: "No one has been set as this workspace's computer owner yet, so department chats are paused. Nothing was sent.",
+  computer_owner_unavailable: "Could not confirm this workspace's computer owner just now. Nothing was sent. Try again in a moment.",
   // POST /api/os/runs into a conversation that holds an automation's runs
   // (lib/os/runs/send.ts): that conversation is the automation's record.
   automation_conversation: "This conversation is an automation's record, so it can't take new messages. Start a new chat to ask a question.",

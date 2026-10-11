@@ -163,6 +163,16 @@ async function main() {
     assert.equal(await via("bridge_not_enabled_for_tenant"), null);
   });
 
+  // Each reason its own code (CodeRabbit, PR #583): the client shows only the
+  // code's sentence, so a missing owner row must not read as "yours isn't
+  // connected yet".
+  const EXPECTED_CODE = {
+    not_your_computer: "computer_not_yours",
+    agents_owner_not_set: "computer_owner_not_set",
+    agents_owner_unavailable: "computer_owner_unavailable",
+  } as const;
+  const { failureCopy } = await import("../lib/os/channel/outcome");
+
   for (const reason of ["not_your_computer", "agents_owner_not_set", "agents_owner_unavailable"] as const) {
     await check(`prepareAgentTurn: a non-owner refused as ${reason} gets the pause refusal, no key, no platform fallback, no usage row`, async () => {
       await db.execute("DELETE FROM ai_usage_events");
@@ -171,7 +181,8 @@ async function main() {
       assert.ok(!refused.ok, JSON.stringify(refused));
       if (refused.ok) return;
       assert.equal(refused.status, 409);
-      assert.equal(refused.error, "computer_not_yours");
+      assert.equal(refused.error, EXPECTED_CODE[reason], "each reason has its own code, so the client shows its own sentence");
+      assert.match(failureCopy(EXPECTED_CODE[reason]).sentence, /Nothing was sent/, "every refusal code has its own plain sentence");
       assert.equal(refused.recordAs, undefined, "never a verdict on the workspace's AI account");
       assert.match(String((refused.extra as { hint?: string })?.hint), /Nothing was sent/);
       assert.doesNotMatch(String((refused.extra as { hint?: string })?.hint), /—/, "no em dash in client-facing copy");
@@ -212,7 +223,12 @@ async function main() {
     const okTrueAt = src.indexOf("ok: true,");
     assert.ok(refusedAt > 0, "resolveRunSession must check the bridge resolution for a BridgeRefused");
     assert.ok(okTrueAt > 0 && refusedAt < okTrueAt, "the refused check must come before the ok:true session is returned");
-    assert.match(src, /status: 409, error: "computer_not_yours"/);
+    assert.match(src, /status: 409, error: BRIDGE_REFUSAL_ERROR\[bridge\.refused\]/);
+    // The fleet-control override keys on the owner, never on "is an operator"
+    // (CodeRabbit, PR #583: Adon is an operator since #576).
+    const control = readFileSync(join(ROOT, "app/api/automations/background-workers/control/route.ts"), "utf8");
+    assert.match(control, /const operatorOverride = actorSide === "cc";/);
+    assert.doesNotMatch(control, /operatorOverride = auth\.isOperator/);
     const route = readFileSync(join(ROOT, "app/api/os/runs/route.ts"), "utf8");
     assert.ok(
       route.indexOf("resolveRunSession(") < route.indexOf("sendMessage("),

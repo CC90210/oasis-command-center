@@ -74,7 +74,7 @@ import {
 } from "@/lib/ai/agent-engine";
 import { harnessForDepartment } from "@/lib/admin/harness-targets";
 import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
-import { streamBridgeTurn, type BridgeCaller, type BridgeEngine, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
+import { BRIDGE_REFUSAL_ERROR, streamBridgeTurn, type BridgeCaller, type BridgeEngine, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -339,7 +339,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     return {
       ok: false,
       status: 409,
-      error: "computer_not_yours",
+      error: BRIDGE_REFUSAL_ERROR[resolved.refused],
       extra: { hint: PAUSE_HINT[resolved.refused] },
     };
   }

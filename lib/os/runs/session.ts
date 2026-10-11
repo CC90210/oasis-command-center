@@ -25,7 +25,7 @@ import { operatorNameOverride } from "@/lib/operator-name";
 import { isAdminProfile } from "@/lib/lead-scope";
 import { OS_DEPARTMENTS, type OsDepartment } from "@/lib/os/departments";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
-import { bridgeResolutionForSession, type BridgeCaller, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
+import { BRIDGE_REFUSAL_ERROR, bridgeResolutionForSession, type BridgeCaller, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import type { OsViewerResult } from "@/components/os/department/viewer";
 import type { RunScope } from "./store";
@@ -80,7 +80,7 @@ export async function resolveRunSession(input: { department: string }): Promise<
   // means a non-owner's message never becomes a run row at all: refused, not
   // queued, not saved, not failed.
   if (bridge && "refused" in bridge) {
-    return { ok: false, status: 409, error: "computer_not_yours" };
+    return { ok: false, status: 409, error: BRIDGE_REFUSAL_ERROR[bridge.refused] };
   }
 
   return {

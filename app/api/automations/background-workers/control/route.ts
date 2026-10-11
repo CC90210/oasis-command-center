@@ -145,7 +145,11 @@ export async function POST(req: Request) {
   // that would let Adon's side bounce CC's core-infra daemons, defeating the
   // whole point of this gate. (CodeRabbit PR #81 [Major]: the prior
   // `auth.teamRole === "owner" || auth.isOperator` left exactly that hole.)
-  const operatorOverride = auth.isOperator;
+  // O1 (CodeRabbit, PR #583): the override keys on the SAME identity check as
+  // actorSide. `auth.isOperator` is true for Adon too since PR #576, so it no
+  // longer means "is CC"; an unreadable owner row puts CC on the "adon" side
+  // and refuses him, which is the fail-closed answer.
+  const operatorOverride = actorSide === "cc";
   if (!ownerMatches) {
     await logTenantAudit({
       tenantId: auth.tenantId,

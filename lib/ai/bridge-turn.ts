@@ -197,6 +197,18 @@ export type BridgeUnavailable = { unavailable: "not_set_up" | "gate_error" };
 export type BridgeRefused = { refused: "not_your_computer" | "agents_owner_not_set" | "agents_owner_unavailable" };
 
 /**
+ * The route error each refusal answers with; lib/os/channel/outcome.ts
+ * ROUTE_ERRORS holds each one's sentence. Kept distinct because the client
+ * shows only the code's sentence: a missing or unreadable owner row must not
+ * read as "yours isn't connected yet" (CodeRabbit, PR #583).
+ */
+export const BRIDGE_REFUSAL_ERROR: Record<BridgeRefused["refused"], string> = {
+  not_your_computer: "computer_not_yours",
+  agents_owner_not_set: "computer_owner_not_set",
+  agents_owner_unavailable: "computer_owner_unavailable",
+};
+
+/**
  * bridgeCallerForSession with the reason kept. null is the gate saying NO by
  * design (a teammate who may not use the computer, another workspace's
  * session): the API account answering them is the rule, not a fault. A
