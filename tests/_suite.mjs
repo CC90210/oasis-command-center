@@ -269,6 +269,15 @@ const TESTS = [
   "tests/cron-poll-action-allowlist.test.ts",
   "tests/cron-jobs-refuse-department-task.test.ts",
   "tests/script-automations-operator-only.test.ts",
+  // O2 (2026-10-11): the Automations tab shows only your own. The house
+  // (Empire) lane and the background workers belong to the workspace's
+  // AGENTS OWNER (lib/agents-owner.ts), not merely a verified operator —
+  // PR #576 made Adon one too, without making him CCPC's owner. Unlisted,
+  // these prove nothing.
+  "tests/automations-owner-scope.test.ts",
+  "tests/cron-id-owner.test.ts",
+  "tests/cron-poll-owner.test.ts",
+  "tests/automation-owner-migration.test.ts",
   "tests/automation-schedule-plan.test.ts",
   // A drafted schedule the runner cannot run (day names like MON-FRI) is
   // refused at the draft step in a sentence, save-draft's refusal is a

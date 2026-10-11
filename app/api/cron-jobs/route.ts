@@ -1,7 +1,9 @@
 /**
  * /api/cron-jobs — tenant-scoped scheduled-job inventory and creation.
  *
- * GET  → list tenant jobs plus the operator-only Empire lane. Service-role
+ * GET  → list the caller's own tenant jobs ("yours"), a `team` lane of
+ *        everyone else's for owners/admins, and the Empire (house) lane for
+ *        the workspace's agents owner only (O2, 2026-10-11). Service-role
  *        reads are explicitly constrained by the session tenant ID.
  * POST → create a new job. Body: { agent_key, name, description?, schedule,
  *        action_type, action_payload, enabled? }
@@ -14,9 +16,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { getSessionContext } from "@/lib/team";
+import { canManageTeam, getSessionContext } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
-import { isPlatformOperatorForAuthUser, OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
+import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
+import { readAgentsOwner } from "@/lib/agents-owner";
 import {
   DEPARTMENT_TASK,
   isScriptActionType,
@@ -87,19 +90,25 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const db = getServiceSupabase();
   const tenantId = ctx.tenantId;
+  const authUserId = ctx.authUserId;
+  // Owner/admin: may see everyone else's rows in the `team` lane (switch-off
+  // only — see the [id] route) and the agents-owner-gated workers panel.
+  const isOwnerOrAdmin = canManageTeam(ctx.teamRole, ctx.adminAccess);
   // The bridge writes its pm2 snapshot to integrations_health keyed by
   // profile_id (same scope the background-workers route reads). Needed below
   // to tell a parked cron twin whether its daemon is actually up.
   const profileId = ctx.profileId;
 
-  // Tenant lane — every authed user sees their tenant's jobs. Department tasks
-  // are listed by their own route, with their own owner and visibility rules;
-  // this is a display filter, not a security boundary.
+  // Tenant lane. `select("*")` on purpose, not an explicit column list: this
+  // table predates owner_user_id (database/turso/bravo__211_automation_owner.sql)
+  // and a workspace whose migration has not landed yet must still answer 200
+  // with every row visible (the pre-O2 rule), not "no such column". Rows are
+  // split below into "yours" (the caller's own, or a legacy row with no
+  // recorded owner — same visibility as before O2) and, for owners/admins
+  // only, "team" (everyone else's, read-only but for the switch).
   const tenantQuery = await db
     .from("tenant_cron_jobs")
-    .select(
-      "id, agent_key, name, description, schedule, action_type, action_payload, enabled, last_run_at, last_run_status, last_run_output, last_run_error, run_count, created_at, updated_at",
-    )
+    .select("*")
     .eq("tenant_id", tenantId)
     .neq("action_type", DEPARTMENT_TASK)
     .order("created_at", { ascending: false });
@@ -115,43 +124,106 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
     return NextResponse.json({ ok: false, error: tenantQuery.error.message }, { status: 500 });
   }
-  const tenantJobs = (tenantQuery.data || []).map((j) =>
-    normalizeTenantCronRow(j as Record<string, unknown>),
-  ) as CronInventoryJob[];
+  const allTenantRows = (tenantQuery.data || []) as Array<Record<string, unknown>>;
+  const yoursRaw: Record<string, unknown>[] = [];
+  const teamRaw: Record<string, unknown>[] = [];
+  for (const row of allTenantRows) {
+    const ownerUserId = typeof row.owner_user_id === "string" && row.owner_user_id ? row.owner_user_id : null;
+    if (!ownerUserId || ownerUserId === authUserId) {
+      yoursRaw.push(row);
+    } else if (isOwnerOrAdmin) {
+      teamRaw.push(row);
+    }
+    // A member who is not an owner/admin never sees another person's row at
+    // all — not even a count of it.
+  }
+  // Display names for the team lane's owners — read only for an owner/admin,
+  // and only for the distinct owners actually present, so a plain member (who
+  // never sees `team`) never pays this read.
+  const teamOwnerIds = Array.from(
+    new Set(
+      teamRaw
+        .map((row) => (typeof row.owner_user_id === "string" ? row.owner_user_id : null))
+        .filter((id): id is string => Boolean(id)),
+    ),
+  );
+  const ownerNameById = new Map<string, string>();
+  if (teamOwnerIds.length > 0) {
+    const ownerProfiles = await db
+      .from("user_profiles")
+      .select("auth_user_id, display_name, full_name, email")
+      .eq("tenant_id", tenantId)
+      .in("auth_user_id", teamOwnerIds);
+    if (!ownerProfiles.error) {
+      for (const row of (ownerProfiles.data || []) as Array<{
+        auth_user_id: string | null;
+        display_name: string | null;
+        full_name: string | null;
+        email: string;
+      }>) {
+        if (row.auth_user_id) {
+          ownerNameById.set(row.auth_user_id, row.display_name || row.full_name || row.email);
+        }
+      }
+    }
+  }
+  const tenantJobs = yoursRaw.map((j) => normalizeTenantCronRow(j)) as CronInventoryJob[];
+  const teamJobs = teamRaw.map((j) => {
+    const normalized = normalizeTenantCronRow(j) as CronInventoryJob;
+    const ownerUserId = typeof j.owner_user_id === "string" ? j.owner_user_id : null;
+    return { ...normalized, owner_name: ownerUserId ? ownerNameById.get(ownerUserId) ?? null : null };
+  });
 
-  // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
-  // 084), so the operator's tenantId is the canonical filter. Pre-084 we
-  // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
-  // to suppress tenant-scoped rows that leaked in; the column makes both
-  // unnecessary.
+  // Empire (house) lane — the workspace's AGENTS OWNER only (O2, 2026-10-11).
+  // cron_jobs is tenant-scoped (migration 084), so the agents owner's tenantId
+  // is the canonical filter.
   //
   // Evaluated ONCE and reported on the wire, because every Empire guarantee in
   // this route is armed by this one predicate: the query itself, the fail-loud
   // 500 on an Empire read error, and the non-empty contract in
-  // buildAutomationInventoryMetadata. An identity the predicate does not cover
-  // — a new @oasisai.work alias, a Google-linked session whose email differs, an
-  // OPERATOR_EMAIL regression in the environment — does not trip any of them. It
-  // disarms all three at once and returns a tenant-only 200 that is
-  // indistinguishable from "every Empire schedule was deleted", which is the
-  // exact shape of the 4-of-41 outage. Three separate calls to the predicate
-  // could also drift apart under an edit; one binding cannot.
+  // buildAutomationInventoryMetadata. Before O2 the predicate was "is a
+  // verified platform operator" — but PR #576 made Adon one too, so that
+  // predicate would have handed him CC's house lane the moment it covered him.
+  // "Is literally the one auth user CCPC's computer belongs to"
+  // (lib/agents-owner.ts, database/turso/bravo__210_workspace_agents_owner.sql)
+  // is the narrower, correct question.
   //
-  // The predicate is the VERIFIED check (alias AND owner/admin OASIS membership
-  // by auth id): the email alone was registrable by anyone. A failed membership
-  // lookup answers false — and the verdict on the wire says so, as above.
-  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
+  // A read that FAILS, or OASIS's own workspace with no live owner row, is
+  // answered 500 here — never a workspace-only 200 that looks healthy, which
+  // Adon (a non-owner, valid) and "every house schedule just vanished"
+  // (invalid) would otherwise be indistinguishable. Outside OASIS, a tenant
+  // that has never had an owner row falls through untouched (not_set is
+  // simply "not this tenant's owner"), the same posture
+  // lib/bridge-proxy.ts:authorizeBridgeRequest takes for the SAME reason: this
+  // concept does not exist for a tenant that was never given one.
+  const isOasisOperatorTenant = tenantId === OASIS_OPERATOR_TENANT_ID;
+  const ownerLookup = await readAgentsOwner(tenantId);
+  if (isOasisOperatorTenant) {
+    if (ownerLookup.state === "unavailable") {
+      return NextResponse.json(
+        { ok: false, error: "agents_owner_unavailable", message: "Could not confirm this workspace's computer owner just now. Reload in a moment." },
+        { status: 500 },
+      );
+    }
+    if (ownerLookup.state === "not_set" || ownerLookup.state === "revoked") {
+      return NextResponse.json(
+        { ok: false, error: "agents_owner_not_set", message: "No one is set as this workspace's computer owner, so the house schedules have no one to show them to." },
+        { status: 500 },
+      );
+    }
+  }
+  const isAgentsOwner = ownerLookup.state === "set" && ownerLookup.authUserId === authUserId;
   // The non-empty Empire-lane contract (below, requireEmpireRows) only means
   // something in OASIS's own workspace: cron_jobs is tenant-scoped (migration
-  // 084), so an operator whose ACTIVE profile stands in a CLIENT tenant queries
-  // THAT tenant's empire rows, and a client ordinarily has none at all. Zero
-  // there is the correct, boring answer, not the 4/41 outage this contract
-  // exists to catch — demanding non-empty for every operator turned a client's
+  // 084), so a tenant with its own (future) agents owner queries THAT
+  // tenant's empire rows, and a client ordinarily has none at all. Zero there
+  // is the correct, boring answer, not the 4/41 outage this contract exists
+  // to catch — demanding non-empty for every agents owner turned a client's
   // empty list into a false 503. OASIS itself keeps the fail-loud 503: that is
   // the one tenant where "empty Empire lane" really did mean the schedules
   // vanished.
-  const isOasisOperatorTenant = tenantId === OASIS_OPERATOR_TENANT_ID;
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
-  if (isOperator) {
+  if (isAgentsOwner) {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
@@ -219,12 +291,14 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   try {
     const inventory = buildAutomationInventoryMetadata({
       tenantJobs,
+      teamJobs,
+      teamQueried: isOwnerOrAdmin,
       empireJobs,
-      empireQueried: isOperator,
-      requireEmpireRows: isOperator && isOasisOperatorTenant,
-      isOperator,
+      empireQueried: isAgentsOwner,
+      requireEmpireRows: isAgentsOwner && isOasisOperatorTenant,
+      isAgentsOwner,
     });
-    return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
+    return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], team: teamJobs, inventory });
     // Bound as `cause`, not `error`: this is the catch binding for a contract
     // violation, never a destructured driver error. tests/db-error-contract
     // counts every bare `throw error` in a file that destructures `error` off a
@@ -332,9 +406,19 @@ export async function POST(req: NextRequest) {
   }
   const description = body?.description ? String(body.description).slice(0, 500) : null;
   const enabled = body?.enabled !== false;
+  const nowIso = new Date().toISOString();
 
   // `db` was opened above for the tenant-slug lookup — reuse it for the
   // insert. The service-role client is a process-singleton anyway.
+  //
+  // owner_user_id = the session's auth id, same identity created_by already
+  // used here (unlike save-draft, which wrote the PROFILE id — the drift
+  // bravo__211_automation_owner.sql's backfill exists to fix). Never the
+  // request body: tenant and person come from the session, never the body.
+  // last_scheduled_for = now: O5's due-time evaluator reads it as "already
+  // accounted for up to here", so a brand-new job waits for its next real
+  // occurrence instead of firing at once or reading as a missed run before
+  // it has ever been due.
   const { data, error } = await db
     .from("tenant_cron_jobs")
     .insert({
@@ -347,6 +431,8 @@ export async function POST(req: NextRequest) {
       action_payload: actionPayload,
       enabled,
       created_by: userId,
+      owner_user_id: userId,
+      last_scheduled_for: nowIso,
     })
     .select()
     .single();

@@ -30,7 +30,8 @@ import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
 import { WarmPoolPanel } from "@/components/WarmPoolPanel";
 import { BridgeCliPanel } from "@/components/BridgeCliPanel";
 import { requireOperator } from "@/lib/role-surfaces-session";
-import { loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou } from "@/lib/admin/attention";
+import { HOUSE_SCHEDULER_STALE_MS, loadAttentionSummary, loadWorkspaceOutcome, nothingNeedsYou, type AttentionViewer } from "@/lib/admin/attention";
+import { isAgentsOwner } from "@/lib/agents-owner";
 import { machineState, type MachineState } from "@/lib/devices/presence";
 import { setupHref } from "@/lib/setup-links";
 
@@ -83,6 +84,14 @@ export default async function OperationsPage({
   // The tiles at the top: lib/admin/attention.ts, the one definition of
   // "needs you" (/health draws the same numbers with their lists).
   const tenantId = profile?.tenant_id || null;
+  // O2: house (platform) failures, workers down and untenanted events are the
+  // agents owner's alone — this page is reachable by any verified operator
+  // (requireOperator above), and PR #576 made Adon one too without making
+  // him CCPC's owner.
+  const viewer: AttentionViewer | undefined =
+    tenantId && profile?.auth_user_id
+      ? { authUserId: profile.auth_user_id, isAgentsOwner: await isAgentsOwner(tenantId, profile.auth_user_id) }
+      : undefined;
 
   // Every read below throws on a failed read, the lib/queries ones and the
   // inline ones alike; safe() turns that into null, which each card and tile
@@ -144,8 +153,8 @@ export default async function OperationsPage({
     ),
     // null tenant: every tile says Couldn't check (nothing was read).
     tenantId
-      ? loadAttentionSummary(tenantId)
-      : Promise.resolve({ errors: null, warnings: null, cronFailures: null, workersDown: null, coldLeads: null }),
+      ? loadAttentionSummary(tenantId, { viewer })
+      : Promise.resolve({ errors: null, warnings: null, cronFailures: null, workersDown: null, coldLeads: null, houseScheduler: undefined }),
     // The outcome checks (OASIS: the founder-booking check) count into "All
     // clear" exactly as they count into /health's header. Never throws.
     tenantId
@@ -214,6 +223,17 @@ export default async function OperationsPage({
       </div>
       {allClear && (
         <div className="text-xs text-status-engaged">All clear — nothing needs your attention.</div>
+      )}
+      {/* O2: the agents-owner-only item. Present only for CC (or whoever
+          owns CCPC); absent for everyone else, including a null read, which
+          is why this checks the key itself, not a boolean. */}
+      {attention.houseScheduler?.stalled && (
+        <div className="text-xs text-status-warm">
+          House scheduler has not fetched jobs for over {Math.round(HOUSE_SCHEDULER_STALE_MS / 60_000)} minutes
+          {attention.houseScheduler.lastPollOkAt
+            ? ` (last fetched ${new Date(attention.houseScheduler.lastPollOkAt).toLocaleString()}).`
+            : " (it has never fetched)."}
+        </div>
       )}
       {outcome && outcome.signalCount > 0 && (
         <div className="text-xs text-status-warm">

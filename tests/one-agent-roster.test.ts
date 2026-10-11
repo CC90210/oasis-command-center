@@ -172,7 +172,9 @@ async function main() {
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, updated_at TEXT);
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
       agent_key TEXT, name TEXT, description TEXT, schedule TEXT, action_type TEXT, action_payload TEXT,
-      enabled INTEGER, created_by TEXT, created_at TEXT, updated_at TEXT);
+      enabled INTEGER, created_by TEXT, owner_user_id TEXT, last_scheduled_for TEXT, created_at TEXT, updated_at TEXT);
+    CREATE TABLE workspace_agents_owner (tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL,
+      set_by TEXT NOT NULL, set_at TEXT NOT NULL, note TEXT, revoked_at TEXT);
   `);
 
   const { buildProvisionedManifest, mergeProvisionedManifest } = await import("../lib/provisioning/manifest");
@@ -199,6 +201,13 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'selfsignup', 'Self Signup')", args: [SELFSIGNUP] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'fresh-co', 'Fresh Co')", args: [FRESH] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'suga', 'Suga')", args: [SUGA] },
+      // O2: the house (Empire) cron lane is queried only for OASIS's AGENTS
+      // OWNER (lib/agents-owner.ts) — CC, here, same as production
+      // (database/turso/bravo__210_workspace_agents_owner.sql).
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, USERS.cc.id, USERS.cc.id, stamp],
+      },
       {
         sql: "INSERT INTO tenant_manifests (id, tenant_id, slug, manifest, version, schema_version) VALUES ('m-client', ?, 'client-co', ?, 1, 1)",
         args: [CLIENT, JSON.stringify(provisioned("client-co", "Client Co"))],

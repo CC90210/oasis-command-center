@@ -75,9 +75,11 @@ export async function AutomationsContent({
   // OASIS workspace can have more than one paired computer, and "Your
   // computer is connected" was true only for CC's — Adon read a claim
   // about HIS machine that was false. See lib/bridge-online-copy.ts.
+  // O2 (2026-10-11): scoped to THIS viewer's own pairings — Adon, with none,
+  // now correctly reads "Computer not connected yet" instead of CC's status.
   const onlineLabels = await safe(
     "automations.bridge_online",
-    getOnlineBridgeComputerLabels(profile?.tenant_id || null),
+    getOnlineBridgeComputerLabels(profile?.tenant_id || null, profile?.auth_user_id || null),
     null,
   );
   const bridgeOnline = onlineLabels === null ? null : onlineLabels.length > 0;

@@ -113,6 +113,18 @@ export async function POST(req: NextRequest) {
       await recordPairAttempt(rateKey, "code_consumed", ip);
       return bad(410, "code already redeemed");
     }
+    if (msg.includes("PCODE_MACHINE_CONFLICT")) {
+      // O0 correctness review (MEDIUM): this machine already has a live
+      // pairing in this workspace that belongs to someone else (or to no
+      // one). redeem_pair_code only rotates a live row back to the SAME
+      // person — anything else must not burn the code on a write that can
+      // never succeed, and must not read as a generic 500.
+      await recordPairAttempt(rateKey, "code_redeem_failed", ip);
+      return bad(
+        409,
+        "machine_paired_to_another_person: this computer is already paired in this workspace. Disconnect it in Settings > Devices, then redeem a new code.",
+      );
+    }
     await recordPairAttempt(rateKey, "code_redeem_failed", ip);
     return bad(500, `redeem_failed: ${msg}`);
   }

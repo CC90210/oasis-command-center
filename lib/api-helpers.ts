@@ -250,6 +250,30 @@ export function isMissingTableError(
 }
 
 /**
+ * Detect "the column doesn't exist in the schema yet" — the shape of a read
+ * that outran a migration (O2, database/turso/bravo__211_automation_owner.sql).
+ * libSQL reports this as a message-only `no such column: <name>`, with no
+ * stable error code to key on; Postgres reports 42703 `undefined_column`.
+ * Routes that read a just-added column and must answer a NAMED 503 while the
+ * migration has not landed yet — rather than a 500 with raw driver text, or
+ * (worse) silently treating a real column as absent — call this first.
+ *
+ * `columnHint` is required: a bare message-pattern match on "no such column"
+ * would also catch an unrelated typo'd column name in the SAME query and
+ * misreport it as "migration not applied".
+ */
+export function isMissingColumnError(
+  err: { message?: string; code?: string } | null | undefined,
+  columnHint: string,
+): boolean {
+  if (!err) return false;
+  if (err.code === "42703") return true; // Postgres undefined_column
+  const msg = err.message || "";
+  const escaped = columnHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`no such column:\\s*(?:[\\w."\`]+\\.)?${escaped}\\b`, "i").test(msg);
+}
+
+/**
  * Cross-DB unique-constraint classifier. Postgres-direct and PostgREST
  * report unique violations as code 23505, but the Turso/libSQL path reports
  * them as `SQLITE_CONSTRAINT` with the detail only in the message — code is

@@ -204,8 +204,13 @@ async function main() {
       agent_key TEXT NOT NULL DEFAULT 'bravo', name TEXT NOT NULL, description TEXT,
       schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_payload TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_run_status TEXT, last_run_output TEXT,
-      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
+      last_scheduled_for TEXT, tz TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+    );
+    CREATE TABLE workspace_agents_owner (
+      tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,
+      set_at TEXT NOT NULL, note TEXT, revoked_at TEXT
     );
   `);
   const stamp = "2026-09-01T00:00:00Z";
@@ -217,6 +222,12 @@ async function main() {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at,
                 full_name, agents_enabled, updated_at, joined_at) VALUES ('p-cc', ?, ?, ?, 'owner', 1, ?, 'Test Person', '[]', ?, ?)`,
         args: [CC.id, CC.email, OASIS, stamp, stamp, stamp],
+      },
+      // O2: script-automation creation gates on the workspace's AGENTS OWNER
+      // (lib/agents-owner.ts) — CC, here, matching production.
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, CC.id, CC.id, stamp],
       },
     ],
     "write",
@@ -380,11 +391,15 @@ async function main() {
     assert.match(flat(view()), /Automation saved \(paused\)/, flat(view()));
     assert.equal(fetchesTo("/api/bridge/exec-tool"), 1, "the script file is written once");
     assert.equal(await rowCount(), before + 1);
-    const row = (await db.execute("SELECT tenant_id, schedule, action_type, enabled FROM tenant_cron_jobs ORDER BY created_at DESC LIMIT 1")).rows[0];
+    const row = (await db.execute("SELECT tenant_id, schedule, action_type, enabled, owner_user_id, created_by FROM tenant_cron_jobs ORDER BY created_at DESC LIMIT 1")).rows[0];
     assert.equal(row.tenant_id, OASIS);
     assert.equal(row.schedule, "0 9 * * 1-5");
     assert.equal(row.action_type, "script_run");
     assert.equal(Number(row.enabled), 0, "an AI-drafted script lands switched off");
+    // O2: an unowned row is anyone's to manage and is served to the labelled
+    // computer, so a saved draft must belong to the person who saved it.
+    assert.equal(row.owner_user_id, CC.id, "the saved draft is owned by the saver's auth id");
+    assert.equal(row.created_by, CC.id, "created_by is the auth id, like POST /api/cron-jobs");
   });
 
   await check("a review drafted before this fix, whose Save is refused, shows save-draft's sentence and can be drafted again", async () => {

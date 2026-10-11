@@ -10,12 +10,25 @@
  *      to ~/.oasis/bridge_token; the local bridge daemon then uses it as a
  *      Bearer credential when pinging integrations_health.
  *
- * Auth: Bearer-secret (CLI_SIGNUP_SECRET env), same as provision-cli.
+ * Auth, and who gets paired. The request body never chooses the person:
+ *   - HMAC headers (x-oasis-profile-id + x-oasis-secret), the bridge's
+ *     self-pair on boot: the profile the headers prove is the person.
+ *     body.email and body.auth_user_id are ignored.
+ *   - Bearer CLI_SIGNUP_SECRET, the wizard's legacy path: every wizard machine
+ *     holds this secret, so it proves nobody's identity. The body names the
+ *     account, and the route pairs it only while it is still being set up:
+ *     not onboarded, and the profile and its workspace created within the last
+ *     hour (install/bootstrap.py provisions the account, then the wizard pairs
+ *     it). Anything else is 403 use_a_pair_code: that person pairs with a code
+ *     minted in a signed-in session (Settings > Devices, /api/auth/pair-code).
+ * Before this (2026-10-10), body.email won over the proven profile and
+ * body.auth_user_id was looked up first, so one person's HMAC secret, or the
+ * shared secret, could pair as anyone and overwrite another workspace's AI keys.
  *
  * Body:
  *   {
- *     email:           string  (required — operator who ran the wizard)
- *     auth_user_id?:   uuid    (optional — if the wizard already provisioned)
+ *     email:           string  (CLI_SIGNUP_SECRET only, required; ignored with HMAC)
+ *     auth_user_id?:   uuid    (CLI_SIGNUP_SECRET only; ignored with HMAC)
  *     profile:         {
  *       full_name?:        string,
  *       display_name?:     string,
@@ -51,6 +64,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, checkBearerSecret, sha256, isUniqueViolationError, publicAppBaseUrl } from "@/lib/api-helpers";
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
+import { canManageTeam, type TeamRole } from "@/lib/team";
+import { dbBool } from "@/lib/db-bool";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
 import { defaultModelFor } from "@/lib/ai/model-registry";
 import {
@@ -128,6 +143,54 @@ const PROFILE_FIELDS = new Set([
 // redeem shares the same primitives. See migration 031 + 034 + brain/
 // SECURITY_MODEL.md §6 for the threat model + table schema.
 
+type ProfileRow = {
+  id: string;
+  tenant_id: string | null;
+  auth_user_id: string | null;
+  email: string | null;
+  /** Below: only ever populated on the HMAC-proven path (_hmacProvenProfile). */
+  deactivated_at?: string | null;
+  is_owner?: boolean | number | null;
+  team_role?: string | null;
+  admin_access?: boolean | number | null;
+};
+
+/**
+ * How long after an account and its workspace are created the shared
+ * CLI_SIGNUP_SECRET may still pair it: the wizard pairs in the same run that
+ * provisioned the account (/api/auth/provision-cli).
+ */
+const SIGNUP_SECRET_PAIR_WINDOW_MS = 60 * 60 * 1000;
+/** A creation time this far ahead of this server's clock still counts as now. */
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+// The wizard prints the first 200 characters of a refusal; both stay under it.
+// `bravo seed-keys` sends this secret too, to set an account's AI keys — that
+// command breaks on this refusal and needs an HMAC-header replacement from
+// Bravo (O0 correctness review, MEDIUM); the remedy below names where keys
+// are actually set now so the printed refusal is not a dead end.
+const USE_A_PAIR_CODE =
+  "use_a_pair_code: already set up; the setup secret cannot pair it or set its AI keys. " +
+  "Use a code from Settings > Devices, or set keys in AI settings.";
+const MACHINE_PAIRED_TO_ANOTHER_PERSON =
+  "machine_paired_to_another_person: this computer is paired to another person in this workspace. " +
+  "Disconnect it in Settings > Devices, then pair again.";
+// Distinct from the above: a LEGACY live row whose owner was never recorded
+// (NULL user_id) is not "another person" — that wording sent the operator to
+// ask a teammate who did not hold their computer (O0 correctness review, LOW).
+const MACHINE_PAIRING_HAS_NO_OWNER =
+  "machine_pairing_has_no_owner: this computer's pairing has no recorded owner. " +
+  "Disconnect it in Settings > Devices, then pair again.";
+
+/** True when `createdAt` is a readable time within the signup-secret window. */
+function createdWithinSignupWindow(createdAt: unknown, nowMs: number): boolean {
+  if (typeof createdAt !== "string" || !createdAt) return false;
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return false;
+  const ageMs = nowMs - createdMs;
+  return ageMs >= -CLOCK_SKEW_MS && ageMs <= SIGNUP_SECRET_PAIR_WINDOW_MS;
+}
+
 /**
  * Alternate auth path: HMAC headers (x-oasis-profile-id + x-oasis-secret).
  * Used by the chat server's self-pair-on-boot — operators don't have
@@ -135,10 +198,11 @@ const PROFILE_FIELDS = new Set([
  * HMAC secret (issued by `n8n_webhook_secret.py issue --save-env` and used
  * for the outbound write-through path). One credential, two purposes.
  *
- * Returns the email associated with the verified profile so the rest of
- * the route can flow without an explicit body.email.
+ * Returns the profile the headers PROVE, or null when the headers are absent
+ * or malformed, no live secret for that profile matches, or the profile cannot
+ * be read. The route pairs exactly this profile.
  */
-async function _hmacAuthEmail(req: NextRequest): Promise<{ email: string; profileId: string } | null> {
+async function _hmacProvenProfile(req: NextRequest): Promise<ProfileRow | null> {
   const profileId = req.headers.get("x-oasis-profile-id");
   const rawSecret = req.headers.get("x-oasis-secret");
   if (!profileId || !rawSecret) return null;
@@ -178,9 +242,42 @@ async function _hmacAuthEmail(req: NextRequest): Promise<{ email: string; profil
     if (timingSafeEqual(stored, provided)) matched = true;
   }
   if (!matched) return null;
-  const pf = await db.from("user_profiles").select("email").eq("id", profileId).maybeSingle();
-  if (!pf.data?.email) return null;
-  return { email: String(pf.data.email).toLowerCase(), profileId };
+  const pf = await db
+    .from("user_profiles")
+    .select("id, tenant_id, auth_user_id, email, deactivated_at, is_owner, team_role, admin_access")
+    .eq("id", profileId)
+    .maybeSingle();
+  if (pf.error || !pf.data) return null;
+  return pf.data as ProfileRow;
+}
+
+type SignupProfileRow = ProfileRow & {
+  onboarding_completed_at: string | null;
+  created_at: string | null;
+  /** Set by redeem_tenant_invite; never set by the wizard's own signup_tenant. */
+  invited_by: string | null;
+};
+
+/**
+ * The account a CLI_SIGNUP_SECRET call names: by auth_user_id first, then by
+ * email, as the wizard has always been answered. A failed read is an error,
+ * never "not found": falling through to the email lookup after a failed
+ * auth_user_id read could resolve a different account than the one named.
+ */
+async function _findSignupProfile(
+  db: ReturnType<typeof getServiceSupabase>,
+  authUserId: string | undefined,
+  email: string,
+): Promise<{ row: SignupProfileRow | null; error: string | null }> {
+  const columns = "id, tenant_id, auth_user_id, email, onboarding_completed_at, created_at, invited_by";
+  if (authUserId) {
+    const r = await db.from("user_profiles").select(columns).eq("auth_user_id", authUserId).maybeSingle();
+    if (r.error) return { row: null, error: r.error.message };
+    if (r.data) return { row: r.data as SignupProfileRow, error: null };
+  }
+  const r = await db.from("user_profiles").select(columns).eq("email", email).maybeSingle();
+  if (r.error) return { row: null, error: r.error.message };
+  return { row: (r.data as SignupProfileRow | null) ?? null, error: null };
 }
 
 export async function POST(req: NextRequest) {
@@ -201,13 +298,13 @@ export async function POST(req: NextRequest) {
     return bad(429, "rate_limited: too many failed pair attempts; back off and retry");
   }
 
-  const hmacAuth = await _hmacAuthEmail(req);
-  if (!hmacAuth && !checkBearerSecret(req, "CLI_SIGNUP_SECRET")) {
+  const hmacProfile = await _hmacProvenProfile(req);
+  if (!hmacProfile && !checkBearerSecret(req, "CLI_SIGNUP_SECRET")) {
     // Log the failure with the right outcome based on which path was tried.
     // headerProfileId may be empty when neither header was sent at all.
     const outcome: PairOutcome = !headerProfileId
       ? "invalid_bearer"
-      : hmacAuth === null
+      : hmacProfile === null
         ? "invalid_hmac"
         : "invalid_bearer";
     await _recordPairAttempt(headerProfileId || "no-profile", outcome, ip);
@@ -220,43 +317,110 @@ export async function POST(req: NextRequest) {
   } catch {
     body = {};
   }
-  const email = (body.email || hmacAuth?.email || "").trim().toLowerCase();
-  if (!email) return bad(400, "email required");
 
   const db = getServiceSupabase();
 
-  // ---- 1. Resolve user_profiles row ---------------------------------------
+  // ---- 1. Resolve the person ----------------------------------------------
   const profileSrc = body.profile || {};
   const update: Record<string, unknown> = {};
   for (const k of Object.keys(profileSrc)) {
     if (PROFILE_FIELDS.has(k)) update[k] = (profileSrc as Record<string, unknown>)[k];
   }
 
-  let profileRow:
-    | { id: string; tenant_id: string | null; auth_user_id: string | null }
-    | null = null;
-
-  if (body.auth_user_id) {
-    const r = await db
-      .from("user_profiles")
-      .select("id, tenant_id, auth_user_id")
-      .eq("auth_user_id", body.auth_user_id)
-      .maybeSingle();
-    profileRow = r.data || null;
-  }
-  if (!profileRow) {
-    const r = await db
-      .from("user_profiles")
-      .select("id, tenant_id, auth_user_id")
-      .eq("email", email)
-      .maybeSingle();
-    profileRow = r.data || null;
+  // HMAC: the proven profile, whatever the body names. Signup secret: the
+  // account the body names, which step 1b must find still being set up.
+  let profileRow: ProfileRow | null = hmacProfile;
+  let signupRow: SignupProfileRow | null = null;
+  if (!hmacProfile) {
+    const email = (body.email || "").trim().toLowerCase();
+    if (!email) return bad(400, "email required");
+    const lookup = await _findSignupProfile(db, body.auth_user_id, email);
+    if (lookup.error) return bad(503, `profile lookup failed: ${lookup.error}`);
+    signupRow = lookup.row;
+    profileRow = signupRow;
   }
   if (!profileRow) {
     return bad(
       404,
       "no user_profiles row for this email — call /api/auth/provision-cli first"
     );
+  }
+
+  // ---- 1a. A proven HMAC profile must still be a live seat ----------------
+  // Checked before any write. A deactivated member's still-valid HMAC secret
+  // must never re-pair a computer or touch workspace AI keys (O0 security
+  // review, HIGH) — deactivateMember revokes nothing in n8n_webhook_secrets,
+  // so the secret alone keeps working after removal. A profile with no
+  // sign-in account can never OWN a computer, so it must never create an
+  // unowned row that a later re-pair cannot claim back as "its own" (O0
+  // correctness review, LOW) — refusing it up front means no such row is
+  // ever created via this path.
+  if (hmacProfile) {
+    if (hmacProfile.deactivated_at) {
+      await _recordPairAttempt(hmacProfile.id, "invalid_hmac", ip);
+      return bad(403, "seat_inactive: this profile was removed from its workspace and can no longer pair a computer.");
+    }
+    if (!hmacProfile.auth_user_id) {
+      await _recordPairAttempt(hmacProfile.id, "invalid_hmac", ip);
+      return bad(
+        412,
+        "profile_has_no_sign_in: this profile has no sign-in account, so its computer cannot have an owner. Sign in once, then pair.",
+      );
+    }
+  }
+
+  // Checked before any write, so a refusal changes nothing.
+  if (!profileRow.tenant_id) {
+    return bad(412, "profile has no tenant_id — provision step incomplete");
+  }
+
+  // ---- 1b. The shared signup secret pairs only an account being set up -----
+  // Not onboarded, and both the profile and its workspace created within the
+  // hour. The workspace check matters: a member invited minutes ago into an
+  // established workspace has a fresh profile, and pairing it would seed that
+  // established workspace's AI keys in step 1.5.
+  if (signupRow) {
+    const tenant = await db
+      .from("tenants")
+      .select("created_at")
+      .eq("id", profileRow.tenant_id)
+      .maybeSingle();
+    if (tenant.error) return bad(503, `workspace lookup failed: ${tenant.error.message}`);
+    const nowMs = Date.now();
+    const beingSetUp =
+      signupRow.onboarding_completed_at == null &&
+      // redeem_tenant_invite always sets invited_by; signup_tenant (the
+      // wizard's own path) never does. Without this, anyone holding the
+      // shared secret could pair as an owner or member who joined an
+      // operator-provisioned workspace by invite within the hour (O0
+      // security review, MEDIUM).
+      signupRow.invited_by == null &&
+      createdWithinSignupWindow(signupRow.created_at, nowMs) &&
+      createdWithinSignupWindow(tenant.data?.created_at, nowMs);
+    if (!beingSetUp) {
+      console.warn("[pair] setup-secret pairing refused: account or workspace already set up", {
+        profileId: profileRow.id,
+      });
+      return bad(403, USE_A_PAIR_CODE);
+    }
+  }
+
+  // ---- 1c. Only an owner or admin may set the workspace's AI keys ---------
+  // Checked before any write. HMAC secrets are issued per-profile for the
+  // outbound write-through path (n8n_webhook_secret.py issue --save-env) and
+  // land in any teammate's .env.agents — not just an owner's or admin's.
+  // /api/agent-config already refuses this same write to a non-admin; this
+  // route silently allowed it for whoever happened to hold a secret (O0
+  // security review, MEDIUM).
+  if (hmacProfile && body.api_keys && Object.keys(body.api_keys).length > 0) {
+    // dbBool (lib/db-bool.ts): libSQL hands back 0/1, and a shim can hand back
+    // "1"; true, 1 and "1" count, a stringly "0" never does.
+    const isOwner = dbBool(hmacProfile.is_owner);
+    const adminAccess = dbBool(hmacProfile.admin_access);
+    const teamRole = (hmacProfile.team_role as TeamRole | null) || "member";
+    if (!isOwner && !canManageTeam(teamRole, adminAccess)) {
+      return bad(403, "admin_required: only an owner or admin may set the workspace's AI keys.");
+    }
   }
 
   if (Object.keys(update).length > 0) {
@@ -267,10 +431,6 @@ export async function POST(req: NextRequest) {
       .select("id")
       .maybeSingle();
     if (r.error) return bad(500, `profile update failed: ${r.error.message}`);
-  }
-
-  if (!profileRow.tenant_id) {
-    return bad(412, "profile has no tenant_id — provision step incomplete");
   }
 
   // V6.2: brand-based client profile routing. If the wizard sent a brand
@@ -288,7 +448,7 @@ export async function POST(req: NextRequest) {
         tenantId: profileRow.tenant_id,
         profileId: profileRow.id,
         brand: brandForRouting,
-        email,
+        email: profileRow.email,
       });
     } catch (err) {
       // Non-fatal: pair still succeeds. Operator can re-trigger from /settings.
@@ -387,7 +547,13 @@ export async function POST(req: NextRequest) {
     pairingId = ins.data.id;
   } else if (isUniqueViolationError(ins.error) && fingerprint) {
     // Partial unique index fired — a live pairing already exists for this
-    // (tenant, machine). Rotate the token + label on the existing row.
+    // (tenant, machine). Rotate the token + label on the existing row, but
+    // only when that row is this person's own. The fingerprint is
+    // self-reported, so without the user_id guard anyone paired in this
+    // workspace could send a teammate's fingerprint, rotate the teammate's
+    // computer and receive a token for it. One guarded UPDATE: the check and
+    // the rotation cannot be split by a concurrent pair.
+    if (!row.user_id) return bad(409, MACHINE_PAIRING_HAS_NO_OWNER);
     const upd = await db
       .from("bridge_pairings")
       .update({
@@ -397,13 +563,30 @@ export async function POST(req: NextRequest) {
       })
       .eq("tenant_id", profileRow.tenant_id)
       .eq("machine_fingerprint", fingerprint)
+      .eq("user_id", row.user_id)
       .is("revoked_at", null)
-      .select("id")
-      .single();
-    if (upd.error || !upd.data) {
-      return bad(500, `pair rotate failed: ${upd.error?.message || "unknown"}`);
+      .select("id");
+    if (upd.error) {
+      return bad(500, `pair rotate failed: ${upd.error.message}`);
     }
-    pairingId = upd.data.id;
+    if (!upd.data || upd.data.length !== 1) {
+      // "Another person" is simply wrong when the live row has no owner at
+      // all (a legacy pairing from before owners were recorded) — tell the
+      // two apart so the remedy printed actually matches the cause (O0
+      // correctness review, LOW).
+      const conflict = await db
+        .from("bridge_pairings")
+        .select("user_id")
+        .eq("tenant_id", profileRow.tenant_id)
+        .eq("machine_fingerprint", fingerprint)
+        .is("revoked_at", null)
+        .maybeSingle();
+      if (!conflict.error && conflict.data && !conflict.data.user_id) {
+        return bad(409, MACHINE_PAIRING_HAS_NO_OWNER);
+      }
+      return bad(409, MACHINE_PAIRED_TO_ANOTHER_PERSON);
+    }
+    pairingId = upd.data[0].id;
   } else {
     return bad(500, `pair insert failed: ${ins.error?.message || "unknown"}`);
   }
