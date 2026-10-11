@@ -36,7 +36,7 @@ import { listTenantIntegrationStatus, tenantMayUseEnvFallback } from "@/lib/tena
 import { readPersonalGoogleFact } from "@/lib/integrations/personal-google";
 import { listServerChecks } from "@/lib/integrations/server-checks";
 import { listActiveConnections } from "@/lib/connections/store";
-import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
+import { PROVIDERS, missingProviderEnv, providerAvailability } from "@/lib/connections/registry";
 import {
   CONNECTOR_CATALOG,
   connectorBySlug,
@@ -139,6 +139,8 @@ export async function loadConnectorFacts(input: {
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
     // OASIS's apps; every other workspace is a client and is shown its own path.
     oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
+    // Secret NAMES, for OASIS's own operators only: a client is never shown one.
+    appSecretsMissing: tenantMayUseEnvFallback(input.tenantId) ? appSecretsMissingByProvider() : undefined,
   };
 }
 
@@ -172,6 +174,7 @@ export async function loadWorkspaceConnectorStatus(
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),
+      appSecretsMissing: tenantMayUseEnvFallback(tenantId) ? appSecretsMissingByProvider() : undefined,
     },
     nowMs,
   );
@@ -200,4 +203,19 @@ export async function loadConnectorStatuses(input: {
  */
 export function appNotConfiguredProviders(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
   return PROVIDERS.filter((p) => (p.liveWhenEnv?.length ?? 0) > 0 && providerAvailability(p, env) !== "live").map((p) => p.id);
+}
+
+/**
+ * The Worker secret NAMES each not-yet-configured app still needs (never a
+ * value), for OASIS's own operators' cards: "Missing Worker secrets: ...".
+ */
+export function appSecretsMissingByProvider(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string[]> {
+  return Object.fromEntries(
+    PROVIDERS.filter((p) => (p.liveWhenEnv?.length ?? 0) > 0 && providerAvailability(p, env) !== "live").map((p) => [
+      p.id,
+      missingProviderEnv(p, env),
+    ]),
+  );
 }

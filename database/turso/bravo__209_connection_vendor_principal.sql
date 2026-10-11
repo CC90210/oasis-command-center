@@ -1,0 +1,22 @@
+-- bravo__209_connection_vendor_principal.sql
+--
+-- tenant_connections.vendor_principal_id: the vendor-side PERSON who approved
+-- a connection (not the account), read once at connect time from the grant
+-- itself (WhatsApp/Meta: debug_token's data.user_id). Disconnect uses it to
+-- decide whether the vendor revoke is safe: Meta's DELETE /me/permissions
+-- de-authorizes OASIS's whole app for that ONE Facebook user, across every
+-- WhatsApp Business Account they ever approved, not just the one connection
+-- this workspace holds (security review, PR #574). So a revoke is skipped
+-- whenever another tenant's live connection shares this same principal, even
+-- when the account id (the WABA) differs, and skipped (never guessed) when
+-- the principal could not be read at all.
+--
+-- Xero does not need this column to decide whether to revoke: its revoke
+-- itself changed to remove only the one pinned organisation
+-- (DELETE /connections/{id}) instead of calling the user-wide
+-- /connect/revocation, so the existing external_account_id check is already
+-- enough for Xero.
+--
+-- NOT RE-RUNNABLE AS A WHOLE: SQLite has no ADD COLUMN IF NOT EXISTS.
+
+ALTER TABLE tenant_connections ADD COLUMN vendor_principal_id TEXT;

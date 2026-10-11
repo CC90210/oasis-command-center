@@ -165,9 +165,14 @@ assert.notEqual(glyphColor(connectorBySlug("cal-com")!), "#292929", "Cal.com's n
 // (Calendly, Cal.com, Fathom, Fireflies, Zernio, GoHighLevel, its own mail
 // server) went live on the key store, each with a real Test
 // (tests/connectors-by-key.test.ts).
+// 2026-10-10: every other app in the catalog connects too (CC: no app is
+// "coming soon"): Plaid, Discord, Microsoft Teams and Meta Ads with a pasted
+// key and a real Test, QuickBooks, Xero, Zoom and WhatsApp at the vendor's own
+// sign-in page (tests/every-connector-works.test.ts walks every one).
 const LIVE = [
   "stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev",
   "calendly", "cal-com", "fathom", "fireflies", "zernio", "gohighlevel", "smtp",
+  "quickbooks", "xero", "plaid", "zoom", "whatsapp", "discord", "microsoft-teams", "meta",
 ].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),
@@ -249,14 +254,7 @@ for (const def of CONNECTOR_CATALOG) {
     assert.doesNotMatch(s.label, /connected/i);
     // The state, in the same words Chat apps uses for the same apps; "Coming
     // soon" / "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
-    // An app whose one-click connect waits on OASIS's own vendor app says that
-    // instead (CC, 2026-10-09): never "Not built yet" for something a vendor
-    // approval stands between.
-    assert.equal(
-      s.label,
-      def.registration ? `OASIS is registering with ${def.registration.vendor}` : "Not built yet",
-      `${def.slug}: a card with nothing to connect today says why in one line`,
-    );
+    assert.equal(s.label, "Not built yet", `${def.slug}: a card with nothing to connect today says why in one line`);
     assert.equal(s.detail, def.pendingNote, `${def.slug}: the drawer says why it is not connectable`);
   }
 }
@@ -621,15 +619,16 @@ assert.match(read("app/settings/connections/page.tsx"), /loadConnectorStatuses\(
 assert.match(read("components/os/connections/connector-facts.ts"), /resolveConnectorStatus\(def, facts, now\)/);
 assert.match(read("app/settings/chat-apps/page.tsx"), /resolveConnectorStatus\(telegram/);
 // Slack is a Connections-framework card set up under Chat apps, and wherever
-// OASIS's Slack app is not on the deployment it says OASIS is registering with
-// Slack (CC, 2026-10-09), for a client and for OASIS alike.
+// OASIS's Slack app is not on the deployment it says "Not available on this
+// workspace yet" (CC, 2026-10-10: never a registration nobody can show), for a
+// client and for OASIS alike.
 const slackDef = connectorBySlug("slack")!;
 assert.deepEqual(slackDef.live?.source, { kind: "tenant_connection", provider: "slack" });
 assert.deepEqual(slackDef.live?.connect, { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" });
 for (const oasisWorkspace of [true, false, undefined]) {
   assert.equal(
     resolveConnectorStatus(slackDef, { keyRows: [], personalGoogle: null, connections: [], appNotConfigured: ["slack"], oasisWorkspace }, Date.now()).label,
-    "OASIS is registering with Slack",
+    "Not available on this workspace yet",
   );
 }
 // Every workspace has one way into Slack, the OASIS app: no client builds one.
@@ -896,6 +895,32 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // A card this workspace cannot connect yet (coming_soon) also opens the drawer.
   assert.match(hub, /const next = connectorClickAction\(def, embedded\);[\s\S]{0,300}if \(next === "drawer" \|\| !action \|\| statuses\[def\.slug\]\?\.kind === "coming_soon"\) return openDrawer\(def\.slug\);/);
   assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
+  // A connected/configured/attention OAuth card's click opens the drawer
+  // (never restarts sign-in); only the drawer's own footer button bypasses it
+  // with fromDrawer — real execution of this decision is proven in
+  // tests/connections-everywhere.test.ts, which runs it in a real React render
+  // (CodeRabbit PR #574).
+  assert.match(
+    hub,
+    /export function oauthManageOpensDrawer\(statusKind: ConnectorStatusKind \| undefined, fromDrawer: boolean\): boolean \{[\s\S]{0,400}return !fromDrawer && \(statusKind === "connected" \|\| statusKind === "configured" \|\| statusKind === "attention" \|\| statusKind === "unknown"\);/,
+    "unknown (the read itself failed) must open the drawer too, same as its 'Manage' label (Codex review, PR #574)",
+  );
+  assert.match(
+    hub,
+    /if \(next === "popup" && oauthManageOpensDrawer\(statuses\[def\.slug\]\?\.kind, !!opts\?\.fromDrawer\)\) return openDrawer\(def\.slug\);/,
+    "connect() checks it before ever starting a popup",
+  );
+  assert.match(hub, /onConnect=\{\(d\) => connect\(d, \{ fromDrawer: true \}\)\}/, "the drawer's own footer button is the one caller that bypasses it");
+  // A full-window sign-in that fell back when the popup was blocked comes back
+  // on the URL (?connection=&status=&reason=); page.tsx hands it to the hub,
+  // which reads it into its OWN first render (not an effect after), so the
+  // banner shows before anything clears those params.
+  assert.match(page, /const initialStatus = one\(sp\.status\);\s*const initialReason = one\(sp\.reason\);/);
+  assert.match(page, /<ConnectionsHub[\s\S]{0,200}initialStatus=\{initialStatus\}[\s\S]{0,80}initialReason=\{initialReason\}/);
+  assert.match(
+    hub,
+    /const \[banner, setBanner\] = useState<NoticeValue>\(\(\) =>\s*resultBanner\(connectorBySlug\(initialApp \?\? ""\)\?\.name \?\? "That app", initialStatus, initialReason\),/,
+  );
   // Google's sign-in comes back to its drawer, not to a removed anchor.
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
   assert.match(page, /one\(sp\.gmail_oauth\) \? "google-workspace"/);
@@ -904,7 +929,7 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   // Google's sign-in result params (CodeRabbit #477).
   assert.match(hub, /const closeDrawer = useCallback\(\(\) => \{\s*setDrawerOpen\(false\);\s*clearDeepLink\(\);/);
   assert.match(hub, /const closeCustom = useCallback\(\(\) => \{\s*setCustomOpen\(false\);\s*clearDeepLink\(\);/);
-  assert.match(hub, /DEEP_LINK_PARAMS = \["app", "gmail_oauth", "reason", "gmail", "mailbox"\]/);
+  assert.match(hub, /DEEP_LINK_PARAMS = \["app", "gmail_oauth", "reason", "gmail", "mailbox", "connection", "status"\]/);
   // Remove always re-reads, even when a later DELETE fails part-way.
   assert.match(read("components/os/connections/ServiceKeysForm.tsx"), /\} finally \{[\s\S]{0,300}await reload\(\);\s*onChanged\(\);/);
 
@@ -912,13 +937,13 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   assert.match(hub, /<CustomCredentialsVault \/>/);
   assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
 
-  // Apps that are not built are one compact row, never full cards that do nothing.
-  // Apps that wait on OASIS's own vendor app (registration) are their own row,
-  // and an app this workspace cannot connect yet is never under "Connect today".
-  assert.match(hub, /const waiting = \(def: ConnectorDef\) => !def\.live \|\| statuses\[def\.slug\]\?\.kind === "coming_soon";/);
-  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool\(def, statuses\[def\.slug\]\) && !waiting\(def\)\);/);
-  assert.match(hub, /const oneClick = pending\.filter\(\(def\) => def\.registration\);/);
-  assert.match(hub, /const later = pending\.filter\(\(def\) => !def\.registration\);/);
+  // Every app with a way to connect has its own card in its own category, even
+  // while OASIS's app for it is not set up here (the card says so); only an app
+  // with nothing built is one compact row (CC, 2026-10-10: no "One click, once
+  // approved" strip).
+  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool\(def, statuses\[def\.slug\]\)\);/);
+  assert.match(hub, /const later = visible\.filter\(\(def\) => !def\.live\);/);
+  assert.doesNotMatch(hub, /oneClick|One click, once approved/, "the one-click strip is gone");
   assert.doesNotMatch(hub, /rest\.filter\(\(d\) => d\.category === cat\.key\)/, "coming-soon apps no longer fill the category grids");
 }
 

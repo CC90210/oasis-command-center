@@ -894,6 +894,7 @@ async function main() {
   // whether Zernio is connected, and the Operations tile counts the hub's own
   // statuses (bravo__187 + the live key-store DDL).
   await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__187_os_connections.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__209_connection_vendor_principal.sql"), "utf8"));
   await raw.executeMultiple(`
     CREATE TABLE "tenant_integration_credentials" (
       "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),

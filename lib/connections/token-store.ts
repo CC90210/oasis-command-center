@@ -37,6 +37,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
+import { encryptField } from "@/lib/field-encryption";
 import {
   getTenantIntegrationBundle,
   readTenantCredentialStrict,
@@ -60,13 +61,15 @@ export type OAuthTokens = {
 
 /** A refresh call must finish well inside the lease. */
 export const REFRESH_TIMEOUT_MS = 30_000;
+/** Extra time a losing refresher waits beyond the winner's refresh deadline, for the winner's save. */
+export const LOSER_WAIT_MARGIN_MS = 5_000;
 /**
  * How long a holder WAITS for its token save. Refresh plus this stay well
  * inside REFRESH_LEASE_MS (tests/os-connections.test.ts holds the sum under
  * it). It stops the wait, not the write: a save stalled past the lease could
- * still land after a newer holder's. The fix is a write fenced by the holder's
- * token_version; until then the "[gate]" test keeps every OAuth provider from
- * going live (nothing calls getAccessToken while they are all coming_soon).
+ * still land after a newer holder's. That is why the write is FENCED
+ * (saveConnectionTokensFenced): it lands only while the holder's token_version
+ * is still the connection's, so a stalled save that finally runs writes nothing.
  */
 export const TOKEN_SAVE_TIMEOUT_MS = 30_000;
 
@@ -184,6 +187,47 @@ export async function saveConnectionTokens(tenantId: string, connectionId: strin
   if (!saved.ok) throw new TokenStoreError("save_failed", saved.error);
 }
 
+/**
+ * Save a refreshed token set ONLY while `version` is still the connection's
+ * token_version: the holder's fence. The three fields are written in one
+ * batch (one transaction), each as an INSERT ... SELECT whose WHERE asks the
+ * connection row for that exact version, so a holder whose lease was lost to
+ * a newer refresh writes nothing at all: its tokens can never land over the
+ * newer holder's (the new refresh token, with rotating providers, is the only
+ * live one). Returns false, with nothing written, when it was fenced out.
+ */
+export async function saveConnectionTokensFenced(
+  db: Client,
+  input: { tenantId: string; connectionId: string; version: number; tokens: OAuthTokens; now: Date },
+): Promise<boolean> {
+  const { tenantId, connectionId, version, tokens } = input;
+  const fields: Array<[string, string]> = [
+    ["access_token", tokens.access_token],
+    ["refresh_token", tokens.refresh_token],
+    ["expires_at", String(tokens.expires_at)],
+  ];
+  for (const [key, value] of fields) {
+    if (!value.trim()) throw new TokenStoreError("save_failed", `empty_value:${key}`);
+  }
+  const service = credentialServiceFor(connectionId);
+  const stamp = input.now.toISOString();
+  const results = await db.batch(
+    fields.map(([fieldKey, value]) => ({
+      sql: `INSERT INTO tenant_integration_credentials
+              (tenant_id, service, field_key, encrypted_value, last_tested_at, last_test_ok, last_test_error, updated_at)
+            SELECT ?, ?, ?, ?, NULL, NULL, NULL, ?
+            WHERE EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND token_version = ? AND revoked_at IS NULL)
+            ON CONFLICT (tenant_id, service, field_key) DO UPDATE SET
+              encrypted_value = excluded.encrypted_value,
+              last_tested_at = NULL, last_test_ok = NULL, last_test_error = NULL,
+              updated_at = excluded.updated_at`,
+      args: [tenantId, service, fieldKey, encryptField(value.trim()), stamp, connectionId, tenantId, version],
+    })),
+    "write",
+  );
+  return results.every((r) => r.rowsAffected === 1);
+}
+
 async function loadTokens(tenantId: string, connectionId: string): Promise<OAuthTokens | null> {
   const b = await getTenantIntegrationBundle(tenantId, credentialServiceFor(connectionId), { allowEnvFallback: false });
   if (!b.access_token || !b.refresh_token) return null;
@@ -216,7 +260,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function getAccessToken(db: Client, input: GetAccessTokenInput): Promise<string> {
   const now = input.now ?? (() => new Date());
-  const waitMs = input.waitMs ?? 10_000;
+  // A loser must outwait the winner's refresh (aborted at REFRESH_TIMEOUT_MS) AND
+  // the winner's fenced save (bounded by TOKEN_SAVE_TIMEOUT_MS) before the lease
+  // releases — both are bounded and still land well inside the 120 s lease — or a
+  // slow vendor plus a slow save makes it give up with refresh_busy instead of
+  // re-reading the tokens the winner saved.
+  const waitMs = input.waitMs ?? REFRESH_TIMEOUT_MS + TOKEN_SAVE_TIMEOUT_MS + LOSER_WAIT_MARGIN_MS;
   const pollMs = input.pollMs ?? 150;
 
   const conn = await getConnection(db, input.tenantId, input.connectionId);
@@ -256,12 +305,27 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
     throw new TokenStoreError("refresh_busy", "Another refresh is still running.");
   }
 
-  // This caller holds the lease.
+  // This caller holds the lease, but the tokens read above are from BEFORE it
+  // won: another caller can have refreshed, saved and released in the gap
+  // between that read and takeRefreshLease succeeding (Codex review, PR
+  // #574). The version bump alone does not prove the refresh_token read above
+  // is still current. Re-read inside the lease: if it is already fresh,
+  // someone else just saved it — release and return that, never refresh
+  // again. Otherwise refresh with THIS read's refresh_token, never the stale
+  // one, so a vendor that rotates on every use (Zoom) is never handed a
+  // token that is already dead, which would wrongly expire a healthy connection.
+  const held = await loadTokens(input.tenantId, input.connectionId);
+  if (held && now().getTime() < held.expires_at - REFRESH_SKEW_MS) {
+    await releaseRefreshLease(db, { tenantId: input.tenantId, connectionId: input.connectionId, version, now: now() });
+    return held.access_token;
+  }
+  const refreshToken = held?.refresh_token ?? tokens.refresh_token;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
   let refreshed: OAuthTokens;
   try {
-    refreshed = await input.refresh(tokens.refresh_token, controller.signal);
+    refreshed = await input.refresh(refreshToken, controller.signal);
   } catch (err) {
     clearTimeout(timer);
     const refused = isConfirmedRefreshRefusal(err);
@@ -314,11 +378,20 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
     if (now().getTime() + TOKEN_SAVE_TIMEOUT_MS >= leaseEndsMs) {
       throw new TokenStoreError("refresh_busy", "The refresh ran past its lease, so its tokens were not saved over a newer refresh.");
     }
-    await withTimeout(
-      saveConnectionTokens(input.tenantId, input.connectionId, refreshed),
+    const landed = await withTimeout(
+      saveConnectionTokensFenced(db, {
+        tenantId: input.tenantId,
+        connectionId: input.connectionId,
+        version,
+        tokens: refreshed,
+        now: now(),
+      }),
       TOKEN_SAVE_TIMEOUT_MS,
       () => new TokenStoreError("save_failed", "Saving the refreshed tokens timed out."),
     );
+    if (!landed) {
+      throw new TokenStoreError("refresh_busy", "A newer refresh took over this connection, so these tokens were not saved.");
+    }
     saved = true;
   } finally {
     const released = await releaseRefreshLease(db, {

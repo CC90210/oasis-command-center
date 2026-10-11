@@ -5,9 +5,9 @@
  * Honest about what exists today:
  *   - Slack: built (lib/slack/*). It works on a deployment that holds OASIS's
  *     Slack app (the Worker secrets); where it does not, a workspace that has
- *     not connected is told OASIS is registering with Slack (no button), and
- *     one that already connected keeps its connection and Disconnect with the
- *     problem stated. Owners and admins install
+ *     not connected is told Slack is "Not available on this workspace yet" (no
+ *     button), and one that already connected keeps its connection and
+ *     Disconnect with the problem stated. Owners and admins install
  *     it, see the connected workspace, and map each channel to a department
  *     and, optionally, a client. @mentions get a department's draft that waits
  *     for approval; mapped channels show on the client's Conversations tab.
@@ -17,10 +17,11 @@
  *     status (its Connections card's own). Two-way AI teammates in Telegram
  *     chats are not built, and the card says exactly that: a state, never a
  *     release promise, with a button that asks OASIS for it.
- *   - Discord, Microsoft Teams, WhatsApp: one click once the vendor approves
- *     OASIS's own app (each card's status, from the Connections resolver, says
- *     "OASIS is registering with <vendor>"). Each opens the shared Connections
- *     drawer, which says where it stands and files the request (no dead chip).
+ *   - Discord and Microsoft Teams connect with a channel webhook URL pasted
+ *     into the shared Connections drawer (OASIS posts to that one channel and
+ *     reads nothing); WhatsApp signs in at Meta's own page. Each card's status
+ *     comes from the Connections resolver, and each opens that drawer (no dead
+ *     chip).
  *   - Slack: every workspace, client or OASIS, installs the same OASIS app.
  *
  * OASIS's own Telegram bridges on CC's machine are not this and never appear
@@ -69,7 +70,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   const params = await searchParams;
   const slack = connectorBySlug("slack");
   const telegram = connectorBySlug("telegram");
-  const later = ["discord", "microsoft-teams", "whatsapp"]
+  const others = ["discord", "microsoft-teams", "whatsapp"]
     .map(connectorBySlug)
     .filter((d): d is ConnectorDef => d !== null);
   const nowMs = Date.now();
@@ -147,10 +148,9 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
             ) : !conn && !slackSettings.appConfigured ? (
               <div className="space-y-1.5">
                 <p className="text-[13px] leading-5 text-fg-muted">
-                  {slackCardStatus?.detail ??
-                    "OASIS is registering with Slack; you'll connect Slack with one click once approved. Nothing is broken on your side."}
+                  {slackCardStatus?.detail ?? "Slack is not available on this workspace yet. Nothing is broken on your side."}
                 </p>
-                {viewer.access.isOperator && slackSettings.missingSecrets.length > 0 && (
+                {viewer.access.isOperator && slackSettings.missingSecrets.length > 0 && !slackCardStatus?.detail?.includes("Missing Worker secrets") && (
                   <p className="text-[12px] leading-4 text-fg-dim">
                     Missing Worker secrets: {slackSettings.missingSecrets.join(", ")}.
                   </p>
@@ -269,15 +269,15 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
             workspace) — SettingsContent's chat-apps cards, unchanged. */}
         <SettingsContent section="chat-apps" viewerAccess={viewer.viewerAccess} />
 
-        {later.length > 0 && (
+        {others.length > 0 && (
           <section className="rounded-xl border border-hairline bg-bg-panel px-4 py-4">
-            <h2 className="text-sm font-semibold text-fg">One click, once approved</h2>
+            <h2 className="text-sm font-semibold text-fg">More chat apps</h2>
             <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-              OASIS is registering its own app with each of these. Once the vendor approves it, you add it with one click
-              and never create an app yourself. Open one to see where it stands.
+              Open one to connect it: a sign-in on the app&apos;s own page, or a webhook URL you paste. You never create
+              an app yourself.
             </p>
             <ul className="mt-3 grid gap-2 sm:grid-cols-3">
-              {later.map((d) => {
+              {others.map((d) => {
                 // The card's own status, from the Connections resolver: the same
                 // words the hub and its drawer use (never a label built here).
                 const status = resolveConnectorStatus(d, facts, nowMs);

@@ -48,7 +48,9 @@ import { TWILIO_FAILURE_STATES } from "@/lib/twilio/shared";
 // ── Catalog shape ──────────────────────────────────────────────────────────
 
 export type ConnectorCategoryKey =
-  | "money"
+  | "payments"
+  | "accounting"
+  | "banking"
   | "calendar_email"
   | "meetings"
   | "messaging"
@@ -58,10 +60,12 @@ export type ConnectorCategoryKey =
 
 /** Catalog groups, in the order the hub renders them. */
 export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: string }[] = [
-  { key: "money", label: "Money" },
+  { key: "payments", label: "Payments" },
+  { key: "accounting", label: "Accounting" },
+  { key: "banking", label: "Banking" },
   { key: "calendar_email", label: "Calendar & email" },
   { key: "meetings", label: "Meetings" },
-  { key: "messaging", label: "Messaging" },
+  { key: "messaging", label: "Messaging & chat" },
   { key: "ads_social", label: "Ads & social" },
   { key: "crm_import", label: "CRM import" },
   { key: "ai_models", label: "AI models" },
@@ -118,6 +122,14 @@ export type ConnectorConnect =
   /** An OAuth start route opened in a popup that postMessages `{ source }` back. */
   | { kind: "popup"; href: string; label: string; messageSource: string }
   /**
+   * The vendor's own sign-in page, opened in a popup from
+   * /api/connections/[provider]/authorize (QuickBooks, Xero, Zoom, WhatsApp).
+   * The provider is registered in lib/connections/registry.ts with OASIS's app
+   * secrets named; the callback stores the encrypted tokens for the session's
+   * workspace, and the card says which secrets are missing until they exist.
+   */
+  | { kind: "oauth"; label: string; provider: string }
+  /**
    * A key pasted into the connector's drawer and posted to
    * /api/connections/[provider]/connect, which probes it live before saving.
    */
@@ -155,14 +167,12 @@ export type ConnectorDef = {
   /** Why it is not live (yet, or on this deployment), in plain English. Every not-built app has one. */
   pendingNote?: string;
   /**
-   * The vendor's standard one-click connect needs OASIS's OWN app registered
-   * with that vendor (CC, 2026-10-02: clients never create a developer app).
-   * While it is not, the card says so in one sentence (registrationStatus):
-   * "OASIS is registering with <vendor>; you'll connect with one click once
-   * approved", never "Not built yet". `clientsOnly`: OASIS's own workspace can
-   * already connect (Constant Contact's app is private to OASIS's login).
+   * OASIS's own app for this vendor is private to OASIS's own login (Constant
+   * Contact's), so a CLIENT workspace that has not connected is told it is
+   * "Not available on this workspace yet" (unavailableStatus) instead of being
+   * offered a button that answers "not enabled". OASIS's own workspace connects.
    */
-  registration?: { vendor: string; clientsOnly?: boolean };
+  clientsUnavailable?: boolean;
   /**
    * A connection tied to each person's own login, shown in the drawer under
    * the workspace's (Google: your own Gmail and Calendar).
@@ -192,6 +202,18 @@ export type ConnectorPath = {
   /** It needs OASIS's own app on this deployment (Worker secrets), so appNotConfigured decides its state. */
   needsOasisApp: boolean;
 };
+
+/**
+ * The `source` the sign-in popup page posts back to the hub with
+ * (lib/connections/popup.ts CONNECTION_POPUP_SOURCE is this same value; a test
+ * holds the two together). Client-safe, so the hub can import it.
+ */
+export const OAUTH_POPUP_SOURCE = "oasis_connection";
+
+/** Where an `oauth` card's button goes: the route that sends the browser to the vendor's own sign-in page. */
+export function oauthStartHref(provider: string): string {
+  return `/api/connections/${encodeURIComponent(provider)}/authorize`;
+}
 
 /** Settings › Connections with this app's drawer open. */
 export function connectorHref(slug: string): string {
@@ -325,6 +347,26 @@ export function keyTestStates(
 }
 
 /**
+ * A channel webhook (Discord, Microsoft Teams): the shared key words, plus the
+ * one a webhook adds - an address that is not the vendor's own, which OASIS
+ * never calls (lib/tenant-integration-schemas.ts parseDiscordWebhookUrl).
+ */
+function webhookTestStates(appName: string): Readonly<Record<string, TestState>> {
+  const states = { ...keyTestStates(appName, { keyWord: "webhook" }) };
+  states.key_rejected = {
+    kind: "attention",
+    label: `${appName} no longer has this webhook`,
+    detail: `${appName} does not accept this webhook. It may have been deleted or its sign-in setting changed. Create a new webhook for the channel, save it, then run Test.`,
+  };
+  states.blocked_host = {
+    kind: "attention",
+    label: `Not a ${appName} address`,
+    detail: `This is not a ${appName} webhook address, so OASIS will not call it. Copy the webhook URL again from ${appName}, save it, then run Test.`,
+  };
+  return states;
+}
+
+/**
  * A self-hosted mail server that OASIS's
  * servers cannot connect to safely: they cannot lock the connection to the
  * address they checked (lib/integrations/host-safety.ts), so nothing was sent.
@@ -374,7 +416,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     slug: "stripe",
     name: "Stripe",
     summary: "Payments and subscriptions",
-    category: "money",
+    category: "payments",
     departments: ["finance", "sales"],
     brandColor: "#635BFF",
     icon: { kind: "svg", file: "stripe.svg" },
@@ -387,7 +429,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       "Will feed revenue and recurring income into Finance once the Finance sync exists; nothing flows from this key into Finance yet",
       "Never charges a card, issues a refund or moves money: the key it accepts is read-only",
     ],
-    keywords: ["payments", "billing", "mrr", "invoices", "restricted key"],
+    keywords: ["money", "payments", "billing", "mrr", "invoices", "restricted key"],
     live: {
       source: { kind: "tenant_connection", provider: "stripe" },
       connect: { kind: "key_form", label: "Connect Stripe", provider: "stripe" },
@@ -398,49 +440,66 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     slug: "quickbooks",
     name: "QuickBooks",
     summary: "Accounting books",
-    category: "money",
+    category: "accounting",
     departments: ["finance"],
     brandColor: "#2CA01C",
     icon: { kind: "svg", file: "quickbooks.svg" },
-    reads: ["Your chart of accounts, invoices, bills and reports"],
-    does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
-    keywords: ["accounting", "intuit", "qbo", "bookkeeping"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Intuit; you'll connect QuickBooks with one click once approved. You never create an app yourself. Intuit reviews OASIS's app before other businesses can connect their books.",
-    registration: { vendor: "Intuit" },
+    reads: ["The name of the QuickBooks company you approve, when OASIS checks the connection"],
+    does: [
+      "Checks the connection with QuickBooks every hour and keeps the sign-in renewed",
+      "Your books do not flow into Finance from this connection yet: that sync is not built",
+      "OASIS only reads. Intuit has no read-only permission, so this is kept by OASIS's code and not by QuickBooks; Disconnect also tells Intuit to forget OASIS",
+    ],
+    keywords: ["money", "accounting", "intuit", "qbo", "bookkeeping"],
+    live: {
+      source: { kind: "tenant_connection", provider: "quickbooks" },
+      connect: { kind: "oauth", label: "Connect QuickBooks", provider: "quickbooks" },
+    },
   },
   {
     slug: "xero",
     name: "Xero",
     summary: "Accounting books",
-    category: "money",
+    category: "accounting",
     departments: ["finance"],
     brandColor: "#13B5EA",
     icon: { kind: "svg", file: "xero.svg" },
-    reads: ["Your chart of accounts, invoices, bills and reports"],
-    does: ["Mirrors your books so Finance matches what your accountant sees", "Read-only: nothing is posted to your books"],
-    keywords: ["accounting", "bookkeeping"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Xero; you'll connect Xero with one click once approved. You never create an app yourself.",
-    registration: { vendor: "Xero" },
+    reads: ["The name of the Xero organisation you approve, when OASIS checks the connection"],
+    does: [
+      "Checks the connection with Xero every hour and keeps the sign-in renewed",
+      "Your books do not flow into Finance from this connection yet: that sync is not built",
+      "Asks Xero for read access only; Disconnect also tells Xero to forget OASIS",
+    ],
+    keywords: ["money", "accounting", "bookkeeping"],
+    live: {
+      source: { kind: "tenant_connection", provider: "xero" },
+      connect: { kind: "oauth", label: "Connect Xero", provider: "xero" },
+    },
   },
   {
     slug: "plaid",
     name: "Plaid",
     summary: "Bank accounts",
-    category: "money",
+    category: "banking",
     departments: ["finance"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Pl", reason: "Not in Simple Icons" },
-    reads: ["Balances and transactions from the bank accounts you choose"],
-    does: ["Shows cash on hand and runway in Finance", "Read-only: OASIS never moves money"],
-    keywords: ["bank", "banking", "cash", "transactions"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Plaid; you'll connect your bank through Plaid with one click once approved. You never create an app yourself. Plaid approves OASIS for real bank accounts first.",
-    registration: { vendor: "Plaid" },
+    reads: ["Whether Plaid accepts your client ID and secret, when you run Test (Test asks for one supported bank and reads no account)"],
+    does: [
+      "Checks your Plaid credentials when you press Test, and changes nothing in your Plaid",
+      "Linking a bank account through Plaid Link is not built yet, so no balances or transactions are read",
+    ],
+    keywords: ["money", "bank", "banking", "cash", "transactions", "client id", "secret"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "plaid",
+        requireAll: ["client_id", "secret", "environment"],
+        failureStates: keyTestStates("Plaid", { keyWord: "secret" }),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Plaid", service: "plaid" },
+    },
   },
 
   // Calendar & email
@@ -569,13 +628,17 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales", "client_success"],
     brandColor: "#0B5CFF",
     icon: { kind: "svg", file: "zoom.svg" },
-    reads: ["Meeting transcripts, after everyone is told the call is recorded"],
-    does: ["Writes call notes and follow-ups for Sales and Client Success"],
+    reads: ["The email of the Zoom account you approve, when OASIS checks the connection"],
+    does: [
+      "Checks the connection with Zoom every hour and keeps the sign-in renewed",
+      "Transcripts and call notes do not flow from this connection yet: that sync is not built",
+      "Disconnect also tells Zoom to forget OASIS",
+    ],
     keywords: ["video", "calls", "recording", "transcript"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Zoom; you'll connect Zoom with one click once approved. You never create an app yourself. Zoom reviews OASIS's app in its Marketplace before other Zoom accounts can install it.",
-    registration: { vendor: "Zoom" },
+    live: {
+      source: { kind: "tenant_connection", provider: "zoom" },
+      connect: { kind: "oauth", label: "Connect Zoom", provider: "zoom" },
+    },
   },
   {
     slug: "fathom",
@@ -656,9 +719,6 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       source: { kind: "tenant_connection", provider: "slack" },
       connect: { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" },
     },
-    pendingNote:
-      "OASIS is registering with Slack; you'll connect Slack with one click once approved. You never create an app yourself. Nothing is broken on your side.",
-    registration: { vendor: "Slack" },
     seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
     // CC, 2026-10-02: every workspace connects through the vendor's standard
     // Connect, and clients never create a developer app. So a client uses the
@@ -750,52 +810,76 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["sales", "client_success"],
     brandColor: "#25D366",
     icon: { kind: "svg", file: "whatsapp.svg" },
-    reads: ["Messages customers send to your business number"],
-    does: ["Drafts replies for your approval"],
-    keywords: ["chat", "messages"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Meta; you'll connect WhatsApp with one click once approved. You never create an app yourself. Meta verifies OASIS as a WhatsApp provider first.",
-    registration: { vendor: "Meta" },
+    reads: ["The name of the WhatsApp Business Account you approve, when OASIS checks the connection"],
+    does: [
+      "Checks the connection with WhatsApp every hour and keeps the sign-in renewed",
+      "OASIS does not read or send WhatsApp messages from this connection yet: that is not built",
+      "Disconnect also tells Meta to withdraw OASIS's access",
+    ],
+    keywords: ["chat", "messages", "meta", "whatsapp business"],
+    live: {
+      source: { kind: "tenant_connection", provider: "whatsapp" },
+      connect: { kind: "oauth", label: "Connect WhatsApp", provider: "whatsapp" },
+    },
   },
   {
     slug: "discord",
     name: "Discord",
-    summary: "Community and team chat",
+    summary: "Post to one channel",
     category: "messaging",
     departments: ["chief_of_staff", "marketing"],
     brandColor: "#5865F2",
     icon: { kind: "svg", file: "discord.svg" },
-    reads: ["Messages in the channels you add an AI teammate to"],
-    does: ["Your department agents reply in those channels"],
-    keywords: ["chat", "community"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Discord; you'll add OASIS to your Discord server with one click once approved. You never create an app yourself.",
-    registration: { vendor: "Discord" },
+    reads: ["Whether Discord still has the webhook, when you run Test. OASIS cannot read any message in your server"],
+    does: [
+      "Can post messages to the one channel the webhook belongs to",
+      "Test asks Discord whether the webhook exists and posts nothing",
+      "No department posts to this channel yet: that is not built",
+    ],
+    keywords: ["chat", "community", "webhook", "channel"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "discord",
+        requireAll: ["webhook_url"],
+        failureStates: webhookTestStates("Discord"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Discord", service: "discord" },
+    },
   },
   {
     slug: "microsoft-teams",
     name: "Microsoft Teams",
-    summary: "Team chat",
+    summary: "Post to one channel",
     category: "messaging",
     departments: ["chief_of_staff", "sales", "client_success"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Te", reason: "Removed from Simple Icons at Microsoft's request" },
-    reads: ["Messages in the channels you add an AI teammate to"],
-    does: ["Your department agents reply in those channels"],
-    keywords: ["chat", "microsoft", "teams"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Microsoft; you'll connect Microsoft Teams with one click once approved. You never create an app yourself. Microsoft validates OASIS's Teams app first, and your Teams admin approves it once.",
-    registration: { vendor: "Microsoft" },
+    reads: ["Nothing. A Teams webhook can only be posted to, so OASIS cannot read any message in your channel"],
+    does: [
+      "Can post messages to the one channel the Workflows webhook belongs to",
+      "Test posts one short message that says OASIS is connected, because Microsoft gives a webhook no other way to be checked",
+      "No department posts to this channel yet: that is not built",
+    ],
+    keywords: ["chat", "microsoft", "teams", "webhook", "workflows", "channel"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "microsoft_teams",
+        requireAll: ["webhook_url"],
+        failureStates: webhookTestStates("Microsoft Teams"),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Microsoft Teams", service: "microsoft_teams" },
+    },
   },
 
   // Ads & social
   {
     slug: "meta",
     name: "Meta",
-    summary: "Ads Manager, Facebook and Instagram Lead Ads",
+    summary: "Ad account access, with a system user token",
     category: "ads_social",
     departments: ["marketing"],
     brandColor: "#0467DF",
@@ -804,16 +888,27 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       { name: "Facebook", file: "facebook.svg", color: "#0866FF" },
       { name: "Instagram", file: "instagram.svg", color: "#FF0069" },
     ],
-    reads: ["Campaign spend and results, and leads from your Facebook and Instagram forms"],
+    reads: ["The name and status of the ad account the token can read, when you run Test"],
     does: [
-      "Reports cost per lead and cost per paying customer",
-      "Proposes pauses, budget changes and new ads — each one waits for your approval, and new ads start paused",
+      "Checks the token with Meta when you press Test, and changes nothing in your ad account",
+      "Campaign results and Lead Ads do not flow into Marketing from this token yet: that sync is not built",
+      "Never creates, pauses or edits an ad: give the system user read access (ads_read) only",
     ],
-    keywords: ["facebook", "instagram", "ads", "lead ads", "advertising"],
-    live: null,
-    pendingNote:
-      "OASIS is registering with Meta; you'll connect Meta with one click once approved. You never create an app yourself. Meta's App Review approves OASIS's app before it can read other businesses' ads and leads.",
-    registration: { vendor: "Meta" },
+    keywords: ["facebook", "instagram", "ads", "lead ads", "advertising", "system user", "business manager"],
+    live: {
+      source: {
+        kind: "tenant_keys",
+        service: "meta_ads",
+        requireAll: ["access_token", "ad_account_id"],
+        failureStates: keyTestStates("Meta", {
+          keyWord: "token",
+          notFound:
+            "Meta could not find that ad account for this token. Check the ad account ID, and that the system user is assigned to it in Business Settings, then run Test.",
+        }),
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Meta Ads", service: "meta_ads" },
+    },
   },
   {
     slug: "zernio",
@@ -863,10 +958,8 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     // OASIS's Constant Contact app is private to the login that created it
     // until Constant Contact's support approves it for all users, and the
     // authorize route answers a client workspace "not configured": a client
-    // card says it waits on that approval instead of offering a dead button.
-    pendingNote:
-      "OASIS is registering with Constant Contact; you'll connect Constant Contact with one click once approved. You never create an app yourself.",
-    registration: { vendor: "Constant Contact", clientsOnly: true },
+    // card says it is not available here yet instead of offering a dead button.
+    clientsUnavailable: true,
   },
 
   // CRM import
@@ -953,6 +1046,13 @@ export type ConnectorStatus = {
    * of workspace), each with its state on this deployment, for the drawer.
    */
   paths?: readonly ConnectorPathStatus[];
+  /**
+   * Connected, but OASIS's own app for it is missing on THIS deployment: a
+   * Reconnect or a Test again would only end in a refusal (the app can't be
+   * reached here at all), so the drawer and panel hide both and keep only
+   * Disconnect (Codex review, PR #574).
+   */
+  appMissing?: boolean;
 };
 
 export type ConnectorPathStatus = {
@@ -1066,6 +1166,12 @@ export type ConnectorFacts = {
    * (Slack without its Worker secrets). Their cards say so and offer nothing.
    */
   appNotConfigured?: readonly string[] | null;
+  /**
+   * For OASIS's own workspaces ONLY: the Worker secret NAMES each missing app
+   * still needs (provider id -> names, never values). The operator's card says
+   * exactly which to add; a client is never shown a secret name.
+   */
+  appSecretsMissing?: Readonly<Record<string, readonly string[]>> | null;
   /**
    * The workspace is OASIS's own (true) or a client's (false), which decides
    * the connection paths it is shown (Slack: the OASIS app, or its own app).
@@ -1400,12 +1506,21 @@ function frameworkStatus(
         account,
       };
     case "expired":
-      return {
-        kind: "attention",
-        label: "Key no longer accepted",
-        detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
-        account,
-      };
+      // A sign-in at the vendor's own page never had a "key"; it had a
+      // consent that expired or was refused (Codex review, PR #574).
+      return def.live?.connect.kind === "oauth"
+        ? {
+            kind: "attention",
+            label: "Sign-in expired · reconnect",
+            detail: row.last_health_detail ?? `${def.name} stopped accepting this sign-in. Reconnect it.`,
+            account,
+          }
+        : {
+            kind: "attention",
+            label: "Key no longer accepted",
+            detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
+            account,
+          };
     case "degraded":
     case "error":
       return {
@@ -1447,16 +1562,25 @@ function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathSt
  * same words, which is what lets the test feed it hostile inputs.
  */
 /**
- * A card whose one-click connect waits on OASIS's own app with the vendor
- * (ConnectorDef.registration): the state in CC's words, never "Not built yet"
- * and never a date. The drawer's detail is the card's pendingNote.
+ * A card that cannot connect on THIS deployment because OASIS's own app for the
+ * vendor is not set up here (Worker secrets missing), or is private to OASIS's
+ * login (ConnectorDef.clientsUnavailable). It claims nothing about a vendor
+ * registration or a date: it says the state.
+ *
+ *   OASIS's own workspace (`missing` given): which Worker secret names to add.
+ *   A client: "Not available on this workspace yet", and that nothing is wrong
+ *   on their side. A secret name is never shown to a client.
  */
-export function registrationStatus(def: ConnectorDef): ConnectorStatus {
-  const vendor = def.registration?.vendor ?? def.name;
+export const UNAVAILABLE_LABEL = "Not available on this workspace yet";
+
+export function unavailableStatus(def: ConnectorDef, missing?: readonly string[]): ConnectorStatus {
   return {
     kind: "coming_soon",
-    label: `OASIS is registering with ${vendor}`,
-    detail: def.pendingNote ?? `OASIS is registering with ${vendor}; you'll connect with one click once approved.`,
+    label: UNAVAILABLE_LABEL,
+    detail:
+      missing && missing.length > 0
+        ? `OASIS's ${def.name} app is not set up on this deployment. Missing Worker secrets: ${missing.join(", ")}. Add them in Cloudflare, then this card connects with one click.`
+        : `${def.name} cannot be connected on this workspace yet. Nothing is wrong on your side: OASIS has to switch it on first.`,
   };
 }
 
@@ -1469,9 +1593,7 @@ export function resolveConnectorStatus(
   // The label is the state, never an era or a promise: Chat apps and the
   // drawer say "not built yet" for the same apps, and "Coming soon" /
   // "Planned" promised a release nobody had scheduled (S5-F01, W3A-R4).
-  // An app that waits on OASIS's own vendor app says that instead.
   if (!def.live) {
-    if (def.registration) return registrationStatus(def);
     return {
       kind: "coming_soon",
       label: "Not built yet",
@@ -1490,27 +1612,25 @@ export function resolveConnectorStatus(
     // An app OASIS itself has not been given on this deployment cannot be
     // connected, whatever the facts say: say so rather than offer a dead button.
     // A workspace whose own way in does not need OASIS's app is not held to it.
-    // A workspace that already connected is never told it waits on
-    // registration: its connection is real, it needs to see it and keep its
-    // Disconnect, and the missing app is an attention state, not "registering".
-    const alreadyConnected = !!facts.connections?.some((c) => c.provider === source.provider && c.status !== "revoked");
+    // A workspace that already connected is never told the app is unavailable:
+    // its connection is real, it needs to see it and keep its Disconnect, and
+    // the missing app is an attention state.
+    const connectedRow = facts.connections?.find((c) => c.provider === source.provider && c.status !== "revoked") ?? null;
+    const alreadyConnected = !!connectedRow;
     if (oasisAppMissing && alreadyConnected) {
       return withPaths({
         kind: "attention",
         label: "Connected · needs attention",
-        detail: `This workspace is connected to ${def.name}, but OASIS's ${def.name} app is not set up on this deployment, so messages may not arrive. You can still disconnect.`,
+        // Provider-neutral: "messages may not arrive" was Slack-only wording
+        // and means nothing for QuickBooks, Xero or Zoom (Codex review, PR
+        // #574). Also carries the account name on, same as every other status.
+        detail: `OASIS can't check or renew this connection here until ${def.name}'s app is set up again on this deployment. You can still disconnect.`,
+        account: accountLine(connectedRow),
+        appMissing: true,
       });
     }
     if (oasisAppMissing && (mine.length === 0 || mine.every((p) => p.needsOasisApp))) {
-      return withPaths(
-        def.registration
-          ? registrationStatus(def)
-          : {
-              kind: "coming_soon",
-              label: `${def.name} app not configured yet`,
-              detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
-            },
-      );
+      return withPaths(unavailableStatus(def, facts.appSecretsMissing?.[source.provider]));
     }
     if (!facts.connections) return withPaths(UNKNOWN);
     // A workspace whose every way in is not built yet cannot connect, unless it
@@ -1522,12 +1642,12 @@ export function resolveConnectorStatus(
     return withPaths(frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs));
   }
   if (!facts.keyRows) return UNKNOWN;
-  // OASIS's app is approved for OASIS's own login only (Constant Contact): a
-  // client workspace that has not connected is told it waits on the vendor,
+  // OASIS's app is private to OASIS's own login (Constant Contact): a client
+  // workspace that has not connected is told it is not available here yet,
   // instead of a Connect button that answers "not enabled for your workspace".
-  if (def.registration?.clientsOnly && facts.oasisWorkspace === false) {
+  if (def.clientsUnavailable && facts.oasisWorkspace === false) {
     const own = keyedStatus(source, facts.keyRows, [], nowMs, def.name);
-    if (own.kind === "not_connected") return registrationStatus(def);
+    if (own.kind === "not_connected") return unavailableStatus(def);
   }
   const workspace = keyedStatus(source, facts.keyRows, facts.serverChecks === undefined ? [] : facts.serverChecks, nowMs, def.name);
   if (def.yourAccount !== "google" || facts.personalGoogle === undefined) return workspace;

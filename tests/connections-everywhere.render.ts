@@ -30,8 +30,18 @@ type HubCase = {
   statuses: Record<string, Record<string, unknown>>;
   embedded?: boolean;
   initialApp?: string | null;
+  /** A full-window sign-in's result, as it comes back on the URL (page.tsx). */
+  initialStatus?: string | null;
+  initialReason?: string | null;
 };
-type Input = { cases: Array<DrawerCase | HubCase>; clicks: Array<{ slug: string; embedded: boolean }> };
+type ClickCase = {
+  slug: string;
+  embedded: boolean;
+  /** When set, also reports what the OAuth "Manage" card-click decision would be for this status. */
+  statusKind?: string;
+  fromDrawer?: boolean;
+};
+type Input = { cases: Array<DrawerCase | HubCase>; clicks: Array<ClickCase> };
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -62,7 +72,7 @@ async function main() {
   (globalThis as unknown as { React: typeof React }).React = React;
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { ConnectorDrawer } = await import("../components/os/connections/ConnectorDrawer");
-  const { ConnectionsHub, connectorClickAction } = await import("../components/os/connections/ConnectionsHub");
+  const { ConnectionsHub, connectorClickAction, oauthManageOpensDrawer } = await import("../components/os/connections/ConnectionsHub");
   const { connectorBySlug } = await import("../lib/os/connectors");
 
   const input = JSON.parse(await readStdin()) as Input;
@@ -89,13 +99,19 @@ async function main() {
           statuses: c.statuses as never,
           supportHref: null,
           initialApp: c.initialApp ?? null,
+          initialStatus: c.initialStatus ?? null,
+          initialReason: c.initialReason ?? null,
           personalGoogle: false,
           embedded: c.embedded ?? false,
         }),
       );
     }
   }
-  const clicks = input.clicks.map((k) => ({ ...k, action: connectorClickAction(connectorBySlug(k.slug)!, k.embedded) }));
+  const clicks = input.clicks.map((k) => {
+    const action = connectorClickAction(connectorBySlug(k.slug)!, k.embedded);
+    const manageOpensDrawer = "statusKind" in k ? oauthManageOpensDrawer(k.statusKind as never, !!k.fromDrawer) : null;
+    return { ...k, action, manageOpensDrawer };
+  });
   process.stdout.write(JSON.stringify({ markup, clicks }));
 }
 

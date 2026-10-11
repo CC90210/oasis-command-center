@@ -50,7 +50,12 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
   const statuses = await loadConnectorStatuses({ tenantId: viewer.tenantId, userId: viewer.userId });
   const sp = await searchParams;
   // Google's sign-in returns here with ?gmail_oauth=…; its drawer shows the result.
-  const initialApp = one(sp.app) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);
+  // A sign-in popup that had to fall back to a full-window navigation (popup
+  // blocked) returns with ?connection=<slug>&status=...&reason=...: that app's
+  // drawer opens, and the hub shows the same banner the popup would have.
+  const initialApp = one(sp.app) ?? one(sp.connection) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);
+  const initialStatus = one(sp.status);
+  const initialReason = one(sp.reason);
 
   return (
     <PageFrame
@@ -61,6 +66,8 @@ export default async function SettingsConnectionsPage({ searchParams }: { search
         statuses={statuses}
         supportHref={SUPPORT_FORM_PATH}
         initialApp={initialApp}
+        initialStatus={initialStatus}
+        initialReason={initialReason}
         personalGoogle={!isSharedInboxTenant(viewer.tenantSlug)}
       />
     </PageFrame>

@@ -34,7 +34,14 @@ import type { Client } from "@libsql/client";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
 import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
 import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
-import { STRIPE_READ_PERMISSIONS, providerById, providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import {
+  GENERIC_OAUTH_PROVIDER_IDS,
+  STRIPE_READ_PERMISSIONS,
+  isGenericOAuthProvider,
+  providerById,
+  providerForEnv,
+  type ProviderDef,
+} from "@/lib/connections/registry";
 import { probeJevKey } from "@/lib/jev/client";
 import { connectorBySlug } from "@/lib/os/connectors";
 import { setupHref } from "@/lib/setup-links";
@@ -394,7 +401,8 @@ export function probeFor(provider: string): Probe | null {
 
 /** Providers the health cron can re-probe: live on this deployment, and holding a probe. */
 export function probedProviders(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
-  return Object.keys(PROBES).filter((id) => providerForEnv(id, env)?.availability === "live");
+  // The OAuth sign-ins have no stored key to probe; oauth-live probes them with a fresh token.
+  return [...Object.keys(PROBES), ...GENERIC_OAUTH_PROVIDER_IDS].filter((id) => providerForEnv(id, env)?.availability === "live");
 }
 
 // ── Probe a stored connection ─────────────────────────────────────────────
@@ -430,6 +438,38 @@ function credentialFieldFor(provider: ProviderDef): string {
   throw new Error(`provider_has_no_stored_key:${provider.id}`);
 }
 
+type ProbeOutcome = Pick<ProbeResult, "verdict" | "code" | "detail" | "accountLabel" | "environment"> & { latencyMs: number | null };
+
+/** The outcome of probing a stored KEY (Stripe, Jev, a Slack bot token) with its own saved credential. */
+async function keyProbeOutcome(deps: ConnectionsDeps, row: ConnectionRow, provider: ProviderDef, probe: Probe): Promise<ProbeOutcome> {
+  const credential = await readTenantCredentialStrict(row.tenant_id, credentialServiceFor(row.id), credentialFieldFor(provider));
+  if (!credential.ok) {
+    if (credential.reason === "lookup_failed") throw new Error("credential_lookup_failed");
+    return { verdict: "down", ...CREDENTIAL_FAILURE[credential.reason], latencyMs: null, accountLabel: null, environment: null };
+  }
+  const result = await probe(credential.value, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
+  if (result.accountId && row.external_account_id && result.accountId !== row.external_account_id) {
+    // The key now answers for a different account than the one pinned: never
+    // let another company's numbers flow into this workspace.
+    return {
+      verdict: "down",
+      code: "account_mismatch",
+      detail: `This key now belongs to ${result.accountId}, not the connected account ${row.external_account_id}. OASIS stopped using it. Disconnect and connect the right account.`,
+      latencyMs: result.latencyMs,
+      accountLabel: null,
+      environment: null,
+    };
+  }
+  return {
+    verdict: result.verdict,
+    code: result.code,
+    detail: result.detail,
+    latencyMs: result.latencyMs,
+    accountLabel: result.verdict === "healthy" ? result.accountLabel : null,
+    environment: result.verdict === "healthy" ? result.environment : null,
+  };
+}
+
 /**
  * Probe one stored connection with its own saved credential, compare the
  * account against the pinned one, and record the result. Used by the manual
@@ -445,37 +485,21 @@ export async function probeStoredConnection(
   actor: AuditActor,
 ): Promise<HealthRecordResult> {
   const provider = providerForEnv(row.provider, process.env);
-  const probe = provider && provider.availability === "live" ? probeFor(provider.id) : null;
-  if (!provider || !probe) throw new Error(`provider_not_probeable:${row.provider}`);
+  const live = !!provider && provider.availability === "live";
+  // A sign-in made over OASIS's own OAuth app (QuickBooks, Xero, Zoom, WhatsApp)
+  // is checked with a fresh access token and the vendor's own read
+  // (lib/connections/oauth-live.ts), not with a stored key.
+  const signedIn = !!provider && live && isGenericOAuthProvider(provider);
+  const probe = provider && live && !signedIn ? probeFor(provider.id) : null;
+  if (!provider || (!probe && !signedIn)) throw new Error(`provider_not_probeable:${row.provider}`);
 
-  const credential = await readTenantCredentialStrict(row.tenant_id, credentialServiceFor(row.id), credentialFieldFor(provider));
-  let outcome: Pick<ProbeResult, "verdict" | "code" | "detail" | "accountLabel" | "environment"> & { latencyMs: number | null };
-  if (!credential.ok) {
-    if (credential.reason === "lookup_failed") throw new Error("credential_lookup_failed");
-    outcome = { verdict: "down", ...CREDENTIAL_FAILURE[credential.reason], latencyMs: null, accountLabel: null, environment: null };
+  let outcome: ProbeOutcome;
+  if (signedIn) {
+    // Imported here: oauth-live reaches the token store, which reports back to this file.
+    const { oauthProbeOutcome } = await import("@/lib/connections/oauth-live");
+    outcome = await oauthProbeOutcome(deps, row);
   } else {
-    const result = await probe(credential.value, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
-    if (result.accountId && row.external_account_id && result.accountId !== row.external_account_id) {
-      // The key now answers for a different account than the one pinned: never
-      // let another company's numbers flow into this workspace.
-      outcome = {
-        verdict: "down",
-        code: "account_mismatch",
-        detail: `This key now belongs to ${result.accountId}, not the connected account ${row.external_account_id}. OASIS stopped using it. Disconnect and connect the right account.`,
-        latencyMs: result.latencyMs,
-        accountLabel: null,
-        environment: null,
-      };
-    } else {
-      outcome = {
-        verdict: result.verdict,
-        code: result.code,
-        detail: result.detail,
-        latencyMs: result.latencyMs,
-        accountLabel: result.verdict === "healthy" ? result.accountLabel : null,
-        environment: result.verdict === "healthy" ? result.environment : null,
-      };
-    }
+    outcome = await keyProbeOutcome(deps, row, provider, probe!);
   }
 
   const recorded = await recordHealthCheck(deps.db, {

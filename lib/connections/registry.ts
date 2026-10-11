@@ -9,17 +9,19 @@
  * tests/os-connections.test.ts holds the two lists together.
  *
  * AVAILABILITY IS HONEST. A provider is "live" only when OASIS can complete a
- * real connection for it today. Every OAuth provider below needs app
- * credentials (and, for most, a platform review) that OASIS does not hold yet,
- * so each is "coming_soon": the connect route refuses it with a 409, and no
- * button anywhere pretends otherwise. Their scopes are recorded now so the
- * minimum-scope decision (doc 03 a.5) is made once, in review, not at 2 a.m.
- * when the credentials arrive.
+ * real connection for it on this deployment. An OAuth provider needs OASIS's
+ * own app for that vendor (its client id and secret, Worker secrets), so its
+ * static row is "coming_soon": the connect route refuses it with a 409, and no
+ * button anywhere pretends otherwise. Their scopes are recorded so the
+ * minimum-scope decision (doc 03 a.5) is made once, in review.
  *
- * Slack is the one exception with a switch: it names the Worker secrets that
- * hold OASIS's Slack app (`liveWhenEnv`), and providerAvailability() makes it
- * live only on a deployment where all of them are set. Every caller that
+ * Slack, QuickBooks, Xero, Zoom and WhatsApp name the Worker secrets that hold
+ * OASIS's app for that vendor (`liveWhenEnv`), and providerAvailability() makes
+ * each live only on a deployment where all of them are set. Every caller that
  * decides "can this connect here?" asks providerForEnv(), never the static row.
+ * Plaid, Meta Ads, Discord and Microsoft Teams do not connect through this
+ * file at all: they take a key or webhook the client pastes into the key store
+ * (lib/tenant-integration-schemas.ts), and their rows below are not offered.
  *
  * PURE DATA. No fetch, no server import, and no env read of its own (the env
  * is passed in) — the probes live in lib/connections/health.ts, keyed by
@@ -154,6 +156,7 @@ export const PROVIDERS: readonly ProviderDef[] = [
     // only, enforced in code and by test when this goes live (doc 03 a.5).
     scopes: { base: ["com.intuit.quickbooks.accounting"], byDepartment: {} },
     blockedOn: "OASIS's Intuit app and Intuit's app assessment.",
+    liveWhenEnv: ["INTUIT_CLIENT_ID", "INTUIT_CLIENT_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"],
     oauth: {
       authorizeUrl: "https://appcenter.intuit.com/connect/oauth2",
       tokenUrl: "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
@@ -170,19 +173,34 @@ export const PROVIDERS: readonly ProviderDef[] = [
     authKind: "oauth2",
     scopeKind: "tenant",
     departments: ["finance"],
-    // Granular read scopes + offline_access; doc 03 a.5 says to confirm the
-    // current scope names against Xero's docs when this is built.
+    // Read-only granular scopes (Xero assigned them to every web app in March
+    // 2026; the broad accounting.transactions.read is deprecated) plus
+    // offline_access for a refresh token. Confirmed against
+    // developer.xero.com/documentation/guides/oauth2/scopes, 2026-10-10.
     scopes: {
-      base: ["openid", "offline_access", "accounting.transactions.read", "accounting.reports.read", "accounting.contacts.read"],
+      base: [
+        "openid",
+        "offline_access",
+        "accounting.invoices.read",
+        "accounting.payments.read",
+        "accounting.banktransactions.read",
+        "accounting.contacts.read",
+        "accounting.settings.read",
+        "accounting.reports.profitandloss.read",
+        "accounting.reports.balancesheet.read",
+      ],
       byDepartment: {},
     },
     blockedOn: "OASIS's Xero app credentials.",
+    liveWhenEnv: ["XERO_CLIENT_ID", "XERO_CLIENT_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"],
+    // A web app with a client secret uses the standard code flow (Basic auth at
+    // the token endpoint); PKCE is Xero's flow for apps that hold no secret.
     oauth: {
       authorizeUrl: "https://login.xero.com/identity/connect/authorize",
       tokenUrl: "https://identity.xero.com/connect/token",
       clientIdEnv: "XERO_CLIENT_ID",
       clientSecretEnv: "XERO_CLIENT_SECRET",
-      pkce: true,
+      pkce: false,
     },
   }),
   def({
@@ -297,9 +315,41 @@ export const PROVIDERS: readonly ProviderDef[] = [
     scopeKind: "tenant",
     departments: ["sales", "client_success"],
     // Scopes are fixed on the Zoom app itself at creation and Marketplace
-    // review; nothing is requested until that app exists.
+    // review, so the authorize URL carries none.
     scopes: { base: [], byDepartment: {} },
     blockedOn: "OASIS's Zoom app and Zoom Marketplace review.",
+    liveWhenEnv: ["ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"],
+    oauth: {
+      authorizeUrl: "https://zoom.us/oauth/authorize",
+      tokenUrl: "https://zoom.us/oauth/token",
+      clientIdEnv: "ZOOM_CLIENT_ID",
+      clientSecretEnv: "ZOOM_CLIENT_SECRET",
+      pkce: false,
+    },
+  }),
+  def({
+    // WhatsApp Business Platform (Cloud API) through Meta's Facebook Login: a
+    // business approves OASIS's Meta app for its WhatsApp Business Account.
+    // Meta issues a token and no refresh token; it is extended by exchanging
+    // the current one (lib/connections/oauth-adapters.ts).
+    id: "whatsapp",
+    label: "WhatsApp",
+    wave: 2,
+    availability: "coming_soon",
+    authKind: "oauth2",
+    scopeKind: "tenant",
+    departments: ["sales", "client_success"],
+    scopes: { base: ["whatsapp_business_management", "whatsapp_business_messaging"], byDepartment: {} },
+    blockedOn: "OASIS's Meta app with WhatsApp access.",
+    liveWhenEnv: ["META_APP_ID", "META_APP_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"],
+    oauth: {
+      authorizeUrl: "https://www.facebook.com/v23.0/dialog/oauth",
+      tokenUrl: "https://graph.facebook.com/v23.0/oauth/access_token",
+      clientIdEnv: "META_APP_ID",
+      clientSecretEnv: "META_APP_SECRET",
+      pkce: false,
+      scopeSeparator: ",",
+    },
   }),
   def({
     // Jev: TypeSafe's System One model, a fast classifier. Each workspace pastes
@@ -330,6 +380,18 @@ export const PROVIDERS: readonly ProviderDef[] = [
     },
   }),
 ];
+
+/**
+ * A provider connected through the generic OAuth sign-in over OASIS's own app
+ * (lib/connections/oauth-connect.ts): OAuth 2, with app secrets named for this
+ * deployment. Slack has its own install (authKind app_install); GoHighLevel's
+ * card connects with a token, so it has no secrets named here.
+ */
+export function isGenericOAuthProvider(p: ProviderDef): boolean {
+  return p.authKind === "oauth2" && !!p.oauth && (p.liveWhenEnv?.length ?? 0) > 0;
+}
+
+export const GENERIC_OAUTH_PROVIDER_IDS: readonly string[] = PROVIDERS.filter(isGenericOAuthProvider).map((p) => p.id);
 
 export function providerById(id: string): ProviderDef | null {
   return PROVIDERS.find((p) => p.id === id) ?? null;
