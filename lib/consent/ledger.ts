@@ -95,7 +95,20 @@ export type RecordConsentEventsResult = {
   failed: Array<ConsentDecision & { reason: string }>;
 };
 
-export type ConsentState = "ticked" | "declined" | "none" | "unknown";
+/**
+ * What the ledger says about one destination on one channel:
+ *   ticked    — consented, and has never declined since: marketing allowed.
+ *   withdrawn — consented, then declined: refused, and a later tick does NOT
+ *               revive it (see consentState).
+ *   declined  — has only ever declined (or left the box unticked).
+ *   none      — never asked.
+ *   unknown   — the read failed; callers treat it as the worst case.
+ */
+export type ConsentState = "ticked" | "withdrawn" | "declined" | "none" | "unknown";
+
+/** Rows read per destination. A destination with more than this many
+ *  decisions answers "unknown" rather than a guess from a partial history. */
+const CONSENT_HISTORY_CAP = 500;
 
 /** sha256 of the exact rendered text, hex-encoded. */
 export function sha256Hex(text: string): string {
@@ -184,15 +197,34 @@ export async function recordConsentEvents(
 }
 
 /**
- * The latest recorded decision for this destination on this channel, in this
- * workspace, across every lead. "unknown" means the read failed — callers
- * must treat it as the worst case for whatever they are deciding.
+ * Classify a destination's decisions, oldest first. Pure, so the rule is
+ * testable without a database.
  *
- * Latest wins (the ledger is append-only, so re-ticking or un-ticking is a
- * new row). On an exact created_at tie the decline sorts first: when two
- * answers are indistinguishable in time, "no" is the safe one to believe.
+ * A WITHDRAWAL IS PERMANENT. Once a tick is followed by any decline, the
+ * answer is "withdrawn" no matter what comes after. Consent is keyed on the
+ * address, and a public form lets anyone type anyone's address: if the latest
+ * row simply won, a stranger could tick a box with your email and undo the
+ * opt-out you gave. Re-consent after a withdrawal therefore needs a verified
+ * path (a confirmation the address itself answers), which this ledger does not
+ * provide; until it exists, a withdrawn destination stays refused. Declines
+ * BEFORE the first tick are only ever "did not opt in" and do not block a
+ * later tick. Rows sharing a timestamp are read tick-first, so a "no"
+ * recorded at the same instant as a "yes" counts as coming after it.
  */
-export async function latestConsentState(
+export function classifyConsentHistory(rows: ReadonlyArray<{ ticked?: unknown }>): ConsentState {
+  if (rows.length === 0) return "none";
+  const firstTick = rows.findIndex((r) => dbBool(r.ticked));
+  if (firstTick < 0) return "declined";
+  const declinedSince = rows.slice(firstTick + 1).some((r) => !dbBool(r.ticked));
+  return declinedSince ? "withdrawn" : "ticked";
+}
+
+/**
+ * The ledger's answer for this destination on this channel, in this
+ * workspace, across every lead (classifyConsentHistory has the rule).
+ * "unknown" means the read failed or the history was too long to read whole.
+ */
+export async function consentState(
   db: SupabaseClient,
   args: { tenantId: string; channel: ConsentChannel; destination: unknown },
 ): Promise<ConsentState> {
@@ -201,14 +233,13 @@ export async function latestConsentState(
   try {
     const res = await db
       .from("consent_events")
-      .select("ticked")
+      .select("ticked, created_at")
       .eq("tenant_id", args.tenantId)
       .eq("channel", args.channel)
       .eq("subject_hash", consentSubjectHash(args.channel, subject))
-      .order("created_at", { ascending: false })
-      .order("ticked", { ascending: true })
-      .limit(1)
-      .maybeSingle();
+      .order("created_at", { ascending: true })
+      .order("ticked", { ascending: false })
+      .limit(CONSENT_HISTORY_CAP);
     if (res.error) {
       console.error("[consent.ledger] consent read failed", {
         tenant_id: args.tenantId,
@@ -217,9 +248,9 @@ export async function latestConsentState(
       });
       return "unknown";
     }
-    const row = res.data as { ticked?: unknown } | null;
-    if (!row) return "none";
-    return dbBool(row.ticked) ? "ticked" : "declined";
+    const rows = (res.data || []) as Array<{ ticked?: unknown }>;
+    if (!Array.isArray(rows) || rows.length >= CONSENT_HISTORY_CAP) return "unknown";
+    return classifyConsentHistory(rows);
   } catch (err) {
     console.error("[consent.ledger] consent read threw", {
       tenant_id: args.tenantId,
@@ -233,17 +264,17 @@ export async function latestConsentState(
 /**
  * May this channel be used for a MARKETING send to this destination?
  *
- * Only a latest decision of "ticked" allows. No row at all (never asked, or
- * the ask failed to record) refuses, same as an explicit decline: the
- * absence of evidence is not evidence of consent. A read error refuses — a
- * send that cannot prove consent is exactly the CASL/TCPA failure mode this
- * ledger exists to prevent.
+ * Only "ticked" allows. No row at all (never asked, or the ask failed to
+ * record) refuses, same as a decline: the absence of evidence is not evidence
+ * of consent. A withdrawal refuses for good. A read error refuses — a send
+ * that cannot prove consent is exactly the CASL/TCPA failure mode this ledger
+ * exists to prevent.
  */
 export async function hasTickedConsent(
   db: SupabaseClient,
   args: { tenantId: string; channel: ConsentChannel; destination: unknown },
 ): Promise<boolean> {
-  return (await latestConsentState(db, args)) === "ticked";
+  return (await consentState(db, args)) === "ticked";
 }
 
 /**
@@ -259,7 +290,7 @@ export async function unrecordedWithdrawal(
 ): Promise<boolean> {
   for (const f of result.failed) {
     if (f.ticked || !f.subject) continue;
-    const state = await latestConsentState(db, { tenantId, channel: f.channel, destination: f.subject });
+    const state = await consentState(db, { tenantId, channel: f.channel, destination: f.subject });
     if (state === "ticked" || state === "unknown") return true;
   }
   return false;

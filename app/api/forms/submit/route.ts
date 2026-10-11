@@ -713,7 +713,8 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   const renderedConsentDecisions: ConsentDecision[] = consentDecisionsForStep(
     currentStep,
     mergedAnswers,
-    body.consent_ledger || {},
+    payload,
+    body.consent_ledger && typeof body.consent_ledger === "object" ? body.consent_ledger : {},
   );
   if (renderedConsentDecisions.length > 0) {
     const { identity, source: identitySource } = resolveConsentIdentity({

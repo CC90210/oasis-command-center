@@ -39,19 +39,24 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { hasTickedConsent } from "./ledger";
-import type { ConsentChannel } from "./ledger-disclosure";
+import { normalizeConsentSubject, type ConsentChannel } from "./ledger-disclosure";
 
 export type MarketingSendVerdict =
-  | { allow: true }
+  | { allow: true; destination: string }
   | { allow: false; reason: "no_ticked_consent" };
 
 /**
  * May a MARKETING send reach this destination on this channel?
  *
- * `destination` is the exact email address or number the send is about to
- * use, never a lead id: consent was given for a destination, and a lead's
- * contact details can change or be merged after the fact. Pass the raw value;
- * normalisation happens inside.
+ * `destination` is the email address or number the send is about to use,
+ * never a lead id: consent was given for a destination, and a lead's contact
+ * details can change or be merged after the fact. Pass the raw value.
+ *
+ * SEND ONLY TO `verdict.destination`. On allow, the verdict carries the
+ * canonical address the consent was matched under (lowercased email, E.164
+ * number). A sender that went on to use its own raw value would reintroduce
+ * a second parser: an input the gate read as one recipient could reach the
+ * mail or SMS provider as another.
  *
  * Thin by design: hasTickedConsent already fails closed on a read error
  * (lib/consent/ledger.ts) and already treats "no row" the same as an
@@ -64,6 +69,8 @@ export async function marketingSendAllowed(
   db: SupabaseClient,
   args: { tenantId: string; channel: ConsentChannel; destination: unknown },
 ): Promise<MarketingSendVerdict> {
-  const ticked = await hasTickedConsent(db, args);
-  return ticked ? { allow: true } : { allow: false, reason: "no_ticked_consent" };
+  const canonical = normalizeConsentSubject(args.channel, args.destination);
+  if (!canonical) return { allow: false, reason: "no_ticked_consent" };
+  const ticked = await hasTickedConsent(db, { ...args, destination: canonical });
+  return ticked ? { allow: true, destination: canonical } : { allow: false, reason: "no_ticked_consent" };
 }

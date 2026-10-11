@@ -90,35 +90,53 @@ export function renderedChannelsForStep(step: FormStep, values: Record<string, u
   return channels;
 }
 
+// One plain mailbox, nothing a mail library could read as a second recipient,
+// a display name, a comment or a route: no whitespace, comma, semicolon,
+// colon, angle bracket, parenthesis, square bracket, quote or backslash.
+const EMAIL_SHAPE = /^[^\s@,;:<>()[\]"\\]+@[^\s@,;:<>()[\]"\\]+\.[^\s@,;:<>()[\]"\\]+$/;
+// Digits plus the separators people actually type. A letter (an "ext 22")
+// makes the number ambiguous, so it is refused rather than guessed at.
+const PHONE_SHAPE = /^\+?[\d\s().-]+$/;
+
 /**
- * The canonical form of an email address or mobile number, so a consent
- * decision binds to the exact destination it was given for and the send gate
- * can match it. Email: trimmed + lowercased. SMS: digits only, a leading
- * North American "1" dropped from an 11-digit number. Anything that does not
- * look like a usable destination answers null — and a null subject can never
- * authorise a send (lib/consent/ledger.ts).
+ * The ONE canonical form of a destination. Consent is stored under it, the
+ * send gate looks it up under it, and the gate hands it back as the only
+ * address a sender may use (lib/consent/marketing-send-gate.ts) — so there is
+ * no second parser anywhere that could read the same input as a different
+ * recipient from the one that consented.
+ *
+ * Email: trimmed, lowercased, exactly one plain mailbox (EMAIL_SHAPE).
+ * SMS: E.164. A leading "+" keeps its country code; otherwise a 10-digit
+ * number, or an 11-digit one starting with 1, is North American (+1), which
+ * is the region these forms collect in. Anything else is ambiguous and
+ * answers null — and a null subject can never authorise a send.
  */
 export function normalizeConsentSubject(channel: ConsentChannel, raw: unknown): string | null {
   if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
   if (channel === "email") {
-    const email = raw.trim().toLowerCase();
-    return email.includes("@") && email.length <= 320 ? email : null;
+    const email = trimmed.toLowerCase();
+    return email.length <= 254 && EMAIL_SHAPE.test(email) ? email : null;
   }
-  let digits = raw.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
-  return digits.length >= 7 && digits.length <= 15 ? digits : null;
+  if (!PHONE_SHAPE.test(trimmed)) return null;
+  const digits = trimmed.replace(/\D/g, "");
+  if (trimmed.startsWith("+")) return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : null;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
 }
 
-/** The value the step's own visible field of this channel's type holds. */
+/** The value THIS submission's own visible field of this channel's type holds. */
 function stepSubjectFor(
   step: FormStep,
-  values: Record<string, unknown>,
+  visibility: Record<string, unknown>,
+  stepPayload: Record<string, unknown>,
   channel: ConsentChannel,
 ): string | null {
   const fieldType = channel === "email" ? "email" : "phone";
   for (const f of step.fields) {
-    if (f.type !== fieldType || !isFieldVisible(f, values)) continue;
-    const subject = normalizeConsentSubject(channel, values[f.name]);
+    if (f.type !== fieldType || !isFieldVisible(f, visibility)) continue;
+    const subject = normalizeConsentSubject(channel, stepPayload[f.name]);
     if (subject) return subject;
   }
   return null;
@@ -129,29 +147,36 @@ function stepSubjectFor(
  * the decisions actually worth recording.
  *
  * THIS IS THE FORGERY FENCE. `requested` is untrusted client input
- * (body.consent_ledger in the submit route) — a channel named there that the
- * step does not render is simply never looked at, because the loop only
- * ever iterates `renderedChannelsForStep`'s own output. A channel the step
- * DOES render gets exactly the boolean `requested` supplied for it (missing
- * or non-`true` means unticked, never a throw and never a default to
- * "ticked" — an absent/malformed claim must read as "did not consent").
+ * (body.consent_ledger in the submit route). A channel is recorded only when
+ * BOTH sides agree a box was on screen: the step's own fields render it
+ * (renderedChannelsForStep — a forged extra channel is never looked at) AND
+ * the client sent an answer for it (the page sends a key only for a box it
+ * drew). Without the second half, a page whose visibility rules read the
+ * answers differently from the server would leave the server recording
+ * "shown and declined" for a disclosure nobody saw. The answer itself counts
+ * as ticked only when it is exactly `true`; anything else is a decline.
  *
- * EACH DECISION BINDS TO THE DESTINATION ON THAT STEP. `subject` is the
- * normalised email/number the step's own field holds — the address the
- * visitor was agreeing about. Consent is never a property of the LEAD: an
- * anonymous submission can smart-match an existing lead by business name
- * alone (app/api/forms/submit/route.ts initAnonymousLead), so a lead-keyed
- * tick would let a stranger's "yes" authorise texts to the real customer's
- * number. The send gate matches on subject, never on lead.
+ * EACH DECISION BINDS TO THE DESTINATION THIS SUBMISSION TYPED. `subject`
+ * comes from `stepPayload` — what was submitted on this step — never from
+ * answers merged in from earlier submissions, which could bind a tick to an
+ * address the visitor did not enter here. `visibility` (the merged answers)
+ * is used only to decide which fields were showing. Consent is never a
+ * property of the LEAD: an anonymous submission can smart-match an existing
+ * lead by business name alone (app/api/forms/submit/route.ts
+ * initAnonymousLead), so a lead-keyed tick would let a stranger's "yes"
+ * authorise texts to the real customer's number.
  */
 export function consentDecisionsForStep(
   step: FormStep,
-  values: Record<string, unknown>,
+  visibility: Record<string, unknown>,
+  stepPayload: Record<string, unknown>,
   requested: Partial<Record<ConsentChannel, unknown>>,
 ): Array<{ channel: ConsentChannel; ticked: boolean; subject: string | null }> {
-  return renderedChannelsForStep(step, values).map((channel) => ({
-    channel,
-    ticked: requested[channel] === true,
-    subject: stepSubjectFor(step, values, channel),
-  }));
+  return renderedChannelsForStep(step, visibility)
+    .filter((channel) => Object.prototype.hasOwnProperty.call(requested, channel))
+    .map((channel) => ({
+      channel,
+      ticked: requested[channel] === true,
+      subject: stepSubjectFor(step, visibility, stepPayload, channel),
+    }));
 }

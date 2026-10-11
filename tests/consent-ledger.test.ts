@@ -24,9 +24,11 @@
  *      .delete( off a consent_events access.
  *   5. hasTickedConsent / marketingSendAllowed: keyed on the DESTINATION,
  *      never the lead (consent for one number never authorises another on
- *      the same lead); no row refuses; the most RECENT row wins across
- *      leads; an exact time tie resolves to the decline; a blank-field
- *      row never authorises; a read error refuses (fail closed).
+ *      the same lead); no row refuses; a decline after a tick withdraws for
+ *      good, on any lead record, and a later tick does not revive it; a
+ *      blank-field row never authorises; a read error or an over-long
+ *      history refuses (fail closed); the verdict carries the canonical
+ *      address a sender must use.
  *   6. unrecordedWithdrawal: a failed decline that leaves an earlier tick
  *      standing (or cannot be checked) is reported, and the submit route
  *      refuses the submission on it, BEFORE the submission row is written.
@@ -68,10 +70,7 @@ function readStub(answer: unknown): any {
         order() {
           return this;
         },
-        limit() {
-          return this;
-        },
-        async maybeSingle() {
+        async limit() {
           if (answer instanceof Error) throw answer;
           return answer;
         },
@@ -106,7 +105,8 @@ async function main() {
   const {
     recordConsentEvents,
     hasTickedConsent,
-    latestConsentState,
+    consentState,
+    classifyConsentHistory,
     unrecordedWithdrawal,
     consentPageUrl,
     consentSubjectHash,
@@ -186,41 +186,65 @@ async function main() {
   });
 
   await check("consentDecisionsForStep: a forged extra channel (sms) the step never rendered is ignored", () => {
-    const decisions = consentDecisionsForStep(stepEmailOnly, { email: EMAIL_A }, { email: true, sms: true });
+    const decisions = consentDecisionsForStep(stepEmailOnly, { email: EMAIL_A }, { email: EMAIL_A }, { email: true, sms: true });
     assert.deepEqual(decisions, [{ channel: "email", ticked: true, subject: EMAIL_A }]);
     assert.ok(!decisions.some((d) => d.channel === "sms"), "a channel this step did not render must never be recorded");
   });
 
-  await check("consentDecisionsForStep: a missing or non-true claim for a rendered channel reads as unticked, never a default yes", () => {
-    assert.deepEqual(consentDecisionsForStep(stepBoth, {}, {}), [
+  await check("consentDecisionsForStep: an answer that is not exactly true is a decline, never a default yes", () => {
+    assert.deepEqual(consentDecisionsForStep(stepBoth, {}, {}, { email: "yes", sms: false }), [
       { channel: "email", ticked: false, subject: null },
       { channel: "sms", ticked: false, subject: null },
     ]);
-    assert.deepEqual(consentDecisionsForStep(stepBoth, {}, { email: "yes" }), [
-      { channel: "email", ticked: false, subject: null },
-      { channel: "sms", ticked: false, subject: null },
+  });
+
+  await check("consentDecisionsForStep: a box the page did not draw (no answer sent) is never recorded as shown-and-declined", () => {
+    assert.deepEqual(consentDecisionsForStep(stepBoth, {}, {}, {}), []);
+    assert.deepEqual(consentDecisionsForStep(stepBoth, {}, {}, { email: true }), [
+      { channel: "email", ticked: true, subject: null },
+    ]);
+  });
+
+  await check("consentDecisionsForStep: the destination comes from THIS submission, never from answers merged in from earlier ones", () => {
+    const merged = { email: "earlier@client-a.test" };
+    assert.deepEqual(consentDecisionsForStep(stepEmailOnly, merged, {}, { email: true }), [
+      { channel: "email", ticked: true, subject: null },
+    ]);
+    assert.deepEqual(consentDecisionsForStep(stepEmailOnly, merged, { email: EMAIL_A }, { email: true }), [
+      { channel: "email", ticked: true, subject: EMAIL_A },
     ]);
   });
 
   await check("consentDecisionsForStep: each decision carries the normalised destination the step's OWN field held", () => {
-    const decisions = consentDecisionsForStep(
-      stepBoth,
-      { email: "  Owner@Client-A.TEST ", phone: PHONE_A },
-      { email: true, sms: true },
-    );
+    const typed = { email: "  Owner@Client-A.TEST ", phone: PHONE_A };
+    const decisions = consentDecisionsForStep(stepBoth, typed, typed, { email: true, sms: true });
     assert.deepEqual(decisions, [
       { channel: "email", ticked: true, subject: EMAIL_A },
-      { channel: "sms", ticked: true, subject: "5145550101" },
+      { channel: "sms", ticked: true, subject: "+15145550101" },
     ]);
   });
 
-  await check("normalizeConsentSubject: email lowercased and trimmed, phone digits with a leading NANP 1 dropped, junk is null", () => {
+  await check("normalizeConsentSubject: one canonical form (lowercased mailbox, E.164), and anything ambiguous is null", () => {
     assert.equal(normalizeConsentSubject("email", " A@B.Test "), "a@b.test");
     assert.equal(normalizeConsentSubject("email", "not-an-email"), null);
-    assert.equal(normalizeConsentSubject("sms", "+1 514-555-0101"), "5145550101");
-    assert.equal(normalizeConsentSubject("sms", "514.555.0101"), "5145550101");
+    assert.equal(normalizeConsentSubject("sms", "+1 514-555-0101"), "+15145550101");
+    assert.equal(normalizeConsentSubject("sms", "514.555.0101"), "+15145550101");
+    assert.equal(normalizeConsentSubject("sms", "1 (514) 555-0101"), "+15145550101");
+    assert.equal(normalizeConsentSubject("sms", "+44 20 7946 0958"), "+442079460958");
     assert.equal(normalizeConsentSubject("sms", "12"), null);
     assert.equal(normalizeConsentSubject("sms", 5145550101), null);
+  });
+
+  await check("normalizeConsentSubject: an input a mail or SMS library could read as a different or second recipient is refused", () => {
+    assert.equal(normalizeConsentSubject("email", "a@b.test, victim@c.test"), null);
+    assert.equal(normalizeConsentSubject("email", "a@b.test;victim@c.test"), null);
+    assert.equal(normalizeConsentSubject("email", "Name <victim@c.test>"), null);
+    assert.equal(normalizeConsentSubject("email", "a@b@c.test"), null);
+    assert.equal(normalizeConsentSubject("email", "a @b.test"), null);
+    assert.equal(normalizeConsentSubject("email", '"x"@b.test'), null);
+    assert.equal(normalizeConsentSubject("sms", "514-555-0101 ext 22"), null);
+    assert.equal(normalizeConsentSubject("sms", "514-555-0101,5145550199"), null);
+    assert.equal(normalizeConsentSubject("sms", "23456789012"), null, "11 digits not starting with 1 and no + is ambiguous");
   });
 
   // ── 3. recordConsentEvents + page address ──
@@ -234,7 +258,7 @@ async function main() {
       formId: "form-1",
       decisions: [
         { channel: "email", ticked: true, subject: EMAIL_A },
-        { channel: "sms", ticked: false, subject: "5145550101" },
+        { channel: "sms", ticked: false, subject: "+15145550101" },
       ],
       identity,
       identitySource: "brand",
@@ -265,7 +289,7 @@ async function main() {
       assert.equal(row.ip_address, "203.0.113.9", "the body's own ip must never override the caller-supplied header IP");
       assert.equal(row.user_agent, "test-agent/1.0");
       assert.equal(row.page_url, "https://test.example/f/a/form-1");
-      const expectSubject = channel === "email" ? EMAIL_A : "5145550101";
+      const expectSubject = channel === "email" ? EMAIL_A : "+15145550101";
       assert.equal(row.subject_hash, consentSubjectHash(channel, expectSubject));
       assert.ok(!String(row.subject_hash).includes(expectSubject), "the raw destination is never stored on the row");
       assert.equal(row.ticked, channel === "email" ? 1 : 0);
@@ -296,6 +320,8 @@ async function main() {
     assert.ok(/ipAddress:\s*ipHeader\b/.test(block), `expected ipAddress: ipHeader in:\n${block}`);
     assert.ok(!/body\.ip\b|body\["ip"\]|body\.ip_address/.test(block), "the ledger write must never read an IP off the request body");
     assert.ok(/pageUrl:\s*consentPageUrl\(/.test(block), "page_url must go through consentPageUrl, never the raw submission_path");
+    assert.ok(/consentDecisionsForStep\(\s*currentStep,\s*mergedAnswers,\s*payload,/.test(routeSrc),
+      "the destination must come from this submission's own payload; merged answers only decide visibility");
     assert.ok(/const resolvedIp = getClientIp\(req\);/.test(routeSrc));
     assert.ok(/const ipHeader = resolvedIp === "unknown" \? null : resolvedIp;/.test(routeSrc));
   });
@@ -351,8 +377,9 @@ async function main() {
   await check("hasTickedConsent: a ticked destination allows, matched after normalisation; marketingSendAllowed agrees", async () => {
     assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: " OWNER@client-a.test" }), true);
     assert.deepEqual(
-      await marketingSendAllowed(dbClient, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }),
-      { allow: true },
+      await marketingSendAllowed(dbClient, { tenantId: TENANT_A, channel: "email", destination: " Owner@Client-A.test" }),
+      { allow: true, destination: EMAIL_A },
+      "the verdict hands back the canonical address, the only one a sender may use",
     );
   });
 
@@ -372,7 +399,7 @@ async function main() {
       tenantId: TENANT_A,
       leadId: "lead-merged",
       formId: "form-3",
-      decisions: [{ channel: "sms", ticked: true, subject: "4385550199" }],
+      decisions: [{ channel: "sms", ticked: true, subject: "+14385550199" }],
       identity,
       identitySource: "brand",
       ipAddress: "198.51.100.7",
@@ -387,7 +414,7 @@ async function main() {
     );
   });
 
-  await check("the MOST RECENT decision for a destination wins, even when it was recorded on a different lead", async () => {
+  await check("a decline after a tick withdraws consent, even when it was recorded on a different lead record", async () => {
     await recordConsentEvents(dbClient, {
       tenantId: TENANT_A,
       leadId: "lead-flip-1",
@@ -417,9 +444,43 @@ async function main() {
       false,
       "a later decline must override an earlier tick, whichever lead record it landed on",
     );
+    assert.equal(await consentState(dbClient, { tenantId: TENANT_A, channel: "email", destination: "flip@client-a.test" }), "withdrawn");
   });
 
-  await check("an exact created_at tie between a tick and a decline resolves to the decline", async () => {
+  await check("a tick AFTER a withdrawal does not revive it (a stranger cannot undo someone's opt-out by typing their address)", async () => {
+    await new Promise((r) => setTimeout(r, 20));
+    await recordConsentEvents(dbClient, {
+      tenantId: TENANT_A,
+      leadId: "lead-stranger",
+      formId: "form-2",
+      decisions: [{ channel: "email", ticked: true, subject: "flip@client-a.test" }],
+      identity,
+      identitySource: "brand",
+      ipAddress: "192.0.2.66",
+      userAgent: null,
+      pageUrl: null,
+    });
+    assert.equal(await hasTickedConsent(dbClient, { tenantId: TENANT_A, channel: "email", destination: "flip@client-a.test" }), false);
+    assert.equal(await consentState(dbClient, { tenantId: TENANT_A, channel: "email", destination: "flip@client-a.test" }), "withdrawn");
+  });
+
+  await check("classifyConsentHistory: declines before the first tick never block it; any decline after it withdraws for good", () => {
+    assert.equal(classifyConsentHistory([]), "none");
+    assert.equal(classifyConsentHistory([{ ticked: 0 }, { ticked: 0 }]), "declined");
+    assert.equal(classifyConsentHistory([{ ticked: 0 }, { ticked: 1 }]), "ticked");
+    assert.equal(classifyConsentHistory([{ ticked: 1 }, { ticked: 1 }]), "ticked");
+    assert.equal(classifyConsentHistory([{ ticked: 1 }, { ticked: 0 }]), "withdrawn");
+    assert.equal(classifyConsentHistory([{ ticked: 1 }, { ticked: 0 }, { ticked: 1 }]), "withdrawn");
+  });
+
+  await check("a history longer than the read cap answers unknown, never a guess from part of it", async () => {
+    const rows = Array.from({ length: 500 }, () => ({ ticked: 1 }));
+    const longDb = readStub({ data: rows, error: null });
+    assert.equal(await consentState(longDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
+    assert.equal(await hasTickedConsent(longDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), false);
+  });
+
+  await check("an exact created_at tie between a tick and a decline reads as a withdrawal", async () => {
     const at = "2026-10-11T12:00:00.000Z";
     const hash = consentSubjectHash("email", "tie@client-a.test");
     for (const [id, ticked] of [["tie-1", 1], ["tie-2", 0]] as const) {
@@ -430,7 +491,7 @@ async function main() {
         args: [id, TENANT_A, ticked, hash, at],
       });
     }
-    assert.equal(await latestConsentState(dbClient, { tenantId: TENANT_A, channel: "email", destination: "tie@client-a.test" }), "declined");
+    assert.equal(await consentState(dbClient, { tenantId: TENANT_A, channel: "email", destination: "tie@client-a.test" }), "withdrawn");
   });
 
   await check("a tick recorded with a blank field (null subject) never authorises anything", async () => {
@@ -452,7 +513,7 @@ async function main() {
   await check("hasTickedConsent: a read that throws refuses (fail closed), never throws, never defaults to allow", async () => {
     const throwingDb = readStub(new Error("simulated connection failure"));
     assert.equal(await hasTickedConsent(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), false);
-    assert.equal(await latestConsentState(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
+    assert.equal(await consentState(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
     assert.deepEqual(
       await marketingSendAllowed(throwingDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }),
       { allow: false, reason: "no_ticked_consent" },
@@ -462,7 +523,7 @@ async function main() {
   await check("hasTickedConsent: a query that answers an ERROR object (not a throw) also refuses", async () => {
     const erroringDb = readStub({ data: null, error: { message: "relation does not exist" } });
     assert.equal(await hasTickedConsent(erroringDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), false);
-    assert.equal(await latestConsentState(erroringDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
+    assert.equal(await consentState(erroringDb, { tenantId: TENANT_A, channel: "email", destination: EMAIL_A }), "unknown");
   });
 
   // ── 6. A failed withdrawal is never silently lost ──
