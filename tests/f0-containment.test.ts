@@ -269,6 +269,11 @@ async function main() {
       deactivated_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
   `);
+  // DV0 (2026-10-11): the full-install wizard is now gated on this workspace's
+  // AGENTS OWNER (lib/agents-owner.ts, O1) as well as operator status, so CC
+  // needs a real owner row here too, the same migration-seeded shape
+  // tests/bridge-owner-gate.test.ts uses for the same person.
+  await db.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__210_workspace_agents_owner.sql"), "utf8"));
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner,
@@ -298,6 +303,11 @@ async function main() {
                 onboarding_completed_at, agents_enabled, updated_at)
               VALUES (?, ?, ?, ?, 'owner', 1, NULL, '["bravo"]', ?)`,
         args: [`p-${USERS.newbie.id}`, USERS.newbie.id, USERS.newbie.email, CLIENT, stamp],
+      },
+      // CC: this workspace's agents owner (hand-inserted, as production is).
+      {
+        sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at, note, revoked_at) VALUES (?, ?, 'test', ?, 'fixture', NULL)",
+        args: [OASIS, USERS.cc.id, stamp],
       },
     ],
     "write",

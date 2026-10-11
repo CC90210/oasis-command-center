@@ -589,18 +589,24 @@ export async function SettingsContent({
               id="devices"
               defaultOpen={focused}
               title="Devices (advanced)"
-              subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
+              subtitle="Pair a machine on your network to run the local bridge. Gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
               action={
-                <Link
-                  href="/settings/devices/install"
-                  className="btn-primary inline-flex items-center gap-1 !px-3 !py-1.5 !text-xs"
-                >
-                  Pair a machine →
-                </Link>
+                // O1: pairing names this workspace's own private harness repo,
+                // which only its AGENTS OWNER (lib/agents-owner.ts) can read.
+                // Everyone else who reaches this operator-only section gets the
+                // honest in-section notice instead of a link that 404s.
+                agentsOwner ? (
+                  <Link
+                    href="/settings/devices/install"
+                    className="btn-primary inline-flex items-center gap-1 !px-3 !py-1.5 !text-xs"
+                  >
+                    Pair a machine →
+                  </Link>
+                ) : undefined
               }
             >
               <SafeBoundary label="Devices">
-                <DevicesEditor installRepo={HARNESS_REPO} />
+                <DevicesEditor installRepo={agentsOwner ? HARNESS_REPO : null} />
               </SafeBoundary>
             </SettingsSection>
           )}
