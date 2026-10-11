@@ -296,14 +296,20 @@ export async function loadCronFailures(
     // bravo__211_automation_owner.sql adds, and a workspace whose migration
     // has not landed yet must still answer with every failure, not
     // "no such column" — the pre-O2 rule for a table with no owner concept.
-    db
-      .from("tenant_cron_jobs")
-      .select("*", { count: "exact" })
-      .eq("tenant_id", tenantId)
-      .eq("last_run_status", "error")
-      .gte("last_run_at", since)
-      .order("last_run_at", { ascending: false })
-      .limit(ATTENTION_LIST_LIMIT),
+    // With a viewer, the owner filter runs in JS, so every row in the 24 h
+    // window is read: capping before the filter let another owner's newer
+    // failures push the viewer's own out of the count (CodeRabbit, PR #585).
+    // The displayed list is still capped below.
+    (() => {
+      const q = db
+        .from("tenant_cron_jobs")
+        .select("*", { count: "exact" })
+        .eq("tenant_id", tenantId)
+        .eq("last_run_status", "error")
+        .gte("last_run_at", since)
+        .order("last_run_at", { ascending: false });
+      return viewer ? q : q.limit(ATTENTION_LIST_LIMIT);
+    })(),
   ]);
   if (platform.error) throw new Error(`cron_jobs read failed: ${platform.error.message}`);
   if (workspace.error) throw new Error(`tenant_cron_jobs read failed: ${workspace.error.message}`);
@@ -351,11 +357,8 @@ export async function loadCronFailures(
     .sort((a, b) => (Date.parse(b.lastRunAt || "") || 0) - (Date.parse(a.lastRunAt || "") || 0))
     .slice(0, ATTENTION_LIST_LIMIT);
   // Without a viewer, the DB's exact count (every matching row, not just the
-  // capped list) is the true total. With one, the owner filter ran in JS
-  // against the (already capped) rows, so the count is the filtered list's
-  // length — an approximation only if a single tenant has more than
-  // ATTENTION_LIST_LIMIT failures in 24h, which "a few dozen at most" above
-  // says does not happen in practice.
+  // capped list) is the true total. With one, the owner filter ran in JS over
+  // every row in the window (no query cap above), so its length is exact.
   const workspaceFailureCount = viewer ? ownedWorkspaceRows.length : Number(workspace.count ?? 0);
   return { count: platformFailed.length + workspaceFailureCount, rows };
 }
