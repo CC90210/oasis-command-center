@@ -292,13 +292,15 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     const { readAgentsOwner } = await import("@/lib/agents-owner");
     const owner = await readAgentsOwner(tenantId);
     const isOasis = isOasisSurfaceTenant(tenantRow.slug);
-    if (isOasis || owner.state === "set") {
+    // Only a non-OASIS tenant that has NEVER had an owner row skips the gate.
+    // A revoked row still locks (it refuses everyone), and a failed read
+    // locks for every tenant, because "could not read" is never "no lock"
+    // (Codex review, O1: both used to fall through to an operator's 200).
+    if (isOasis || owner.state !== "not_set") {
       if (owner.state === "unavailable") {
         return { ok: false, status: 403, error: "agents_owner_unavailable" };
       }
-      if (owner.state === "not_set") {
-        // Only reachable when isOasis is true (the `||` above): a non-OASIS
-        // tenant with no owner row never enters this block.
+      if (owner.state === "not_set" || owner.state === "revoked") {
         return { ok: false, status: 403, error: "agents_owner_not_set" };
       }
       if (owner.authUserId !== user.id) {

@@ -57,7 +57,14 @@ type IncomingBody = {
   tab_id?: string;
   cli_provider?: string;
   chat_mode?: string;
-  attachments?: Array<{ id?: string }>;
+  attachments?: Array<{
+    id?: string;
+    filename?: string;
+    mime_type?: string;
+    size_bytes?: number;
+    parser?: string;
+    text_excerpt?: string | null;
+  }>;
   // tenant_id / team_role / user_id / disallowed_tools, if present, are
   // IGNORED — we always derive them server-side and let the server fields
   // win in the forwarded body.
@@ -102,8 +109,18 @@ export async function POST(req: NextRequest) {
   if (!lastUserMsg || !String(lastUserMsg.content || "").trim()) {
     return jsonError(400, "no_user_message");
   }
+  // Every entry is checked BEFORE the allow-listed projection below reads its
+  // fields: `[null, {...}]` used to pass the checks above and then throw an
+  // unhandled 500 when the projection read `m.role` (Codex review, O1).
+  const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!messages.every((m) => isObject(m) && typeof m.role === "string" && typeof m.content === "string")) {
+    return jsonError(400, "invalid_messages");
+  }
   const attachments = Array.isArray(clientBody.attachments) ? clientBody.attachments : [];
   if (attachments.length > MAX_ATTACHMENTS) return jsonError(400, "too_many_attachments");
+  if (!attachments.every((a) => isObject(a) && typeof a.id === "string" && a.id.length > 0)) {
+    return jsonError(400, "invalid_attachments");
+  }
 
   // cli_provider gate — same allowlist /api/chat (and the bridge) enforce.
   const cliProvider = String(clientBody.cli_provider || "claude").toLowerCase();
@@ -168,7 +185,18 @@ export async function POST(req: NextRequest) {
     tab_id: clientBody.tab_id,
     cli_provider: effectiveCliProvider, // forced to claude for non-owner/admin
     chat_mode: clientBody.chat_mode,
-    attachments: attachments.map((a) => ({ id: a.id })),
+    // The six fields ChatWidget sends (components/ChatWidget.tsx attachmentPayload),
+    // each kept only when it has its expected type. Before O1 the whole client
+    // object was spread through, so the bridge has always received these; an
+    // id-only projection silently dropped the file's name and text excerpt.
+    attachments: attachments.map((a) => ({
+      id: a.id,
+      filename: typeof a.filename === "string" ? a.filename : undefined,
+      mime_type: typeof a.mime_type === "string" ? a.mime_type : undefined,
+      size_bytes: typeof a.size_bytes === "number" ? a.size_bytes : undefined,
+      parser: typeof a.parser === "string" ? a.parser : undefined,
+      text_excerpt: typeof a.text_excerpt === "string" ? a.text_excerpt : null,
+    })),
     tenant_id: auth.tenantId,
     user_id: auth.userId,
     team_role: auth.teamRole,

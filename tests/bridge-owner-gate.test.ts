@@ -233,6 +233,44 @@ async function main() {
     }
   });
 
+  // Codex review (O1, P1): outside OASIS the gate applies once a workspace has
+  // an owner row, and a revoked row or a failed read must keep it locked. Both
+  // used to fall through to an operator's ok. The same fixture workspace,
+  // renamed to a client slug, takes the non-OASIS branch.
+  await check("a client workspace with an owner: revoked row and failed read stay locked; a never-owned workspace is untouched", async () => {
+    await db.execute("UPDATE tenants SET slug = 'client-acme' WHERE id = ?", [OASIS]);
+    try {
+      await login(ADON);
+      assert.deepEqual(await bridge.authorizeBridgeRequest(), { ok: false, status: 403, error: "not_your_computer" });
+      await db.execute("UPDATE workspace_agents_owner SET revoked_at = ? WHERE tenant_id = ?", [stamp, OASIS]);
+      assert.deepEqual(await bridge.authorizeBridgeRequest(), { ok: false, status: 403, error: "agents_owner_not_set" }, "revoked owner must not open the computer");
+      await db.execute("UPDATE workspace_agents_owner SET revoked_at = NULL WHERE tenant_id = ?", [OASIS]);
+      await db.execute("ALTER TABLE workspace_agents_owner RENAME TO workspace_agents_owner_offline");
+      try {
+        assert.deepEqual(await bridge.authorizeBridgeRequest(), { ok: false, status: 403, error: "agents_owner_unavailable" }, "a failed read must not open the computer");
+      } finally {
+        await db.execute("ALTER TABLE workspace_agents_owner_offline RENAME TO workspace_agents_owner");
+      }
+      await db.execute("DELETE FROM workspace_agents_owner WHERE tenant_id = ?", [OASIS]);
+      // Past the owner gate, exactly as before O1: this fixture gives a client
+      // slug no bridge address, so the next check (no computer configured)
+      // answers. The point is that no owner refusal fires.
+      const never = await bridge.authorizeBridgeRequest();
+      assert.deepEqual(
+        never.ok ? "ok" : never.error,
+        "bridge_not_configured",
+        `a client workspace that never had an owner keeps today's operator path: ${JSON.stringify(never)}`,
+      );
+    } finally {
+      await db.execute("UPDATE tenants SET slug = 'oasis-ai-cc' WHERE id = ?", [OASIS]);
+      await db.execute("DELETE FROM workspace_agents_owner WHERE tenant_id = ?", [OASIS]);
+      await db.execute(
+        "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at, note, revoked_at) VALUES (?, ?, 'test', ?, 'fixture', NULL)",
+        [OASIS, CC.id, stamp],
+      );
+    }
+  });
+
   await check("the submissions ('SunBiz') tenant is untouched: its owner reaches exactly what it reached before", async () => {
     await login(SUNBIZ_OWNER);
     // No BRIDGE_VPS_URL/BRIDGE_BEARER_TOKEN is set globally in this fixture,

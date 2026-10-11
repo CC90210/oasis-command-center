@@ -16,23 +16,30 @@
  * mean different things to a caller deciding whether to answer, refuse, or
  * fall back to a key:
  *   "set"         - a live, unrevoked row: authUserId is the owner.
- *   "not_set"     - no row for this tenant, or the only row is revoked:
- *                   nobody is the owner yet, and nobody may be routed to a
- *                   key in the (absent) owner's place.
+ *   "not_set"     - no row for this tenant at all: this workspace has never
+ *                   had an owner, so the owner gate does not apply to it
+ *                   (outside OASIS, where an owner is required).
+ *   "revoked"     - a row exists but it is revoked: the workspace HAD an
+ *                   owner and now has none. That is a lock with no key, never
+ *                   "no lock": revoking the owner must refuse everyone, not
+ *                   open the computer to every operator (Codex review, O1).
  *   "unavailable" - the read itself failed: a database fault, never read as
  *                   "not_set" (which would wrongly look like "nobody owns
  *                   this yet, pick a safe default") and never as permission.
  *
  * No route writes workspace_agents_owner. Rows are inserted and revoked by
  * hand, by an operator with direct database access; a revocation sets
- * revoked_at rather than deleting the row, so the history survives — and
- * reads here as "not_set" (dbBool is not needed: revoked_at is a presence
- * check, not a 0/1 column).
+ * revoked_at rather than deleting the row, so the history survives
+ * (dbBool is not needed: revoked_at is a presence check, not a 0/1 column).
  */
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
-export type AgentsOwnerLookup = { state: "set"; authUserId: string } | { state: "not_set" } | { state: "unavailable" };
+export type AgentsOwnerLookup =
+  | { state: "set"; authUserId: string }
+  | { state: "not_set" }
+  | { state: "revoked" }
+  | { state: "unavailable" };
 
 type OwnerRow = { auth_user_id?: string | null; revoked_at?: string | null };
 
@@ -52,7 +59,9 @@ export async function readAgentsOwner(tenantId: string): Promise<AgentsOwnerLook
     if (error) throw new Error(error.message);
     const row = data as OwnerRow | null;
     const authUserId = row?.auth_user_id ? String(row.auth_user_id).trim() : "";
-    if (!authUserId || row?.revoked_at) return { state: "not_set" };
+    if (!row) return { state: "not_set" };
+    // A row with no usable owner id is a broken lock, not an absent one.
+    if (!authUserId || row.revoked_at) return { state: "revoked" };
     return { state: "set", authUserId };
   } catch (err) {
     console.error("[agents-owner.read]", { tenantId, error: err instanceof Error ? err.message : String(err) });

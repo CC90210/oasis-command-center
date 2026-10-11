@@ -178,14 +178,47 @@ async function main() {
     assert.deepEqual(calls[0].body.messages, [{ role: "user", content: "hi" }]);
   });
 
-  await check("every attachment is reduced to {id}: a per-attachment smuggled field is dropped too", async () => {
+  await check("every attachment keeps exactly the fields ChatWidget sends; a smuggled field or a wrong type is dropped", async () => {
     calls = [];
     await post({
       agent: "bravo",
       messages: [{ role: "user", content: "hi" }],
-      attachments: [{ id: "att-1", url: "https://evil.example/exfil" } as Record<string, unknown>],
+      attachments: [
+        {
+          id: "att-1",
+          filename: "notes.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 1200,
+          parser: "pdf",
+          text_excerpt: "first page",
+          url: "https://evil.example/exfil",
+        } as Record<string, unknown>,
+        { id: "att-2", filename: 7, size_bytes: "big" } as Record<string, unknown>,
+      ],
     });
-    assert.deepEqual(calls[0].body.attachments, [{ id: "att-1" }]);
+    assert.deepEqual(calls[0].body.attachments, [
+      { id: "att-1", filename: "notes.pdf", mime_type: "application/pdf", size_bytes: 1200, parser: "pdf", text_excerpt: "first page" },
+      { id: "att-2", text_excerpt: null },
+    ]);
+  });
+
+  // Codex review (O1, P2): a null entry used to pass validation and then throw
+  // an unhandled 500 inside the allow-listed projection.
+  await check("malformed messages or attachments are a 400, never an unhandled 500, and nothing is forwarded", async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ agent: "bravo", messages: [null, { role: "user", content: "hi" }] }, "invalid_messages"],
+      [{ agent: "bravo", messages: [{ role: "user", content: 42 }, { role: "user", content: "hi" }] }, "invalid_messages"],
+      [{ agent: "bravo", messages: [{ role: "user", content: "hi" }], attachments: [null] }, "invalid_attachments"],
+      [{ agent: "bravo", messages: [{ role: "user", content: "hi" }], attachments: [{ filename: "no-id.txt" }] }, "invalid_attachments"],
+    ];
+    for (const [body, error] of cases) {
+      calls = [];
+      const res = await post(body);
+      assert.equal(res.status, 400, `${JSON.stringify(body)} -> ${res.status}`);
+      const json = (await res.json()) as { error?: string };
+      assert.equal(json.error, error);
+      assert.equal(calls.length, 0, "nothing may reach the bridge");
+    }
   });
 
   await check("legitimate fields still reach the bridge unchanged: session_id, tab_id, chat_mode", async () => {
