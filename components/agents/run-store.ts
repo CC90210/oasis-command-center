@@ -27,7 +27,7 @@ import { announceTurn } from "@/components/os/department/turn-event";
 import { asFailureModel, viaLine } from "./chat-shared";
 import { readSse } from "./sse-client";
 import { applyRunEvent, emptyRunView, reduceRunEvents, type RunView } from "@/lib/os/runs/reduce";
-import { isRunEventKind, isRunStatus, isTerminalStatus, type RunEvent, type RunStatus } from "@/lib/os/runs/types";
+import { isRunEventKind, isRunExecutor, isRunStatus, isTerminalStatus, type RunEvent, type RunExecutor, type RunStatus } from "@/lib/os/runs/types";
 import type { FailureModel } from "@/lib/os/channel/outcome";
 
 /** Not over yet: being sent, waiting its turn, or working. */
@@ -53,6 +53,8 @@ export type ChatItem = {
   stopping: boolean;
   /** This browser watched the run end (so the channel's header is told); a reopened old run is not announced. */
   live: boolean;
+  /** O4: who may claim this run (lib/os/runs/types.ts). Null until the server says (a reopened saved run that never set it). */
+  executor: RunExecutor | null;
 };
 
 export type ConversationSummary = { id: string; title: string; lastMessageAt: string; activeRuns: number };
@@ -68,6 +70,8 @@ export type DeptChatState = {
   opening: boolean;
   /** Set when the saved-chat service says no (a plain code: chat_history_unavailable). */
   notice: string | null;
+  /** O4: this conversation's computer, when one is answering it ("Waiting for {label} to pick this up"). Learned from the SSE prelude's `computer_label` (lib/os/runs/send.ts); null for every chat not dispatched to a paired computer, and for one reopened without having sent into it this visit. */
+  computerLabel: string | null;
 };
 
 const states = new Map<string, DeptChatState>();
@@ -78,7 +82,7 @@ const sendStreams = new Map<string, string>();
 const initialised = new Set<string>();
 
 function blank(department: string): DeptChatState {
-  return { department, conversationId: null, title: "", items: [], conversations: [], listState: "idle", opening: false, notice: null };
+  return { department, conversationId: null, title: "", items: [], conversations: [], listState: "idle", opening: false, notice: null, computerLabel: null };
 }
 
 const serverBlank = new Map<string, DeptChatState>();
@@ -155,6 +159,7 @@ function itemFromHead(head: Record<string, unknown>): ChatItem {
     failure: null,
     stopping: false,
     live: true,
+    executor: isRunExecutor(head.executor) ? head.executor : null,
   };
 }
 
@@ -183,6 +188,10 @@ function itemFromSaved(run: Record<string, unknown>): ChatItem {
     failure: status === "failed" || status === "interrupted" ? failureOf(view, code ?? (status === "interrupted" ? "interrupted" : null)) : null,
     stopping: false,
     live: false,
+    // Not in a saved transcript row today (lib/os/runs/transcript.ts); a run
+    // reopened still active learns it moments later from the live "run"
+    // frame the re-attach stream sends on connect (follow.ts headOf).
+    executor: isRunExecutor(run.executor) ? run.executor : null,
   };
 }
 
@@ -211,7 +220,13 @@ function onRun(department: string, conversationId: string, head: Record<string, 
     patchItem(
       department,
       (i) => i === known,
-      (i) => ({ ...i, runId: id, seq: Number(head.seq) || i.seq, status: i.status === "running" ? i.status : status }),
+      (i) => ({
+        ...i,
+        runId: id,
+        seq: Number(head.seq) || i.seq,
+        status: i.status === "running" ? i.status : status,
+        executor: isRunExecutor(head.executor) ? head.executor : i.executor,
+      }),
     );
   } else {
     set(department, (cur) => ({ ...cur, items: [...cur.items, itemFromHead(head)] }));
@@ -277,6 +292,14 @@ async function pump(
           remember(department, id);
           set(department, (s) => ({ ...s, conversationId: id, title: text(d.title) || s.title }));
         }
+      }
+      // O4: this request's own run was dispatched to this person's own
+      // computer (lib/os/runs/send.ts). The label is set on the conversation,
+      // not the run, so a second message into the same still-open chat
+      // learns it too, not only the one that created the conversation.
+      const label = typeof d.computer_label === "string" && d.computer_label.trim() ? d.computer_label.trim() : null;
+      if (label && ref.id && getState(department).conversationId === ref.id) {
+        set(department, (s) => ({ ...s, computerLabel: label }));
       }
       continue;
     }
@@ -376,12 +399,12 @@ export async function loadInitial(department: string): Promise<void> {
 
 export function newChat(department: string): void {
   remember(department, null);
-  set(department, (s) => ({ ...s, conversationId: null, title: "", items: [], opening: false }));
+  set(department, (s) => ({ ...s, conversationId: null, title: "", items: [], opening: false, computerLabel: null }));
 }
 
 export async function openConversation(department: string, id: string): Promise<void> {
   if (getState(department).conversationId === id && getState(department).items.length > 0) return;
-  set(department, (s) => ({ ...s, conversationId: id, title: s.conversations.find((c) => c.id === id)?.title ?? "", items: [], opening: true }));
+  set(department, (s) => ({ ...s, conversationId: id, title: s.conversations.find((c) => c.id === id)?.title ?? "", items: [], opening: true, computerLabel: null }));
   try {
     const res = await fetch(`/api/os/conversations/${encodeURIComponent(id)}`);
     if (getState(department).conversationId !== id) return; // the person went elsewhere meanwhile
@@ -449,6 +472,7 @@ export async function sendMessage(department: string, input: SendInput): Promise
     failure: null,
     stopping: false,
     live: true,
+    executor: null,
   };
   set(department, (s) => ({ ...s, items: [...s.items, item], notice: null }));
   let conversationId = before.conversationId;

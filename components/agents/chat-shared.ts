@@ -83,3 +83,26 @@ const RUN_ROUTE_COPY: Record<string, string> = {
 export function runFailureSentence(code: string, opts: { canManageAi: boolean; model?: FailureModel | null }): string {
   return RUN_ROUTE_COPY[code] ?? failureCopy(code, opts).sentence;
 }
+
+/**
+ * O4: the deferred status line for a run dispatched to this person's own
+ * paired computer (lib/os/runs/computer-turn.ts), while it hasn't answered
+ * yet. `label` is the computer's own name (set by whoever paired it,
+ * run-store.ts DeptChatState.computerLabel, learned from the SSE prelude's
+ * `computer_label`); unknown only on a reopened chat this browser did not
+ * send into, so it falls back to a plain "your computer". `busy` is whether
+ * another message in this SAME conversation is already running (the
+ * computer can only answer one at a time): that is the one case the
+ * question "why hasn't it answered" has a better sentence than "waiting".
+ * Null for every run not dispatched this way — a worker-driven run keeps
+ * its ordinary "Queued - goes next" / activity-trail copy, and this line
+ * never names a house agent.
+ */
+export function computerStatusLine(args: { executor: string | null; status: string; label: string | null; busy: boolean }): string | null {
+  if (args.executor !== "computer") return null;
+  if (args.status === "queued") {
+    return args.busy ? `${args.label || "Your computer"} is busy with another reply` : `Waiting for ${args.label || "your computer"} to pick this up`;
+  }
+  if (args.status === "running") return `${args.label || "Your computer"} · Claude Code`;
+  return null;
+}

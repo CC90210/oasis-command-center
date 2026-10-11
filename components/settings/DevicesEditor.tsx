@@ -113,6 +113,13 @@ function timeAgo(iso: string | null): string {
  * but not the computer owner, hit a 404 running the full-install command,
  * which names a private repository only the owner's own GitHub account can
  * read). Never a dead button, never the repository name.
+ *
+ * Updated (DV1): the server side of the connector program (O3a's 'connector'
+ * pair-code purpose and scope) is live; the installer that would make this
+ * notice obsolete is J2, not shipped yet. So this stays honest instead of
+ * promising an install that does not exist, and points this viewer at the
+ * one place every signed-in person (this one included) can already get a
+ * connector code: Settings > Connect your computer.
  */
 function OwnerOnlyConnectNotice() {
   return (
@@ -123,10 +130,12 @@ function OwnerOnlyConnectNotice() {
       </div>
       <p className="text-xs text-fg-muted leading-relaxed">
         Connecting your own computer would let your agents use its files,
-        tools and scheduled jobs. That runs through the OASIS connector,
-        which is on its way and is not ready yet, so there is nothing to
-        install today. Until it ships, your department chats pause instead
-        of running on someone else&apos;s computer.
+        tools and scheduled jobs. That runs through the OASIS connector app,
+        which is rolling out. If you already have it, paste a connector code
+        into it, get one from Settings &gt; Connect your computer. If you do
+        not have it yet, there is nothing to install today. Until a computer
+        is connected and approved, your department chats pause instead of
+        running on someone else&apos;s computer.
       </p>
     </div>
   );

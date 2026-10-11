@@ -157,10 +157,17 @@ export default async function BridgeInstallPage() {
 /**
  * A verified operator who is not this workspace's computer owner (DV0,
  * 2026-10-11). Plain words only: what connecting a computer would do, that it
- * runs through the OASIS connector (still being built), that nothing needs
- * installing today, and that department chats pause for the same reason they
- * already do in chat (O1: every department chat runs on the owner's computer
- * alone). Never the private repository's name, never a button that cannot work.
+ * runs through the OASIS connector app, that nothing needs installing today,
+ * and that department chats pause for the same reason they already do in
+ * chat (O1: every department chat runs on the owner's computer alone). Never
+ * the private repository's name, never a button that cannot work.
+ *
+ * Updated (DV1), matching components/settings/DevicesEditor.tsx's
+ * OwnerOnlyConnectNotice: the connector program's server side (O3a) is live,
+ * the installer that would make this notice obsolete is J2 and not shipped
+ * yet, so this points the viewer at the one place every signed-in person
+ * (this one included) can already get a connector code: Settings > Connect
+ * your computer.
  */
 function OwnerOnlyInstallNotice() {
   return (
@@ -171,10 +178,12 @@ function OwnerOnlyInstallNotice() {
       </div>
       <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
         Connecting your own computer would let your agents use its files,
-        tools and scheduled jobs. That runs through the OASIS connector,
-        which is on its way and is not ready yet, so there is nothing to
-        install today. Until it ships, your department chats pause instead
-        of running on someone else&apos;s computer.
+        tools and scheduled jobs. That runs through the OASIS connector app,
+        which is rolling out. If you already have it, paste a connector code
+        into it, get one from Settings &gt; Connect your computer. If you do
+        not have it yet, there is nothing to install today. Until a computer
+        is connected and approved, your department chats pause instead of
+        running on someone else&apos;s computer.
       </p>
     </div>
   );

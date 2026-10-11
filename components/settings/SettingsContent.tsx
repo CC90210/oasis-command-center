@@ -58,7 +58,7 @@ import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerP
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
-import { YourComputersCard } from "@/components/settings/YourComputersCard";
+import { ConnectYourComputerCard, YourComputersCard } from "@/components/settings/YourComputersCard";
 import { PersonEngineCard } from "@/components/settings/PersonEngineCard";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
@@ -352,6 +352,25 @@ export async function SettingsContent({
             <SettingsSection defaultOpen={focused} title="Password" subtitle="Change your sign-in password">
               <SafeBoundary label="Password form">
                 <ChangePasswordForm />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
+          {/* "Connect your computer" (DV1): every signed-in person in the
+              workspace, operator or not -- sits on the Profile section
+              deliberately, not inside "Your computers" or "Devices
+              (advanced)" below: those stay behind SettingsContent's VERIFIED-
+              operator gate (and /settings/devices 404s anyone else before
+              this component even renders), OASIS-only pending J2's client
+              installer (O3b decision). This is not J2 -- it is the
+              connector program (J1), which O3a's server side has supported
+              for anyone in the workspace since the 'connector' purpose/scope
+              landed, and the Profile section is the one every signed-in
+              person reaches regardless of team role or operator status. */}
+          {show("profile") && (
+            <SettingsSection id="connect-your-computer" defaultOpen title="Connect your computer" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
+              <SafeBoundary label="Connect your computer">
+                <ConnectYourComputerCard />
               </SafeBoundary>
             </SettingsSection>
           )}
@@ -728,6 +747,18 @@ async function PersonalSettingsView({
         <SettingsSection defaultOpen={!!section} title="Password" subtitle="Change your sign-in password">
           <SafeBoundary label="Password form">
             <ChangePasswordForm />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {/* "Connect your computer" (DV1): see the matching comment in
+          SettingsContent's own render above -- this is the non-manager
+          branch of the SAME Profile section, so it reaches a teammate or a
+          non-admin client member too, not only an owner or admin. */}
+      {show("profile") && (
+        <SettingsSection id="connect-your-computer" defaultOpen title="Connect your computer" subtitle="Let your agents use this computer's files, tools and department chats, through the OASIS connector app.">
+          <SafeBoundary label="Connect your computer">
+            <ConnectYourComputerCard />
           </SafeBoundary>
         </SettingsSection>
       )}
