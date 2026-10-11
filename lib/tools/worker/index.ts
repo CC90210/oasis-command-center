@@ -17,7 +17,6 @@ import type { WorkerCommit } from "@/lib/tools/store";
 import type { ToolModelDeps } from "@/lib/tools/worker/ai";
 import { runLearnFromLink, type LearnInput, type PageFetch } from "@/lib/tools/worker/learn-from-link";
 import { runRepurposePost } from "@/lib/tools/worker/repurpose-post";
-import { runScoreHook } from "@/lib/tools/worker/score-hook";
 
 export type WorkerContext = {
   db: Client;
@@ -27,6 +26,8 @@ export type WorkerContext = {
   /** Who a written row names as its author (the person's email, else their profile). */
   contributedBy: string;
   now: () => Date;
+  /** When THIS REQUEST started (set once in session-handlers.ts), not per-call: lib/tools/worker/ai.ts modelBudgetMs budgets the model call against what is left of the request, not a flat timer of its own. */
+  requestStartedAt: Date;
   /** Tests inject these; production uses the real AI account path and fetch. */
   ai?: ToolModelDeps;
   fetchPage?: PageFetch;
@@ -39,8 +40,11 @@ export type WorkerResult =
 export type WorkerExecutor = (input: Record<string, unknown>, ctx: WorkerContext) => Promise<WorkerResult>;
 
 export const WORKER_EXECUTORS: Readonly<Record<string, WorkerExecutor>> = {
-  score_hook: (input) => runScoreHook({ hook: String(input.hook ?? ""), caption: String(input.caption ?? "") }),
   repurpose_post: (input, ctx) =>
-    runRepurposePost({ post: String(input.post ?? "") }, { tenantId: ctx.tenantId, userId: ctx.userId, jobId: ctx.jobId }, ctx.ai),
+    runRepurposePost(
+      { post: String(input.post ?? "") },
+      { tenantId: ctx.tenantId, userId: ctx.userId, jobId: ctx.jobId, requestStartedAt: ctx.requestStartedAt },
+      ctx.ai,
+    ),
   learn_from_link: (input, ctx) => runLearnFromLink(input as unknown as LearnInput, ctx),
 };

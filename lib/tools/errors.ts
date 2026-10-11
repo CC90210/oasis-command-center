@@ -57,6 +57,14 @@ export const WORKER_ERROR_LINES: Readonly<Record<string, string>> = {
   ai_account_missing: "Connect an AI account in Settings > AI brain to use this tool.",
   ai_account_unreadable: "Couldn't read the AI account. Try again.",
   ai_failed: "The AI account didn't answer. Try again.",
+  // Tool-neutral (Codex review round 3, LOW): this line used to say "Try a
+  // shorter post", which made no sense on Learn from a link (its input is a
+  // link, not a post). ai_timeout fires once the AI account was actually
+  // asked and did not answer in time; request_timeout (below) fires when
+  // there was no time left to ask it at all - that one never blames the
+  // account, because it was never contacted.
+  ai_timeout: "The AI account took too long to answer; nothing was saved. Try again.",
+  request_timeout: "This took too long and was stopped; nothing was saved. Try again.",
   [AI_BUDGET_EXHAUSTED]: AI_BUDGET_SENTENCES[AI_BUDGET_EXHAUSTED],
   [AI_BUDGET_UNPRICED_MODEL]: AI_BUDGET_SENTENCES[AI_BUDGET_UNPRICED_MODEL],
   [AI_USAGE_UNAVAILABLE]: AI_USAGE_UNAVAILABLE_SENTENCE,

@@ -84,7 +84,7 @@ export function parseVariants(text: string): Record<RepurposePlatform, Variant> 
 
 export async function runRepurposePost(
   input: { post: string },
-  ctx: { tenantId: string; userId: string | null; jobId: string },
+  ctx: { tenantId: string; userId: string | null; jobId: string; requestStartedAt: Date },
   ai?: ToolModelDeps,
 ): Promise<{ ok: true; result: RepurposeResult } | { ok: false; code: string }> {
   const r = await runToolModelCall(

@@ -1,0 +1,139 @@
+/**
+ * tests/content-tools-collapsible.test.ts — Content Tools page: both
+ * sections (Tools, Whiteboard) are the same disclosure
+ * (components/leads/CollapsibleSection.tsx), proven two ways without a
+ * browser:
+ *
+ *   1. CollapsibleSection's own server markup, for a few prop combinations:
+ *      aria-expanded reflects the open/closed state, children are drawn ONLY
+ *      when open for the default (keepMounted=false) case (not merely hidden
+ *      with CSS), the toggle is a real <button type="button"> -
+ *      keyboard-operable by construction (Enter and Space are the browser's
+ *      own default activation on a button; this file adds nothing for that)
+ *      - and for `keepMounted` (Codex review round 2, 2026-10-10: collapsing
+ *      the Whiteboard must never unmount its canvas), the children stay IN
+ *      THE MARKUP even while closed, only marked `hidden`, so React's
+ *      reconciler never has a reason to unmount them on a collapse/reopen -
+ *      that "same instance survives" claim needs a real browser to run a
+ *      live reconciliation and is not re-proven here; this file proves the
+ *      structural precondition (children never leave the tree).
+ *   2. The real Content Tools page (app/founders/marketing/tools/page.tsx),
+ *      through the real founder gate: it wires exactly two
+ *      CollapsibleSection elements, "Tools" and "Whiteboard", each with its
+ *      own storageKey (so Adon's choice on one never collapses the other)
+ *      and open by default (defaultCollapsed={false}, this page's behaviour
+ *      before 2026-10-10).
+ *
+ * NOT covered here (needs a real browser): that a click actually flips the
+ * section and that the choice survives a reload via localStorage. Both are
+ * plain DOM/localStorage behaviour with no server-renderable surface to pin;
+ * CollapsibleSection's toggle()/localStorage code is read here, not driven.
+ *
+ * Run: node --conditions=react-server --import tsx tests/content-tools-collapsible.test.ts
+ */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import * as ReactNS from "react";
+import { USERS, check, finish, login, setupToolsDatabase } from "./_tools-harness";
+
+// tsconfig.json sets jsx:"preserve", so tsx compiles page JSX with the
+// classic runtime, which expects a global React (same as every other
+// page-render check in this suite).
+(globalThis as unknown as { React: typeof ReactNS }).React = ReactNS;
+
+const root = join(__dirname, "..");
+
+function renderMarkup(cases: Array<{ id: string; defaultCollapsed: boolean; keepMounted?: boolean }>): Record<string, string> {
+  const r = spawnSync(process.execPath, ["--import", "tsx", "tests/content-tools-collapsible.render.ts"], {
+    cwd: root,
+    input: JSON.stringify({ cases }),
+    encoding: "utf8",
+    // CI sets NODE_OPTIONS=--conditions=react-server for the whole step;
+    // react-dom/server refuses to load under it, so the child drops it.
+    env: { ...process.env, NODE_OPTIONS: "" },
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(r.status, 0, `render failed: ${r.stderr}`);
+  return (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
+}
+
+type El = { type: unknown; props: Record<string, unknown> & { children?: unknown } };
+const nodes = (n: unknown): El[] =>
+  Array.isArray(n) ? n.flatMap(nodes) : n && typeof n === "object" && "props" in n ? [n as El, ...nodes((n as El).props.children)] : [];
+
+async function main() {
+  console.log("content-tools-collapsible:");
+
+  await check("CollapsibleSection: aria-expanded and the children follow defaultCollapsed; the toggle is a real button", () => {
+    const m = renderMarkup([
+      { id: "open", defaultCollapsed: false },
+      { id: "closed", defaultCollapsed: true },
+      { id: "closedKept", defaultCollapsed: true, keepMounted: true },
+      { id: "openKept", defaultCollapsed: false, keepMounted: true },
+    ]);
+    assert.match(m.open, /<button type="button"[^>]*aria-expanded="true"/, "open: a real button, aria-expanded true");
+    assert.match(m.closed, /<button type="button"[^>]*aria-expanded="false"/, "closed: aria-expanded false");
+    assert.match(m.open, /the body is here/, "open: the children are drawn");
+    assert.doesNotMatch(m.closed, /the body is here/, "closed, default: the children are not drawn at all, not merely hidden");
+
+    // keepMounted: closed still carries the children in the markup (hidden,
+    // not removed) - the structural guarantee that a real reconciler never
+    // unmounts them on a collapse/reopen.
+    assert.match(m.closedKept, /the body is here/, "closed, keepMounted: the children are still IN the markup");
+    assert.match(m.closedKept, /<div[^>]*\bhidden=""[^>]*>\s*<p>\s*the body is here/, "closed, keepMounted: the wrapper carries the hidden attribute");
+    assert.match(m.openKept, /the body is here/, "open, keepMounted: the children are drawn");
+    assert.doesNotMatch(m.openKept, /\bhidden=""/, "open, keepMounted: not hidden");
+  });
+
+  await check(
+    "CollapsibleSection: the heading wraps the button (not the other way round), aria-controls points at the real panel, and the section names itself (Codex review round 3, LOW)",
+    () => {
+      const m = renderMarkup([{ id: "open", defaultCollapsed: false }]);
+      const html = m.open;
+      // <h2 id="X">...<button ... aria-controls="Y">...</button></h2>, in that
+      // nesting order - a heading INSIDE a button is presentational to
+      // assistive tech and never reaches heading navigation; the button must
+      // be the one nested inside the heading.
+      const h2 = /<h2 id="([^"]+)"[^>]*>[\s\S]*?<button type="button"[^>]*aria-controls="([^"]+)"[^>]*>[\s\S]*?<\/button>[\s\S]*?<\/h2>/.exec(html);
+      assert.ok(h2, "an <h2> wraps the toggle <button>, carrying the real heading text");
+      assert.match(html, /<section aria-labelledby="[^"]+"/, "the section names itself from that same heading - the Whiteboard region had lost this entirely");
+      const section = /<section aria-labelledby="([^"]+)"/.exec(html)!;
+      assert.equal(section[1], h2![1], "the section's aria-labelledby is the heading's own id, not a different one");
+      // aria-controls points at a panel that actually exists with that id.
+      assert.match(html, new RegExp(`<div id="${h2![2]}"`), "aria-controls names the real panel, not a placeholder");
+      // No old plain <h2>{title}</h2> left floating inside the button.
+      assert.doesNotMatch(html, /<button[^>]*>[\s\S]{0,400}?<h2[^>]*>/, "no heading left nested INSIDE the button");
+    },
+  );
+
+  await check("the Content Tools page wires Tools and Whiteboard as two independent, open-by-default disclosures, with a gap between the two cards", async () => {
+    await setupToolsDatabase();
+    await login(USERS.cc);
+    const { CollapsibleSection } = await import("../components/leads/CollapsibleSection");
+    const { PageFrame } = await import("../components/os/PageFrame");
+    const Page = (await import("../app/founders/marketing/tools/page")).default;
+    const tree = await Page();
+    const sections = nodes(tree).filter((n) => n.type === CollapsibleSection);
+    assert.deepEqual(
+      sections.map((s) => [s.props.title, s.props.storageKey, s.props.defaultCollapsed, s.props.keepMounted]),
+      [
+        ["Tools", "content-tools:tools", false, true],
+        ["Whiteboard", "content-tools:whiteboard", false, true],
+      ],
+      "two sections, each its own storage key, both open by default, both keepMounted (neither's state may be destroyed by a collapse)",
+    );
+    // Codex review round 3, LOW: PageFrame adds no spacing of its own and
+    // CollapsibleSection's <section> carries no outer margin, so the two
+    // bordered, shadowed cards rendered flush against each other.
+    const frame = nodes(tree).find((n) => n.type === PageFrame)!;
+    assert.match(String(frame.props.className ?? ""), /\bspace-y-\d/, "PageFrame's own className gives the two cards a gap");
+  });
+
+  finish("content-tools-collapsible");
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
