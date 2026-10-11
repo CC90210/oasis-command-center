@@ -29,6 +29,7 @@ import {
 import { bridgeExecToolAllowedForRole } from "./role-gates";
 import { CLAIR_TOOL_NAME, clairCapabilityError, type ClairSession } from "./clair/capability";
 import { dbBool } from "./db-bool";
+import { isOasisSurfaceTenant } from "./role-surfaces";
 
 export type BridgeTarget = _BridgeTarget;
 export const resolveBridgeTarget = _resolveBridgeTarget;
@@ -270,6 +271,40 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   }
   if (tenantRow.slug !== "submissions" && !isOperator) {
     return { ok: false, status: 403, error: "bridge_not_enabled_for_tenant" };
+  }
+
+  // O1 (2026-10-10): only a workspace's AGENTS OWNER may reach that
+  // workspace's paired computer. Before this, any verified operator
+  // (isOperator, just checked above) was admitted into every OASIS-surface
+  // workspace's bridge, so Adon's department chats, the coding harness and
+  // fleet control all ran on CC's PC under CC's own Claude sign-in — the
+  // opposite of the founders' rule that work runs on the asking person's OWN
+  // computer. lib/agents-owner.ts (database/turso/bravo__210_workspace_agents_owner.sql)
+  // is the fail-closed read of who that owner is.
+  //
+  // Scope: the OASIS surface (isOasisSurfaceTenant — oasis / oasis-ai-cc /
+  // oasis-webdev, the same set department-agent.ts already treats as "one
+  // internal workspace" for harness routing), OR any tenant that already has
+  // an owner row (future workspaces, without widening this predicate). A
+  // non-OASIS tenant with no owner row falls through untouched — this is what
+  // keeps the legacy SunBiz ('submissions') path unchanged below.
+  if (tenantRow.slug !== "submissions") {
+    const { readAgentsOwner } = await import("@/lib/agents-owner");
+    const owner = await readAgentsOwner(tenantId);
+    const isOasis = isOasisSurfaceTenant(tenantRow.slug);
+    if (isOasis || owner.state === "set") {
+      if (owner.state === "unavailable") {
+        return { ok: false, status: 403, error: "agents_owner_unavailable" };
+      }
+      if (owner.state === "not_set") {
+        // Only reachable when isOasis is true (the `||` above): a non-OASIS
+        // tenant with no owner row never enters this block.
+        return { ok: false, status: 403, error: "agents_owner_not_set" };
+      }
+      if (owner.authUserId !== user.id) {
+        return { ok: false, status: 403, error: "not_your_computer" };
+      }
+    }
   }
 
   const target = resolveBridgeTarget(tenantRow);
