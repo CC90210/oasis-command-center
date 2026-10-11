@@ -65,6 +65,7 @@ import { bad, checkBearerSecret, sha256, isUniqueViolationError, publicAppBaseUr
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { canManageTeam, type TeamRole } from "@/lib/team";
+import { dbBool } from "@/lib/db-bool";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
 import { defaultModelFor } from "@/lib/ai/model-registry";
 import {
@@ -412,8 +413,10 @@ export async function POST(req: NextRequest) {
   // route silently allowed it for whoever happened to hold a secret (O0
   // security review, MEDIUM).
   if (hmacProfile && body.api_keys && Object.keys(body.api_keys).length > 0) {
-    const isOwner = hmacProfile.is_owner === true || hmacProfile.is_owner === 1;
-    const adminAccess = hmacProfile.admin_access === true || hmacProfile.admin_access === 1;
+    // dbBool (lib/db-bool.ts): libSQL hands back 0/1, and a shim can hand back
+    // "1"; true, 1 and "1" count, a stringly "0" never does.
+    const isOwner = dbBool(hmacProfile.is_owner);
+    const adminAccess = dbBool(hmacProfile.admin_access);
     const teamRole = (hmacProfile.team_role as TeamRole | null) || "member";
     if (!isOwner && !canManageTeam(teamRole, adminAccess)) {
       return bad(403, "admin_required: only an owner or admin may set the workspace's AI keys.");
