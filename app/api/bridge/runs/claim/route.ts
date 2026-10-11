@@ -45,7 +45,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { bad, getClientIp } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { isDaemonScope, pairingCanClaim, resolvePairingFromBearer, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
+import { isDaemonScope, pairingCanClaim, pairingLiveForClaim, resolvePairingFromBearer, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
 import { isAgentsOwner } from "@/lib/agents-owner";
 import { liveSeat } from "@/lib/os/seat";
 import { resolveOsViewerFor } from "@/components/os/department/viewer";
@@ -169,6 +169,13 @@ async function buildAndRespond(run: Run, pairing: ResolvedPairing): Promise<Next
     });
     return NextResponse.json({ ok: true, run: null });
   };
+  // Re-check the PAIRING right before building the response, not only at
+  // claim time: this covers the idempotent-retry path (which bypasses the
+  // CAS entirely) and the few milliseconds between a fresh claim and this
+  // function returning. A disconnected computer must never receive the
+  // run's conversation history or department context just because it was
+  // still approved when the request started.
+  if (!(await pairingLiveForClaim(run.claimedPairingId ?? pairing.pairingId))) return fail("computer_offline");
   if (!dept) return fail("department_profile_unsafe");
 
   // Re-check the seat AFTER claiming (O4 security rule): a removal between
@@ -277,7 +284,14 @@ export async function POST(req: NextRequest) {
 
   const tryClaim = async (): Promise<NextResponse | null> => {
     const claimed = await claimComputerRun(db, claimPairing, claimId, new Date());
-    return claimed ? buildAndRespond(claimed, pairing) : null;
+    if (claimed) return buildAndRespond(claimed, pairing);
+    // claimComputerRun returning null is ambiguous on its own: either there
+    // was nothing left to claim, OR a concurrent request for this EXACT
+    // (pairing, claim_id) just won the unique-index race for a DIFFERENT
+    // run (Codex review, [P2]). The loser must return the WINNER's
+    // assignment, never silently re-poll as if nothing happened yet.
+    const wonByOther = await findClaimedComputerRun(db, claimPairing, claimId);
+    return wonByOther ? buildAndRespond(wonByOther, pairing) : null;
   };
   const first = await tryClaim();
   if (first) return first;

@@ -157,7 +157,7 @@ async function main() {
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, tenant_id TEXT, auth_user_id TEXT, email TEXT, team_role TEXT,
       is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
     CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, banned_until TEXT, deleted_at TEXT, session_version INTEGER DEFAULT 0);
-    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT, revoked_at TEXT);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT, revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT);
   `);
   // O4's seat/pairing checks (liveSeat, pairingBlocked) read these through
   // getServiceSupabase() -- the same Turso-backed shim, the same file. The
@@ -737,8 +737,8 @@ async function main() {
   console.log("O4: the producer door, pull-dispatched (claimComputerRun, never attachProducer)");
   const PAIRING_O4 = { tenantId: ACME, userId: ANN, pairingId: "pairing-o4-ann" };
   await db.execute({
-    sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, revoked_at) VALUES (?, ?, ?, 'Ann''s laptop', NULL)`,
-    args: [PAIRING_O4.pairingId, PAIRING_O4.tenantId, PAIRING_O4.userId],
+    sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, revoked_at, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, 'Ann''s laptop', NULL, ?, 'test', 'pair_code')`,
+    args: [PAIRING_O4.pairingId, PAIRING_O4.tenantId, PAIRING_O4.userId, new Date().toISOString()],
   });
   async function computerProducerRun() {
     const conv = await store.createConversation(db, scopeA, { department: "sales", agentSlug: "sdr", now: now() });

@@ -29,6 +29,11 @@ process.env.TURSO_DB_PATH = dbFile;
 process.env.AUTH_SESSION_SECRET = "bridge-runs-claim-test-master-secret-32-chars-min";
 process.env.EMPIRE_AUTH_BACKEND = "turso";
 process.env.BRAVO_FIELD_ENCRYPTION_KEY = "bridge-runs-claim-test-field-key-long-enough-01";
+// A credential-shaped env value (lib/secret-redaction.ts loadPairs caches the
+// process.env scan on its FIRST call, so this must be set before any check
+// exercises a scrub path, never inside an individual check).
+const PASTED_CREDENTIAL = "sk-claim-test-pasted-credential-0123456789abcdef";
+process.env.CLAIM_FIXTURE_API_KEY = PASTED_CREDENTIAL;
 for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN", "BRAVO_SUPABASE_URL", "BRAVO_SUPABASE_SERVICE_ROLE_KEY", "OASIS_RUN_TOKEN_KEY", "OASIS_MCP_TOKEN_KID"]) {
   delete process.env[k];
 }
@@ -116,6 +121,8 @@ async function createSchema() {
       event_type TEXT, publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE tenant_manifests (slug TEXT, tenant_id TEXT, manifest TEXT, updated_at TEXT);
+    CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
+      service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
   `);
   await db.batch(
     [
@@ -391,6 +398,57 @@ async function main() {
     );
     assert.ok(row.rows[0].deadline_at);
   });
+  await check("a pasted credential-shaped string in the message never reaches the claim payload (env-secret redaction, [P1] Codex finding)", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    const { run } = await enqueueComputerRun(member, `Here is my key, please use it: ${PASTED_CREDENTIAL}`);
+    assert.ok(run);
+    const r = await claim(pairing.token, body(randomUUID()));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const claimed = r.json.run as Record<string, unknown>;
+    assert.doesNotMatch(String(claimed.prompt), /sk-claim-test-pasted-credential/, "the credential reached the prompt unredacted");
+    assert.doesNotMatch(String(claimed.system), /sk-claim-test-pasted-credential/, "the credential reached the system prompt unredacted");
+    assert.match(String(claimed.prompt), /\[REDACTED:CLAIM_FIXTURE_API_KEY\]/);
+  });
+  await check("a tenant-vault secret in the conversation is also scrubbed from the claim payload, and an undecryptable vault entry refuses the whole claim rather than send a partial scrub", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    const { encryptField } = await import("../lib/field-encryption");
+    const vaultValue = "vault-claim-test-secret-zyxwvutsrqpo";
+    await db.execute({
+      sql: `INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value, created_at, updated_at) VALUES (?, 'custom', 'claim_vault_key', ?, ?, ?)`,
+      args: [TENANT, encryptField(vaultValue), stamp, stamp],
+    });
+    try {
+      const { run } = await enqueueComputerRun(member, `My vault value is ${vaultValue}, use it`);
+      assert.ok(run);
+      const r = await claim(pairing.token, body(randomUUID()));
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      const claimed = r.json.run as Record<string, unknown>;
+      assert.doesNotMatch(String(claimed.prompt), /vault-claim-test-secret/);
+
+      // Now break the SAME workspace's vault (one undecryptable entry) and
+      // claim a SECOND message: the whole claim must refuse, never send a
+      // scrub covering only the entry that happened to decrypt.
+      await db.execute({
+        sql: `INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value, created_at, updated_at) VALUES (?, 'custom', 'claim_broken_key', 'not-a-ciphertext', ?, ?)`,
+        args: [TENANT, stamp, stamp],
+      });
+      try {
+        const second = await enqueueComputerRun(member, "a second message, while the vault is broken");
+        assert.ok(second.run);
+        await db.execute({ sql: `UPDATE bridge_pairings SET claim_state_at = ? WHERE id = ?`, args: [new Date(Date.now() - 5000).toISOString(), pairing.id] });
+        const refused = await claim(pairing.token, body(randomUUID()));
+        assert.deepEqual(refused.json, { ok: true, run: null }, "the claim route must refuse a run rather than send a partially-scrubbed prompt");
+        const row = await db.execute({ sql: `SELECT status, error_code FROM dept_chat_runs WHERE id = ?`, args: [second.run!.id] });
+        assert.deepEqual([row.rows[0].status, row.rows[0].error_code], ["failed", "scrub_unavailable"]);
+      } finally {
+        await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'claim_broken_key'");
+      }
+    } finally {
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'claim_vault_key'");
+    }
+  });
   await check("plan mode claims a 'read' profile, never 'propose'", async () => {
     const store = await import("../lib/os/runs/store");
     const member = await freshMember();
@@ -449,6 +507,65 @@ async function main() {
     const r = await claim(token, body(randomUUID(), { wait_ms: 500 }));
     assert.deepEqual(r.json, { ok: true, run: null });
     assert.ok(Date.now() - started < 10_000, "the long-poll must not hang far past wait_ms");
+  });
+
+  console.log("Revocation during the long-poll ([P1] Codex finding)");
+  await check("a pairing revoked WHILE its claim request is long-polling claims nothing, even once work arrives", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    const claimId = randomUUID();
+    // Nothing is queued yet: the first (immediate) attempt finds nothing and
+    // the request enters its poll loop (POLL_EVERY_MS = 2000, wait_ms = 3000
+    // guarantees exactly one 2s sleep before the deadline).
+    const claimPromise = claim(pairing.token, body(claimId, { wait_ms: 3000 }));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The computer is disconnected MID-WAIT (its pairing is revoked), and
+    // only THEN does new work arrive for this person -- exactly the order
+    // the finding describes: a newly queued message during the poll.
+    await db.execute({ sql: `UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?`, args: [new Date().toISOString(), pairing.id] });
+    const { run } = await enqueueComputerRun(member, "arrives after the pairing was revoked, mid-poll");
+    assert.ok(run);
+    const result = await claimPromise;
+    assert.deepEqual(result.json, { ok: true, run: null }, "a revoked pairing must claim nothing, even though work existed to claim");
+    // Nobody's revoked pairing silently consumed it: the run is still queued.
+    const row = await db.execute({ sql: `SELECT status, claimed_pairing_id FROM dept_chat_runs WHERE id = ?`, args: [run!.id] });
+    assert.equal(row.rows[0].status, "queued");
+    assert.equal(row.rows[0].claimed_pairing_id, null);
+  });
+  await check("pairingLiveForClaim: the SECOND re-check buildAndRespond runs, in direct isolation (revoked / de-approved / signup_secret / missing / live)", async () => {
+    // The claim route's own top-level gates (resolvePairingFromBearer,
+    // pairingCanClaim) already catch a revoked or de-approved pairing on
+    // the VERY NEXT request -- that is what the long-poll test above
+    // exercises end to end. The narrower window this finding also names
+    // ("again before building the response") is the few milliseconds
+    // between a successful claim/lookup and the response being built,
+    // WITHIN the same request: too small to force deterministically without
+    // mocking, so this tests the exact mechanism buildAndRespond calls
+    // (pairingLiveForClaim) directly, over every state it must get right.
+    const { pairingLiveForClaim } = await import("../lib/bridge/pairing-auth");
+    const approved = await makePairing({ userId: await freshMember(), scope: "connector" });
+    assert.equal(await pairingLiveForClaim(approved.id), true);
+
+    const revoked = await makePairing({ userId: await freshMember(), scope: "connector" });
+    await db.execute({ sql: `UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?`, args: [stamp, revoked.id] });
+    assert.equal(await pairingLiveForClaim(revoked.id), false);
+
+    const deApproved = await makePairing({ userId: await freshMember(), scope: "connector" });
+    await db.execute({ sql: `UPDATE bridge_pairings SET claim_enabled_at = NULL, claim_enabled_by = NULL WHERE id = ?`, args: [deApproved.id] });
+    assert.equal(await pairingLiveForClaim(deApproved.id), false);
+
+    const signup = await makePairing({ userId: await freshMember(), scope: "connector" });
+    await db.execute({ sql: `UPDATE bridge_pairings SET paired_via = 'signup_secret' WHERE id = ?`, args: [signup.id] });
+    assert.equal(await pairingLiveForClaim(signup.id), false, "a signup_secret pairing can never be approved for claiming, however claim_enabled_at reads");
+
+    assert.equal(await pairingLiveForClaim("no-such-pairing-id"), false);
+    assert.equal(await pairingLiveForClaim(""), false);
+  });
+  await check("buildAndRespond still calls the re-check (source pin, since the exact few-millisecond race is not reproducible on demand)", () => {
+    const src = readFileSync(join(ROOT, "app/api/bridge/runs/claim/route.ts"), "utf8");
+    assert.match(src, /pairingLiveForClaim\(/, "buildAndRespond must re-validate the pairing before building the response");
+    const buildAndRespondBody = src.slice(src.indexOf("async function buildAndRespond"), src.indexOf("export async function POST"));
+    assert.match(buildAndRespondBody, /pairingLiveForClaim\(/, "the re-check must live INSIDE buildAndRespond, not only at the route's top-level gate");
   });
 
   console.error = realError;

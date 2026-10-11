@@ -28,7 +28,7 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { conversationActivity, failQueuedComputerRun, nextActiveRun, pollRun, reapStale, type Run, type RunScope } from "./store";
+import { conversationActivity, failQueuedComputerRun, markFirstInLine, nextActiveRun, pollRun, reapStale, type Run, type RunScope } from "./store";
 import { COMPUTER_BUSY_TIMEOUT_MS, COMPUTER_MAX_QUEUED_MS, COMPUTER_NOT_ANSWERING_MS, isTerminalStatus, type RunEvent, type RunExecutor, type RunSource, type RunStatus } from "./types";
 import { blockedReasonCode } from "@/lib/os/channel/outcome";
 import type { ComputerAnswerState } from "@/lib/devices/presence";
@@ -119,8 +119,6 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
   let askedDriver = false;
   let lastReap = startedAt;
   let lastFrameAt = startedAt;
-  /** O4: when this run most recently became first-in-line with nothing running ahead of it -- NOT when it was sent. */
-  let firstInLineSince: number | null = null;
 
   for (;;) {
     if (o.gone?.()) return;
@@ -168,13 +166,15 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
       // The other two clocks start when this run becomes FIRST IN LINE
       // (nothing running ahead of it in its conversation), never from when
       // it was sent -- a follow-up waiting behind a long reply in the SAME
-      // conversation is never penalised for that wait.
+      // conversation is never penalised for that wait. PERSISTED (O4 [P2]
+      // Codex review): markFirstInLine's CAS sets dept_chat_runs.
+      // first_in_line_at ONCE, durably, so a stream reconnect (every ~25 s)
+      // never resets this clock the way a local variable would have.
       const activity = await conversationActivity(o.db, o.scope, run.conversationId, now());
-      if (activity.live) {
-        firstInLineSince = null;
-      } else {
-        firstInLineSince ??= t;
-        const waitedMs = t - firstInLineSince;
+      if (!activity.live) {
+        const markedAt = await markFirstInLine(o.db, o.scope, run.id, now());
+        const firstInLineSinceMs = markedAt ? Date.parse(markedAt) : t;
+        const waitedMs = t - (Number.isFinite(firstInLineSinceMs) ? firstInLineSinceMs : t);
         const cs = o.computerState ? await o.computerState() : null;
         if (!failedCode) {
           if (cs?.startsWith("blocked:")) {
@@ -182,6 +182,14 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
             failedCode = blockedReasonCode(cs.slice("blocked:".length));
           } else if (cs === "busy") {
             if (waitedMs >= COMPUTER_BUSY_TIMEOUT_MS) failedCode = "computer_busy_timeout";
+          } else if (cs === "can_answer") {
+            // Reachable and ready: no clock in THIS branch applies at all
+            // (found while testing [P2] -- 'can_answer' is not "blocked" and
+            // not "busy", so it fell into the "no live claimer" else branch
+            // below and would have timed out after 20 s even though the
+            // computer is answering fine, just hasn't claimed this ONE run
+            // yet). Only the 10-minute absolute cap (`failedCode` set above,
+            // from createdAt) still applies while it stays can_answer.
           } else {
             // 'offline', 'not_approved', or unknown (no computerState hook at all): no live claimer.
             if (waitedMs >= COMPUTER_NOT_ANSWERING_MS) failedCode = "computer_not_answering";

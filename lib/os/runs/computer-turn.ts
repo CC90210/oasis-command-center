@@ -32,6 +32,8 @@ import { historyFor, type Run, type RunScope } from "./store";
 import type { OsViewer } from "@/components/os/department/viewer";
 import type { OsDepartment } from "@/lib/os/departments";
 import type { ChatMessage, StreamEvent } from "@/lib/providers";
+import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
 
 /** The run token outlives the 20-minute claim deadline a little, so a last event posted right at the edge still verifies. */
 export const RUN_TOKEN_TTL_SEC = 1500;
@@ -121,13 +123,37 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
       })
     : null;
   const systemFull: string = desk?.system ?? t.system;
-  const system = systemFull.length > COMPUTER_SYSTEM_PROMPT_CHARS ? `${systemFull.slice(0, COMPUTER_SYSTEM_PROMPT_CHARS)}\n…[truncated]` : systemFull;
+  const systemCapped = systemFull.length > COMPUTER_SYSTEM_PROMPT_CHARS ? `${systemFull.slice(0, COMPUTER_SYSTEM_PROMPT_CHARS)}\n…[truncated]` : systemFull;
 
   // A chat run carries its earlier turns, fenced (composeComputerPrompt);
   // O4 writes no other origin, but the shape is harmless either way (an
-  // automation/test run would simply have an empty history).
+  // automation/test run would simply have an empty history). historyFor
+  // returns a member's STORED message text unchanged -- if someone pasted a
+  // credential into a chat, it reaches here verbatim. groundDepartmentTurn's
+  // own scrub covers only the DEPARTMENT STATE block it appends to `system`,
+  // never the base prompt or this prompt/history text.
   const history = await historyFor(db, { tenantId: run.tenantId, userId: run.userId } satisfies RunScope, run.conversationId, run.seq);
-  const prompt = composeComputerPrompt(history, run.userText);
+  const promptFull = composeComputerPrompt(history, run.userText);
+
+  // COMPLETE or nothing (the rule every other outbound-text boundary in this
+  // codebase follows -- the events route, groundDepartmentTurn): an entry
+  // that cannot be read or decrypted fails the whole claim rather than
+  // sending the computer a system prompt and conversation scrubbed of only
+  // SOME of this workspace's secrets. Covers the env-secret pattern
+  // (redactAll, a pasted credential whose value matches a live secret) AND
+  // this tenant's own vault values, over the COMPLETE outbound text -- the
+  // base system prompt, the appended department-state block (already
+  // scrubbed once by groundDepartmentTurn; redacting it again is harmless),
+  // and every message in the conversation history.
+  let vault: VaultSecret[];
+  try {
+    vault = await fetchTenantVaultSecretsForRedaction(run.tenantId, { requireComplete: true });
+  } catch {
+    return { ok: false, status: 503, error: "scrub_unavailable" };
+  }
+  const scrub = (text: string): string => redactTenantVaultSecrets(redactAll(text), vault);
+  const system = scrub(systemCapped);
+  const prompt = scrub(promptFull);
 
   const planMode = run.chatMode === "plan";
   const toolset = deskToolset({ viewer, dept, agentSlug: run.agentSlug, planMode });

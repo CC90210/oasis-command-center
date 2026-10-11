@@ -87,6 +87,12 @@ async function main() {
   for (const file of ["bravo__192_ai_usage.sql", "bravo__207_department_chat_runs.sql", "bravo__213_dept_runs_computer.sql"]) {
     for (const stmt of splitStatements(readFileSync(join(ROOT, "database", "turso", file), "utf8"))) await db.execute(stmt);
   }
+  // claimComputerRun's CAS re-checks the pairing's live state in THIS same
+  // table now (Codex review, [P1]/[P2]): every `person()` below seeds a
+  // real, approved, unrevoked row here, or every claimComputerRun call
+  // would throw "no such table: bridge_pairings".
+  await db.execute(`CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT,
+    revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT)`);
 
   const store = await import("../lib/os/runs/store");
   const types = await import("../lib/os/runs/types");
@@ -95,10 +101,14 @@ async function main() {
   const now = () => new Date(clock);
   const advance = (ms: number) => void (clock += ms);
 
-  /** A fresh (tenant, user) and the matching claim pairing, isolated from every other check. */
-  function person(tenantId = uid()) {
+  /** A fresh (tenant, user) and the matching claim pairing (a real, approved, unrevoked bridge_pairings row), isolated from every other check. */
+  async function person(tenantId = uid()) {
     const userId = uid();
     const pairingId = uid();
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, ?, ?, 'test', 'pair_code')`,
+      args: [pairingId, tenantId, userId, `test computer ${pairingId}`, new Date().toISOString()],
+    });
     return { scope: { tenantId, userId }, pairing: { tenantId, userId, pairingId } };
   }
 
@@ -108,7 +118,7 @@ async function main() {
 
   console.log("enqueueRun carries executor and origin");
   await check("a 'computer' run enqueues queued, executor 'computer', origin 'chat', and is NOT claimable by the Worker driver", async () => {
-    const { scope } = person();
+    const { scope } = await person();
     const c = await conv(scope);
     const q = await store.enqueueRun(db, scope, { conversationId: c.id, text: "hi", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -123,7 +133,7 @@ async function main() {
     assert.equal(stillQueued?.status, "queued");
   });
   await check("a default enqueueRun call is executor 'worker', origin 'chat' (unchanged behaviour)", async () => {
-    const { scope } = person();
+    const { scope } = await person();
     const c = await conv(scope);
     const q = await store.enqueueRun(db, scope, { conversationId: c.id, text: "hi", chatMode: "build", showThinking: false, now: now() });
     assert.ok(q.ok);
@@ -137,8 +147,8 @@ async function main() {
   console.log("claimComputerRun: only the owner's runs, one compare-and-swap, chats first");
   await check("Ann's computer can never claim Ben's run, and the reverse", async () => {
     const tenant = uid();
-    const ann = person(tenant);
-    const ben = person(tenant);
+    const ann = await person(tenant);
+    const ben = await person(tenant);
     const cA = await conv(ann.scope);
     const cB = await conv(ben.scope);
     const qA = await store.enqueueRun(db, ann.scope, { conversationId: cA.id, text: "ann's", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
@@ -165,15 +175,20 @@ async function main() {
     assert.equal(await store.claimComputerRun(db, ben.pairing, "claim-ben-2", now()), null);
   });
   await check("a different workspace's queued computer run is invisible to this one (tenant scoping)", async () => {
-    const zeta = person();
+    const zeta = await person();
     const cZ = await conv(zeta.scope);
     await store.enqueueRun(db, zeta.scope, { conversationId: cZ.id, text: "zeta's", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     const wrongTenantSamePairingId = await store.claimComputerRun(db, { tenantId: uid(), userId: zeta.scope.userId, pairingId: zeta.pairing.pairingId }, "claim-x", now());
     assert.equal(wrongTenantSamePairingId, null, "the tenant id differs, so no row matches even with the right user id");
   });
   await check("two concurrent claims for the same person have exactly one winner (compare-and-swap)", async () => {
-    const owner = person();
-    const otherPairingSamePerson = { ...owner.pairing, pairingId: uid() };
+    const owner = await person();
+    const secondPairingId = uid();
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, ?, ?, 'test', 'pair_code')`,
+      args: [secondPairingId, owner.scope.tenantId, owner.scope.userId, "owner's second computer", new Date().toISOString()],
+    });
+    const otherPairingSamePerson = { ...owner.pairing, pairingId: secondPairingId };
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "race", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -185,8 +200,59 @@ async function main() {
     assert.equal(winners.length, 1, "exactly one claim won");
     assert.equal(winners[0]?.id, q.ok ? q.run.id : undefined);
   });
+  await check("[P2] claim-id dedup is atomic with claiming: two overlapping requests for the SAME claim_id, with TWO different runs available, never claim two different runs under it", async () => {
+    // The scenario the previous check cannot reach: with only ONE queued
+    // run, the loser's CAS subquery finds no candidate at all (0 rows
+    // matched, not a unique violation). With TWO queued runs for the same
+    // person, each racer's CAS can target a DIFFERENT row and successfully
+    // claim it -- and only the partial unique index on (claimed_pairing_id,
+    // lease_id) stops the SECOND commit from landing the SAME claim_id onto
+    // a SECOND run.
+    const owner = await person();
+    const c1 = await conv(owner.scope);
+    const c2 = await conv(owner.scope, "marketing");
+    const q1 = await store.enqueueRun(db, owner.scope, { conversationId: c1.id, text: "first conversation", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    const q2 = await store.enqueueRun(db, owner.scope, { conversationId: c2.id, text: "second conversation", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    assert.ok(q1.ok && q2.ok);
+    const sharedClaimId = "shared-overlapping-claim-id";
+    // Sequential, not Promise.all: SQLite serializes writes on one
+    // connection anyway, so this reproduces exactly what two truly
+    // concurrent requests would each see once their UPDATEs are ordered --
+    // the SECOND one must never silently succeed on a DIFFERENT row.
+    const first = await store.claimComputerRun(db, owner.pairing, sharedClaimId, now());
+    assert.ok(first, "the first request claims a run");
+    const second = await store.claimComputerRun(db, owner.pairing, sharedClaimId, now());
+    assert.equal(second, null, "the second request, same claim_id, must NOT claim the other run");
+    // The loser's own recovery path: ask for the winner's assignment.
+    const winnersAssignment = await store.findClaimedComputerRun(db, owner.pairing, sharedClaimId);
+    assert.ok(winnersAssignment);
+    assert.equal(winnersAssignment!.id, first!.id, "the loser must be told the WINNER's run, never nothing");
+    // Exactly ONE run is running under this claim_id; the other is still queued, untouched.
+    const running = await db.execute({ sql: `SELECT id FROM dept_chat_runs WHERE tenant_id = ? AND user_id = ? AND lease_id = ? AND status = 'running'`, args: [owner.scope.tenantId, owner.scope.userId, sharedClaimId] });
+    assert.equal(running.rows.length, 1);
+    const otherRunId = (q1.ok ? q1.run.id : "") === first!.id ? (q2.ok ? q2.run.id : "") : (q1.ok ? q1.run.id : "");
+    const other = await store.getRun(db, owner.scope, otherRunId);
+    assert.equal(other?.status, "queued");
+  });
+  await check("[P2] truly concurrent (Promise.all) overlapping claims for the same claim_id still land on exactly one run", async () => {
+    const owner = await person();
+    const c1 = await conv(owner.scope);
+    const c2 = await conv(owner.scope, "marketing");
+    const q1 = await store.enqueueRun(db, owner.scope, { conversationId: c1.id, text: "concurrent 1", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    const q2 = await store.enqueueRun(db, owner.scope, { conversationId: c2.id, text: "concurrent 2", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    assert.ok(q1.ok && q2.ok);
+    const sharedClaimId = "truly-concurrent-claim-id";
+    const [a, b] = await Promise.all([
+      store.claimComputerRun(db, owner.pairing, sharedClaimId, now()),
+      store.claimComputerRun(db, owner.pairing, sharedClaimId, now()),
+    ]);
+    const claimedDirectly = [a, b].filter(Boolean);
+    assert.ok(claimedDirectly.length <= 1, "never two different runs claimed directly under the same claim_id");
+    const running = await db.execute({ sql: `SELECT id FROM dept_chat_runs WHERE tenant_id = ? AND user_id = ? AND lease_id = ? AND status = 'running'`, args: [owner.scope.tenantId, owner.scope.userId, sharedClaimId] });
+    assert.equal(running.rows.length, 1, "exactly one run ends up running under the shared claim_id, never two");
+  });
   await check("order is kept within a conversation; chats go before automations (origin ordering)", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const chatRun = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "the chat one", chatMode: "build", showThinking: false, now: now(), executor: "computer", origin: "chat" });
     assert.ok(chatRun.ok);
@@ -210,7 +276,7 @@ async function main() {
     assert.equal(claimed?.id, chatRun.ok ? chatRun.run.id : undefined, "the chat-origin run claimed first, even though it was not inserted first");
   });
   await check("a Worker driver (claimNextRun) never claims a computer-executor run, even with the chat queue otherwise empty", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "mine", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.equal(await store.claimNextRun(db, owner.scope, c.id, "worker-lease-x", now()), null);
@@ -218,7 +284,7 @@ async function main() {
 
   console.log("idempotent retry vs. claim_already_started");
   await check("a lost claim answer retried with the same claim_id returns the same run again", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "retry me", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -233,7 +299,7 @@ async function main() {
     assert.equal(await store.producerEventsExist(db, found!), false, "no events posted yet: a safe retry, not claim_already_started");
   });
   await check("after the first event, the idempotent lookup still finds the run, and producerEventsExist flips true (409 claim_already_started)", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "started", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -245,7 +311,7 @@ async function main() {
     assert.equal(await store.producerEventsExist(db, found!), true);
   });
   await check("findClaimedComputerRun never returns another pairing's claim of the same claim_id", async () => {
-    const owner = person();
+    const owner = await person();
     const otherPairingSamePerson = { ...owner.pairing, pairingId: uid() };
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "mine", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
@@ -257,7 +323,7 @@ async function main() {
 
   console.log("the failure clocks and pre-claim cleanup");
   await check("failQueuedComputerRun fails a queued run closed, and never a running one", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "timeout me", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -275,7 +341,7 @@ async function main() {
     assert.equal(stillRunning, false, "a running run is never touched by the queued-only CAS");
   });
   await check("failLongQueuedComputerRuns fails only this person's CHAT runs queued past the 10-minute cap", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "old", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -288,8 +354,8 @@ async function main() {
     assert.equal((await store.getRun(db, owner.scope, q2.ok ? q2.run.id : ""))?.status, "queued", "the fresh run is untouched");
   });
   await check("reapStaleComputerRuns closes a producer that went silent past RUN_STALE_PRODUCER_MS, scoped to this person only", async () => {
-    const owner = person();
-    const other = person();
+    const owner = await person();
+    const other = await person();
     const mine = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: mine.id, text: "going stale", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -307,8 +373,8 @@ async function main() {
     assert.equal((await store.getRun(db, other.scope, othersRun.ok ? othersRun.run.id : ""))?.status, "running", "another person's run is untouched by this person's reap");
   });
   await check("claimCleanup runs both reapers for this person and leaves other people untouched", async () => {
-    const owner = person();
-    const other = person();
+    const owner = await person();
+    const other = await person();
     const mine = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: mine.id, text: "mine stale", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);
@@ -327,7 +393,7 @@ async function main() {
 
   console.log("finishProducerRun writes a usage-ledger row (O4 truthfulness rule 8)");
   await check("a computer-claimed run that finishes 'done' writes one ai_usage_events row: provider bridge, model claude, subscription, cost 0", async () => {
-    const owner = person();
+    const owner = await person();
     const c = await conv(owner.scope);
     const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "ledger me", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.ok(q.ok);

@@ -521,27 +521,110 @@ export type ClaimPairing = { tenantId: string; userId: string; pairingId: string
  * existing `source = 'producer'` gate) -- O4 adds no new event-writing path.
  * `claimId` becomes the run's lease_id, so a lost answer retried with the
  * same claim_id is found again by findClaimedComputerRun, idempotently.
+ *
+ * THE PAIRING'S LIVE STATE IS PART OF THE SAME STATEMENT (Codex review,
+ * 2026-10-11, [P1]). The claim route authenticates the bearer once, at
+ * request start, then may long-poll for up to 20 s before this runs again;
+ * a computer disconnected (its pairing revoked) mid-wait must never have a
+ * NEWLY queued message, its conversation history and department context
+ * handed to it on a later poll just because the request started before the
+ * revocation. bridge_pairings lives in the SAME Turso database dept_chat_runs
+ * does (both reachable from one libSQL connection; the Supabase-shaped
+ * client is a different WRAPPER over the identical tables, never a
+ * different database), so this EXISTS subquery re-checks revoked_at AND
+ * claim_enabled_at, atomically, in the same UPDATE that claims the run --
+ * not a read-then-decide two-step a revocation could land inside of.
+ *
+ * CLAIM-ID DEDUP IS ATOMIC WITH CLAIMING (Codex review, 2026-10-11, [P2]).
+ * Two overlapping requests for the SAME (pairing, claim_id) -- a retry
+ * racing its own original, both past the idempotent-retry lookup because
+ * neither had claimed anything yet -- must never land on two DIFFERENT
+ * runs: the connector asks about one claim_id once. The partial unique
+ * index dept_chat_runs_pairing_claim_idx (bravo__213) makes the SECOND
+ * commit of this UPDATE fail outright when it would set the SAME
+ * (claimed_pairing_id, lease_id) pair onto a DIFFERENT row that is already
+ * running under it -- caught here and reported as "lost the race" (null),
+ * never left to bubble up as an unhandled 500. The caller (the claim
+ * route) then asks findClaimedComputerRun for the WINNER's assignment
+ * rather than treating this call as "nothing was claimable".
  */
 export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimId: string, now: Date): Promise<Run | null> {
   const at = iso(now);
   const deadline = iso(new Date(now.getTime() + COMPUTER_CLAIM_DEADLINE_MS));
-  const rs = await exec(db, {
-    sql: `UPDATE dept_chat_runs
-          SET status = 'running', source = 'producer', lease_id = ?, claimed_pairing_id = ?, started_at = ?, heartbeat_at = ?, deadline_at = ?
-          WHERE status = 'queued' AND executor = 'computer' AND tenant_id = ? AND user_id = ?
-            AND id = (
-              SELECT q.id FROM dept_chat_runs q
-              WHERE q.tenant_id = ? AND q.user_id = ? AND q.executor = 'computer' AND q.status = 'queued'
-                AND q.seq = (SELECT MIN(f.seq) FROM dept_chat_runs f WHERE f.conversation_id = q.conversation_id AND f.status = 'queued')
-                AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = q.conversation_id AND x.status = 'running')
-              ORDER BY CASE q.origin WHEN 'chat' THEN 0 WHEN 'test' THEN 1 ELSE 2 END, q.created_at
-              LIMIT 1
-            )
-          RETURNING *`,
-    args: [claimId, pairing.pairingId, at, at, deadline, pairing.tenantId, pairing.userId, pairing.tenantId, pairing.userId],
-  });
+  let rs: ResultSet;
+  try {
+    rs = await exec(db, {
+      sql: `UPDATE dept_chat_runs
+            SET status = 'running', source = 'producer', lease_id = ?, claimed_pairing_id = ?, started_at = ?, heartbeat_at = ?, deadline_at = ?
+            WHERE status = 'queued' AND executor = 'computer' AND tenant_id = ? AND user_id = ?
+              AND EXISTS (
+                SELECT 1 FROM bridge_pairings bp
+                WHERE bp.id = ? AND bp.tenant_id = ? AND bp.user_id = ? AND bp.revoked_at IS NULL AND bp.claim_enabled_at IS NOT NULL
+              )
+              AND id = (
+                SELECT q.id FROM dept_chat_runs q
+                WHERE q.tenant_id = ? AND q.user_id = ? AND q.executor = 'computer' AND q.status = 'queued'
+                  AND q.seq = (SELECT MIN(f.seq) FROM dept_chat_runs f WHERE f.conversation_id = q.conversation_id AND f.status = 'queued')
+                  AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = q.conversation_id AND x.status = 'running')
+                ORDER BY CASE q.origin WHEN 'chat' THEN 0 WHEN 'test' THEN 1 ELSE 2 END, q.created_at
+                LIMIT 1
+              )
+            RETURNING *`,
+      args: [
+        claimId,
+        pairing.pairingId,
+        at,
+        at,
+        deadline,
+        pairing.tenantId,
+        pairing.userId,
+        pairing.pairingId,
+        pairing.tenantId,
+        pairing.userId,
+        pairing.tenantId,
+        pairing.userId,
+      ],
+    });
+  } catch (err) {
+    // SQLite reports a UNIQUE violation by COLUMN list, not index name:
+    // "SQLITE_CONSTRAINT: UNIQUE constraint failed: dept_chat_runs.claimed_pairing_id, dept_chat_runs.lease_id"
+    // (verified against a real libSQL file; `code` is "SQLITE_CONSTRAINT_UNIQUE"
+    // on a LibsqlError, checked first as the more structured signal).
+    const code = (err as { code?: unknown } | null)?.code;
+    const message = err instanceof Error ? err.message : String(err);
+    const isPairingClaimCollision =
+      code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed/i.test(message);
+    if (isPairingClaimCollision && /claimed_pairing_id/i.test(message) && /lease_id/i.test(message)) return null;
+    throw err;
+  }
   const r = rows(rs)[0];
   return r ? runOf(r) : null;
+}
+
+/**
+ * Set this run's first_in_line_at ONCE (Codex review, 2026-10-11, [P2]):
+ * called every time a follower observes it queued with nothing running
+ * ahead of it in its own conversation. The CAS (COALESCE against the
+ * existing value) means the FIRST observation wins and every later one is
+ * a no-op that still returns the same, durable value -- never a value kept
+ * only in one follower stream's local state, which a reconnect (every
+ * ~25 s, TAIL_WINDOW_MS) would otherwise forget, resetting the clock and
+ * letting a continuously busy computer's queue sail past
+ * computer_busy_timeout into the 10-minute absolute cap instead. Returns
+ * null when the run is no longer queued (claimed or ended between the
+ * caller's own read and this call) -- the caller falls back to "now" then,
+ * since there is no stale clock to protect against for a run that is
+ * already past "queued".
+ */
+export async function markFirstInLine(db: Client, scope: RunScope, runId: string, now: Date): Promise<string | null> {
+  const rs = await exec(db, {
+    sql: `UPDATE dept_chat_runs SET first_in_line_at = COALESCE(first_in_line_at, ?)
+          WHERE id = ? AND tenant_id = ? AND user_id = ? AND status = 'queued'
+          RETURNING first_in_line_at`,
+    args: [iso(now), runId, scope.tenantId, scope.userId],
+  });
+  const r = rows(rs)[0];
+  return r ? sOrNull(r.first_in_line_at) : null;
 }
 
 /**
