@@ -46,7 +46,8 @@ check("the canary bearer carries sv, and an unreadable session version refuses t
   const route = src("app/api/bridge/runs/canary/route.ts");
   assert.match(route, /const sv = await currentSessionVersion\(pairing\.userId\);/);
   assert.match(route, /if \(sv === null\) return bad\(503, "seat_unavailable"\);/);
-  assert.match(route, /\n\s+sv,\n/);
+  // \r? : a Windows checkout has CRLF line endings.
+  assert.match(route, /\n\s+sv,\r?\n/);
   assert.match(src("lib/os/seat.ts"), /export async function currentSessionVersion\(/);
 });
 
