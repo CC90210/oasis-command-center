@@ -512,6 +512,11 @@ export function FormPublicClient({
   validateRef.current = validate;
   const buildSubmitPayloadRef = useRef<typeof buildSubmitPayload>(buildSubmitPayload);
   buildSubmitPayloadRef.current = buildSubmitPayload;
+  // The consent boxes, for the same reason: they stay clickable during the
+  // address wait, so a visitor can untick one after pressing Continue. Read
+  // in the old closure, the tick they just took back would be sent as a "yes".
+  const ledgerRef = useRef({ channels: ledgerChannels, ticked: ledgerTicked });
+  ledgerRef.current = { channels: ledgerChannels, ticked: ledgerTicked };
   /** Claimed before the first await in `submit()` so a second click cannot
    *  start a second submission while the first is waiting. */
   const submitGuard = useRef(false);
@@ -698,13 +703,14 @@ export function FormPublicClient({
       // each was ticked right now — nothing else is sent, because nothing
       // else is trusted: the server independently derives which channels
       // step `stepAtStart` actually declares and ignores anything here that
-      // disagrees (app/api/forms/submit/route.ts). ledgerChannels at submit
-      // time, not a stale closure — `submit` is recreated every render, same
-      // as every other value it reads from component scope.
-      if (ledgerChannels.length > 0) {
+      // disagrees (app/api/forms/submit/route.ts). Read through ledgerRef,
+      // never the closure: this line runs after the address wait, and the
+      // visitor's last answer is what the current render holds.
+      const ledgerNow = ledgerRef.current;
+      if (ledgerNow.channels.length > 0) {
         submitBody.consent_ledger = {
-          email: ledgerChannels.includes("email") ? ledgerTicked.email : undefined,
-          sms: ledgerChannels.includes("sms") ? ledgerTicked.sms : undefined,
+          email: ledgerNow.channels.includes("email") ? ledgerNow.ticked.email : undefined,
+          sms: ledgerNow.channels.includes("sms") ? ledgerNow.ticked.sms : undefined,
         };
       }
 

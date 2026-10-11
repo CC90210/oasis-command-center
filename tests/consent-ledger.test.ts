@@ -592,6 +592,19 @@ async function main() {
     assert.ok(/consent_record_unavailable:/.test(src), "the visitor sees plain words, not the 503 code");
   });
 
+  await check("FormPublicClient sends the visitor's LAST answer, read after the address wait, never a stale tick", () => {
+    const src = readFileSync(join(ROOT, "components", "forms", "FormPublicClient.tsx"), "utf8");
+    assert.ok(
+      /ledgerRef\.current = \{ channels: ledgerChannels, ticked: ledgerTicked \};/.test(src),
+      "the ref must be re-pointed on every render",
+    );
+    const at = src.indexOf("submitBody.consent_ledger = {");
+    assert.ok(at > 0, "consent_ledger body not found");
+    const block = src.slice(Math.max(0, at - 400), at + 300);
+    assert.ok(/const ledgerNow = ledgerRef\.current;/.test(block), "submit must read the boxes through the ref");
+    assert.ok(!/ledgerTicked\.(email|sms)/.test(block), "submit must not read the closure's tick state");
+  });
+
   finish("consent-ledger");
 }
 
