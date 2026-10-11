@@ -192,7 +192,7 @@ async function createSchema() {
     CREATE TABLE bridge_pairings (
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) PRIMARY KEY,
       tenant_id TEXT NOT NULL, user_id TEXT, label TEXT NOT NULL, bridge_token_hash TEXT NOT NULL,
-      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT,
+      machine_fingerprint TEXT, last_seen_at TEXT, revoked_at TEXT, paired_via TEXT, scope TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL;

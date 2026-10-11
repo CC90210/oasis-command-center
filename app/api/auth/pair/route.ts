@@ -530,6 +530,10 @@ export async function POST(req: NextRequest) {
   const fingerprint = (machine.fingerprint as string | undefined) || null;
   const label = (machine.label as string | undefined) || "Local install";
   const nowIso = new Date().toISOString();
+  // paired_via (O3a): which proof minted this row. A signup_secret pairing
+  // can never be approved for work (security rule 1) — recording it is what
+  // lets the approval endpoint refuse it by name instead of by inference.
+  const pairedVia = hmacProfile ? "hmac" : "signup_secret";
 
   const row = {
     tenant_id: profileRow.tenant_id,
@@ -538,6 +542,7 @@ export async function POST(req: NextRequest) {
     bridge_token_hash: tokenHash,
     machine_fingerprint: fingerprint,
     last_seen_at: nowIso,
+    paired_via: pairedVia,
   };
 
   let pairingId: string | null = null;
@@ -560,6 +565,7 @@ export async function POST(req: NextRequest) {
         bridge_token_hash: tokenHash,
         last_seen_at: nowIso,
         label,
+        paired_via: pairedVia,
       })
       .eq("tenant_id", profileRow.tenant_id)
       .eq("machine_fingerprint", fingerprint)

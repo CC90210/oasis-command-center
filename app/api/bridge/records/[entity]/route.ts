@@ -13,11 +13,19 @@
  *   that pattern doesn't scale to a multi-VPS client model where each
  *   tenant's daemon has only its own per-tenant credentials.
  *
- *   This endpoint is the answer. Auth is the same bridge bearer token
- *   that /api/bridge/ping uses — hashed-and-stored in bridge_pairings,
+ *   This endpoint is the answer. Auth is resolvePairingFromBearer
+ *   (lib/bridge/pairing-auth.ts), the same bridge bearer token
+ *   /api/bridge/ping uses — hashed-and-stored in bridge_pairings,
  *   minted per-tenant during onboarding. The token's bridge_pairing
  *   row carries the tenant_id, so daemons can't write across tenants
  *   even if they tried (request body's tenant_id is ignored).
+ *
+ *   O3a: record writes need a DAEMON-scope pairing — a 'connector'
+ *   pairing (Settings > Computers, no shell) is refused outright. When
+ *   the pairing has a recorded owner, every call re-checks that owner's
+ *   LIVE seat and canWriteCrm (lib/role-gates.ts): a deactivated member's
+ *   or a read_only seat's still-valid token stops writing records at
+ *   once, not only when its pairing is separately revoked.
  *
  * Verbs:
  *   POST   /api/bridge/records/[entity]              body: { data: {...} }
@@ -41,12 +49,14 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp } from "@/lib/api-helpers";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { rateLimit } from "@/lib/rate-limit";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { resolvePairingFromBearer, isDaemonScope, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
+import { liveSeat } from "@/lib/os/seat";
+import { canWriteCrm } from "@/lib/role-gates";
 
 /** Token-bucket gate — applied BEFORE the bridge token check so
  *  brute-forcers can't probe the hash-comparison timing. Writes get
@@ -71,13 +81,6 @@ function checkRateLimit(req: NextRequest): NextResponse | null {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-type Pairing = {
-  id: string;
-  tenant_id: string;
-  user_id: string | null;
-  revoked_at: string | null;
-};
 
 async function rejectUnsafeOasisLeadWrite(
   tenantId: string,
@@ -105,38 +108,34 @@ async function rejectUnsafeOasisLeadWrite(
 
 /**
  * Validate the bearer token + return the bridge_pairing row. Single
- * choke-point — every verb on this route goes through it. Identical
- * shape to /api/bridge/ping's auth so future refactors can extract
- * a shared helper.
+ * choke-point — every verb on this route goes through it. Shared with
+ * /api/bridge/ping and /api/cron-jobs/poll via resolvePairingFromBearer
+ * (lib/bridge/pairing-auth.ts), plus the two gates this route adds: daemon
+ * scope, and — when the pairing has a recorded owner — a live seat that can
+ * still write CRM data (O3a).
  */
 async function resolveBridgePairing(req: NextRequest): Promise<
-  | { ok: true; pairing: Pairing }
+  | { ok: true; pairing: ResolvedPairing }
   | { ok: false; status: number; message: string }
 > {
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.toLowerCase().startsWith("bearer ")) {
-    return { ok: false, status: 401, message: "Bearer bridge token required" };
+  const resolved = await resolvePairingFromBearer(req);
+  if (!resolved.ok) {
+    return { ok: false, status: resolved.status, message: resolved.error };
   }
-  const tokenPlain = auth.slice(7).trim();
-  if (!tokenPlain) {
-    return { ok: false, status: 401, message: "empty bridge token" };
+  const { pairing } = resolved;
+  if (!isDaemonScope(pairing)) {
+    return { ok: false, status: 403, message: "connector_scope_cannot_write_records" };
   }
-  const tokenHash = sha256(tokenPlain);
-
-  const db = getServiceSupabase();
-  const r = await db
-    .from("bridge_pairings")
-    .select("id, tenant_id, user_id, revoked_at")
-    .eq("bridge_token_hash", tokenHash)
-    .maybeSingle();
-  if (r.error || !r.data) {
-    return { ok: false, status: 401, message: "unknown bridge token" };
+  if (pairing.userId) {
+    const seat = await liveSeat(pairing.tenantId, pairing.userId);
+    if (!seat.live) {
+      return { ok: false, status: 403, message: `seat_inactive: ${seat.reason}` };
+    }
+    if (!canWriteCrm(seat.profile.teamRole)) {
+      return { ok: false, status: 403, message: "role_cannot_write_crm" };
+    }
   }
-  const p = r.data as Pairing;
-  if (p.revoked_at) {
-    return { ok: false, status: 403, message: "bridge pairing revoked" };
-  }
-  return { ok: true, pairing: p };
+  return { ok: true, pairing };
 }
 
 export async function POST(
@@ -148,7 +147,7 @@ export async function POST(
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;
-  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenant_id, entity);
+  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenantId, entity);
   if (unsafeWrite) return unsafeWrite;
 
   let body: { data?: Record<string, unknown> };
@@ -166,7 +165,7 @@ export async function POST(
 
   try {
     const record = await createRecord({
-      tenant_id: auth.pairing.tenant_id,
+      tenant_id: auth.pairing.tenantId,
       entity,
       data: body.data,
     });
@@ -190,7 +189,7 @@ export async function PATCH(
   const auth = await resolveBridgePairing(req);
   if (!auth.ok) return bad(auth.status, auth.message);
   const { entity } = await ctx.params;
-  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenant_id, entity);
+  const unsafeWrite = await rejectUnsafeOasisLeadWrite(auth.pairing.tenantId, entity);
   if (unsafeWrite) return unsafeWrite;
 
   const id = new URL(req.url).searchParams.get("id");
@@ -213,7 +212,7 @@ export async function PATCH(
 
   try {
     const record = await updateRecord({
-      tenant_id: auth.pairing.tenant_id,
+      tenant_id: auth.pairing.tenantId,
       entity,
       id,
       patch: body.patch,

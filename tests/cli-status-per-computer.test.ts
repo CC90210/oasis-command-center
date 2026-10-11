@@ -51,7 +51,9 @@ async function main() {
       metadata TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX "integrations_health_profile_id_service_key" ON integrations_health (profile_id, service);
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT, label TEXT,
-      bridge_token_hash TEXT, last_seen_at TEXT, last_seen_ip TEXT, revoked_at TEXT, tool_capabilities TEXT);
+      bridge_token_hash TEXT, last_seen_at TEXT, last_seen_ip TEXT, revoked_at TEXT, tool_capabilities TEXT,
+      scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
+      previous_token_hash TEXT, token_rotated_at TEXT);
   `);
   const { NextRequest } = await import("next/server");
   const { sha256 } = await import("../lib/api-helpers");

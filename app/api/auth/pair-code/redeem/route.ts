@@ -19,6 +19,12 @@
  *     bridge: { pairing_id, token, dashboard_url }
  *   }
  *
+ * O3a: a 'connector' purpose code (minted by Settings > Computers, not the
+ * Devices button) mints NO sign-in link — `session` is always null — and
+ * the response instead names `workspace` (slug + name) and `account` (the
+ * minting person's masked email), so the connector can show "Join OASIS as
+ * a***@oasisai.work?" before it ever saves the token.
+ *
  * Error states:
  *   404 — unknown / expired / already-consumed code
  *   410 — code was already redeemed (different from 404 to make the CLI's
@@ -43,6 +49,13 @@ export const dynamic = "force-dynamic";
 
 function isValidCodeShape(s: unknown): s is string {
   return typeof s === "string" && /^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(s);
+}
+
+/** "adon@oasisai.work" -> "a***@oasisai.work". Never the full local part. */
+function maskEmail(email: string): string {
+  const at = email.indexOf("@");
+  if (at <= 0) return "***";
+  return `${email.slice(0, 1)}***${email.slice(at)}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -137,12 +150,14 @@ export async function POST(req: NextRequest) {
           tenant_id: string;
           auth_user_id: string;
           profile_id: string | null;
+          purpose: "desktop" | "connector";
         })
       : null;
   if (!row) {
     await recordPairAttempt(rateKey, "code_redeem_failed", ip);
     return bad(500, "redeem_returned_empty");
   }
+  const isConnector = row.purpose === "connector";
 
   const baseUrl = process.env.BRAVO_DASHBOARD_URL || publicAppBaseUrl();
 
@@ -170,12 +185,19 @@ export async function POST(req: NextRequest) {
   //
   // The response field stays `magic_link_url` — the desktop client reads that
   // key, and renaming it would break pairing on every already-shipped build.
+  //
+  // O3a: a 'connector' code mints NO sign-in link at all (security rule 16)
+  // — the connector never gets a browser session, only its bearer. The
+  // email lookup below still runs for a connector, to build the masked
+  // `account` field the confirm prompt shows.
   let magicLinkUrl: string | null = null;
+  let resolvedEmail: string | null = null;
   try {
     const emailLookup = await adminGetUser(db, row.auth_user_id);
     if (!emailLookup.ok) throw new Error(emailLookup.error);
     const email = emailLookup.value.email;
-    if (email) {
+    resolvedEmail = email || null;
+    if (email && !isConnector) {
       if (tursoAuthActive()) {
         const linkToken = await mintSessionLinkToken(email);
         magicLinkUrl =
@@ -208,6 +230,25 @@ export async function POST(req: NextRequest) {
     magicLinkUrl = null;
   }
 
+  // A connector code's answer names what it is joining, so the connector
+  // can ask "Join OASIS as a***@oasisai.work?" before it ever saves the
+  // token (security rule 16). Best-effort: a failed workspace lookup never
+  // fails the redeem itself — the pairing is already durable.
+  let workspace: { tenant_id: string; slug: string | null; name: string | null } | null = null;
+  if (isConnector) {
+    try {
+      const tenantRow = await db.from("tenants").select("slug, name").eq("id", row.tenant_id).maybeSingle();
+      workspace = {
+        tenant_id: row.tenant_id,
+        slug: (tenantRow.data?.slug as string | undefined) ?? null,
+        name: (tenantRow.data?.name as string | undefined) ?? null,
+      };
+    } catch (err) {
+      console.error("[pair-code/redeem] workspace lookup failed (pairing itself succeeded):", err);
+      workspace = { tenant_id: row.tenant_id, slug: null, name: null };
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     tenant_id: row.tenant_id,
@@ -219,5 +260,8 @@ export async function POST(req: NextRequest) {
       dashboard_url: baseUrl.replace(/\/$/, "") + "/",
     },
     session: magicLinkUrl ? { magic_link_url: magicLinkUrl } : null,
+    ...(isConnector
+      ? { workspace, account: { email_masked: resolvedEmail ? maskEmail(resolvedEmail) : null } }
+      : {}),
   });
 }

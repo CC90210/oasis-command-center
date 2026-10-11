@@ -24,6 +24,7 @@ import { resolveViewerSurface, type ViewerSurface } from "@/lib/role-surfaces-se
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { dbBool } from "@/lib/db-bool";
+import { liveSeat } from "@/lib/os/seat";
 import type { BuildOsNavInput } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 
@@ -156,35 +157,41 @@ export async function resolveMemberNavInput(
  *
  * The token is only a claim. Every call re-reads the member's seat here, so a
  * removed seat or a downgraded role takes effect on the NEXT call, not when the
- * token expires. Same rules as the session path:
- *   - the profile is chosen across ALL the user's rows as
- *     resolveActiveProfileForUser chooses it, and must belong to the token's
- *     workspace (a member active in another workspace is not in this one);
- *   - role, admin and persona derive as resolveSessionContext (lib/api-auth.ts)
- *     and resolveViewerSurface derive them: no role is read-only, both admin
- *     flags go through dbBool;
- *   - an unreadable seat or workspace is "degraded", never a guess.
+ * token expires. liveSeat (lib/os/seat.ts) is the gate (O3a security rule 6):
+ *   - the profile is looked up IN THE REQUESTED WORKSPACE, not chosen across
+ *     every workspace the auth id happens to have a row in — before this, a
+ *     member of two workspaces could be refused at random (as "seat_gone")
+ *     whenever their OTHER workspace's row ranked higher in
+ *     chooseActiveProfile's tiering;
+ *   - deactivated_at must be NULL, and the auth user must not be banned or
+ *     deleted — neither was checked here before O3a, so a removed member's
+ *     bearer kept answering MCP calls until the token itself expired;
+ *   - role, admin and persona derive exactly as resolveSessionContext
+ *     (lib/api-auth.ts) and resolveViewerSurface derive them: no role is
+ *     read-only, both admin flags go through dbBool;
+ *   - a read fault is "degraded" (never a guess); every other refusal reads
+ *     as "signed_out", which the MCP caller reports as seat_gone — a removed
+ *     seat must read exactly the same as no seat.
  * The caller still runs departmentGate on the result, as a page does.
  */
 export async function resolveOsViewerFor(tenantId: string, authUserId: string): Promise<OsViewerResult> {
   if (!tenantId || !authUserId) return { ok: false, reason: "signed_out" };
   try {
-    const found = await getServiceSupabase().from("user_profiles").select("*").eq("auth_user_id", authUserId).limit(20);
-    if (found.error) throw new Error(found.error.message);
-    const rows = (found.data || []) as ActiveUserProfile[];
-    if (rows.length === 0) return { ok: false, reason: "signed_out" };
-    const profile = chooseActiveProfile(rows, null);
-    if (!profile.tenant_id || profile.tenant_id !== tenantId) return { ok: false, reason: "signed_out" };
+    const seat = await liveSeat(tenantId, authUserId);
+    if (!seat.live) {
+      return seat.reason === "unavailable" ? { ok: false, reason: "degraded" } : { ok: false, reason: "signed_out" };
+    }
+    const { profile } = seat;
 
     const tenant = await getTenant(tenantId);
     const tenantSlug = tenant?.slug?.trim().toLowerCase() || null;
     if (!tenant || !tenantSlug) return { ok: false, reason: "degraded" };
 
-    const teamRole = profile.team_role || "read_only";
+    const teamRole = profile.teamRole;
     const persona = resolvePersona({
       teamRole,
-      isTrueAdmin: dbBool(profile.is_owner) || teamRole === "admin" || teamRole === "owner",
-      adminAccess: dbBool(profile.admin_access),
+      isTrueAdmin: profile.isOwner || teamRole === "admin" || teamRole === "owner",
+      adminAccess: profile.adminAccess,
     });
     const capabilities = capabilitiesFor(persona, tenantSlug);
     const manifest = await getManifest(resolveClientProfileSlug(tenant), tenantId);
@@ -195,7 +202,7 @@ export async function resolveOsViewerFor(tenantId: string, authUserId: string): 
       oasis: isOasisSurfaceTenant(tenantSlug),
       provisioned,
       manifest,
-      email: profile.email ?? null,
+      email: profile.email,
       authUserId,
       navInput: navInputFor(persona, capabilities, tenantSlug, provisioned),
     };

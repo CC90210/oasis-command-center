@@ -3,6 +3,16 @@
  * DELETE /api/devices?id=<uuid>   — revoke a pairing (sets revoked_at, the
  *                                   bridge daemon will see 403 on next ping
  *                                   and self-stop)
+ *
+ * OWNER SEMANTICS (O3a). A computer belongs to the person who paired it:
+ *   - GET returns YOUR OWN computers always. An owner or admin ALSO sees
+ *     every other member's ("Team computers") — before this, any member of
+ *     a client workspace could list and revoke every pairing in it
+ *     (O3a security rule, app/api/devices/route.ts:17-47).
+ *   - DELETE: disconnecting your own computer never needs anything extra.
+ *     Disconnecting someone else's requires both session.isAdmin AND an
+ *     explicit confirm, and is written to the tenant audit log through
+ *     log_tenant_event — the same trail lib/team-activation.ts writes to.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -22,11 +32,17 @@ export async function GET() {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("bridge_pairings")
-    .select("id, label, machine_fingerprint, last_seen_at, last_seen_ip, created_at, revoked_at")
+    .select("id, user_id, label, machine_fingerprint, last_seen_at, last_seen_ip, created_at, revoked_at, scope, claim_enabled_at")
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
   if (error) return bad(500, error.message);
-  return NextResponse.json({ ok: true, devices: data || [] });
+  const rows = (data || []) as Array<{ user_id: string | null } & Record<string, unknown>>;
+  // Everyone sees their own; an owner or admin also sees the team's.
+  const devices = session.isAdmin ? rows : rows.filter((r) => r.user_id === session.userId);
+  return NextResponse.json({
+    ok: true,
+    devices: devices.map((r) => ({ ...r, mine: r.user_id === session.userId })),
+  });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -34,9 +50,37 @@ export async function DELETE(req: NextRequest) {
   if (!session.ok) return bad(401, "unauthorized");
   if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const tenantId = session.tenantId;
-  const id = new URL(req.url).searchParams.get("id");
+  const url = new URL(req.url);
+  const id = url.searchParams.get("id");
   if (!id) return bad(400, "id required");
   const db = getServiceSupabase();
+
+  const row = await db
+    .from("bridge_pairings")
+    .select("id, user_id, label, revoked_at")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (row.error) return bad(500, row.error.message);
+  if (!row.data) return bad(404, "pairing_not_found");
+  const pairing = row.data as { id: string; user_id: string | null; label: string | null; revoked_at: string | null };
+
+  const isMine = pairing.user_id === session.userId;
+  if (!isMine) {
+    if (!session.isAdmin) return bad(403, "not_your_computer");
+    const confirmed = url.searchParams.get("confirm") === "true";
+    if (!confirmed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "confirm_required",
+          message: `Disconnecting ${pairing.label || "this computer"} is someone else's computer. Add confirm=true to proceed.`,
+        },
+        { status: 409 },
+      );
+    }
+  }
+
   // Tenant-scope the update — operator can't revoke another tenant's pairing
   const { error } = await db
     .from("bridge_pairings")
@@ -44,5 +88,18 @@ export async function DELETE(req: NextRequest) {
     .eq("id", id)
     .eq("tenant_id", tenantId);
   if (error) return bad(500, error.message);
+
+  if (!isMine) {
+    const audit = await db.rpc("log_tenant_event", {
+      p_tenant_id: tenantId,
+      p_action_type: "device.admin_disconnect",
+      p_target_table: "bridge_pairings",
+      p_target_id: id,
+      p_after: { revoked_at: new Date().toISOString(), label: pairing.label, owner_user_id: pairing.user_id },
+      p_metadata: { actor_user_id: session.userId, actor_profile_id: session.profileId },
+    });
+    if (audit.error) console.error("[devices.DELETE] audit log_tenant_event failed", audit.error.message);
+  }
+
   return NextResponse.json({ ok: true });
 }

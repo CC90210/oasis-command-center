@@ -212,6 +212,22 @@ async function personLevelDeactivation(): Promise<void> {
       action_type TEXT NOT NULL, target_table TEXT, target_id TEXT, before TEXT,
       after TEXT, ip_hash TEXT, user_agent TEXT, metadata TEXT, created_at TEXT
     );
+    -- O3a: deactivateMember also revokes the person's computers, disables
+    -- their automations and cancels their queued department-chat runs, all
+    -- scoped to this tenant. None of these fixtures seed rows here (no test
+    -- below pairs a computer or schedules an automation), so every call is
+    -- expected to affect zero rows — these tables just need to EXIST.
+    CREATE TABLE bridge_pairings (
+      id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT, revoked_at TEXT
+    );
+    CREATE TABLE tenant_cron_jobs (
+      id TEXT PRIMARY KEY, tenant_id TEXT, owner_user_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT
+    );
+    CREATE TABLE dept_chat_runs (
+      id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, status TEXT,
+      finished_at TEXT, cancel_requested_at TEXT
+    );
   `);
 
   const profile = async (p: {

@@ -103,7 +103,9 @@ async function main() {
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT, agent_key TEXT, name TEXT, description TEXT,
       schedule TEXT, enabled INTEGER, last_run_at TEXT, last_run_status TEXT, created_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT, team_role TEXT,
-      full_name TEXT, display_name TEXT);
+      full_name TEXT, display_name TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT);
+    CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (slug TEXT, tenant_id TEXT, manifest TEXT, updated_at TEXT);
     CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
@@ -141,6 +143,12 @@ async function main() {
     [
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'acme-roofing', 'Acme Roofing')", args: [ACME] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'zeta-print', 'Zeta Print')", args: [ZETA] },
+      // liveSeat (lib/os/seat.ts) requires a live _supabase_auth_users row for
+      // every person the MCP server resolves — every auth id this file uses.
+      ...[OWNER, REP, OTHER_REP, VIEWER, ZOWNER].map((id) => ({
+        sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`,
+        args: [id, `${id}@test.local`],
+      })),
       profile("p-owner", OWNER, ACME, "owner", "owner@acme.test"),
       profile("p-rep", REP, ACME, "closer", "rep@acme.test"),
       profile("p-other", OTHER_REP, ACME, "closer", "other@acme.test"),

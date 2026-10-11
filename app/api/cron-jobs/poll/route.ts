@@ -6,8 +6,13 @@
  * into local cron_engine.py SEED_JOBS and ticks them locally; this route
  * only delivers the spec, not the execution.
  *
- * Auth: same bridge_pairings bearer token /api/bridge/ping uses. No
- * session cookie — the bridge is a long-running daemon not a user agent.
+ * Auth: resolvePairingFromBearer (lib/bridge/pairing-auth.ts), the same
+ * bridge_pairings bearer token /api/bridge/ping uses. No session cookie —
+ * the bridge is a long-running daemon not a user agent. Polling and
+ * reporting both require a DAEMON-scope pairing (O3a security rule 3): a
+ * 'connector' pairing (Settings > Computers, no shell) is refused outright
+ * — it never even reaches the per-tenant executor gate below. A pairing
+ * with a recorded owner must also still be a LIVE seat.
  *
  * GET  → list jobs for the bridge's bound tenant.
  * POST → bridge reports back the outcome of a tick:
@@ -18,9 +23,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
+import { bad, getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { isScriptActionType, SCRIPT_ACTION_TYPES } from "@/lib/automations/action-types";
+import { resolvePairingFromBearer, isDaemonScope } from "@/lib/bridge/pairing-auth";
+import { liveSeat } from "@/lib/os/seat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,30 +74,38 @@ function isExpectedExecutor(tenantId: string, label: string): boolean {
   return expected === undefined || expected === label;
 }
 
-async function resolveBridge(
-  req: NextRequest,
-): Promise<{ tenantId: string; label: string } | null> {
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.toLowerCase().startsWith("bearer ")) return null;
-  const tokenPlain = auth.slice(7).trim();
-  const tokenHash = sha256(tokenPlain);
+type BridgeRefusal = { status: number; message: string };
+type BridgeOk = { tenantId: string; label: string };
 
-  const db = getServiceSupabase();
-  const pairing = await db
-    .from("bridge_pairings")
-    .select("tenant_id, label, revoked_at")
-    .eq("bridge_token_hash", tokenHash)
-    .maybeSingle();
-  if (pairing.error || !pairing.data) return null;
-  if (pairing.data.revoked_at) return null;
-  return { tenantId: pairing.data.tenant_id, label: String(pairing.data.label || "") };
+/**
+ * The shared pairing resolver, PLUS the two gates this route adds on top:
+ * daemon scope (a 'connector' pairing — Settings > Computers, no shell —
+ * never reaches cron jobs at all: 403, not the bare 401 an unknown token
+ * gets) and a live seat for whoever owns the pairing (also 403, O3a).
+ */
+async function resolveBridge(req: NextRequest): Promise<BridgeOk | BridgeRefusal> {
+  const resolved = await resolvePairingFromBearer(req);
+  if (!resolved.ok) return { status: resolved.status, message: resolved.error };
+  const { pairing } = resolved;
+  if (!isDaemonScope(pairing)) {
+    return { status: 403, message: "connector_scope_cannot_poll_jobs" };
+  }
+  if (pairing.userId) {
+    const seat = await liveSeat(pairing.tenantId, pairing.userId);
+    if (!seat.live) return { status: 403, message: `seat_inactive: ${seat.reason}` };
+  }
+  return { tenantId: pairing.tenantId, label: pairing.label };
+}
+
+function isBridgeOk(r: BridgeOk | BridgeRefusal): r is BridgeOk {
+  return (r as BridgeOk).tenantId !== undefined;
 }
 
 export async function GET(req: NextRequest) {
   const limited = checkPollRateLimit(req);
   if (limited) return limited;
   const bridge = await resolveBridge(req);
-  if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
+  if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
   if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
     // 200 with an empty list, not an error: the machine is paired and healthy,
     // it is simply not this tenant's executor. An error would make its daemon
@@ -125,7 +140,7 @@ export async function POST(req: NextRequest) {
   const limited = checkPollRateLimit(req);
   if (limited) return limited;
   const bridge = await resolveBridge(req);
-  if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
+  if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
   if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
     // The WRITE side is the one that poisons rows — refuse it loudly so the
     // machine's own log says exactly why its report was not accepted.

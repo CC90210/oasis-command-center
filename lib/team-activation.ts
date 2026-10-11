@@ -67,6 +67,11 @@ export type DeactivationResult = {
   impact: DeactivationImpact;
   loginBlocked: boolean;
   loginNote: string | null;
+  /** O3a: computers, automations and queued department-chat work this
+   *  tenant revoked for the person, in this same operation. */
+  pairingsRevoked: number;
+  automationsDisabled: number;
+  runsCancelled: number;
   released: number;
   boardUnassigned: number;
   /** Leads that changed under us (someone else touched them) — left as-is. */
@@ -420,6 +425,56 @@ export async function deactivateMember(args: {
         : `${loginsKept.length} of ${person.authUserIds.length} logins kept: still active in another workspace`;
   }
 
+  // 2b. Computers, automations and queued work (O3a). Scoped to THIS
+  // tenant and this person's auth ids, regardless of whether a login was
+  // kept open elsewhere (lib/os/seat.ts liveSeat reads deactivated_at per
+  // workspace, not per login) — the grants this workspace gave them stop
+  // the moment they leave it.
+  let pairingsRevoked = 0;
+  let automationsDisabled = 0;
+  let runsCancelled = 0;
+  if (person.authUserIds.length > 0) {
+    const svc = getServiceSupabase();
+    const pairings = await svc
+      .from("bridge_pairings")
+      .update({ revoked_at: nowIso })
+      .eq("tenant_id", args.tenantId)
+      .in("user_id", person.authUserIds)
+      .is("revoked_at", null)
+      .select("id");
+    if (pairings.error) {
+      console.error("[team-activation] pairing revoke failed", pairings.error.message);
+    } else {
+      pairingsRevoked = (pairings.data || []).length;
+    }
+
+    const automations = await svc
+      .from("tenant_cron_jobs")
+      .update({ enabled: false, updated_at: nowIso })
+      .eq("tenant_id", args.tenantId)
+      .in("owner_user_id", person.authUserIds)
+      .eq("enabled", true)
+      .select("id");
+    if (automations.error) {
+      console.error("[team-activation] automation disable failed", automations.error.message);
+    } else {
+      automationsDisabled = (automations.data || []).length;
+    }
+
+    const runs = await svc
+      .from("dept_chat_runs")
+      .update({ status: "cancelled", finished_at: nowIso, cancel_requested_at: nowIso })
+      .eq("tenant_id", args.tenantId)
+      .in("user_id", person.authUserIds)
+      .eq("status", "queued")
+      .select("id");
+    if (runs.error) {
+      console.error("[team-activation] queued run cancel failed", runs.error.message);
+    } else {
+      runsCancelled = (runs.data || []).length;
+    }
+  }
+
   // 3. Leads.
   let released = 0;
   let boardUnassigned = 0;
@@ -448,6 +503,9 @@ export async function deactivateMember(args: {
     profile_ids: profileIds,
     login_blocked: loginBlocked,
     logins_blocked: loginsBlocked,
+    pairings_revoked: pairingsRevoked,
+    automations_disabled: automationsDisabled,
+    runs_cancelled: runsCancelled,
     leads_released: released,
     leads_unassigned_on_board: boardUnassigned,
     leads_refused: refused.length,
@@ -463,6 +521,9 @@ export async function deactivateMember(args: {
     },
     loginBlocked,
     loginNote,
+    pairingsRevoked,
+    automationsDisabled,
+    runsCancelled,
     released,
     boardUnassigned,
     refused,
