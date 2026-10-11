@@ -20,6 +20,18 @@
  *   - redeeming a code for a fingerprint already live under a DIFFERENT person
  *     gets a named 409, and the code stays unconsumed (a legitimate retry,
  *     after disconnecting the computer, can still use it).
+ *
+ * ATOMICITY (O0 security review: "atomicity / fail-open state drift" — the
+ * first fix above read the conflicting row, then wrote, in two separate
+ * steps). Both the pairing write and the code-consume now live in ONE
+ * client.batch('write'), so this also pins:
+ *   - two concurrent redeems of the SAME code: exactly one succeeds, the
+ *     other sees the code already consumed — never both, never neither;
+ *   - a forced failure partway through the batch (a trigger that fires on
+ *     the code-consume statement, by which point the pairing statement has
+ *     already appeared to apply within the uncommitted transaction) leaves
+ *     BOTH the pairing row and the code exactly as they were — proving the
+ *     whole batch rolled back, not just its last statement.
  */
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -67,6 +79,15 @@ const OTHERS_FP = "others-pc-fp-00000000000000000001";
 const FRESH_FP = "fresh-pc-fp-000000000000000000001";
 const MY_EXISTING_TOKEN_HASH = "my-existing-token-hash";
 const OTHERS_TOKEN_HASH = "others-token-hash";
+const CONCURRENT_FP = "concurrent-pc-fp-0000000000000001";
+// A sentinel tenant used ONLY by the forced-mid-batch-failure check below. A
+// BEFORE UPDATE trigger aborts the code-consume statement whenever it fires
+// for this tenant, so the test can prove the WHOLE batch rolls back — not
+// just its last statement — without reaching into the driver.
+const FORCE_FAIL_TENANT = "ffffffff-0000-4000-8000-00000000ff01";
+const AUTH_FORCE = "auth-force";
+const FORCE_FAIL_FP = "force-fail-pc-fp-00000000000001";
+const FORCE_FAIL_OLD_TOKEN_HASH = "force-fail-old-token-hash";
 
 async function createSchema() {
   await db.executeMultiple(`
@@ -88,6 +109,12 @@ async function createSchema() {
       expires_at TEXT NOT NULL, consumed_at TEXT, consumed_by_pairing_id TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX idx_bridge_pair_codes_code ON bridge_pair_codes (code);
+    CREATE TRIGGER force_fail_on_consume
+      BEFORE UPDATE ON bridge_pair_codes
+      WHEN NEW.tenant_id = '${FORCE_FAIL_TENANT}' AND NEW.consumed_at IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'forced_failure_for_test');
+    END;
   `);
 }
 
@@ -112,12 +139,18 @@ async function seed() {
           VALUES ('bp-other', ?, ?, 'Others laptop (Mac)', ?, ?, ?)`,
     args: [TENANT, AUTH_OTHER, OTHERS_TOKEN_HASH, OTHERS_FP, LONG_AGO],
   });
+  // Fixture for the forced-mid-batch-failure check only.
+  await db.execute({
+    sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, machine_fingerprint, last_seen_at)
+          VALUES ('bp-force', ?, ?, 'Force-fail laptop', ?, ?, ?)`,
+    args: [FORCE_FAIL_TENANT, AUTH_FORCE, FORCE_FAIL_OLD_TOKEN_HASH, FORCE_FAIL_FP, LONG_AGO],
+  });
 }
 
-function mintCode(code: string, authUserId: string): Promise<unknown> {
+function mintCode(code: string, authUserId: string, tenantId: string = TENANT): Promise<unknown> {
   return db.execute({
     sql: "INSERT INTO bridge_pair_codes (code, tenant_id, auth_user_id, expires_at) VALUES (?, ?, ?, ?)",
-    args: [code, TENANT, authUserId, inMinutes(15)],
+    args: [code, tenantId, authUserId, inMinutes(15)],
   });
 }
 
@@ -129,10 +162,10 @@ function redeemRequest(code: string, fingerprint: string): NextRequest {
   });
 }
 
-async function liveRow(fingerprint: string) {
+async function liveRow(fingerprint: string, tenantId: string = TENANT) {
   const r = await db.execute({
     sql: "SELECT id, user_id, bridge_token_hash, revoked_at FROM bridge_pairings WHERE tenant_id = ? AND machine_fingerprint = ? AND revoked_at IS NULL",
-    args: [TENANT, fingerprint],
+    args: [tenantId, fingerprint],
   });
   return r.rows as unknown as Array<{ id: string; user_id: string | null; bridge_token_hash: string; revoked_at: string | null }>;
 }
@@ -209,6 +242,60 @@ async function main() {
     assert.equal(rows[0].bridge_token_hash, OTHERS_TOKEN_HASH, "untouched");
     const c = await codeRow("AAA-AAA-003");
     assert.equal(c?.consumed_at, null, "a code that can never succeed against this fingerprint is not burned");
+  });
+
+  await check("two concurrent redeems of the SAME code: exactly one succeeds", async () => {
+    await mintCode("AAA-AAA-004", AUTH_ME);
+    const [a, b] = await Promise.all([
+      POST(redeemRequest("AAA-AAA-004", CONCURRENT_FP)),
+      POST(redeemRequest("AAA-AAA-004", CONCURRENT_FP)),
+    ]);
+    const bodies = await Promise.all([a.json(), b.json()]);
+    const statuses = [a.status, b.status].sort();
+    const oks = bodies.filter((b) => b.ok === true);
+    console.log(`    OBSERVED statuses=${JSON.stringify(statuses)} bodies=${JSON.stringify(bodies)}`);
+    assert.equal(oks.length, 1, "exactly one of the two concurrent redeems succeeds");
+    // The loser sees the code already consumed, not a 500 or a second pairing.
+    const loserBody = bodies.find((b) => b.ok !== true);
+    assert.match(String(loserBody?.error), /^code already redeemed$|code_consumed/i, JSON.stringify(loserBody));
+    const rows = await liveRow(CONCURRENT_FP);
+    assert.equal(rows.length, 1, "exactly one pairing row, never two, never zero");
+    const c = await codeRow("AAA-AAA-004");
+    assert.ok(c?.consumed_at, "the code ends up consumed exactly once");
+    assert.equal(c?.consumed_by_pairing_id, rows[0].id);
+  });
+
+  await check("a forced failure mid-batch leaves BOTH the pairing row and the code exactly as they were", async () => {
+    await mintCode("AAA-AAA-005", AUTH_FORCE, FORCE_FAIL_TENANT);
+    let res: Awaited<ReturnType<typeof POST>> | null = null;
+    let threw: unknown = null;
+    try {
+      res = await POST(redeemRequest("AAA-AAA-005", FORCE_FAIL_FP));
+    } catch (e) {
+      threw = e;
+    }
+    // Whether the route surfaces the driver error as a non-200 response or
+    // lets it escape as a rejection, SOMETHING must signal failure — a
+    // silent 200 would mean the forced abort did not roll the batch back.
+    if (threw === null) {
+      assert.ok(res, "neither threw nor returned a response");
+      const body = await res!.json();
+      console.log(`    OBSERVED status=${res!.status} body=${JSON.stringify(body)}`);
+      assert.notEqual(res!.status, 200, "a forced mid-batch failure must never read as success");
+    } else {
+      console.log(`    OBSERVED throw=${threw instanceof Error ? threw.message : String(threw)}`);
+    }
+    const rows = await liveRow(FORCE_FAIL_FP, FORCE_FAIL_TENANT);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, "bp-force", "no second row was minted");
+    assert.equal(
+      rows[0].bridge_token_hash,
+      FORCE_FAIL_OLD_TOKEN_HASH,
+      "the in-flight rotate was rolled back along with everything else in the batch",
+    );
+    const c = await codeRow("AAA-AAA-005");
+    assert.equal(c?.consumed_at, null, "the code was never marked used");
+    assert.equal(c?.consumed_by_pairing_id, null);
   });
 
   if (failures) {
