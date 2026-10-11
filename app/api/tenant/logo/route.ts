@@ -4,9 +4,14 @@
  *
  * Multipart upload (FormData with a `file` field, max 2 MB). We verify the
  * caller manages the tenant before touching storage, push the bytes to the
- * tenant-assets bucket (public read — public form pages need it), then
- * write the resolved URL onto tenants.logo_url. The settings UI optimistic-
- * renders the new logo using the URL we return.
+ * tenant-assets prefix, then write the logo's address onto tenants.logo_url.
+ * The settings UI optimistic-renders the new logo using the URL we return.
+ *
+ * The address is OUR route, /api/tenant-assets/<tenant>/<file>, never what
+ * storage.getPublicUrl returns (2026-10-11): on R2 that was the r2.dev host,
+ * which answered 404 for the object (or, with no public base set, a signed URL
+ * that died within two hours), so the logo was a broken image everywhere it
+ * was drawn. See lib/tenant/logo-url.ts.
  *
  * Tenant scoping: every object lands under <tenant_id>/<timestamp>_<name>
  * so a misconfigured bucket policy can't leak across tenants.
@@ -15,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { sanitizeStorageFilename } from "@/lib/storage-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { tenantAssetUrl } from "@/lib/tenant/logo-url";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,7 +88,7 @@ export async function POST(req: NextRequest) {
       {
         ok: false,
         error: "unsupported_mime",
-        hint: "Use PNG, JPG, WEBP, SVG, or GIF.",
+        hint: "Use PNG, JPG, WEBP or GIF.",
       },
       { status: 400 },
     );
@@ -105,8 +111,7 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
-  const publicUrl = db.storage.from("tenant-assets").getPublicUrl(storagePath)
-    .data.publicUrl;
+  const publicUrl = tenantAssetUrl(storagePath);
 
   const update = await db
     .from("tenants")

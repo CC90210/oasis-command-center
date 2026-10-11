@@ -49,6 +49,7 @@ import {
 } from "@/lib/forms/types";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { publicMarkForTenant, faviconForTenant, publicIdentityForTenant } from "@/lib/tenant/public-identity";
+import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { offerPagesDb, readOfferRow, readPublicOfferState, type PublicOfferState } from "@/lib/offer-pages/store";
 import { fallbackHeadline } from "@/lib/offer-pages/operator";
 import { prepareOfferRender, type PreparedOffer } from "@/lib/offer-pages/render";
@@ -211,6 +212,12 @@ async function loadForm(params: RouteParams): Promise<LoadResult> {
       tenantSlug: resolved.tenant_slug,
     });
     if (mark) branding = { ...branding, logo_url: mark };
+  }
+  // The address the logo is DRAWN from (lib/tenant/logo-url.ts): an uploaded
+  // logo stored as an R2 address (which answered 404 on 2026-10-11) is served
+  // through our own route; an unusable value draws no logo at all.
+  if (branding.logo_url != null) {
+    branding = { ...branding, logo_url: displayLogoUrl(branding.logo_url) ?? undefined };
   }
 
   return {

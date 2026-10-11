@@ -26,6 +26,7 @@ import { isFieldVisible } from "@/lib/forms/visibility";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { DEFAULT_PRIMARY_COLOR, getContrastingTextColor } from "@/lib/forms/themes";
 import { captureConsent, disclosureFor, requiredIdentifiers, toE164, type ConsentBrand } from "@/lib/consent/optinvault";
+import { SafeLogo } from "@/components/brand/SafeLogo";
 
 // Submit-side route (api/forms/submit) now decodes the base64 and uploads
 // to Supabase Storage instead of holding the bytes in form_submissions.
@@ -1064,10 +1065,9 @@ export function FormPublicClient({
             branded sun mark so the form reads as the brand (not the
             internal form name). */}
         <header className="text-center space-y-3">
-          {branding.logo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
-          ) : null}
+          {/* A logo that fails to load draws nothing, never a broken-image
+              icon: the headline below already names the brand. */}
+          <SafeLogo src={branding.logo_url} alt={headline} className="mx-auto h-12" />
           <div className="space-y-2">
             <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
             <div

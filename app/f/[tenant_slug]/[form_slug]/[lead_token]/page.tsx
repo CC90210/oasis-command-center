@@ -18,6 +18,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
 import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
+import { displayLogoUrl } from "@/lib/tenant/logo-url";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -210,6 +211,11 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
     });
     if (mark) branding = { ...branding, logo_url: mark };
   }
+  // The address the logo is DRAWN from, as on the anonymous route
+  // (lib/tenant/logo-url.ts): an uploaded logo is served through our own route.
+  if (branding.logo_url != null) {
+    branding = { ...branding, logo_url: displayLogoUrl(branding.logo_url) ?? undefined };
+  }
 
   // Cross-form pre-fill (2026-06-20): load the lead's existing data so the full
   // application seeds name / phone / business / revenue the merchant already gave
@@ -326,7 +332,7 @@ function FormErrorPage({
       : reason === "form_disabled"
         ? {
             title: "This form isn't accepting submissions right now",
-            body: "Reach out to your contact at OASIS — we'll let you know when it reopens.",
+            body: "Reach out to your contact at OASIS. We'll let you know when it reopens.",
           }
         : {
             title: "Form configuration error",

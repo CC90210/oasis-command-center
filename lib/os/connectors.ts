@@ -1167,9 +1167,11 @@ export type ConnectorFacts = {
    */
   appNotConfigured?: readonly string[] | null;
   /**
-   * For OASIS's own workspaces ONLY: the Worker secret NAMES each missing app
-   * still needs (provider id -> names, never values). The operator's card says
-   * exactly which to add; a client is never shown a secret name.
+   * For a VERIFIED platform operator in OASIS's own workspace ONLY: the Worker
+   * secret NAMES each missing app still needs (provider id -> names, never
+   * values). That operator's card says exactly which to add; a client, and any
+   * other member of OASIS's workspace, is never shown a secret name
+   * (components/os/connections/connector-facts.ts secretNamesFor).
    */
   appSecretsMissing?: Readonly<Record<string, readonly string[]>> | null;
   /**
@@ -1567,9 +1569,11 @@ function pathStatus(p: ConnectorPath, oasisAppMissing: boolean): ConnectorPathSt
  * login (ConnectorDef.clientsUnavailable). It claims nothing about a vendor
  * registration or a date: it says the state.
  *
- *   OASIS's own workspace (`missing` given): which Worker secret names to add.
- *   A client: "Not available on this workspace yet", and that nothing is wrong
- *   on their side. A secret name is never shown to a client.
+ *   A verified platform operator (`missing` given): which Worker secret names
+ *   to add.
+ *   Anyone else, a client or a member of OASIS's own workspace: "Not available
+ *   on this workspace yet", and that nothing is wrong on their side. A secret
+ *   name is never shown to them.
  */
 export const UNAVAILABLE_LABEL = "Not available on this workspace yet";
 
@@ -1580,7 +1584,7 @@ export function unavailableStatus(def: ConnectorDef, missing?: readonly string[]
     detail:
       missing && missing.length > 0
         ? `OASIS's ${def.name} app is not set up on this deployment. Missing Worker secrets: ${missing.join(", ")}. Add them in Cloudflare, then this card connects with one click.`
-        : `${def.name} cannot be connected on this workspace yet. Nothing is wrong on your side: OASIS has to switch it on first.`,
+        : `${def.name} isn't available yet for this workspace. Nothing is wrong on your side: OASIS has to switch it on first.`,
   };
 }
 

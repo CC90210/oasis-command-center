@@ -69,9 +69,9 @@ export const FORM_THEMES: FormTheme[] = [
       logo_url: "/brand/sunbiz-logo.png",
       headline: "SunBiz Funding",
       subheadline:
-        "Business funding, fast — tell us about your business and we'll match you with the right capital.",
+        "Business funding, fast. Tell us about your business and we'll match you with the right capital.",
       thanks_message:
-        "Thanks — we've got your details. A SunBiz Funding specialist will reach out within one business day.",
+        "Thanks, we've got your details. A SunBiz Funding specialist will reach out within one business day.",
     },
   },
   {
@@ -84,9 +84,9 @@ export const FORM_THEMES: FormTheme[] = [
       accent_color: "#FFB81C",
       headline: "SunBiz Funding",
       subheadline:
-        "Business funding, fast — tell us about your business and we'll match you with the right capital.",
+        "Business funding, fast. Tell us about your business and we'll match you with the right capital.",
       thanks_message:
-        "Thanks — we've got your details. A SunBiz Funding specialist will reach out within one business day.",
+        "Thanks, we've got your details. A SunBiz Funding specialist will reach out within one business day.",
     },
   },
   {
@@ -162,7 +162,7 @@ export const GENERIC_FORM_THEMES: FormTheme[] = [
       primary_color: "#1e293b",
       accent_color: "#b45309",
       headline: "Priority intake",
-      subheadline: "Confidential — a senior team member reviews every submission.",
+      subheadline: "Confidential. A senior team member reviews every submission.",
       thanks_message: "Your submission is in. Someone senior will reach out personally.",
     },
   },

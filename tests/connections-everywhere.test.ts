@@ -430,7 +430,10 @@ async function main() {
     assert.match(button, /<ConnectorDrawer\s/);
     assert.match(button, /const close = useCallback\(\(\) => setOpen\(false\), \[\]\);/, "a stable close keeps the sheet's focus handling from re-running");
     assert.match(read("app/settings/ai/page.tsx"), /await loadConnectorStatuses\(\{ tenantId, userId, nowMs \}\)/);
-    assert.match(read("app/settings/connections/page.tsx"), /await loadConnectorStatuses\(\{ tenantId: viewer\.tenantId, userId: viewer\.userId \}\)/);
+    assert.match(
+      read("app/settings/connections/page.tsx"),
+      /await loadConnectorStatuses\(\{ tenantId: viewer\.tenantId, userId: viewer\.userId, viewerIsOperator: viewer\.access\.isOperator \}\)/,
+    );
   });
 
   await check("an OAuth card already connected, configured or needing attention opens its details drawer on click instead of starting sign-in again; its drawer's own Reconnect still starts the popup (CodeRabbit PR #574)", () => {
@@ -522,11 +525,27 @@ async function main() {
     assert.deepEqual(client.paths?.map((p) => [p.title, p.state, p.requestable]), [["The OASIS Slack app", "Not set up on this deployment", false]]);
     assert.match(client.paths![0].body, /You never create a Slack app yourself/);
     assert.doesNotMatch(client.paths![0].body, /client ID|client secret|signing secret/);
-    const oasisOff = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id })).slack;
+    const oasisOff = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id, viewerIsOperator: true })).slack;
     assert.deepEqual([oasisOff.kind, oasisOff.label], ["coming_soon", "Not available on this workspace yet"]);
-    // OASIS's own operator is told which Worker secrets are missing; the client was not.
+    // A VERIFIED platform operator is told which Worker secrets are missing; the client was not.
     assert.match(String(oasisOff.detail), /Missing Worker secrets: SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET, CONNECTIONS_OAUTH_STATE_SECRET/);
     assert.doesNotMatch(String(client.detail), /SLACK_CLIENT_ID|Worker secrets/);
+    // Adon, 2026-10-11: everyone in OASIS's workspace read those secret names.
+    // A member who is not a verified operator (or a page that did not say)
+    // gets the plain sentence, exactly as a client does: no secret name.
+    for (const viewerIsOperator of [false, undefined]) {
+      const member = (await loadConnectorStatuses({ tenantId: OASIS, userId: USERS.cc.id, viewerIsOperator })).slack;
+      assert.deepEqual([member.kind, member.label], ["coming_soon", "Not available on this workspace yet"]);
+      assert.equal(member.detail, connectors.unavailableStatus(connectors.connectorBySlug("slack")!).detail, String(viewerIsOperator));
+      assert.match(String(member.detail), /^Slack isn't available yet for this workspace\. Nothing is wrong on your side/);
+      assert.doesNotMatch(String(member.detail), /SLACK_|Worker secret|Cloudflare/, `operator=${String(viewerIsOperator)}: a secret name reached a non-operator`);
+    }
+    // The client never gets one even when a page claims an operator is looking:
+    // the names belong to OASIS's own deployment, not to a client's workspace.
+    const clientAsOperator = (await loadConnectorStatuses({ tenantId: CLIENT_A, userId: USERS.clientA.id, viewerIsOperator: true })).slack;
+    assert.doesNotMatch(String(clientAsOperator.detail), /SLACK_|Worker secret/);
+    // Chat apps passes the verified check, never an email alias.
+    assert.match(read("app/settings/chat-apps/page.tsx"), /viewerIsOperator: viewer\.access\.isOperator,/);
     assert.deepEqual(oasisOff.paths?.map((p) => [p.title, p.state, p.requestable]), [["The OASIS Slack app", "Not set up on this deployment", false]]);
     // While OASIS's app is missing the body says so first, and the original
     // body follows untouched (a re-cased splice once read "oASIS's own").
