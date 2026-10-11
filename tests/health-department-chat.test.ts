@@ -90,6 +90,8 @@ type Turn = {
   /** undefined = 120 tokens; null = the provider reported none. */
   out?: number | null;
   fallback?: string | null;
+  /** The ledger surface; undefined = a department chat turn (agents.chat). */
+  surface?: string;
 };
 
 async function main() {
@@ -114,11 +116,12 @@ async function main() {
         sql: `INSERT INTO ai_usage_events
                 (id, tenant_id, occurred_at, provider, model, surface, auth_kind, billing_mode, department_key,
                  fallback_reason, output_tokens, outcome, error_code)
-              VALUES (?, ?, ?, 'anthropic', 'claude-sonnet-4-6', 'agents.chat', 'api_key', 'byo_key', ?, ?, ?, ?, ?)`,
+              VALUES (?, ?, ?, 'anthropic', 'claude-sonnet-4-6', ?, 'api_key', 'byo_key', ?, ?, ?, ?, ?)`,
         args: [
           `row-${seq}`,
           t.tenant ?? OASIS,
           new Date(NOW - t.minsAgo * MIN).toISOString(),
+          t.surface ?? "agents.chat",
           t.dept,
           t.fallback ?? null,
           t.out === undefined ? 120 : t.out,
@@ -363,6 +366,43 @@ async function main() {
     assert.equal((await run(outcomes, OASIS)).verdict, "failing");
   });
 
+  // ── an automation is not the chat ────────────────────────────────────────
+  await check("an automation's model calls (automations.run / automations.draft) are not chat turns: a failing one never pages, a passing one never hides a failing chat", async () => {
+    // A Sales automation failed at its slot (a 429; a run whose call never yielded again and expired): Sales' chat is fine.
+    await reset();
+    await seed(
+      { dept: "sales", minsAgo: 2, outcome: "error", error: "http_429", surface: "automations.run" },
+      { dept: "sales", minsAgo: 3, outcome: "expired", error: "reservation_expired", out: null, surface: "automations.run" },
+      { dept: "sales", minsAgo: 30 },
+      { dept: "sales", minsAgo: 60 },
+    );
+    let r = await run(outcomes);
+    assert.equal(r.verdict, "ok", r.reason);
+    assert.match(r.reason, /^2 department chat turn\(s\) across 1 department\(s\)/, "an automation's calls were counted as chat turns");
+    // An automation answered AFTER the chat's failing turn: the chat is still failing, and still pages.
+    await reset();
+    await seed(
+      { dept: "sales", minsAgo: 2, surface: "automations.run" },
+      { dept: "sales", minsAgo: 5, outcome: "error", error: "empty_reply_empty", out: 0 },
+      ...Array.from({ length: 6 }, (_, i) => ({ dept: "marketing", minsAgo: 10 + i * 20 })),
+    );
+    r = await run(outcomes);
+    assert.equal(r.verdict, "failing", r.reason);
+    assert.match(r.reason, /Sales: failing now, the model sent back an empty reply \(empty_reply_empty\)/);
+    // The drafter is not the chat either, and neither feeds the fallback warning.
+    await reset();
+    await seed(
+      { dept: "sales", minsAgo: 2, outcome: "error", error: "http_500", surface: "automations.draft" },
+      { dept: "sales", minsAgo: 4, fallback: "model_retired:claude-sonnet-4-5", surface: "automations.run" },
+      { dept: "sales", minsAgo: 20 },
+    );
+    r = await run(outcomes);
+    assert.equal(r.verdict, "ok", r.reason);
+    const fb = await run(fallback);
+    assert.equal(fb.verdict, "ok", fb.reason);
+    assert.match(fb.reason, /^1 department chat turn\(s\) in the last 6 h, none answered by a fallback/);
+  });
+
   // ── department_chat_fallback ─────────────────────────────────────────────
   await check("turns answered by a fallback -> DEGRADED (a warning), with the reason in words and a link", async () => {
     await reset();
@@ -431,6 +471,20 @@ async function main() {
     assert.deepEqual([...found.tenantIds].sort(), [OASIS, CLIENT].sort());
     await reset();
     assert.deepEqual((await departmentChatTenantIds(NOW)).tenantIds, [OASIS], "a quiet estate still grades OASIS");
+  });
+
+  await check("departmentChatTenantIds: a workspace whose only department rows are automation calls has no department chat to grade", async () => {
+    await reset();
+    await seed(
+      { tenant: CLIENT, dept: "sales", minsAgo: 30, surface: "automations.run" },
+      { tenant: "dddddddd-0000-4000-8000-0000000000dd", dept: "sales", minsAgo: 30, surface: "automations.draft" },
+    );
+    const found = await departmentChatTenantIds(NOW);
+    assert.equal(found.error, null);
+    assert.deepEqual(found.tenantIds, [OASIS], "an automation-only workspace was graded as a chat workspace");
+    // A chat turn in the same workspace brings it in.
+    await seed({ tenant: CLIENT, dept: "sales", minsAgo: 20 });
+    assert.deepEqual([...(await departmentChatTenantIds(NOW)).tenantIds].sort(), [OASIS, CLIENT].sort());
   });
 
   // ── the real runner: page once, dedupe, announce recovery ────────────────
