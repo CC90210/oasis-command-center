@@ -23,7 +23,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, getClientIp } from "@/lib/api-helpers";
+import { bad, getClientIp, isMissingColumnError } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { isScriptActionType, SCRIPT_ACTION_TYPES } from "@/lib/automations/action-types";
 import { resolvePairingFromBearer, isDaemonScope } from "@/lib/bridge/pairing-auth";
@@ -75,7 +75,8 @@ function isExpectedExecutor(tenantId: string, label: string): boolean {
 }
 
 type BridgeRefusal = { status: number; message: string };
-type BridgeOk = { tenantId: string; label: string };
+/** pairingId and userId feed O2's owner filter and last_poll_ok_at stamp. */
+type BridgeOk = { pairingId: string; tenantId: string; label: string; userId: string | null };
 
 /**
  * The shared pairing resolver, PLUS the two gates this route adds on top:
@@ -94,11 +95,29 @@ async function resolveBridge(req: NextRequest): Promise<BridgeOk | BridgeRefusal
     const seat = await liveSeat(pairing.tenantId, pairing.userId);
     if (!seat.live) return { status: 403, message: `seat_inactive: ${seat.reason}` };
   }
-  return { tenantId: pairing.tenantId, label: pairing.label };
+  return { pairingId: pairing.pairingId, tenantId: pairing.tenantId, label: pairing.label, userId: pairing.userId };
 }
 
 function isBridgeOk(r: BridgeOk | BridgeRefusal): r is BridgeOk {
   return (r as BridgeOk).tenantId !== undefined;
+}
+
+/**
+ * Best-effort: the moment a poll last answered this computer with 200. Feeds
+ * the agents-owner attention item "House scheduler has not fetched jobs for N
+ * minutes" (lib/admin/attention.ts). Never fails the poll itself — a stamp a
+ * daemon never reads is a worse outage than a late attention tile, and the
+ * column is new (database/turso/bravo__211_automation_owner.sql), so a
+ * deployment mid-rollout sees "no such column" here and simply keeps going.
+ */
+async function stampLastPollOk(db: ReturnType<typeof getServiceSupabase>, pairingId: string): Promise<void> {
+  const result = await db
+    .from("bridge_pairings")
+    .update({ last_poll_ok_at: new Date().toISOString() })
+    .eq("id", pairingId);
+  if (result.error && !isMissingColumnError(result.error, "last_poll_ok_at")) {
+    console.error("[api/cron-jobs/poll] last_poll_ok_at stamp failed", result.error.message);
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -106,14 +125,17 @@ export async function GET(req: NextRequest) {
   if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
+  const db = getServiceSupabase();
   if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
     // 200 with an empty list, not an error: the machine is paired and healthy,
     // it is simply not this tenant's executor. An error would make its daemon
-    // retry-spin; an empty list makes it idle politely.
+    // retry-spin; an empty list makes it idle politely. It does NOT stamp
+    // last_poll_ok_at: that stamp means "the house scheduler fetched its jobs",
+    // and another of the owner's computers polling must never hide the
+    // executor being down (Codex review, O2).
     return NextResponse.json({ ok: true, jobs: [], polled_at: new Date().toISOString() });
   }
 
-  const db = getServiceSupabase();
   // Only enabled jobs go to the bridge — disabled rows still live in the
   // table for the operator to re-enable later, but they don't tick.
   //
@@ -123,17 +145,52 @@ export async function GET(req: NextRequest) {
   // one would overwrite its status with a false error every minute it matched.
   // `.in`, never `.neq("department_task")`: a type added later reaches the
   // bridge only once someone names it there.
+  //
+  // owner_user_id is named EXPLICITLY (not `select("*")`) on purpose: this is
+  // the one place O2 needs a missing migration to be LOUD (requirement O2.3).
+  // The bridge is an unattended daemon, not a person who can read a banner —
+  // silently treating every row as unowned during the rollout gap would be a
+  // correct-looking 200 the moment it is actually a sign the column has not
+  // landed yet. A named 503 stops the daemon's retry loop from masquerading
+  // as a healthy, empty tenant.
   const { data, error } = await db
     .from("tenant_cron_jobs")
     .select(
-      "id, agent_key, name, schedule, action_type, action_payload, enabled, last_run_at, run_count",
+      "id, agent_key, name, schedule, action_type, action_payload, enabled, last_run_at, run_count, owner_user_id",
     )
     .eq("tenant_id", bridge.tenantId)
     .eq("enabled", true)
     .in("action_type", [...SCRIPT_ACTION_TYPES])
     .order("created_at", { ascending: true });
-  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, jobs: data || [], polled_at: new Date().toISOString() });
+  if (error) {
+    if (isMissingColumnError(error, "owner_user_id")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "automation_owner_column_missing",
+          message: "The automation-owner column has not been applied to this deployment yet, so this poll cannot be answered safely. Apply database/turso/bravo__211_automation_owner.sql first.",
+        },
+        { status: 503 },
+      );
+    }
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+  const rows = (data || []) as Array<Record<string, unknown> & { owner_user_id?: string | null }>;
+  // A row with an owner goes only to the computer whose paired user_id IS that
+  // owner. A row with no owner (a legacy row the migration's backfill could
+  // not resolve) keeps today's label-only rule — it has no person to prefer.
+  const owned = rows.filter((row) => !row.owner_user_id || row.owner_user_id === bridge.userId);
+  // There ARE enabled rows for this tenant, but every one of them belongs to
+  // someone else: this is the computer being paired to the wrong PERSON, not
+  // an empty tenant. An empty 200 here is exactly what makes Bravo's runner
+  // idle in silence (cron_runner.py:505-515) — so this is a named refusal
+  // instead, never the plausible-looking empty list.
+  if (rows.length > 0 && owned.length === 0) {
+    return bad(409, "owner_mismatch");
+  }
+  await stampLastPollOk(db, bridge.pairingId);
+  const jobs = owned.map(({ owner_user_id: _ownerUserId, ...job }) => job);
+  return NextResponse.json({ ok: true, jobs, polled_at: new Date().toISOString() });
 }
 
 export async function POST(req: NextRequest) {

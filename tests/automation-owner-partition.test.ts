@@ -56,17 +56,35 @@ const inventory = buildAutomationInventoryMetadata({
   empireJobs: jobs.filter((entry) => entry.source === "empire"),
   empireQueried: true,
   requireEmpireRows: true,
-  isOperator: true,
+  isAgentsOwner: true,
 });
 assert.deepEqual(inventory, {
   lanes: {
     tenant: { queried: true, count: 1 },
+    team: { queried: false, count: 0 },
     empire: { queried: true, count: 2 },
   },
   total_count: 3,
   distinct_source_id_count: 3,
   empire_included: true,
+  team_included: false,
 });
+
+// O2: the team lane (requirement A) — everyone else's rows, owners/admins
+// only. Counted separately from `jobs` (tenant + empire) so a client that
+// never reads `team` still sees a total that matches `jobs.length` exactly.
+const withTeam = buildAutomationInventoryMetadata({
+  tenantJobs: [jobs[0]],
+  teamJobs: [job("tenant", "someone-elses-id", "bravo")],
+  teamQueried: true,
+  empireJobs: jobs.filter((entry) => entry.source === "empire"),
+  empireQueried: true,
+  requireEmpireRows: true,
+  isAgentsOwner: true,
+});
+assert.deepEqual(withTeam.lanes.team, { queried: true, count: 1 });
+assert.equal(withTeam.team_included, true);
+assert.equal(withTeam.total_count, 3, "team is not folded into total_count");
 
 assert.throws(
   () => buildAutomationInventoryMetadata({
@@ -74,7 +92,7 @@ assert.throws(
     empireJobs: [],
     empireQueried: true,
     requireEmpireRows: true,
-    isOperator: true,
+    isAgentsOwner: true,
   }),
   (error) => error instanceof AutomationInventoryError
     && error.code === "incomplete_automation_inventory"
@@ -86,11 +104,25 @@ assert.throws(
     empireJobs: [],
     empireQueried: false,
     requireEmpireRows: false,
-    isOperator: false,
+    isAgentsOwner: false,
   }),
   (error) => error instanceof AutomationInventoryError
     && error.code === "duplicate_automation_inventory_key"
     && error.status === 500,
+);
+assert.throws(
+  () => buildAutomationInventoryMetadata({
+    tenantJobs: [jobs[0]],
+    teamJobs: [{ ...jobs[0] }],
+    teamQueried: true,
+    empireJobs: [],
+    empireQueried: false,
+    requireEmpireRows: false,
+    isAgentsOwner: false,
+  }),
+  (error) => error instanceof AutomationInventoryError
+    && error.code === "duplicate_automation_inventory_key",
+  "a row duplicated between yours and team is a contract violation too",
 );
 
 // ── an omission must be stated, not inferred ───────────────────────────────
@@ -105,7 +137,7 @@ const tenantOnly = buildAutomationInventoryMetadata({
   empireJobs: [],
   empireQueried: false,
   requireEmpireRows: false,
-  isOperator: false,
+  isAgentsOwner: false,
 });
 assert.equal(
   tenantOnly.empire_included,

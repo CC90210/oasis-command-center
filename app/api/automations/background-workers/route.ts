@@ -10,6 +10,12 @@
  * Response shape:
  *   {
  *     ok: true,
+ *     // O2 (2026-10-11): present ONLY when the OASIS inventory was withheld
+ *     // because the caller is not the workspace's agents owner — "not_yours"
+ *     // is the one value this ever takes. The panel renders nothing for it,
+ *     // rather than an honest-but-confusing "0/0 healthy". Absent (not
+ *     // false, not null) on every other response, including every SunBiz one.
+ *     scope?: "not_yours",
  *     bridge_online: boolean,        // lib/devices/presence.ts isOnline(bridge_pairings.last_seen_at)
  *     last_seen_at: string | null,
  *     workers: Array<{
@@ -60,6 +66,7 @@ import {
 import { jsonRoute } from "@/lib/api-helpers";
 import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
 import { isOnline } from "@/lib/devices/presence";
+import { isAgentsOwner } from "@/lib/agents-owner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -120,6 +127,17 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   }
   const isOasis = inventory === "oasis";
   const isSun = inventory === "client";
+  // O2: OASIS_WORKERS (CC's own local empire daemons) and the daemon-backed
+  // cron rows they share integrations_health with go only to the workspace's
+  // AGENTS OWNER — canSeeSystemSurfaces above admits every owner/admin, but
+  // PR #576 made Adon a verified operator AND an OASIS admin, so that gate
+  // alone would still hand him CC's machine's process list. Everyone else
+  // gets an explicit, honest empty scope instead of the panel's usual shape,
+  // so the client (lib/queries/BackgroundWorkersPanel.tsx) can tell "nothing
+  // to show you" apart from "the read failed".
+  if (isOasis && !(await isAgentsOwner(tenantId, session.userId))) {
+    return NextResponse.json({ ok: true, workers: [], scope: "not_yours" });
+  }
   const workerSet = isOasis
     ? OASIS_WORKERS
     : (await import("@/lib/automations/sunbiz-workers")).SUNBIZ_WORKERS;
@@ -133,11 +151,19 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
 
   // Bridge liveness — the heartbeat tells us when the bridge last pushed
   // anything. Older than 2 minutes means daemon snapshots are stale.
-  const pairing = await db
+  //
+  // O2: for OASIS, scoped to the VIEWER'S OWN pairings, not the newest
+  // pairing in the workspace — only the agents owner reaches this line (the
+  // early return above), so this is CCPC specifically, but the query says so
+  // explicitly rather than relying on that gate never changing. SunBiz's VPS
+  // pairing is not a person's computer, so it keeps the workspace-wide query.
+  let pairingQuery = db
     .from("bridge_pairings")
     .select("last_seen_at")
     .eq("tenant_id", tenantId)
-    .is("revoked_at", null)
+    .is("revoked_at", null);
+  if (isOasis) pairingQuery = pairingQuery.eq("user_id", session.userId);
+  const pairing = await pairingQuery
     .order("last_seen_at", { ascending: false })
     .limit(1)
     .maybeSingle();

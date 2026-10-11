@@ -25,11 +25,14 @@
  */
 
 import Link from "next/link";
-import { ArrowLeft, Cloud, Cpu } from "lucide-react";
+import { ArrowLeft, Cloud, Cpu, Info } from "lucide-react";
 import { PageHeader } from "@/components/Card";
 import { getSessionUser } from "@/lib/supabase-server";
 import { redirect } from "next/navigation";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
+import { isAgentsOwner } from "@/lib/agents-owner";
+import { getActiveProfile } from "@/lib/queries";
+import { safe } from "@/lib/api-helpers";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import { setupHref } from "@/lib/setup-links";
 import { HARNESS_REPO } from "@/lib/install-scripts";
@@ -43,7 +46,22 @@ export default async function BridgeInstallPage() {
   if (!user) redirect("/login?next=/settings/devices/install");
   // Fails closed: a membership lookup error is logged inside and answers "not
   // an operator", which renders the pair-only page.
-  const op = await resolvePlatformOperator();
+  const profile = await safe("devices.install.profile", getActiveProfile(), null);
+  const [op, agentsOwner] = await Promise.all([
+    resolvePlatformOperator(),
+    // O1: the full install clones this workspace's own private harness repo,
+    // readable only by its AGENTS OWNER (lib/agents-owner.ts). Since PR #576
+    // every OASIS founder is a verified operator, which is no longer enough
+    // on its own: the 2026-10-11 incident is exactly a non-owner operator
+    // (Adon) running this command and hitting a 404 on the private repo.
+    profile?.tenant_id && profile?.auth_user_id
+      ? safe("devices.install.agents_owner", isAgentsOwner(profile.tenant_id, profile.auth_user_id), false)
+      : Promise.resolve(false),
+  ]);
+  // Both must hold: the private repo stays OASIS-operator-only AND
+  // owner-only, so a future client workspace's agents owner (a row any
+  // operator may hand-insert for a non-OASIS tenant, O1) never sees it either.
+  const canFullInstall = op.operator && agentsOwner;
 
   const back = (
     <Link
@@ -54,7 +72,22 @@ export default async function BridgeInstallPage() {
     </Link>
   );
 
-  if (!op.operator) {
+  if (!canFullInstall) {
+    // A verified operator who is not this workspace's computer owner (Adon)
+    // gets the plain, honest notice: pairing a computer of his own cannot
+    // reach anywhere useful yet (O1 routes every department chat to the
+    // owner's computer alone), so neither the full install nor the generic
+    // pair-only flow belongs on his screen. Everyone else signed in (a
+    // teammate, a client workspace owner) keeps today's pair-only page,
+    // which works for them: their own tenant has no computer-owner lock.
+    if (op.operator) {
+      return (
+        <div className="space-y-6 animate-fade-in">
+          <PageHeader title="Connect a computer" action={back} />
+          <OwnerOnlyInstallNotice />
+        </div>
+      );
+    }
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader
@@ -117,6 +150,32 @@ export default async function BridgeInstallPage() {
       </div>
 
       <InstallBridgeWizard installRepo={HARNESS_REPO} />
+    </div>
+  );
+}
+
+/**
+ * A verified operator who is not this workspace's computer owner (DV0,
+ * 2026-10-11). Plain words only: what connecting a computer would do, that it
+ * runs through the OASIS connector (still being built), that nothing needs
+ * installing today, and that department chats pause for the same reason they
+ * already do in chat (O1: every department chat runs on the owner's computer
+ * alone). Never the private repository's name, never a button that cannot work.
+ */
+function OwnerOnlyInstallNotice() {
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-3">
+      <div className="flex items-center gap-2">
+        <Info className="w-4 h-4 text-fg-dim" aria-hidden="true" />
+        <h2 className="text-base font-bold text-fg">Connecting your own computer</h2>
+      </div>
+      <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
+        Connecting your own computer would let your agents use its files,
+        tools and scheduled jobs. That runs through the OASIS connector,
+        which is on its way and is not ready yet, so there is nothing to
+        install today. Until it ships, your department chats pause instead
+        of running on someone else&apos;s computer.
+      </p>
     </div>
   );
 }

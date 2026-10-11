@@ -86,7 +86,7 @@ async function main() {
       name TEXT NOT NULL, description TEXT, schedule TEXT NOT NULL, action_type TEXT NOT NULL,
       action_payload TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
       last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
-      run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+      run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
       created_at TEXT NOT NULL, updated_at TEXT
     );
   `);

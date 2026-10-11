@@ -82,7 +82,8 @@ async function createSchema() {
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       tool_capabilities TEXT NOT NULL DEFAULT '[]',
       scope TEXT, paired_via TEXT, claim_protocols TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT,
-      claude_account_hash TEXT, previous_token_hash TEXT, token_rotated_at TEXT);
+      claude_account_hash TEXT, previous_token_hash TEXT, token_rotated_at TEXT,
+      last_poll_ok_at TEXT);
     CREATE UNIQUE INDEX idx_bridge_pairings_unique_live_machine
       ON bridge_pairings (tenant_id, machine_fingerprint) WHERE revoked_at IS NULL;
     CREATE TABLE bridge_pair_codes (
@@ -98,6 +99,7 @@ async function createSchema() {
       action_payload TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
       last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
       run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+      owner_user_id TEXT, last_scheduled_for TEXT, tz TEXT,
       created_at TEXT NOT NULL, updated_at TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT,

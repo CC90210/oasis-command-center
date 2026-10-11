@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Plus, Copy, Clock, Download } from "lucide-react";
+import { Loader2, Trash2, Check, AlertCircle, Monitor, RefreshCw, Plus, Copy, Clock, Download, Info } from "lucide-react";
 import { InstallBridgeModal } from "./InstallBridgeModal";
 import { machineState } from "@/lib/devices/presence";
 
@@ -92,7 +92,7 @@ function PairCodeBlock({
         onClick={onClear}
         className="text-[11px] text-fg-dim hover:text-fg-muted underline"
       >
-        Cancel — generate a different code
+        Cancel, generate a different code
       </button>
     </div>
   );
@@ -107,8 +107,41 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(ms / (24 * 60 * 60_000))}d ago`;
 }
 
-/** `installRepo`: the private harness repo, passed by SettingsContent inside its verified-operator gate. */
-export function DevicesEditor({ installRepo }: { installRepo: string }) {
+/**
+ * Plain words for what this workspace's computer owner has, for everyone else
+ * (DV0, 2026-10-11, after the 2026-10-11 incident: Adon, a verified operator
+ * but not the computer owner, hit a 404 running the full-install command,
+ * which names a private repository only the owner's own GitHub account can
+ * read). Never a dead button, never the repository name.
+ */
+function OwnerOnlyConnectNotice() {
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4 space-y-2">
+      <div className="flex items-center gap-2 text-sm font-bold text-fg">
+        <Info className="w-4 h-4 text-fg-dim" aria-hidden="true" />
+        Connecting your own computer
+      </div>
+      <p className="text-xs text-fg-muted leading-relaxed">
+        Connecting your own computer would let your agents use its files,
+        tools and scheduled jobs. That runs through the OASIS connector,
+        which is on its way and is not ready yet, so there is nothing to
+        install today. Until it ships, your department chats pause instead
+        of running on someone else&apos;s computer.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * `installRepo`: the private harness repo, passed by SettingsContent only when
+ * the signed-in viewer is this workspace's AGENTS OWNER (lib/agents-owner.ts,
+ * O1) — null for every other viewer, operator included, so the repo's name
+ * never reaches a non-owner's rendered props. A non-owner sees
+ * OwnerOnlyConnectNotice instead of the connect buttons and Revoke; the paired
+ * device list itself stays visible (read-only) so they can see what the
+ * owner has connected.
+ */
+export function DevicesEditor({ installRepo }: { installRepo: string | null }) {
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // device id being revoked
   const [error, setError] = useState<string | null>(null);
@@ -183,7 +216,10 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
     setBusy(id);
     setError(null);
     try {
-      const r = await fetch(`/api/devices?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      // confirm=true: the person just said yes in the dialog above. The API
+      // requires it to disconnect someone else's computer (O3a), and a
+      // missing flag used to make that Revoke answer 409 with nothing done.
+      const r = await fetch(`/api/devices?id=${encodeURIComponent(id)}&confirm=true`, { method: "DELETE" });
       const j = await r.json();
       if (!j.ok) {
         setError(j.error || `http_${r.status}`);
@@ -213,35 +249,46 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
             <span className="font-mono">{error}</span>
           </div>
         )}
-        <div className="text-fg-muted text-sm">
-          No computers connected yet. Connect one so your agents can use its
-          files, tools and scheduled jobs. Chat works without one.
-        </div>
-        {pairCode ? (
-          <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
+        {installRepo ? (
+          <>
+            <div className="text-fg-muted text-sm">
+              No computers connected yet. Connect one so your agents can use its
+              files, tools and scheduled jobs. Chat works without one.
+            </div>
+            {pairCode ? (
+              <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setInstallerOpen(true)}
+                  className="btn-primary inline-flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" />
+                  Connect this computer
+                </button>
+                <button
+                  type="button"
+                  onClick={generatePairCode}
+                  disabled={generating}
+                  className="btn-secondary inline-flex items-center gap-2"
+                  title="Makes a one-time code to enter in the OASIS installer on another computer"
+                >
+                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                  Connect another computer
+                </button>
+              </div>
+            )}
+            {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
+          </>
         ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setInstallerOpen(true)}
-              className="btn-primary inline-flex items-center gap-2"
-            >
-              <Download className="w-4 h-4" />
-              Connect this computer
-            </button>
-            <button
-              type="button"
-              onClick={generatePairCode}
-              disabled={generating}
-              className="btn-secondary inline-flex items-center gap-2"
-              title="Makes a one-time code to enter in the OASIS installer on another computer"
-            >
-              {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              Connect another computer
-            </button>
-          </div>
+          <>
+            <div className="text-fg-muted text-sm">
+              No computers connected yet. Chat works without one.
+            </div>
+            <OwnerOnlyConnectNotice />
+          </>
         )}
-        {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
       </div>
     );
   }
@@ -261,7 +308,7 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
           {active.length} active{revoked.length > 0 ? ` · ${revoked.length} revoked` : ""}
         </div>
         <div className="flex items-center gap-2">
-          {!pairCode && (
+          {installRepo && !pairCode && (
             <>
               <button
                 type="button"
@@ -289,10 +336,11 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
           </button>
         </div>
       </div>
-      {installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
-      {pairCode && (
+      {installRepo && installerOpen && <InstallBridgeModal installRepo={installRepo} onClose={() => { setInstallerOpen(false); load(); }} />}
+      {installRepo && pairCode && (
         <PairCodeBlock code={pairCode} onClear={() => setPairCode(null)} />
       )}
+      {!installRepo && <OwnerOnlyConnectNotice />}
       <ul className="divide-y divide-bg-border">
         {active.map((d) => {
           // The one online rule (lib/devices/presence.ts): idle is not online.
@@ -318,15 +366,17 @@ export function DevicesEditor({ installRepo }: { installRepo: string }) {
                   </div>
                 </div>
               </div>
-              <button
-                onClick={() => revoke(d.id)}
-                disabled={busy === d.id}
-                className="btn-danger inline-flex items-center gap-1 shrink-0"
-                title="Revoke this pairing"
-              >
-                {busy === d.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                Revoke
-              </button>
+              {installRepo && (
+                <button
+                  onClick={() => revoke(d.id)}
+                  disabled={busy === d.id}
+                  className="btn-danger inline-flex items-center gap-1 shrink-0"
+                  title="Revoke this pairing"
+                >
+                  {busy === d.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                  Revoke
+                </button>
+              )}
             </li>
           );
         })}

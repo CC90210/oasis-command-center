@@ -118,7 +118,14 @@ export async function POST(req: NextRequest) {
     // generated file. Prevents an AI-drafted script from running before
     // anyone's seen what it does.
     enabled: false,
-    created_by: ctx.profileId,
+    // O2: the row belongs to the person who saved it, by AUTH id, exactly as
+    // POST /api/cron-jobs stamps it. A row with no owner is "legacy, anyone's
+    // to manage" (app/api/cron-jobs/[id]) and the poll serves it to the
+    // workspace's labelled computer, so an unowned draft let another admin
+    // switch on a script that then ran on the owner's computer.
+    created_by: ctx.authUserId,
+    owner_user_id: ctx.authUserId,
+    last_scheduled_for: new Date().toISOString(),
   };
   const insRes = await db
     .from("tenant_cron_jobs")

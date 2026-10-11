@@ -97,6 +97,9 @@ const RUNTIME_GROUP_ORDER: WorkerRuntime[] = ["local", "cloud", "remote", "retir
 
 type ApiResponse = {
   ok: boolean;
+  /** O2: present only when the caller is not this workspace's agents owner.
+   *  The panel renders nothing for it — see the component body below. */
+  scope?: "not_yours";
   bridge_online: boolean;
   last_seen_at: string | null;
   /** Whether the bridge could read the fleet — absent on an older API. */
@@ -172,6 +175,12 @@ export function BackgroundWorkersPanel() {
       </div>
     );
   }
+  // O2: the house (Empire) background workers belong to the workspace's
+  // agents owner only. Everyone else gets this explicit scope back — not a
+  // read error, not an empty "0/0 healthy" panel that looks like a fleet with
+  // nothing running. Rendering nothing here is the honest answer: there is no
+  // "your workers" for someone whose computer this isn't.
+  if (data.scope === "not_yours") return null;
 
   // Local, cloud, and remote workers are active health. Retired inventory is
   // visible in its own collapsed section but never counts as an outage.

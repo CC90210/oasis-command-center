@@ -237,6 +237,11 @@ function relativeTimeShort(iso: string | null | undefined): string {
 
 export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
+  // O2: everyone else's automations, present only for an owner/admin
+  // (inventory.team_included says so). Switch-off only — see TeamJobRow.
+  const [team, setTeam] = useState<CronJob[]>([]);
+  const [teamError, setTeamError] = useState<string | null>(null);
+  const [teamPendingKey, setTeamPendingKey] = useState<string | null>(null);
   // Kept, not discarded, because the receipt answers a question the rows cannot:
   // whether the Empire lane was left out on purpose. See the empire_included
   // banner below.
@@ -302,6 +307,7 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
           });
           setLoadError(null);
           setJobs([]);
+          setTeam([]);
           // The previous read's receipt describes rows that are now gone, and a
           // stale "only this workspace" note under a migration banner is two
           // unrelated explanations for one blank board.
@@ -333,6 +339,7 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
         return;
       }
       setJobs(parsed.jobs);
+      setTeam(parsed.team);
       setInventory(parsed.inventory);
       setLoadError(null);
       setMigrationGap(null);
@@ -534,6 +541,38 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
     }
   }
 
+  /**
+   * O2: the ONE write an owner/admin may make to someone else's automation —
+   * switch it off. The server (app/api/cron-jobs/[id]/route.ts) refuses
+   * anything else for a row this account does not own; this function never
+   * sends any other field, so there is nothing for that refusal to catch.
+   */
+  async function switchTeamJobOff(job: CronJob) {
+    if (!confirm(`Switch off "${job.name}"? It belongs to ${job.owner_name || "someone else"} and you can only switch it off, not edit it.`)) {
+      return;
+    }
+    const key = cronJobKey(job);
+    setTeamPendingKey(key);
+    setTeamError(null);
+    try {
+      const res = await fetch(`/api/cron-jobs/${job.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false, source: "tenant" }),
+      });
+      const body = await res.json().catch(() => null) as { ok?: boolean; error?: string; job?: CronJob } | null;
+      const persisted = body?.job;
+      if (!res.ok || !body?.ok || !persisted) throw new Error(body?.error || `http_${res.status}`);
+      setTeam((prev) => prev.map((current) =>
+        cronJobKey(current) === key ? { ...current, ...persisted, owner_name: current.owner_name } : current,
+      ));
+    } catch (error) {
+      setTeamError(`Couldn't switch off "${job.name}": ${(error as Error).message || "unknown"}.`);
+    } finally {
+      setTeamPendingKey((cur) => (cur === key ? null : cur));
+    }
+  }
+
   return (
     <div className="space-y-4">
       {migrationGap && (
@@ -604,12 +643,27 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
           </button>
         </div>
       )}
+      {teamError && (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">{teamError}</span>
+          <button
+            type="button"
+            onClick={() => setTeamError(null)}
+            className="text-status-warm/70 hover:text-status-warm shrink-0"
+            aria-label="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs text-fg-muted space-y-0.5">
           {(() => {
             if (jobs === null) return "Loading…";
-            if (jobs.length === 0) return "No automations yet.";
+            // O2 requirement G's exact empty-state words.
+            if (jobs.length === 0) return "You have no automations yet.";
             const tenantCount = jobs.filter((j) => j.source === "tenant").length;
             const empireCount = jobs.filter((j) => j.source === "empire").length;
             // Counts the daemon-backed rows by what their process is doing,
@@ -739,6 +793,79 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false }: Props) 
           </div>
         );
       })()}
+
+      {/* O2: everyone else's automations — present only for an owner/admin
+          (the server only ever sends rows here for one). Switch-off only: no
+          edit, no delete, no enabling someone else's row back on. */}
+      {team.length > 0 && (
+        <section aria-labelledby="team-automations-heading" className="space-y-2 border-t-2 border-bg-border pt-6">
+          <h2
+            id="team-automations-heading"
+            className="text-[10px] font-bold uppercase tracking-wider text-fg-dim"
+          >
+            Team automations
+            <span className="ml-2 text-fg-dim/70 normal-case font-normal tracking-normal">
+              Automations other people on this team run. You can switch one off; only its owner can change or delete it.
+            </span>
+          </h2>
+          <div className="space-y-2">
+            {team.map((job) => (
+              <TeamJobRow
+                key={cronJobKey(job)}
+                job={job}
+                onSwitchOff={() => switchTeamJobOff(job)}
+                isPending={teamPendingKey === cronJobKey(job)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/**
+ * O2: a read-only row for someone else's automation, plus the one control an
+ * owner/admin has over it — switch off. No edit, no delete, no re-enabling:
+ * the server refuses all three for a row this account does not own
+ * (app/api/cron-jobs/[id]/route.ts refuseUnownedWrite).
+ */
+function TeamJobRow({
+  job,
+  onSwitchOff,
+  isPending,
+}: {
+  job: CronJob;
+  onSwitchOff: () => void;
+  isPending?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-elev/30 p-4 flex items-start gap-4">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="font-bold text-base text-fg truncate">{job.name}</div>
+          <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
+            {job.enabled ? "On" : "Off"}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap mt-1 text-[10px] uppercase tracking-wider text-fg-dim">
+          <span>{job.owner_name ? `Owned by ${job.owner_name}` : "Owner unknown"}</span>
+          <span className="text-fg-faint">·</span>
+          <span>{job.agent_key}</span>
+          <span className="text-fg-faint">·</span>
+          <span>{job.action_type.replace(/_/g, " ")}</span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onSwitchOff}
+        disabled={!job.enabled || isPending}
+        className="btn-secondary text-xs shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50"
+        title={job.enabled ? "Switch this automation off" : "Already off"}
+      >
+        {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+        {job.enabled ? "Switch off" : "Off"}
+      </button>
     </div>
   );
 }
