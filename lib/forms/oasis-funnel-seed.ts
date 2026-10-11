@@ -32,7 +32,7 @@ export const OASIS_FUNNEL_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 export const OASIS_FUNNEL_NAME = "Work with CC";
 export const OASIS_FUNNEL_DESCRIPTION =
-  "CC's personal-brand lead funnel — AI automation, DJ bookings, brand coaching.";
+  "CC's personal-brand lead funnel: AI automation, DJ bookings, brand coaching.";
 
 /** Leads land here on completion + at create time (single-stage funnel).
  *  First stage of the 14-stage OASIS lifecycle (lib/oasis-stage-meta.ts). */
@@ -44,9 +44,9 @@ export const OASIS_FUNNEL_BRANDING: FormBranding = {
   accent_color: "#faf9f5",
   headline: "Hey, I'm CC",
   subheadline:
-    "AI automation, DJ sets, and personal brand. Tell me what you need and I'll send something free — no fluff.",
+    "AI automation, DJ sets, and personal brand. Tell me what you need and I'll send something free. No fluff.",
   thanks_message:
-    "You're in. I'll personally follow up — keep an eye on your inbox (and your DMs).",
+    "You're in. I'll personally follow up. Keep an eye on your inbox (and your DMs).",
 };
 
 export const OASIS_FUNNEL_STEPS: FormStep[] = [
@@ -63,9 +63,9 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
         required: true,
         help: "Pick one or more.",
         options: [
-          { value: "ai", label: "⚡ AI & Automation — free AI audit for your business" },
-          { value: "music", label: "🎧 DJing & Music — book CC for your event" },
-          { value: "brand", label: "🔥 Personal Brand — free 15-min strategy session" },
+          { value: "ai", label: "⚡ AI & Automation: free AI audit for your business" },
+          { value: "music", label: "🎧 DJing & Music: book CC for your event" },
+          { value: "brand", label: "🔥 Personal Brand: free 15-min strategy session" },
         ],
       },
       // Contact moved here from the old final step (2026-08-20). A lead row is
@@ -81,14 +81,14 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
         type: "phone",
         required: true,
         placeholder: "+1 …",
-        help: "So I can text you — most people never open the email.",
+        help: "So I can text you. Most people never open the email.",
       },
     ],
   },
   {
     key: "details",
     title: "Tell me more",
-    description: "So I can give you something actually useful — not generic fluff.",
+    description: "So I can give you something actually useful, not generic fluff.",
     cta_label: "Continue",
     fields: [
       // ---- AI branch (show_if interests includes "ai") ----
@@ -206,9 +206,9 @@ export const OASIS_FUNNEL_STEPS: FormStep[] = [
   },
   {
     key: "contact",
-    title: "Last step — anywhere else I should reach you?",
+    title: "Last step: anywhere else I should reach you?",
     description:
-      "I'll personally follow up. No spam, no newsletter — just the free thing you asked for.",
+      "I'll personally follow up. No spam, no newsletter. Just the free thing you asked for.",
     cta_label: "Send me my free stuff",
     fields: [
       {

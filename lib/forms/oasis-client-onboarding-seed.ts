@@ -48,7 +48,7 @@ export const CLIENT_ONBOARDING_TENANT_SLUG = "oasis-webdev";
 
 export const CLIENT_ONBOARDING_NAME = "Client Onboarding";
 export const CLIENT_ONBOARDING_DESCRIPTION =
-  "Post-sale intake for a won OASIS website client — reply CCs, brand identity, " +
+  "Post-sale intake for a won OASIS website client: reply CCs, brand identity, " +
   "voice rules, site assets, and written permission to send on their behalf.";
 
 /**
@@ -89,7 +89,7 @@ export const CLIENT_ONBOARDING_BRANDING: FormBranding = {
   accent_color: "#faf9f5",
   headline: "Let's get your site and your automation live",
   subheadline:
-    "Five short steps, about six minutes. We never ask for passwords or logins — " +
+    "Five short steps, about six minutes. We never ask for passwords or logins. " +
     "OASIS supplies the infrastructure. All we need is where to copy you.",
   thanks_message:
     "Got it. Your build starts from this. You'll get a preview link to approve " +
@@ -149,7 +149,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
     key: "replies",
     title: "Where should we copy you?",
     description:
-      "When someone fills in your website form, we answer them in your name — " +
+      "When someone fills in your website form, we answer them in your name, " +
       "and copy you on every single reply, so nothing happens behind your back.",
     cta_label: "Next",
     fields: [
@@ -163,7 +163,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         // filled with the address OASIS has been emailing them at, editable.
         // The one field the whole model depends on should not start blank.
         name: "email",
-        label: "Your email — copied on every reply we send",
+        label: "Your email (copied on every reply we send)",
         type: "email",
         required: true,
         placeholder: "you@yourbusiness.com",
@@ -182,7 +182,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         label: "Where should urgent enquiries be flagged?",
         type: "email",
         placeholder: "Leave blank to use the email above",
-        help: "Optional — for the ones that shouldn't wait, like an emergency call-out.",
+        help: "Optional. For the ones that shouldn't wait, like an emergency call-out.",
       },
       {
         // `phone`, again to hit the lead-token prefill whitelist.
@@ -230,7 +230,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         label: "Industry",
         type: "combobox",
         required: true,
-        help: "Pick the closest match — or type your own if it isn't listed.",
+        help: "Pick the closest match, or type your own if it isn't listed.",
         options: CLIENT_INDUSTRIES.map((v) => ({ value: v, label: v })),
       },
       {
@@ -258,13 +258,13 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         required: true,
         help: "Your hours mean nothing without this.",
         options: [
-          { value: "America/Toronto", label: "Eastern — Toronto / Montreal / New York" },
-          { value: "America/Halifax", label: "Atlantic — Halifax" },
-          { value: "America/St_Johns", label: "Newfoundland — St. John's" },
-          { value: "America/Winnipeg", label: "Central — Winnipeg / Chicago" },
-          { value: "America/Edmonton", label: "Mountain — Edmonton / Denver" },
-          { value: "America/Vancouver", label: "Pacific — Vancouver / Los Angeles" },
-          { value: "America/Phoenix", label: "Arizona — no daylight saving" },
+          { value: "America/Toronto", label: "Eastern (Toronto / Montreal / New York)" },
+          { value: "America/Halifax", label: "Atlantic (Halifax)" },
+          { value: "America/St_Johns", label: "Newfoundland (St. John's)" },
+          { value: "America/Winnipeg", label: "Central (Winnipeg / Chicago)" },
+          { value: "America/Edmonton", label: "Mountain (Edmonton / Denver)" },
+          { value: "America/Vancouver", label: "Pacific (Vancouver / Los Angeles)" },
+          { value: "America/Phoenix", label: "Arizona (no daylight saving)" },
         ],
       },
       {
@@ -286,7 +286,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
   // the busy owner who most needs to answer it.
   {
     key: "voice",
-    title: "How should we sound — and what's off limits?",
+    title: "How should we sound, and what's off limits?",
     description:
       "The assistant answers in your name, so these are the rules it follows.",
     cta_label: "Next",
@@ -297,10 +297,10 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         type: "select",
         required: true,
         options: [
-          { value: "formal", label: "Formal — full sentences, no contractions" },
-          { value: "professional", label: "Professional — polished but human (most businesses)" },
-          { value: "friendly", label: "Friendly — warm and conversational" },
-          { value: "casual", label: "Casual — short, plain, first-name basis" },
+          { value: "formal", label: "Formal: full sentences, no contractions" },
+          { value: "professional", label: "Professional: polished but human (most businesses)" },
+          { value: "friendly", label: "Friendly: warm and conversational" },
+          { value: "casual", label: "Casual: short, plain, first-name basis" },
         ],
       },
       {
@@ -309,7 +309,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         type: "textarea",
         placeholder:
           "We always say 'no charge for the estimate'. Never use the word 'cheap'.",
-        help: "Optional. Phrases you always use, words you hate — anything that sounds like you.",
+        help: "Optional. Phrases you always use, words you hate, anything that sounds like you.",
         maxLength: 800,
       },
       {
@@ -320,7 +320,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         placeholder:
           "Never quote a price\nNever promise same-day service\nNever say the work is guaranteed",
         help:
-          "One per line. Prices, guarantees, timelines — anything only you can commit to. " +
+          "One per line. Prices, guarantees, timelines, anything only you can commit to. " +
           "If there's genuinely nothing, write \"nothing\".",
         maxLength: 800,
       },
@@ -329,9 +329,9 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         label: "How fast should customers hear back?",
         type: "select",
         required: true,
-        help: "The assistant replies immediately either way — this sets what it promises YOU'll do next.",
+        help: "The assistant replies immediately either way. This sets what it promises YOU'll do next.",
         options: [
-          { value: "5", label: "Within 5 minutes — speed is how we win" },
+          { value: "5", label: "Within 5 minutes: speed is how we win" },
           { value: "15", label: "Within 15 minutes" },
           { value: "60", label: "Within the hour" },
           { value: "240", label: "Within 4 hours" },
@@ -351,7 +351,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
   {
     key: "assets",
     title: "Your website",
-    description: "Domain, logo, photos — whatever you already have. Missing pieces are fine.",
+    description: "Domain, logo, photos: whatever you already have. Missing pieces are fine.",
     cta_label: "Next",
     fields: [
       {
@@ -360,7 +360,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         type: "text",
         required: true,
         placeholder: "acmeheating.com",
-        help: "Just the domain — no \"https://\", no \"www.\", no slash at the end.",
+        help: "Just the domain: no \"https://\", no \"www.\", no slash at the end.",
         maxLength: 253,
       },
       {
@@ -372,7 +372,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
           { value: "own_it", label: "I own it and can give access to the DNS" },
           { value: "own_no_access", label: "I own it but I don't know how to get in" },
           { value: "third_party", label: "My old web guy / agency controls it" },
-          { value: "need_one", label: "I don't have one yet — OASIS should register it" },
+          { value: "need_one", label: "I don't have one yet. OASIS should register it" },
         ],
         help: "No wrong answer. It just changes who does the DNS work.",
       },
@@ -384,7 +384,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         max_files: 40,
         max_file_mb: 25,
         help:
-          "Drag everything in at once — logo, team photos, job photos, old brochures. " +
+          "Drag everything in at once: logo, team photos, job photos, old brochures. " +
           "Real photos of your actual work beat stock images every time.",
       },
       {
@@ -400,14 +400,14 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
         label: "Link to your reviews",
         type: "url",
         placeholder: "https://g.page/…",
-        help: "Optional. Google, Facebook, HomeStars — wherever your reviews live.",
+        help: "Optional. Google, Facebook, HomeStars, wherever your reviews live.",
       },
       {
         name: "booking_link",
         label: "Booking or scheduling link",
         type: "url",
         placeholder: "https://calendly.com/…",
-        help: "Optional — if you have one, the assistant can send customers straight to it.",
+        help: "Optional. If you have one, the assistant can send customers straight to it.",
       },
       {
         name: "social_profiles",
@@ -429,7 +429,7 @@ export const CLIENT_ONBOARDING_STEPS: FormStep[] = [
   // evidence, not a paraphrase of it.
   {
     key: "approval",
-    title: "Last step — sign off",
+    title: "Last step: sign off",
     description:
       "Who approves the finished site, and your permission for us to answer on your behalf.",
     cta_label: "Finish onboarding",

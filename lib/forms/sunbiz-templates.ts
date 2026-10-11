@@ -97,7 +97,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
       {
         key: "lead",
         title: "Tell us about your business",
-        description: "A few quick fields — takes under a minute.",
+        description: "A few quick fields. Takes under a minute.",
         cta_label: "Submit",
         fields: [
           // 2026-06-20 (Ethan/Alex): monthly_revenue REMOVED from the first
@@ -114,7 +114,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "textarea",
             required: false,
             maxLength: 200,
-            placeholder: "Optional — e.g. best time to call, specific need...",
+            placeholder: "Optional, e.g. best time to call, specific need...",
           },
         ],
       },
@@ -130,7 +130,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
   "full-application": {
     name: "Full Application",
     description:
-      "Comprehensive application. All the fields a lender needs — business identity, owner info, financials, and document uploads.",
+      "Comprehensive application. All the fields a lender needs: business identity, owner info, financials, and document uploads.",
     steps: [
       // Step 0 — Business identity
       {
@@ -160,7 +160,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: true,
             placeholder: "Start typing your business address…",
-            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
+            help: "Street, city, state and ZIP, for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
           {
             name: "tax_id_ein",
@@ -207,7 +207,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             label: "Business state",
             type: "select",
             required: true,
-            help: "The state your business operates in — used to match you with lenders that fund your state.",
+            help: "The state your business operates in. Used to match you with lenders that fund your state.",
             options: US_STATES.map((s) => ({ value: s, label: s })),
           },
           {
@@ -215,7 +215,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             label: "Industry",
             type: "combobox",
             required: true,
-            help: "Pick the closest match — or type your own if it isn't listed.",
+            help: "Pick the closest match, or type your own if it isn't listed.",
             options: SUNBIZ_INDUSTRIES.map((v) => ({ value: v, label: titleCase(v) })),
           },
         ],
@@ -284,7 +284,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: true,
             placeholder: "Start typing your home address…",
-            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
+            help: "Street, city, state and ZIP, for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
         ],
       },
@@ -321,7 +321,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: false,
             placeholder: "Start typing your home address…",
-            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
+            help: "Street, city, state and ZIP, for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
         ],
       },
@@ -371,7 +371,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             label: "Sign here",
             type: "signature",
             required: true,
-            help: "Draw your signature — works with your finger on a phone or your mouse on a computer.",
+            help: "Draw your signature. It works with your finger on a phone or your mouse on a computer.",
           },
           {
             name: "signature_name",
@@ -415,7 +415,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
         key: "upload",
         title: "Upload your documents",
         description:
-          "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
+          "Drag and drop everything here: bank statements, driver's license, voided check. As many files as you need.",
         cta_label: "Submit",
         fields: [
           {

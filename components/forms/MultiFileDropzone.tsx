@@ -193,7 +193,7 @@ export function MultiFileDropzone({
       setNotice(null);
       if (!uploadToken && !ensureUploadToken) {
         setNotice(
-          "Open this form from the personalized link we sent you to upload — or complete the earlier steps first.",
+          "Open this form from the personalized link we sent you to upload, or complete the earlier steps first.",
         );
         return;
       }

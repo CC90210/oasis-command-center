@@ -332,7 +332,7 @@ function FormErrorPage({
       : reason === "form_disabled"
         ? {
             title: "This form isn't accepting submissions right now",
-            body: "Reach out to your contact at OASIS — we'll let you know when it reopens.",
+            body: "Reach out to your contact at OASIS. We'll let you know when it reopens.",
           }
         : {
             title: "Form configuration error",
