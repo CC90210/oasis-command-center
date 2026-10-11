@@ -204,6 +204,11 @@ const TESTS = [
   // list is explicit, not globbed, so a coherence guard that is not on it is a
   // file that never runs.
   "tests/brand-identity-coherence.test.ts",
+  // Beside it deliberately: a client workspace's own sending identity is the
+  // one way a brand can now come from data, so it is held to the same
+  // one-company rule, counts only once its address is proven, and can never
+  // move OASIS's or SunBiz's identity (email-sender-identity, 2026-10-02).
+  "tests/tenant-sender.test.ts",
   "tests/brand-routing.test.ts",
   "tests/drip-deal-state.test.ts",
   "tests/drip-board-parity.test.ts",
