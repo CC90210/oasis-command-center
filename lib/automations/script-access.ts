@@ -1,28 +1,38 @@
 /**
- * Who may CREATE a script automation: a verified platform operator, and no one
- * else (Automations guided setup, PR1).
+ * Who may CREATE a script automation: the workspace's AGENTS OWNER, or (for a
+ * workspace that has never had an agents-owner row) the pre-O2 verified
+ * platform operator rule (Automations guided setup PR1; tightened O2,
+ * 2026-10-11).
  *
- * A script automation is code that runs on a paired machine. Until now any
- * workspace owner or admin could draft one with AI and save it, or post one to
- * /api/cron-jobs. Clients get department tasks instead (standing instructions
- * the server runs, with approval cards), so the three create doors now ask the
- * same verified question lib/platform-operator.ts answers everywhere else:
- * operator alias or listed founder id, AND an owner/admin seat in OASIS's own
- * workspace, by auth id. Existing client script rows keep their canManageTeam
- * toggle and edit (app/api/cron-jobs/[id]); only creation moves.
+ * A script automation (script_run / snapshot_run / webhook_post) is code that
+ * runs on a paired machine. #580 gated creation on "operator AND canManageTeam"
+ * — but PR #576 made Adon a verified platform operator too, so that rule let
+ * him create script automations CCPC alone can run. Only CCPC's owner (the
+ * agents owner, lib/agents-owner.ts, database/turso/bravo__210_workspace_agents_owner.sql)
+ * may create one now. A workspace that has never had an owner row (every
+ * client tenant today) keeps the old rule unchanged — this is what "the
+ * client-tenant behavior from #580 stays intact" means: nothing here narrows a
+ * client owner's access, because clients never reach the agents-owner branch
+ * at all.
+ *
+ * Department tasks (the O5 kind any owner/admin may create) are a DIFFERENT
+ * action_type and never reach this gate; see action-types.ts.
  *
  * Two halves, both here so the rule has one home:
  *   - gateScriptAutomationCreate(): the route gate. Fails CLOSED and says why:
  *     401 signed out, 403 not an admin of this workspace, 403
- *     script_automations_operator_only, and 503 when the operator check itself
- *     could not be read (an outage is not a verdict about the person).
- *   - scriptAccessFrom(): the page's answer, from the same check, as a
- *     three-way value the UI renders honestly ("unknown" is not "no").
+ *     script_automations_operator_only, and 503 when the agents-owner read or
+ *     (on the fallback path) the operator check itself could not be read (an
+ *     outage is not a verdict about the person).
+ *   - scriptAccessFrom() / resolveScriptAutomationAccess(): the page's answer,
+ *     from the same checks, as a three-way value the UI renders honestly
+ *     ("unknown" is not "no").
  */
 
 import { NextResponse } from "next/server";
 import { canManageTeam, getSessionContext, type SessionContext } from "@/lib/team";
 import { getSessionUser } from "@/lib/supabase-server";
+import { readAgentsOwner } from "@/lib/agents-owner";
 import {
   resolvePlatformOperatorForAuthUser,
   type PlatformOperatorCheck,
@@ -44,26 +54,49 @@ export function scriptAccessFrom(check: PlatformOperatorCheck | null | undefined
 }
 
 /**
- * The full verdict a mount needs before offering create controls: the verified
- * operator check AND the viewer's ACTIVE workspace seat can manage the team —
- * the exact two gates gateScriptAutomationCreate enforces (canManageTeam is
- * checked there before the operator question is even asked). scriptAccessFrom
- * alone answers only the first half, so a verified operator whose active seat
- * is a plain member in some workspace read "allowed" and saw create controls
- * every one of the three create routes then answered 403 to.
+ * O2's tightened verdict: is `authUserId` allowed to create a script
+ * automation in `tenantId`?
+ *   - this workspace has a LIVE agents owner and `authUserId` is them: allowed.
+ *   - this workspace has a live agents owner and it is someone else, or the
+ *     row is revoked (a lock with no key, never "no lock"): not_allowed.
+ *   - the read itself failed: unknown — an outage is not a verdict about the
+ *     person.
+ *   - this workspace has NEVER had an agents-owner row (every client tenant
+ *     today): fall through to the pre-O2 rule unchanged — this is the half
+ *     of #580 that keeps a client owner's access exactly as it was.
+ */
+async function agentsOwnerCreateVerdict(
+  tenantId: string,
+  authUserId: string,
+  check: PlatformOperatorCheck | null | undefined,
+): Promise<ScriptAutomationAccess> {
+  const owner = await readAgentsOwner(tenantId);
+  if (owner.state === "set") return owner.authUserId === authUserId ? "allowed" : "not_allowed";
+  if (owner.state === "unavailable") return "unknown";
+  if (owner.state === "revoked") return "not_allowed";
+  return scriptAccessFrom(check);
+}
+
+/**
+ * The full verdict a mount needs before offering create controls: the
+ * viewer's ACTIVE workspace seat can manage the team, AND — the exact two
+ * gates gateScriptAutomationCreate enforces, in the same order (canManageTeam
+ * is checked there before the agents-owner question is even asked) —
+ * agentsOwnerCreateVerdict above. scriptAccessFrom alone answers only the old
+ * operator half, so a verified operator whose active seat is a plain member
+ * in some workspace read "allowed" and saw create controls every one of the
+ * three create routes then answered 403 to.
  *
- * "unknown" on a failed operator lookup is unchanged — that is scriptAccessFrom's
- * call. A missing or non-managing active seat resolves to "not_allowed", same as
- * the routes would answer; it is never promoted to "unknown" because there is no
- * failure to report, just an ordinary no.
+ * A missing or non-managing active seat resolves to "not_allowed", same as
+ * the routes would answer; it is never promoted to "unknown" because there is
+ * no failure to report, just an ordinary no.
  */
 export async function resolveScriptAutomationAccess(
   check: PlatformOperatorCheck | null | undefined,
 ): Promise<ScriptAutomationAccess> {
-  const operatorVerdict = scriptAccessFrom(check);
-  if (operatorVerdict !== "allowed") return operatorVerdict;
   const ctx = await getSessionContext();
-  return ctx && canManageTeam(ctx.teamRole, ctx.adminAccess) ? "allowed" : "not_allowed";
+  if (!ctx || !canManageTeam(ctx.teamRole, ctx.adminAccess)) return "not_allowed";
+  return agentsOwnerCreateVerdict(ctx.tenantId, ctx.authUserId, check);
 }
 
 export type ScriptCreateGate =
@@ -98,16 +131,29 @@ export async function gateScriptAutomationCreate(forbiddenMessage: string): Prom
     console.error("[automations.script_access] session read failed", err);
     return { ok: false, response: operatorCheckUnavailable() };
   }
+  // O2: the agents owner of THIS workspace, or — only when this workspace has
+  // never had an owner row at all — the pre-O2 verified-operator rule. A live
+  // owner row naming someone else, or a revoked one, is a flat refusal with no
+  // fallback: see agentsOwnerCreateVerdict's doc comment.
+  const owner = await readAgentsOwner(ctx.tenantId);
+  if (owner.state === "set") {
+    if (owner.authUserId === ctx.authUserId) return { ok: true, ctx, email };
+    return { ok: false, response: scriptAutomationsOperatorOnly() };
+  }
+  if (owner.state === "unavailable") return { ok: false, response: operatorCheckUnavailable() };
+  if (owner.state === "revoked") return { ok: false, response: scriptAutomationsOperatorOnly() };
+
   const check = await resolvePlatformOperatorForAuthUser(ctx.authUserId, email);
   if (check.operator) return { ok: true, ctx, email };
   if (check.reason === "lookup_failed") return { ok: false, response: operatorCheckUnavailable() };
-  return {
-    ok: false,
-    response: NextResponse.json(
-      { ok: false, error: SCRIPT_AUTOMATIONS_OPERATOR_ONLY, message: SCRIPT_AUTOMATIONS_OPERATOR_ONLY_MESSAGE },
-      { status: 403 },
-    ),
-  };
+  return { ok: false, response: scriptAutomationsOperatorOnly() };
+}
+
+function scriptAutomationsOperatorOnly(): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: SCRIPT_AUTOMATIONS_OPERATOR_ONLY, message: SCRIPT_AUTOMATIONS_OPERATOR_ONLY_MESSAGE },
+    { status: 403 },
+  );
 }
 
 function operatorCheckUnavailable(): NextResponse {

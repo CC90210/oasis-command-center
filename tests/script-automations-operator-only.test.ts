@@ -187,8 +187,12 @@ async function main() {
       agent_key TEXT NOT NULL DEFAULT 'bravo', name TEXT NOT NULL, description TEXT,
       schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_payload TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_run_status TEXT, last_run_output TEXT,
-      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT,
-      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+      last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
+      last_scheduled_for TEXT, created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+    );
+    CREATE TABLE workspace_agents_owner (
+      tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,
+      set_at TEXT NOT NULL, note TEXT, revoked_at TEXT
     );
   `);
   const stamp = "2026-09-01T00:00:00Z";
@@ -205,6 +209,16 @@ async function main() {
       profile("cc", OASIS, "owner", 1),
       profile("owner", CLIENT, "owner", 1),
       profile("member", CLIENT, "member", 0),
+      // O2: script-automation creation is gated on the workspace's AGENTS
+      // OWNER (lib/agents-owner.ts), not merely "a verified operator" — PR
+      // #576 made Adon a verified operator too, so that old predicate alone
+      // would hand him CC's CCPC-only create power. CLIENT has no row at
+      // all, which keeps it on the pre-O2 fallback rule (the whole point of
+      // this test file).
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, USERS.cc.id, USERS.cc.id, stamp],
+      },
       // dual's OASIS seat: what isPlatformOperatorForAuthUser checks (scoped to
       // that tenant alone — onboarding is irrelevant there). Left un-onboarded
       // so the ACTIVE-profile pick across every tenant (tier: owner+onboarded >
@@ -271,10 +285,13 @@ async function main() {
     assert.equal(res.body.error, "script_automations_operator_only", label);
     assert.match(String(res.body.message), /\s/, `${label}: the refusal is a sentence`);
   };
-  // Breaks only the operator membership read (it selects deactivated_at by
-  // name); the session's own profile read is select("*") and still works.
-  const breakOperatorRead = () => db.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at TO deactivated_at_offline");
-  const restoreOperatorRead = () => db.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at_offline TO deactivated_at");
+  // O2: CC's create verdict now resolves from workspace_agents_owner FIRST
+  // (lib/agents-owner.ts) and never reaches the operator-membership read at
+  // all once that resolves — so breakOperatorRead alone no longer exercises
+  // CC's "the identity check itself failed" path. Breaking THIS table is the
+  // equivalent outage for CC's half of the gate.
+  const breakAgentsOwnerRead = () => db.execute("ALTER TABLE workspace_agents_owner RENAME TO workspace_agents_owner_offline");
+  const restoreAgentsOwnerRead = () => db.execute("ALTER TABLE workspace_agents_owner_offline RENAME TO workspace_agents_owner");
   const quietly = async <T>(fn: () => Promise<T>): Promise<T> => {
     const original = console.error;
     console.error = () => undefined;
@@ -347,11 +364,11 @@ async function main() {
     assert.equal(await rowCount(), before);
   });
 
-  await check("an operator check that cannot be read answers 503 on all three: no create, and no false 'not an operator'", async () => {
+  await check("an agents-owner check that cannot be read answers 503 on all three: no create, and no false 'not an operator'", async () => {
     await login(USERS.cc);
     const before = await rowCount();
     const callsBefore = draftCalls;
-    await breakOperatorRead();
+    await breakAgentsOwnerRead();
     try {
       for (const [route, path, body] of [
         [cronRoute, "/api/cron-jobs", cronBody("During outage")],
@@ -364,7 +381,7 @@ async function main() {
         assert.match(String(res.body.message), /\s/);
       }
     } finally {
-      await restoreOperatorRead();
+      await restoreAgentsOwnerRead();
     }
     assert.equal(await rowCount(), before);
     assert.equal(draftCalls, callsBefore);
@@ -408,14 +425,14 @@ async function main() {
     assert.equal(((await TenantAutomations({ tenantSlug: "clientco", tenantId: CLIENT })) as { props: { scriptAccess: string } }).props.scriptAccess, "not_allowed");
     await login(USERS.cc);
     assert.equal(((await TenantAutomations({ tenantSlug: "oasis-ai-cc", tenantId: OASIS })) as { props: { scriptAccess: string } }).props.scriptAccess, "allowed");
-    await breakOperatorRead();
+    await breakAgentsOwnerRead();
     try {
       const verdict = await quietly(async () =>
         ((await TenantAutomations({ tenantSlug: "oasis-ai-cc", tenantId: OASIS })) as { props: { scriptAccess: string } }).props.scriptAccess,
       );
       assert.equal(verdict, "unknown", "a failed lookup is not a 'no'");
     } finally {
-      await restoreOperatorRead();
+      await restoreAgentsOwnerRead();
     }
     assert.equal(((await TenantAutomations({ tenantSlug: "clientco", tenantId: null })) as { props: { scriptAccess: string } }).props.scriptAccess, "not_allowed");
   });

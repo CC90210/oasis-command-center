@@ -196,8 +196,15 @@ export async function getBridgeToolCapabilities(
  * the any-pairing rule above, which in the shared OASIS workspace is always
  * CC's PC — so Adon read a claim about HIS machine that was false. Render
  * via lib/bridge-online-copy.ts:bridgeConnectionHeadline, which names the
- * pairing(s) instead. Per-person ownership is a separate, later change —
- * bridge_pairings has no owner column yet.
+ * pairing(s) instead.
+ *
+ * `authUserId` (O2, 2026-10-11): when given, scopes to THAT person's own
+ * pairings (bridge_pairings.user_id) — the Automations tab's headline passes
+ * it so Adon, with no paired computer of his own, reads "Computer not
+ * connected yet" rather than a true fact about CC's PC. Omitted, this stays
+ * the tenant-wide "is anything online" read /sequences and every other
+ * existing caller relies on — unchanged on purpose, not every reader of this
+ * function asks "whose".
  *
  * An online pairing with a blank/missing label is still reported (as ""):
  * this read never drops a real connection for lack of a name. The caller
@@ -206,14 +213,19 @@ export async function getBridgeToolCapabilities(
  * Throws when bridge_pairings cannot be read — same "Couldn't check"
  * contract as getTenantBridgeStatus; callers wrap with safe().
  */
-export async function getOnlineBridgeComputerLabels(tenantId: string | null): Promise<string[]> {
+export async function getOnlineBridgeComputerLabels(
+  tenantId: string | null,
+  authUserId?: string | null,
+): Promise<string[]> {
   if (!tenantId) return [];
   const db = getServiceSupabase();
-  const r = await db
+  let query = db
     .from("bridge_pairings")
     .select("label, last_seen_at")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null);
+  if (authUserId) query = query.eq("user_id", authUserId);
+  const r = await query;
   if (r.error) throw new Error(`getOnlineBridgeComputerLabels: bridge_pairings read failed: ${r.error.message}`);
   const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null }>;
   const now = Date.now();

@@ -125,6 +125,10 @@ async function main() {
       last_result TEXT, next_run_at TEXT, run_count INTEGER NOT NULL DEFAULT 0,
       fail_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
     );
+    CREATE TABLE workspace_agents_owner (
+      tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,
+      set_at TEXT NOT NULL, note TEXT, revoked_at TEXT
+    );
   `);
   const job = (id: string, tenant: string, actionType: string, enabled: 0 | 1, name: string) => ({
     sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, agent_key, name, description, schedule, action_type, action_payload, enabled, created_at)
@@ -173,6 +177,12 @@ async function main() {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, full_name, agents_enabled, updated_at, joined_at)
               VALUES ('p-beta', ?, 'owner+beta@acme.test', ?, 'member', 0, 'Acme Owner', '[]', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')`,
         args: [OWNER.id, OTHER],
+      },
+      // O1 + O2: OASIS's house (Empire) lane is queried only for its AGENTS
+      // OWNER (lib/agents-owner.ts). OPERATOR_OASIS stands in for CC here.
+      {
+        sql: `INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, ?, ?, ?)`,
+        args: [OASIS, OPERATOR_OASIS.id, OPERATOR_OASIS.id, STAMP],
       },
       job("dt1", TENANT, "department_task", 0, "Weekly pipeline digest"),
       job("dt-on", TENANT, "department_task", 1, "Morning lead check"),
@@ -308,7 +318,13 @@ async function main() {
     const src = readFileSync(join(ROOT, "app", "api", "cron-jobs", "route.ts"), "utf8");
     const getBody = src.slice(src.indexOf("export const GET"), src.indexOf("export async function POST"));
     assert.match(getBody, /await getSessionContext\(\)/);
-    assert.doesNotMatch(getBody, /from\("user_profiles"\)/, "GET must not look the workspace up a second way");
+    // The original bug was GET re-deriving the VIEWER'S OWN workspace with its
+    // own `user_profiles.eq("auth_user_id", ...)` lookup, which 401s a member
+    // with a seat in two workspaces. O2 added a SEPARATE user_profiles read —
+    // tenant-scoped display names for the `team` lane's owners — which is not
+    // that bug: it never resolves whose workspace this request is in.
+    assert.doesNotMatch(getBody, /from\("user_profiles"\)[\s\S]{0,80}\.eq\("auth_user_id"/,
+      "GET must not look the viewer's OWN workspace up a second way");
     assert.match(getBody, /\.neq\("action_type", DEPARTMENT_TASK\)/);
   });
 
