@@ -74,6 +74,7 @@ import { loadWorkspaceRoster } from "@/components/os/aiteam/roster";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
 import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
 import { isVerifiedOperator } from "@/components/settings/settings-viewer";
+import { isAgentsOwner } from "@/lib/agents-owner";
 import { hasUsableKey, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { departmentBrain, type DepartmentBrain } from "@/lib/ai/department-brain";
 
@@ -147,15 +148,22 @@ export async function SettingsContent({
   const showHeader = !hideHeader && !focused;
 
   const profile = await safe("settings.profile", getActiveProfile(), null);
-  const [tenant, isOperator] = await Promise.all([
+  const [tenant, isOperator, agentsOwner] = await Promise.all([
     profile?.tenant_id
       ? safe("settings.tenant", getTenant(profile.tenant_id), null)
       : Promise.resolve(null),
     // VERIFIED operator (email alias AND an owner/admin seat in OASIS, by auth
     // id) — not isOperatorEmail alone, which trusts an unproven signup email.
-    // It gates the local-CLI card, the Devices section and the operator view of
-    // integration health.
+    // It gates the Devices section and the operator view of integration health.
     isVerifiedOperator(),
+    // O1: the local-CLI card starts a sign-in on the workspace's PAIRED
+    // COMPUTER, which only its agents owner may do (lib/agents-owner.ts) —
+    // narrower than isOperator, since #576 made every OASIS founder (CC AND
+    // Adon) a verified operator. A read error or no active profile answers
+    // false: fail closed, show the plain note, never the live card.
+    profile?.tenant_id && profile?.auth_user_id
+      ? safe("settings.agents_owner", isAgentsOwner(profile.tenant_id, profile.auth_user_id), false)
+      : Promise.resolve(false),
   ]);
 
   const manifestSlug = tenant ? resolveClientProfileSlug(tenant) : null;
@@ -482,7 +490,7 @@ export async function SettingsContent({
               brain (CC, 2026-10-09). */}
           {show("ai") && isOperator && (
             <SafeBoundary label="Local CLI providers">
-              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} />
+              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} isAgentsOwner={agentsOwner} />
             </SafeBoundary>
           )}
 

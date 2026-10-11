@@ -3285,6 +3285,18 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <div className="font-bold">The CLI exited with an error.</div>
                   <div className="text-xs text-fg-muted font-sans whitespace-pre-wrap">{error}</div>
                 </>
+              ) : error === "not_your_computer" ? (
+                <>
+                  <div className="font-bold">This runs on another team member&apos;s computer, so only they can use it.</div>
+                </>
+              ) : error === "agents_owner_not_set" ? (
+                <>
+                  <div className="font-bold">No one has been set as this workspace&apos;s computer owner yet.</div>
+                </>
+              ) : error === "agents_owner_unavailable" ? (
+                <>
+                  <div className="font-bold">Couldn&apos;t confirm this workspace&apos;s computer owner just now. Try again in a moment.</div>
+                </>
               ) : error.startsWith("provider_temporarily_unavailable") ? (
                 <>
                   <div className="font-bold">Provider had a hiccup.</div>
