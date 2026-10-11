@@ -128,6 +128,9 @@ async function main() {
   for (const stmt of splitStatements(readFileSync("database/turso/bravo__187_os_connections.sql", "utf8"))) {
     await db.execute(stmt);
   }
+  for (const stmt of splitStatements(readFileSync("database/turso/bravo__209_connection_vendor_principal.sql", "utf8"))) {
+    await db.execute(stmt);
+  }
   await seedTenant(db, OASIS, "oasis-ai-cc", "OASIS AI");
   await seedTenant(db, BAYSIDE, "bayside-hvac", "Bayside HVAC");
   for (const who of [CC, OWNER, MEMBER, OASIS_MEMBER]) await seedAuthUser(db, who);

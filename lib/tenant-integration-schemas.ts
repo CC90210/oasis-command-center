@@ -24,7 +24,11 @@ export type IntegrationFieldDef = {
     | "twilio_sid"
     | "public_hostname"
     | "smtp_port"
-    | "single_line_token";
+    | "single_line_token"
+    | "plaid_environment"
+    | "discord_webhook_url"
+    | "teams_webhook_url"
+    | "meta_ad_account_id";
   /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
   sidPrefix?: "AC" | "SK" | "MG";
   /** Not needed for the app to work (a label that says "(optional)" counts too). */
@@ -242,6 +246,67 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     ],
     getKey: { href: "https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken", label: "GoHighLevel's guide to private integration tokens" },
   },
+  // Plaid: the three values on a developer's own dashboard (Developers >
+  // Keys): client_id, secret, and which environment the secret is for. Test is
+  // POST /institutions/get for one bank, which sends no customer data and
+  // reads no account. client_id and secret travel in the PLAID-CLIENT-ID and
+  // PLAID-SECRET headers. https://plaid.com/docs/api/institutions/ (read 2026-10-10).
+  {
+    service: "plaid",
+    label: "Plaid",
+    description:
+      "Your own Plaid credentials: the client ID, the secret for one environment, and that environment. Test asks Plaid for one supported bank, which sends no customer data and changes nothing. Linking bank accounts through Plaid Link is not built yet, so for now OASIS saves the credentials and checks them.",
+    fields: [
+      { key: "environment", label: "Environment", sensitive: false, validation: "plaid_environment", bindsSecrets: ["secret"], placeholder: "production", hint: "Type sandbox or production: the environment the secret below belongs to. Changing it removes the saved secret, so paste the secret again." },
+      { key: "client_id", label: "Client ID", sensitive: false, validation: "single_line_token", hint: "In the Plaid dashboard: Developers > Keys. The same client ID is used for every environment." },
+      { key: "secret", label: "Secret", sensitive: true, validation: "single_line_token", hint: "In the Plaid dashboard: Developers > Keys. Copy the secret for the environment you typed above." },
+    ],
+    getKey: { href: "https://dashboard.plaid.com/developers/keys", label: "Open your Plaid keys" },
+  },
+  // Discord channel webhook: https://discord.com/api/webhooks/{id}/{token}.
+  // GET on it (no auth) returns the webhook and posts nothing.
+  // https://docs.discord.com/developers/resources/webhook#get-webhook-with-token
+  // (read 2026-10-10).
+  {
+    service: "discord",
+    label: "Discord",
+    description:
+      "A webhook URL for one channel in your Discord server. OASIS can post messages to that one channel; it cannot read any message. Test asks Discord whether the webhook still exists, and posts nothing.",
+    fields: [
+      { key: "webhook_url", label: "Webhook URL", sensitive: true, validation: "discord_webhook_url", placeholder: "https://discord.com/api/webhooks/...", hint: "In Discord: Server Settings > Integrations > Webhooks > New Webhook, pick the channel, then Copy Webhook URL. Anyone with the URL can post to that channel, so OASIS stores it encrypted." },
+    ],
+    getKey: { href: "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks", label: "Discord's guide to webhooks" },
+  },
+  // Microsoft Teams Workflows webhook ("When a Teams webhook request is
+  // received"): POST only, GET is not supported, so Test posts one short card.
+  // https://learn.microsoft.com/en-us/connectors/teams/ (read 2026-10-10).
+  {
+    service: "microsoft_teams",
+    label: "Microsoft Teams",
+    description:
+      "A Workflows webhook URL for one Teams channel. OASIS can post messages to that one channel; it cannot read any message. Microsoft gives a webhook no way to be checked without sending to it, so Test posts one short message that says OASIS is connected.",
+    fields: [
+      { key: "webhook_url", label: "Workflows webhook URL", sensitive: true, validation: "teams_webhook_url", placeholder: "https://...logic.azure.com:443/workflows/...", hint: "In Teams: the channel's ... menu > Workflows > Post to a channel when a webhook request is received. Set who can trigger it to Anyone, then copy the URL it shows. Anyone with the URL can post to the channel, so OASIS stores it encrypted." },
+    ],
+    getKey: { href: "https://support.microsoft.com/en-us/office/create-incoming-webhooks-with-workflows-for-microsoft-teams-8ae491c7-0394-4861-ba59-055e33f75498", label: "Microsoft's guide to Teams webhooks" },
+  },
+  // Meta Ads: a Business Manager system-user token and the ad account it may
+  // read. Test is GET /act_{id}?fields=name,account_status on the Graph API
+  // with the token as a Bearer header.
+  // https://developers.facebook.com/docs/marketing-api/system-users and
+  // https://developers.facebook.com/docs/marketing-api/overview/authorization
+  // (read 2026-10-10).
+  {
+    service: "meta_ads",
+    label: "Meta Ads",
+    description:
+      "A system-user access token from your Meta Business Manager, and the ad account it can read. Test asks Meta for that ad account's name and status, which changes nothing. Give the system user read access to the ad account (ads_read) only.",
+    fields: [
+      { key: "access_token", label: "System user access token", sensitive: true, validation: "single_line_token", placeholder: "EAA...", hint: "In Business Settings: Users > System users > pick one > Generate token. Choose ads_read. Meta shows the token once." },
+      { key: "ad_account_id", label: "Ad account ID", sensitive: false, validation: "meta_ad_account_id", placeholder: "act_1234567890", hint: "In Ads Manager or Business Settings > Accounts > Ad accounts. Digits only, with or without act_. The system user must be assigned to this ad account." },
+    ],
+    getKey: { href: "https://developers.facebook.com/docs/marketing-api/system-users", label: "Meta's guide to system user tokens" },
+  },
   {
     service: "telegram",
     label: "Telegram Bridge",
@@ -353,6 +418,16 @@ export function validateIntegrationValue(
         ? null
         : "That does not look like a key: paste it as one line, with no spaces.";
     }
+    case "plaid_environment":
+      return (PLAID_ENVIRONMENTS as readonly string[]).includes(value.trim()) ? null : "Type sandbox or production.";
+    case "discord_webhook_url":
+      return parseDiscordWebhookUrl(value) ? null : "That is not a Discord webhook URL. It looks like https://discord.com/api/webhooks/123.../abc...";
+    case "teams_webhook_url":
+      return parseTeamsWebhookUrl(value)
+        ? null
+        : "That is not a Teams Workflows webhook URL. Copy the whole address Workflows shows after you save the flow (it ends with a long sig=... part).";
+    case "meta_ad_account_id":
+      return /^(act_)?\d{5,20}$/.test(value.trim()) ? null : "Use the ad account's number, like act_1234567890.";
     case "public_hostname":
       return isPublicHostname(value) ? null : "Use the server's public name (like smtp.example.com), not an IP address or an internal name.";
     case "smtp_port":
@@ -360,6 +435,60 @@ export function validateIntegrationValue(
     default:
       return null;
   }
+}
+
+/** The two Plaid environments a developer has keys for (Plaid retired Development in 2024). */
+export const PLAID_ENVIRONMENTS = ["sandbox", "production"] as const;
+export type PlaidEnvironment = (typeof PLAID_ENVIRONMENTS)[number];
+
+/** Plaid's API host for an environment: the only two places a Plaid secret is ever sent. */
+export const PLAID_HOSTS: Readonly<Record<PlaidEnvironment, string>> = {
+  sandbox: "https://sandbox.plaid.com",
+  production: "https://production.plaid.com",
+};
+
+/** Discord's own domains for a webhook (the old discordapp.com address still works). */
+const DISCORD_WEBHOOK_HOSTS: ReadonlySet<string> = new Set(["discord.com", "ptb.discord.com", "canary.discord.com", "discordapp.com"]);
+
+/**
+ * A Discord channel webhook URL, or null. Exactly https://<discord host>/api/webhooks/<id>/<token>:
+ * no other host, no port, no sign-in part, no query. This is the whole host
+ * pin: the URL is a secret AND an address, and a pasted URL that points
+ * anywhere but Discord is refused before it is saved or called.
+ */
+export function parseDiscordWebhookUrl(raw: string): URL | null {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.port || u.search || u.hash) return null;
+  if (!DISCORD_WEBHOOK_HOSTS.has(u.hostname)) return null;
+  return /^\/api\/webhooks\/\d{15,25}\/[A-Za-z0-9_-]{20,120}$/.test(u.pathname) ? u : null;
+}
+
+/** The domains Microsoft serves Workflows webhook triggers from (Logic Apps and the Power Platform). */
+const TEAMS_WEBHOOK_SUFFIXES: readonly string[] = [".logic.azure.com", ".api.powerplatform.com"];
+
+/**
+ * A Teams Workflows webhook URL, or null: https on a Microsoft Workflows
+ * domain, port 443 or none, no sign-in part, a workflow path, and the sig=
+ * part that is the secret. A URL on any other host is refused, so a Test can
+ * never carry the webhook to an address that is not Microsoft's.
+ */
+export function parseTeamsWebhookUrl(raw: string): URL | null {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || (u.port && u.port !== "443") || u.hash) return null;
+  const host = u.hostname.toLowerCase();
+  if (!TEAMS_WEBHOOK_SUFFIXES.some((s) => host.endsWith(s) && host.length > s.length)) return null;
+  if (!/^\/(workflows|powerautomate\/automations\/direct\/workflows)\//.test(u.pathname)) return null;
+  return (u.searchParams.get("sig") ?? "").length >= 8 ? u : null;
 }
 
 /** The submission ports a mail server listens on (RFC 6409 587, RFC 8314 465, 25, and 2525 by convention). */

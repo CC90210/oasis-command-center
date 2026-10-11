@@ -242,6 +242,7 @@ async function main() {
   `);
   const root = join(__dirname, "..");
   await db.executeMultiple(readFileSync(join(root, "database/turso/bravo__187_os_connections.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(root, "database/turso/bravo__209_connection_vendor_principal.sql"), "utf8"));
   await db.executeMultiple(readFileSync(join(root, "database/turso/bravo__197_slack_jev.sql"), "utf8"));
   await db.batch(
     [

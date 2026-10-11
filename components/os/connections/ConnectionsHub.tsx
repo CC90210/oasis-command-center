@@ -6,17 +6,21 @@
  * same apps again under "Keys and accounts").
  *
  * "Your tools" first: live connectors this workspace has already set up in some
- * way (connected, saved, failing, or not checkable right now). Then the apps
- * that can be connected today, grouped by purpose, with the Custom key card
- * last. Apps that are not built yet are one compact "Not built yet" row, not a
- * grid of cards that do nothing; each opens its drawer, which says why and
- * files a request on OASIS's desk. Statuses arrive computed from the server
+ * way (connected, saved, failing, or not checkable right now). Then every other
+ * app, each a card in its own category (Accounting, Banking, Meetings,
+ * Messaging & chat, Ads & social ...), with the Custom key card last. An app
+ * whose own OASIS app is not set up on this deployment still has its card: it
+ * says "Not available on this workspace yet" and opens a drawer that says why,
+ * never a button that fails. Apps with nothing built are one compact "Not
+ * built yet" row; each opens its drawer, which says why and files a request on
+ * OASIS's desk. Statuses arrive computed from the server
  * (lib/os/connectors.ts resolveConnectorStatus), so this component only
  * arranges them — it has no way to make a card look more connected than the
  * server said.
  *
- * Clicking a card opens its drawer, where the app is connected, tested and
- * removed; only an OAuth app (Constant Contact) goes straight to its popup.
+ * Clicking a card opens its drawer, where a key app is connected, tested and
+ * removed; an app signed in at the vendor's own page (Constant Contact,
+ * QuickBooks, Xero, Zoom, WhatsApp) goes straight to its popup.
  * `?app=<slug>` opens that app's drawer (lib/os/connectors.ts connectorHref),
  * and Google's sign-in comes back to it.
  */
@@ -33,10 +37,13 @@ import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
+  OAUTH_POPUP_SOURCE,
   connectorBySlug,
   connectorMatches,
+  oauthStartHref,
   type ConnectorDef,
   type ConnectorStatus,
+  type ConnectorStatusKind,
 } from "@/lib/os/connectors";
 
 /** A live connector counts as "yours" once it reports anything but a clean "not connected". */
@@ -44,17 +51,49 @@ function isYourTool(def: ConnectorDef, status: ConnectorStatus | undefined): boo
   return !!def.live && !!status && status.kind !== "not_connected" && status.kind !== "coming_soon";
 }
 
+const NOT_AVAILABLE = "OASIS's own app for this isn't available on this workspace yet, so it can't connect here. Nothing is wrong on your side.";
+
+/** The sentence for each reason a sign-in popup can end with (lib/connections/oauth-connect.ts, the authorize and callback routes). */
 const POPUP_ERRORS: Record<string, string> = {
   admin_only: "Only an owner or admin can connect this.",
-  // Raised when OASIS's own app for the vendor is not available on this
-  // workspace: awaiting the vendor's approval, or not set up on this
-  // deployment. Both are true of this sentence; "waiting on approval" was not.
-  not_configured: "OASIS's own app for this isn't available on this workspace yet, so it can't connect here. Nothing is wrong on your side.",
+  // OASIS's own app for the vendor is not set up on this deployment (its Worker
+  // secrets are missing), or is private to OASIS's login.
+  not_configured: NOT_AVAILABLE,
+  app_credentials_missing: NOT_AVAILABLE,
+  state_secret_missing: NOT_AVAILABLE,
+  provider_not_available: NOT_AVAILABLE,
   login_required: "Your session expired. Sign in again, then retry.",
+  signed_out_or_not_allowed: "Your session expired, or only an owner or admin can connect this. Sign in again, then retry.",
+  state_invalid: "That sign-in took too long or was already used. Start again.",
+  wrong_person: "That sign-in was started by someone else. Start again from your own screen.",
+  exchange_failed: "The app did not accept the sign-in. Try again in a minute.",
+  account_unidentified: "The app did not say which account was approved. Try again and approve an account when it asks.",
+  several_accounts: "That sign-in covered more than one account. Start again and approve only one.",
+  account_connected_elsewhere: "That account is already connected to another OASIS workspace. Disconnect it there first.",
+  another_account_connected: "A different account is already connected here. Disconnect it first, then connect the other one.",
+  token_save_failed: "OASIS could not save the sign-in, so nothing was connected. Try again.",
+  oasis_unavailable: "OASIS could not check your access just now. Try again in a minute.",
 };
 
+/**
+ * The banner for a sign-in's result: the popup's own postMessage (runPopup's
+ * onDone), or a full-window sign-in that had to fall back when the popup was
+ * blocked, which comes back on the URL instead (page.tsx's
+ * ?connection=&status=&reason=, CodeRabbit PR #574). Both read the same codes,
+ * so the result reads the same words either way.
+ */
+function resultBanner(appName: string, status: string | undefined | null, reason: string | undefined | null): NoticeValue {
+  if (!status) return null;
+  if (status === "connected") return { tone: "ok", text: `${appName} connected.` };
+  if (status === "denied") return { tone: "err", text: "Connection cancelled." };
+  return {
+    tone: "err",
+    text: POPUP_ERRORS[reason || ""] ?? `${appName} did not finish connecting. Try again in a minute.`,
+  };
+}
+
 /** What opened a sheet on arrival: ?app=, and Google's sign-in result (page.tsx). */
-export const DEEP_LINK_PARAMS = ["app", "gmail_oauth", "reason", "gmail", "mailbox"] as const;
+export const DEEP_LINK_PARAMS = ["app", "gmail_oauth", "reason", "gmail", "mailbox", "connection", "status"] as const;
 
 /** A closed sheet stays closed: a refresh must not reopen it or replay a sign-in banner. */
 function clearDeepLink() {
@@ -88,6 +127,22 @@ export function connectorClickAction(def: ConnectorDef, embedded: boolean): "dra
   return "popup";
 }
 
+/**
+ * A sign-in card already connected, configured or needing attention says
+ * "Manage": its primary click should open the details drawer, exactly like
+ * its own Details button, rather than start a fresh sign-in (CodeRabbit PR
+ * #574, ConnectionsHub.tsx card click). `fromDrawer` is the one exception:
+ * the drawer's own footer button (Reconnect/Manage) passes it, because from
+ * inside the drawer one of those statuses is exactly when the popup IS wanted.
+ */
+export function oauthManageOpensDrawer(statusKind: ConnectorStatusKind | undefined, fromDrawer: boolean): boolean {
+  // "unknown" (the connections read itself failed) still gets "Manage" as its
+  // accessible name (ConnectorCard's primaryLabel only special-cases
+  // coming_soon and not_connected), so its click must agree and open the
+  // drawer too, never restart a sign-in the card never offered (Codex review, PR #574).
+  return !fromDrawer && (statusKind === "connected" || statusKind === "configured" || statusKind === "attention" || statusKind === "unknown");
+}
+
 /** The drawer a `?app=` deep link opens on the first render (not after it), or null. */
 function deepLinkedApp(initialApp: string | null): string | null {
   return initialApp && initialApp !== "custom-keys" && connectorBySlug(initialApp) ? initialApp : null;
@@ -99,6 +154,8 @@ export function ConnectionsHub({
   initialApp,
   personalGoogle,
   embedded = false,
+  initialStatus = null,
+  initialReason = null,
 }: {
   statuses: Record<string, ConnectorStatus>;
   supportHref: string | null;
@@ -112,15 +169,51 @@ export function ConnectionsHub({
    * another Settings page opens its drawer, which says where.
    */
   embedded?: boolean;
+  /**
+   * A sign-in's result when the popup was blocked and fell back to a
+   * full-window navigation: it comes back on the URL (page.tsx's
+   * ?connection=&status=&reason=) instead of the popup's postMessage, so the
+   * hub reads the same words from its own first render (CodeRabbit PR #574).
+   */
+  initialStatus?: string | null;
+  initialReason?: string | null;
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  // A full-window sign-in that FAILED (the popup was blocked) must show WHY:
+  // the banner below (role=status, the same words the popup would have
+  // shown) is the thing to see. An auto-opened drawer has nothing in it to
+  // explain a refusal — nothing was connected — and on a phone it fully
+  // covers the banner, on desktop it sits dimmed behind the dialog (Codex
+  // review, PR #574). A successful sign-in still opens its drawer, as before.
+  const deepLinkOpensDrawer = initialStatus !== "error";
   // A deep link opens its drawer in the first render, so the page arrives with
   // it open rather than opening a moment later.
-  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => deepLinkedApp(initialApp));
-  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkedApp(initialApp) !== null);
-  const [customOpen, setCustomOpen] = useState(() => initialApp === "custom-keys");
-  const [banner, setBanner] = useState<NoticeValue>(null);
+  const [drawerSlug, setDrawerSlug] = useState<string | null>(() => (deepLinkOpensDrawer ? deepLinkedApp(initialApp) : null));
+  const [drawerOpen, setDrawerOpen] = useState(() => deepLinkOpensDrawer && deepLinkedApp(initialApp) !== null);
+  const [customOpen, setCustomOpen] = useState(() => deepLinkOpensDrawer && initialApp === "custom-keys");
+  // A full-window sign-in's result (the popup was blocked) is already on the
+  // URL at first render, so its banner is read then — not in an effect after —
+  // and shows before anything clears those params (CodeRabbit PR #574).
+  const [banner, setBanner] = useState<NoticeValue>(() =>
+    resultBanner(connectorBySlug(initialApp ?? "")?.name ?? "That app", initialStatus, initialReason),
+  );
+  // role="status" announces a CHANGE, not content already on the page at
+  // mount: a screen reader reading the page right after the full-window
+  // navigation can miss text that was there from the first paint (Codex
+  // review, PR #574). Clearing it and setting it back once, right after
+  // mount, gives assistive tech a real mutation to announce, while the
+  // first render (and the static markup this is tested against) still
+  // shows the words immediately for a sighted reader.
+  useEffect(() => {
+    if (!initialStatus) return;
+    setBanner(null);
+    const id = window.requestAnimationFrame(() =>
+      setBanner(resultBanner(connectorBySlug(initialApp ?? "")?.name ?? "That app", initialStatus, initialReason)),
+    );
+    return () => window.cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
   const openDrawer = useCallback((slug: string) => {
@@ -137,9 +230,10 @@ export function ConnectionsHub({
   }, []);
 
   useEffect(() => {
+    if (!deepLinkOpensDrawer) return;
     if (initialApp === "custom-keys") setCustomOpen(true);
     else if (initialApp && connectorBySlug(initialApp)) openDrawer(initialApp);
-  }, [initialApp, openDrawer]);
+  }, [initialApp, openDrawer, deepLinkOpensDrawer]);
 
   // The one popup being watched. Stopped on unmount and before another popup
   // starts, so its listener and poll never outlive this hub (popup-watch.ts).
@@ -178,17 +272,10 @@ export function ConnectionsHub({
         onDone: ({ status, reason }) => {
           stopWatch.current = null;
           setBusySlug(null);
-          if (status === "connected") {
-            setBanner({ tone: "ok", text: `${def.name} connected.` });
-          } else if (status === "denied") {
-            setBanner({ tone: "err", text: "Connection cancelled." });
-          } else if (status) {
-            if (!POPUP_ERRORS[reason || ""]) console.error("[connections.popup]", def.slug, reason);
-            setBanner({
-              tone: "err",
-              text: POPUP_ERRORS[reason || ""] ?? `${def.name} did not finish connecting. Try again in a minute.`,
-            });
+          if (status && status !== "connected" && status !== "denied" && !POPUP_ERRORS[reason || ""]) {
+            console.error("[connections.popup]", def.slug, reason);
           }
+          setBanner(resultBanner(def.name, status, reason));
           // Re-read every status from the server either way: a popup closed with
           // no message may still have finished.
           router.refresh();
@@ -204,14 +291,19 @@ export function ConnectionsHub({
   );
 
   const connect = useCallback(
-    (def: ConnectorDef) => {
+    (def: ConnectorDef, opts?: { fromDrawer?: boolean }) => {
       const action = def.live?.connect;
       const next = connectorClickAction(def, embedded);
       // A card this workspace cannot connect yet (OASIS's app still waiting on
       // the vendor) opens its drawer, which says why: never a popup that fails.
       if (next === "drawer" || !action || statuses[def.slug]?.kind === "coming_soon") return openDrawer(def.slug);
+      // Connected, configured or needing attention says "Manage": the card
+      // opens the drawer instead of starting sign-in again. Only the drawer's
+      // own footer button bypasses this (fromDrawer) — that IS its Reconnect.
+      if (next === "popup" && oauthManageOpensDrawer(statuses[def.slug]?.kind, !!opts?.fromDrawer)) return openDrawer(def.slug);
       setDrawerOpen(false);
       if (next === "popup" && action.kind === "popup") return runPopup(def, action.href, action.messageSource);
+      if (next === "popup" && action.kind === "oauth") return runPopup(def, oauthStartHref(action.provider), OAUTH_POPUP_SOURCE);
       if (action.kind === "link") router.push(action.href);
     },
     [openDrawer, router, runPopup, embedded, statuses],
@@ -222,15 +314,12 @@ export function ConnectionsHub({
     [query],
   );
   const yours = visible.filter((def) => isYourTool(def, statuses[def.slug]));
-  // A card this workspace cannot connect today (nothing built, or OASIS's own
-  // app with the vendor still waiting) is never offered under "Connect today".
-  const waiting = (def: ConnectorDef) => !def.live || statuses[def.slug]?.kind === "coming_soon";
-  const available = visible.filter((def) => def.live && !isYourTool(def, statuses[def.slug]) && !waiting(def));
-  const pending = visible.filter((def) => !isYourTool(def, statuses[def.slug]) && waiting(def));
-  // One click once the vendor approves OASIS's own app (registration), apart
-  // from anything nothing is built for.
-  const oneClick = pending.filter((def) => def.registration);
-  const later = pending.filter((def) => !def.registration);
+  // Every app with a way to connect has its own card in its own category, whether
+  // or not OASIS's app for it is switched on here: an unavailable one says so on
+  // the card ("Not available on this workspace yet") and opens its drawer, never
+  // a button that fails. Only an app with nothing built sits apart below.
+  const available = visible.filter((def) => def.live && !isYourTool(def, statuses[def.slug]));
+  const later = visible.filter((def) => !def.live);
   const q = query.trim().toLowerCase();
   const customVisible = !q || CUSTOM_KEYS.words.some((w) => w.includes(q) || q.includes(w));
 
@@ -285,10 +374,11 @@ export function ConnectionsHub({
         <section aria-labelledby="set-up-heading" className="space-y-5">
           <div>
             <h2 id="set-up-heading" className="text-sm font-semibold text-fg">
-              Connect today
+              Apps
             </h2>
             <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-              Open an app to connect it. Keys are stored encrypted and never shown again.
+              Open an app to connect it: a sign-in on the app&apos;s own page, or a key you paste. Keys are stored
+              encrypted and never shown again.
             </p>
           </div>
           {CONNECTOR_CATEGORIES.map((cat) => {
@@ -339,32 +429,6 @@ export function ConnectionsHub({
         </section>
       )}
 
-      {oneClick.length > 0 && (
-        <section aria-labelledby="one-click-heading">
-          <h2 id="one-click-heading" className="text-sm font-semibold text-fg">
-            One click, once approved
-          </h2>
-          <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-            OASIS is registering its own app with each of these. Once the vendor approves it, you connect with one click
-            and never create an app yourself. Open one to see where it stands.
-          </p>
-          <ul className="mt-3 flex flex-wrap gap-1.5">
-            {oneClick.map((def) => (
-              <li key={def.slug}>
-                <button
-                  type="button"
-                  onClick={() => openDrawer(def.slug)}
-                  className="inline-flex items-center gap-2 rounded-lg border border-hairline bg-bg-panel py-1 pl-1 pr-2.5 text-[13px] text-fg-muted transition-colors duration-150 hover:border-bg-border-strong hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/70"
-                >
-                  <ConnectorIcon def={def} size="sm" />
-                  {def.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       {later.length > 0 && (
         <section aria-labelledby="later-heading">
           <h2 id="later-heading" className="text-sm font-semibold text-fg">
@@ -406,7 +470,7 @@ export function ConnectionsHub({
         def={drawerDef}
         status={drawerDef ? statuses[drawerDef.slug] ?? null : null}
         onClose={closeDrawer}
-        onConnect={connect}
+        onConnect={(d) => connect(d, { fromDrawer: true })}
         onChanged={() => router.refresh()}
         personalGoogle={personalGoogle}
         embedded={embedded}
@@ -458,11 +522,14 @@ function ConnectorCard({
   const live = !!def.live;
   // No status from the server is unknown, never "not connected".
   const shown: ConnectorStatus = status ?? { kind: "unknown", label: "Status unavailable" };
-  const primaryLabel = live
-    ? shown.kind === "not_connected"
+  // A card OASIS cannot connect here yet (its app is not set up) offers the
+  // drawer that says why, never its connect button.
+  const unavailable = live && shown.kind === "coming_soon";
+  const primaryLabel = unavailable || !live
+    ? `About ${def.name}`
+    : shown.kind === "not_connected"
       ? def.live!.connect.label
-      : `Manage ${def.name}`
-    : `About ${def.name}`;
+      : `Manage ${def.name}`;
   return (
     <li className="group relative flex items-center gap-3 rounded-xl border border-hairline bg-bg-panel px-3 py-3 transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover">
       {/* The whole card is the primary action; Details sits above it. */}

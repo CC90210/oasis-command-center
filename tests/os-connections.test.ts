@@ -236,6 +236,7 @@ async function check(name: string, fn: () => Promise<void> | void) {
 const root = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 const MIGRATION = read("database/turso/bravo__187_os_connections.sql");
+const VENDOR_PRINCIPAL_MIGRATION = read("database/turso/bravo__209_connection_vendor_principal.sql");
 
 async function main() {
   const db = createClient({ url: `file:${dbFile}` });
@@ -276,6 +277,7 @@ async function main() {
   `);
   // The real migration, as one script (it carries triggers).
   await db.executeMultiple(MIGRATION);
+  await db.executeMultiple(VENDOR_PRINCIPAL_MIGRATION);
 
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({
@@ -861,8 +863,10 @@ async function main() {
 
     STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false }) });
     assert.equal(((await test("stripe")).body.connection as Record<string, unknown>).verified, true);
-    // A recovery clears the item and raises nothing new.
-    assert.equal((await needsYouFor(TENANT_B)).items.length, 0);
+    // A recovery clears the item and raises nothing new. (B also holds a pending
+    // Xero claim from the test above; with OASIS's Xero app not set up in this
+    // deployment, that card is its own item, which is not Stripe's.)
+    assert.deepEqual((await needsYouFor(TENANT_B)).items.filter((i) => i.id === "connection-stripe"), []);
     assert.equal((await attentionEvents(TENANT_B)).length, 1);
   });
 
@@ -1005,7 +1009,14 @@ async function main() {
   // ── 11. OAuth: dedicated secret, single-use state ────────────────────────
 
   const STATE_SECRET = "state-secret-for-tests-".padEnd(48, "x");
-  const liveXero = { ...registry.providerById("xero")!, availability: "live" as const };
+  // PKCE is Xero's flow for apps without a client secret; OASIS's Xero app has
+  // one, so the registry says pkce:false. The state machinery is still held to
+  // its PKCE behaviour here, with the flag forced on.
+  const liveXero = {
+    ...registry.providerById("xero")!,
+    availability: "live" as const,
+    oauth: { ...registry.providerById("xero")!.oauth!, pkce: true },
+  };
   const oauthEnv = { CONNECTIONS_OAUTH_STATE_SECRET: STATE_SECRET, XERO_CLIENT_ID: "xero-client", XERO_CLIENT_SECRET: "xero-secret" };
 
   await check("no state-secret fallback: the field-encryption key present, the state secret absent → refused", async () => {
@@ -1254,15 +1265,45 @@ async function main() {
     }
   });
 
-  await check("[gate] no OAuth provider goes live until the token save is fenced by the lease version", () => {
-    // CodeRabbit #472: TOKEN_SAVE_TIMEOUT_MS stops WAITING for a save, it
-    // does not cancel it; a save stalled past the lease could still land after
-    // a newer holder's and overwrite its tokens. Nothing calls getAccessToken
-    // while every OAuth provider is coming_soon, so the gap cannot bite yet.
-    // Before the first one goes live, make the credential write conditional
-    // on the holder's token_version (a fenced write), then remove this gate.
-    const liveOauth = registry.PROVIDERS.filter((p) => p.authKind === "oauth2" && p.availability === "live").map((p) => p.id);
-    assert.deepEqual(liveOauth, [], `OAuth provider(s) went live before the token save is fenced: ${liveOauth.join(", ")}`);
+  await check("[gate] the token save is fenced by the lease version: a holder whose lease was taken over writes nothing", async () => {
+    // CodeRabbit #472: TOKEN_SAVE_TIMEOUT_MS stops WAITING for a save, it does
+    // not cancel it; a save stalled past the lease could still land after a
+    // newer holder's and overwrite its tokens. The gate that kept every OAuth
+    // provider off until this was fixed is replaced by the fix itself: the
+    // credential write is conditional on the holder's token_version
+    // (saveConnectionTokensFenced), checked here against the real tables.
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "current-access", refresh_token: "current-refresh", expires_at: Date.now() + 3_600_000 });
+    const before = (await store.getConnection(db, TENANT_A, row.id))!.token_version;
+    const staleWrite = await tokens.saveConnectionTokensFenced(db, {
+      tenantId: TENANT_A,
+      connectionId: row.id,
+      version: before - 1,
+      tokens: { access_token: "stale-access", refresh_token: "stale-refresh", expires_at: Date.now() + 1000 },
+      now: new Date(),
+    });
+    assert.equal(staleWrite, false, "a fenced-out holder's save reported success");
+    const bundle = await credentials.getTenantIntegrationBundle(TENANT_A, `connection:${row.id}`, { allowEnvFallback: false });
+    assert.deepEqual([bundle.access_token, bundle.refresh_token], ["current-access", "current-refresh"], "a fenced-out save changed the stored tokens");
+    const currentWrite = await tokens.saveConnectionTokensFenced(db, {
+      tenantId: TENANT_A,
+      connectionId: row.id,
+      version: before,
+      tokens: { access_token: "newer-access", refresh_token: "newer-refresh", expires_at: Date.now() + 3_600_000 },
+      now: new Date(),
+    });
+    assert.equal(currentWrite, true);
+    const after = await credentials.getTenantIntegrationBundle(TENANT_A, `connection:${row.id}`, { allowEnvFallback: false });
+    assert.deepEqual([after.access_token, after.refresh_token], ["newer-access", "newer-refresh"]);
+    // Another workspace never matches this tenant's fence.
+    const otherTenant = await tokens.saveConnectionTokensFenced(db, {
+      tenantId: TENANT_B,
+      connectionId: row.id,
+      version: before,
+      tokens: { access_token: "x-access", refresh_token: "x-refresh", expires_at: Date.now() + 1000 },
+      now: new Date(),
+    });
+    assert.equal(otherTenant, false, "a save for another tenant's connection landed");
   });
 
   await check("[lease] a refresh that ran past its lease saves nothing and returns no token", async () => {
