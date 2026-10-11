@@ -37,6 +37,8 @@ import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/sec
 
 /** The run token outlives the 20-minute claim deadline a little, so a last event posted right at the edge still verifies. */
 export const RUN_TOKEN_TTL_SEC = 1500;
+/** How long past the run's deadline a run token may still post its final events. */
+export const RUN_TOKEN_DEADLINE_GRACE_SEC = 60;
 /** The MCP bearer never outlives the run's own deadline, and never more than this. */
 export const MCP_TOKEN_MAX_TTL_SEC = 1200;
 /** The system prompt a connector gets, whole: capped so a very large department page summary never reaches an unbounded size. */
@@ -194,7 +196,14 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
 
   const signingKey = await runSigningKey();
   if (!signingKey) return { ok: false, status: 503, error: "producer_not_configured" };
-  const runToken = await mintRunCredential(signingKey, { runId: run.id, tenantId: run.tenantId, ttlSec: RUN_TOKEN_TTL_SEC });
+  // The run token never outlives the run's deadline (plus a minute for the
+  // final events), the same clamp as the MCP bearer above: an idempotent claim
+  // retry long after the claim must not mint a token valid past the deadline
+  // (CodeRabbit, PR #589).
+  const runTtlSec = Number.isFinite(deadlineMs)
+    ? Math.max(1, Math.min(Math.floor((deadlineMs - nowMs) / 1000) + RUN_TOKEN_DEADLINE_GRACE_SEC, RUN_TOKEN_TTL_SEC))
+    : RUN_TOKEN_TTL_SEC;
+  const runToken = await mintRunCredential(signingKey, { runId: run.id, tenantId: run.tenantId, ttlSec: runTtlSec });
 
   const body: ClaimRunBody = {
     id: run.id,

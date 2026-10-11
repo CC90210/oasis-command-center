@@ -462,6 +462,26 @@ async function main() {
     assert.equal(Number(r.output_tokens), 40);
   });
 
+  // CodeRabbit (PR #589): on the push path the Worker's meter already wrote the
+  // turn's usage row before attachProducer handed the run over, so a producer
+  // finishing a WORKER run must not write a second row (double-counted usage
+  // and monthly run limits). Only computer runs get the producer ledger row.
+  await check("a push-path (worker) producer run that finishes writes NO second ai_usage_events row", async () => {
+    const owner = await person();
+    const c = await conv(owner.scope);
+    const q = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "push path", chatMode: "build", showThinking: false, now: now(), executor: "worker" });
+    assert.ok(q.ok);
+    const run = q.ok ? q.run : null;
+    assert.ok(run && run.executor === "worker");
+    await db.execute({ sql: "UPDATE dept_chat_runs SET status = 'running', source = 'producer' WHERE id = ?", args: [run!.id] });
+    const count = async () =>
+      Number((await db.execute({ sql: "SELECT COUNT(1) AS n FROM ai_usage_events WHERE tenant_id = ? AND user_id = ?", args: [owner.scope.tenantId, owner.scope.userId] })).rows[0].n);
+    const before = await count();
+    const ok = await store.finishProducerRun(db, run!, { status: "done", errorCode: null, message: null, inputTokens: 10, outputTokens: 5, now: now() });
+    assert.equal(ok, true);
+    assert.equal(await count(), before, "the push handoff's own meter is the only ledger row");
+  });
+
   console.log("Registered in CI");
   await check("the test group includes this file", () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { scripts?: Record<string, string> };

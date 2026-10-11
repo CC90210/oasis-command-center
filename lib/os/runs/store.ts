@@ -948,7 +948,11 @@ export async function finishProducerRun(
   });
   if (rs.rowsAffected === 0) return false;
   await closeRun(db, scope, run.id, f.status, f.errorCode && f.message ? { code: f.errorCode, message: f.message } : null, f.now);
-  await recordProducerLedgerRow(db, run, f);
+  // Computer runs only (CodeRabbit, PR #589): on the push path the Worker's
+  // meteredBridgeTurn already wrote this turn's usage row before
+  // attachProducer handed the run over, so a second row would double-count
+  // usage and the monthly run limit.
+  if (run.executor === "computer") await recordProducerLedgerRow(db, run, f);
   return true;
 }
 

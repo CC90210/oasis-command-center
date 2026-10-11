@@ -50,6 +50,16 @@ check("the canary bearer carries sv, and an unreadable session version refuses t
   assert.match(src("lib/os/seat.ts"), /export async function currentSessionVersion\(/);
 });
 
+// CodeRabbit (PR #589): the run token never outlives the run's deadline (plus
+// a minute of grace), the same clamp the MCP bearer uses, so a late claim
+// retry cannot mint a token valid long past the deadline.
+check("the run token's lifetime is clamped to the run's deadline", () => {
+  const turn = src("lib/os/runs/computer-turn.ts");
+  assert.match(turn, /ttlSec: runTtlSec/);
+  assert.match(turn, /Math\.floor\(\(deadlineMs - nowMs\) \/ 1000\) \+ RUN_TOKEN_DEADLINE_GRACE_SEC, RUN_TOKEN_TTL_SEC/);
+  assert.doesNotMatch(turn, /ttlSec: RUN_TOKEN_TTL_SEC \}/);
+});
+
 if (failures > 0) {
   console.log(`mcp-canary-binding: ${failures} failure(s)`);
   process.exit(1);
