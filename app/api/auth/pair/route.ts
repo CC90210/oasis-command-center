@@ -534,6 +534,18 @@ export async function POST(req: NextRequest) {
   // can never be approved for work (security rule 1) — recording it is what
   // lets the approval endpoint refuse it by name instead of by inference.
   const pairedVia = hmacProfile ? "hmac" : "signup_secret";
+  // scope (O3a, CodeRabbit PR #587): from the PROVEN role, never left NULL,
+  // because NULL reads as the legacy daemon. The HMAC secret sits in any
+  // teammate's agents file, so only a proven owner or admin gets a daemon
+  // pairing here, the same rule /api/auth/pair-code applies to desktop codes.
+  // A signup-secret pairing is always a connector: it can never be approved
+  // for work.
+  const pairScope =
+    hmacProfile &&
+    (dbBool(hmacProfile.is_owner) ||
+      canManageTeam((hmacProfile.team_role as TeamRole | null) || "member", dbBool(hmacProfile.admin_access)))
+      ? "daemon"
+      : "connector";
 
   const row = {
     tenant_id: profileRow.tenant_id,
@@ -543,6 +555,7 @@ export async function POST(req: NextRequest) {
     machine_fingerprint: fingerprint,
     last_seen_at: nowIso,
     paired_via: pairedVia,
+    scope: pairScope,
   };
 
   let pairingId: string | null = null;
@@ -566,6 +579,7 @@ export async function POST(req: NextRequest) {
         last_seen_at: nowIso,
         label,
         paired_via: pairedVia,
+        scope: pairScope,
         // A re-pair starts a fresh token history and a fresh approval (Codex,
         // O3a P1): a still-in-grace previous token must never answer for the
         // new pairing, nor revoke it later, and an approval given to the old

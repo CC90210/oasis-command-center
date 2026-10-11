@@ -228,15 +228,20 @@ export async function getOnlineBridgeComputerLabels(
   const db = getServiceSupabase();
   let query = db
     .from("bridge_pairings")
-    .select("label, last_seen_at")
+    .select("*")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null);
   if (authUserId) query = query.eq("user_id", authUserId);
   const r = await query;
   if (r.error) throw new Error(`getOnlineBridgeComputerLabels: bridge_pairings read failed: ${r.error.message}`);
-  const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null }>;
+  const rows = (r.data || []) as Array<{ label?: string | null; last_seen_at?: string | null; scope?: string | null }>;
   const now = Date.now();
-  return rows.filter((row) => isOnline(row.last_seen_at ?? null, now)).map((row) => row.label || "");
+  // Daemon pairings only, like getTenantBridgeStatus: these labels back the
+  // "<computer> is connected" line on Automations, and a connector does not
+  // run automations (independent review, PR #587). Legacy NULL scope counts.
+  return rows
+    .filter((row) => (row.scope == null || row.scope === "daemon") && isOnline(row.last_seen_at ?? null, now))
+    .map((row) => row.label || "");
 }
 
 // getTodayPlan and getPlanTemplates are gone (2026-09-29): nothing called
