@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "@/lib/clipboard";
 import { CORPUS_LABEL_COPY, type CorpusLabel } from "@/lib/founders/ingest-core";
-import { toolByKey } from "@/lib/tools/registry";
+import { inputRefusalLine, toolByKey } from "@/lib/tools/registry";
 import { setupHref } from "@/lib/setup-links";
 import type { CatalogTool, JobView, ToolCatalog } from "@/lib/tools/types";
 import {
@@ -235,10 +235,11 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
             const id = `tool-${tool.key}-${f.name}`;
             const value = values[f.name] ?? "";
             const set = (next: string) => setValues((v) => ({ ...v, [f.name]: next }));
-            const line =
-              f.kind === "url" && value.trim() && validation && !validation.ok && validation.field === f.name
-                ? urlFieldLine(tool.key, validation.code)
-                : null;
+            const refused = value.trim() && validation && !validation.ok && validation.field === f.name ? validation.code : null;
+            // A URL field says why a link was refused; any field whose refusal
+            // has its own line says it (a post that is only a link).
+            const line = refused === null ? null : f.kind === "url" ? urlFieldLine(tool.key, refused) : inputRefusalLine(refused);
+            const lineId = `${id}-line`;
             return (
               <div key={f.name} className="space-y-1">
                 <label htmlFor={id} className="block text-xs font-medium text-fg-muted">
@@ -252,6 +253,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
                     value={value}
                     maxLength={f.maxLength}
                     disabled={busy}
+                    aria-describedby={line ? lineId : undefined}
                     onChange={(e) => set(e.target.value)}
                   />
                 ) : f.kind === "select" ? (
@@ -281,10 +283,15 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, settingsAi
                     value={value}
                     maxLength={f.maxLength}
                     disabled={busy}
+                    aria-describedby={line ? lineId : undefined}
                     onChange={(e) => set(e.target.value)}
                   />
                 )}
-                {line && <p className="text-[11px] text-fg-dim">{line}</p>}
+                {line && (
+                  <p id={lineId} className="text-[11px] text-fg-dim">
+                    {line}
+                  </p>
+                )}
               </div>
             );
           })}

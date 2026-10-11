@@ -216,6 +216,31 @@ const learnFromLink: ToolDef = {
   },
 };
 
+/**
+ * A post that is only a link (one or more, nothing else) - the input of the
+ * only Repurpose run ever made (tool_jobs 67b30884, an Instagram reel URL).
+ * The model cannot open a link, so it was asked to rewrite a URL into three
+ * posts; that run never answered. Refused up front with POST_LINK_ONLY_LINE.
+ */
+export const POST_LINK_ONLY = "link_only";
+export const POST_LINK_ONLY_LINE = "Paste the post's text. Grabbing a post from a link is coming next.";
+
+/** A token that is a link: a scheme, www., or a domain followed by a path. */
+const LINK_TOKEN = /^(?:https?:\/\/\S+|www\.\S+|[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*)$/i;
+
+export function isLinkOnly(post: string): boolean {
+  const tokens = post.trim().split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((t) => LINK_TOKEN.test(t));
+}
+
+/**
+ * The line a refused input shows, for codes that have one of their own; null
+ * for the rest (the field's own state says enough, or the grid has a line).
+ */
+export function inputRefusalLine(code: string): string | null {
+  return code === POST_LINK_ONLY ? POST_LINK_ONLY_LINE : null;
+}
+
 const repurposePost: ToolDef = {
   key: "repurpose_post",
   title: "Repurpose a post",
@@ -234,6 +259,9 @@ const repurposePost: ToolDef = {
     if (!f) return { ok: false, field: "post", code: "required" };
     const post = text(f.post);
     if (!post) return { ok: false, field: "post", code: "required" };
+    // Checked before the length: a short link is still a link, and the person
+    // needs the line that says why, not a silent too_short.
+    if (isLinkOnly(post)) return { ok: false, field: "post", code: POST_LINK_ONLY };
     if (post.length < POST_MIN) return { ok: false, field: "post", code: "too_short" };
     if (post.length > POST_MAX) return { ok: false, field: "post", code: "too_long" };
     if (hasControlCharacters(post)) return { ok: false, field: "post", code: "invalid_characters" };
