@@ -39,8 +39,12 @@ function dayOfWeekNumber(token: string): number | null {
  * step, or a comma list of those — to the sorted values it fires on. Null for
  * anything else: a wrong interval is worse than no interval, because it mints a
  * confident "Overdue" on a schedule nobody parsed correctly.
+ *
+ * Exported for lib/automations/cron-grammar.ts (bounds) and
+ * lib/automations/schedule-plan.ts (run times), so the overdue verdict, the
+ * grammar and the run calculator read a field the same way.
  */
-function expandNumericField(field: string, min: number, max: number): number[] | null {
+export function expandNumericField(field: string, min: number, max: number): number[] | null {
   const values = new Set<number>();
   for (const rawPart of field.split(",")) {
     const part = rawPart.trim();
@@ -69,7 +73,7 @@ function expandNumericField(field: string, min: number, max: number): number[] |
 }
 
 /** Day-of-week field → the days it fires on. Handles MON-FRI as well as 1-5. */
-function expandDayOfWeek(field: string): number[] | null {
+export function expandDayOfWeek(field: string): number[] | null {
   if (field.trim() === "*" || field.trim() === "?") return [0, 1, 2, 3, 4, 5, 6];
   const days = new Set<number>();
   for (const rawPart of field.split(",")) {

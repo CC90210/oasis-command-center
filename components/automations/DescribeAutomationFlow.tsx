@@ -105,7 +105,11 @@ export function DescribeAutomationFlow() {
   const [state, setState] = useState<State>({ kind: "input", description: "" });
 
   async function draft() {
-    if (state.kind !== "input") return;
+    // The error view is the input view with the message under it and the
+    // description kept, so "Draft with AI" must work from there too. It used to
+    // return here until the text was edited, which made the very step a refusal
+    // asks for ("Click Draft with AI to write it again") a dead button.
+    if (state.kind !== "input" && state.kind !== "error") return;
     const description = state.description.trim();
     if (description.length < 10) {
       setState({ kind: "error", message: "Describe at least one full sentence — what should happen, when, and where the output goes.", description: state.description });

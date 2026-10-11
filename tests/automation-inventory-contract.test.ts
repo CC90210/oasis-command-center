@@ -55,8 +55,9 @@ assert.equal(
 );
 assert.doesNotMatch(listRoute, /isOperatorEmail/,
   "the Empire lane must not be armed by an email string alone");
-assert.match(listRoute, /requireEmpireRows: isOperator,\s*\n\s*isOperator,/,
-  "GET must report the operator verdict alongside the lane counts");
+assert.match(listRoute, /requireEmpireRows: isOperator && isOasisOperatorTenant,\s*\n\s*isOperator,/,
+  "GET must report the operator verdict alongside the lane counts, and must only " +
+    "demand a non-empty Empire lane in OASIS's own tenant");
 assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,
   "create API must not advertise agent_prompt until a runner supports it");
 const patchRoute = readFileSync("app/api/cron-jobs/[id]/route.ts", "utf8");

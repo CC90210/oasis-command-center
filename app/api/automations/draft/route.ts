@@ -12,25 +12,23 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionContext, canManageTeam } from "@/lib/team";
 import { draftAutomation } from "@/lib/ai-automation-drafter";
+import { CRON_RULE_SENTENCE } from "@/lib/automations/cron-grammar";
+import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
+
+const BAD_SCHEDULE = "automation_draft_bad_schedule";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  // Admin-only: drafting an automation is the first step of creating a
-  // scheduled job (script_run etc.). Gate it like the save step.
-  const ctx = await getSessionContext();
-  if (!ctx) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
-      { status: 403 },
-    );
-  }
+  // Drafting a script automation is the first step of creating one, so it has
+  // the create gate: a verified platform operator who manages this workspace
+  // (lib/automations/script-access.ts). Checked before the body is read, so a
+  // refused caller never reaches the model.
+  const gate = await gateScriptAutomationCreate("Only owners/admins can create automations.");
+  if (!gate.ok) return gate.response;
+  const ctx = gate.ctx;
 
   let body: { description?: unknown };
   try {
@@ -61,6 +59,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { ok: false, error: "ai_unavailable", message: "BRAVO_ANTHROPIC_API_KEY not set on the dashboard" },
         { status: 503 },
+      );
+    }
+    // A schedule the runner cannot run is refused here, before review, where it
+    // is read-only text beside a Save that would refuse it. The sentence names
+    // what the AI wrote and the way forward (the UI shows `message` first).
+    if (message.startsWith(BAD_SCHEDULE)) {
+      const written = message.slice(BAD_SCHEDULE.length).replace(/^:\s*/, "");
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "draft_invalid",
+          message: `The AI wrote a schedule that can't run ("${written}"). ${CRON_RULE_SENTENCE} Click Draft with AI to write it again.`,
+        },
+        { status: 502 },
       );
     }
     if (message.startsWith("automation_draft_parse_failed") || message.startsWith("automation_draft_missing_field") || message.startsWith("automation_draft_bad_filename")) {

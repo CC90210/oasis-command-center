@@ -261,6 +261,19 @@ const TESTS = [
   "tests/cron-owner-migration.test.ts",
   "tests/atomic-cron-toggle.test.ts",
   "tests/legacy-cron-toggle.test.ts",
+  // Automations guided setup, PR1 (safety rails before any department task can
+  // exist): the bridge pipe serves and accepts script jobs only, the old cron
+  // editor refuses department tasks and lists the session's active workspace,
+  // script creation is for verified operators with no dead button for anyone
+  // else, and the one DST-correct schedule library every later slice shares.
+  "tests/cron-poll-action-allowlist.test.ts",
+  "tests/cron-jobs-refuse-department-task.test.ts",
+  "tests/script-automations-operator-only.test.ts",
+  "tests/automation-schedule-plan.test.ts",
+  // A drafted schedule the runner cannot run (day names like MON-FRI) is
+  // refused at the draft step in a sentence, save-draft's refusal is a
+  // sentence, and Draft with AI works straight from the error.
+  "tests/automation-draft-schedule.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",

@@ -260,6 +260,21 @@ async function main() {
         body: JSON.stringify(body),
       }),
     );
+  const cronRowRoute = await import("../app/api/cron-jobs/[id]/route");
+  // Reassigning an existing script job's agent (PATCH /api/cron-jobs/[id]),
+  // the path a client's roster still governs now that only verified operators
+  // create script jobs.
+  const reassignCron = async (jobId: string, agentKey: string) => {
+    const res = await cronRowRoute.PATCH(
+      new NextRequest(`http://localhost/api/cron-jobs/${jobId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent_key: agentKey, source: "tenant" }),
+      }),
+      { params: Promise.resolve({ id: jobId }) },
+    );
+    return { status: res.status, body: (await res.json()) as { ok: boolean; error?: string } };
+  };
   const toggle = async (body: { action: string; slug: string }) => {
     const res = await post(toggleRoute, "/api/tenant/agents/toggle", body);
     return { status: res.status, body: (await res.json()) as { ok: boolean; error?: string; message?: string } };
@@ -707,15 +722,30 @@ async function main() {
       });
       return { status: res.status, body: (await res.json()) as { ok: boolean; error?: string } };
     };
+    const reassign = (jobId: string, agentKey: string) => reassignCron(jobId, agentKey);
     await login(USERS.cc);
     const aura = await create("aura");
     assert.equal(aura.status, 200, `OASIS cannot schedule Aura: ${JSON.stringify(aura.body)}`);
     const sdr = await create("sdr");
     assert.equal(sdr.status, 403, JSON.stringify(sdr.body));
     assert.equal(sdr.body.error, "agent_key_not_allowed_for_tenant:sdr", "no bridge root maps a lead's library template");
+    // A client owner no longer CREATES script jobs at all: that is for verified
+    // platform operators (Automations guided setup PR1,
+    // tests/script-automations-operator-only.test.ts). Its roster still governs
+    // the scripts it already has, through the reassign (PATCH) path.
     await login(USERS.owner);
-    assert.equal((await create("sdr")).status, 200, "a client schedules its own teammate");
-    assert.equal((await create("aura")).status, 403, "a client schedules an OASIS house agent");
+    const clientCreate = await create("sdr");
+    assert.equal(clientCreate.status, 403, JSON.stringify(clientCreate.body));
+    assert.equal(clientCreate.body.error, "script_automations_operator_only");
+    await db.execute({
+      sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, agent_key, name, schedule, action_type, action_payload, enabled)
+            VALUES ('client-existing-job', ?, 'sdr', 'Existing client job', '0 9 * * *', 'snapshot_run', '{"snapshot":"daily"}', 1)`,
+      args: [CLIENT],
+    });
+    assert.equal((await reassign("client-existing-job", "sdr")).status, 200, "a client reassigns a job to its own teammate");
+    const house = await reassign("client-existing-job", "aura");
+    assert.equal(house.status, 403, "a client reassigns a job to an OASIS house agent");
+    assert.equal(house.body.error, "agent_key_not_allowed_for_tenant:aura");
     // Reassigning a job (PATCH), /operations and /health read the same list.
     for (const page of ["app/api/cron-jobs/[id]/route.ts", "app/operations/page.tsx", "app/health/page.tsx"]) {
       assert.match(readFileSync(join(ROOT, page), "utf8"), /oasisOperatorAgents\(/, `${page} lists OASIS's business roster`);
@@ -742,25 +772,36 @@ async function main() {
       if (el.type === type && el.props) return el as { props: Record<string, unknown> };
       return el.props ? find(el.props.children, type) : null;
     };
-    const offered = async (who: U) => {
+    // The picker feeds two forms: create (verified operators only, so only
+    // where the page grants canCreateScripts) and reassign on an existing job
+    // (every admin). Each key offered must be accepted by the route that form
+    // posts to.
+    const offered = async (who: U, scriptAccess: "allowed" | "not_allowed", existingJobId?: string) => {
       await login(who);
-      const picker = find(await AutomationsContent({}), CronJobsManager);
+      const picker = find(await AutomationsContent({ scriptAccess }), CronJobsManager);
       assert.ok(picker, `no job picker for ${who.email}`);
+      assert.equal(picker.props.canCreateScripts, scriptAccess === "allowed", `${who.email}: create offered against the verdict`);
       const keys = picker.props.agentKeys as string[];
       for (const key of keys) {
-        const res = await post(cronRoute, "/api/cron-jobs", {
-          name: `Picked ${key}`,
-          schedule: "0 8 * * *",
-          action_type: "snapshot_run",
-          action_payload: { snapshot: "daily" },
-          agent_key: key,
-        });
-        assert.equal(res.status, 200, `${who.email} was offered "${key}", which the cron API refuses: ${JSON.stringify(await res.json())}`);
+        if (scriptAccess === "allowed") {
+          const res = await post(cronRoute, "/api/cron-jobs", {
+            name: `Picked ${key}`,
+            schedule: "0 8 * * *",
+            action_type: "snapshot_run",
+            action_payload: { snapshot: "daily" },
+            agent_key: key,
+          });
+          assert.equal(res.status, 200, `${who.email} was offered "${key}", which the cron API refuses: ${JSON.stringify(await res.json())}`);
+        }
+        if (existingJobId) {
+          const res = await reassignCron(existingJobId, key);
+          assert.equal(res.status, 200, `${who.email} was offered "${key}", which the reassign API refuses: ${JSON.stringify(res.body)}`);
+        }
       }
       return keys;
     };
-    assert.deepEqual(await offered(USERS.cc), oasisOperatorAgents(OASIS), "OASIS is offered the agents its bridge runs");
-    const client = await offered(USERS.owner);
+    assert.deepEqual(await offered(USERS.cc, "allowed"), oasisOperatorAgents(OASIS), "OASIS is offered the agents its bridge runs");
+    const client = await offered(USERS.owner, "not_allowed", "client-existing-job");
     assert.ok(client.includes("sdr"), `the client's own lead is not offered: ${client.join(", ")}`);
     assert.ok(!client.some((k) => isHouseAgentSlug(k)), `a client is offered a house agent: ${client.join(", ")}`);
   });

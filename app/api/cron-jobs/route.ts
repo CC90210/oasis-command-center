@@ -14,9 +14,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
-import { getSessionContext, canManageTeam } from "@/lib/team";
+import { getSessionContext } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { isPlatformOperatorForAuthUser, OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
+import {
+  DEPARTMENT_TASK,
+  isScriptActionType,
+  SCRIPT_ACTION_TYPES,
+  type ScriptActionType,
+} from "@/lib/automations/action-types";
+import { isValidCronExpr } from "@/lib/automations/cron-grammar";
+import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
 import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
@@ -39,10 +47,12 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Action types we accept on create. Discriminator + payload-shape validation
-// done in code (vs JSON-schema) because the shapes are small and clear.
-const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "webhook_post"] as const;
-type ActionType = (typeof VALID_ACTION_TYPES)[number];
+// Action types we accept on create: the script types the bridge runs, from
+// lib/automations/action-types.ts (the poll serves the same allowlist), so a
+// department_task can never be created on this route. Discriminator +
+// payload-shape validation done in code (vs JSON-schema) because the shapes are
+// small and clear.
+type ActionType = ScriptActionType;
 
 /**
  * Empire-cron row shape from public.cron_jobs.
@@ -59,18 +69,9 @@ type ActionType = (typeof VALID_ACTION_TYPES)[number];
  * UI surfaces an "Empire" tag on cron_jobs rows.
  */
 
-// Minimal cron-expression validator. Five fields, each one of:
-//   *, N, N-M, */N, N,M,K
-// More exotic forms (L, W, #, named months/dow) intentionally rejected — the
-// bridge's cron_engine uses standard Python schedule semantics, and refusing
-// the weird forms keeps validation simple. Operators who need them can drop
-// down to bash from the agent chat.
-const CRON_FIELD = /^(\*|\*\/\d+|\d+(-\d+)?(\/\d+)?(,\d+(-\d+)?(\/\d+)?)*)$/;
-function isValidCron(expr: string): boolean {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return false;
-  return parts.every((p) => CRON_FIELD.test(p));
-}
+// Cron expressions are validated by the one shared grammar,
+// lib/automations/cron-grammar.ts: exactly the forms the bridge's
+// cron_runner.py reads (no names, no L/W/#), each field in range.
 
 // Wrapped so a throw cannot escape as an empty body — see jsonRoute in
 // lib/api-helpers.ts for why the Automations tab kept reporting a JSON parser
@@ -78,27 +79,29 @@ function isValidCron(expr: string): boolean {
 export const GET = jsonRoute("api/cron-jobs GET", async () => {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  // The workspace is the session's ACTIVE profile, resolved the way every other
+  // route resolves it. This read used to be its own
+  // `user_profiles.eq("auth_user_id").maybeSingle()`, which errors for anyone
+  // with a seat in two workspaces, so the tab answered 401 to a signed-in member.
+  const ctx = await getSessionContext();
+  if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("id, tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const profileRow = profile.data as { id: string | null; tenant_id: string | null } | null;
-  const tenantId = profileRow?.tenant_id ?? null;
+  const tenantId = ctx.tenantId;
   // The bridge writes its pm2 snapshot to integrations_health keyed by
   // profile_id (same scope the background-workers route reads). Needed below
   // to tell a parked cron twin whether its daemon is actually up.
-  const profileId = profileRow?.id ?? null;
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const profileId = ctx.profileId;
 
-  // Tenant lane — every authed user sees their tenant's jobs.
+  // Tenant lane — every authed user sees their tenant's jobs. Department tasks
+  // are listed by their own route, with their own owner and visibility rules;
+  // this is a display filter, not a security boundary.
   const tenantQuery = await db
     .from("tenant_cron_jobs")
     .select(
       "id, agent_key, name, description, schedule, action_type, action_payload, enabled, last_run_at, last_run_status, last_run_output, last_run_error, run_count, created_at, updated_at",
     )
     .eq("tenant_id", tenantId)
+    .neq("action_type", DEPARTMENT_TASK)
     .order("created_at", { ascending: false });
   if (tenantQuery.error) {
     if (isMissingTableError(tenantQuery.error, "public.tenant_cron_jobs")) {
@@ -137,6 +140,16 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // by auth id): the email alone was registrable by anyone. A failed membership
   // lookup answers false — and the verdict on the wire says so, as above.
   const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
+  // The non-empty Empire-lane contract (below, requireEmpireRows) only means
+  // something in OASIS's own workspace: cron_jobs is tenant-scoped (migration
+  // 084), so an operator whose ACTIVE profile stands in a CLIENT tenant queries
+  // THAT tenant's empire rows, and a client ordinarily has none at all. Zero
+  // there is the correct, boring answer, not the 4/41 outage this contract
+  // exists to catch — demanding non-empty for every operator turned a client's
+  // empty list into a false 503. OASIS itself keeps the fail-loud 503: that is
+  // the one tenant where "empty Empire lane" really did mean the schedules
+  // vanished.
+  const isOasisOperatorTenant = tenantId === OASIS_OPERATOR_TENANT_ID;
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
   if (isOperator) {
     const empireQuery = await db
@@ -208,7 +221,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       tenantJobs,
       empireJobs,
       empireQueried: isOperator,
-      requireEmpireRows: isOperator,
+      requireEmpireRows: isOperator && isOasisOperatorTenant,
       isOperator,
     });
     return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
@@ -236,16 +249,13 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
 });
 
 export async function POST(req: NextRequest) {
-  // Admin-only: creating a scheduled job (script_run / webhook_post /
-  // snapshot_run). Non-admin members can view (GET) only.
-  const ctx = await getSessionContext();
-  if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only owners/admins can create automations." },
-      { status: 403 },
-    );
-  }
+  // Creating a scheduled SCRIPT job (script_run / webhook_post / snapshot_run)
+  // is for verified platform operators, who must also manage this workspace
+  // (lib/automations/script-access.ts). Members view (GET) only; client owners
+  // keep toggle and edit on their existing rows at /api/cron-jobs/[id].
+  const gate = await gateScriptAutomationCreate("Only owners/admins can create automations.");
+  if (!gate.ok) return gate.response;
+  const ctx = gate.ctx;
   const tenantId = ctx.tenantId;
   const userId = ctx.authUserId;
 
@@ -260,20 +270,21 @@ export async function POST(req: NextRequest) {
   if (!name) return NextResponse.json({ ok: false, error: "name_required" }, { status: 400 });
 
   const schedule = String(body?.schedule || "").trim();
-  if (!isValidCron(schedule)) {
+  if (!isValidCronExpr(schedule)) {
     return NextResponse.json(
       { ok: false, error: "invalid_cron_expression", hint: "Use 5-field cron syntax (m h dom mon dow)." },
       { status: 400 },
     );
   }
 
-  const actionType = String(body?.action_type || "") as ActionType;
-  if (!VALID_ACTION_TYPES.includes(actionType)) {
+  const rawActionType = String(body?.action_type || "");
+  if (!isScriptActionType(rawActionType)) {
     return NextResponse.json(
-      { ok: false, error: `invalid_action_type:${actionType}`, valid: VALID_ACTION_TYPES },
+      { ok: false, error: `invalid_action_type:${rawActionType}`, valid: SCRIPT_ACTION_TYPES },
       { status: 400 },
     );
   }
+  const actionType: ActionType = rawActionType;
   const rawActionPayload: Record<string, unknown> =
     body?.action_payload && typeof body.action_payload === "object" && !Array.isArray(body.action_payload)
       ? (body.action_payload as Record<string, unknown>)

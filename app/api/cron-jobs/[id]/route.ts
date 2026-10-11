@@ -21,18 +21,52 @@ import {
   type CronToggleSource,
 } from "@/lib/automations/cron-toggle-transaction";
 import { toggleLegacyCronWithAudit } from "@/lib/automations/cron-toggle-legacy";
+import { isDepartmentTask } from "@/lib/automations/action-types";
+import { isValidCronExpr } from "@/lib/automations/cron-grammar";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Reuse the validators from the parent route by re-declaring inline
-// (don't want to expand the export surface of /api/cron-jobs unnecessarily).
-const CRON_FIELD = /^(\*|\*\/\d+|\d+(-\d+)?(\/\d+)?(,\d+(-\d+)?(\/\d+)?)*)$/;
-function isValidCron(expr: string): boolean {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return false;
-  return parts.every((p) => CRON_FIELD.test(p));
+/**
+ * A department task is never written through this route. Its switch, edits and
+ * deletion go through /api/automations/department-tasks/[id], which re-signs
+ * the brief, checks the owner and the admin lock, arms or clears the pending
+ * run and writes the audit row. A direct write here would skip all of that.
+ *
+ * Reads only id and action_type, scoped to the session's workspace. Returns
+ * the response to send, or null when the row is a script job this route may
+ * keep handling. A row that is not in this workspace is the same 404 the write
+ * itself would give; a failed read fails closed.
+ */
+async function refuseDepartmentTask(id: string, tenantId: string): Promise<NextResponse | null> {
+  const read = await getServiceSupabase()
+    .from("tenant_cron_jobs")
+    .select("id, action_type")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (read.error) {
+    console.error("[api/cron-jobs/[id]] job type read failed", { id, tenantId, error: read.error.message });
+    return NextResponse.json(
+      { ok: false, error: "job_lookup_failed", message: "We couldn't read this automation just now. Nothing was changed." },
+      { status: 503 },
+    );
+  }
+  if (!read.data) {
+    return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });
+  }
+  if (isDepartmentTask((read.data as { action_type?: unknown }).action_type)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "use_department_task_route",
+        message: "This is a department task. Change, switch or delete it from its own page in Automations.",
+      },
+      { status: 409 },
+    );
+  }
+  return null;
 }
 
 export async function PATCH(
@@ -67,6 +101,12 @@ export async function PATCH(
   if (source === "empire" && !(await isPlatformOperatorForAuthUser(user?.id, user?.email))) {
     return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });
   }
+  // Department tasks live only in the tenant lane. Refused before any field is
+  // read, so a toggle and an edit are both stopped.
+  if (source === "tenant") {
+    const refusal = await refuseDepartmentTask(id, tenantId);
+    if (refusal) return refusal;
+  }
 
   // Patch is intentionally narrow — only the fields operators commonly toggle.
   // Changing action_type / action_payload on an existing row is rare enough
@@ -82,7 +122,7 @@ export async function PATCH(
     update.description = body.description ? String(body.description).slice(0, 500) : null;
   }
   if (typeof body.schedule === "string") {
-    if (!isValidCron(body.schedule)) {
+    if (!isValidCronExpr(body.schedule)) {
       return NextResponse.json({ ok: false, error: "invalid_cron_expression" }, { status: 400 });
     }
     update.schedule = body.schedule.trim();
@@ -224,6 +264,9 @@ export async function DELETE(
   }
   const tenantId = session.tenantId;
   const { id } = await ctx.params;
+
+  const refusal = await refuseDepartmentTask(id, tenantId);
+  if (refusal) return refusal;
 
   const db = getServiceSupabase();
   const { error, count } = await db
