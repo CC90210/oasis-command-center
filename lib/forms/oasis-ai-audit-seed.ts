@@ -36,7 +36,7 @@ export const AI_AUDIT_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 export const AI_AUDIT_NAME = "AI Automation Audit";
 export const AI_AUDIT_DESCRIPTION =
-  "OASIS AI Solutions B2B qualification funnel — bottleneck, scale, budget, timeline.";
+  "OASIS AI Solutions B2B qualification funnel: bottleneck, scale, budget, timeline.";
 
 /** Leads land at researched (the 14-stage lifecycle's first stage),
  *  same as the personal-brand funnel. */
@@ -50,9 +50,9 @@ export const AI_AUDIT_BRANDING: FormBranding = {
   accent_color: "#faf9f5",
   headline: "Find the 20 hours a month you're losing",
   subheadline:
-    "Four questions. I'll map where AI actually pays off in your business — and where it doesn't. No pitch deck, no retainer talk until it's obvious it's worth it.",
+    "Four questions. I'll map where AI actually pays off in your business, and where it doesn't. No pitch deck, no retainer talk until it's obvious it's worth it.",
   thanks_message:
-    "Got it. I'm reading this myself, not a bot — expect a specific answer about YOUR bottleneck, not a brochure.",
+    "Got it. I'm reading this myself, not a bot. Expect a specific answer about YOUR bottleneck, not a brochure.",
 };
 
 export const AI_AUDIT_STEPS: FormStep[] = [
@@ -67,7 +67,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
   // reply, so it is asked first and required.
   {
     key: "identity",
-    title: "First — who am I talking to?",
+    title: "First, who am I talking to?",
     description: "Takes about 20 seconds. I read every one of these personally.",
     cta_label: "Next",
     fields: [
@@ -96,7 +96,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         required: true,
         placeholder: "+1 …",
         // No report is texted (CC, 2026-10-08): the line promises only what he does.
-        help: "So I can follow up with you personally — I read every one.",
+        help: "So I can follow up with you personally. I read every one.",
       },
       {
         name: "company",
@@ -110,7 +110,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         label: "Website or social handle",
         type: "text",
         placeholder: "acme.com  ·  @acmehvac",
-        help: "Optional — but it lets me look at your actual setup before we speak.",
+        help: "Optional, but it lets me look at your actual setup before we speak.",
       },
     ],
   },
@@ -122,7 +122,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
     key: "bottleneck",
     title: "Where's the bottleneck right now?",
     description:
-      "Be honest about the messy one — that's usually where the money is.",
+      "Be honest about the messy one. That's usually where the money is.",
     cta_label: "Next",
     fields: [
       {
@@ -133,19 +133,19 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         options: [
           {
             value: "sales_leadgen",
-            label: "Sales & lead gen — finding and following up with prospects",
+            label: "Sales & lead gen: finding and following up with prospects",
           },
           {
             value: "customer_support",
-            label: "Customer support — answering the same questions all day",
+            label: "Customer support: answering the same questions all day",
           },
           {
             value: "workflow_automation",
-            label: "Workflow automation — the manual admin between systems",
+            label: "Workflow automation: the manual admin between systems",
           },
           {
             value: "agent_fleet",
-            label: "A custom AI agent fleet — I want the whole operation running itself",
+            label: "A custom AI agent fleet: I want the whole operation running itself",
           },
         ],
       },
@@ -162,10 +162,10 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         label: "Tried to fix it before?",
         type: "select",
         options: [
-          { value: "never", label: "No — first time looking at this" },
-          { value: "diy", label: "Yes — built something myself, it half-works" },
-          { value: "hired", label: "Yes — hired someone, it didn't stick" },
-          { value: "tools", label: "Yes — bought tools nobody uses" },
+          { value: "never", label: "No, first time looking at this" },
+          { value: "diy", label: "Yes, built something myself and it half-works" },
+          { value: "hired", label: "Yes, hired someone and it didn't stick" },
+          { value: "tools", label: "Yes, bought tools nobody uses" },
         ],
         help: "No wrong answer. It tells me what NOT to repeat.",
       },
@@ -180,7 +180,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
     key: "scale",
     title: "How big is the operation?",
     description:
-      "Rough is fine. This decides whether AI pays back in weeks or never — I'll tell you straight if it's the latter.",
+      "Rough is fine. This decides whether AI pays back in weeks or never. I'll tell you straight if it's the latter.",
     cta_label: "Next",
     fields: [
       {
@@ -212,13 +212,13 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         label: "Budget set aside for this?",
         type: "select",
         options: [
-          { value: "none_yet", label: "Nothing yet — exploring what it costs" },
+          { value: "none_yet", label: "Nothing yet, exploring what it costs" },
           { value: "under_2k", label: "Under $2K/mo" },
           { value: "2k_5k", label: "$2K – $5K/mo" },
           { value: "5k_15k", label: "$5K – $15K/mo" },
           { value: "15k_plus", label: "$15K+/mo" },
         ],
-        help: "Optional. Skipping it doesn't disqualify you — it just changes what I propose.",
+        help: "Optional. Skipping it doesn't disqualify you. It just changes what I propose.",
       },
     ],
   },
@@ -228,7 +228,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
   // here the lead is already captured, so hesitation costs nothing.
   {
     key: "timeline",
-    title: "Last one — when do you want this working?",
+    title: "Last one: when do you want this working?",
     description: "Sets whether I send you the audit or we just get on a call.",
     cta_label: "Send me the audit",
     fields: [
@@ -238,10 +238,10 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         type: "select",
         required: true,
         options: [
-          { value: "immediate", label: "Immediately — it's costing me money right now" },
+          { value: "immediate", label: "Immediately, it's costing me money right now" },
           { value: "30_days", label: "Next 30 days" },
           { value: "quarter", label: "This quarter" },
-          { value: "exploring", label: "Just exploring — no timeline yet" },
+          { value: "exploring", label: "Just exploring, no timeline yet" },
         ],
       },
       {
@@ -249,7 +249,7 @@ export const AI_AUDIT_STEPS: FormStep[] = [
         label: "Want to skip the back-and-forth and just book a call?",
         type: "select",
         options: [
-          { value: "yes", label: "Yes — send me times" },
+          { value: "yes", label: "Yes, send me times" },
           { value: "audit_first", label: "Send the audit first, then we'll talk" },
         ],
         help: "Either is fine. The audit is free regardless.",

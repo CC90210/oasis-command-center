@@ -362,7 +362,7 @@ function renderInput(
           onChange={(e) => onChange(e.target.value)}
           className={base}
         >
-          <option value="">— Select —</option>
+          <option value="">Select one</option>
           {(field.options || []).map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}

@@ -26,7 +26,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getSessionUser } from "@/lib/supabase-server";
 import { SWEEP_ERROR_LINES } from "@/lib/tools/errors";
-import { toolByKey, type ToolDef } from "@/lib/tools/registry";
+import { inputRefusalLine, toolByKey, type ToolDef } from "@/lib/tools/registry";
 import type { ToolsViewer } from "@/lib/tools/access";
 import { removeUnusedUploads, type ToolStorage } from "@/lib/tools/runner-handlers";
 import {
@@ -137,7 +137,12 @@ export async function handleToolRun(req: Request, deps: SessionDeps): Promise<Re
     return json(422, { ok: false, error: "invalid_input", field: "idempotency_key", code: "invalid" });
   }
   const v = tool.validate(body.input);
-  if (!v.ok) return json(422, { ok: false, error: "invalid_input", field: v.field, code: v.code });
+  if (!v.ok) {
+    // A refusal with its own line (a post that is only a link) carries it, so
+    // the card shows why instead of the generic "stopped" line.
+    const message = inputRefusalLine(v.code);
+    return json(422, { ok: false, error: "invalid_input", field: v.field, code: v.code, ...(message ? { message } : {}) });
+  }
 
   const tenantId = viewer.tenantId;
   const inputHash = inputHashOf(tool.key, v.value);

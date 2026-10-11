@@ -88,6 +88,7 @@ import {
   modelCallMeter,
 } from "@/lib/ai/usage";
 import { resolveCall } from "@/lib/ai/model-registry";
+import { classifyStreamError } from "@/lib/os/channel/outcome";
 import { redactAll } from "@/lib/secret-redaction";
 
 export type ToolSurface = "tools.learn_from_link" | "tools.repurpose_post" | "automations.draft";
@@ -286,7 +287,7 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
       else if (ev.type === "error") {
         if (isAiBudgetCode(ev.message) || ev.message === AI_USAGE_UNAVAILABLE) return { ok: false, code: ev.message };
         console.error("[tools.ai.stream]", { tenantId: call.tenantId, surface: call.surface, error: redactAll(ev.message).slice(0, 300) });
-        return { ok: false, code: "ai_failed" };
+        return { ok: false, code: toolCodeForStreamError(ev.message) };
       }
     }
   } catch (err) {
@@ -301,6 +302,36 @@ export async function runToolModelCall(call: ToolModelCall, deps: ToolModelDeps 
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, code: "ai_failed" };
   return { ok: true, text: trimmed, provider: account.provider, model: picked.model };
+}
+
+/**
+ * The provider's own refusal, as the run's code (2026-10-11). Every refusal
+ * used to be `ai_failed`, "The AI account didn't answer", including a key the
+ * provider refused, a model it does not offer, and the 524 timeout tool_jobs
+ * 67b30884 actually got (ai_usage_events: google, gemini-3.8-flash, http_524
+ * after 132 s). A key or model problem is one only an owner can fix, so its
+ * line says exactly that and where; a provider that is down or busy says so.
+ * The stream's error text is read the one way the department channels read it
+ * (lib/os/channel/outcome.ts classifyStreamError).
+ */
+export function toolCodeForStreamError(message: string): string {
+  switch (classifyStreamError(message)) {
+    case "provider_401":
+    case "provider_402":
+    case "provider_400_credit":
+    case "provider_403":
+      return "ai_key_refused";
+    case "provider_404":
+      return "ai_model_not_found";
+    case "provider_429":
+      return "ai_rate_limited";
+    case "provider_5xx":
+      return "ai_provider_down";
+    case "reply_blocked":
+      return "ai_blocked";
+    default:
+      return "ai_failed";
+  }
 }
 
 /**

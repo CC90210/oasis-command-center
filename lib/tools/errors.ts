@@ -65,6 +65,18 @@ export const WORKER_ERROR_LINES: Readonly<Record<string, string>> = {
   // account, because it was never contacted.
   ai_timeout: "The AI account took too long to answer; nothing was saved. Try again.",
   request_timeout: "This took too long and was stopped; nothing was saved. Try again.",
+  // The provider's own refusal (lib/tools/worker/ai.ts toolCodeForStreamError).
+  // A key or model problem is one only an owner or admin can fix: the line says
+  // so and where, so nobody presses Try again on something that cannot work.
+  ai_key_refused:
+    "Your workspace's AI account refused the request. An owner or admin needs to check its key and billing in Settings > AI brain.",
+  ai_model_not_found:
+    "The AI model chosen in Settings > AI brain isn't available to this AI account. An owner or admin needs to pick another model there.",
+  ai_rate_limited:
+    "Your workspace's AI account is rate-limited or out of quota. Try again in a minute, or an owner or admin can check its billing in Settings > AI brain.",
+  ai_provider_down: "The AI provider didn't answer (it was busy or timed out); nothing was saved. Try again in a few minutes.",
+  ai_blocked: "The AI provider's safety filter blocked this. Change the text and try again.",
+  ai_unusable_answer: "The AI answered, but not in a form this tool can use; nothing was saved. Try again.",
   [AI_BUDGET_EXHAUSTED]: AI_BUDGET_SENTENCES[AI_BUDGET_EXHAUSTED],
   [AI_BUDGET_UNPRICED_MODEL]: AI_BUDGET_SENTENCES[AI_BUDGET_UNPRICED_MODEL],
   [AI_USAGE_UNAVAILABLE]: AI_USAGE_UNAVAILABLE_SENTENCE,

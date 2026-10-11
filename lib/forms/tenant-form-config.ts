@@ -114,7 +114,7 @@ function sunbizStarterForm(): Omit<StarterForm, "branding"> {
         key: "documents",
         title: "Upload your documents",
         description:
-          "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
+          "Drag and drop everything here: bank statements, driver's license, voided check. As many files as you need.",
         fields: [
           {
             name: "bank_statements",
@@ -157,7 +157,7 @@ function genericStarterForm(): Omit<StarterForm, "branding"> {
             name: "project_details",
             label: "What do you need?",
             type: "textarea",
-            help: "A sentence or two is plenty — we'll follow up with the details.",
+            help: "A sentence or two is plenty. We'll follow up with the details.",
           },
         ],
       },

@@ -6,12 +6,23 @@
  * custom_fields.telegram_chat_id = the sender's chat id, clears the code, and
  * confirms. After that, the user receives per-lead application alerts.
  *
- * Setup (CC, one-time): set SUNBIZ_TELEGRAM_BOT_TOKEN (+ optional
- * SUNBIZ_TELEGRAM_BOT_USERNAME, TELEGRAM_WEBHOOK_SECRET) in Vercel, then call
- * Telegram setWebhook → https://oasisai.work/api/telegram/webhook with the secret.
+ * Setup (CC, one-time): set SUNBIZ_TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET
+ * (REQUIRED; + optional SUNBIZ_TELEGRAM_BOT_USERNAME) as Worker secrets, then
+ * call Telegram setWebhook -> https://oasisai.work/api/telegram/webhook with
+ * secret_token set to the same TELEGRAM_WEBHOOK_SECRET.
  *
- * Always returns 200 so Telegram doesn't retry-storm; auth is the secret header.
+ * Auth is the secret header, and it FAILS CLOSED (2026-10-11). It used to be
+ * checked only "if set": with TELEGRAM_WEBHOOK_SECRET unset, anyone who posted
+ * a fake update carrying someone's valid link code could tie their own
+ * Telegram chat to that person's profile and receive their lead alerts. Now:
+ *   - secret unset (or blank): nothing is read or written; a loud error is
+ *     logged and the answer is 200 {ok:false} (200 so a webhook that is still
+ *     registered does not retry-storm; the update itself is refused);
+ *   - secret set: compared in constant time, before the body is read; a
+ *     mismatch (or no header) is 401.
+ * Every other answer is 200 so Telegram doesn't retry-storm.
  */
+import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendTelegram } from "@/lib/notify/telegram";
@@ -44,10 +55,27 @@ async function reply(text: string, chat: string): Promise<void> {
   await sendTelegram(text, { token: TOKEN, chatId: chat });
 }
 
+/** Constant-time compare; a missing header or a different length is a mismatch. */
+function secretMatches(expected: string, presented: string | null): boolean {
+  if (presented === null) return false;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(presented, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 export async function POST(req: NextRequest) {
-  // Verify Telegram's secret header (configured at setWebhook time) if set.
-  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-  if (secret && req.headers.get("x-telegram-bot-api-secret-token") !== secret) {
+  // Telegram's secret header (configured at setWebhook time), checked FIRST,
+  // before the body is read. No secret configured is a refusal, never a pass.
+  const secret = (process.env.TELEGRAM_WEBHOOK_SECRET ?? "").trim();
+  if (!secret) {
+    console.error(
+      "[telegram-webhook] TELEGRAM_WEBHOOK_SECRET is not set: refusing every update. " +
+        "Set it on the Worker and pass the same value as secret_token to setWebhook.",
+    );
+    return NextResponse.json({ ok: false, error: "webhook_not_configured" });
+  }
+  if (!secretMatches(secret, req.headers.get("x-telegram-bot-api-secret-token"))) {
     return NextResponse.json({ ok: false }, { status: 401 });
   }
 

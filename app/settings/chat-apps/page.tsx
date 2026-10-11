@@ -77,8 +77,11 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
 
   // Every status comes from the Connections hub's own facts and resolver, never
   // built here. The shared team-alerts bot is owners and admins only.
-  // No card here is Google's, so the viewer's own Google is not read.
-  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId, personal: false });
+  // No card here is Google's, so the viewer's own Google is not read. Worker
+  // secret names reach only a VERIFIED platform operator (viewer.access
+  // .isOperator is lib/platform-operator.ts's check); everyone else, OASIS
+  // members included, reads "not available on this workspace yet" in plain words.
+  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId, viewerIsOperator: viewer.access.isOperator, personal: false });
   const slackCardStatus = slack ? resolveConnectorStatus(slack, facts, nowMs) : null;
   // This workspace's ways into Slack that are not built yet, as the
   // Connections drawer states them (resolved for its kind of workspace).

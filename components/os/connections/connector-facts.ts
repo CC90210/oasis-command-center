@@ -123,6 +123,14 @@ export async function loadConnectorFacts(input: {
    * token bundle and reads their profile on every page (PR #553 review F5).
    */
   personal?: boolean;
+  /**
+   * The viewer is a VERIFIED platform operator (lib/platform-operator.ts, via
+   * the page's own session check; never an email alias alone). Only then do
+   * the facts carry the Worker secret NAMES an unset OASIS app still needs, so
+   * a card can say "Missing Worker secrets: ...". Absent or false: no names,
+   * and the card says the app is not available here yet in plain words.
+   */
+  viewerIsOperator?: boolean;
 }): Promise<ConnectorFacts> {
   const [keyRows, personalGoogle, connections, serverChecks] = await Promise.all([
     loadKeyRows(input.tenantId),
@@ -139,9 +147,20 @@ export async function loadConnectorFacts(input: {
     // OASIS's own workspaces, by id (the env-credential tenants): they connect
     // OASIS's apps; every other workspace is a client and is shown its own path.
     oasisWorkspace: tenantMayUseEnvFallback(input.tenantId),
-    // Secret NAMES, for OASIS's own operators only: a client is never shown one.
-    appSecretsMissing: tenantMayUseEnvFallback(input.tenantId) ? appSecretsMissingByProvider() : undefined,
+    appSecretsMissing: secretNamesFor(input.tenantId, input.viewerIsOperator),
   };
+}
+
+/**
+ * Worker secret NAMES, for a verified platform operator in OASIS's own
+ * workspace only (2026-10-11). This used to key on the workspace alone, so
+ * every member of OASIS's workspace, operator or not, read "Missing Worker
+ * secrets: SLACK_CLIENT_ID, ..." on the Slack card. A client is never shown
+ * one, and now neither is anyone who is not a verified operator. Fails closed:
+ * anything but an explicit `true` is no names.
+ */
+function secretNamesFor(tenantId: string, viewerIsOperator: boolean | undefined): Record<string, string[]> | undefined {
+  return viewerIsOperator === true && tenantMayUseEnvFallback(tenantId) ? appSecretsMissingByProvider() : undefined;
 }
 
 /**
@@ -156,6 +175,7 @@ export async function loadWorkspaceConnectorStatus(
   tenantId: string,
   slug: string,
   nowMs: number = Date.now(),
+  opts: { viewerIsOperator?: boolean } = {},
 ): Promise<ConnectorStatus | null> {
   const def = connectorBySlug(slug);
   if (!def) return null;
@@ -174,7 +194,7 @@ export async function loadWorkspaceConnectorStatus(
       connections,
       appNotConfigured: appNotConfiguredProviders(),
       oasisWorkspace: tenantMayUseEnvFallback(tenantId),
-      appSecretsMissing: tenantMayUseEnvFallback(tenantId) ? appSecretsMissingByProvider() : undefined,
+      appSecretsMissing: secretNamesFor(tenantId, opts.viewerIsOperator),
     },
     nowMs,
   );
@@ -189,8 +209,10 @@ export async function loadConnectorStatuses(input: {
   tenantId: string;
   userId: string;
   nowMs?: number;
+  /** See loadConnectorFacts: only a verified platform operator is shown secret names. */
+  viewerIsOperator?: boolean;
 }): Promise<Record<string, ConnectorStatus>> {
-  const facts = await loadConnectorFacts({ tenantId: input.tenantId, userId: input.userId });
+  const facts = await loadConnectorFacts({ tenantId: input.tenantId, userId: input.userId, viewerIsOperator: input.viewerIsOperator });
   const now = input.nowMs ?? Date.now();
   return Object.fromEntries(CONNECTOR_CATALOG.map((def) => [def.slug, resolveConnectorStatus(def, facts, now)]));
 }

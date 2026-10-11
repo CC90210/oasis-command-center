@@ -13,6 +13,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Upload, Trash2, AlertCircle } from "lucide-react";
+import { SafeLogo } from "@/components/brand/SafeLogo";
+import { displayLogoUrl } from "@/lib/tenant/logo-url";
 
 type Props = {
   initialLogoUrl: string | null;
@@ -22,6 +24,7 @@ type Props = {
 export function BrandLogoCard({ initialLogoUrl, canManage }: Props) {
   const router = useRouter();
   const [logoUrl, setLogoUrl] = useState<string | null>(initialLogoUrl);
+  const shownUrl = displayLogoUrl(logoUrl);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,12 +83,19 @@ export function BrandLogoCard({ initialLogoUrl, canManage }: Props) {
     <div className="space-y-3">
       <div className="flex items-center gap-4">
         <div className="h-16 w-16 rounded-md border border-bg-border bg-bg-deep flex items-center justify-center overflow-hidden">
-          {logoUrl ? (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img
-              src={logoUrl}
+          {/* Drawn from the address public pages use (lib/tenant/logo-url.ts),
+              so this preview fails exactly when they would. One that cannot
+              load says so instead of showing a broken-image icon. */}
+          {shownUrl ? (
+            <SafeLogo
+              src={shownUrl}
               alt="Brand logo"
               className="max-h-full max-w-full"
+              fallback={
+                <span className="px-1 text-center text-[10px] leading-tight text-fg-dim">
+                  Can&apos;t load. Upload it again.
+                </span>
+              }
             />
           ) : (
             <span className="text-[10px] text-fg-dim uppercase tracking-wider">
@@ -96,7 +106,7 @@ export function BrandLogoCard({ initialLogoUrl, canManage }: Props) {
         <div className="text-xs text-fg-muted leading-relaxed flex-1">
           Upload once here. Every new form, public application page, and
           anywhere else the dashboard shows your brand will pick it up
-          automatically. PNG, JPG, WEBP, or GIF — under 2 MB.
+          automatically. PNG, JPG, WEBP or GIF, under 2 MB.
         </div>
       </div>
 
