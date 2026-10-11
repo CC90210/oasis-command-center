@@ -1013,10 +1013,16 @@ async function main() {
       const client = await card(ALPHA, app.id);
       assert.deepEqual([client.kind, client.label], ["coming_soon", "Not available on this workspace yet"], app.id);
       assert.doesNotMatch(String(client.detail), /_ID|_SECRET|Worker secret|registering/, `${app.id}: a client was shown a secret name`);
-      const operator = await card(OASIS_OWN, app.id);
+      // Secret names reach a VERIFIED platform operator only (the page passes
+      // its own verified check); any other member of OASIS's workspace reads
+      // the client's plain sentence (Adon, 2026-10-11).
+      const operator = (await loadWorkspaceConnectorStatus(OASIS_OWN, app.id, Date.now(), { viewerIsOperator: true }))!;
       assert.equal(operator.label, "Not available on this workspace yet");
       const needed = registry.providerById(app.id)!.liveWhenEnv!;
       assert.match(String(operator.detail), new RegExp(`Missing Worker secrets: ${needed.join(", ")}`), `${app.id}: the operator is told exactly which secrets`);
+      const member = await card(OASIS_OWN, app.id);
+      assert.equal(member.label, "Not available on this workspace yet");
+      assert.doesNotMatch(String(member.detail), /_ID|_SECRET|Worker secret/, `${app.id}: a non-operator in OASIS's workspace was shown a secret name`);
       const res = await authorizeRoute.GET(new NextRequest(`https://oasisai.work/api/connections/${app.id}/authorize`), ctx(app.id));
       assert.equal(res.status, 200, `${app.id}: the button must answer a page, not an error (${res.status})`);
       const out = popupOutcome(await res.text());
