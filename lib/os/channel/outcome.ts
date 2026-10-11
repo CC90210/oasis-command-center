@@ -212,6 +212,15 @@ const ROUTE_ERRORS = {
   workspace_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   config_unavailable: "We could not read this workspace's AI settings just now. Try again in a moment.",
   ai_usage_unavailable: "We could not check this workspace's AI budget just now. Try again in a moment.",
+  // O1 (department-agent.ts prepareAgentTurn, 409): this person is not the
+  // workspace's agents owner, so department chats run on each person's own
+  // computer and theirs is not connected yet. PAUSE, NOT FALLBACK: never a
+  // verdict on the workspace's AI account, so this is never recorded as the
+  // channel's last turn (see department-agent.ts's PAUSE_HINT for the
+  // per-reason wording this generic sentence stands in for here).
+  computer_not_yours: "Department chats in this workspace run on each person's own computer, and yours isn't connected yet. Nothing was sent.",
+  computer_owner_not_set: "No one has been set as this workspace's computer owner yet, so department chats are paused. Nothing was sent.",
+  computer_owner_unavailable: "Could not confirm this workspace's computer owner just now. Nothing was sent. Try again in a moment.",
   // POST /api/os/runs into a conversation that holds an automation's runs
   // (lib/os/runs/send.ts): that conversation is the automation's record.
   automation_conversation: "This conversation is an automation's record, so it can't take new messages. Start a new chat to ask a question.",

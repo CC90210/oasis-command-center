@@ -74,7 +74,7 @@ import {
 } from "@/lib/ai/agent-engine";
 import { harnessForDepartment } from "@/lib/admin/harness-targets";
 import { departmentBrain, brainLine } from "@/lib/ai/department-brain";
-import { streamBridgeTurn, type BridgeCaller, type BridgeEngine, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
+import { BRIDGE_REFUSAL_ERROR, streamBridgeTurn, type BridgeCaller, type BridgeEngine, type BridgeRefused, type BridgeUnavailable } from "@/lib/ai/bridge-turn";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -123,9 +123,12 @@ export type AgentTurnRequest = {
    * null is the gate saying NO by design (a teammate who may not use the
    * computer): the API account answering is the rule, not a fault. A
    * BridgeUnavailable is a person who may use it and cannot (no bridge set up,
-   * the gate threw): that alone is a fallback worth reporting.
+   * the gate threw): that alone is a fallback worth reporting. A BridgeRefused
+   * (O1) is the owner gate saying no: this person is not the workspace's
+   * agents owner, or OASIS has no owner set, or the owner row could not be
+   * read — never answered by a fallback key (PAUSE, NOT FALLBACK).
    */
-  bridge?: (() => Promise<BridgeCaller | BridgeUnavailable | null>) | null;
+  bridge?: (() => Promise<BridgeCaller | BridgeUnavailable | BridgeRefused | null>) | null;
 };
 
 /**
@@ -192,6 +195,19 @@ export type PrepareRefusal = {
 };
 
 export type PrepareResult = { ok: true; turn: PreparedTurn } | PrepareRefusal;
+
+/**
+ * O1 pause copy, one per BridgeRefused reason (lib/ai/bridge-turn.ts). Plain
+ * words, no jargon (no "VPS"/"tunnel"/"bridge"), no house-agent name, and
+ * truthful that nothing was sent — this is a refusal, not a queued or failed
+ * turn. The two OASIS-fault reasons are rare (a missing or unreadable owner
+ * row) but must read as plainly as the common case, never as a raw code.
+ */
+const PAUSE_HINT: Record<BridgeRefused["refused"], string> = {
+  not_your_computer: "Paused. Department chats in this workspace run on each person's own computer, and yours isn't connected yet. Nothing was sent.",
+  agents_owner_not_set: "Paused. No one has been set as this workspace's computer owner yet. Nothing was sent.",
+  agents_owner_unavailable: "Paused. Could not confirm this workspace's computer owner just now. Nothing was sent. Try again in a moment.",
+};
 
 /**
  * Per-value sanitiser for template substitutions. Tenant-controlled strings
@@ -302,8 +318,31 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const harness = target && dept ? { agent: target.agent, department: dept.label, label: target.departments } : null;
   // Asked only when an engine on the paired computer is chosen; a gate that
   // throws is "can't be reached", never a crash of the turn.
-  const resolved: BridgeCaller | BridgeUnavailable | null =
+  const resolved: BridgeCaller | BridgeUnavailable | BridgeRefused | null =
     bridgeEngine && harness && req.bridge ? await req.bridge().catch((): BridgeUnavailable => ({ unavailable: "gate_error" })) : null;
+  // O1: PAUSE, NOT FALLBACK (Adon). A BridgeRefused means this person is not
+  // the workspace's agents owner (or OASIS has no owner set, or the owner row
+  // could not be read) — never answered on the workspace key or the platform
+  // key, because either would still be borrowing the owner's computer under a
+  // different name. Returned BEFORE `caller`/`viaBridge` are computed and
+  // BEFORE the key/platformFallback branch below, so this path decrypts no
+  // key and reads no platformFallback. No `recordAs`: a paused chat is not a
+  // verdict on the workspace's AI account, so it must never become the
+  // channel's last turn (agent_turn_outcomes is shared by the whole
+  // workspace — one person's pause must not turn it red for everyone else).
+  // Deliberately NOT run through recordRefusedTurn either: that writes an
+  // ai_usage_events row under this department's chat surface, which
+  // lib/health/department-chat-checks.ts counts toward the department-chat
+  // failure-rate alert — a frequent, expected, non-owner pause must never
+  // contribute to paging "department chat is failing".
+  if (resolved && "refused" in resolved) {
+    return {
+      ok: false,
+      status: 409,
+      error: BRIDGE_REFUSAL_ERROR[resolved.refused],
+      extra: { hint: PAUSE_HINT[resolved.refused] },
+    };
+  }
   const caller = resolved && "target" in resolved ? resolved : null;
   const viaBridge = bridgeEngine && harness && caller ? { engine: bridgeEngine, caller, harness } : null;
   // WHY the chosen engine is not answering decides what is said and recorded.
