@@ -284,6 +284,8 @@ type ConnectState =
   | { phase: "idle" }
   | { phase: "minting" }
   | { phase: "error"; message: string }
+  /** The workspace does not let this person connect a computer (403): permanent, never "try again". */
+  | { phase: "forbidden" }
   | { phase: "code"; code: string; expiresAt: string; mintedAtMs: number }
   | { phase: "expired" }
   | { phase: "found"; pairingId: string; label: string; approving: boolean; approveError: string | null }
@@ -315,6 +317,12 @@ export function ConnectYourComputerCard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ purpose: "connector" }),
       });
+      // 403: this workspace only lets owners and admins connect a computer
+      // (independent review, DV1). Say so; a retry can never succeed.
+      if (r.status === 403) {
+        setState({ phase: "forbidden" });
+        return;
+      }
       const j = await r.json();
       if (!j.ok || typeof j.code !== "string" || typeof j.expires_at !== "string") {
         setState({ phase: "error", message: j.error || `http_${r.status}` });
@@ -429,6 +437,12 @@ export function ConnectYourComputerCard() {
         <div role="alert" className="rounded-md border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-center gap-2">
           <AlertCircle className="w-4 h-4" aria-hidden="true" />
           <span>Could not get a code just now. Try again.</span>
+        </div>
+      )}
+      {state.phase === "forbidden" && (
+        <div role="status" className="rounded-md border border-border p-3 text-sm text-fg-muted flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" aria-hidden="true" />
+          <span>Only an owner or admin can connect a computer in this workspace. Ask one of them if you need yours connected.</span>
         </div>
       )}
       {(state.phase === "idle" || state.phase === "minting" || state.phase === "error") && (

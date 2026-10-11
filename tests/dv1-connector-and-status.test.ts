@@ -252,6 +252,15 @@ async function main() {
     assert.match(src, /executor:\s*h\.executor/);
   });
 
+  // -- 6: a permanent refusal says so (independent review, DV1) -------------
+  console.log("6. a 403 from the code route is told plainly, never 'try again'");
+  await check("a 403 sets a forbidden state with its own sentence and no retry button", () => {
+    const card = read("components/settings/YourComputersCard.tsx");
+    assert.match(card, /if \(r\.status === 403\) \{\s*setState\(\{ phase: "forbidden" \}\);/);
+    assert.match(card, /Only an owner or admin can connect a computer in this workspace\./);
+    assert.match(card, /\(state\.phase === "idle" \|\| state\.phase === "minting" \|\| state\.phase === "error"\) && \(/, "the retry button never renders for forbidden");
+  });
+
   console.log(`\n${passed} passed, ${failures} failed`);
   if (failures) process.exit(1);
 }
