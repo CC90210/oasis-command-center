@@ -33,6 +33,7 @@ import {
   readEffectiveEngine,
   readPersonEngine,
   savePersonEngine,
+  workspaceAllowsPersonApiChoice,
 } from "@/lib/ai/agent-engine-store";
 import { agentsEngineLine } from "@/lib/ai/agent-engine";
 
@@ -48,10 +49,11 @@ export async function GET() {
   if (!ctx) return fail(401, "unauthorized", SIGNED_OUT);
   const { tenantId, authUserId } = ctx;
   try {
-    const [choice, effective, computers] = await Promise.all([
+    const [choice, effective, computers, apiChoiceAllowed] = await Promise.all([
       readPersonEngine(tenantId, authUserId),
       readEffectiveEngine(tenantId, authUserId),
       getOwnComputers(tenantId, authUserId),
+      workspaceAllowsPersonApiChoice(tenantId),
     ]);
     const hasApprovedComputer = computers.some((c) => Boolean(c.claimEnabledAt));
     const workspaceEngine = effective.source === "workspace" ? effective.engine : null;
@@ -61,6 +63,7 @@ export async function GET() {
         choice: choice?.kind ?? null,
         effective,
         hasApprovedComputer,
+        apiChoiceAllowed,
         workspaceDefault: workspaceEngine ? agentsEngineLine(workspaceEngine) : null,
       },
       { headers: { "cache-control": "no-store" } },
@@ -93,6 +96,17 @@ export async function PUT(req: NextRequest) {
   const choice = parsePersonEngineChoice(raw.choice);
   if (!choice) return fail(400, "invalid_choice", "Pick your own computer, the workspace API key, or the workspace default.");
   try {
+    // The workspace AI account only where the workspace itself runs on it
+    // (security review, O3b): a person never opts onto the owner's key
+    // against the owner's choice. readEffectiveEngine enforces it on every
+    // send too; this refusal just says so at the moment of choosing.
+    if (choice.kind === "api" && !(await workspaceAllowsPersonApiChoice(tenantId))) {
+      return fail(
+        409,
+        "workspace_key_not_allowed",
+        "This workspace runs department chats on each person's own computer, so its AI account can't be chosen here. Ask an owner if that should change.",
+      );
+    }
     await savePersonEngine(tenantId, authUserId, choice);
   } catch (err) {
     console.error("[agent-config.person-engine.write]", { tenantId, error: errText(err) });

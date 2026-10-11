@@ -18,6 +18,8 @@ type Facts = {
   effective: { source: "person" | "workspace"; kind?: string; engine?: { kind: string } };
   hasApprovedComputer: boolean;
   workspaceDefault: string | null;
+  /** The workspace AI account can be chosen only where the workspace itself runs on it. */
+  apiChoiceAllowed: boolean;
 };
 
 export function PersonEngineCard() {
@@ -115,7 +117,13 @@ export function PersonEngineCard() {
       <Option
         value="api"
         label="Workspace API key"
-        disabledReason={facts.workspaceDefault ? null : "An owner or admin adds the workspace key in AI brain."}
+        disabledReason={
+          !facts.apiChoiceAllowed
+            ? "This workspace runs department chats on each person's own computer, so its AI account isn't offered here."
+            : facts.workspaceDefault
+              ? null
+              : "An owner or admin adds the workspace key in AI brain."
+        }
       />
       <Option
         value="default"

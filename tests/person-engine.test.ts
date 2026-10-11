@@ -144,6 +144,24 @@ async function main() {
     assert.deepEqual(await readEffectiveEngine(OASIS, ADON), { source: "workspace", engine: OASIS_DEFAULT_ENGINE });
   });
 
+  // Security review (O3b): a person never opts onto the workspace AI account
+  // against the owner's choice. In OASIS (a computer workspace) that would
+  // spend the owner's key and undo O1's pause.
+  await check("a saved 'api' choice is IGNORED where the workspace runs on computers, and honoured where the workspace runs on the key", async () => {
+    await savePersonEngine(OASIS, ADON, { kind: "api" });
+    assert.deepEqual(
+      await readEffectiveEngine(OASIS, ADON),
+      { source: "workspace", engine: OASIS_DEFAULT_ENGINE },
+      "OASIS runs on computers: Adon's 'api' row must not reach the owner's key",
+    );
+    await saveAgentEngine(CLIENT_TENANT, { kind: "api" });
+    await savePersonEngine(CLIENT_TENANT, ADON, { kind: "api" });
+    assert.deepEqual(await readEffectiveEngine(CLIENT_TENANT, ADON), { source: "person", kind: "api" }, "a key workspace honours it");
+    const { workspaceAllowsPersonApiChoice } = await import("../lib/ai/agent-engine-store");
+    assert.equal(await workspaceAllowsPersonApiChoice(OASIS), false);
+    assert.equal(await workspaceAllowsPersonApiChoice(CLIENT_TENANT), true);
+  });
+
   await check("saving a person's choice does not touch the workspace row or another person's", async () => {
     await savePersonEngine(OASIS, ADON, { kind: "computer" });
     assert.deepEqual(await readAgentEngine(OASIS), OASIS_DEFAULT_ENGINE, "the workspace row is untouched");

@@ -231,9 +231,22 @@ export async function clearPersonEngine(tenantId: string, userId: string): Promi
  * person choice. Throws when either read fails.
  */
 export async function readEffectiveEngine(tenantId: string, userId: string | null | undefined): Promise<EffectiveEngine> {
-  const person = userId ? await readPersonEngine(tenantId, userId) : null;
-  if (person) return { source: "person", kind: person.kind };
-  return { source: "workspace", engine: await readAgentEngine(tenantId) };
+  const [person, workspace] = await Promise.all([
+    userId ? readPersonEngine(tenantId, userId) : Promise.resolve(null),
+    readAgentEngine(tenantId),
+  ]);
+  // The workspace AI account answers a person only where the workspace itself
+  // runs on it (security review, O3b). A saved 'api' choice in a workspace whose
+  // owner chose computers would otherwise spend the owner's key against that
+  // choice, and in OASIS undo O1's pause. It is ignored, on every read, so a
+  // workspace that switches away from the key takes everyone with it.
+  if (person && !(person.kind === "api" && workspace.kind !== "api")) return { source: "person", kind: person.kind };
+  return { source: "workspace", engine: workspace };
+}
+
+/** Whether a person may choose the workspace AI account here: only where the workspace itself runs on it. Throws when the read fails. */
+export async function workspaceAllowsPersonApiChoice(tenantId: string): Promise<boolean> {
+  return (await readAgentEngine(tenantId)).kind === "api";
 }
 
 type KeyRow = { agent_key: string; provider: string; model: string; encrypted_api_key: string | null; enabled: unknown };
