@@ -27,6 +27,7 @@
  */
 
 import { inferForTenant } from "./ai/infer";
+import { isValidCronExpr } from "@/lib/automations/cron-grammar";
 
 const MAX_TOKENS = 2400;
 
@@ -67,13 +68,20 @@ Return ONLY a single JSON object on one line. Schema:
 {
   "suggested_name": "<short title, <40 chars, for the cron row's name column>",
   "suggested_description": "<one sentence operator-facing description>",
-  "schedule": "<5-field cron expression>",
+  "schedule": "<5-field numeric cron expression, e.g. 0 9 * * 1-5>",
   "schedule_human": "<human-readable, e.g. 'Daily at 09:00'>",
   "script_filename": "<snake_case_name>.py",
   "script_content": "<the full Python script as a JSON-escaped string>",
   "agent_key": "<one of: bravo | atlas | maven | aura | solara — pick the agent whose domain this falls under>",
   "reasoning": "<1-2 sentences explaining your design choices>"
 }
+
+Schedule rules. The bridge's cron runner reads numeric cron only, and a draft whose schedule it cannot read is refused:
+  - Five fields: minute (0-59), hour (0-23), day of month (1-31), month (1-12), day of week (0-6).
+  - Each field is *, */N, N, N-M, N-M/S, or a comma list of N, N-M or N-M/S.
+  - Day of week as numbers 0-6 (0 = Sunday); never names like MON or MON-FRI. Weekdays are 1-5.
+  - Month as numbers 1-12; never names like JAN.
+  - No L, W, # or ?, and no @daily-style shortcuts.
 
 NO markdown, NO code fence, NO prose outside the JSON. The script_content must be a valid JSON string (newlines as \\n).`;
 
@@ -83,7 +91,7 @@ export async function draftAutomation(
 ): Promise<AutomationDraft> {
   const userPrompt =
     `Operator description:\n\n${description.trim()}\n\n` +
-    `Generate the automation. Be specific about the cron schedule — if they said "every morning" pick 0 8 * * *, if "weekly" pick a sensible day + time, etc.`;
+    `Generate the automation. Be specific about the cron schedule — if they said "every morning" pick 0 8 * * *, if "weekdays" pick 0 9 * * 1-5, if "weekly" pick a sensible day + time, etc.`;
 
   // Subscription, not the paid API. See lib/subscription-infer.ts.
   const inf = await inferForTenant(opts.tenantId, {
@@ -129,6 +137,18 @@ export async function draftAutomation(
   // Defense against pathological filenames — must be snake_case .py
   if (!/^[a-z][a-z0-9_]*\.py$/.test(parsed.script_filename!)) {
     throw new Error(`automation_draft_bad_filename: ${parsed.script_filename}`);
+  }
+
+  // The schedule must be one the bridge's cron runner can run: the same shared
+  // grammar save-draft enforces (lib/automations/cron-grammar.ts). Unchecked
+  // here, a draft with day names (0 9 * * MON-FRI) reached the read-only
+  // review step and was then refused at Save. Refused here instead, the
+  // operator is asked to draft again before being offered a Save that cannot
+  // work. The schedule rides in the message (one line, bounded) so the route
+  // can say what the AI wrote.
+  if (!isValidCronExpr(parsed.schedule)) {
+    const shown = parsed.schedule!.replace(/\s+/g, " ").trim().slice(0, 60);
+    throw new Error(`automation_draft_bad_schedule: ${shown}`);
   }
 
   return parsed as AutomationDraft;

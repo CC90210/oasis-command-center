@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { isScriptActionType, SCRIPT_ACTION_TYPES } from "@/lib/automations/action-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,6 +101,13 @@ export async function GET(req: NextRequest) {
   const db = getServiceSupabase();
   // Only enabled jobs go to the bridge — disabled rows still live in the
   // table for the operator to re-enable later, but they don't tick.
+  //
+  // And only SCRIPT jobs, by ALLOWLIST (lib/automations/action-types.ts). The
+  // same table will hold department tasks, which the server runs; the bridge
+  // stamps "unknown action_type" over any row it cannot dispatch, so serving
+  // one would overwrite its status with a false error every minute it matched.
+  // `.in`, never `.neq("department_task")`: a type added later reaches the
+  // bridge only once someone names it there.
   const { data, error } = await db
     .from("tenant_cron_jobs")
     .select(
@@ -107,6 +115,7 @@ export async function GET(req: NextRequest) {
     )
     .eq("tenant_id", bridge.tenantId)
     .eq("enabled", true)
+    .in("action_type", [...SCRIPT_ACTION_TYPES])
     .order("created_at", { ascending: true });
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, jobs: data || [], polled_at: new Date().toISOString() });
@@ -140,6 +149,32 @@ export async function POST(req: NextRequest) {
   const errorText = typeof body?.error === "string" ? body.error.slice(0, 2000) : null;
 
   const db = getServiceSupabase();
+  // The bridge may only report on a job it could have been served. Read the
+  // row's type first, tenant-scoped; anything that is not a script job is
+  // refused BEFORE record_tenant_cron_run, so a department task's run_count and
+  // last-run status are only ever the dispatcher's.
+  const typeRead = await db
+    .from("tenant_cron_jobs")
+    .select("id, action_type")
+    .eq("id", jobId)
+    .eq("tenant_id", bridge.tenantId)
+    .maybeSingle();
+  if (typeRead.error) {
+    console.error("[api/cron-jobs/poll POST] job type read failed", { tenantId: bridge.tenantId, jobId, error: typeRead.error.message });
+    return NextResponse.json({ ok: false, error: "job_lookup_failed" }, { status: 500 });
+  }
+  if (!typeRead.data) return bad(404, "job_not_found_or_other_tenant");
+  if (!isScriptActionType((typeRead.data as { action_type?: unknown }).action_type)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "not_a_bridge_job",
+        message: "This job is not run by the bridge, so the bridge cannot report on it.",
+      },
+      { status: 409 },
+    );
+  }
+
   // Migration 087 — atomic single-statement update via record_tenant_cron_run.
   // Previous SELECT-then-UPDATE pattern raced under multi-machine pairing.
   const rpc = await db.rpc("record_tenant_cron_run", {

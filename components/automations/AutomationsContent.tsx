@@ -30,13 +30,19 @@ import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
+import type { ScriptAutomationAccess } from "@/lib/automations/script-access";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
+
+/** What a viewer who cannot create script automations is told, in place of the
+ *  box and the button, until the guided setup lands. No dead control. */
+const NEW_AUTOMATIONS_COMING = "New automations are coming to this page.";
 
 export async function AutomationsContent({
   previewMode = false,
   tenantSlug: overrideSlug,
   hideHeader = false,
+  scriptAccess = "not_allowed",
 }: {
   /** Operator is viewing a tenant they don't own. Renders the chrome
    *  + empty scaffold; NO sub-components mount, so no client-side
@@ -49,6 +55,14 @@ export async function AutomationsContent({
   /** Catch-all dispatcher already renders the page title — suppress
    *  the inner one when mounted there. */
   hideHeader?: boolean;
+  /** May this viewer CREATE script automations? Resolved by the mount
+   *  (app/automations/page.tsx, TenantAutomations) from the verified platform
+   *  check in lib/automations/script-access.ts, the same rule the three create
+   *  routes enforce. It decides which controls are offered, never which data
+   *  is shown, so this component stays free of identity checks
+   *  (tests/client-surface-isolation.test.ts). Defaults closed: a mount that
+   *  forgets it offers no create control, rather than one the API refuses. */
+  scriptAccess?: ScriptAutomationAccess;
 }) {
   if (previewMode) {
     return <PreviewAutomations tenantSlug={overrideSlug ?? "this tenant"} hideHeader={hideHeader} />;
@@ -207,18 +221,29 @@ export async function AutomationsContent({
             </p>
           )}
           <p>
-            <span className="text-fg font-bold">Making your own.</span> Describe what you want
-            in the box below and your agent writes the script, shows you what it does, and
-            saves it switched-off so nothing fires until you read it.
+            <span className="text-fg font-bold">Making your own.</span>{" "}
+            {scriptAccess === "allowed"
+              ? "Describe what you want in the box below and your agent writes the script, shows you what it does, and saves it switched-off so nothing fires until you read it."
+              : NEW_AUTOMATIONS_COMING}
           </p>
         </div>
       </details>
 
       {profile ? (
         <>
-          <DescribeAutomationFlow />
+          {scriptAccess === "allowed" ? (
+            // Drafting and saving a script is for verified platform operators
+            // only; the routes refuse everyone else, so nobody else is offered it.
+            <DescribeAutomationFlow />
+          ) : (
+            <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-4 text-sm text-fg-muted">
+              {scriptAccess === "unknown"
+                ? "We couldn't confirm your access to create automations just now, so that option is hidden. Reload the page to try again."
+                : NEW_AUTOMATIONS_COMING}
+            </div>
+          )}
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
-          <CronJobsManager agentKeys={automationAgentKeys} />
+          <CronJobsManager agentKeys={automationAgentKeys} canCreateScripts={scriptAccess === "allowed"} />
           {isOasisSurfaceTenant(tenantSlug) && (
             // The panel existed and rendered for exactly one tenant: "sun".
             // OASIS's own workspace — where the empire daemons actually run —
