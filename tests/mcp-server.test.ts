@@ -180,8 +180,8 @@ async function main() {
   const route = await import("../app/api/mcp/route");
 
   const T0 = Date.now();
-  const mint = (o: { uid?: string; tid?: string; dept?: string; prof?: "read" | "propose"; sid?: string; ttlSeconds?: number; nowMs?: number } = {}) =>
-    bearer.mintMcpToken({ tid: o.tid ?? ACME, uid: o.uid ?? OWNER, dept: o.dept ?? "sales", prof: o.prof ?? "propose", sid: o.sid ?? "chat-1", ttlSeconds: o.ttlSeconds, nowMs: o.nowMs }).token;
+  const mint = async (o: { uid?: string; tid?: string; dept?: string; prof?: "read" | "propose"; sid?: string; ttlSeconds?: number; nowMs?: number } = {}) =>
+    (await bearer.mintMcpToken({ tid: o.tid ?? ACME, uid: o.uid ?? OWNER, dept: o.dept ?? "sales", prof: o.prof ?? "propose", sid: o.sid ?? "chat-1", ttlSeconds: o.ttlSeconds, nowMs: o.nowMs })).token;
 
   // A signed bearer built by hand: for claims the minter would never produce.
   const forge = (claims: Record<string, unknown>, key = KEY_K1) => {
@@ -212,7 +212,7 @@ async function main() {
 
   console.log("Protocol");
   await check("initialize: negotiates the version, declares tools only, names itself", async () => {
-    const r = await rpc(mint(), "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-code", version: "2" } });
+    const r = await rpc(await mint(), "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-code", version: "2" } });
     assert.equal(r.status, 200);
     assert.equal(r.json?.jsonrpc, "2.0");
     assert.equal(result(r).protocolVersion, "2025-06-18");
@@ -221,18 +221,18 @@ async function main() {
     assert.equal(r.res.headers.get("content-type"), "application/json");
   });
   await check("initialize with a version it does not know answers its latest, and an older supported one is echoed", async () => {
-    assert.equal(result(await rpc(mint(), "initialize", { protocolVersion: "2099-01-01" })).protocolVersion, "2025-06-18");
-    assert.equal(result(await rpc(mint(), "initialize", { protocolVersion: "2024-11-05" })).protocolVersion, "2024-11-05");
+    assert.equal(result(await rpc(await mint(), "initialize", { protocolVersion: "2099-01-01" })).protocolVersion, "2025-06-18");
+    assert.equal(result(await rpc(await mint(), "initialize", { protocolVersion: "2024-11-05" })).protocolVersion, "2024-11-05");
   });
   await check("ping answers {}; a notification is accepted with 202 and no body", async () => {
-    const t = mint();
+    const t = await mint();
     assert.deepEqual(result(await rpc(t, "ping")), {});
     const n = await rpc(t, "notifications/initialized", undefined, { id: null });
     assert.equal(n.status, 202);
     assert.equal(n.json, null);
   });
   await check("an unknown method is -32601; batching and bad JSON are refused", async () => {
-    const t = mint();
+    const t = await mint();
     assert.equal((await rpc(t, "resources/list")).json?.error && ((await rpc(t, "resources/list")).json?.error as { code: number }).code, -32601);
     const batch = await route.POST(new Request("https://x/api/mcp", { method: "POST", headers: { authorization: `Bearer ${t}` }, body: "[]" }));
     assert.equal(batch.status, 400);
@@ -250,13 +250,28 @@ async function main() {
   });
 
   console.log("The bearer");
-  await check("mint caps the lifetime at 60 minutes and refuses to mint without a configured key", () => {
-    const m = bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", ttlSeconds: 999_999, nowMs: T0 });
-    const v = bearer.verifyMcpToken(m.token, { nowMs: T0 });
+  await check("mint caps the lifetime at 60 minutes and refuses to mint without a configured key", async () => {
+    const m = await bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", ttlSeconds: 999_999, nowMs: T0 });
+    const v = await bearer.verifyMcpToken(m.token, { nowMs: T0 });
     assert.ok(v.ok);
     if (v.ok) assert.equal(v.claims.exp - v.claims.iat, 3600);
-    assert.throws(() => bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", env: {} }), /oasis_mcp_not_configured/);
-    assert.throws(() => bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", env: { OASIS_MCP_TOKEN_KID: "K1", OASIS_MCP_TOKEN_KEY_K1: "short" } }), /oasis_mcp_not_configured/);
+    // env:{} has no explicit K-keyed key AND no AUTH_SESSION_SECRET for the
+    // derived fallback, so minting with no kid named still refuses closed.
+    await assert.rejects(() => bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", env: {} }), /oasis_mcp_not_configured/);
+    await assert.rejects(
+      () => bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", env: { OASIS_MCP_TOKEN_KID: "K1", OASIS_MCP_TOKEN_KEY_K1: "short" } }),
+      /oasis_mcp_not_configured/,
+    );
+  });
+  await check("with no explicit kid named, mint falls back to the derived kid 'd1' when AUTH_SESSION_SECRET is set", async () => {
+    const env = { AUTH_SESSION_SECRET: "mcp-server-test-derived-master-secret-32-chars-min" };
+    const m = await bearer.mintMcpToken({ tid: ACME, uid: OWNER, dept: "sales", prof: "read", sid: "s", nowMs: T0, env });
+    assert.equal(m.kid, "d1");
+    const v = await bearer.verifyMcpToken(m.token, { nowMs: T0, env });
+    assert.ok(v.ok);
+    // The disable switch makes 'd1' unknown at once, no code change needed.
+    const disabled = await bearer.verifyMcpToken(m.token, { nowMs: T0, env: { ...env, OASIS_MCP_DERIVED_KID_DISABLED: "1" } });
+    assert.ok(!disabled.ok && disabled.reason === "unknown_kid");
   });
   await check("no bearer, a malformed one, or a non-omcp1 one is 401", async () => {
     for (const t of [null, "garbage", "omcp1.x", "Bearer omcp1.a.b", "eyJhbGciOiJIUzI1NiJ9.e30.sig"]) {
@@ -266,9 +281,9 @@ async function main() {
     }
   });
   await check("an expired bearer is refused", async () => {
-    const old = mint({ nowMs: T0 - 2 * 3600 * 1000 });
+    const old = await mint({ nowMs: T0 - 2 * 3600 * 1000 });
     assert.equal((await rpc(old, "tools/list")).status, 401);
-    const v = bearer.verifyMcpToken(old);
+    const v = await bearer.verifyMcpToken(old);
     assert.ok(!v.ok && v.reason === "expired");
     const edge = forge({ ...goodClaims, iat: sec - 100, exp: sec - 1 });
     assert.equal((await rpc(edge, "tools/list")).status, 401);
@@ -276,7 +291,7 @@ async function main() {
   await check("a bearer for another audience is refused, even correctly signed", async () => {
     const t = forge({ ...goodClaims, aud: "someone-else" });
     assert.equal((await rpc(t, "tools/list")).status, 401);
-    const v = bearer.verifyMcpToken(t);
+    const v = await bearer.verifyMcpToken(t);
     assert.ok(!v.ok && v.reason === "wrong_aud");
   });
   await check("an unknown key id is refused (never issued, rotated away, or signed with a guessed key)", async () => {
@@ -293,7 +308,7 @@ async function main() {
     }
   });
   await check("a tampered bearer is refused: claims edited under the old signature, or the wrong key", async () => {
-    const [p, body, sig] = mint({ prof: "read" }).split(".");
+    const [p, body, sig] = (await mint({ prof: "read" })).split(".");
     const edited = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, "base64url").toString()), prof: "propose" })).toString("base64url");
     assert.equal((await rpc(`${p}.${edited}.${sig}`, "tools/list")).status, 401);
     assert.equal((await rpc(forge(goodClaims, KEY_K2), "tools/list")).status, 401);
@@ -305,7 +320,7 @@ async function main() {
     assert.equal((await rpc(forge({ ...goodClaims, iat: sec + 500, exp: sec + 600 }), "tools/list")).status, 401);
   });
   await check("a browser Origin is refused even with a valid bearer; the same call without one works", async () => {
-    const t = mint();
+    const t = await mint();
     const web = await rpc(t, "tools/list", undefined, { headers: { origin: "https://evil.example" } });
     assert.equal(web.status, 403);
     const same = await rpc(t, "tools/list", undefined, { headers: { origin: "https://oasisai.work" } });
@@ -315,7 +330,7 @@ async function main() {
 
   console.log("tools/list");
   await check("lists exactly the department's palette, with annotations", async () => {
-    const r = await rpc(mint({ dept: "sales", prof: "propose" }), "tools/list");
+    const r = await rpc(await mint({ dept: "sales", prof: "propose" }), "tools/list");
     assert.equal(r.status, 200);
     assert.deepEqual(toolNames(r), catalog.deskPalette("sales", { canAct: true }).map((t) => t.name));
     const tools = result(r).tools as Array<{ name: string; inputSchema: unknown; annotations: Record<string, boolean> }>;
@@ -329,30 +344,30 @@ async function main() {
   });
   await check("the 'read' profile lists no propose_* tool, in any department", async () => {
     for (const d of OS_DEPARTMENTS) {
-      const r = await rpc(mint({ dept: d.key, prof: "read" }), "tools/list");
+      const r = await rpc(await mint({ dept: d.key, prof: "read" }), "tools/list");
       if (r.status !== 200) continue; // a department this member cannot open lists nothing
       assert.ok(!toolNames(r).some((n) => n.startsWith("propose_")), d.key);
       const reads = catalog.deskPalette(d.key, { planMode: true, canAct: true }).map((t) => t.name);
       assert.ok(toolNames(r).every((n) => (reads as string[]).includes(n)), d.key);
     }
-    const sales = await rpc(mint({ dept: "sales", prof: "read" }), "tools/list");
+    const sales = await rpc(await mint({ dept: "sales", prof: "read" }), "tools/list");
     assert.equal(sales.status, 200);
     assert.ok(toolNames(sales).length > 0);
   });
   await check("a department's palette is its own: Marketing offers no proposal and no pipeline tool", async () => {
-    const r = await rpc(mint({ dept: "marketing", prof: "propose" }), "tools/list");
+    const r = await rpc(await mint({ dept: "marketing", prof: "propose" }), "tools/list");
     assert.equal(r.status, 200);
     assert.deepEqual(toolNames(r), ["department_numbers", "approvals_list", "connections_status"]);
   });
   await check("a read-only member is never offered a proposal, whatever the bearer's profile says", async () => {
-    const r = await rpc(mint({ uid: VIEWER, dept: "sales", prof: "propose" }), "tools/list");
+    const r = await rpc(await mint({ uid: VIEWER, dept: "sales", prof: "propose" }), "tools/list");
     assert.equal(r.status, 200);
     assert.ok(!toolNames(r).some((n) => n.startsWith("propose_")));
   });
 
   console.log("tools/call");
   await check("a read returns this workspace's data, fenced as outside text", async () => {
-    const r = await call(mint(), "leads_search", { query: "Harbor" });
+    const r = await call(await mint(), "leads_search", { query: "Harbor" });
     assert.equal(result(r).isError, false, callText(r));
     const text = callText(r);
     assert.match(text, /<<<UNTRUSTED_INPUT_BEGIN>>>/);
@@ -360,19 +375,19 @@ async function main() {
     assert.match(text, /<<<UNTRUSTED_INPUT_END>>>/);
   });
   await check("a tenant id the model writes is stripped: another workspace's leads never appear", async () => {
-    const r = await call(mint(), "leads_search", { tenant_id: ZETA, tenantId: ZETA, limit: 15 });
+    const r = await call(await mint(), "leads_search", { tenant_id: ZETA, tenantId: ZETA, limit: 15 });
     const text = callText(r);
     assert.match(text, /Harbor Bakery/);
     assert.match(text, /Northwind Clinic/);
     assert.doesNotMatch(text, /Quillfeather/);
-    const other = await call(mint(), "lead_timeline", { lead_id: "lead-zeta-1", tenant_id: ZETA });
+    const other = await call(await mint(), "lead_timeline", { lead_id: "lead-zeta-1", tenant_id: ZETA });
     assert.equal(result(other).isError, true);
     assert.doesNotMatch(callText(other), /Quillfeather/);
   });
   await check("a tool outside the department's palette is refused at dispatch, with no mutation", async () => {
     const before = await approvalCount();
     for (const [d, tool] of [["marketing", "propose_email"], ["sales", "routines_status"], ["sales", "get_credential"], ["sales", "finance_get_metric"]] as const) {
-      const r = await call(mint({ dept: d }), tool, { to: "a@b.test", subject: "s", body: "b" });
+      const r = await call(await mint({ dept: d }), tool, { to: "a@b.test", subject: "s", body: "b" });
       assert.equal(result(r).isError, true, `${d}/${tool}`);
       assert.doesNotMatch(callText(r), /Error:|\bat\s.+\(.+:\d+:\d+\)/, "no stack trace");
     }
@@ -380,13 +395,13 @@ async function main() {
   });
   await check("the read profile cannot propose: refused, no card", async () => {
     const before = await approvalCount();
-    const r = await call(mint({ prof: "read" }), "propose_email", { to: "lee@harbor.test", subject: "Hi", body: "Hello" });
+    const r = await call(await mint({ prof: "read" }), "propose_email", { to: "lee@harbor.test", subject: "Hi", body: "Hello" });
     assert.equal(result(r).isError, true);
     assert.equal(await approvalCount(), before);
   });
   await check("the propose profile makes one pending card owned by the member and sends nothing", async () => {
     const before = await approvalCount();
-    const r = await call(mint({ uid: REP, prof: "propose" }), "propose_email", { to: "lee@harbor.test", subject: "Following up", body: "Hi Lee, checking in." });
+    const r = await call(await mint({ uid: REP, prof: "propose" }), "propose_email", { to: "lee@harbor.test", subject: "Following up", body: "Hi Lee, checking in." });
     assert.equal(result(r).isError, false, callText(r));
     assert.equal(await approvalCount(), before + 1);
     const row = (await db.execute("SELECT status, idempotency_key, requested_by_id FROM approvals ORDER BY created_at DESC LIMIT 1")).rows[0];
@@ -396,17 +411,17 @@ async function main() {
   });
   await check("a read-only member cannot propose even when the bearer claims 'propose'", async () => {
     const before = await approvalCount();
-    const r = await call(mint({ uid: VIEWER, prof: "propose" }), "propose_email", { to: "lee@harbor.test", subject: "Nope", body: "Nope" });
+    const r = await call(await mint({ uid: VIEWER, prof: "propose" }), "propose_email", { to: "lee@harbor.test", subject: "Nope", body: "Nope" });
     assert.equal(result(r).isError, true);
     assert.equal(await approvalCount(), before);
   });
   await check("a failure is plain words: an unknown lead names no table, key, or stack", async () => {
-    const r = await call(mint(), "lead_timeline", { lead_id: "does-not-exist" });
+    const r = await call(await mint(), "lead_timeline", { lead_id: "does-not-exist" });
     assert.equal(result(r).isError, true);
     assert.equal(callText(r), "No lead with that id was found in this workspace.");
   });
   await check("a call with no tool name is -32602", async () => {
-    const r = await rpc(mint(), "tools/call", {});
+    const r = await rpc(await mint(), "tools/call", {});
     assert.equal((r.json?.error as { code: number }).code, -32602);
   });
   await check("env secrets and workspace vault secrets are redacted from results", async () => {
@@ -421,7 +436,7 @@ async function main() {
       ],
       "write",
     );
-    const r = await call(mint(), "leads_search", { query: "" , limit: 15 });
+    const r = await call(await mint(), "leads_search", { query: "" , limit: 15 });
     const text = callText(r);
     assert.match(text, /Secretive Co/);
     assert.ok(!text.includes(ENV_SECRET), "env secret leaked");
@@ -430,7 +445,7 @@ async function main() {
   });
   await check("a vault that cannot be read fails the call closed: nothing is returned", async () => {
     await db.execute("INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'custom', 'broken', 'not-ciphertext')", [ACME] as never);
-    const r = await call(mint(), "leads_search", {});
+    const r = await call(await mint(), "leads_search", {});
     assert.equal(result(r).isError, true);
     assert.doesNotMatch(callText(r), /Harbor/);
     await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'broken'");
@@ -438,18 +453,18 @@ async function main() {
 
   console.log("Whose seat it is");
   await check("a bearer for one workspace with a member of another is refused, both ways", async () => {
-    assert.equal((await rpc(mint({ tid: ZETA, uid: OWNER }), "tools/list")).status, 403);
-    assert.equal((await call(mint({ tid: ZETA, uid: OWNER }), "leads_search")).status, 403);
-    assert.equal((await rpc(mint({ tid: ACME, uid: ZOWNER }), "tools/list")).status, 403);
-    const own = await call(mint({ tid: ZETA, uid: ZOWNER }), "leads_search");
+    assert.equal((await rpc(await mint({ tid: ZETA, uid: OWNER }), "tools/list")).status, 403);
+    assert.equal((await call(await mint({ tid: ZETA, uid: OWNER }), "leads_search")).status, 403);
+    assert.equal((await rpc(await mint({ tid: ACME, uid: ZOWNER }), "tools/list")).status, 403);
+    const own = await call(await mint({ tid: ZETA, uid: ZOWNER }), "leads_search");
     assert.equal(own.status, 200);
     assert.match(callText(own), /Quillfeather/);
     assert.doesNotMatch(callText(own), /Harbor|Northwind/);
   });
   await check("a department the member cannot open is refused (the rail's own gate)", async () => {
-    const r = await rpc(mint({ uid: REP, dept: "operations" }), "tools/list");
+    const r = await rpc(await mint({ uid: REP, dept: "operations" }), "tools/list");
     assert.equal(r.status, 403);
-    const unknown = await rpc(mint({ dept: "not_a_department" }), "tools/list");
+    const unknown = await rpc(await mint({ dept: "not_a_department" }), "tools/list");
     assert.equal(unknown.status, 403);
   });
   await check("the cookie viewer and the bearer viewer get the same person, role and palette", async () => {
@@ -467,7 +482,7 @@ async function main() {
         const a = deskToolset({ viewer: fromCookie, dept: d, agentSlug: "x" }).palette.map((t) => t.name);
         const b = deskToolset({ viewer: fromBearer, dept: d, agentSlug: "x" }).palette.map((t) => t.name);
         assert.deepEqual(b, a, `${uid}/${d.key}`);
-        const opened = (await rpc(mint({ uid, dept: d.key, prof: "propose" }), "tools/list")).status === 200;
+        const opened = (await rpc(await mint({ uid, dept: d.key, prof: "propose" }), "tools/list")).status === 200;
         const gate = (await import("../components/os/department/gate")).departmentGate(d.slug, fromCookie.navInput) !== null;
         assert.equal(opened, gate, `${uid}/${d.key} gate`);
       }
@@ -475,7 +490,7 @@ async function main() {
     cookieUser = null;
   });
   await check("a role downgrade bites on the very next call", async () => {
-    const t = mint({ uid: OTHER_REP, prof: "propose" });
+    const t = await mint({ uid: OTHER_REP, prof: "propose" });
     assert.ok(toolNames(await rpc(t, "tools/list")).includes("propose_email"));
     await db.execute("UPDATE user_profiles SET team_role = 'read_only' WHERE auth_user_id = ?", [OTHER_REP] as never);
     assert.ok(!toolNames(await rpc(t, "tools/list")).includes("propose_email"));
@@ -485,7 +500,7 @@ async function main() {
     assert.equal(await approvalCount(), before);
   });
   await check("a removed seat is refused on the next call, with the same unexpired bearer", async () => {
-    const t = mint({ uid: REP });
+    const t = await mint({ uid: REP });
     assert.equal((await call(t, "leads_search")).status, 200);
     await db.execute("DELETE FROM user_profiles WHERE auth_user_id = ?", [REP] as never);
     const after = await call(t, "leads_search");
@@ -494,6 +509,91 @@ async function main() {
     assert.equal((await rpc(t, "tools/list")).status, 403);
     // ping needs no seat: it carries no workspace data.
     assert.equal((await rpc(t, "ping")).status, 200);
+  });
+
+  console.log("O4: a pull-dispatched bearer also checks the run and the computer");
+  const tools = await import("../lib/mcp/tools");
+  type RunRow = import("../lib/os/runs/store").Run;
+  const runningRun = { id: "run-x", tenantId: ACME, userId: OWNER, executor: "computer", status: "running", claimedPairingId: "pairing-1" } as unknown as RunRow;
+  const sessionOk = () =>
+    tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1", sv: 7 },
+      { getRun: async () => runningRun, pairingBlocked: async () => false, liveSeat: async () => ({ live: true, profile: { id: "p1", email: null, teamRole: "owner", isOwner: true, adminAccess: false } }) },
+    );
+  await check("a bearer naming a run belongs to the right (tenant, user) and still running on a computer, claimed by this pairing, unrevoked, passes", async () => {
+    const r = await sessionOk();
+    assert.ok(r.ok, JSON.stringify(r));
+  });
+  await check("a bearer naming a run that finished (status not 'running') is refused run_gone", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1", sv: 7 },
+      { getRun: async () => ({ ...runningRun, status: "done" }), pairingBlocked: async () => false },
+    );
+    assert.ok(!r.ok && r.code === "run_gone", JSON.stringify(r));
+  });
+  await check("a bearer naming a run claimed by ANOTHER pairing (the computer changed) is refused run_gone", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-2", sv: 7 },
+      { getRun: async () => runningRun, pairingBlocked: async () => false },
+    );
+    assert.ok(!r.ok && r.code === "run_gone");
+  });
+  await check("a bearer for a run of ANOTHER workspace or ANOTHER person is refused run_gone, never answered from the run's own row", async () => {
+    const wrongTenant = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ZETA, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1" },
+      { getRun: async () => runningRun, pairingBlocked: async () => false },
+    );
+    assert.ok(!wrongTenant.ok && wrongTenant.code === "run_gone");
+    const wrongUser = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: REP, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1" },
+      { getRun: async () => runningRun, pairingBlocked: async () => false },
+    );
+    assert.ok(!wrongUser.ok && wrongUser.code === "run_gone");
+  });
+  await check("a run's executor 'worker' (never pull-dispatched) is refused run_gone even if someone forged rid/pid claims for it", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1" },
+      { getRun: async () => ({ ...runningRun, executor: "worker" }), pairingBlocked: async () => false },
+    );
+    assert.ok(!r.ok && r.code === "run_gone");
+  });
+  await check("the computer's pairing being revoked refuses the call at once, even with a valid, unexpired, correctly-claimed bearer", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1" },
+      { getRun: async () => runningRun, pairingBlocked: async () => true },
+    );
+    assert.ok(!r.ok && r.code === "run_gone");
+  });
+  await check("a run lookup that throws is 'unavailable' (503), never treated as a pass", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1" },
+      {
+        getRun: async () => {
+          throw new Error("db down");
+        },
+      },
+    );
+    assert.ok(!r.ok && r.code === "unavailable");
+  });
+  await check("a session_version mismatch (sv) refuses seat_gone, same as a removed member, even with a run that is still live", async () => {
+    const r = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999, rid: "run-x", pid: "pairing-1", sv: 7 },
+      { getRun: async () => runningRun, pairingBlocked: async () => false, liveSeat: async () => ({ live: false, reason: "session_version_mismatch" }) },
+    );
+    assert.ok(!r.ok && r.code === "seat_gone");
+  });
+  await check("a legacy push-path bearer with no rid claim is unaffected: no run or pairing lookup happens at all", async () => {
+    const r = await sessionOk(); // sanity: the helper itself still passes
+    assert.ok(r.ok);
+    const legacy = await tools.resolveMcpSession(
+      { aud: "oasis-mcp", kid: "K1", tid: ACME, uid: OWNER, dept: "sales", prof: "propose", sid: "conv-1", iat: 0, exp: 999_999 },
+      {
+        getRun: async () => {
+          throw new Error("must never be called for a bearer with no rid");
+        },
+      },
+    );
+    assert.ok(legacy.ok, JSON.stringify(legacy));
   });
 
   console.log("Wiring");

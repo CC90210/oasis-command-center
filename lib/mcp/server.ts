@@ -66,7 +66,7 @@ export async function handleMcpPost(req: Request, deps: McpDeps = {}): Promise<R
   }
 
   const bearer = bearerFrom(req);
-  const verified = bearer ? verifyMcpToken(bearer, { nowMs: deps.nowMs, env: deps.env }) : null;
+  const verified = bearer ? await verifyMcpToken(bearer, { nowMs: deps.nowMs, env: deps.env }) : null;
   if (!verified || !verified.ok) {
     if (bearer && verified && !verified.ok) console.warn("[mcp.server] bearer refused", { reason: verified.reason });
     return rpcError(401, null, -32001, "Sign in again: this session's access has ended.", { "www-authenticate": 'Bearer realm="oasis-mcp"' });

@@ -17,6 +17,8 @@ import { followRun, headOf } from "./follow";
 import { sseResponse } from "./sse";
 import { keepAlive } from "./keepalive";
 import { json } from "./scope";
+import { getOwnComputers } from "@/lib/queries";
+import { bestComputerAnswerState, computerAnswerState, type ComputerAnswerState } from "@/lib/devices/presence";
 
 /** The longest one request follows (and so holds a driver's connection). Past it the browser re-attaches. */
 export const MAX_FOLLOW_MS = 14 * 60_000;
@@ -38,6 +40,8 @@ export function followRunResponse(args: {
   prelude?: string;
   now?: () => Date;
   pollMs?: (elapsedMs: number) => number;
+  /** O4: read fresh on every poll of a QUEUED computer-executor run (lib/os/runs/follow.ts FollowOptions.computerState). */
+  computerState?: () => Promise<ComputerAnswerState>;
 }): Response {
   let gone = false;
   const frames = followRun({
@@ -50,8 +54,22 @@ export function followRunResponse(args: {
     gone: () => gone,
     now: args.now,
     pollMs: args.pollMs,
+    computerState: args.computerState,
   });
   return sseResponse(frames, { prelude: args.prelude, onGone: () => (gone = true) });
+}
+
+/** This person's current best-ranked own-computer state (lib/devices/presence.ts), for follow.ts's computer-queue clocks. Read failures answer 'offline': never read as a live claimer on an error. */
+export function computerStateFor(scope: RunScope): () => Promise<ComputerAnswerState> {
+  return async () => {
+    try {
+      const computers = await getOwnComputers(scope.tenantId, scope.userId);
+      return bestComputerAnswerState(computers.map((c) => computerAnswerState(c, Date.now())));
+    } catch (err) {
+      console.error("[os.runs.send.computerState]", { tenantId: scope.tenantId, error: err instanceof Error ? err.message : String(err) });
+      return "offline";
+    }
+  };
 }
 
 export type SendInput = {
@@ -72,11 +90,22 @@ export async function sendMessage(args: {
   keep?: typeof keepAlive;
   /** Test seam: how fast the follower polls. */
   pollMs?: (elapsedMs: number) => number;
+  /**
+   * O4: set when this person's effective engine is their OWN paired
+   * computer and it can take work right now (lib/os/runs/session.ts
+   * RunSession.computerDispatch). The message enqueues as executor
+   * 'computer', origin 'chat', and this request starts NO driver: the run
+   * sits queued until the claim route's compare-and-swap claims it. `label`
+   * reaches the browser in the SSE prelude, for "Waiting for {label} to pick
+   * this up".
+   */
+  computerDispatch?: { label: string } | null;
 }): Promise<Response> {
   const { db, deps, input } = args;
   const scope = deps.scope;
   const now = args.now ?? (() => new Date());
   const keep = args.keep ?? keepAlive;
+  const computerDispatch = args.computerDispatch ?? null;
 
   let conversation: Conversation | null;
   if (input.conversationId) {
@@ -95,22 +124,47 @@ export async function sendMessage(args: {
     chatMode: input.chatMode,
     showThinking: args.showThinking,
     now: now(),
+    ...(computerDispatch ? { executor: "computer" as const, origin: "chat" as const } : {}),
   });
   if (!queued.ok) {
     return queued.reason === "queue_full" ? json(429, { ok: false, error: "queue_full" }) : json(404, { ok: false, error: "conversation_not_found" });
   }
   const run = queued.run;
 
-  // Another driver has the conversation: it runs this message next.
+  // Another driver (or, for a computer run, another queued/running message in
+  // this conversation) has the conversation: it runs this message next.
   const activity = await conversationActivity(db, scope, conversation.id, now());
   if (activity.live) {
     return json(202, { ok: true, mode: "queued", conversation_id: conversation.id, run: headOf(run) });
+  }
+
+  const prelude = `event: conversation\ndata: ${JSON.stringify({
+    id: conversation.id,
+    title: conversation.title || run.userText.slice(0, 80),
+    ...(computerDispatch ? { computer_label: computerDispatch.label } : {}),
+  })}\n\n`;
+
+  if (computerDispatch) {
+    // NO KEY FALLBACK: this request starts no driver and calls no model. The
+    // run waits, queued, for the person's own computer to claim it through
+    // the claim route's compare-and-swap; this response only FOLLOWS it from
+    // the database, exactly as a re-attach does.
+    return followRunResponse({
+      db,
+      scope,
+      runId: run.id,
+      queue: true,
+      windowMs: MAX_FOLLOW_MS,
+      prelude,
+      now,
+      pollMs: args.pollMs,
+      computerState: computerStateFor(scope),
+    });
   }
 
   // Nothing is driving it: this request does. The driver is NOT tied to the response.
   const driving = driveConversation(deps, conversation.id);
   await keep(driving, `drive:${conversation.id}`);
 
-  const prelude = `event: conversation\ndata: ${JSON.stringify({ id: conversation.id, title: conversation.title || run.userText.slice(0, 80) })}\n\n`;
   return followRunResponse({ db, scope, runId: run.id, queue: true, windowMs: MAX_FOLLOW_MS, prelude, now, pollMs: args.pollMs });
 }

@@ -25,17 +25,25 @@
 import "server-only";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import {
+  COMPUTER_CLAIM_DEADLINE_MS,
+  COMPUTER_MAX_QUEUED_MS,
   MAX_QUEUED_RUNS,
   MAX_TITLE_CHARS,
+  PRODUCER_SEQ_BASE,
   RUN_STALE_MS,
   RUN_STALE_PRODUCER_MS,
   isRunEventKind,
+  isRunExecutor,
+  isRunOrigin,
   isRunStatus,
   type RunEvent,
   type RunEventKind,
+  type RunExecutor,
+  type RunOrigin,
   type RunSource,
   type RunStatus,
 } from "./types";
+import { billingForBridge, recordModelCall, type ModelUsage } from "@/lib/ai/usage";
 
 export type RunScope = { tenantId: string; userId: string };
 
@@ -242,6 +250,14 @@ export type Run = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** O4: who may claim this run (migration bravo__213). */
+  executor: RunExecutor;
+  /** O4: the bridge_pairings row (computer) that claimed it; null until claimed, or for a worker run. */
+  claimedPairingId: string | null;
+  /** O4: why it was queued (chat before test before automation in the claim CAS). */
+  origin: RunOrigin;
+  /** O4: claim time + 20 minutes -- the longest an MCP or run token may outlive. null until claimed. */
+  deadlineAt: string | null;
 };
 
 function parseObject(raw: unknown): Record<string, unknown> | null {
@@ -257,6 +273,9 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
 function sourceOf(raw: unknown): RunSource {
   return raw === "producer" ? "producer" : raw === "automation" ? "automation" : "worker";
 }
+
+const executorOf = (v: unknown): RunExecutor => (isRunExecutor(v) ? v : "worker");
+const originOf = (v: unknown): RunOrigin => (isRunOrigin(v) ? v : "chat");
 
 function runOf(r: Record<string, unknown>): Run {
   return {
@@ -283,6 +302,10 @@ function runOf(r: Record<string, unknown>): Run {
     createdAt: s(r.created_at),
     startedAt: sOrNull(r.started_at),
     finishedAt: sOrNull(r.finished_at),
+    executor: executorOf(r.executor),
+    claimedPairingId: sOrNull(r.claimed_pairing_id),
+    origin: originOf(r.origin),
+    deadlineAt: sOrNull(r.deadline_at),
   };
 }
 
@@ -332,6 +355,14 @@ export type EnqueueResult = { ok: true; run: Run } | { ok: false; reason: "no_co
  * `id` and `source` are for a department task's run (lib/automations): the
  * automation records the run id before it enqueues, so a crash in between can
  * be reconciled, and source 'automation' keeps every chat driver off it.
+ *
+ * `executor` (O4) is 'computer' for a person whose effective engine is their
+ * own paired computer: the row sits `queued` until the claim route's
+ * compare-and-swap claims it (claimComputerRun) -- claimNextRun (the Worker's
+ * own driver) explicitly excludes it, so send.ts starting NO driver for such a
+ * message is a belt the claimNextRun filter is the suspenders for. `origin`
+ * orders the claim CAS (chat before test before automation); O4 itself only
+ * ever writes 'chat'.
  */
 export async function enqueueRun(
   db: Client,
@@ -344,25 +375,44 @@ export async function enqueueRun(
     now: Date;
     id?: string;
     source?: "automation";
+    executor?: RunExecutor;
+    origin?: RunOrigin;
   },
 ): Promise<EnqueueResult> {
   if (input.id !== undefined && !RUN_ID_RE.test(input.id)) throw new Error("os.runs.enqueue: the run id is not a lowercase UUID");
   if (input.source !== undefined && input.source !== "automation") throw new Error("os.runs.enqueue: unknown run source");
+  if (input.executor !== undefined && !isRunExecutor(input.executor)) throw new Error("os.runs.enqueue: unknown executor");
+  if (input.origin !== undefined && !isRunOrigin(input.origin)) throw new Error("os.runs.enqueue: unknown origin");
   const id = input.id ?? newId();
   const source: RunSource = input.source ?? "worker";
+  const executor: RunExecutor = input.executor ?? "worker";
+  const origin: RunOrigin = input.origin ?? "chat";
   const at = iso(input.now);
   for (let attempt = 0; attempt < 3; attempt++) {
     let affected = 0;
     try {
       const rs = await db.execute({
-        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, created_at)
+        sql: `INSERT INTO dept_chat_runs (id, tenant_id, user_id, conversation_id, department_key, agent_slug, seq, status, user_text, chat_mode, source, show_thinking, executor, origin, created_at)
               SELECT ?, c.tenant_id, c.user_id, c.id, c.department_key, c.agent_slug,
                      COALESCE((SELECT MAX(r.seq) FROM dept_chat_runs r WHERE r.conversation_id = c.id), 0) + 1,
-                     'queued', ?, ?, ?, ?, ?
+                     'queued', ?, ?, ?, ?, ?, ?, ?
               FROM dept_chat_conversations c
               WHERE c.id = ? AND c.tenant_id = ? AND c.user_id = ?
                 AND (SELECT COUNT(*) FROM dept_chat_runs q WHERE q.conversation_id = c.id AND q.status = 'queued') < ?`,
-        args: [id, input.text, input.chatMode, source, input.showThinking ? 1 : 0, at, input.conversationId, scope.tenantId, scope.userId, MAX_QUEUED_RUNS],
+        args: [
+          id,
+          input.text,
+          input.chatMode,
+          source,
+          input.showThinking ? 1 : 0,
+          executor,
+          origin,
+          at,
+          input.conversationId,
+          scope.tenantId,
+          scope.userId,
+          MAX_QUEUED_RUNS,
+        ],
       });
       affected = rs.rowsAffected;
     } catch (err) {
@@ -395,15 +445,23 @@ export async function enqueueRun(
  * 'automation'). Those run as their owner with the automation's own limits
  * (lookups, proposals, time), which only the automation driver carries
  * (claimAutomationRun); a chat driver would run one with the chat's.
+ *
+ * NEVER a computer-executor run (O4 security rule 6, "WORKER-DRIVEN RUNS"):
+ * `executor = 'worker'` is explicit in BOTH the outer WHERE and the inner
+ * subquery, so a run a person's own paired computer must answer can never be
+ * claimed and run here, on the workspace's API account -- the one fallback
+ * this estate must never have. send.ts starting no driver for such a message
+ * is the first line; this filter is the one that holds even if that is ever
+ * missed, bypassed, or called from a path that does not know about O4.
  */
 export async function claimNextRun(db: Client, scope: RunScope, conversationId: string, leaseId: string, now: Date): Promise<Run | null> {
   const at = iso(now);
   const rs = await exec(db, {
     sql: `UPDATE dept_chat_runs
           SET status = 'running', lease_id = ?, started_at = ?, heartbeat_at = ?
-          WHERE tenant_id = ? AND user_id = ? AND conversation_id = ? AND status = 'queued' AND source <> 'automation'
+          WHERE tenant_id = ? AND user_id = ? AND conversation_id = ? AND status = 'queued' AND source <> 'automation' AND executor = 'worker'
             AND id = (SELECT q.id FROM dept_chat_runs q
-                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued' AND q.source <> 'automation'
+                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued' AND q.source <> 'automation' AND q.executor = 'worker'
                       ORDER BY q.seq ASC LIMIT 1)
             AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = ? AND x.tenant_id = ? AND x.status = 'running')`,
     args: [leaseId, at, at, scope.tenantId, scope.userId, conversationId, conversationId, scope.tenantId, scope.userId, conversationId, scope.tenantId],
@@ -445,6 +503,160 @@ export async function claimAutomationRun(
   });
   if (rs.rowsAffected === 0) return null;
   return claimedBy(db, scope, conversationId, leaseId);
+}
+
+// -- O4: a person's own paired computer claims its runs (pull dispatch) ------
+
+/** The pairing (computer) a claim call authenticates as; tenant and user come ONLY from the pairing row, never a request body. */
+export type ClaimPairing = { tenantId: string; userId: string; pairingId: string };
+
+/**
+ * The claim route's compare-and-swap. ONE person's computer-executor runs,
+ * across every one of their conversations, chat before test before
+ * automation, oldest first WITHIN its own conversation, and only when
+ * nothing in that conversation is already running. Claiming ALSO hands the
+ * run straight to the producer (source = 'producer') in the same statement:
+ * a pull-claimed run writes its events through the identical door a
+ * push-handed-over run does (./producer.ts ingestBatch, the events route's
+ * existing `source = 'producer'` gate) -- O4 adds no new event-writing path.
+ * `claimId` becomes the run's lease_id, so a lost answer retried with the
+ * same claim_id is found again by findClaimedComputerRun, idempotently.
+ */
+export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimId: string, now: Date): Promise<Run | null> {
+  const at = iso(now);
+  const deadline = iso(new Date(now.getTime() + COMPUTER_CLAIM_DEADLINE_MS));
+  const rs = await exec(db, {
+    sql: `UPDATE dept_chat_runs
+          SET status = 'running', source = 'producer', lease_id = ?, claimed_pairing_id = ?, started_at = ?, heartbeat_at = ?, deadline_at = ?
+          WHERE status = 'queued' AND executor = 'computer' AND tenant_id = ? AND user_id = ?
+            AND id = (
+              SELECT q.id FROM dept_chat_runs q
+              WHERE q.tenant_id = ? AND q.user_id = ? AND q.executor = 'computer' AND q.status = 'queued'
+                AND q.seq = (SELECT MIN(f.seq) FROM dept_chat_runs f WHERE f.conversation_id = q.conversation_id AND f.status = 'queued')
+                AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = q.conversation_id AND x.status = 'running')
+              ORDER BY CASE q.origin WHEN 'chat' THEN 0 WHEN 'test' THEN 1 ELSE 2 END, q.created_at
+              LIMIT 1
+            )
+          RETURNING *`,
+    args: [claimId, pairing.pairingId, at, at, deadline, pairing.tenantId, pairing.userId, pairing.tenantId, pairing.userId],
+  });
+  const r = rows(rs)[0];
+  return r ? runOf(r) : null;
+}
+
+/**
+ * The idempotent-retry lookup: a run THIS pairing already claimed under
+ * THIS claim_id, still running. Called only when claimComputerRun matched
+ * nothing (every queued computer run was already claimed, or there was
+ * none) -- the claim route then checks producerEventsExist to tell a safe
+ * retry (mint fresh tokens again) from claim_already_started (409).
+ */
+export async function findClaimedComputerRun(db: Client, pairing: ClaimPairing, claimId: string): Promise<Run | null> {
+  const rs = await exec(db, {
+    sql: `SELECT * FROM dept_chat_runs
+          WHERE lease_id = ? AND claimed_pairing_id = ? AND tenant_id = ? AND user_id = ? AND executor = 'computer' AND status = 'running'`,
+    args: [claimId, pairing.pairingId, pairing.tenantId, pairing.userId],
+  });
+  const r = rows(rs)[0];
+  return r ? runOf(r) : null;
+}
+
+/** Whether the computer has already posted at least one event for this run (the producer event range starts at PRODUCER_SEQ_BASE). */
+export async function producerEventsExist(db: Client, run: Run): Promise<boolean> {
+  const rs = await exec(db, {
+    sql: `SELECT 1 AS x FROM dept_chat_run_events WHERE run_id = ? AND tenant_id = ? AND seq >= ? LIMIT 1`,
+    args: [run.id, run.tenantId, PRODUCER_SEQ_BASE],
+  });
+  return rs.rows.length > 0;
+}
+
+/**
+ * Fail ONE queued computer-executor run with `code` (the claim route's three
+ * clocks: computer_not_answering, computer_busy_timeout, or a blocked
+ * reason -- lib/os/runs/follow.ts owns the clocks; this is the guarded CAS
+ * they act through). Guarded by status = 'queued' AND executor = 'computer',
+ * so a run that was claimed a moment before this runs is left alone.
+ */
+export async function failQueuedComputerRun(db: Client, scope: RunScope, runId: string, code: string, now: Date): Promise<boolean> {
+  const rs = await exec(db, {
+    sql: `UPDATE dept_chat_runs SET status = 'failed', error_code = ?, finished_at = ?
+          WHERE id = ? AND tenant_id = ? AND user_id = ? AND status = 'queued' AND executor = 'computer'`,
+    args: [code, iso(now), runId, scope.tenantId, scope.userId],
+  });
+  if (rs.rowsAffected === 0) return false;
+  const { failureCopy } = await import("@/lib/os/channel/outcome");
+  const message = failureCopy(code, { canManageAi: false }).sentence;
+  await closeRun(db, scope, runId, "failed", { code, message }, now);
+  return true;
+}
+
+/**
+ * Pre-claim cleanup, run once at the top of every claim call (O4 "Before
+ * claiming, clean up for this person, so the queue never holds work
+ * forever"): reap this person's own computer-executor runs a producer went
+ * silent on past RUN_STALE_PRODUCER_MS, and fail any of their CHAT runs that
+ * have sat queued past COMPUTER_MAX_QUEUED_MS. automation-run cleanup
+ * (scheduled_for more than 12h old -> 'missed') is O5's: no run O4 enqueues
+ * ever carries an automation_id, so there is nothing for it to do yet.
+ */
+export async function claimCleanup(db: Client, scope: RunScope, now: Date): Promise<{ reaped: string[]; timedOut: string[] }> {
+  const reaped = await reapStaleComputerRuns(db, scope, now);
+  const timedOut = await failLongQueuedComputerRuns(db, scope, now);
+  return { reaped, timedOut };
+}
+
+/**
+ * reapStale's per-run close loop, scoped to ONE PERSON across every
+ * conversation they have (reapStale itself is per-conversation, which the
+ * claim route does not know in advance -- a claim call is for a person, not
+ * a chat). Only ever touches executor = 'computer' rows: a worker run going
+ * stale is the chat driver's own reapStale, called from follow.ts as today.
+ */
+export async function reapStaleComputerRuns(db: Client, scope: RunScope, now: Date): Promise<string[]> {
+  const cutoff = iso(new Date(now.getTime() - RUN_STALE_PRODUCER_MS));
+  const stale = rows(
+    await exec(db, {
+      sql: `SELECT id FROM dept_chat_runs
+            WHERE tenant_id = ? AND user_id = ? AND executor = 'computer' AND status = 'running' AND heartbeat_at < ?`,
+      args: [scope.tenantId, scope.userId, cutoff],
+    }),
+  );
+  const closed: string[] = [];
+  for (const row of stale) {
+    const id = s(row.id);
+    const partial = await partialText(db, scope, id);
+    const rs = await exec(db, {
+      sql: `UPDATE dept_chat_runs SET status = 'interrupted', error_code = 'interrupted', final_text = ?, finished_at = ?
+            WHERE id = ? AND tenant_id = ? AND user_id = ? AND executor = 'computer' AND status = 'running' AND heartbeat_at < ?`,
+      args: [partial || null, iso(now), id, scope.tenantId, scope.userId, cutoff],
+    });
+    if (rs.rowsAffected === 0) continue;
+    await closeRun(db, scope, id, "interrupted", { code: "interrupted", message: INTERRUPTED_MESSAGE }, now);
+    closed.push(id);
+  }
+  return closed;
+}
+
+/**
+ * The 10-minute absolute cap (O4 "OFFLINE AND HONEST"): a CHAT run that has
+ * sat queued this long, whatever the computer last reported, fails
+ * computer_not_answering so the page stops waiting. Scoped to this person,
+ * across every conversation.
+ */
+export async function failLongQueuedComputerRuns(db: Client, scope: RunScope, now: Date): Promise<string[]> {
+  const cutoff = iso(new Date(now.getTime() - COMPUTER_MAX_QUEUED_MS));
+  const candidates = rows(
+    await exec(db, {
+      sql: `SELECT id FROM dept_chat_runs
+            WHERE tenant_id = ? AND user_id = ? AND executor = 'computer' AND origin = 'chat' AND status = 'queued' AND created_at < ?`,
+      args: [scope.tenantId, scope.userId, cutoff],
+    }),
+  );
+  const failed: string[] = [];
+  for (const row of candidates) {
+    if (await failQueuedComputerRun(db, scope, s(row.id), "computer_not_answering", now)) failed.push(s(row.id));
+  }
+  return failed;
 }
 
 /** Whether the conversation has a run whose driver is alive (or one that is queued with none). */
@@ -606,7 +818,55 @@ export async function finishProducerRun(
   });
   if (rs.rowsAffected === 0) return false;
   await closeRun(db, scope, run.id, f.status, f.errorCode && f.message ? { code: f.errorCode, message: f.message } : null, f.now);
+  await recordProducerLedgerRow(db, run, f);
   return true;
+}
+
+/**
+ * The usage-ledger row every producer run leaves, whatever its end -- the
+ * same shape meteredBridgeTurn writes (lib/os/department-agent.ts) for a
+ * department turn on the paired computer: provider 'bridge', model 'claude'
+ * (bridgeCliPolicy forces Claude Code for every department run, push or
+ * pull), subscription billing, a known cost of 0, real token counts. Before
+ * this, finishProducerRun wrote NO row at all, so a department's 600-run
+ * monthly cap never counted a computer-dispatched reply, and its usage
+ * dashboard undercounted every workspace that answers on a paired computer.
+ * Never throws: recordModelCall logs and swallows its own failure, so a
+ * ledger-write fault can never stop the run's own terminal state from
+ * landing (that UPDATE already committed, above).
+ */
+async function recordProducerLedgerRow(
+  db: Client,
+  run: Run,
+  f: { status: "done" | "failed" | "cancelled"; errorCode: string | null; inputTokens: number | null; outputTokens: number | null; now: Date },
+): Promise<void> {
+  const billing = billingForBridge({ kind: "cli" });
+  const outcome = f.status === "done" ? "ok" : f.status === "cancelled" ? "cancelled" : "error";
+  const usage: ModelUsage | null =
+    f.inputTokens !== null || f.outputTokens !== null
+      ? { inputTokens: f.inputTokens, outputTokens: f.outputTokens, cacheReadTokens: null, cacheWriteTokens: null }
+      : null;
+  const startedMs = run.startedAt ? Date.parse(run.startedAt) : NaN;
+  await recordModelCall(
+    {
+      tenantId: run.tenantId,
+      surface: "agents.chat",
+      ...billing,
+      departmentKey: run.department || null,
+      teammateId: run.agentSlug || null,
+      userId: run.userId,
+      occurredAt: f.now,
+      provider: "bridge",
+      model: "claude",
+      usage,
+      costMicroUsd: 0,
+      costSource: "none",
+      latencyMs: Number.isFinite(startedMs) ? Math.max(0, f.now.getTime() - startedMs) : null,
+      outcome,
+      errorCode: f.errorCode,
+    },
+    db,
+  );
 }
 
 export const INTERRUPTED_MESSAGE = "This reply was interrupted before it finished. Send it again to retry.";

@@ -208,10 +208,19 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
   }
 
   const planMode = args.chatMode === "plan";
+  // O4: a turn pull-dispatched to the person's own paired computer runs
+  // Claude Code there, WITH the oasis MCP server (lib/mcp/*) -- the exact
+  // same desk palette every other engine gets, reached through MCP instead
+  // of the Worker's own tool loop. Tools are therefore ON, unconditionally;
+  // every OTHER non-API engine (the workspace's shared tunnel, lib/ai/
+  // bridge-turn.ts) still has no tool loop of its own and stays OFF.
+  const isComputerEngine = turn.engine?.kind === "computer";
   const engineOk = !turn.engine || turn.engine.kind === "api";
-  const support = engineOk
-    ? deskToolSupport(turn.provider)
-    : ({ on: false, reason: "this AI brain runs outside the Command Center, where it cannot look things up in the workspace" } as const);
+  const support = isComputerEngine
+    ? ({ on: true, reason: null } as const)
+    : engineOk
+      ? deskToolSupport(turn.provider)
+      : ({ on: false, reason: "this AI brain runs outside the Command Center, where it cannot look things up in the workspace" } as const);
   let facts: DeskStateFacts;
   let vault: VaultSecret[];
   try {
@@ -241,6 +250,22 @@ export async function groundDepartmentTurn(args: GroundArgs): Promise<DeskGround
   const info: DeskToolsInfo = support.on ? { on: true, tools: palette } : { on: false, reason: support.reason, tools: palette };
   const system = turn.system + scrub(renderDepartmentState(facts, info));
   const grounded: DeskTurn = { ...turn, system };
+
+  if (isComputerEngine) {
+    // O4: the system prompt and the palette's labels are everything
+    // buildComputerTurn (lib/os/runs/computer-turn.ts) reads from this
+    // grounding -- the run itself never streams through the Worker (the
+    // person's own computer calls these same tools over MCP instead, with
+    // its own run-scoped bearer). `.stream` is therefore never called for a
+    // computer-dispatched turn; it exists only so DeskGrounding's shape
+    // holds, and it fails LOUD rather than silently routing a reply through
+    // a provider call with no key (streamAgentTurn carries its own,
+    // identical guard, in case either is ever reached unexpectedly).
+    async function* refuseComputerStream(): AsyncGenerator<DeskEvent> {
+      throw new Error("os.desk.turn: a computer-dispatched turn's grounding.stream must never be called");
+    }
+    return { system, tools: { on: true, labels: palette.map((t) => t.label), note: null }, stream: () => refuseComputerStream() };
+  }
 
   if (!support.on) {
     return {

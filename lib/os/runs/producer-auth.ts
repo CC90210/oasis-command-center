@@ -12,13 +12,17 @@
  *   orun1.<base64url payload>.<base64url HMAC-SHA256 of "orun1.<payload>">
  *   payload { aud: "oasis-run", rid, tid, iat, exp }   (seconds)
  *
- * The key is the Worker secret OASIS_RUN_TOKEN_KEY (at least 32 characters). With
- * no key set nothing verifies and the events route answers 503: fail closed.
- * Rotating the key ends every outstanding credential. Minting lives here so the
- * Worker that dispatches a bridge turn and the route that receives its events
- * agree on one format; the bridge only echoes it back.
+ * The key: the Worker secret OASIS_RUN_TOKEN_KEY (at least 32 characters) wins
+ * when set. Otherwise it is derived from AUTH_SESSION_SECRET under the 'run'
+ * label (lib/crypto/derived-keys.ts) -- O4 ships with no new Cloudflare
+ * secret. With neither available, nothing verifies and the events route
+ * answers 503: fail closed. Rotating OASIS_RUN_TOKEN_KEY (or AUTH_SESSION_SECRET,
+ * which also ends every MCP bearer) ends every outstanding credential.
+ * Minting lives here so the Worker that dispatches a turn and the route that
+ * receives its events agree on one format; the bridge only echoes it back.
  */
 import "server-only";
+import { deriveKey, DERIVED_KEY_LABELS } from "@/lib/crypto/derived-keys";
 
 const AUD = "oasis-run";
 const PREFIX = "orun1";
@@ -32,10 +36,20 @@ export type RunCredentialCheck =
   | { ok: true; claims: RunClaims }
   | { ok: false; reason: "malformed" | "bad_signature" | "wrong_audience" | "expired" };
 
-/** The signing key, or null when this deployment has none (then nothing verifies). */
-export function runSigningKey(): string | null {
-  const key = process.env.OASIS_RUN_TOKEN_KEY;
-  return key && key.length >= MIN_KEY_CHARS ? key : null;
+/**
+ * The signing key: the explicit Worker secret OASIS_RUN_TOKEN_KEY when it is
+ * long enough, otherwise the key derived from AUTH_SESSION_SECRET. null when
+ * neither is usable -- then nothing verifies, and the events route fails
+ * closed (503), never open.
+ */
+export async function runSigningKey(env: Record<string, string | undefined> = process.env): Promise<string | null> {
+  const explicit = env.OASIS_RUN_TOKEN_KEY;
+  if (explicit && explicit.length >= MIN_KEY_CHARS) return explicit;
+  try {
+    return await deriveKey(DERIVED_KEY_LABELS.run, { env });
+  } catch {
+    return null;
+  }
 }
 
 function toB64url(bytes: Uint8Array): string {
