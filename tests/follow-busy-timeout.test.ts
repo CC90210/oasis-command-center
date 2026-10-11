@@ -185,6 +185,78 @@ async function main() {
     assert.equal(row?.status, "queued", "can_answer must never time out on its own; only computer_not_answering/busy/blocked clocks apply");
   });
 
+  console.log("[P2, round 2] markFirstInLine must not start the clock behind an earlier QUEUED (not yet running) message");
+  await check("following the SECOND of two queued computer messages never sets ITS OWN first_in_line_at while the first is still queued; its clock starts at zero only once the first truly leaves the queue", async () => {
+    const tenantId = uid();
+    const userId = uid();
+    const scope = { tenantId, userId };
+    const conv = await store.createConversation(db, scope, { department: "sales", agentSlug: "sdr", now: new Date() });
+    const first = await store.enqueueRun(db, scope, { conversationId: conv.id, text: "seq 1, still queued", chatMode: "build", showThinking: false, now: new Date(), executor: "computer" });
+    const second = await store.enqueueRun(db, scope, { conversationId: conv.id, text: "seq 2, waiting behind seq 1", chatMode: "build", showThinking: false, now: new Date(), executor: "computer" });
+    assert.ok(first.ok && second.ok);
+    const firstRunId = first.ok ? first.run.id : "";
+    const secondRunId = second.ok ? second.run.id : "";
+
+    const clockRef = { value: Date.now() };
+    const busy = async () => "busy" as const;
+
+    // Follow seq 2 directly for a few reconnects (how LONG it waits here
+    // does not matter -- the mechanism is a boolean NOT EXISTS, not a
+    // timer -- a few is enough to prove repeated observation still never
+    // sets it, while leaving the full 10-minute absolute-cap budget free
+    // for phase 3 below to demonstrate the 5-minute BUSY clock cleanly).
+    // seq 1 sits untouched, still queued (never claimed) throughout.
+    // Before this fix, conversationActivity.live checked only RUNNING
+    // rows -- nothing was running, so markFirstInLine would have set seq
+    // 2's own first_in_line_at on the very first observation, accumulating
+    // wait time it never actually had.
+    for (let i = 0; i < 2; i++) await oneReconnect(scope, secondRunId, clockRef, busy);
+    const seq2WhileBehindSeq1 = await store.getRun(db, scope, secondRunId);
+    assert.equal(seq2WhileBehindSeq1?.status, "queued", "seq 2 must still be queued: it must never time out while seq 1 is still ahead of it");
+    const row = await db.execute({ sql: `SELECT first_in_line_at FROM dept_chat_runs WHERE id = ?`, args: [secondRunId] });
+    assert.equal(row.rows[0].first_in_line_at, null, "seq 2's first_in_line_at must still be NULL: it has never truly been first in line");
+    // seq 1 itself, followed the same way, DOES set its own clock and
+    // would eventually time out on its own schedule -- untouched by this fix.
+    const seq1Row = await store.getRun(db, scope, firstRunId);
+    assert.equal(seq1Row?.status, "queued");
+
+    // Now seq 1 is claimed and finishes: it truly leaves the queue.
+    const pairing = { tenantId, userId, pairingId: uid() };
+    await db.execute(`CREATE TABLE IF NOT EXISTS bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT,
+      revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT)`).catch(() => undefined);
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, user_id, label, claim_enabled_at, claim_enabled_by, paired_via) VALUES (?, ?, ?, 'test computer', ?, 'test', 'pair_code')`,
+      args: [pairing.pairingId, tenantId, userId, new Date(clockRef.value).toISOString()],
+    });
+    const claimedFirst = await store.claimComputerRun(db, pairing, "claim-seq-1-round2", new Date(clockRef.value));
+    assert.ok(claimedFirst);
+    assert.equal(claimedFirst!.id, firstRunId);
+    await store.finishProducerRun(db, claimedFirst!, { status: "done", errorCode: null, message: null, inputTokens: 1, outputTokens: 1, now: new Date(clockRef.value) });
+
+    // seq 2 is now TRULY first in line. One observation sets its clock at
+    // (approximately) zero wait -- it must NOT already read as having
+    // waited the many simulated minutes that passed while it sat behind
+    // seq 1 (the exact bug: "failed... immediately when the first
+    // finished, despite zero actual first-in-line waiting time").
+    await oneReconnect(scope, secondRunId, clockRef, busy);
+    const justBecameFirst = await store.getRun(db, scope, secondRunId);
+    assert.equal(justBecameFirst?.status, "queued", "seq 2 must NOT fail immediately when seq 1 finishes: it has waited zero real first-in-line time so far");
+    const afterRow = await db.execute({ sql: `SELECT first_in_line_at FROM dept_chat_runs WHERE id = ?`, args: [secondRunId] });
+    assert.ok(afterRow.rows[0].first_in_line_at, "seq 2's first_in_line_at is now set, for the first time, now that it is truly first in line");
+
+    // It still needs its OWN full 5 minutes from here before timing out.
+    let reconnects = 0;
+    for (; reconnects < 30; reconnects++) {
+      await oneReconnect(scope, secondRunId, clockRef, busy);
+      const r = await store.getRun(db, scope, secondRunId);
+      if (r?.status !== "queued") break;
+    }
+    const finalRow = await store.getRun(db, scope, secondRunId);
+    assert.equal(finalRow?.status, "failed");
+    assert.equal(finalRow?.errorCode, "computer_busy_timeout");
+    assert.ok(reconnects >= 10, `seq 2 timed out after only ${reconnects} reconnects (~${reconnects * RECONNECT_WINDOW_MS}ms) of ITS OWN wait -- it must take close to the full 5 minutes, not the leftover time it spent waiting behind seq 1`);
+  });
+
   console.log(`\n${passed} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);
 }

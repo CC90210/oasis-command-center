@@ -447,12 +447,27 @@ export async function enqueueRun(
  * (claimAutomationRun); a chat driver would run one with the chat's.
  *
  * NEVER a computer-executor run (O4 security rule 6, "WORKER-DRIVEN RUNS"):
- * `executor = 'worker'` is explicit in BOTH the outer WHERE and the inner
- * subquery, so a run a person's own paired computer must answer can never be
- * claimed and run here, on the workspace's API account -- the one fallback
- * this estate must never have. send.ts starting no driver for such a message
- * is the first line; this filter is the one that holds even if that is ever
- * missed, bypassed, or called from a path that does not know about O4.
+ * `executor = 'worker'` in the OUTER WHERE means a run a person's own paired
+ * computer must answer can never be claimed and run here, on the
+ * workspace's API account -- the one fallback this estate must never have.
+ * send.ts starting no driver for such a message is the first line; this
+ * filter is the one that holds even if that is ever missed, bypassed, or
+ * called from a path that does not know about O4.
+ *
+ * QUEUE ORDER ACROSS EXECUTORS (Codex review, 2026-10-11, [P2]). The INNER
+ * subquery picks the conversation's earliest QUEUED run of EITHER executor
+ * -- no `executor = 'worker'` filter there at all -- and the outer clause
+ * then claims it ONLY IF that earliest row is itself executor='worker'. A
+ * person who sent a computer-dispatched message (seq 1, still queued),
+ * then switched engines and sent another (seq 2, executor='worker'), must
+ * never have seq 2 run ahead of seq 1 in its own history: before this fix,
+ * the inner subquery filtered to executor='worker' FIRST, so it found seq
+ * 2 as "the earliest WORKER-executor queued run" and claimed it, skipping
+ * seq 1 entirely. Now, with seq 1 still the conversation's overall
+ * earliest-queued row, the id the subquery returns is seq 1's -- which
+ * fails the outer `executor = 'worker'` check -- so this claims NOTHING
+ * until seq 1 is claimed (by a computer) and finishes, exactly mirroring
+ * claimComputerRun's own MIN(f.seq)-over-every-executor subquery below.
  */
 export async function claimNextRun(db: Client, scope: RunScope, conversationId: string, leaseId: string, now: Date): Promise<Run | null> {
   const at = iso(now);
@@ -461,7 +476,7 @@ export async function claimNextRun(db: Client, scope: RunScope, conversationId: 
           SET status = 'running', lease_id = ?, started_at = ?, heartbeat_at = ?
           WHERE tenant_id = ? AND user_id = ? AND conversation_id = ? AND status = 'queued' AND source <> 'automation' AND executor = 'worker'
             AND id = (SELECT q.id FROM dept_chat_runs q
-                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued' AND q.source <> 'automation' AND q.executor = 'worker'
+                      WHERE q.conversation_id = ? AND q.tenant_id = ? AND q.user_id = ? AND q.status = 'queued' AND q.source <> 'automation'
                       ORDER BY q.seq ASC LIMIT 1)
             AND NOT EXISTS (SELECT 1 FROM dept_chat_runs x WHERE x.conversation_id = ? AND x.tenant_id = ? AND x.status = 'running')`,
     args: [leaseId, at, at, scope.tenantId, scope.userId, conversationId, conversationId, scope.tenantId, scope.userId, conversationId, scope.tenantId],
@@ -547,6 +562,18 @@ export type ClaimPairing = { tenantId: string; userId: string; pairingId: string
  * never left to bubble up as an unhandled 500. The caller (the claim
  * route) then asks findClaimedComputerRun for the WINNER's assignment
  * rather than treating this call as "nothing was claimable".
+ *
+ * QUEUE ORDER ACROSS EXECUTORS (Codex review, 2026-10-11, round 2, [P2]):
+ * already correct, by construction, and left unchanged here -- documented
+ * so the next reader does not "fix" it to match claimNextRun's bug. The
+ * inner `f.seq` subquery that computes MIN(f.seq) carries NO executor
+ * filter (unlike the OUTER `q.executor = 'computer'`, which only narrows
+ * which rows this function may even consider claiming): it is the
+ * conversation's overall earliest QUEUED seq, any executor, any origin. A
+ * computer-executor candidate only matches `q.seq = MIN(f.seq)` when
+ * NOTHING queued ahead of it -- worker-executor included -- so an earlier
+ * worker-dispatched message never gets skipped the way claimNextRun's old
+ * bug skipped an earlier computer-dispatched one.
  */
 export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimId: string, now: Date): Promise<Run | null> {
   const at = iso(now);
@@ -603,25 +630,45 @@ export async function claimComputerRun(db: Client, pairing: ClaimPairing, claimI
 
 /**
  * Set this run's first_in_line_at ONCE (Codex review, 2026-10-11, [P2]):
- * called every time a follower observes it queued with nothing running
- * ahead of it in its own conversation. The CAS (COALESCE against the
- * existing value) means the FIRST observation wins and every later one is
- * a no-op that still returns the same, durable value -- never a value kept
- * only in one follower stream's local state, which a reconnect (every
- * ~25 s, TAIL_WINDOW_MS) would otherwise forget, resetting the clock and
- * letting a continuously busy computer's queue sail past
- * computer_busy_timeout into the 10-minute absolute cap instead. Returns
- * null when the run is no longer queued (claimed or ended between the
- * caller's own read and this call) -- the caller falls back to "now" then,
- * since there is no stale clock to protect against for a run that is
- * already past "queued".
+ * called every time a follower observes it queued. The CAS (COALESCE
+ * against the existing value) means the FIRST observation wins and every
+ * later one is a no-op that still returns the same, durable value -- never
+ * a value kept only in one follower stream's local state, which a
+ * reconnect (every ~25 s, TAIL_WINDOW_MS) would otherwise forget, resetting
+ * the clock and letting a continuously busy computer's queue sail past
+ * computer_busy_timeout into the 10-minute absolute cap instead.
+ *
+ * TRULY first in line, not merely "nothing RUNNING yet" (Codex review,
+ * round 2, 2026-10-11, [P2]). The NOT EXISTS below is checked INSIDE this
+ * same UPDATE -- atomic with the write, not a separate read the caller
+ * decides from -- and requires no OTHER non-automation run in this
+ * conversation, at a LOWER seq, that is still 'queued' OR 'running'. With
+ * two computer messages queued (seq 1, seq 2) and neither claimed yet, a
+ * follower of seq 2 used to set ITS OWN first_in_line_at immediately
+ * (conversationActivity.live only checks 'running' rows, and nothing was
+ * running yet), even though seq 1 -- still queued -- was genuinely ahead
+ * of it. The moment seq 1 finished, seq 2's clock (already ticking since
+ * whenever a follower first glanced at it) could already exceed
+ * COMPUTER_BUSY_TIMEOUT_MS, failing it on the spot with zero real
+ * first-in-line wait. Now seq 2 cannot set its own timestamp AT ALL while
+ * seq 1 is still queued or running; the first observation AFTER seq 1
+ * truly leaves the queue is the one that sets it, correctly, at zero.
+ *
+ * Returns null when the run is no longer queued, OR when something
+ * earlier (any executor) is still queued or running ahead of it -- the
+ * caller treats both the same way: no clock to protect against yet, so it
+ * falls back to "now" (waited = 0) for this observation.
  */
-export async function markFirstInLine(db: Client, scope: RunScope, runId: string, now: Date): Promise<string | null> {
+export async function markFirstInLine(db: Client, scope: RunScope, run: Pick<Run, "id" | "conversationId" | "seq">, now: Date): Promise<string | null> {
   const rs = await exec(db, {
     sql: `UPDATE dept_chat_runs SET first_in_line_at = COALESCE(first_in_line_at, ?)
           WHERE id = ? AND tenant_id = ? AND user_id = ? AND status = 'queued'
+            AND NOT EXISTS (
+              SELECT 1 FROM dept_chat_runs x
+              WHERE x.conversation_id = ? AND x.source <> 'automation' AND x.seq < ? AND x.status IN ('queued', 'running')
+            )
           RETURNING first_in_line_at`,
-    args: [iso(now), runId, scope.tenantId, scope.userId],
+    args: [iso(now), run.id, scope.tenantId, scope.userId, run.conversationId, run.seq],
   });
   const r = rows(rs)[0];
   return r ? sOrNull(r.first_in_line_at) : null;

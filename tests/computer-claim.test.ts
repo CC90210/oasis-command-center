@@ -281,6 +281,51 @@ async function main() {
     await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "mine", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
     assert.equal(await store.claimNextRun(db, owner.scope, c.id, "worker-lease-x", now()), null);
   });
+  await check("[P2, round 2] a person who sends a computer message, switches engines, then sends a worker message: the worker claim must NOT skip ahead of the still-queued computer message", async () => {
+    const owner = await person();
+    const c = await conv(owner.scope);
+    const seq1 = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "computer message, seq 1", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    const seq2 = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "switched to the API key, seq 2", chatMode: "build", showThinking: false, now: now(), executor: "worker" });
+    assert.ok(seq1.ok && seq2.ok);
+    // Before the fix, this subquery filtered to executor='worker' FIRST and
+    // found seq 2 as "the earliest WORKER row", claiming it while seq 1 sat
+    // untouched -- the later reply would then run with NO history of seq 1.
+    assert.equal(await store.claimNextRun(db, owner.scope, c.id, "worker-lease-skip-check", now()), null, "the worker claim must claim NOTHING while an earlier computer message is still queued");
+    const stillQueued1 = await store.getRun(db, owner.scope, seq1.ok ? seq1.run.id : "");
+    const stillQueued2 = await store.getRun(db, owner.scope, seq2.ok ? seq2.run.id : "");
+    assert.equal(stillQueued1?.status, "queued");
+    assert.equal(stillQueued2?.status, "queued", "seq 2 must not have been claimed either -- the whole point is order, not merely refusing seq 1");
+
+    // Once seq 1 (the earlier, computer-executor message) is claimed and
+    // finishes, the worker claim may THEN take seq 2, in order.
+    const claimed1 = await store.claimComputerRun(db, owner.pairing, "computer-claim-for-order-check", now());
+    assert.ok(claimed1);
+    assert.equal(claimed1!.id, seq1.ok ? seq1.run.id : "");
+    await store.finishProducerRun(db, claimed1!, { status: "done", errorCode: null, message: null, inputTokens: 1, outputTokens: 1, now: now() });
+    const nowClaimable = await store.claimNextRun(db, owner.scope, c.id, "worker-lease-after-seq1-done", now());
+    assert.ok(nowClaimable);
+    assert.equal(nowClaimable!.id, seq2.ok ? seq2.run.id : "");
+  });
+  await check("[P2, round 2] the reverse: a worker message queued before a computer message is never skipped by claimComputerRun either", async () => {
+    const owner = await person();
+    const c = await conv(owner.scope);
+    const seq1 = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "worker message, seq 1", chatMode: "build", showThinking: false, now: now(), executor: "worker" });
+    const seq2 = await store.enqueueRun(db, owner.scope, { conversationId: c.id, text: "switched to a computer, seq 2", chatMode: "build", showThinking: false, now: now(), executor: "computer" });
+    assert.ok(seq1.ok && seq2.ok);
+    assert.equal(await store.claimComputerRun(db, owner.pairing, "computer-claim-skip-check", now()), null, "the computer claim must claim NOTHING while an earlier worker message is still queued");
+    const stillQueued1 = await store.getRun(db, owner.scope, seq1.ok ? seq1.run.id : "");
+    const stillQueued2 = await store.getRun(db, owner.scope, seq2.ok ? seq2.run.id : "");
+    assert.equal(stillQueued1?.status, "queued");
+    assert.equal(stillQueued2?.status, "queued");
+
+    const claimed1 = await store.claimNextRun(db, owner.scope, c.id, "worker-lease-for-order-check", now());
+    assert.ok(claimed1);
+    assert.equal(claimed1!.id, seq1.ok ? seq1.run.id : "");
+    await store.finishRun(db, owner.scope, claimed1!.id, "worker-lease-for-order-check", { status: "done", finalText: "ok", errorCode: null, inputTokens: 1, outputTokens: 1, agent: null, now: now() });
+    const nowClaimable = await store.claimComputerRun(db, owner.pairing, "computer-claim-after-seq1-done", now());
+    assert.ok(nowClaimable);
+    assert.equal(nowClaimable!.id, seq2.ok ? seq2.run.id : "");
+  });
 
   console.log("idempotent retry vs. claim_already_started");
   await check("a lost claim answer retried with the same claim_id returns the same run again", async () => {

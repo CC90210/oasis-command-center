@@ -164,15 +164,19 @@ export async function* followRun(o: FollowOptions): AsyncGenerator<Frame> {
       const queuedSinceMs = Date.parse(run.createdAt);
       let failedCode: string | null = Number.isFinite(queuedSinceMs) && t - queuedSinceMs >= COMPUTER_MAX_QUEUED_MS ? "computer_not_answering" : null;
       // The other two clocks start when this run becomes FIRST IN LINE
-      // (nothing running ahead of it in its conversation), never from when
-      // it was sent -- a follow-up waiting behind a long reply in the SAME
-      // conversation is never penalised for that wait. PERSISTED (O4 [P2]
-      // Codex review): markFirstInLine's CAS sets dept_chat_runs.
+      // (nothing QUEUED or RUNNING ahead of it in its conversation), never
+      // from when it was sent -- a follow-up waiting behind a long reply
+      // (or behind an earlier, still-queued message of ANY executor) in
+      // the SAME conversation is never penalised for that wait. PERSISTED
+      // (O4 [P2] Codex review): markFirstInLine's CAS sets dept_chat_runs.
       // first_in_line_at ONCE, durably, so a stream reconnect (every ~25 s)
       // never resets this clock the way a local variable would have.
+      // markFirstInLine's own NOT EXISTS (round 2 of the same review) is
+      // the real guarantee for "truly first", not merely "nothing running
+      // yet" -- conversationActivity.live below is only a cheap early-out.
       const activity = await conversationActivity(o.db, o.scope, run.conversationId, now());
       if (!activity.live) {
-        const markedAt = await markFirstInLine(o.db, o.scope, run.id, now());
+        const markedAt = await markFirstInLine(o.db, o.scope, run, now());
         const firstInLineSinceMs = markedAt ? Date.parse(markedAt) : t;
         const waitedMs = t - (Number.isFinite(firstInLineSinceMs) ? firstInLineSinceMs : t);
         const cs = o.computerState ? await o.computerState() : null;
