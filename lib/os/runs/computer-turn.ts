@@ -123,7 +123,6 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
       })
     : null;
   const systemFull: string = desk?.system ?? t.system;
-  const systemCapped = systemFull.length > COMPUTER_SYSTEM_PROMPT_CHARS ? `${systemFull.slice(0, COMPUTER_SYSTEM_PROMPT_CHARS)}\n…[truncated]` : systemFull;
 
   // A chat run carries its earlier turns, fenced (composeComputerPrompt);
   // O4 writes no other origin, but the shape is harmless either way (an
@@ -133,7 +132,6 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
   // own scrub covers only the DEPARTMENT STATE block it appends to `system`,
   // never the base prompt or this prompt/history text.
   const history = await historyFor(db, { tenantId: run.tenantId, userId: run.userId } satisfies RunScope, run.conversationId, run.seq);
-  const promptFull = composeComputerPrompt(history, run.userText);
 
   // COMPLETE or nothing (the rule every other outbound-text boundary in this
   // codebase follows -- the events route, groundDepartmentTurn): an entry
@@ -152,8 +150,20 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
     return { ok: false, status: 503, error: "scrub_unavailable" };
   }
   const scrub = (text: string): string => redactTenantVaultSecrets(redactAll(text), vault);
-  const system = scrub(systemCapped);
-  const prompt = scrub(promptFull);
+  // Scrub BEFORE any cap or clip (security review, O4): exact-value redaction
+  // cannot recognise a secret that a truncation cut in half, so cutting first
+  // would leak the part of a secret that straddles the cut.
+  const systemScrubbed = scrub(systemFull);
+  const system =
+    systemScrubbed.length > COMPUTER_SYSTEM_PROMPT_CHARS
+      ? `${systemScrubbed.slice(0, COMPUTER_SYSTEM_PROMPT_CHARS)}\n…[truncated]`
+      : systemScrubbed;
+  const prompt = scrub(
+    composeComputerPrompt(
+      history.map((m) => ({ role: m.role, content: scrub(String(m.content ?? "")) })),
+      scrub(run.userText),
+    ),
+  );
 
   const planMode = run.chatMode === "plan";
   const toolset = deskToolset({ viewer, dept, agentSlug: run.agentSlug, planMode });

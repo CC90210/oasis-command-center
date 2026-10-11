@@ -449,6 +449,36 @@ async function main() {
       await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'claim_vault_key'");
     }
   });
+  // Security review (O4): exact-value redaction cannot recognise a secret that
+  // a clip cut in half, so the scrub must run BEFORE any clip. A secret that
+  // straddles the 2,000-character history clip must leave no fragment.
+  await check("a vault secret straddling the history clip boundary is scrubbed before the clip: no fragment of it reaches the computer", async () => {
+    const member = await freshMember();
+    const pairing = await makePairing({ userId: member, scope: "connector" });
+    const { encryptField } = await import("../lib/field-encryption");
+    const vaultValue = "straddle-vault-secret-qrstuvwxyz0123";
+    await db.execute({
+      sql: `INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value, created_at, updated_at) VALUES (?, 'custom', 'claim_straddle_key', ?, ?, ?)`,
+      args: [TENANT, encryptField(vaultValue), stamp, stamp],
+    });
+    try {
+      const first = await enqueueComputerRun(member, `${"x".repeat(1990)}${vaultValue} trailing words`);
+      assert.ok(first.run);
+      await db.execute({ sql: "UPDATE dept_chat_runs SET status = 'done', final_text = 'noted' WHERE id = ?", args: [first.run!.id] });
+      const store = await import("../lib/os/runs/store");
+      const q = await store.enqueueRun(db, { tenantId: TENANT, userId: member }, {
+        conversationId: first.conv.id, text: "what did I say before?", chatMode: "build", showThinking: false, now: new Date(), executor: "computer",
+      });
+      assert.ok(q.ok);
+      const r = await claim(pairing.token, body(randomUUID()));
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      const prompt = String((r.json.run as Record<string, unknown>).prompt);
+      assert.doesNotMatch(prompt, /straddle-v/, "no fragment of the secret survives the clip");
+    } finally {
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE field_key = 'claim_straddle_key'");
+    }
+  });
+
   await check("plan mode claims a 'read' profile, never 'propose'", async () => {
     const store = await import("../lib/os/runs/store");
     const member = await freshMember();
