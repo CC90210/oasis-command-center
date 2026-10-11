@@ -280,6 +280,52 @@ check("no file outside the metered call sites calls a model provider, and every 
   );
 });
 
+/** USAGE_SURFACES, read from lib/ai/usage.ts's source (this lint imports nothing it checks). */
+function knownSurfaces(): Set<string> {
+  const src = readFileSync(join(ROOT, RECORDER), "utf8");
+  const block = /export const USAGE_SURFACES = \[([\s\S]*?)\] as const;/.exec(src);
+  assert.ok(block, "USAGE_SURFACES was not found in lib/ai/usage.ts");
+  return new Set([...block[1].matchAll(/^\s*"([^"]+)",/gm)].map((m) => m[1]));
+}
+
+/**
+ * Surface names a file that takes its meter writes as a literal (`surface: "x"`)
+ * that the ledger does not know. A misspelt surface would be refused by the
+ * meter at run time (and the call it meters would fail with it); this finds it
+ * in the tree instead.
+ */
+export function unknownSurfacesIn(src: string, known: Set<string>): string[] {
+  const code = stripComments(src);
+  if (!USAGE_IMPORT_RE.test(code)) return [];
+  return [...code.matchAll(/\bsurface: "([^"]+)"/g)]
+    .map((m) => m[1])
+    // A usage surface is a dotted lowercase name; prose in a field that happens
+    // to be called surface (a model's API name in the registry) is something else.
+    .filter((s) => /^(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*|infer:.*)$/.test(s))
+    .filter((s) => !known.has(s) && !/^infer:[A-Za-z0-9_.:-]{1,100}$/.test(s));
+}
+
+check("every surface a metered file names is one the ledger knows, the automation surfaces included; a PLANTED misspelling is caught", () => {
+  const known = knownSurfaces();
+  for (const s of ["agents.chat", "automations.run", "automations.draft", "tools.repurpose_post"]) assert.ok(known.has(s), `${s} is not in USAGE_SURFACES`);
+  const planted = `import { modelCallMeter } from "@/lib/ai/usage";\nexport const m = (t: string) => modelCallMeter({ tenantId: t, surface: "automation.run", authKind: "api_key", billingMode: "byo_key" });\n`;
+  assert.deepEqual(unknownSurfacesIn(planted, known), ["automation.run"]);
+  // A file that takes no meter may use the word for something else (a health check's surface).
+  assert.deepEqual(unknownSurfacesIn(`const x = { surface: "oasis" };`, known), []);
+  assert.deepEqual(unknownSurfacesIn(`import type { X } from "@/lib/ai/usage";\nconst api = { surface: "Anthropic's Messages API" };`, known), []);
+  assert.deepEqual(unknownSurfacesIn(`import type { X } from "@/lib/ai/usage";\nconst m = { surface: "infer:" };`, known), ["infer:"]);
+  const files = SOURCE_DIRS.flatMap((d) => walk(join(ROOT, d)));
+  const bad: string[] = [];
+  let named = 0;
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    if (USAGE_IMPORT_RE.test(stripComments(src))) named += [...stripComments(src).matchAll(/\bsurface: "([^"]+)"/g)].length;
+    for (const s of unknownSurfacesIn(src, known)) bad.push(`${rel(file)}: surface "${s}"`);
+  }
+  assert.ok(named >= 5, `only ${named} surface literals found in metered files: the scan is broken`);
+  assert.deepEqual(bad, [], `surfaces the ledger does not know:\n  ${bad.join("\n  ")}`);
+});
+
 if (failures > 0) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);

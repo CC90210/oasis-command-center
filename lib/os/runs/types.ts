@@ -53,4 +53,35 @@ export const PRODUCER_SEQ_BASE = 100;
 /** A re-attach stream lives this long, then ends; the browser asks again with the last seq it saw. */
 export const TAIL_WINDOW_MS = 25_000;
 
-export type RunSource = "worker" | "producer";
+/**
+ * Who drives a run and writes its events:
+ *   worker      the department chat's driver in the Worker (the default);
+ *   producer    the paired computer's bridge, posting events with a run token;
+ *   automation  a department task's run (lib/automations), driven only by the
+ *               automation driver (executor.ts driveAutomationRun) that claims
+ *               it BY ID. No chat driver ever claims one (store.ts claimNextRun),
+ *               the follow route never starts a driver for one, and no message
+ *               can be sent into a conversation that holds one (send.ts).
+ * A worker or automation run is stale after RUN_STALE_MS of silence.
+ */
+export type RunSource = "worker" | "producer" | "automation";
+
+/**
+ * Why an automation run failed, beyond the channel's own failure codes
+ * (lib/os/channel/outcome.ts TURN_FAILURE_CODES):
+ *   run_timeout          the run reached its time limit (ExecutorDeps.deadlineMs)
+ *                        and was stopped. Its model call's ledger row is closed
+ *                        as cancelled once the stream unwinds; a provider stream
+ *                        that never yields again leaves the row pending until
+ *                        the reservation sweep expires it (RESERVATION_TTL_MS);
+ *   sources_unavailable  the department's data could not be read for the run, so
+ *                        no model was asked.
+ * Neither is a verdict on the workspace's AI account or the department chat, so
+ * neither is recorded as the channel's last turn.
+ */
+export const RUN_FAILURE_CODES = ["run_timeout", "sources_unavailable"] as const;
+export type RunFailureCode = (typeof RUN_FAILURE_CODES)[number];
+
+export function isRunFailureCode(code: unknown): code is RunFailureCode {
+  return typeof code === "string" && (RUN_FAILURE_CODES as readonly string[]).includes(code);
+}

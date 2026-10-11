@@ -31,6 +31,12 @@
  * ONE DRIVER PER CONVERSATION. driveConversation runs the conversation's queued
  * runs one after another; claimNextRun lets only one driver have a run, and
  * every write by a driver is guarded by its lease (./store.ts).
+ *
+ * AN AUTOMATION'S RUN (driveAutomationRun) is the same executeRun, with limits
+ * a chat run does not have: it is claimed by its own id and never by a chat
+ * driver, it has a time limit (deadlineMs: past it the run fails run_timeout
+ * and the model call is stopped as Stop stops it), and it is shown no earlier
+ * turns of its conversation (history "none").
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -41,6 +47,7 @@ import { redactAll } from "@/lib/secret-redaction";
 import { RunRecorder } from "./activity";
 import {
   appendEvents,
+  claimAutomationRun,
   claimNextRun,
   finishRun,
   heartbeat,
@@ -49,7 +56,7 @@ import {
   type Run,
   type RunScope,
 } from "./store";
-import type { RunEvent, RunStatus } from "./types";
+import { isRunFailureCode, type RunEvent, type RunStatus } from "./types";
 
 export type TurnStart =
   | {
@@ -82,6 +89,23 @@ export type ExecutorDeps = {
   heartbeatMs?: number;
   startTurn: (input: { run: Run; messages: ChatMessage[]; signal: AbortSignal }) => Promise<TurnStart>;
   recordOutcome: (o: { channelKey: string; agentSlug: string; ok: boolean; code: TurnFailureCode | null }) => Promise<void>;
+  /**
+   * The run's time limit, from its start. Past it the run is stopped the way
+   * Stop stops it and fails with `run_timeout`. The model call's ledger row is
+   * closed as cancelled once its stream unwinds; a provider stream that never
+   * yields again is left behind after UNWIND_MS, and its row stays pending
+   * until the reservation sweep expires it. Absent: no limit (a chat run,
+   * which a person can Stop). An automation run always has one
+   * (driveAutomationRun refuses without).
+   */
+  deadlineMs?: number;
+  /**
+   * What the model is shown of the conversation before this message:
+   * "conversation" (the default) its earlier questions and answers; "none"
+   * only this message. An automation run is always "none": an earlier run's
+   * output is not an instruction to the next.
+   */
+  history?: "conversation" | "none";
 };
 
 /** How long Stop waits for a hosted provider's stream to unwind before the run is finished anyway. */
@@ -98,8 +122,21 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
   const now = deps.now ?? (() => new Date());
   const recorder = new RunRecorder(deps.departmentLabel, () => now().getTime(), run.showThinking);
   const ac = new AbortController();
-  const state = { cancelled: false, lost: false };
+  const state = { cancelled: false, lost: false, timedOut: false };
   let chain: Promise<void> = Promise.resolve();
+  // Settles when the run is stopped for any reason (Stop, lost, its time limit).
+  const aborted = new Promise<"aborted">((resolve) => {
+    if (ac.signal.aborted) resolve("aborted");
+    else ac.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+  });
+  const deadline =
+    typeof deps.deadlineMs === "number" && deps.deadlineMs > 0
+      ? setTimeout(() => {
+          if (state.cancelled || state.lost) return;
+          state.timedOut = true;
+          ac.abort();
+        }, deps.deadlineMs)
+      : null;
 
   const write = (events: RunEvent[]) => {
     if (events.length === 0) return;
@@ -151,15 +188,35 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
   let refusal: { recordAs?: TurnFailureCode } | null = null;
 
   try {
-    const history = await historyFor(db, scope, run.conversationId, run.seq);
+    const history = deps.history === "none" ? [] : await historyFor(db, scope, run.conversationId, run.seq);
     const messages: ChatMessage[] = [...history, { role: "user", content: run.userText }];
 
     let started: TurnStart;
-    try {
-      started = await deps.startTurn({ run, messages, signal: ac.signal });
-    } catch (err) {
+    // The turn's preparation (the account, the budget, the department's data)
+    // counts against the time limit too: a run past it never starts its model.
+    const starting = Promise.resolve().then(() => deps.startTurn({ run, messages, signal: ac.signal }));
+    const first = await Promise.race([
+      starting.then(
+        (value) => ({ value }),
+        (err: unknown) => ({ err }),
+      ),
+      aborted,
+    ]);
+    if (first === "aborted") {
+      // Stopped before the turn began (its time limit, Stop, or the run is
+      // gone): no model was asked. A turn that starts later has its stream
+      // closed unread, so it never calls one.
+      void starting.then(
+        (late) => (late.ok ? late.stream.return(undefined).then(() => undefined, () => undefined) : undefined),
+        () => undefined,
+      );
+      started = { ok: false, status: 504, error: state.timedOut ? "run_timeout" : state.lost ? "lost" : "cancelled" };
+    } else if ("err" in first) {
+      const err = first.err;
       log("stream_failed", { stage: "start", detail: redactAll(err instanceof Error ? err.message : String(err)).slice(0, 160) });
       started = { ok: false, status: 500, error: "stream_failed" };
+    } else {
+      started = first.value;
     }
 
     if (!started.ok) {
@@ -167,17 +224,13 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
       refusal = { recordAs: started.recordAs };
       channelKey = started.channelKey ?? null;
       turnAgentSlug = started.agentSlug ?? null;
-      log(started.error, { stage: "pre_stream", status: started.status });
+      if (!state.cancelled && !state.lost) log(started.error, { stage: "pre_stream", status: started.status });
     } else {
       agent = started.agent;
       channelKey = started.channelKey;
       turnAgentSlug = started.agentSlug;
       write(recorder.start(started.agent));
       const it = started.stream[Symbol.asyncIterator]();
-      const aborted = new Promise<"aborted">((resolve) => {
-        if (ac.signal.aborted) resolve("aborted");
-        else ac.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
-      });
       let unwound = false;
       try {
         for (;;) {
@@ -185,7 +238,14 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
           const pending = it.next();
           pending.catch(() => undefined);
           const got = await Promise.race([pending, aborted]);
-          if (got === "aborted") break;
+          if (got === "aborted") {
+            if (state.timedOut && !state.cancelled && !state.lost && !failure) {
+              // Out of time. A failure the stream reported first stays the cause.
+              failure = "run_timeout";
+              log(failure, { stage: "stream", deadlineMs: deps.deadlineMs });
+            }
+            break;
+          }
           if (got.done) {
             unwound = true;
             break;
@@ -265,8 +325,9 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
 
     // The channel's last turn, as the route recorded it before runs: a reply
     // clears an old failure, a failure says why. A refusal that is no verdict
-    // on the AI account (no key tried) and a Stop record nothing.
-    if (status !== "cancelled") {
+    // on the AI account (no key tried), a Stop, and a run's own limits
+    // (run_timeout, sources_unavailable: types.ts RUN_FAILURE_CODES) record nothing.
+    if (status !== "cancelled" && !isRunFailureCode(failure)) {
       const code = status === "failed" && isTurnFailureCode(failure) ? failure : null;
       const slug = turnAgentSlug ?? run.agentSlug;
       const key = channelKey;
@@ -281,7 +342,46 @@ export async function executeRun(deps: ExecutorDeps, run: Run, leaseId: string):
     return status;
   } finally {
     clearInterval(timer);
+    if (deadline) clearTimeout(deadline);
     await chain;
+  }
+}
+
+/**
+ * Drive ONE automation run: the run the automation enqueued (source
+ * 'automation'), claimed by its id (store.ts claimAutomationRun), never the
+ * conversation's queue. `deps` are built from that run's automation row, so a
+ * test run's preview-only proposals can never pick up a live run's rights.
+ *
+ * Always bounded: refused without a time limit (deadlineMs), and always run
+ * with history "none". Returns how the run ended, or null when it could not be
+ * claimed (another driver has it, it is no longer queued, or another run in the
+ * conversation is working).
+ */
+export async function driveAutomationRun(deps: ExecutorDeps, conversationId: string, runId: string): Promise<RunEnd | null> {
+  if (!(typeof deps.deadlineMs === "number" && Number.isFinite(deps.deadlineMs) && deps.deadlineMs > 0)) {
+    throw new Error("os.runs.driveAutomationRun: an automation run needs a deadline (deadlineMs)");
+  }
+  const now = deps.now ?? (() => new Date());
+  await reapStale(deps.db, deps.scope, conversationId, now());
+  const lease = crypto.randomUUID();
+  const run = await claimAutomationRun(deps.db, deps.scope, conversationId, runId, lease, now());
+  if (!run) return null;
+  try {
+    return await executeRun({ ...deps, history: "none" }, run, lease);
+  } catch (err) {
+    // An unexpected throw must not leave the run `running` for the reconcile to wait out.
+    console.error("[os.runs.executor.automation]", { tenantId: deps.scope.tenantId, runId: run.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+    const closed = await finishRun(deps.db, deps.scope, run.id, lease, {
+      status: "failed",
+      finalText: null,
+      errorCode: "stream_failed",
+      inputTokens: null,
+      outputTokens: null,
+      agent: null,
+      now: now(),
+    }).catch(() => false);
+    return closed ? "failed" : "lost";
   }
 }
 

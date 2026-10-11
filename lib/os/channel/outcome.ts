@@ -212,11 +212,34 @@ const ROUTE_ERRORS = {
   workspace_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   config_unavailable: "We could not read this workspace's AI settings just now. Try again in a moment.",
   ai_usage_unavailable: "We could not check this workspace's AI budget just now. Try again in a moment.",
+  // POST /api/os/runs into a conversation that holds an automation's runs
+  // (lib/os/runs/send.ts): that conversation is the automation's record.
+  automation_conversation: "This conversation is an automation's record, so it can't take new messages. Start a new chat to ask a question.",
   // Client-side: the request never reached the route, or the stream closed
   // with no text and no reason.
   network: "Could not reach the server. Check your connection and try again.",
   empty_reply: "The reply came back empty. Try again.",
 } as const;
+
+/**
+ * An automation run's own failures (lib/os/runs/types.ts RUN_FAILURE_CODES).
+ * Not channel failure codes: they are never a department channel's last turn.
+ * Kept here, with the rest of the copy, so a run's closing error event and the
+ * automation list say the same sentence. This file stays import-free of
+ * lib/os/runs (tests/department-runs.test.ts pins the two lists equal).
+ */
+const RUN_FAILURES = {
+  run_timeout: {
+    sentence: "This run reached its time limit and was stopped before it finished.",
+    short: "the run reached its time limit",
+  },
+  sources_unavailable: {
+    sentence: "This run couldn't read the department's data, so it didn't ask the AI anything.",
+    short: "the department's data could not be read",
+  },
+} as const;
+
+export const RUN_FAILURE_COPY_CODES: readonly string[] = Object.keys(RUN_FAILURES);
 
 export type FailureFix = { href: string; label: string };
 
@@ -426,6 +449,10 @@ export function failureCopy(
     const c = named ? { ...COPY[code], ...named } : COPY[code];
     if (!c.fix) return { ...c };
     return opts.canManageAi ? { ...c } : { sentence: c.sentence + OWNER_CAN_FIX, short: c.short, fix: null };
+  }
+  if (typeof code === "string" && Object.prototype.hasOwnProperty.call(RUN_FAILURES, code)) {
+    const r = RUN_FAILURES[code as keyof typeof RUN_FAILURES];
+    return { sentence: r.sentence, short: r.short, fix: null };
   }
   if (typeof code === "string" && code in ROUTE_ERRORS) {
     const sentence = ROUTE_ERRORS[code as keyof typeof ROUTE_ERRORS];
