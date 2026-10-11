@@ -119,6 +119,28 @@ export function cliUnsupportedDetail(provider: CliProvider): string {
     : "The app's maker does not allow this sign-in on this computer. Pick another app, or use an AI account.";
 }
 
+/**
+ * ONE LINE per app, for the DEPARTMENT inventory (O3b, Settings > Computers'
+ * "Your computers" card) -- distinct from CLI_STATE_LABEL above, which still
+ * drives the OLD coding-harness picker (an owner or admin's own console,
+ * where Codex and Gemini ARE usable). Codex and Gemini can never answer a
+ * department turn (lib/bridge-cli-policy.ts, departments are Claude-only,
+ * O3b), so their line says that plainly instead of "Ready" / "Needs
+ * sign-in" -- wording that would read as "connect it and it will work",
+ * which is false for a department chat.
+ *
+ * Inventory wording is EXACT (O3b truthfulness rule): a Gemini check that
+ * did not finish reads "installed, did not answer the check", never "Needs
+ * sign-in" (it may already be signed in; the check just did not finish).
+ */
+export function departmentInventoryLine(provider: CliProvider, info: Pick<CliStatusInfo, "installed" | "authenticated" | "checked">): string {
+  const label = CLI_SIGN_IN[provider].label;
+  if (!info.installed) return `${label}: not detected`;
+  if (provider === "claude") return info.authenticated ? `${label}: signed in` : `${label}: installed, not signed in`;
+  if (!info.checked) return `${label}: installed, did not answer the check`;
+  return `${label}: installed, not used for department work`;
+}
+
 export type CliStatusSnapshot = Record<CliProvider, CliStatusInfo>;
 
 export type NormalizedCliSnapshot =

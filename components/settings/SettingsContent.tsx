@@ -58,6 +58,8 @@ import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerP
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
+import { YourComputersCard } from "@/components/settings/YourComputersCard";
+import { PersonEngineCard } from "@/components/settings/PersonEngineCard";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
@@ -483,6 +485,25 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
+          {/* "How your departments think" (O3b): YOUR OWN engine choice --
+              your own paired computer, or the workspace API key -- separate
+              from the workspace default this section's "What powers your
+              agents" picks above. Every workspace member who reaches Settings
+              > AI (owners and admins; AI brain is not operator-only) sees
+              and sets their own. */}
+          {show("ai") && (
+            <SettingsSection
+              id="person-engine"
+              defaultOpen
+              title="How your departments think"
+              subtitle="Your own choice: Claude Code on your own computer, or the workspace API key."
+            >
+              <SafeBoundary label="How your departments think">
+                <PersonEngineCard />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
           {/* The paired computer's AI command-line tools. They answer only the
               operator's own Coding chat (/agent, components/ChatWidget.tsx) when
               it runs on that computer; no department ever uses them, so the card
@@ -575,6 +596,20 @@ export async function SettingsContent({
             >
               <SafeBoundary label="Branding">
                 <BrandLogoCard initialLogoUrl={tenant?.logo_url ?? null} canManage={canManageTenant} />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
+          {/* "Your computers" (O3b): each person's OWN computers and their
+              plain-words status, with an Approve button -- separate from the
+              raw pair/revoke list in "Devices (advanced)" below. OASIS only,
+              until J2 packages the connector for clients (ui_changes rule),
+              which this section already follows: it is inside the same
+              VERIFIED-operator gate as Devices. */}
+          {show("devices") && isOperator && (
+            <SettingsSection id="your-computers" defaultOpen title="Your computers" subtitle="Each of your own computers, and whether it can take department work right now.">
+              <SafeBoundary label="Your computers">
+                <YourComputersCard />
               </SafeBoundary>
             </SettingsSection>
           )}

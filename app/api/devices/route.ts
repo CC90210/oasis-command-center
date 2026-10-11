@@ -32,7 +32,9 @@ export async function GET() {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("bridge_pairings")
-    .select("id, user_id, label, machine_fingerprint, last_seen_at, last_seen_ip, created_at, revoked_at, scope, claim_enabled_at")
+    .select(
+      "id, user_id, label, machine_fingerprint, last_seen_at, last_seen_ip, created_at, revoked_at, scope, paired_via, claim_enabled_at, claim_state_at, claim_blocked_reason, claim_capacity",
+    )
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
   if (error) return bad(500, error.message);

@@ -244,6 +244,68 @@ export async function getOnlineBridgeComputerLabels(
     .map((row) => row.label || "");
 }
 
+/**
+ * OwnComputer (O3b) - one of THIS PERSON's own bridge_pairings rows, with the
+ * claim columns computerAnswerState (lib/devices/presence.ts) reads. Used by
+ * the department-run gate (lib/os/runs/session.ts) and Settings > Computers'
+ * "Your computers" card. Unlike getTenantBridgeStatus / getOnlineBridgeComputerLabels
+ * (daemon pairings only, by design, never touched here), this returns the
+ * person's pairings of EVERY scope, because a person's own computer pairs as
+ * 'connector' -- the daemon-only filter would hide it entirely.
+ */
+export type OwnComputer = {
+  id: string;
+  label: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+  scope: string | null;
+  pairedVia: string | null;
+  claimEnabledAt: string | null;
+  claimStateAt: string | null;
+  claimBlockedReason: string | null;
+  claimCapacity: number | null;
+};
+
+/** This person's own, non-revoked paired computers, newest first. Throws when the read fails. */
+export async function getOwnComputers(tenantId: string, authUserId: string): Promise<OwnComputer[]> {
+  if (!tenantId || !authUserId) return [];
+  const db = getServiceSupabase();
+  const r = await db
+    .from("bridge_pairings")
+    .select(
+      "id, label, last_seen_at, revoked_at, scope, paired_via, claim_enabled_at, claim_state_at, claim_blocked_reason, claim_capacity",
+    )
+    .eq("tenant_id", tenantId)
+    .eq("user_id", authUserId)
+    .is("revoked_at", null)
+    .order("created_at", { ascending: false });
+  if (r.error) throw new Error(`getOwnComputers: bridge_pairings read failed: ${r.error.message}`);
+  type Row = {
+    id: string;
+    label: string | null;
+    last_seen_at: string | null;
+    revoked_at: string | null;
+    scope: string | null;
+    paired_via: string | null;
+    claim_enabled_at: string | null;
+    claim_state_at: string | null;
+    claim_blocked_reason: string | null;
+    claim_capacity: unknown;
+  };
+  return ((r.data || []) as Row[]).map((row) => ({
+    id: row.id,
+    label: row.label || "Unnamed computer",
+    lastSeenAt: row.last_seen_at,
+    revokedAt: row.revoked_at,
+    scope: row.scope,
+    pairedVia: row.paired_via,
+    claimEnabledAt: row.claim_enabled_at,
+    claimStateAt: row.claim_state_at,
+    claimBlockedReason: row.claim_blocked_reason,
+    claimCapacity: typeof row.claim_capacity === "number" ? row.claim_capacity : row.claim_capacity == null ? null : Number(row.claim_capacity),
+  }));
+}
+
 // getTodayPlan and getPlanTemplates are gone (2026-09-29): nothing called
 // them, and each turned a failed read into "no plan" / "no templates".
 

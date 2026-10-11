@@ -36,7 +36,9 @@ import { safe } from "@/lib/api-helpers";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { aiKeyOnFile, aiServicesWithKey, getTenant, integrationsHealth } from "@/lib/queries";
+import { aiKeyOnFile, aiServicesWithKey, getActiveProfile, getTenant, integrationsHealth } from "@/lib/queries";
+import { isAgentsOwner } from "@/lib/agents-owner";
+import type { AttentionViewer } from "@/lib/admin/attention";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
@@ -78,8 +80,22 @@ export default async function HealthPage() {
   if (!tenantId) redirect("/login");
   const now = Date.now();
 
+  // O3b: who is looking, so the machine card/verdict describe THEIR OWN
+  // computer (never whichever pairing is newest workspace-wide), and the
+  // fleet reporter + background workers stay the agents owner's alone.
+  // Fail closed (CodeRabbit, PR #588): a viewer we cannot identify sees what a
+  // non-owner with no computers sees, never the unscoped view of everyone's
+  // computers and the owner's workers; and an owner read that throws is "not
+  // the owner", never a crashed page.
+  const profile = await safe("health.profile", getActiveProfile(), null);
+  const viewerAuthId = profile?.auth_user_id ?? "";
+  const viewer: AttentionViewer = {
+    authUserId: viewerAuthId,
+    isAgentsOwner: viewerAuthId ? await safe("health.agents_owner", isAgentsOwner(tenantId, viewerAuthId), false) : false,
+  };
+
   const [system, enabledAgents, tenant] = await Promise.all([
-    loadSystemHealth(tenantId, { now }),
+    loadSystemHealth(tenantId, { now, viewer }),
     // OASIS's own workspace: the agents its bridge runs (W4a review R4).
     oasisOperatorAgents(tenantId) ?? safe("health.enabled_agents", getTenantEnabledAgents(tenantId), [] as string[]),
     safe("health.tenant", getTenant(tenantId), null),

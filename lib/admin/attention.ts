@@ -98,14 +98,33 @@ export { machineState, type MachineState };
 
 export type PairedMachine = { label: string; lastSeenAt: string | null; state: MachineState };
 
-/** The workspace's paired computers, freshest first. Throws on a failed read. */
-export async function loadMachines(db: AdminDb, tenantId: string, now: number): Promise<PairedMachine[]> {
-  const r = await db
-    .from("bridge_pairings")
-    .select("label, last_seen_at")
-    .eq("tenant_id", tenantId)
-    .is("revoked_at", null)
-    .order("last_seen_at", { ascending: false });
+/**
+ * The workspace's paired computers, freshest first. Throws on a failed read.
+ *
+ * `viewer` (O3b): omitted, this is the pre-O3b behaviour -- every non-revoked
+ * pairing in the tenant (whoever paired it). Passed, this is scoped to THAT
+ * PERSON's own computers, PLUS any LEGACY pairing with no recorded owner
+ * (user_id NULL, every row that predates O0's proven-identity pairing): a
+ * legacy row is nobody's in particular, so hiding it from a viewer who is
+ * not its owner would hide nothing it was ever scoped to, while showing it
+ * keeps CC's operator view of CCPC exactly as it is today (O3b rule 6) with
+ * no dependency on workspace_agents_owner being populated. Two EXPLICITLY
+ * owned pairings (CC's daemon, Adon's connector) are still kept apart: the
+ * bug this fixes is /health describing whichever pairing is newest in the
+ * shared OASIS workspace, never CC's and Adon's own computers to each other
+ * (Codex, O3b -- the same bug class O2 already fixed for Automations).
+ */
+export async function loadMachines(db: AdminDb, tenantId: string, now: number, viewer?: AttentionViewer): Promise<PairedMachine[]> {
+  let query = db.from("bridge_pairings").select("label, last_seen_at").eq("tenant_id", tenantId).is("revoked_at", null);
+  if (viewer?.authUserId) {
+    // Spliced into an `.or()` filter string below: charset-allowlisted first,
+    // not merely UUID-shaped (a legacy auth id in this codebase's own test
+    // fixtures is not always a real UUID) -- the allowlist is what keeps the
+    // filter grammar safe, same discipline as the tenantId check just below.
+    if (!/^[A-Za-z0-9_-]+$/.test(viewer.authUserId)) throw new Error("loadMachines: the viewer's auth id has an unexpected shape");
+    query = query.or(`user_id.eq.${viewer.authUserId},user_id.is.null`);
+  }
+  const r = await query.order("last_seen_at", { ascending: false });
   if (r.error) throw new Error(`bridge_pairings read failed: ${r.error.message}`);
   return ((r.data || []) as Array<{ label: string | null; last_seen_at: string | null }>).map((p) => ({
     label: p.label || "Unnamed computer",
